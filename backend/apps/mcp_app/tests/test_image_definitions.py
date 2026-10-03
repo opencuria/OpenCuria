@@ -103,8 +103,8 @@ def test_mcp_delete_image_definition_uses_orchestrated_delete(mcp_image_setup):
     )
 
     definition.refresh_from_db()
-    assert payload["deleted"] is True
-    assert definition.status == ImageDefinition.Status.DELETED
+    assert payload["status"] == "pending_deletion"
+    assert definition.status == ImageDefinition.Status.PENDING_DELETION
     assert ImageDefinition.objects.filter(id=definition.id).exists()
 
 
@@ -135,6 +135,6 @@ def test_mcp_delete_build_job_uses_orchestrated_delete(mcp_image_setup):
     )
 
     build.refresh_from_db()
-    assert payload["deleted"] is True
-    assert build.status == ImageBuildJob.Status.DELETED
+    assert payload["phase"] == "waiting_inventory"
+    assert build.status == ImageBuildJob.Status.PENDING_DELETION
     assert ImageBuildJob.objects.filter(id=build.id).exists()

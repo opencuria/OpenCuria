@@ -80,6 +80,7 @@ from .services.sessions.xdotool import (  # noqa: F401,E402
     _xdotool_key_failed,
     _xdotool_type_command,
 )
+
 # -- Step 2 canonical managers ------------------------------------------------
 # Leaf clusters (terminals + images) now live canonically in
 # ``src.services``. ``TerminalSession`` is re-exported so
@@ -355,6 +356,7 @@ class WorkspaceService:
                 )
             ),
         )
+        self._images.lifecycle_context = self._registry.lifecycle
         # Step 3: stateful leaf clusters own stream + background state.
         # The managers are wired with bound lookups (no service import in
         # the modules). ``sanitize_exec_workdir`` is the canonical
@@ -468,24 +470,18 @@ class WorkspaceService:
         # identity holds for the process lifetime.
         self._registry.desktop_sessions = self._desktop._desktop_sessions
         self._registry.background_entries = self._background._background_processes
-        self._registry.background_status = (
-            lambda runtime, instance_id, entry: self._background_status_locked(
-                runtime, instance_id, entry
-            )
+        self._registry.background_status = lambda runtime, instance_id, entry: (
+            self._background_status_locked(runtime, instance_id, entry)
         )
-        self._registry.desktop_live = (
-            lambda workspace_id: self._is_desktop_session_live(workspace_id)
+        self._registry.desktop_live = lambda workspace_id: (
+            self._is_desktop_session_live(workspace_id)
         )
-        self._registry.desktop_heartbeat_payload = (
-            lambda workspace_id, session: self._desktop_heartbeat_payload(
-                workspace_id, session
-            )
+        self._registry.desktop_heartbeat_payload = lambda workspace_id, session: (
+            self._desktop_heartbeat_payload(workspace_id, session)
         )
         # Lifecycle cross-cluster hooks: late-bound service facades.
-        self._lifecycle.remove_hook = (
-            lambda runtime, instance_id, log: self.remove_workspace_credentials(
-                runtime, instance_id, log
-            )
+        self._lifecycle.remove_hook = lambda runtime, instance_id, log: (
+            self.remove_workspace_credentials(runtime, instance_id, log)
         )
         self._lifecycle.inject_hook = (
             lambda runtime, instance_id, env_vars, files, ssh_keys, log: (
@@ -494,38 +490,28 @@ class WorkspaceService:
                 )
             )
         )
-        self._lifecycle.exec_hook = (
-            lambda runtime, instance_id, command: self._exec_command(
-                runtime, instance_id, command
-            )
+        self._lifecycle.exec_hook = lambda runtime, instance_id, command: (
+            self._exec_command(runtime, instance_id, command)
         )
-        self._lifecycle.close_streams_hook = (
-            lambda workspace_id, reason: self.close_workspace_streams(
-                workspace_id, reason=reason
-            )
+        self._lifecycle.close_streams_hook = lambda workspace_id, reason: (
+            self.close_workspace_streams(workspace_id, reason=reason)
         )
-        self._lifecycle.kill_all_hook = (
-            lambda workspace_id, reason: self._kill_all_background_processes(
-                workspace_id, reason=reason
-            )
+        self._lifecycle.kill_all_hook = lambda workspace_id, reason: (
+            self._kill_all_background_processes(workspace_id, reason=reason)
         )
-        self._lifecycle.drop_tracking_hook = (
-            lambda workspace_id, reason: self._drop_background_tracking(
-                workspace_id, reason=reason
-            )
+        self._lifecycle.drop_tracking_hook = lambda workspace_id, reason: (
+            self._drop_background_tracking(workspace_id, reason=reason)
         )
         self._lifecycle.release_hook = (
-            lambda workspace_id, holder, run_id=None, force=False: (
-                self.release_desktop(
-                    workspace_id, holder=holder, run_id=run_id, force=force
-                )
+            lambda workspace_id, holder, run_id=None, force=False: self.release_desktop(
+                workspace_id, holder=holder, run_id=run_id, force=force
             )
         )
-        self._lifecycle.interrupt_hook = (
-            lambda workspace_id: self._interrupt_desktop_recordings(workspace_id)
+        self._lifecycle.interrupt_hook = lambda workspace_id: (
+            self._interrupt_desktop_recordings(workspace_id)
         )
-        self._lifecycle.desktop_lock_hook = (
-            lambda workspace_id: self._desktop_lock(workspace_id)
+        self._lifecycle.desktop_lock_hook = lambda workspace_id: self._desktop_lock(
+            workspace_id
         )
         # Self-healing unreachable timers are owned by the lifecycle;
         # this stays as a property alias below so tests poking
@@ -1138,6 +1124,150 @@ class WorkspaceService:
         """
         return self._registry.get_runtime_by_type(runtime_type)
 
+    async def inventory_for_runner(self) -> dict:
+        """Collect explicit completeness independently for each enabled runtime."""
+        from dataclasses import asdict
+        from .runtime.inventory import RuntimeInventory
+
+        snapshots = []
+        for name, runtime in self._runtimes.items():
+            try:
+                scan = await runtime.inventory()
+            except Exception:
+                scan = RuntimeInventory(name, errors=["Runtime unavailable"])
+            if getattr(self, "_journal", None):
+                for resource in scan.resources:
+                    workspace_id = resource.metadata.get("workspace_id")
+                    if resource.kind == "workspace" and workspace_id:
+                        self._journal.observe_workspace(workspace_id, resource.state)
+            snapshots.append(asdict(scan))
+        return {
+            "schema_version": 1,
+            "runtimes": snapshots,
+            "complete": all(s["complete"] for s in snapshots),
+        }
+
+    async def workspace_incarnation(self, workspace_id: str) -> tuple[dict, str] | None:
+        """Read exact current resource identity for durable checkpoint validation."""
+        from dataclasses import asdict
+
+        matches = []
+        for name, runtime in self._runtimes.items():
+            inspect_source = getattr(runtime, "workspace_incarnation", None)
+            if inspect_source is not None:
+                observed = await inspect_source(workspace_id)
+                if observed:
+                    matches.append(observed)
+                continue
+            scan = asdict(await runtime.inventory())
+            if not scan["complete"]:
+                continue
+            for resource in scan["resources"]:
+                if (
+                    resource["kind"] == "workspace"
+                    and resource["metadata"].get("workspace_id") == workspace_id
+                ):
+                    matches.append(
+                        (
+                            {
+                                "runtime": name,
+                                "resource_id": resource["resource_id"],
+                                "dependencies": sorted(resource["dependencies"]),
+                                "metadata": resource["metadata"],
+                            },
+                            resource["state"],
+                        )
+                    )
+        result = matches[0] if len(matches) == 1 else None
+        if result and getattr(self, "_journal", None):
+            self._journal.observe_workspace(workspace_id, result[1])
+        return result
+
+    async def publication_evidence(self, identity: dict) -> tuple[str, dict] | None:
+        """Prove publication or exact incarnation-bound initialization/scrub checkpoint."""
+        if identity.get("workspace_id") and getattr(self, "_journal", None):
+            observed = await self.workspace_incarnation(identity["workspace_id"])
+            proof = (
+                self._journal.proof(identity["workspace_id"], observed[0])
+                if observed
+                else None
+            )
+            if proof and proof.get("operation_id") == identity.get("operation_id"):
+                if (
+                    proof.get("initialized")
+                    and observed[1] == "running"
+                    and identity.get("failure_event") == "workspace:error"
+                ):
+                    return proof.get("event", "workspace:created"), {
+                        **identity,
+                        "credentials_present": proof.get("credentials_present"),
+                        "execution_finished": True,
+                        "outcome_known": True,
+                    }
+                if proof.get("event") in {"scrubbed", "workspace:stopped"} and observed[
+                    1
+                ] in {"exited", "stopped"}:
+                    return "workspace:stopped", {
+                        **identity,
+                        "credentials_present": False,
+                        "execution_finished": True,
+                        "outcome_known": True,
+                    }
+        snapshot = await self.inventory_for_runner()
+        for scan in snapshot["runtimes"]:
+            if not scan["complete"]:
+                continue
+            for resource in scan["resources"]:
+                meta = resource["metadata"]
+                op = meta.get("operation_id") or meta.get("opencuria.operation-id")
+                image = meta.get("artifact_id") or meta.get(
+                    "opencuria.image-instance-id"
+                )
+                if (
+                    op != identity.get("operation_id")
+                    or image != identity.get("image_instance_id")
+                    or image != identity.get("target")
+                ):
+                    continue
+                if (
+                    scan["runtime_type"] == "qemu"
+                    and identity.get("image_path")
+                    and meta.get("image_path") != identity["image_path"]
+                ):
+                    continue
+                if (
+                    scan["runtime_type"] == "docker"
+                    and (
+                        resource["kind"] != "image"
+                        or identity.get("image_tag") != f"opencuria/generations:{image}"
+                        or meta.get("published_image_id") != resource["resource_id"]
+                        or meta.get("expected_image_tag") != identity.get("image_tag")
+                    )
+                ):
+                    continue
+                failure = identity.get("failure_event")
+                if failure == "image:build_failed":
+                    return "image:built", {
+                        **identity,
+                        "image_path": meta.get("image_path", ""),
+                        "image_tag": identity.get("image_tag", ""),
+                        "image_id": resource["resource_id"]
+                        if scan["runtime_type"] == "docker"
+                        else "",
+                    }
+                if (
+                    failure == "image_artifact:failed"
+                    and meta.get("credential_clean") is True
+                ):
+                    return "image_artifact:created", {
+                        **identity,
+                        "image_artifact_id": image,
+                        "name": meta["name"],
+                        "created_at": meta["created_at"],
+                        "size_bytes": meta["size_bytes"],
+                    }
+        return None
+
     @property
     def supported_runtimes(self) -> list[str]:
         """Return the list of enabled runtime type names.
@@ -1706,7 +1836,9 @@ class WorkspaceService:
         """
         return await self._desktop._is_desktop_session_live(workspace_id)
 
-    def _desktop_heartbeat_payload(self, workspace_id: uuid.UUID, session: DesktopSession) -> dict[str, Any]:
+    def _desktop_heartbeat_payload(
+        self, workspace_id: uuid.UUID, session: DesktopSession
+    ) -> dict[str, Any]:
         """Return heartbeat fields for a live desktop session.
 
         Step 6a: thin facade over ``DesktopManager._desktop_heartbeat_payload``.
@@ -1728,7 +1860,9 @@ class WorkspaceService:
         """
         return self._desktop._empty_desktop_release_result()
 
-    def _desktop_release_result(self, session: DesktopSession | None, *, stopped: bool) -> DesktopReleaseResult:
+    def _desktop_release_result(
+        self, session: DesktopSession | None, *, stopped: bool
+    ) -> DesktopReleaseResult:
         """Build a release result from the current session cache.
 
         Step 6a: thin facade over ``DesktopManager._desktop_release_result``.
@@ -1736,7 +1870,9 @@ class WorkspaceService:
         return self._desktop._desktop_release_result(session, stopped=stopped)
 
     @staticmethod
-    def _resolve_desktop_geometry(width: int | None = None, height: int | None = None) -> tuple[int, int]:
+    def _resolve_desktop_geometry(
+        width: int | None = None, height: int | None = None
+    ) -> tuple[int, int]:
         """Return a sanitized even framebuffer size for Xvnc.
 
         Step 6a: thin facade over ``DesktopManager._resolve_desktop_geometry``.
@@ -1751,47 +1887,92 @@ class WorkspaceService:
         """
         return DesktopManager._desktop_start_command(width, height)
 
-    def get_desktop_state_payload(self, workspace_id: uuid.UUID) -> dict[str, Any] | None:
+    def get_desktop_state_payload(
+        self, workspace_id: uuid.UUID
+    ) -> dict[str, Any] | None:
         """Return cache/network fields for desktop lifecycle announcements.
 
         Step 6a: thin facade over ``DesktopManager.get_desktop_state_payload``.
         """
         return self._desktop.get_desktop_state_payload(workspace_id)
 
-    async def ensure_desktop_process(self, workspace_id: uuid.UUID, *, width: int | None = None, height: int | None = None) -> DesktopSession:
+    async def ensure_desktop_process(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> DesktopSession:
         """Start the shared KasmVNC process without acquiring a lease.
 
         Step 6a: thin facade over ``DesktopManager.ensure_desktop_process``.
         """
-        return await self._desktop.ensure_desktop_process(workspace_id, width=width, height=height)
+        return await self._desktop.ensure_desktop_process(
+            workspace_id, width=width, height=height
+        )
 
-    async def _ensure_desktop_process_locked(self, workspace_id: uuid.UUID, *, width: int | None = None, height: int | None = None) -> DesktopSession:
+    async def _ensure_desktop_process_locked(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> DesktopSession:
         """Ensure the desktop process while holding the workspace lock.
 
         Step 6a: thin facade over ``DesktopManager._ensure_desktop_process_locked``.
         """
-        return await self._desktop._ensure_desktop_process_locked(workspace_id, width=width, height=height)
+        return await self._desktop._ensure_desktop_process_locked(
+            workspace_id, width=width, height=height
+        )
 
-    async def acquire_desktop(self, workspace_id: uuid.UUID, *, holder: str, run_id: str | None = None, width: int | None = None, height: int | None = None) -> DesktopSession:
+    async def acquire_desktop(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        holder: str,
+        run_id: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> DesktopSession:
         """Ensure the desktop process and acquire a viewer or computer-use lease.
 
         Step 6a: thin facade over ``DesktopManager.acquire_desktop``.
         """
-        return await self._desktop.acquire_desktop(workspace_id, holder=holder, run_id=run_id, width=width, height=height)
+        return await self._desktop.acquire_desktop(
+            workspace_id, holder=holder, run_id=run_id, width=width, height=height
+        )
 
-    async def release_desktop(self, workspace_id: uuid.UUID, *, holder: str, run_id: str | None = None, force: bool = False) -> DesktopReleaseResult:
+    async def release_desktop(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        holder: str,
+        run_id: str | None = None,
+        force: bool = False,
+    ) -> DesktopReleaseResult:
         """Drop a desktop lease and stop Xvnc when no holders remain.
 
         Step 6a: thin facade over ``DesktopManager.release_desktop``.
         """
-        return await self._desktop.release_desktop(workspace_id, holder=holder, run_id=run_id, force=force)
+        return await self._desktop.release_desktop(
+            workspace_id, holder=holder, run_id=run_id, force=force
+        )
 
-    async def start_desktop(self, workspace_id: uuid.UUID, *, width: int | None = None, height: int | None = None) -> DesktopSession:
+    async def start_desktop(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> DesktopSession:
         """Acquire the viewer lease and ensure the desktop process is running.
 
         Step 6a: thin facade over ``DesktopManager.start_desktop``.
         """
-        return await self._desktop.start_desktop(workspace_id, width=width, height=height)
+        return await self._desktop.start_desktop(
+            workspace_id, width=width, height=height
+        )
 
     async def stop_desktop(self, workspace_id: uuid.UUID) -> DesktopReleaseResult:
         """Release the viewer lease. Stops Xvnc only when no computer-use hold remains.
@@ -1807,12 +1988,22 @@ class WorkspaceService:
         """
         return await self._desktop._interrupt_desktop_recordings(workspace_id)
 
-    async def _stop_desktop_process(self, workspace_id: uuid.UUID, *, interrupt_recordings: bool, expected_session: DesktopSession | None = None) -> None:
+    async def _stop_desktop_process(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        interrupt_recordings: bool,
+        expected_session: DesktopSession | None = None,
+    ) -> None:
         """Kill Xvnc and drop the cached desktop session.
 
         Step 6a: thin facade over ``DesktopManager._stop_desktop_process``.
         """
-        return await self._desktop._stop_desktop_process(workspace_id, interrupt_recordings=interrupt_recordings, expected_session=expected_session)
+        return await self._desktop._stop_desktop_process(
+            workspace_id,
+            interrupt_recordings=interrupt_recordings,
+            expected_session=expected_session,
+        )
 
     @staticmethod
     def _desktop_env() -> dict[str, str]:
@@ -1844,21 +2035,30 @@ class WorkspaceService:
         """
         return await self._desktop._require_desktop_live(workspace_id)
 
-    async def _exec_desktop_shell(self, workspace_id: uuid.UUID, command: str) -> tuple[int, str]:
+    async def _exec_desktop_shell(
+        self, workspace_id: uuid.UUID, command: str
+    ) -> tuple[int, str]:
         """Execute a shell command inside the workspace desktop environment.
 
         Step 6a: thin facade over ``DesktopManager._exec_desktop_shell``.
         """
         return await self._desktop._exec_desktop_shell(workspace_id, command)
 
-    async def _get_desktop_geometry(self, workspace_id: uuid.UUID, width: int | None = None, height: int | None = None) -> tuple[int, int]:
+    async def _get_desktop_geometry(
+        self,
+        workspace_id: uuid.UUID,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> tuple[int, int]:
         """Return desktop width and height, optionally overriding query results.
 
         Step 6a: thin facade over ``DesktopManager._get_desktop_geometry``.
         """
         return await self._desktop._get_desktop_geometry(workspace_id, width, height)
 
-    async def desktop_action(self, workspace_id: uuid.UUID, action: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def desktop_action(
+        self, workspace_id: uuid.UUID, action: str, args: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         """Execute a desktop I/O action inside the workspace display.
 
         Step 6a: thin facade over ``DesktopManager.desktop_action``.
@@ -2175,9 +2375,7 @@ class WorkspaceService:
     # ``_git_locks`` / ``_git_locks_guard`` aliases above; every method
     # here delegates with the same name/signature/messages.
 
-    async def _git_lock(
-        self, workspace_id: uuid.UUID, repo_root: str
-    ) -> asyncio.Lock:
+    async def _git_lock(self, workspace_id: uuid.UUID, repo_root: str) -> asyncio.Lock:
         """Return the serialising lock for one workspace/repo pair.
 
         Step 7: thin facade over ``GitService._git_lock``.
@@ -2199,7 +2397,15 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_exec``.
         """
-        return await self._git._git_exec(runtime, instance_id, argv, workdir=workdir, env=env, timeout=timeout, check_git=check_git)
+        return await self._git._git_exec(
+            runtime,
+            instance_id,
+            argv,
+            workdir=workdir,
+            env=env,
+            timeout=timeout,
+            check_git=check_git,
+        )
 
     async def _git_realpath_contained(
         self,
@@ -2215,7 +2421,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_realpath_contained``.
         """
-        return await self._git._git_realpath_contained(runtime, instance_id, path, env, context=context, display=display)
+        return await self._git._git_realpath_contained(
+            runtime, instance_id, path, env, context=context, display=display
+        )
 
     async def _git_verify_metadata_paths(
         self,
@@ -2228,7 +2436,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_verify_metadata_paths``.
         """
-        return await self._git._git_verify_metadata_paths(runtime, instance_id, repo_root, env)
+        return await self._git._git_verify_metadata_paths(
+            runtime, instance_id, repo_root, env
+        )
 
     async def _git_verify_repo_root(
         self,
@@ -2241,7 +2451,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_verify_repo_root``.
         """
-        return await self._git._git_verify_repo_root(runtime, instance_id, resolved, env)
+        return await self._git._git_verify_repo_root(
+            runtime, instance_id, resolved, env
+        )
 
     async def _git_resolve_repo_root(
         self,
@@ -2254,7 +2466,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_resolve_repo_root``.
         """
-        return await self._git._git_resolve_repo_root(runtime, instance_id, repo_arg, env)
+        return await self._git._git_resolve_repo_root(
+            runtime, instance_id, repo_arg, env
+        )
 
     async def _git_discover_repos(
         self,
@@ -2268,9 +2482,7 @@ class WorkspaceService:
         """
         return await self._git._git_discover_repos(runtime, instance_id, env)
 
-    async def list_git_repositories(
-        self, workspace_id: uuid.UUID
-    ) -> list[str]:
+    async def list_git_repositories(self, workspace_id: uuid.UUID) -> list[str]:
         """Return discovered repository roots for *workspace_id* (internal).
 
         Step 7: thin facade over ``GitService.list_git_repositories``.
@@ -2301,7 +2513,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_repo_snapshot_no_log``.
         """
-        return await self._git._git_repo_snapshot_no_log(runtime, instance_id, repo_root, env)
+        return await self._git._git_repo_snapshot_no_log(
+            runtime, instance_id, repo_root, env
+        )
 
     async def _git_repo_history(
         self,
@@ -2318,7 +2532,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_repo_history``.
         """
-        return await self._git._git_repo_history(runtime, instance_id, repo_root, env, limit=limit, skip=skip, branch=branch)
+        return await self._git._git_repo_history(
+            runtime, instance_id, repo_root, env, limit=limit, skip=skip, branch=branch
+        )
 
     async def _git_merge_state(
         self,
@@ -2345,7 +2561,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_working_diff``.
         """
-        return await self._git._git_working_diff(runtime, instance_id, repo_root, env, changes)
+        return await self._git._git_working_diff(
+            runtime, instance_id, repo_root, env, changes
+        )
 
     async def _git_diff_paths(
         self,
@@ -2359,7 +2577,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_diff_paths``.
         """
-        return await self._git._git_diff_paths(runtime, instance_id, repo_root, env, argv)
+        return await self._git._git_diff_paths(
+            runtime, instance_id, repo_root, env, argv
+        )
 
     async def _git_diff_numstat_raw(
         self,
@@ -2374,7 +2594,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_diff_numstat_raw``.
         """
-        return await self._git._git_diff_numstat_raw(runtime, instance_id, repo_root, env, numstat_argv, raw_argv)
+        return await self._git._git_diff_numstat_raw(
+            runtime, instance_id, repo_root, env, numstat_argv, raw_argv
+        )
 
     def _git_join_diff_parts(
         self,
@@ -2399,7 +2621,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_untracked_entry``.
         """
-        return await self._git._git_untracked_entry(runtime, instance_id, repo_root, env, rel)
+        return await self._git._git_untracked_entry(
+            runtime, instance_id, repo_root, env, rel
+        )
 
     async def _git_untracked_fallback(
         self,
@@ -2413,7 +2637,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_untracked_fallback``.
         """
-        return await self._git._git_untracked_fallback(runtime, instance_id, repo_root, env, rel)
+        return await self._git._git_untracked_fallback(
+            runtime, instance_id, repo_root, env, rel
+        )
 
     async def _git_commit_details(
         self,
@@ -2427,7 +2653,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_commit_details``.
         """
-        return await self._git._git_commit_details(runtime, instance_id, repo_root, env, commit_hash)
+        return await self._git._git_commit_details(
+            runtime, instance_id, repo_root, env, commit_hash
+        )
 
     async def execute_git_operation(
         self,
@@ -2440,7 +2668,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService.execute_git_operation``.
         """
-        return await self._git.execute_git_operation(workspace_id, operation, repo_path, args)
+        return await self._git.execute_git_operation(
+            workspace_id, operation, repo_path, args
+        )
 
     async def _execute_git_operation_inner(
         self,
@@ -2455,7 +2685,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._execute_git_operation_inner``.
         """
-        return await self._git._execute_git_operation_inner(workspace_id, instance_id, runtime, operation, repo_path, params)
+        return await self._git._execute_git_operation_inner(
+            workspace_id, instance_id, runtime, operation, repo_path, params
+        )
 
     async def _git_fresh_snapshot(
         self,
@@ -2486,7 +2718,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_working_diff``.
         """
-        return await self._git._git_op_working_diff(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_working_diff(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     async def _git_op_commit_details(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
@@ -2495,7 +2729,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_commit_details``.
         """
-        return await self._git._git_op_commit_details(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_commit_details(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     @staticmethod
     def _git_require_paths(params: dict[str, Any], operation: str) -> list[str]:
@@ -2512,7 +2748,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_stage``.
         """
-        return await self._git._git_op_stage(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_stage(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     async def _git_op_unstage(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
@@ -2521,7 +2759,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_unstage``.
         """
-        return await self._git._git_op_unstage(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_unstage(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     async def _git_op_discard(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
@@ -2530,7 +2770,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_discard``.
         """
-        return await self._git._git_op_discard(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_discard(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     async def _git_op_commit(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
@@ -2539,7 +2781,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_commit``.
         """
-        return await self._git._git_op_commit(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_commit(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     def _git_remote_arg(self, params: dict[str, Any]) -> str | None:
         """Return the validated remote name, if any.
@@ -2555,7 +2799,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_fetch``.
         """
-        return await self._git._git_op_fetch(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_fetch(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     async def _git_current_branch(
         self, runtime, instance_id, repo_root, env
@@ -2573,7 +2819,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_pull``.
         """
-        return await self._git._git_op_pull(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_pull(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     async def _git_op_push(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
@@ -2582,7 +2830,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_push``.
         """
-        return await self._git._git_op_push(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_push(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     async def _git_op_sync(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
@@ -2591,7 +2841,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_sync``.
         """
-        return await self._git._git_op_sync(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_sync(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     async def _git_verify_branch_exists(
         self, runtime, instance_id, repo_root, env, branch: str
@@ -2600,7 +2852,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_verify_branch_exists``.
         """
-        return await self._git._git_verify_branch_exists(runtime, instance_id, repo_root, env, branch)
+        return await self._git._git_verify_branch_exists(
+            runtime, instance_id, repo_root, env, branch
+        )
 
     async def _git_verify_ref_exists(
         self, runtime, instance_id, repo_root, env, ref: str
@@ -2609,7 +2863,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_verify_ref_exists``.
         """
-        return await self._git._git_verify_ref_exists(runtime, instance_id, repo_root, env, ref)
+        return await self._git._git_verify_ref_exists(
+            runtime, instance_id, repo_root, env, ref
+        )
 
     async def _git_op_checkout_branch(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
@@ -2618,7 +2874,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_checkout_branch``.
         """
-        return await self._git._git_op_checkout_branch(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_checkout_branch(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     async def _git_op_checkout_commit(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
@@ -2627,7 +2885,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_checkout_commit``.
         """
-        return await self._git._git_op_checkout_commit(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_checkout_commit(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     async def _git_op_checkout_remote_branch(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
@@ -2636,7 +2896,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_checkout_remote_branch``.
         """
-        return await self._git._git_op_checkout_remote_branch(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_checkout_remote_branch(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     async def _git_op_create_branch(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
@@ -2645,7 +2907,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_create_branch``.
         """
-        return await self._git._git_op_create_branch(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_create_branch(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     async def _git_op_rename_branch(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
@@ -2654,7 +2918,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_rename_branch``.
         """
-        return await self._git._git_op_rename_branch(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_rename_branch(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     async def _git_op_delete_branch(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
@@ -2663,7 +2929,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_delete_branch``.
         """
-        return await self._git._git_op_delete_branch(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_delete_branch(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     def _git_merge_msg(self, params: dict[str, Any], default: str) -> list[str]:
         """Return ``-m <message>`` argv for merges (single argv element).
@@ -2679,17 +2947,28 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_merge_into_current``.
         """
-        return await self._git._git_op_merge_into_current(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_merge_into_current(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     async def _git_op_merge_current_into(
-        self, runtime, instance_id, repo_root, env, params, timeout,
-        workspace_id: uuid.UUID | None = None, **_: Any
+        self,
+        runtime,
+        instance_id,
+        repo_root,
+        env,
+        params,
+        timeout,
+        workspace_id: uuid.UUID | None = None,
+        **_: Any,
     ) -> dict[str, Any]:
         """Merge the current branch into *target* and return to the start branch.
 
         Step 7: thin facade over ``GitService._git_op_merge_current_into``.
         """
-        return await self._git._git_op_merge_current_into(runtime, instance_id, repo_root, env, params, timeout, workspace_id, **_)
+        return await self._git._git_op_merge_current_into(
+            runtime, instance_id, repo_root, env, params, timeout, workspace_id, **_
+        )
 
     async def _git_op_merge_abort(
         self, runtime, instance_id, repo_root, env, params, timeout, **_: Any
@@ -2698,7 +2977,9 @@ class WorkspaceService:
 
         Step 7: thin facade over ``GitService._git_op_merge_abort``.
         """
-        return await self._git._git_op_merge_abort(runtime, instance_id, repo_root, env, params, timeout, **_)
+        return await self._git._git_op_merge_abort(
+            runtime, instance_id, repo_root, env, params, timeout, **_
+        )
 
     # ── Image artifact operations ─────────────────────────────────────
 

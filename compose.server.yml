@@ -1,38 +1,40 @@
 name: opencuria
-
 services:
   db:
     image: postgres:16-alpine
     container_name: opencuria_db
     restart: unless-stopped
     volumes:
-      - pgdata:/var/lib/postgresql/data
+    - pgdata:/var/lib/postgresql/data
     environment:
       POSTGRES_DB: ${DB_NAME:-opencuria}
       POSTGRES_USER: ${DB_USER:-opencuria}
       POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
     networks:
-      - opencuria-net
+    - opencuria-net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-opencuria}"]
+      test:
+      - CMD-SHELL
+      - pg_isready -U ${DB_USER:-opencuria}
       interval: 5s
       timeout: 5s
       retries: 12
-
   redis:
     image: redis:7-alpine
     container_name: opencuria_redis
     restart: unless-stopped
     volumes:
-      - redisdata:/data
+    - redisdata:/data
     networks:
-      - opencuria-net
+    - opencuria-net
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+      - CMD
+      - redis-cli
+      - ping
       interval: 5s
       timeout: 5s
       retries: 12
-
   backend:
     image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:-latest}
     container_name: opencuria_backend
@@ -42,7 +44,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    environment:
+    environment: &backend_environment
       DJANGO_ENV: production
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required}
       DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
@@ -50,27 +52,31 @@ services:
       DB_USER: ${DB_USER:-opencuria}
       DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
       DB_HOST: db
-      DB_PORT: "5432"
+      DB_PORT: '5432'
       REDIS_URL: redis://redis:6379/0
       CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-${WEBAPP_PUBLIC_URL:-http://localhost:8080}}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-${WEBAPP_PUBLIC_URL:-http://localhost:8080}}
       SIO_CORS_ALLOWED_ORIGINS: ${SIO_CORS_ALLOWED_ORIGINS:-${WEBAPP_PUBLIC_URL:-http://localhost:8080}}
-      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
-      MCP_OAUTH_CALLBACK_URL: ${MCP_OAUTH_CALLBACK_URL:?Set the fixed public HTTPS OAuth callback URL}
-      MCP_OAUTH_FRONTEND_RETURN_URL: ${MCP_OAUTH_FRONTEND_RETURN_URL:?Set the fixed public HTTPS frontend return URL}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY
+        is required}
+      MCP_OAUTH_CALLBACK_URL: ${MCP_OAUTH_CALLBACK_URL:?Set the fixed public HTTPS
+        OAuth callback URL}
+      MCP_OAUTH_FRONTEND_RETURN_URL: ${MCP_OAUTH_FRONTEND_RETURN_URL:?Set the fixed
+        public HTTPS frontend return URL}
       DJANGO_SUPERUSER_EMAIL: ${DJANGO_SUPERUSER_EMAIL:-}
       DJANGO_SUPERUSER_PASSWORD: ${DJANGO_SUPERUSER_PASSWORD:-}
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
-    networks:
-      - opencuria-net
+    - ${BACKEND_PORT:-8000}:8000
+    networks: &id002
+    - opencuria-net
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/')\""]
+      test:
+      - CMD-SHELL
+      - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/')"
       interval: 15s
       timeout: 10s
       retries: 6
       start_period: 30s
-
   webapp:
     image: ghcr.io/opencuria/webapp:${OPENCURIA_TAG:-latest}
     container_name: opencuria_webapp
@@ -82,14 +88,25 @@ services:
       VITE_API_BASE_URL: ${BACKEND_PUBLIC_URL:-${WEBAPP_PUBLIC_URL:-http://localhost:8080}}/api/v1
       VITE_WS_BASE_URL: ${BACKEND_PUBLIC_URL:-${WEBAPP_PUBLIC_URL:-http://localhost:8080}}
     ports:
-      - "${WEBAPP_PORT:-8080}:80"
+    - ${WEBAPP_PORT:-8080}:80
     networks:
-      - opencuria-net
-
+    - opencuria-net
+  recovery:
+    image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:-latest}
+    restart: unless-stopped
+    environment: *backend_environment
+    networks: *id002
+    container_name: opencuria_recovery
+    entrypoint:
+    - python
+    - manage.py
+    - recover_lifecycle
+    depends_on:
+      backend:
+        condition: service_healthy
 volumes:
-  pgdata:
-  redisdata:
-
+  pgdata: null
+  redisdata: null
 networks:
   opencuria-net:
     driver: bridge

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+
 import asyncio
 import json
 import uuid
@@ -124,7 +126,7 @@ class FakeChunkService:
 
 
 def _interface(service) -> WebSocketInterface:
-    interface = WebSocketInterface(service, RunnerSettings())
+    interface = WebSocketInterface(service, RunnerSettings(state_dir=tempfile.mkdtemp()))
     interface._sio.emit = AsyncMock()
     return interface
 
@@ -483,7 +485,7 @@ def _oversize_download_service():
     from src.service import WorkspaceService
 
     runtime = _OversizeProbeRuntime()
-    service = WorkspaceService(runtimes={"docker": runtime}, settings=RunnerSettings())
+    service = WorkspaceService(runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
     workspace_id = uuid.uuid4()
     service._cache[workspace_id] = WorkspaceInfo(workspace_id=workspace_id,
         instance_id="instance-1", status="running", runtime_type="docker")
@@ -675,7 +677,7 @@ def _cap_service(monkeypatch, cap_bytes: int):
     monkeypatch.setattr(service_module, "FILE_UPLOAD_MAX_SIZE", cap_bytes)
     runtime = _CapProbeRuntime()
     service = service_module.WorkspaceService(
-        runtimes={"docker": runtime}, settings=RunnerSettings()
+        runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
     )
     workspace_id = uuid.uuid4()
     service._cache[workspace_id] = WorkspaceInfo(

@@ -11,6 +11,7 @@ def test_workspace_auto_stop_never_stops_a_busy_harness_session():
     workspace = SimpleNamespace(
         status=WorkspaceStatus.RUNNING,
         active_operation=None,
+        current_task_id=None,
         has_active_harness_session=True,
         last_activity_at=timezone.now() - timedelta(hours=12),
         runner=SimpleNamespace(
@@ -26,6 +27,7 @@ def test_workspace_auto_stop_still_stops_idle_workspace():
     workspace = SimpleNamespace(
         status=WorkspaceStatus.RUNNING,
         active_operation=None,
+        current_task_id=None,
         has_active_harness_session=False,
         last_activity_at=timezone.now() - timedelta(hours=12),
         runner=SimpleNamespace(
@@ -35,3 +37,12 @@ def test_workspace_auto_stop_still_stops_idle_workspace():
     )
 
     assert HeartbeatReconcilerMixin()._should_auto_stop_workspace(workspace)
+
+
+def test_intervention_fence_prevents_idle_stop():
+    workspace = SimpleNamespace(
+        status=WorkspaceStatus.RUNNING,
+        active_operation=None,
+        current_task_id="failed-intervention-task",
+    )
+    assert not HeartbeatReconcilerMixin()._should_auto_stop_workspace(workspace)

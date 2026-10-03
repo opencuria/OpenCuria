@@ -79,7 +79,7 @@ async def test_stream_output_delegated_with_runner_id(fresh_sio):
         "stream": "stdout",
         "data": "aGk=",
     }
-    await _handler(server, "workspace:stream_output")("any-sid", data)
+    await _handler(server, "workspace:stream_output")(runner.sid, data)
     service.handle_stream_reply.assert_called_once_with(
         "workspace:stream_output", data, runner_id=str(runner.id)
     )
@@ -102,7 +102,7 @@ async def test_stream_closed_delegated(fresh_sio):
         "workspace_id": str(workspace.id),
         "exit_code": 0,
     }
-    await _handler(server, "workspace:stream_closed")("any-sid", data)
+    await _handler(server, "workspace:stream_closed")(runner.sid, data)
     service.handle_stream_reply.assert_called_once_with(
         "workspace:stream_closed", data, runner_id=str(runner.id)
     )
@@ -238,7 +238,7 @@ async def test_stream_output_ack_ok_and_nack():
             "data": _b64.b64encode(b"hi").decode(),
         }
         # Unknown connection -> routed False -> NACK.
-        result = await handler("any-sid", good)
+        result = await handler(runner.sid, good)
         assert result == {"ok": False}
         # Unauthenticated session -> NACK.
         fresh_server.get_session = AsyncMock(return_value={})

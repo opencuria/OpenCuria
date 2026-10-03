@@ -113,6 +113,8 @@ function clearCredentialsContext(kind: 'service' | 'credential' | 'finished'): v
   }
 }
 
+const selectedRunnerId = ref<string | undefined>()
+
 function handleSettingsEvent(event: Event): void {
   const detail = (
     event as CustomEvent<{
@@ -120,6 +122,7 @@ function handleSettingsEvent(event: Event): void {
       pluginId?: string
       serviceId?: string
       credentialId?: string
+      runnerId?: string
       workspaceDraftId?: string
     }>
   ).detail
@@ -130,6 +133,7 @@ function handleSettingsEvent(event: Event): void {
     workspaceDraftId: detail?.workspaceDraftId,
     version: settingsContext.value.version + 1,
   }
+  selectedRunnerId.value = detail?.runnerId
   openSheet(detail?.tab)
 }
 
@@ -271,7 +275,10 @@ watch(isAdmin, (admin) => {
             />
             <ApiKeysPanel v-else-if="activeTab === 'api-keys'" />
             <CapturedImagesPanel v-else-if="activeTab === 'images'" />
-            <RunnersPanel v-else-if="activeTab === 'runners' && isAdmin" />
+            <RunnersPanel
+              v-else-if="activeTab === 'runners' && isAdmin"
+              :runner-id="selectedRunnerId"
+            />
             <CredentialServicesTab v-else-if="activeTab === 'credential-services'" />
             <ImageDefinitionsTab v-else-if="activeTab === 'image-definitions'" />
           </div>

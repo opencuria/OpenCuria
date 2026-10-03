@@ -70,7 +70,7 @@ class ImageInstanceAdmin(admin.ModelAdmin):
 @admin.register(ImageDefinition)
 class ImageDefinitionAdmin(admin.ModelAdmin):
     list_display = ["id", "name", "runtime_type", "base_distro", "organization", "is_active", "updated_at"]
-    list_filter = ["runtime_type", "is_active", "organization"]
+    list_filter = ["runtime_type", "status", "organization"]
     search_fields = ["name", "description", "base_distro"]
 
 

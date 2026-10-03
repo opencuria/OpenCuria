@@ -49,20 +49,30 @@ class QemuRuntimeBuildBaseImageTests(unittest.TestCase):
 
             with patch("src.runtime.qemu_runtime.Path") as mock_path:
                 real_path = Path
-                mock_path.side_effect = lambda *args, **kwargs: real_path(*args, **kwargs)
+                mock_path.side_effect = lambda *args, **kwargs: real_path(
+                    *args, **kwargs
+                )
                 mock_path.return_value = legacy
                 with patch.object(
                     self.runtime,
                     "_ensure_ubuntu_cloud_image",
                     side_effect=AssertionError("should not download 22.04"),
                 ):
-                    with patch.object(real_path, "exists", autospec=True) as exists_mock:
-                        exists_mock.side_effect = lambda path_obj: str(path_obj) == str(legacy)
-                        resolved = self.runtime._resolve_build_base_image("ubuntu:22.04")
+                    with patch.object(
+                        real_path, "exists", autospec=True
+                    ) as exists_mock:
+                        exists_mock.side_effect = lambda path_obj: (
+                            str(path_obj) == str(legacy)
+                        )
+                        resolved = self.runtime._resolve_build_base_image(
+                            "ubuntu:22.04"
+                        )
 
             self.assertEqual(resolved, legacy)
 
-    def test_resolve_build_base_image_downloads_release_specific_ubuntu_image(self) -> None:
+    def test_resolve_build_base_image_downloads_release_specific_ubuntu_image(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             self.runtime._settings = SimpleNamespace(qemu_image_cache_dir=tmpdir)
 
@@ -89,18 +99,33 @@ class QemuRuntimeBuildBaseImageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             images_dir = Path(tmpdir) / "images"
             images_dir.mkdir(parents=True, exist_ok=True)
-            self.runtime._settings = SimpleNamespace(qemu_image_cache_dir=str(images_dir))
+            self.runtime._settings = SimpleNamespace(
+                qemu_image_cache_dir=str(images_dir)
+            )
 
             response = MagicMock()
             response.read.side_effect = [b"chunk-1", b"chunk-2", b""]
             response.__enter__.return_value = response
             response.__exit__.return_value = False
 
-            with patch.object(self.runtime, "_ensure_host_directory") as ensure_dir_mock:
-                with patch("src.runtime.qemu_runtime.urllib.request.urlopen", return_value=response) as urlopen_mock:
+            with patch.object(
+                self.runtime, "_ensure_host_directory"
+            ) as ensure_dir_mock:
+                with (
+                    patch(
+                        "src.runtime.qemu_runtime.urllib.request.urlopen",
+                        return_value=response,
+                    ) as urlopen_mock,
+                    patch(
+                        "src.runtime.qemu_runtime.subprocess.run",
+                        return_value=SimpleNamespace(stdout=b'{"format": "qcow2"}'),
+                    ),
+                ):
                     target = self.runtime._ensure_ubuntu_cloud_image("24.04")
 
-            self.assertEqual(target, images_dir / "ubuntu-24.04-server-cloudimg-amd64.img")
+            self.assertEqual(
+                target, images_dir / "ubuntu-24.04-server-cloudimg-amd64.img"
+            )
             self.assertTrue(target.exists())
             self.assertEqual(target.read_bytes(), b"chunk-1chunk-2")
             ensure_dir_mock.assert_called_once()
@@ -159,6 +184,12 @@ class QemuRuntimeBuildImageTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             target_path = Path(tmpdir) / "image.qcow2"
+            runtime._snapshot_dir = Path(tmpdir)
+
+            async def publish(disk, target, manifest):
+                target.write_bytes(b"qcow2")
+
+            runtime._publish_image = AsyncMock(side_effect=publish)
 
             process = AsyncMock()
             process.communicate.return_value = (b"", b"")
@@ -169,8 +200,12 @@ class QemuRuntimeBuildImageTests(unittest.IsolatedAsyncioTestCase):
                 tmp_target.write_bytes(b"qcow2")
                 return process
 
-            with patch("src.runtime.qemu_runtime._domain_xml", return_value="<domain/>"):
-                with patch("src.runtime.qemu_runtime.asyncio.to_thread", new=AsyncMock()):
+            with patch(
+                "src.runtime.qemu_runtime._domain_xml", return_value="<domain/>"
+            ):
+                with patch(
+                    "src.runtime.qemu_runtime.asyncio.to_thread", new=AsyncMock()
+                ):
                     with patch(
                         "src.runtime.qemu_runtime.asyncio.create_subprocess_exec",
                         new=AsyncMock(side_effect=_create_subprocess_exec),
@@ -179,6 +214,8 @@ class QemuRuntimeBuildImageTests(unittest.IsolatedAsyncioTestCase):
                             base_distro="ubuntu:24.04",
                             init_script="#!/bin/bash\napt-get update\n",
                             image_path=str(target_path),
+                            operation_id="op",
+                            image_instance_id="image",
                         )
 
         runtime._stream_ssh_process.assert_awaited_once_with(
@@ -207,14 +244,14 @@ class QemuRuntimeDesktopProxyTests(unittest.TestCase):
     def test_resolve_image_artifact_path_accepts_absolute_base_image_path(self) -> None:
         runtime = object.__new__(QemuRuntime)
         runtime._snapshot_dir = Path("/var/lib/opencuria/snapshots")
+        with self.assertRaises(ValueError):
+            runtime._resolve_image_artifact_path(
+                "/var/lib/opencuria/base-images/image.qcow2"
+            )
 
-        result = runtime._resolve_image_artifact_path(
-            "/var/lib/opencuria/base-images/image.qcow2"
-        )
-
-        self.assertEqual(result, Path("/var/lib/opencuria/base-images/image.qcow2"))
-
-    def test_resolve_image_artifact_path_uses_snapshot_dir_for_snapshot_ids(self) -> None:
+    def test_resolve_image_artifact_path_uses_snapshot_dir_for_snapshot_ids(
+        self,
+    ) -> None:
         runtime = object.__new__(QemuRuntime)
         runtime._snapshot_dir = Path("/var/lib/opencuria/snapshots")
 
@@ -227,7 +264,9 @@ class QemuRuntimeDesktopProxyTests(unittest.TestCase):
 
 
 class QemuRuntimeImageArtifactDeletionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_delete_image_artifact_blocks_when_workspace_disk_depends_on_snapshot(self) -> None:
+    async def test_delete_image_artifact_blocks_when_workspace_disk_depends_on_snapshot(
+        self,
+    ) -> None:
         runtime = object.__new__(QemuRuntime)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -238,13 +277,24 @@ class QemuRuntimeImageArtifactDeletionTests(unittest.IsolatedAsyncioTestCase):
 
             runtime._snapshot_dir = snapshot_dir
             runtime._disk_dir = disk_dir
+            runtime._settings = SimpleNamespace(qemu_image_cache_dir=str(snapshot_dir))
 
             snapshot_path = snapshot_dir / "artifact-123.qcow2"
             snapshot_path.write_bytes(b"snapshot")
-            (snapshot_dir / "artifact-123.meta").write_text("snapshot_id=artifact-123\n")
+            (snapshot_dir / "artifact-123.meta").write_text(
+                "snapshot_id=artifact-123\n"
+            )
             (disk_dir / "workspace-1.qcow2").write_bytes(b"overlay")
 
-            runtime._get_qcow2_backing_path = AsyncMock(return_value=snapshot_path.resolve())
+            runtime._libvirt_conn = MagicMock()
+            runtime._libvirt_conn.return_value.listAllDomains.return_value = []
+            runtime._image_info = AsyncMock(
+                side_effect=lambda path: (
+                    {"backing-filename": str(snapshot_path)}
+                    if path.parent == disk_dir
+                    else {}
+                )
+            )
 
             with self.assertRaises(RuntimeError) as ctx:
                 await runtime.delete_image_artifact("artifact-123")
@@ -252,7 +302,9 @@ class QemuRuntimeImageArtifactDeletionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("workspace-1", str(ctx.exception))
             self.assertTrue(snapshot_path.exists())
 
-    async def test_delete_image_artifact_removes_files_when_snapshot_has_no_dependents(self) -> None:
+    async def test_delete_image_artifact_removes_files_when_snapshot_has_no_dependents(
+        self,
+    ) -> None:
         runtime = object.__new__(QemuRuntime)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -263,13 +315,16 @@ class QemuRuntimeImageArtifactDeletionTests(unittest.IsolatedAsyncioTestCase):
 
             runtime._snapshot_dir = snapshot_dir
             runtime._disk_dir = disk_dir
+            runtime._settings = SimpleNamespace(qemu_image_cache_dir=str(snapshot_dir))
 
             snapshot_path = snapshot_dir / "artifact-123.qcow2"
             meta_path = snapshot_dir / "artifact-123.meta"
             snapshot_path.write_bytes(b"snapshot")
             meta_path.write_text("snapshot_id=artifact-123\n")
 
-            runtime._get_qcow2_backing_path = AsyncMock(return_value=None)
+            runtime._libvirt_conn = MagicMock()
+            runtime._libvirt_conn.return_value.listAllDomains.return_value = []
+            runtime._image_info = AsyncMock(return_value={})
 
             await runtime.delete_image_artifact("artifact-123")
 

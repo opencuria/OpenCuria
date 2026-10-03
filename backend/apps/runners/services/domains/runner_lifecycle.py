@@ -82,21 +82,30 @@ class RunnerLifecycleMixin:
 
         Returns the list of dispatched ImageBuildJob records.
         """
-        from ...models import ImageBuildJob
-
-        await sync_to_async(self.timeout_stale_image_operations)()
-
-        pending_builds = await sync_to_async(
-            lambda: list(
-                ImageBuildJob.objects.filter(
-                    runner=runner,
-                    status=ImageBuildJob.Status.PENDING,
-                    build_task__isnull=True,
-                ).select_related("image_definition", "runner")
+        queued = await sync_to_async(
+            lambda: list(self.build_jobs.list_queued(runner.id))
+        )()
+        dispatched = []
+        for build in queued:
+            image = build.pending_generation
+            task = image.creating_task
+            payload = {
+                **image.revision.rendered_input,
+                "task_id": str(task.id),
+                "build_job_id": str(build.id),
+                "image_instance_id": str(image.id),
+                "runtime_type": image.runtime_type,
+            }
+            payload["image_tag" if image.runtime_type == "docker" else "image_path"] = (
+                image.runner_ref
             )
+            await self._emit_to_runner(runner, "task:build_image", payload)
+            await sync_to_async(self.tasks.mark_in_progress)(task)
+            dispatched.append(build)
+        pending_builds = await sync_to_async(
+            lambda: list(self.build_jobs.list_unallocated_pending(runner.id))
         )()
 
-        dispatched = []
         for build in pending_builds:
             try:
                 await self.trigger_build_job(
@@ -120,63 +129,7 @@ class RunnerLifecycleMixin:
 
     async def dispatch_pending_image_deletions(self, runner: "Runner") -> list:
         """Dispatch pending image deletions that accumulated while runner was offline."""
-        from ...models import ImageInstance
-
-        pending_images = await sync_to_async(
-            lambda: list(self.image_instances.list_pending_delete_for_runner(runner.id))
-        )()
-
-        dispatched = []
-        for image in pending_images:
-            try:
-                reused_active_task = False
-                if image.deleting_task_id:
-                    existing_task = await sync_to_async(self.tasks.get_by_id)(
-                        uuid.UUID(image.deleting_task_id)
-                    )
-                    if existing_task and existing_task.status in {
-                        TaskStatus.PENDING,
-                        TaskStatus.IN_PROGRESS,
-                    }:
-                        task = existing_task
-                        reused_active_task = (
-                            image.status == ImageInstance.Status.DELETING
-                        )
-                    else:
-                        task = None
-                else:
-                    task = None
-                if task is None:
-                    task_id = generate_uuid()
-                    task = await sync_to_async(self.tasks.create)(
-                        task_id=task_id,
-                        runner=runner,
-                        task_type=TaskType.DELETE_IMAGE,
-                    )
-                if not reused_active_task:
-                    await sync_to_async(self.image_instances.mark_deleting)(
-                        image.id,
-                        deleting_task_id=str(task.id),
-                    )
-                await self._emit_to_runner(
-                    runner,
-                    "task:delete_image_artifact",
-                    {
-                        "task_id": str(task.id),
-                        "image_instance_id": str(image.id),
-                        "runtime_type": image.runtime_type,
-                        "image_artifact_id": image.runner_ref,
-                    },
-                )
-                await sync_to_async(self.tasks.mark_in_progress)(task)
-                dispatched.append(image)
-            except Exception:
-                logger.exception(
-                    "Failed to dispatch pending image deletion %s for runner %s",
-                    image.id,
-                    runner.id,
-                )
-        return dispatched
+        return []  # Recovery coordinator exclusively owns image deletion.
 
     def unregister_runner(self, sid: str) -> None:
         """
@@ -199,9 +152,7 @@ class RunnerLifecycleMixin:
         try:
             self.fail_streams_for_runner(str(runner.id))
         except Exception:
-            logger.exception(
-                "Failed failing streams for runner %s", runner.id
-            )
+            logger.exception("Failed failing streams for runner %s", runner.id)
 
         # Notify frontend about runner going offline so it can update display.
         self._forward_runner_status_to_frontend(runner, "offline")

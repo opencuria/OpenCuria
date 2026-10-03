@@ -4,6 +4,7 @@ services:
     container_name: opencuria_runner
     restart: unless-stopped
     environment:
+      RUNNER_STATE_DIR: ${RUNNER_STATE_DIR:-/var/lib/opencuria/runner}
       RUNNER_API_TOKEN: ${RUNNER_API_TOKEN:?RUNNER_API_TOKEN is required}
       RUNNER_BACKEND_URL: ${RUNNER_BACKEND_URL:-http://localhost:8000}
       RUNNER_DOCKER_SOCKET: ${RUNNER_DOCKER_SOCKET:-unix:///var/run/docker.sock}
@@ -20,4 +21,8 @@ services:
       RUNNER_QEMU_NETWORK: ${RUNNER_QEMU_NETWORK:-default}
       RUNNER_QEMU_SSH_USER: ${RUNNER_QEMU_SSH_USER:-root}
     volumes:
+      - runner_state:${RUNNER_STATE_DIR:-/var/lib/opencuria/runner}
       - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  runner_state:

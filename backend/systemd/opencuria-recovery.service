@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenCuria lifecycle recovery worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/opencuria/backend
+EnvironmentFile=/opt/opencuria/backend/.env
+ExecStart=/opt/opencuria/backend/.venv/bin/python manage.py recover_lifecycle
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

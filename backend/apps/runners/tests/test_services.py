@@ -796,6 +796,7 @@ class TestCreateWorkspace:
         )
         runner_ref = "opencuria/custom/base:1"
         artifact = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
@@ -806,20 +807,13 @@ class TestCreateWorkspace:
             name="Base Workspace Artifact",
             status=ImageInstance.Status.READY,
         )
+        build.current_generation = artifact
+        build.save()
         workspace, task = await service.create_workspace(
             name="Test Workspace",
             repos=["https://github.com/test/repo"],
             image_artifact_id=artifact.id,
-            env_vars={"GITHUB_TOKEN": "test-token"},
-            files=[
-                ResolvedCredentialFile(
-                    target_path="~/.codex/auth.json",
-                    content='{"access_token":"test"}',
-                )
-            ],
-            ssh_keys=[
-                "-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----"
-            ],
+            credentials=[],
             user=user,
             organization_id=runner.organization_id,
         )
@@ -829,15 +823,14 @@ class TestCreateWorkspace:
         assert task.status == TaskStatus.IN_PROGRESS
         sio_mock.emit.assert_called_once()
         _, payload = sio_mock.emit.await_args.args[:2]
-        assert payload["env_vars"] == {"GITHUB_TOKEN": "test-token"}
-        assert payload["files"] == [
-            {
-                "target_path": "~/.codex/auth.json",
-                "content": '{"access_token":"test"}',
-                "mode": 0o600,
-            }
+        assert payload["env_vars"] == {}
+        assert payload["files"] == []
+        assert payload["ssh_keys"] == []
+        # Credentials require durable catalog associations, tested separately.
+        assert task.lifecyclecommand.event == "task:create_workspace"
+        assert task.lifecyclecommand.payload["repos"] == [
+            "https://github.com/test/repo"
         ]
-        assert len(payload["ssh_keys"]) == 1
         workspace.refresh_from_db()
         assert workspace.base_image_instance_id == artifact.id
 
@@ -864,6 +857,7 @@ class TestCreateWorkspace:
             status=ImageBuildJob.Status.ACTIVE,
         )
         artifact = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
@@ -874,24 +868,24 @@ class TestCreateWorkspace:
             name="Base Workspace Artifact",
             status=ImageInstance.Status.READY,
         )
+        build.current_generation = artifact
+        build.save()
 
-        with pytest.raises(RunnerOfflineError):
-            await service.create_workspace(
-                name="Test Workspace",
-                repos=[],
-                image_artifact_id=artifact.id,
-                user=user,
-                organization_id=runner.organization_id,
-            )
-
+        await service.create_workspace(
+            name="Test Workspace",
+            repos=[],
+            image_artifact_id=artifact.id,
+            user=user,
+            organization_id=runner.organization_id,
+        )
         task = Task.objects.latest("created_at")
-        assert task.type == TaskType.CREATE_WORKSPACE
-        assert task.status == TaskStatus.FAILED
-        assert "offline" in task.error.lower()
+        assert task.status == TaskStatus.IN_PROGRESS
+        from apps.runners.models import LifecycleCommand
 
+        assert LifecycleCommand.objects.get(task=task).event == "task:create_workspace"
         workspace = Workspace.objects.latest("created_at")
-        assert workspace.active_operation is None
-        assert workspace.status == WorkspaceStatus.CREATING
+        assert workspace.current_task_id == task.id
+        assert workspace.active_operation == WorkspaceOperation.CREATING
 
     @pytest.mark.asyncio
     async def test_requires_image_selection(self, service, runner, user):
@@ -960,6 +954,7 @@ class TestCreateWorkspace:
         )
         runner_ref = "opencuria/custom/foreign:1"
         artifact = ImageInstance.objects.create(
+            is_legacy=True,
             runner=foreign_runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
@@ -970,6 +965,8 @@ class TestCreateWorkspace:
             name="Foreign Artifact",
             status=ImageInstance.Status.READY,
         )
+        build.current_generation = artifact
+        build.save()
 
         with pytest.raises(NotFoundError):
             await service.create_workspace(
@@ -1006,6 +1003,7 @@ class TestCreateWorkspace:
         )
         runner_ref = "opencuria/custom/base:definition"
         artifact = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
@@ -1016,6 +1014,8 @@ class TestCreateWorkspace:
             name="Definition Artifact",
             status=ImageInstance.Status.READY,
         )
+        build.current_generation = artifact
+        build.save()
 
         with pytest.raises(
             ConflictError,
@@ -1070,6 +1070,7 @@ class TestCreateWorkspace:
             runtime_type="docker",
         )
         image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=foreign_runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -1093,6 +1094,7 @@ class TestCreateWorkspace:
         self, service, sio_mock, runner, user
     ):
         artifact = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -1131,17 +1133,13 @@ class TestRemoveWorkspace:
         runner.sid = ""
         runner.save(update_fields=["sid"])
 
-        with pytest.raises(RunnerOfflineError):
-            await service.remove_workspace(workspace.id)
-
+        await service.remove_workspace(workspace.id)
         task = Task.objects.latest("created_at")
-        assert task.type == TaskType.REMOVE_WORKSPACE
-        assert task.status == TaskStatus.FAILED
-        assert "offline" in task.error.lower()
-
+        assert task.status == TaskStatus.IN_PROGRESS
         workspace.refresh_from_db()
-        assert workspace.active_operation is None
-        assert workspace.status == WorkspaceStatus.RUNNING
+        assert workspace.current_task_id == task.id
+        assert workspace.active_operation == WorkspaceOperation.REMOVING
+        assert workspace.status == WorkspaceStatus.DELETING
 
     @pytest.mark.asyncio
     async def test_remove_workspace_tracks_delete_metadata_and_offline_retry_state(
@@ -1308,6 +1306,7 @@ class TestImageDeletionLifecycle:
         self, service, runner, user
     ):
         image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
@@ -1325,11 +1324,10 @@ class TestImageDeletionLifecycle:
             base_image_instance=image,
         )
 
-        with pytest.raises(ConflictError, match="is still used by 1 workspace\\(s\\)"):
-            await service.delete_image_artifact(image.id)
+        await service.delete_image_artifact(image.id)
 
         image.refresh_from_db()
-        assert image.status == ImageInstance.Status.READY
+        assert image.status == ImageInstance.Status.PENDING_DELETION
 
     @pytest.mark.asyncio
     async def test_delete_marks_image_pending_deletion_when_runner_offline(
@@ -1338,6 +1336,7 @@ class TestImageDeletionLifecycle:
         runner.status = RunnerStatus.OFFLINE
         runner.save(update_fields=["status"])
         image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -1354,10 +1353,11 @@ class TestImageDeletionLifecycle:
         assert image.delete_requested_at is not None
 
     @pytest.mark.asyncio
-    async def test_delete_ignores_workspace_already_deleting(
+    async def test_delete_waits_for_workspace_deletion_confirmation(
         self, service, runner, user
     ):
         image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
@@ -1378,11 +1378,11 @@ class TestImageDeletionLifecycle:
         await service.delete_image_artifact(image.id)
 
         image.refresh_from_db()
-        assert image.status == ImageInstance.Status.DELETING
-        assert image.deleting_task_id is not None
+        assert image.status == ImageInstance.Status.PENDING_DELETION
+        assert image.deleting_task_id is None
 
     @pytest.mark.asyncio
-    async def test_delete_build_job_ignores_workspace_already_deleting(
+    async def test_delete_build_job_waits_for_workspace_deletion_confirmation(
         self, service, runner, user
     ):
         definition = ImageDefinition.objects.create(
@@ -1398,6 +1398,7 @@ class TestImageDeletionLifecycle:
             status=ImageBuildJob.Status.ACTIVE,
         )
         image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
@@ -1408,6 +1409,8 @@ class TestImageDeletionLifecycle:
             status=ImageInstance.Status.READY,
             created_by=user,
         )
+        build.current_generation = image
+        build.save()
         Workspace.objects.create(
             runner=runner,
             name="Deleting Build Workspace",
@@ -1421,9 +1424,9 @@ class TestImageDeletionLifecycle:
 
         build.refresh_from_db()
         image.refresh_from_db()
-        assert build.status == ImageBuildJob.Status.DELETING
-        assert image.status == ImageInstance.Status.DELETING
-        assert build.deleting_task_id is not None
+        assert build.status == ImageBuildJob.Status.PENDING_DELETION
+        assert image.status == ImageInstance.Status.PENDING_DELETION
+        assert build.deleting_task_id is None
         assert image.deleting_task_id == build.deleting_task_id
 
     @pytest.mark.asyncio
@@ -1431,6 +1434,7 @@ class TestImageDeletionLifecycle:
         self, service, runner, user
     ):
         image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
@@ -1449,15 +1453,16 @@ class TestImageDeletionLifecycle:
 
         dispatched = await service.dispatch_pending_image_deletions(runner)
 
-        assert [item.id for item in dispatched] == [image.id]
+        assert dispatched == []
         task = Task.objects.get(id=image.deleting_task_id)
-        assert task.status == TaskStatus.IN_PROGRESS
+        assert task.status == TaskStatus.PENDING
 
     @pytest.mark.asyncio
     async def test_dispatch_pending_image_deletion_creates_task_when_missing(
         self, service, runner, user
     ):
         image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -1469,12 +1474,11 @@ class TestImageDeletionLifecycle:
 
         dispatched = await service.dispatch_pending_image_deletions(runner)
 
-        assert [item.id for item in dispatched] == [image.id]
+        assert dispatched == []
         image.refresh_from_db()
-        assert image.status == ImageInstance.Status.DELETING
-        assert image.deleting_task_id is not None
-        task = Task.objects.get(id=image.deleting_task_id)
-        assert task.status == TaskStatus.IN_PROGRESS
+        assert image.status == ImageInstance.Status.PENDING_DELETION
+        assert image.deleting_task_id is None
+        assert not Task.objects.filter(type=TaskType.DELETE_IMAGE).exists()
 
     @pytest.mark.asyncio
     async def test_dispatch_pending_image_deletion_reuses_attempt_metadata(
@@ -1487,6 +1491,7 @@ class TestImageDeletionLifecycle:
         )
         started_at = timezone.now()
         image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -1537,6 +1542,7 @@ class TestImageDeletionLifecycle:
             delete_attempt_count=1,
         )
         image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
@@ -1551,6 +1557,8 @@ class TestImageDeletionLifecycle:
             delete_started_at=started_at,
             delete_attempt_count=1,
         )
+        build.current_generation = image
+        build.save()
 
         await service.dispatch_pending_build_job_deletions(runner)
 
@@ -1572,6 +1580,7 @@ class TestImageDeletionLifecycle:
             status=TaskStatus.IN_PROGRESS,
         )
         image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
@@ -1598,6 +1607,7 @@ class TestImageDeletionLifecycle:
         self, service, runner, user
     ):
         image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="qemu",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -1607,13 +1617,10 @@ class TestImageDeletionLifecycle:
             created_by=user,
         )
 
-        with pytest.raises(
-            ConflictError, match="cannot be deleted while it is still capturing"
-        ):
-            await service.delete_image_artifact(image.id)
+        await service.delete_image_artifact(image.id)
 
         image.refresh_from_db()
-        assert image.status == ImageInstance.Status.CAPTURING
+        assert image.status == ImageInstance.Status.PENDING_DELETION
 
     def test_handle_image_artifact_delete_failed_marks_build_and_definition_failed(
         self, service, runner, user
@@ -1626,19 +1633,19 @@ class TestImageDeletionLifecycle:
             base_distro="ubuntu:24.04",
             status=ImageDefinition.Status.DELETING,
         )
-        build = ImageBuildJob.objects.create(
-            image_definition=definition,
-            runner=runner,
-            status=ImageBuildJob.Status.DELETING,
-            deleting_task_id=str(uuid.uuid4()),
-        )
         task = Task.objects.create(
-            id=uuid.UUID(build.deleting_task_id),
             runner=runner,
             type=TaskType.DELETE_IMAGE,
             status=TaskStatus.IN_PROGRESS,
         )
+        build = ImageBuildJob.objects.create(
+            image_definition=definition,
+            runner=runner,
+            status=ImageBuildJob.Status.DELETING,
+            deleting_task=task,
+        )
         image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
@@ -1650,6 +1657,8 @@ class TestImageDeletionLifecycle:
             created_by=user,
             deleting_task_id=str(task.id),
         )
+        build.current_generation = image
+        build.save()
 
         service.handle_image_artifact_delete_failed(
             task_id=str(task.id),
@@ -1684,6 +1693,7 @@ class TestImageDeletionLifecycle:
             status=ImageBuildJob.Status.ACTIVE,
         )
         image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
@@ -1694,6 +1704,8 @@ class TestImageDeletionLifecycle:
             status=ImageInstance.Status.READY,
             created_by=user,
         )
+        build.current_generation = image
+        build.save()
         Workspace.objects.create(
             runner=runner,
             name="Dependent Definition Workspace",
@@ -1703,14 +1715,13 @@ class TestImageDeletionLifecycle:
             base_image_instance=image,
         )
 
-        with pytest.raises(ConflictError, match="still used by 1 workspace\\(s\\)"):
-            await service.delete_image_definition(definition.id)
+        await service.delete_image_definition(definition.id)
 
         definition.refresh_from_db()
         build.refresh_from_db()
-        assert definition.status == ImageDefinition.Status.DELETE_FAILED
-        assert "still used by 1 workspace(s)" in definition.delete_last_error
-        assert build.status == ImageBuildJob.Status.ACTIVE
+        assert definition.status == ImageDefinition.Status.PENDING_DELETION
+        assert not definition.delete_last_error
+        assert build.status == ImageBuildJob.Status.PENDING_DELETION
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1784,6 +1795,7 @@ class TestRuntimeCompatibilityGuards:
             qemu_disk_size_gb=50,
         )
         artifact = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="qemu",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -1821,6 +1833,7 @@ class TestCreateWorkspaceFromImageArtifact:
             runtime_type="docker",
         )
         artifact = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -1888,6 +1901,7 @@ class TestCreateWorkspaceFromImageArtifact:
             runner=runner, name="clone-source", created_by=user
         )
         artifact = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -1945,6 +1959,7 @@ class TestCreateWorkspaceFromImageArtifact:
             runtime_type="docker",
         )
         artifact = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -1992,6 +2007,7 @@ class TestCreateWorkspaceFromImageArtifact:
             runtime_type="docker",
         )
         artifact = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -2019,6 +2035,7 @@ class TestCreateWorkspaceFromImageArtifact:
         self, service, sio_mock, runner, user
     ):
         artifact = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -2323,14 +2340,14 @@ class TestHeartbeatReconciliation:
         assert workspace.status == WorkspaceStatus.CREATING
 
     def test_missing_workspace_marked_failed(self, service):
-        """Heartbeat should mark backend workspace FAILED when runtime misses it."""
+        """Heartbeat should preserve backend workspace when runtime misses it."""
         runner = self._create_runner()
         workspace = self._create_workspace(runner, WorkspaceStatus.RUNNING)
 
         service.handle_heartbeat(runner=runner, workspaces=[])
 
         workspace.refresh_from_db()
-        assert workspace.status == WorkspaceStatus.FAILED
+        assert workspace.status == WorkspaceStatus.RUNNING
 
     def test_delete_state_not_overwritten_by_heartbeat(self, service):
         runner = self._create_runner()
@@ -2364,11 +2381,7 @@ class TestHeartbeatReconciliation:
             ],
         )
 
-        sio_mock.emit.assert_awaited_once_with(
-            "task:cleanup_unknown_workspace",
-            {"workspace_id": unknown_workspace_id},
-            to=runner.sid,
-        )
+        sio_mock.emit.assert_not_awaited()
 
     def test_unknown_cleanup_request_is_deduplicated_while_pending(
         self, service, sio_mock
@@ -2386,11 +2399,7 @@ class TestHeartbeatReconciliation:
         service.handle_heartbeat(runner=runner, workspaces=payload)
         service.handle_heartbeat(runner=runner, workspaces=payload)
 
-        sio_mock.emit.assert_awaited_once_with(
-            "task:cleanup_unknown_workspace",
-            {"workspace_id": unknown_workspace_id},
-            to=runner.sid,
-        )
+        sio_mock.emit.assert_not_awaited()
 
     @pytest.mark.parametrize(
         "terminal_state",
@@ -2413,11 +2422,7 @@ class TestHeartbeatReconciliation:
             ],
         )
 
-        sio_mock.emit.assert_awaited_once_with(
-            "task:cleanup_unknown_workspace",
-            {"workspace_id": str(workspace.id)},
-            to=runner.sid,
-        )
+        sio_mock.emit.assert_not_awaited()
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2556,11 +2561,7 @@ class TestForwardFilesFind:
         service.handle_heartbeat(runner=runner, workspaces=payload)
         service.handle_heartbeat(runner=runner, workspaces=payload)
 
-        sio_mock.emit.assert_awaited_once_with(
-            "task:cleanup_unknown_workspace",
-            {"workspace_id": str(workspace.id)},
-            to=runner.sid,
-        )
+        sio_mock.emit.assert_not_awaited()
 
 
 @pytest.mark.django_db(transaction=True)
@@ -3044,7 +3045,8 @@ class TestImageDefinitionLifecycle:
             status=ImageBuildJob.Status.DEACTIVATED,
             built_at=timezone.now(),
         )
-        ImageInstance.objects.create(
+        legacy_image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
@@ -3055,6 +3057,8 @@ class TestImageDefinitionLifecycle:
             runner_ref="opencuria/custom/activate-ready:1",
             status=ImageInstance.Status.RETIRED,
         )
+        build.current_generation = legacy_image
+        build.save()
 
         updated = await service.activate_build_job(build, created_by=user)
 
@@ -3109,7 +3113,8 @@ class TestImageDefinitionLifecycle:
         )
 
         assert build.status == ImageBuildJob.Status.PENDING
-        assert build.build_task_id is None
+        assert build.build_task_id is not None
+        assert build.pending_generation_id is not None
         service.sio.emit.assert_not_called()
 
     @pytest.mark.asyncio
@@ -3145,7 +3150,8 @@ class TestImageDefinitionLifecycle:
             runner=runner,
             status=ImageBuildJob.Status.BUILDING,
         )
-        ImageInstance.objects.create(
+        legacy_image = ImageInstance.objects.create(
+            is_legacy=True,
             runner=runner,
             runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
@@ -3155,6 +3161,8 @@ class TestImageDefinitionLifecycle:
             name="Stale Instance",
             status=ImageInstance.Status.BUILDING,
         )
+        build.pending_generation = legacy_image
+        build.save()
         ImageBuildJob.objects.filter(id=build.id).update(
             updated_at=timezone.now() - timedelta(hours=2)
         )
@@ -3175,7 +3183,6 @@ class TestImageDefinitionLifecycle:
             runtime_type="docker",
             base_distro="ubuntu:24.04",
             status=ImageDefinition.Status.DELETE_FAILED,
-            is_active=False,
             delete_last_error="still used by 1 workspace(s)",
         )
 
@@ -3246,7 +3253,9 @@ class TestPersistentWorkspaceCredentials:
             status=TaskStatus.IN_PROGRESS,
         )
 
-        service.handle_workspace_stopped(str(task.id), str(workspace.id))
+        service.handle_workspace_stopped(
+            str(task.id), str(workspace.id), credentials_present=False
+        )
 
         workspace.refresh_from_db()
         assert workspace.status == WorkspaceStatus.STOPPED
@@ -3312,7 +3321,14 @@ class TestPersistentWorkspaceCredentials:
 
         assert captured.id == workspace.id
         assert task.type == TaskType.CREATE_IMAGE_ARTIFACT
-        sio_mock.emit.assert_called()
+        from apps.runners.models import LifecycleCommand
+
+        assert (
+            LifecycleCommand.objects.get(task=task).event
+            == "task:create_image_artifact"
+        )
+        # Durable capture commands are delivered by the independent worker.
+        sio_mock.emit.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_resume_sends_workspace_credentials(

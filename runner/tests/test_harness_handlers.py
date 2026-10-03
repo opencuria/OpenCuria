@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+
 import asyncio
 import base64
 import io
@@ -356,7 +358,7 @@ class _FakeService:
 
 
 def _interface(service: _FakeService) -> WebSocketInterface:
-    interface = WebSocketInterface(service, RunnerSettings())
+    interface = WebSocketInterface(service, RunnerSettings(state_dir=tempfile.mkdtemp()))
     interface._sio.emit = AsyncMock()
     return interface
 
@@ -1103,7 +1105,7 @@ class HarnessServiceSandboxTests(unittest.IsolatedAsyncioTestCase):
     async def test_write_file_content_rejects_traversal(self) -> None:
         from src.service import WorkspaceService
 
-        service = WorkspaceService(runtimes={}, settings=RunnerSettings())
+        service = WorkspaceService(runtimes={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
         with self.assertRaises(ValueError):
             await service.write_file_content(
                 uuid.uuid4(), "/etc/passwd", base64.b64encode(b"x").decode()
@@ -1123,7 +1125,7 @@ class HarnessServiceSandboxTests(unittest.IsolatedAsyncioTestCase):
 
         workspace_id = uuid.uuid4()
         service = WorkspaceService(
-            runtimes={"docker": UnusedRuntime()}, settings=RunnerSettings()
+            runtimes={"docker": UnusedRuntime()}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
         )
         service._cache[workspace_id] = WorkspaceInfo(
             workspace_id=workspace_id,
@@ -1145,7 +1147,7 @@ class HarnessServiceSandboxTests(unittest.IsolatedAsyncioTestCase):
     async def test_stat_path_rejects_traversal(self) -> None:
         from src.service import WorkspaceService
 
-        service = WorkspaceService(runtimes={}, settings=RunnerSettings())
+        service = WorkspaceService(runtimes={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
         with self.assertRaises(ValueError):
             await service.stat_path(uuid.uuid4(), "/workspace/../evil")
 
@@ -1186,7 +1188,7 @@ class HarnessServiceQuoteInjectionTests(unittest.IsolatedAsyncioTestCase):
 
         runtime = FakeRuntime()
         service = WorkspaceService(
-            runtimes={"docker": runtime}, settings=RunnerSettings()
+            runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
         )
         workspace_id = uuid.uuid4()
         service._cache[workspace_id] = WorkspaceInfo(
@@ -1286,7 +1288,7 @@ class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
 
         runtime = FakeRuntime()
         service = WorkspaceService(
-            runtimes={"docker": runtime}, settings=RunnerSettings()
+            runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
         )
         workspace_id = uuid.uuid4()
         service._cache[workspace_id] = WorkspaceInfo(
@@ -1426,7 +1428,7 @@ class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
 
         runtime = FailingRuntime()
         service = WorkspaceService(
-            runtimes={"docker": runtime}, settings=RunnerSettings()
+            runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
         )
         resolved = await service._realpath_under_workspace(
             runtime, "instance-1", "/workspace/a.txt"

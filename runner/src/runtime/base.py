@@ -12,6 +12,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from .inventory import RuntimeInventory
+
 
 @dataclass(frozen=True)
 class WorkspaceConfig:
@@ -179,6 +181,10 @@ class RuntimeBackend(abc.ABC):
         """
         await self.stop_workspace(instance_id)
         await self.start_workspace(instance_id)
+
+    async def inventory(self) -> RuntimeInventory:
+        """Return a full physical graph or explicit incomplete inspection."""
+        return RuntimeInventory(self.runtime_type, errors=["Inventory unsupported"])
 
     # --- Inspection -----------------------------------------------------------
 
@@ -351,8 +357,10 @@ class RuntimeBackend(abc.ABC):
         return False
 
     async def create_image_artifact(
-        self, instance_id: str, artifact_name: str
-    ) -> str:
+        self, instance_id: str, artifact_name: str, *,
+        artifact_id: str | None = None, operation_id: str | None = None,
+        credential_clean: bool = False,
+    ) -> ImageArtifactInfo:
         """Capture an image artifact for the workspace.
 
         Returns an artifact identifier.

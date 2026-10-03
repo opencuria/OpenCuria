@@ -1049,6 +1049,7 @@ def test_clone_from_image_can_attach_selected_oauth_plugin(context):
     runner.available_runtimes = ["docker"]
     runner.save(update_fields=["status", "sid", "available_runtimes"])
     artifact = ImageInstance.objects.create(
+        is_legacy=True,
         runner=runner,
         runtime_type="docker",
         origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,

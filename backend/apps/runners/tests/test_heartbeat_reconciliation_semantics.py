@@ -114,7 +114,9 @@ async def test_auto_stop_clears_claim_when_task_creation_fails(
     workspace.save(update_fields=["last_activity_at"])
     service = RunnerService()
     monkeypatch.setattr(
-        service.tasks, "create", Mock(side_effect=RuntimeError("task store unavailable"))
+        service.tasks,
+        "create",
+        Mock(side_effect=RuntimeError("task store unavailable")),
     )
 
     with pytest.raises(RuntimeError, match="task store unavailable"):
@@ -126,9 +128,7 @@ async def test_auto_stop_clears_claim_when_task_creation_fails(
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_auto_stop_releases_claim_when_dispatch_fails(
-    runner, workspace
-):
+async def test_auto_stop_releases_claim_when_dispatch_fails(runner, workspace):
     runner.organization.workspace_auto_stop_timeout_minutes = 1
     runner.organization.save(update_fields=["workspace_auto_stop_timeout_minutes"])
     workspace.last_activity_at = timezone.now() - timedelta(hours=1)
@@ -137,11 +137,11 @@ async def test_auto_stop_releases_claim_when_dispatch_fails(
     sio.emit.side_effect = RuntimeError("runner unavailable")
     service = RunnerService(sio_server=sio)
 
-    with pytest.raises(RuntimeError, match="runner unavailable"):
-        await service.stop_workspace(workspace.id, auto_stop=True)
-
+    task = await service.stop_workspace(workspace.id, auto_stop=True)
     workspace.refresh_from_db()
-    assert workspace.active_operation is None
+    assert workspace.active_operation == "stopping"
+    assert workspace.current_task_id == task.id
+    assert task.status == "in_progress"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -174,3 +174,45 @@ async def test_auto_stop_rechecks_busy_session_when_claiming_stop(runner, worksp
     assert not Task.objects.filter(workspace=workspace).exists()
     workspace.refresh_from_db()
     assert workspace.active_operation is None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_current_session_heartbeat_revives_offline_but_old_session_cannot(runner):
+    from apps.runners.repositories import RunnerRepository
+    from apps.runners.models import Runner
+
+    runner.sid = "current-session"
+    runner.status = "offline"
+    runner.last_heartbeat_at = timezone.now() - timedelta(seconds=100)
+    runner.save()
+    stale = Runner.objects.get(pk=runner.pk)
+    RunnerRepository.update_heartbeat(runner)
+    runner.refresh_from_db()
+    assert runner.status == "online"
+    assert runner.sid == "current-session"
+    assert runner.last_heartbeat_at > timezone.now() - timedelta(seconds=2)
+    runner.sid = "replacement-session"
+    runner.status = "offline"
+    runner.save()
+    RunnerRepository.update_heartbeat(stale)
+    runner.refresh_from_db()
+    assert runner.status == "offline"
+    assert runner.sid == "replacement-session"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_offline_current_sid_allowed_only_for_health(runner):
+    from asgiref.sync import sync_to_async
+    from apps.runners.sio_server import _require_runner_id
+
+    runner.sid = "current-health"
+    runner.status = "offline"
+    await sync_to_async(runner.save)()
+    sio = Mock()
+    sio.get_session = AsyncMock(return_value={"runner_id": str(runner.id)})
+    assert await _require_runner_id(sio, "current-health", "runner:heartbeat") == str(
+        runner.id
+    )
+    assert await _require_runner_id(sio, "old-session", "runner:heartbeat") is None
+    assert await _require_runner_id(sio, "current-health", "runner:inventory") is None

@@ -35,6 +35,8 @@ class OwnershipMixin:
             raise ConflictError(
                 f"Workspace '{workspace.id}' is pending deletion and cannot be modified"
             )
+        if workspace.current_task_id and not workspace.active_operation:
+            raise ConflictError("Workspace lifecycle outcome unresolved; intervention required")
         if workspace.active_operation:
             raise ConflictError(
                 f"Workspace '{workspace.id}' is currently {self._workspace_operation_label(workspace.active_operation)}"

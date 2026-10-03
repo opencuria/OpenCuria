@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+
 import asyncio
 import shutil
 import subprocess
@@ -72,6 +74,10 @@ class FakeRuntime:
             return (0, "")
         return (0, "")
 
+    async def get_workspace_status(self, instance_id):
+        from types import SimpleNamespace
+        return SimpleNamespace(status="running")
+
     # Unused abstract surface for service tests.
     async def remove_workspace(self, instance_id: str) -> None:
         return None
@@ -83,7 +89,8 @@ class FakeRuntime:
 def _service_with_workspace(runtime=None):
     runtime = runtime or FakeRuntime()
     service = WorkspaceService(
-        runtimes={"docker": runtime}, settings=RunnerSettings()
+        runtimes={"docker": runtime},
+        settings=RunnerSettings(state_dir=tempfile.mkdtemp()),
     )
     workspace_id = uuid.uuid4()
     service._cache[workspace_id] = WorkspaceInfo(
@@ -133,9 +140,7 @@ class BackgroundServiceTests(unittest.IsolatedAsyncioTestCase):
         runtime.ignore_term = True
         await service.start_background_process(ws_id, "proc-k", "sleep 999")
         runtime.exit_codes["proc-k"] = 143
-        with unittest.mock.patch(
-            "src.service.asyncio.sleep", new_callable=AsyncMock
-        ):
+        with unittest.mock.patch("src.service.asyncio.sleep", new_callable=AsyncMock):
             result = await service.stop_background_process(ws_id, "proc-k")
         self.assertTrue(result["stopped"])
         self.assertTrue(any("TERM" in cmd for cmd in runtime.killed))
@@ -175,9 +180,7 @@ class BackgroundServiceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             log_path = str(Path(tmp) / "proc-exit3.log")
             exit_path = str(Path(tmp) / "proc-exit3.exit")
-            with unittest.mock.patch(
-                "src.service.BACKGROUND_PROCESS_DIR", tmp
-            ):
+            with unittest.mock.patch("src.service.BACKGROUND_PROCESS_DIR", tmp):
                 shell = WorkspaceService._build_background_start_shell(
                     "exit 3", log_path, exit_path
                 )
@@ -241,11 +244,7 @@ class BackgroundServiceTests(unittest.IsolatedAsyncioTestCase):
         service, _runtime, ws_id = _service_with_workspace()
         await service.start_background_process(ws_id, "p-hb", "sleep 5")
         payload = await service.get_workspace_heartbeat_statuses()
-        entry = next(
-            item
-            for item in payload
-            if item["workspace_id"] == str(ws_id)
-        )
+        entry = next(item for item in payload if item["workspace_id"] == str(ws_id))
         self.assertIn("processes", entry)
         self.assertEqual(entry["processes"][0]["process_id"], "p-hb")
         self.assertEqual(entry["processes"][0]["status"], "running")
@@ -267,9 +266,7 @@ class BackgroundServiceTests(unittest.IsolatedAsyncioTestCase):
             log_path=f"{BACKGROUND_PROCESS_DIR}/proc-r_r2.log",
             exit_path=f"{BACKGROUND_PROCESS_DIR}/proc-r_r2.exit",
         )
-        self.assertEqual(
-            started["log_path"], f"{BACKGROUND_PROCESS_DIR}/proc-r_r2.log"
-        )
+        self.assertEqual(started["log_path"], f"{BACKGROUND_PROCESS_DIR}/proc-r_r2.log")
         self.assertEqual(
             started["exit_path"], f"{BACKGROUND_PROCESS_DIR}/proc-r_r2.exit"
         )
@@ -281,12 +278,8 @@ class BackgroundServiceTests(unittest.IsolatedAsyncioTestCase):
         from src.service import BACKGROUND_PROCESS_DIR
 
         service, _runtime, ws_id = _service_with_workspace()
-        started = await service.start_background_process(
-            ws_id, "proc-leg", "sleep 60"
-        )
-        self.assertEqual(
-            started["log_path"], f"{BACKGROUND_PROCESS_DIR}/proc-leg.log"
-        )
+        started = await service.start_background_process(ws_id, "proc-leg", "sleep 60")
+        self.assertEqual(started["log_path"], f"{BACKGROUND_PROCESS_DIR}/proc-leg.log")
         self.assertEqual(
             started["exit_path"], f"{BACKGROUND_PROCESS_DIR}/proc-leg.exit"
         )
@@ -307,9 +300,7 @@ class BackgroundServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(service._background_processes[ws_id]), 1)
         entry = service._background_processes[ws_id]["proc-re"]
-        self.assertEqual(
-            entry.log_path, f"{BACKGROUND_PROCESS_DIR}/proc-re_r2.log"
-        )
+        self.assertEqual(entry.log_path, f"{BACKGROUND_PROCESS_DIR}/proc-re_r2.log")
         self.assertNotEqual(entry.pid, old_pid)
         self.assertFalse(runtime.alive.get(old_pid))
 
@@ -324,9 +315,7 @@ class BackgroundServiceTests(unittest.IsolatedAsyncioTestCase):
             log_path="/etc/x.log",
             exit_path="/etc/x.exit",
         )
-        self.assertEqual(
-            started["log_path"], f"{BACKGROUND_PROCESS_DIR}/proc-inv.log"
-        )
+        self.assertEqual(started["log_path"], f"{BACKGROUND_PROCESS_DIR}/proc-inv.log")
         self.assertEqual(
             started["exit_path"], f"{BACKGROUND_PROCESS_DIR}/proc-inv.exit"
         )
@@ -342,9 +331,7 @@ class BackgroundServiceTests(unittest.IsolatedAsyncioTestCase):
             log_path=f"{BACKGROUND_PROCESS_DIR}/../evil.log",
             exit_path=f"{BACKGROUND_PROCESS_DIR}/../evil.exit",
         )
-        self.assertEqual(
-            started["log_path"], f"{BACKGROUND_PROCESS_DIR}/proc-trav.log"
-        )
+        self.assertEqual(started["log_path"], f"{BACKGROUND_PROCESS_DIR}/proc-trav.log")
         self.assertEqual(
             started["exit_path"], f"{BACKGROUND_PROCESS_DIR}/proc-trav.exit"
         )
@@ -352,7 +339,9 @@ class BackgroundServiceTests(unittest.IsolatedAsyncioTestCase):
 
 class BackgroundWebsocketTests(unittest.IsolatedAsyncioTestCase):
     def _interface(self, service) -> WebSocketInterface:
-        interface = WebSocketInterface(service, RunnerSettings())
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
         interface._sio.emit = AsyncMock()
         return interface
 
@@ -475,16 +464,15 @@ class BackgroundVerifyTests(unittest.IsolatedAsyncioTestCase):
     """Verify/reattach after tracking loss (e.g. runner restart)."""
 
     def _interface(self, service) -> WebSocketInterface:
-        interface = WebSocketInterface(service, RunnerSettings())
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
         interface._sio.emit = AsyncMock()
         return interface
 
-
     async def test_verify_reattaches_live_process(self) -> None:
         service, runtime, ws_id = _service_with_workspace()
-        started = await service.start_background_process(
-            ws_id, "proc-re", "sleep 60"
-        )
+        started = await service.start_background_process(ws_id, "proc-re", "sleep 60")
         pid = started["pid"]
         # Simulate a runner restart: tracking is gone (in-memory only)
         # but the setsid process lives on inside the workspace.
@@ -511,9 +499,7 @@ class BackgroundVerifyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_verify_is_idempotent(self) -> None:
         service, runtime, ws_id = _service_with_workspace()
-        started = await service.start_background_process(
-            ws_id, "proc-idem", "sleep 60"
-        )
+        started = await service.start_background_process(ws_id, "proc-idem", "sleep 60")
         candidate = {
             "process_id": "proc-idem",
             "pid": started["pid"],
@@ -533,9 +519,7 @@ class BackgroundVerifyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_verify_exited_reports_exit_code_without_tracking(self) -> None:
         service, runtime, ws_id = _service_with_workspace()
-        started = await service.start_background_process(
-            ws_id, "proc-ex", "exit 3"
-        )
+        started = await service.start_background_process(ws_id, "proc-ex", "exit 3")
         pid = started["pid"]
         runtime.alive[pid] = False
         runtime.exit_codes["proc-ex"] = 3
@@ -569,9 +553,7 @@ class BackgroundVerifyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_verify_rejects_path_traversal(self) -> None:
         service, runtime, ws_id = _service_with_workspace()
-        started = await service.start_background_process(
-            ws_id, "proc-safe", "sleep 60"
-        )
+        started = await service.start_background_process(ws_id, "proc-safe", "sleep 60")
         service._background_processes.pop(ws_id, None)
         results = await service.verify_and_reattach_background_processes(
             ws_id,
@@ -608,9 +590,7 @@ class BackgroundVerifyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_verify_handler_roundtrip(self) -> None:
         service, runtime, ws_id = _service_with_workspace()
-        started = await service.start_background_process(
-            ws_id, "proc-h", "sleep 30"
-        )
+        started = await service.start_background_process(ws_id, "proc-h", "sleep 30")
         service._background_processes.pop(ws_id, None)
         interface = self._interface(service)
         handlers = interface._sio.handlers["/"]
@@ -701,9 +681,7 @@ class BackgroundVerifyTests(unittest.IsolatedAsyncioTestCase):
         service._background._get_runtime = _boom  # type: ignore[method-assign]
 
         with self.assertRaises(OSError):
-            await service._kill_all_background_processes(
-                ws_id, reason="test"
-            )
+            await service._kill_all_background_processes(ws_id, reason="test")
 
     async def test_remove_workspace_with_evicted_cache_still_cleans_up(
         self,
@@ -717,6 +695,11 @@ class BackgroundVerifyTests(unittest.IsolatedAsyncioTestCase):
         service, _runtime, ws_id = _service_with_workspace()
         await service.start_background_process(ws_id, "p1", "sleep 10")
         service._cache.pop(ws_id, None)
+        from src.runtime.inventory import RuntimeInventory
+
+        _runtime.inventory = AsyncMock(
+            return_value=RuntimeInventory("docker", complete=True)
+        )
 
         await service.remove_workspace(ws_id)
 

@@ -132,6 +132,13 @@ class Workspace(models.Model):
         choices=WorkspaceStatus.choices,
         default=WorkspaceStatus.CREATING,
     )
+    current_task = models.ForeignKey(
+        "runners.Task",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="current_for_workspaces",
+    )
     active_operation = models.CharField(
         max_length=32,
         choices=WorkspaceOperation.choices,
@@ -205,6 +212,16 @@ class Workspace(models.Model):
     class Meta:
         db_table = "runners_workspace"
         ordering = ["-created_at"]
+
+    @property
+    def intervention_required(self) -> bool:
+        """A terminal task with a retained fence is explicit operator work, not busy."""
+        return bool(self.current_task_id and self.current_task.status == "failed")
+
+    @property
+    def lifecycle_diagnostic(self) -> str:
+        """Explain why a retained fence cannot be silently cleared."""
+        return self.current_task.error if self.intervention_required else ""
 
     def __str__(self) -> str:
         return f"Workspace({self.name}, {self.status})"
@@ -459,7 +476,6 @@ class ImageDefinition(models.Model):
     env_vars = models.JSONField(default=dict, blank=True)
     custom_dockerfile = models.TextField(blank=True, default="")
     custom_init_script = models.TextField(blank=True, default="")
-    is_active = models.BooleanField(default=True)
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
@@ -493,6 +509,19 @@ class ImageDefinition(models.Model):
         ]
 
     @property
+    def is_active(self) -> bool:
+        """Compatibility view; lifecycle status is the single source of truth."""
+        return self.status == self.Status.ACTIVE
+
+    @is_active.setter
+    def is_active(self, value: bool) -> None:
+        if self.status not in {self.Status.ACTIVE, self.Status.DEACTIVATED}:
+            from common.exceptions import ConflictError
+
+            raise ConflictError("Image definition is being removed")
+        self.status = self.Status.ACTIVE if value else self.Status.DEACTIVATED
+
+    @property
     def is_standard(self) -> bool:
         """Return True when this is a global/standard definition."""
         return self.organization_id is None
@@ -504,6 +533,31 @@ class ImageDefinition(models.Model):
                 f"org={self.organization_id})"
             )
         return f"ImageDefinition({self.name}, runtime={self.runtime_type})"
+
+
+class ImageRevision(models.Model):
+    """Immutable recipe snapshot, including the exact input sent to the runner."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    definition = models.ForeignKey(
+        ImageDefinition, on_delete=models.PROTECT, related_name="revisions"
+    )
+    digest = models.CharField(max_length=64)
+    recipe = models.JSONField()
+    rendered_input = models.JSONField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["definition", "digest"], name="unique_image_revision_digest"
+            )
+        ]
+
+    def save(self, *args, **kwargs) -> None:
+        if not self._state.adding:
+            raise ValueError("Image revisions are immutable")
+        super().save(*args, **kwargs)
 
 
 class ImageBuildJob(models.Model):
@@ -531,6 +585,27 @@ class ImageBuildJob(models.Model):
         on_delete=models.CASCADE,
         related_name="image_builds",
     )
+    legacy_task_references = models.JSONField(default=dict, blank=True)
+    current_generation = models.ForeignKey(
+        "ImageInstance",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="current_assignments",
+    )
+    pending_generation = models.ForeignKey(
+        "ImageInstance",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="pending_assignments",
+    )
+
+    @property
+    def image_instance(self):
+        """Compatibility alias for the selected generation, not latest attempt."""
+        return self.current_generation
+
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
@@ -544,12 +619,13 @@ class ImageBuildJob(models.Model):
         blank=True,
         related_name="build_jobs",
     )
-    deleting_task_id = models.CharField(
-        max_length=64,
+    deleting_task = models.ForeignKey(
+        Task,
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        db_index=True,
-        help_text="Task ID of the delete task while cleanup is pending.",
+        related_name="+",
+        db_column="deleting_task_id",
     )
     delete_requested_at = models.DateTimeField(null=True, blank=True)
     delete_started_at = models.DateTimeField(null=True, blank=True)
@@ -626,21 +702,32 @@ class ImageInstance(models.Model):
         null=True,
         blank=True,
     )
-    build_job = models.OneToOneField(
+    build_job = models.ForeignKey(
         ImageBuildJob,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="image_instance",
+        related_name="generations",
     )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
         related_name="image_instances",
         null=True,
         blank=True,
         help_text="The user who created this image instance.",
     )
+    revision = models.ForeignKey(
+        ImageRevision,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="generations",
+    )
+    generation = models.PositiveIntegerField(null=True, blank=True)
+    is_legacy = models.BooleanField(default=False)
+    legacy_task_references = models.JSONField(default=dict, blank=True)
+
     runner_ref = models.CharField(
         max_length=512,
         blank=True,
@@ -655,7 +742,9 @@ class ImageInstance(models.Model):
         help_text="Human-readable image instance name.",
     )
     size_bytes = models.BigIntegerField(
-        default=0,
+        null=True,
+        blank=True,
+        default=None,
         help_text="Image instance size in bytes.",
     )
     status = models.CharField(
@@ -664,19 +753,21 @@ class ImageInstance(models.Model):
         default=Status.READY,
         help_text="Lifecycle status of the image instance.",
     )
-    creating_task_id = models.CharField(
-        max_length=64,
+    creating_task = models.ForeignKey(
+        Task,
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        db_index=True,
-        help_text="Task ID of the creation/build task.",
+        related_name="+",
+        db_column="creating_task_id",
     )
-    deleting_task_id = models.CharField(
-        max_length=64,
+    deleting_task = models.ForeignKey(
+        Task,
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        db_index=True,
-        help_text="Task ID of the delete task while cleanup is pending.",
+        related_name="+",
+        db_column="deleting_task_id",
     )
     delete_requested_at = models.DateTimeField(
         null=True,
@@ -709,9 +800,239 @@ class ImageInstance(models.Model):
     class Meta:
         db_table = "runners_image_instance"
         ordering = ["-created_at"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(size_bytes__isnull=True)
+                | models.Q(size_bytes__gte=0),
+                name="image_size_nonnegative",
+            ),
+            models.UniqueConstraint(
+                fields=["build_job", "generation"], name="unique_image_generation"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(is_legacy=True)
+                | (
+                    models.Q(
+                        origin_type="definition_build",
+                        origin_definition__isnull=False,
+                        build_job__isnull=False,
+                        revision__isnull=False,
+                        generation__gte=1,
+                        generation__isnull=False,
+                        origin_workspace__isnull=True,
+                    )
+                )
+                | (
+                    models.Q(
+                        origin_type="workspace_capture",
+                        origin_definition__isnull=True,
+                        build_job__isnull=True,
+                        revision__isnull=True,
+                        generation__isnull=True,
+                        runtime_type="qemu",
+                    )
+                ),
+                name="image_origin_valid",
+            ),
+        ]
+
+    def save(self, *args, **kwargs) -> None:
+        """Generation identity and build target are write-once."""
+        if not self._state.adding:
+            identity_fields = (
+                "runner_id",
+                "runtime_type",
+                "origin_type",
+                "origin_definition_id",
+                "build_job_id",
+                "revision_id",
+                "generation",
+                "is_legacy",
+            )
+            previous = (
+                type(self)
+                .objects.filter(id=self.id)
+                .values(*identity_fields, "runner_ref")
+                .first()
+            )
+            if previous and not previous["is_legacy"]:
+                if any(previous[key] != getattr(self, key) for key in identity_fields):
+                    raise ValueError("Image generation identity is immutable")
+                if previous["runner_ref"] and previous["runner_ref"] != self.runner_ref:
+                    raise ValueError("Image generation target is immutable")
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return (
             "ImageInstance("
             f"{self.name}, origin_type={self.origin_type}, status={self.status})"
         )
+
+
+class LifecycleCommand(models.Model):
+    """One durable intent/outbox per Task, not a second execution state machine."""
+
+    task = models.OneToOneField(Task, primary_key=True, on_delete=models.CASCADE)
+    event = models.CharField(max_length=80, blank=True)
+    payload = models.JSONField(default=dict)
+    target = models.CharField(max_length=512, blank=True)
+    attempt = models.PositiveIntegerField(default=1)
+    deliveries = models.PositiveIntegerField(default=0)
+    phase = models.CharField(max_length=40, default="intent")
+    heartbeat_at = models.DateTimeField(null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    deadline_at = models.DateTimeField()
+    next_delivery_at = models.DateTimeField(default=timezone.now)
+    lease_until = models.DateTimeField(default=timezone.now)
+
+
+class InventorySnapshot(models.Model):
+    """Authenticated observation; partial scans never replace complete evidence."""
+
+    runner = models.ForeignKey(Runner, on_delete=models.CASCADE)
+    session = models.CharField(max_length=255)
+    epoch = models.UUIDField()
+    sequence = models.PositiveBigIntegerField()
+    received_at = models.DateTimeField(default=timezone.now)
+    complete = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["runner", "session", "epoch", "sequence"],
+                name="inventory_unique_sequence",
+            )
+        ]
+
+
+class InventoryRuntime(models.Model):
+    snapshot = models.ForeignKey(
+        InventorySnapshot, on_delete=models.CASCADE, related_name="runtimes"
+    )
+    runtime_type = models.CharField(max_length=20)
+    collected_at = models.DateTimeField()
+    complete = models.BooleanField(default=False)
+    errors = models.JSONField(default=list)
+    filesystems = models.JSONField(default=list)
+    foreign_resource_count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["snapshot", "runtime_type"], name="inventory_unique_runtime"
+            )
+        ]
+
+
+class InventoryResource(models.Model):
+    runtime = models.ForeignKey(
+        InventoryRuntime, on_delete=models.CASCADE, related_name="resources"
+    )
+    physical_id = models.TextField()
+    kind = models.CharField(max_length=40)
+    managed = models.BooleanField(default=False)
+    state = models.CharField(max_length=40, default="unknown")
+    allocated_bytes = models.PositiveBigIntegerField(null=True)
+    logical_bytes = models.PositiveBigIntegerField(null=True)
+    virtual_bytes = models.PositiveBigIntegerField(null=True)
+    shared_bytes = models.PositiveBigIntegerField(null=True)
+    reclaimable_bytes = models.PositiveBigIntegerField(null=True)
+    provenance = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict)
+    image = models.ForeignKey(ImageInstance, null=True, on_delete=models.SET_NULL)
+    workspace = models.ForeignKey(Workspace, null=True, on_delete=models.SET_NULL)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["runtime", "physical_id"], name="inventory_unique_resource"
+            )
+        ]
+
+
+class InventoryAlias(models.Model):
+    resource = models.ForeignKey(
+        InventoryResource, on_delete=models.CASCADE, related_name="aliases"
+    )
+    reference = models.TextField()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["resource", "reference"], name="inventory_unique_alias"
+            )
+        ]
+
+
+class InventoryEdge(models.Model):
+    """Missing dependency endpoints are stored as unknown resources, not discarded."""
+
+    source = models.ForeignKey(
+        InventoryResource, on_delete=models.CASCADE, related_name="dependencies"
+    )
+    target = models.ForeignKey(
+        InventoryResource, on_delete=models.CASCADE, related_name="dependents"
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "target"], name="inventory_unique_edge"
+            )
+        ]
+
+
+class InventoryRefresh(models.Model):
+    """Coalesced durable full-scan request, satisfied only by a newer complete scan."""
+
+    runner = models.OneToOneField(Runner, primary_key=True, on_delete=models.CASCADE)
+    requested_at = models.DateTimeField(default=timezone.now)
+    next_delivery_at = models.DateTimeField(default=timezone.now)
+    fulfilled_at = models.DateTimeField(null=True)
+
+
+class CaptureRequest(models.Model):
+    """Durable QEMU stop/capture/resume orchestration, separate from Task execution."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(Workspace, on_delete=models.PROTECT)
+    image = models.OneToOneField(ImageInstance, on_delete=models.PROTECT)
+    phase = models.CharField(max_length=32, default="stop")
+    prior_running = models.BooleanField(default=False)
+    resume_suppressed = models.BooleanField(default=False)
+    child = models.ForeignKey(Task, null=True, on_delete=models.PROTECT)
+    diagnostic = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class ImageDeletionRequest(models.Model):
+    """Durable approval and tombstone; child execution remains Task-owned."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        "organizations.Organization", on_delete=models.PROTECT
+    )
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL
+    )
+    target_type = models.CharField(max_length=20)
+    target_id = models.UUIDField()
+    mode = models.CharField(max_length=12, default="deferred")
+    phase = models.CharField(max_length=32, default="waiting_inventory")
+    diagnostic = models.TextField(blank=True)
+    fingerprint = models.CharField(max_length=64, blank=True)
+    approval = models.JSONField(default=dict)
+    previous = models.JSONField(default=dict)
+    children = models.JSONField(default=dict)
+    released_at = models.DateTimeField(null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "target_type", "target_id"],
+                condition=~models.Q(phase__in=["completed", "cancelled"]),
+                name="unique_live_image_deletion",
+            )
+        ]

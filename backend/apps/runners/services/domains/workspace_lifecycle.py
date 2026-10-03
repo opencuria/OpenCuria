@@ -177,7 +177,10 @@ class WorkspaceLifecycleMixin:
         """
         selected_build_job = image.build_job
         if selected_build_job is not None:
-            if selected_build_job.status != "active":
+            if (
+                selected_build_job.status != "active"
+                or selected_build_job.current_generation_id != image.id
+            ):
                 raise ConflictError("Selected image artifact is not active on runner")
             origin_definition = selected_build_job.image_definition
             if origin_definition is not None and (
@@ -188,11 +191,7 @@ class WorkspaceLifecycleMixin:
                     "Selected image definition is not available for new workspaces"
                 )
             runner = selected_build_job.runner
-            runtime_type = (
-                origin_definition.runtime_type
-                if origin_definition is not None
-                else image.runtime_type
-            )
+            runtime_type = image.runtime_type
         else:
             runner = image.runner
             runtime_type = image.runtime_type
@@ -291,6 +290,10 @@ class WorkspaceLifecycleMixin:
             DEFAULT_DESKTOP_HEIGHT if desktop_height is None else desktop_height,
         )
 
+        if credentials is None and (env_vars or files or ssh_keys):
+            raise ConflictError(
+                "Workspace lifecycle credentials require secure catalog associations"
+            )
         resolved_credential_records = resolved_credentials
         if credentials is not None:
             if user is None or organization_id is None:
@@ -342,6 +345,23 @@ class WorkspaceLifecycleMixin:
             credentials=list(credentials or []),
             plugin_ids=list(plugin_ids or []),
             task_id=task_id,
+            operation_payload={
+                "workspace_id": str(workspace_id),
+                "repos": repos,
+                "workspace_name": workspace_name,
+                "runtime_type": runtime_type,
+                "qemu_vcpus": resolved_qemu_vcpus,
+                "qemu_memory_mb": resolved_qemu_memory_mb,
+                "qemu_disk_size_gb": resolved_qemu_disk_size_gb,
+                "configure_commands": [],
+                "image_artifact_id": str(image_artifact_id),
+                "image_tag": selected_image.runner_ref
+                if runtime_type == RuntimeType.DOCKER
+                else "",
+                "base_image_path": selected_image.runner_ref
+                if runtime_type == RuntimeType.QEMU
+                else "",
+            },
             credentials_present=bool(env_vars or files or ssh_keys),
         )
         # Dispatch to runner — include workspace_id so the runner
@@ -528,13 +548,8 @@ class WorkspaceLifecycleMixin:
             await sync_to_async(self.mark_processes_killed)(
                 str(workspace_id), reason="workspace_reconfigured"
             )
-            task_id = generate_uuid()
-            task = await sync_to_async(self.tasks.create)(
-                task_id=task_id,
-                runner=workspace.runner,
-                task_type=TaskType.UPDATE_WORKSPACE,
-                workspace=workspace,
-            )
+            task = workspace._lifecycle_task
+            task_id = task.id
             await self._dispatch_workspace_task(
                 runner=workspace.runner,
                 event="task:update_workspace",
@@ -573,9 +588,7 @@ class WorkspaceLifecycleMixin:
                     else:
                         workspace.credentials_present = acknowledged_credentials_present
                         workspace.credential_sync_status = "pending"
-                        workspace.credential_sync_detail = (
-                            "Configuration saved; runner disk-state acknowledgement pending."
-                        )
+                        workspace.credential_sync_detail = "Configuration saved; runner disk-state acknowledgement pending."
                 except Exception:
                     logger.exception(
                         "Credential sync failed for workspace %s", workspace_id
@@ -601,6 +614,10 @@ class WorkspaceLifecycleMixin:
         auto_stop: bool = False,
     ) -> Task:
         """Stop a running workspace; auto-stop uses a fresh atomic busy guard."""
+        if not auto_stop:
+            from ...capture_repository import CaptureRepository
+
+            await sync_to_async(CaptureRepository.suppress_resume)(workspace_id)
         if auto_stop:
             workspace = await sync_to_async(
                 self.workspaces.get_by_id, thread_sensitive=True
@@ -609,7 +626,9 @@ class WorkspaceLifecycleMixin:
                 raise ConflictError(
                     f"Workspace '{workspace_id}' is no longer eligible for auto-stop"
                 )
-            timeout_minutes = workspace.runner.organization.workspace_auto_stop_timeout_minutes
+            timeout_minutes = (
+                workspace.runner.organization.workspace_auto_stop_timeout_minutes
+            )
             if timeout_minutes is None or timeout_minutes <= 0:
                 raise ConflictError(
                     f"Workspace '{workspace_id}' is no longer eligible for auto-stop"
@@ -749,6 +768,9 @@ class WorkspaceLifecycleMixin:
         sets status to ``deleting``.  If the runner is offline, sets status to
         ``pending_deletion`` — the job will be delivered on reconnect.
         """
+        from ...capture_repository import CaptureRepository
+
+        await sync_to_async(CaptureRepository.suppress_resume)(workspace_id)
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
@@ -802,6 +824,14 @@ class WorkspaceLifecycleMixin:
                 raise
         else:
             await sync_to_async(self.workspaces.mark_pending_deletion)(workspace_id)
+            await self._emit_to_runner(
+                runner,
+                "task:remove_workspace",
+                {
+                    "task_id": str(task.id),
+                    "workspace_id": str(workspace_id),
+                },
+            )
 
         self._forward_to_frontend(
             "workspace:status_changed",
@@ -831,6 +861,19 @@ class WorkspaceLifecycleMixin:
             logger.warning("Received workspace:created for unknown task: %s", task_id)
             return
 
+        if (
+            task.type
+            not in {"create_workspace", "create_workspace_from_image_artifact"}
+            or str(task.workspace_id) != workspace_id
+            or task.status not in {TaskStatus.PENDING, TaskStatus.IN_PROGRESS}
+            or (
+                task.workspace
+                and task.workspace.current_task_id
+                and task.workspace.current_task_id != task.id
+            )
+        ):
+            return
+
         if not self._validate_task_runner(task, runner_id):
             return
 
@@ -852,12 +895,28 @@ class WorkspaceLifecycleMixin:
         self._forward_workspace_operation(workspace_id, None)
 
     def handle_workspace_stopped(
-        self, task_id: str, workspace_id: str, runner_id: str | None = None
+        self,
+        task_id: str,
+        workspace_id: str,
+        runner_id: str | None = None,
+        credentials_present: bool | None = None,
     ) -> None:
         """Handle workspace:stopped event from a runner."""
         task = self.tasks.get_by_id(uuid.UUID(task_id))
         if task is None:
             logger.warning("Received workspace:stopped for unknown task: %s", task_id)
+            return
+
+        if (
+            task.type not in {"stop_workspace"}
+            or str(task.workspace_id) != workspace_id
+            or task.status not in {TaskStatus.PENDING, TaskStatus.IN_PROGRESS}
+            or (
+                task.workspace
+                and task.workspace.current_task_id
+                and task.workspace.current_task_id != task.id
+            )
+        ):
             return
 
         if not self._validate_task_runner(task, runner_id):
@@ -867,7 +926,8 @@ class WorkspaceLifecycleMixin:
         if workspace:
             self.workspaces.update_status(workspace, WorkspaceStatus.STOPPED)
             self.workspaces.update_active_operation(workspace, None)
-            self.workspaces.update_credentials_present(workspace, False)
+            if credentials_present is False:
+                self.workspaces.update_credentials_present(workspace, False)
             self._pending_credential_inject.discard(
                 (str(workspace.runner_id), str(workspace.id))
             )
@@ -885,11 +945,24 @@ class WorkspaceLifecycleMixin:
         task_id: str,
         workspace_id: str,
         runner_id: str | None = None,
+        credentials_present: bool | None = None,
     ) -> None:
         """Handle workspace:resumed event from a runner."""
         task = self.tasks.get_by_id(uuid.UUID(task_id))
         if task is None:
             logger.warning("Received workspace:resumed for unknown task: %s", task_id)
+            return
+
+        if (
+            task.type not in {"resume_workspace"}
+            or str(task.workspace_id) != workspace_id
+            or task.status not in {TaskStatus.PENDING, TaskStatus.IN_PROGRESS}
+            or (
+                task.workspace
+                and task.workspace.current_task_id
+                and task.workspace.current_task_id != task.id
+            )
+        ):
             return
 
         if not self._validate_task_runner(task, runner_id):
@@ -899,6 +972,10 @@ class WorkspaceLifecycleMixin:
         if workspace:
             self.workspaces.update_status(workspace, WorkspaceStatus.RUNNING)
             self.workspaces.update_active_operation(workspace, None)
+            if credentials_present is not None:
+                self.workspaces.update_credentials_present(
+                    workspace, credentials_present
+                )
         self.tasks.complete(task)
         logger.info("Workspace resumed: %s", workspace_id)
 
@@ -913,6 +990,18 @@ class WorkspaceLifecycleMixin:
         task = self.tasks.get_by_id(uuid.UUID(task_id))
         if task is None:
             logger.warning("Received workspace:updated for unknown task: %s", task_id)
+            return
+
+        if (
+            task.type not in {"update_workspace"}
+            or str(task.workspace_id) != workspace_id
+            or task.status not in {TaskStatus.PENDING, TaskStatus.IN_PROGRESS}
+            or (
+                task.workspace
+                and task.workspace.current_task_id
+                and task.workspace.current_task_id != task.id
+            )
+        ):
             return
 
         if not self._validate_task_runner(task, runner_id):
@@ -934,6 +1023,14 @@ class WorkspaceLifecycleMixin:
             logger.warning("Received workspace:error for unknown task: %s", task_id)
             return
 
+        if task.status not in {TaskStatus.PENDING, TaskStatus.IN_PROGRESS}:
+            return
+        if (
+            task.workspace
+            and task.workspace.current_task_id
+            and task.workspace.current_task_id != task.id
+        ):
+            return
         if not self._validate_task_runner(task, runner_id):
             return
 
@@ -986,6 +1083,18 @@ class WorkspaceLifecycleMixin:
         task = self.tasks.get_by_id(uuid.UUID(task_id))
         if task is None:
             logger.warning("Received workspace:removed for unknown task: %s", task_id)
+            return
+
+        if (
+            task.type not in {"remove_workspace"}
+            or str(task.workspace_id) != workspace_id
+            or task.status not in {TaskStatus.PENDING, TaskStatus.IN_PROGRESS}
+            or (
+                task.workspace
+                and task.workspace.current_task_id
+                and task.workspace.current_task_id != task.id
+            )
+        ):
             return
 
         if not self._validate_task_runner(task, runner_id):
@@ -1189,6 +1298,12 @@ class WorkspaceLifecycleMixin:
         if not name:
             workspace_name = f"{workspace_name} (clone)"
 
+        if credentials is None and (
+            resolved_env_vars or resolved_files or resolved_ssh_keys
+        ):
+            raise ConflictError(
+                "Workspace lifecycle credentials require secure catalog associations"
+            )
         task_id = generate_uuid()
         from ..workspace_configuration import WorkspaceConfigurationService
 
@@ -1218,6 +1333,15 @@ class WorkspaceLifecycleMixin:
                 resolved_env_vars or resolved_files or resolved_ssh_keys
             ),
             task_type=TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT,
+            operation_payload={
+                "workspace_id": str(workspace_id),
+                "workspace_name": workspace_name,
+                "image_artifact_id": image.runner_ref,
+                "runtime_type": runtime_type,
+                "qemu_vcpus": qemu_vcpus,
+                "qemu_memory_mb": qemu_memory_mb,
+                "qemu_disk_size_gb": qemu_disk_size_gb,
+            },
         )
 
         await self._dispatch_workspace_task(

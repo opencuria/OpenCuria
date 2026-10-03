@@ -17,10 +17,10 @@ living on ``WorkspaceService`` in :mod:`src.service`:
 - :meth:`WorkspaceRegistry.get_vm_metrics`,
 - :meth:`WorkspaceRegistry.workspace_exists`.
 
-Bodies are verbatim moves of the ``WorkspaceService`` implementations
-(all read/write ``self._cache`` / ``self._runtimes`` semantics
-preserved, including creating-preservation, tracking-drop and the
-heartbeat payload shape). Cross-cluster reads (desktop sessions,
+Refresh merges same-incarnation observations into canonical cache entries.
+Per-workspace lifecycle epochs fence stale snapshots across awaited effects;
+creating-preservation and heartbeat payload shapes remain unchanged.
+Cross-cluster reads (desktop sessions,
 background statuses, desktop liveness) go through optional hooks set
 post-construction by the composer (``WorkspaceService``), so the
 registry stays unit-testable without importing sibling managers:
@@ -45,9 +45,10 @@ gracefully, recover is a no-op).
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from contextlib import asynccontextmanager
 from typing import Any
 
 import structlog
@@ -79,6 +80,10 @@ class WorkspaceRegistry:
         self._runtimes = runtimes if runtimes is not None else {}
         self._settings = settings
         self._cache: dict[uuid.UUID, WorkspaceInfo] = {}
+        self._epochs: dict[uuid.UUID, int] = {}
+        self._active: set[uuid.UUID] = set()
+        self._lifecycle_locks: dict[uuid.UUID, asyncio.Lock] = {}
+        self._refresh_lock = asyncio.Lock()
         # Optional cross-cluster hooks, set post-construction by the
         # composer (``WorkspaceService``). All default to ``None`` so
         # the registry stays unit-testable in isolation.
@@ -87,62 +92,76 @@ class WorkspaceRegistry:
         self.background_status: (
             Callable[[RuntimeBackend, str, Any], Awaitable[dict[str, Any]]] | None
         ) = None
-        self.desktop_live: (
-            Callable[[uuid.UUID], Awaitable[bool]] | None
-        ) = None
+        self.desktop_live: Callable[[uuid.UUID], Awaitable[bool]] | None = None
         self.desktop_heartbeat_payload: (
             Callable[[uuid.UUID, DesktopSession], dict[str, Any]] | None
         ) = None
 
     # -- cache ownership -------------------------------------------------
 
-    async def sync_from_runtime(self) -> None:
-        """Rebuild the in-memory cache from live runtime state.
+    @asynccontextmanager
+    async def lifecycle(self, workspace_id: uuid.UUID):
+        """Serialize one resource, not heartbeats or unrelated workspaces.
 
-        Called at startup and can be called periodically to reconcile
-        the cache with actual runtime state (e.g. workspaces killed
-        externally).  Queries all registered runtime backends.
+        Epochs fence inventory which started before/during an awaited operation.
+        Even failures advance the fence: their pre-operation snapshot is unsafe.
         """
-        new_cache: dict[uuid.UUID, WorkspaceInfo] = {}
+        lock = self._lifecycle_locks.setdefault(workspace_id, asyncio.Lock())
+        async with lock:
+            self._epochs[workspace_id] = self._epochs.get(workspace_id, 0) + 1
+            self._active.add(workspace_id)
+            try:
+                yield
+            finally:
+                self._active.remove(workspace_id)
+                self._epochs[workspace_id] += 1
 
-        for runtime_type, runtime in self._runtimes.items():
-            infos = await runtime.list_workspaces()
-            for info in infos:
-                try:
-                    ws_id = uuid.UUID(info.workspace_id)
-                except ValueError:
-                    logger.warning(
-                        "skipping_invalid_workspace_id",
-                        raw_id=info.workspace_id,
+    async def sync_from_runtime(self) -> None:
+        """Merge observations without detaching lifecycle-owned cache objects."""
+        async with self._refresh_lock:
+            epochs = self._epochs.copy()
+            active = self._active.copy()
+            observed: dict[uuid.UUID, WorkspaceInfo] = {}
+            # Collect first: a failed/incomplete enumeration must not delete cache.
+            for runtime_type, runtime in self._runtimes.items():
+                for info in await runtime.list_workspaces():
+                    try:
+                        ws_id = uuid.UUID(info.workspace_id)
+                    except ValueError:
+                        logger.warning(
+                            "skipping_invalid_workspace_id", raw_id=info.workspace_id
+                        )
+                        continue
+                    observed[ws_id] = WorkspaceInfo(
+                        workspace_id=ws_id,
+                        instance_id=info.instance_id,
+                        status=info.status,
+                        runtime_type=runtime_type,
                     )
+
+            for ws_id in self._cache.keys() | observed.keys():
+                if (
+                    ws_id in active
+                    or ws_id in self._active
+                    or epochs.get(ws_id, 0) != self._epochs.get(ws_id, 0)
+                ):
                     continue
-
                 existing = self._cache.get(ws_id)
-
-                new_cache[ws_id] = WorkspaceInfo(
-                    workspace_id=ws_id,
-                    instance_id=info.instance_id,
-                    status=info.status,
-                    runtime_type=runtime_type,
-                    created_at=(
-                        existing.created_at if existing else datetime.now(timezone.utc)
-                    ),
-                )
-
-        # Preserve "creating" entries that are not yet visible to the runtime.
-        # A workspace in the "creating" state has been registered by the service
-        # layer but runtime.create_workspace() is still in progress (e.g. the
-        # QEMU VM is booting).  Dropping it from the cache would cause the
-        # next heartbeat to omit it and the backend to mark it as failed.
-        for ws_id, existing in self._cache.items():
-            if existing.status == "creating" and ws_id not in new_cache:
-                new_cache[ws_id] = existing
-
-        self._cache = new_cache
-        logger.info(
-            "cache_synced_from_runtime",
-            workspace_count=len(self._cache),
-        )
+                incoming = observed.get(ws_id)
+                if incoming is None:
+                    if existing is not None and existing.status != "creating":
+                        self._cache.pop(ws_id, None)
+                elif (
+                    existing is not None
+                    and existing.runtime_type == incoming.runtime_type
+                    and existing.instance_id == incoming.instance_id
+                ):
+                    # Credentials/progress are lifecycle-owned, never inventory-derived.
+                    existing.status = incoming.status
+                else:
+                    # Different incarnation: no old credentials/proof can be inherited.
+                    self._cache[ws_id] = incoming
+            logger.info("cache_synced_from_runtime", workspace_count=len(self._cache))
 
     def _get_cached(self, workspace_id: uuid.UUID) -> WorkspaceInfo:
         """Look up a workspace in the cache or raise."""
@@ -202,13 +221,22 @@ class WorkspaceRegistry:
         info = self.get_cached(workspace_id)
         runtime = self.get_runtime(workspace_id)
 
+        epoch = self._epochs.get(workspace_id, 0)
         # Refresh status from runtime
         if info.instance_id:
             try:
                 status = await runtime.get_workspace_status(info.instance_id)
-                info.status = status.status
+                if (
+                    workspace_id not in self._active
+                    and epoch == self._epochs.get(workspace_id, 0)
+                    and self._cache.get(workspace_id) is info
+                ):
+                    info.status = status.status
             except Exception:
-                info.status = "unknown"
+                if workspace_id not in self._active and epoch == self._epochs.get(
+                    workspace_id, 0
+                ):
+                    info.status = "unknown"
 
         return info
 
@@ -232,7 +260,7 @@ class WorkspaceRegistry:
         sessions = self.desktop_sessions if self.desktop_sessions is not None else {}
         entries = self.background_entries if self.background_entries is not None else {}
         payload: list[dict] = []
-        for info in self._cache.values():
+        for info in list(self._cache.values()):
             workspace_id = info.workspace_id
             item = {
                 "workspace_id": str(workspace_id),
@@ -314,7 +342,7 @@ class WorkspaceRegistry:
     async def recover_desktop_sessions_from_runtime(self) -> None:
         """Rebuild in-memory desktop sessions from live runtime state."""
         sessions = self.desktop_sessions if self.desktop_sessions is not None else {}
-        for workspace_id, info in self._cache.items():
+        for workspace_id, info in list(self._cache.items()):
             if info.status != "running" or workspace_id in sessions:
                 continue
 
@@ -353,7 +381,7 @@ class WorkspaceRegistry:
             return {}
 
         metrics: dict[str, dict[str, Any]] = {}
-        for workspace_id, info in self._cache.items():
+        for workspace_id, info in list(self._cache.items()):
             if info.runtime_type != "qemu":
                 continue
             try:

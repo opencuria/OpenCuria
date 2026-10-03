@@ -58,10 +58,14 @@ export const useImageStore = defineStore('images', () => {
     try {
       await workspacesApi.createImageArtifact(data)
       await fetchImages()
-      notifications.success('Image creating', 'Image is being created. It will appear here when ready.')
+      notifications.success(
+        'Image creating',
+        'Image is being created. It will appear here when ready.',
+      )
       return true
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to create image'
+      error.value = msg
       notifications.error('Image failed', msg)
       return false
     }
@@ -70,16 +74,11 @@ export const useImageStore = defineStore('images', () => {
   async function deleteImageArtifact(imageArtifactId: string): Promise<boolean> {
     try {
       await workspacesApi.deleteImageArtifact(imageArtifactId)
-      // Mark locally as deleting (will be confirmed via next fetch)
-      const idx = images.value.findIndex((a) => a.id === imageArtifactId)
-      if (idx !== -1) {
-        const imageArtifact = images.value[idx]
-        if (imageArtifact) {
-          images.value[idx] = { ...imageArtifact, status: 'deleting' }
-        }
-      }
       await fetchImages()
-      notifications.success('Delete initiated', 'Image deletion has been initiated.')
+      notifications.info(
+        'Deletion requested',
+        'Intent stored; dependent workspaces are preserved. Inspect runner storage for progress.',
+      )
       return true
     } catch (e: any) {
       if (e?.response?.status === 409) {
@@ -112,10 +111,7 @@ export const useImageStore = defineStore('images', () => {
     data: ImageArtifactCloneIn,
   ): Promise<string | null> {
     try {
-      const result = await workspacesApi.createWorkspaceFromUserImageArtifact(
-        imageArtifactId,
-        data,
-      )
+      const result = await workspacesApi.createWorkspaceFromUserImageArtifact(imageArtifactId, data)
       notifications.success('Cloning workspace', 'New workspace is being created from image.')
       return result.workspace_id
     } catch (e) {

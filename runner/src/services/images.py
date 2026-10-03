@@ -26,9 +26,6 @@ Extraction owner: Step 2 (leaf cluster: terminals + images).
 
 from __future__ import annotations
 
-import asyncio
-import io
-import tarfile
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -90,6 +87,9 @@ class ImageManager:
             )
         else:
             self._store_workspace = None
+        self.lifecycle_context = None
+        self.scrub_proof_hook = None
+        self.checkpoint_hook = None
         self._credentials_injector = credentials_injector
 
     async def build_image(
@@ -103,6 +103,8 @@ class ImageManager:
         init_script: str = "",
         image_path: str = "",
         progress_callback=None,
+        operation_id: str | None = None,
+        image_instance_id: str | None = None,
     ) -> dict[str, str]:
         """Build runtime image from definition payload.
 
@@ -115,40 +117,14 @@ class ImageManager:
                 )
             if not image_tag.strip():
                 raise RuntimeError("image_tag is required for docker image builds")
-            try:
-                import docker  # type: ignore[import-not-found]
-            except Exception as exc:
-                raise RuntimeError("docker SDK is not available") from exc
-
-            context_stream = io.BytesIO()
-            with tarfile.open(fileobj=context_stream, mode="w") as tar:
-                df_bytes = dockerfile_content.encode("utf-8")
-                df_info = tarfile.TarInfo(name="Dockerfile")
-                df_info.size = len(df_bytes)
-                tar.addfile(df_info, io.BytesIO(df_bytes))
-
-            context_stream.seek(0)
-            client = docker.from_env()
-            image, logs = await asyncio.to_thread(
-                client.images.build,
-                fileobj=context_stream,
-                custom_context=True,
-                rm=True,
-                tag=image_tag,
-                pull=False,
-                forcerm=True,
+            runtime = self._get_runtime_by_type("docker")
+            return await runtime.build_image(
+                dockerfile_content=dockerfile_content,
+                image_tag=image_tag,
+                operation_id=operation_id,
+                image_instance_id=image_instance_id,
+                progress_callback=progress_callback,
             )
-            for entry in logs:
-                if progress_callback is None:
-                    continue
-                line = ""
-                if isinstance(entry, dict):
-                    line = str(entry.get("stream") or entry.get("status") or "").strip()
-                else:
-                    line = str(entry).strip()
-                if line:
-                    await progress_callback(line)
-            return {"image_tag": image_tag}
 
         if runtime_type == "qemu":
             if not image_path.strip():
@@ -163,6 +139,8 @@ class ImageManager:
                 base_distro=base_distro,
                 init_script=init_script,
                 image_path=image_path,
+                operation_id=operation_id,
+                image_instance_id=image_instance_id,
                 progress_callback=progress_callback,
             )
 
@@ -172,6 +150,10 @@ class ImageManager:
         self,
         workspace_id: uuid.UUID,
         name: str,
+        *,
+        artifact_id: str | None = None,
+        operation_id: str | None = None,
+        credential_clean: bool = False,
     ) -> "ImageArtifactInfo":
         """Create an image artifact from a workspace.
 
@@ -185,7 +167,16 @@ class ImageManager:
             raise RuntimeError(
                 f"Runtime '{info.runtime_type}' does not support image artifact capture"
             )
-        artifact = await runtime.create_image_artifact(info.instance_id, name)
+        proven_clean = False
+        if self.scrub_proof_hook is not None:
+            proven_clean = await self.scrub_proof_hook(workspace_id)
+        artifact = await runtime.create_image_artifact(
+            info.instance_id,
+            name,
+            artifact_id=artifact_id,
+            operation_id=operation_id,
+            credential_clean=proven_clean,
+        )
         logger.info(
             "image_artifact_created",
             workspace_id=str(workspace_id),
@@ -241,22 +232,8 @@ class ImageManager:
         if runtime_type == "docker":
             if not image_ref.strip():
                 raise RuntimeError("image_ref is required for docker image deletion")
-            try:
-                import docker  # type: ignore[import-not-found]
-                from docker.errors import ImageNotFound  # type: ignore[import-not-found]
-            except Exception as exc:
-                raise RuntimeError("docker SDK is not available") from exc
-
-            client = docker.from_env()
-            try:
-                await asyncio.to_thread(
-                    client.images.remove, image=image_ref, force=True
-                )
-                logger.info("docker_image_deleted", image_ref=image_ref)
-                return "deleted"
-            except ImageNotFound:
-                logger.info("docker_image_already_absent", image_ref=image_ref)
-                return "already_absent"
+            runtime = self._get_runtime_by_type("docker")
+            return await runtime.delete_image_reference(image_ref)
 
         if runtime_type == "qemu":
             if not image_ref.strip():
@@ -288,6 +265,30 @@ class ImageManager:
         files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
     ) -> tuple[uuid.UUID, bool]:
+        """Fence clone initialization against inventory while retaining leaf API."""
+        kwargs = dict(
+            image_artifact_id=image_artifact_id, new_workspace_id=new_workspace_id,
+            runtime_type=runtime_type, qemu_vcpus=qemu_vcpus,
+            qemu_memory_mb=qemu_memory_mb, qemu_disk_size_gb=qemu_disk_size_gb,
+            env_vars=env_vars, files=files, ssh_keys=ssh_keys,
+        )
+        if self.lifecycle_context is None:
+            return await self._create_workspace_from_image_artifact(**kwargs)
+        async with self.lifecycle_context(new_workspace_id):
+            return await self._create_workspace_from_image_artifact(**kwargs)
+
+    async def _create_workspace_from_image_artifact(
+        self,
+        image_artifact_id: str,
+        new_workspace_id: uuid.UUID,
+        runtime_type: str,
+        qemu_vcpus: int | None = None,
+        qemu_memory_mb: int | None = None,
+        qemu_disk_size_gb: int | None = None,
+        env_vars: dict[str, str] | None = None,
+        files: list[dict[str, Any]] | None = None,
+        ssh_keys: list[str] | None = None,
+    ) -> tuple[uuid.UUID, bool]:
         """Create a workspace from an image artifact and inject credentials.
 
         Credentials remain on disk until a controlled stop.
@@ -300,6 +301,13 @@ class ImageManager:
                 f"Runtime '{runtime_type}' does not support image artifact cloning"
             )
 
+        info = WorkspaceInfo(
+            workspace_id=new_workspace_id, instance_id="", status="creating",
+            runtime_type=runtime_type,
+        )
+        if self._store_workspace is None:
+            raise RuntimeError("ImageManager has no workspace store configured")
+        self._store_workspace(info)
         instance_id = await runtime.create_workspace_from_image_artifact(
             image_artifact_id,
             str(new_workspace_id),
@@ -308,16 +316,7 @@ class ImageManager:
             qemu_disk_size_gb=qemu_disk_size_gb,
         )
 
-        if self._store_workspace is None:
-            raise RuntimeError("ImageManager has no workspace store configured")
-        self._store_workspace(
-            WorkspaceInfo(
-                workspace_id=new_workspace_id,
-                instance_id=instance_id,
-                status="running",
-                runtime_type=runtime_type,
-            )
-        )
+        info.instance_id = instance_id
 
         log = logger.bind(
             workspace_id=str(new_workspace_id),
@@ -328,6 +327,8 @@ class ImageManager:
 
         if self._credentials_injector is None:
             raise RuntimeError("ImageManager has no credentials injector configured")
+        if self.checkpoint_hook is not None:
+            await self.checkpoint_hook(new_workspace_id, None, "injecting")
         credentials_present = await self._credentials_injector(
             runtime,
             instance_id,
@@ -336,4 +337,10 @@ class ImageManager:
             ssh_keys,
             log,
         )
+        if self.checkpoint_hook is not None:
+            await self.checkpoint_hook(
+                new_workspace_id, credentials_present, "workspace:created"
+            )
+        info.status = "running"
+        info.credentials_present = credentials_present
         return new_workspace_id, credentials_present

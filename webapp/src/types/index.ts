@@ -201,6 +201,8 @@ export interface VmSystemMetrics {
 // --- Workspace ---
 
 export interface Workspace {
+  intervention_required?: boolean
+  lifecycle_diagnostic?: string
   id: string
   runner_id: string
   status: WorkspaceStatus
@@ -685,6 +687,7 @@ export interface ImageArtifact {
 }
 
 export interface ImageArtifactCreateIn {
+  stop_and_restart?: boolean
   name: string
   workspace_id?: string
 }
@@ -708,6 +711,8 @@ export interface ImageArtifactCloneOut {
 }
 
 export interface RunnerImageBuild {
+  current_generation_id?: string | null
+  pending_generation_id?: string | null
   id: string
   image_definition_id: string
   runner_id: string

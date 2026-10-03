@@ -276,3 +276,25 @@ OAuth-capable HTTP MCP plugins (including the seeded Notion plugin) can connect 
 
 This project is licensed under the GNU Affero General Public License v3.0.
 See [`LICENSE`](./LICENSE).
+
+### Lifecycle recovery operations
+
+Backend and runner lifecycle protocol versions must match. Keep the runner's
+`RUNNER_STATE_DIR` persistent across restarts/upgrades (`runner/compose.yml` mounts
+`runner_state`) together with workspace disks/volumes. Do not share one journal
+between runners or delete it to resolve a failed task. Run migrations and the
+independent `python manage.py recover_lifecycle` worker alongside ASGI (Compose
+and the backend systemd worker unit provide this process).
+
+For an unresolved operation, use `GET /api/v1/runners/operations/` then
+`GET /api/v1/runners/operations/{id}/`. Offline inspection returns unknown;
+it never clears a fence. `POST .../{id}/reconcile/` applies proven journal
+completion; `retry/` is only for known finished failed start/stop/remove, bounded
+and requiring fresh resource evidence. Organization admins can explicitly
+`acknowledge_interrupted/` only after proof of no executing handler/helper and a
+complete current-session runtime scan. Acknowledgment preserves all resources;
+partial creation stays failed, with disks intact. Removal is a separate explicit
+request. No full create/build/capture rerun or external-stop auto-start occurs.
+Equivalent MCP tools: `list_lifecycle_operations`, `inspect_lifecycle_operation`,
+`dispose_lifecycle_operation`. Details, authorization and return shapes are in
+[Lifecycle implementation](docs/image-lifecycle-implementation.md#recovery-hardening-operator-workflow).

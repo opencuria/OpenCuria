@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import type { Runner, RunnerSystemMetrics } from '@/types'
 import { RunnerStatus } from '@/types'
+import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Server, Wifi, WifiOff, Clock, Cpu, MemoryStick, HardDrive } from '@lucide/vue'
 import { formatRelativeTime } from '@/lib/utils'
@@ -16,6 +17,7 @@ const props = defineProps<{
   runner: Runner
 }>()
 
+const emit = defineEmits<{ select: [] }>()
 const metrics = ref<RunnerSystemMetrics | null>(null)
 const metricsHistory = ref<number[]>([])
 let pollInterval: ReturnType<typeof setInterval> | null = null
@@ -78,11 +80,11 @@ onUnmounted(() => {
     </template>
     <div class="min-w-0 space-y-1">
       <h3 class="text-sm font-medium text-foreground">
-        {{ runner.name || runner.id.slice(0, 8) }}
+        <Button variant="link" class="h-auto p-0 text-left" @click="emit('select')">{{
+          runner.name || runner.id.slice(0, 8)
+        }}</Button>
       </h3>
-      <p class="font-mono text-xs text-muted-foreground">
-        {{ runner.id.slice(0, 8) }}…
-      </p>
+      <p class="font-mono text-xs text-muted-foreground">{{ runner.id.slice(0, 8) }}…</p>
       <p class="flex items-center gap-1.5 text-xs text-muted-foreground">
         <Clock :size="12" />
         <span v-if="isOnline">Connected {{ formatRelativeTime(runner.connected_at) }}</span>
@@ -109,7 +111,9 @@ onUnmounted(() => {
               <Cpu :size="12" />
               CPU
             </span>
-            <span class="font-mono text-foreground">{{ metrics.cpu_usage_percent.toFixed(1) }}%</span>
+            <span class="font-mono text-foreground"
+              >{{ metrics.cpu_usage_percent.toFixed(1) }}%</span
+            >
           </div>
           <div class="h-1.5 w-full overflow-hidden rounded-full bg-muted">
             <div
@@ -155,7 +159,10 @@ onUnmounted(() => {
           </p>
         </div>
       </div>
-      <div v-if="metricsHistory.length > 1" class="mt-3 hidden border-t border-border pt-3 lg:block">
+      <div
+        v-if="metricsHistory.length > 1"
+        class="mt-3 hidden border-t border-border pt-3 lg:block"
+      >
         <div class="mb-1 flex items-end justify-between">
           <p class="text-xs font-medium text-muted-foreground">24h CPU</p>
           <span class="font-mono text-xs text-muted-foreground">

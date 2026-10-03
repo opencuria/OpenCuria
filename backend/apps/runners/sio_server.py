@@ -12,6 +12,7 @@ The server is mounted as an ASGI app in config/asgi.py.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from collections import defaultdict
 
@@ -108,6 +109,10 @@ def get_sio_server() -> socketio.AsyncServer:
         cors_origins = getattr(django_settings, "SIO_CORS_ALLOWED_ORIGINS", "*")
         _sio = socketio.AsyncServer(
             async_mode="asgi",
+            client_manager=socketio.AsyncRedisManager(
+                os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+                channel="opencuria-runner",
+            ),
             cors_allowed_origins=cors_origins,
             logger=False,
             engineio_logger=False,
@@ -128,6 +133,29 @@ def get_sio_server() -> socketio.AsyncServer:
             ping_timeout=20,
         )
         _register_event_handlers(_sio)
+        from .operations import RESULT_METHODS, LifecycleCommand
+
+        # Durable terminal results must use the versioned envelope. Legacy
+        # direct callbacks cannot bypass target/attempt/session fencing.
+        for event in RESULT_METHODS:
+            original = _sio.handlers["/"].get(event)
+            if original is None:
+                continue
+
+            def fenced(handler):
+                async def receive(sid, data):
+                    durable = await sync_to_async(
+                        lambda: LifecycleCommand.objects.filter(
+                            task_id=data.get("task_id")
+                        ).exists()
+                    )()
+                    if durable:
+                        return
+                    return await handler(sid, data)
+
+                return receive
+
+            _sio.on(event, fenced(original))
         _register_frontend_handlers(_sio)
     return _sio
 
@@ -172,11 +200,92 @@ async def _require_runner_id(
     runner_id = session.get("runner_id") if session else None
     if not runner_id:
         logger.warning("%s from unauthenticated session (sid=%s)", event, sid)
+    if runner_id:
+        from .models import Runner
+
+        current = await sync_to_async(
+            lambda: Runner.objects.filter(
+                pk=runner_id,
+                sid=sid,
+                **({} if event == "runner:heartbeat" else {"status": "online"}),
+            ).exists()
+        )()
+        if not current:
+            return None
     return runner_id
 
 
 def _register_event_handlers(sio: socketio.AsyncServer) -> None:
     """Register all Socket.IO event handlers."""
+
+    # Existing legacy callbacks remain for non-lifecycle RPC; durable lifecycle
+    # terminal events are admitted exclusively through operation:result.
+    @sio.on("runner:inventory")
+    async def runner_inventory(sid: str, data: dict):
+        runner_id = await _require_runner_id(sio, sid, "runner:inventory")
+        if runner_id:
+            from .inventory_repository import InventoryRepository
+
+            await sync_to_async(InventoryRepository.record)(runner_id, sid, data)
+
+    @sio.on("operation:heartbeat")
+    async def operation_heartbeat(sid: str, data: dict):
+        runner_id = await _require_runner_id(sio, sid, "operation:heartbeat")
+        if not runner_id:
+            return
+        from .operations import OperationRepository
+        from .models import LifecycleCommand
+        from django.utils import timezone
+
+        def record():
+            if OperationRepository.validate_result(runner_id, data):
+                LifecycleCommand.objects.filter(
+                    task_id=data["task_id"], task__status__in=["pending", "in_progress"]
+                ).update(heartbeat_at=timezone.now(), phase="executing")
+
+        await sync_to_async(record)()
+
+    @sio.on("operation:inspection")
+    async def operation_inspection(sid: str, evidence: dict):
+        """Automatically reconcile only exact finished journal outcomes on current SID."""
+        runner_id = await _require_runner_id(sio, sid, "operation:inspection")
+        if (
+            not runner_id
+            or not evidence.get("instance_id")
+            or evidence.get("status") != "terminal"
+            or not evidence.get("outcome_known")
+            or not evidence.get("execution_finished")
+        ):
+            return
+        from .operations import apply_result
+
+        await sync_to_async(apply_result)(
+            get_runner_service(),
+            runner_id,
+            evidence.get("event", ""),
+            evidence.get("result", {}),
+        )
+
+    @sio.on("operation:result")
+    async def operation_result(sid: str, packet: dict):
+        runner_id = await _require_runner_id(sio, sid, "operation:result")
+        if not runner_id:
+            return
+        from .operations import apply_result
+
+        data = packet.get("data", {})
+        accepted = await sync_to_async(apply_result)(
+            get_runner_service(), runner_id, packet.get("event", ""), data
+        )
+        if accepted:
+            await sio.emit(
+                "operation:ack",
+                {
+                    k: data[k]
+                    for k in ("operation_id", "attempt", "target", "runner_id")
+                },
+                to=sid,
+            )
 
     @sio.event
     async def connect(sid: str, environ: dict, auth: dict | None = None):
@@ -214,6 +323,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             logger.warning("Connection rejected: invalid token (sid=%s)", sid)
             raise socketio.exceptions.ConnectionRefusedError("Invalid API token")
 
+        await sync_to_async(service.register_runner)(runner, sid=sid)
         # Store runner_id in the session for later lookups
         await sio.save_session(sid, {"runner_id": str(runner.id)})
         logger.info("Runner connected: %s (sid=%s)", runner.id, sid)
@@ -231,6 +341,8 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
     async def on_runner_register(sid: str, data: dict):
         """Handle runner registration with runtime capabilities."""
         service = get_runner_service()
+        if not await _require_runner_id(sio, sid, "runner:register"):
+            return
         session = await sio.get_session(sid)
         runner_id = session.get("runner_id")
 
@@ -256,14 +368,8 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             available_runtimes=data.get("supported_runtimes", ["docker"]),
         )
 
-        # Dispatch any image builds that were created while the runner
-        # was offline (e.g. during bootstrap).
-        runner = await sync_to_async(RunnerRepository.get_by_id)(uuid.UUID(runner_id))
-        if runner is not None:
-            await service.dispatch_pending_image_builds(runner)
-            await service.dispatch_pending_image_deletions(runner)
-            await service.dispatch_pending_workspace_deletions(runner)
-            await service.dispatch_pending_build_job_deletions(runner)
+        # DB worker owns lifecycle delivery. Result replay from runner runs
+        # before its first heartbeat; reconnect never authorizes cleanup.
 
     @sio.on("workspace:created")
     async def on_workspace_created(sid: str, data: dict):
@@ -933,6 +1039,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         await sync_to_async(service.handle_image_build_progress)(
             build_job_id=data.get("build_job_id", ""),
             line=data.get("line", ""),
+            task_id=data.get("task_id", ""),
             runner_id=runner_id,
         )
 
@@ -968,6 +1075,8 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
     @sio.on("runner:system_metrics")
     async def on_runner_system_metrics(sid: str, data: dict):
         """Persist host system metrics reported by a runner once per minute."""
+        if not await _require_runner_id(sio, sid, "runner:system_metrics"):
+            return
         session = await sio.get_session(sid)
         runner_id = session.get("runner_id")
 
@@ -1029,6 +1138,8 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         container states and the backend's records.
         """
         service = get_runner_service()
+        if not await _require_runner_id(sio, sid, "runner:heartbeat"):
+            return
         session = await sio.get_session(sid)
         runner_id = session.get("runner_id")
 
@@ -1046,6 +1157,11 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
                 runner_id,
                 sid,
             )
+            return
+
+        # Refresh transport liveness before potentially slow reconciliation.
+        await sync_to_async(RunnerRepository.update_heartbeat)(runner)
+        if data.get("workspace_states_observed") is False:
             return
 
         credential_sync_ids = await sync_to_async(service.handle_heartbeat)(

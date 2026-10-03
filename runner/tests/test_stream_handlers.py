@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+
 import asyncio
 import base64
 import unittest
@@ -43,7 +45,7 @@ class FakeStreamRuntime:
 def _setup():
     runtime = FakeStreamRuntime()
     service = WorkspaceService(
-        runtimes={"docker": runtime}, settings=RunnerSettings()
+        runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
     )
     ws_id = uuid.uuid4()
     service._cache[ws_id] = WorkspaceInfo(
@@ -52,7 +54,7 @@ def _setup():
         status="running",
         runtime_type="docker",
     )
-    interface = WebSocketInterface(service, RunnerSettings())
+    interface = WebSocketInterface(service, RunnerSettings(state_dir=tempfile.mkdtemp()))
     interface._sio.emit = AsyncMock()
     interface._sio.call = AsyncMock(return_value={"ok": True})
     handlers = interface._sio.handlers["/"]
@@ -189,7 +191,7 @@ class StreamHandlerTests(unittest.IsolatedAsyncioTestCase):
         closed_payload = interface._sio.emit.await_args_list[-1].args[1]
         self.assertEqual(closed_payload["connection_id"], "o1")
 
-    async def test_disconnect_closes_streams(self) -> None:
+    async def test_disconnect_preserves_streams(self) -> None:
         _svc, _rt, ws_id, _interface, handlers = _setup()
         await handlers["workspace:stream_start"](
             {
@@ -201,7 +203,8 @@ class StreamHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("d1", _svc._streams)
         await handlers["disconnect"]()
-        self.assertNotIn("d1", _svc._streams)
+        self.assertIn("d1", _svc._streams)
+        await _svc.streams.close_all_streams(reason="test_shutdown")
 
     async def test_cancelled_pump_emits_plain_close_no_error(self) -> None:
         """Cancelled pump task cleans up silently (no spurious error)."""

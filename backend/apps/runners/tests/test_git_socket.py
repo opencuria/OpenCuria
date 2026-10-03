@@ -89,7 +89,7 @@ async def test_git_reply_delegated_with_exact_runner_id(fresh_sio):
     }
 
     handler = _handler(server, "git:operation_result")
-    await handler("any-sid", data)
+    await handler(runner.sid, data)
 
     service.handle_git_reply.assert_called_once_with(
         "git:operation_result", data, runner_id=str(runner.id)

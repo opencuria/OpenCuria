@@ -4,6 +4,8 @@ import RunnerCard from './RunnerCard.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import { Server } from '@lucide/vue'
 
+const emit = defineEmits<{ select: [runner: Runner] }>()
+
 defineProps<{
   runners: Runner[]
 }>()
@@ -14,7 +16,12 @@ defineProps<{
     v-if="runners.length"
     class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
   >
-    <RunnerCard v-for="runner in runners" :key="runner.id" :runner="runner" />
+    <RunnerCard
+      v-for="runner in runners"
+      :key="runner.id"
+      :runner="runner"
+      @select="emit('select', runner)"
+    />
   </div>
 
   <div v-else class="overflow-hidden rounded-lg border border-border bg-card">

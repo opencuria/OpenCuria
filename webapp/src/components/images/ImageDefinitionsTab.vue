@@ -2,11 +2,7 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from '@/components/ui/collapsible'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import {
   Dialog,
   DialogBody,
@@ -20,20 +16,14 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import SettingsSection from '@/components/settings/SettingsSection.vue'
 import SettingsRow from '@/components/settings/SettingsRow.vue'
-import {
-  Plus,
-  Pencil,
-  Trash2,
-  ChevronDown,
-  Loader2,
-  Copy,
-  RotateCcw,
-  Layers,
-} from '@lucide/vue'
+import { Plus, Pencil, Trash2, ChevronDown, Loader2, Copy, RotateCcw, Layers } from '@lucide/vue'
 import { RunnerStatus, type ImageDefinition, type Runner, type RunnerImageBuild } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 import { ApiRequestError, get } from '@/services/api'
 import { filterRunnersByRuntime } from '@/lib/runtimeSupport'
+import ImageDeletionDialog from './ImageDeletionDialog.vue'
+import type { DeletionTarget } from '@/types/runnerStorage'
+const deletionTarget = ref<DeletionTarget | null>(null)
 import ImageDefinitionModal from './ImageDefinitionModal.vue'
 import {
   buildNeedsPolling,
@@ -71,29 +61,10 @@ let refreshTimer: number | null = null
 
 const REBUILD_CONFIRM = {
   title: 'Rebuild this runner image?',
-  body:
-    'The image on this runner will be rebuilt. Existing workspaces keep the filesystem they were created with and are not deleted or updated. New workspaces will use the rebuilt image after the build succeeds.',
+  body: 'The image on this runner will be rebuilt. Existing workspaces keep the filesystem they were created with and are not deleted or updated. New workspaces will use the rebuilt image after the build succeeds.',
   confirmLabel: 'Rebuild',
   destructive: false,
   kind: 'rebuild' as const,
-}
-
-const REMOVE_CONFIRM = {
-  title: 'Remove this runner image?',
-  body:
-    'The built image will be deleted from this runner. Existing workspaces are not deleted. Removal is blocked until those workspaces are gone.',
-  confirmLabel: 'Remove',
-  destructive: true,
-  kind: 'remove' as const,
-}
-
-const DELETE_DEFINITION_CONFIRM = {
-  title: 'Delete this image definition?',
-  body:
-    'This recipe will be deactivated and its built images will be removed from every runner. Existing workspaces are not deleted. If any workspace still uses one of those images, deletion stays blocked until those workspaces are removed.',
-  confirmLabel: 'Delete definition',
-  destructive: true,
-  kind: 'delete_definition' as const,
 }
 
 function errorMessage(e: unknown, fallback: string): string {
@@ -150,11 +121,16 @@ async function loadDefinitions(options: { quiet?: boolean } = {}): Promise<void>
 
 async function loadBuilds(definitionId: string): Promise<void> {
   try {
-    buildsByDefinition.value[definitionId] =
-      await workspacesApi.listRunnerImageBuilds(definitionId)
+    buildsByDefinition.value[definitionId] = await workspacesApi.listRunnerImageBuilds(definitionId)
   } catch (e) {
     error.value = errorMessage(e, 'Failed to load runner builds')
   }
+}
+
+function windowOpenRunner(runnerId: string) {
+  window.dispatchEvent(
+    new CustomEvent('opencuria:open-settings', { detail: { tab: 'runners', runnerId } }),
+  )
 }
 
 function openCreate() {
@@ -203,18 +179,7 @@ function cancelConfirm(): void {
 }
 
 function requestDeleteDefinition(definition: ImageDefinition): void {
-  askConfirm(DELETE_DEFINITION_CONFIRM, () => executeDeleteDefinition(definition.id))
-}
-
-async function executeDeleteDefinition(id: string): Promise<void> {
-  try {
-    await workspacesApi.deleteImageDefinition(id)
-    await loadDefinitions()
-    ensureRefresh()
-  } catch (e) {
-    error.value = errorMessage(e, 'Failed to delete image definition')
-    await loadDefinitions({ quiet: true })
-  }
+  deletionTarget.value = { target_type: 'definition', target_id: definition.id }
 }
 
 async function restoreDefinition(id: string): Promise<void> {
@@ -297,12 +262,6 @@ async function patchRunner(
   })
 }
 
-async function removeRunnerBuild(definitionId: string, runnerId: string): Promise<void> {
-  await runRunnerAction(definitionId, runnerId, 'remove', async () => {
-    await workspacesApi.deleteRunnerImageBuild(definitionId, runnerId)
-  })
-}
-
 async function viewLog(definitionId: string, runnerId: string): Promise<void> {
   actionLoading.value = actionKey(definitionId, runnerId, 'log')
   try {
@@ -334,8 +293,12 @@ function handleAction(
       case 'rebuild':
         return patchRunner(definitionId, runnerId, 'rebuild')
       case 'remove':
-      case 'retry_remove':
-        return removeRunnerBuild(definitionId, runnerId)
+      case 'retry_remove': {
+        const assignment = getBuild(definitionId, runnerId)
+        if (assignment)
+          deletionTarget.value = { target_type: 'assignment', target_id: assignment.id }
+        return Promise.resolve()
+      }
       case 'view_log':
         return viewLog(definitionId, runnerId)
     }
@@ -346,7 +309,8 @@ function handleAction(
     return
   }
   if (action.confirm === 'remove') {
-    askConfirm(REMOVE_CONFIRM, run)
+    const assignment = getBuild(definitionId, runnerId)
+    if (assignment) deletionTarget.value = { target_type: 'assignment', target_id: assignment.id }
     return
   }
   void run()
@@ -465,7 +429,6 @@ onUnmounted(() => {
                   "
                   variant="destructive"
                 >
-                  <Loader2 :size="10" class="mr-1 inline animate-spin" />
                   {{ definitionStatusLabel(definition.status) }}
                 </Badge>
                 <Badge v-else-if="definition.status === 'delete_failed'" variant="destructive">
@@ -564,7 +527,7 @@ onUnmounted(() => {
                         >
                           <Loader2
                             v-if="
-                              ['pending', 'building', 'pending_deletion', 'deleting'].includes(
+                              ['pending', 'building'].includes(
                                 getBuild(definition.id, runner.id)?.status || '',
                               )
                             "
@@ -581,6 +544,25 @@ onUnmounted(() => {
                       </td>
                       <td class="py-2">
                         <div class="flex flex-wrap items-center gap-2">
+                          <Button variant="outline" size="sm" @click="windowOpenRunner(runner.id)"
+                            >Storage & generation history</Button
+                          >
+                          <span
+                            v-if="getBuild(definition.id, runner.id)?.current_generation_id"
+                            class="text-xs"
+                            >Current available ·
+                            {{
+                              getBuild(definition.id, runner.id)?.current_generation_id?.slice(0, 8)
+                            }}</span
+                          >
+                          <span
+                            v-if="getBuild(definition.id, runner.id)?.pending_generation_id"
+                            class="text-xs"
+                            >Pending attempt ·
+                            {{
+                              getBuild(definition.id, runner.id)?.pending_generation_id?.slice(0, 8)
+                            }}</span
+                          >
                           <Button
                             v-if="
                               ['pending', 'building'].includes(
@@ -609,8 +591,7 @@ onUnmounted(() => {
                             variant="outline"
                             disabled
                           >
-                            <Loader2 :size="12" class="animate-spin" />
-                            Removing…
+                            Deletion queued
                           </Button>
                           <Button
                             v-for="action in getRunnerBuildActions(
@@ -660,6 +641,11 @@ onUnmounted(() => {
       </div>
     </SettingsSection>
 
+    <ImageDeletionDialog
+      :target="deletionTarget"
+      @close="deletionTarget = null"
+      @requested="() => loadDefinitions()"
+    />
     <ImageDefinitionModal
       :open="modalOpen"
       :image-definition="editing"

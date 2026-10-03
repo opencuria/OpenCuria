@@ -10,6 +10,7 @@ from apps.plugins.services import PluginSelectionError, PluginService
 from apps.runners.enums import TaskType
 from common.exceptions import NotFoundError
 
+from ..locking import lock_runner
 from ..models import Task, Workspace
 from ..repositories import TaskRepository, WorkspaceRepository
 
@@ -32,11 +33,20 @@ class WorkspaceConfigurationService:
         credentials: list,
         plugin_ids: list[uuid.UUID],
         task_id: uuid.UUID,
+        operation_payload: dict | None = None,
         credentials_present: bool = False,
         task_type: TaskType = TaskType.CREATE_WORKSPACE,
     ) -> tuple[Workspace, Task]:
         """Create workspace, selections, task, and initial state atomically."""
         with transaction.atomic():
+            lock_runner(runner.id)
+            from ..repositories import ImageGenerationRepository
+
+            selected = workspace_fields.get("base_image_instance")
+            if selected is not None:
+                workspace_fields["base_image_instance"] = (
+                    ImageGenerationRepository.validate_selection(selected.id)
+                )
             credentials = self._resolve_final_credentials(
                 credentials, owner=user, org_id=organization_id
             )
@@ -58,11 +68,21 @@ class WorkspaceConfigurationService:
             self.plugins.workspace_activations.replace_for_workspace(
                 workspace, list(dict.fromkeys(plugin_ids)), enabled_by=user
             )
+            if (
+                credentials_present
+                and not credentials
+                and operation_payload is not None
+            ):
+                operation_payload = {
+                    **operation_payload,
+                    "_unreproducible_credentials": True,
+                }
             task = self.tasks.create(
                 task_id=task_id,
                 runner=runner,
                 task_type=task_type,
                 workspace=workspace,
+                operation_payload=operation_payload,
             )
             return self.workspaces.get_by_id(workspace.id), task
 
@@ -80,6 +100,11 @@ class WorkspaceConfigurationService:
     ) -> Workspace:
         """Validate and replace final associations/name under a workspace lock."""
         with transaction.atomic():
+            existing = self.workspaces.get_by_id(workspace_id)
+            if existing is None:
+                raise NotFoundError("Workspace", str(workspace_id))
+            runner_id = existing.runner_id
+            lock_runner(runner_id)
             workspace = self.workspaces.get_by_id(workspace_id, lock=True)
             if workspace is None:
                 raise NotFoundError("Workspace", str(workspace_id))
@@ -88,6 +113,10 @@ class WorkspaceConfigurationService:
                 or workspace.runner.organization_id != organization_id
             ):
                 raise NotFoundError("Workspace", str(workspace_id))
+            if workspace.current_task_id:
+                from common.exceptions import ConflictError
+
+                raise ConflictError("Workspace lifecycle outcome unresolved")
             current_credentials = self.workspaces.list_attached_credentials(
                 workspace.id
             )
@@ -120,6 +149,15 @@ class WorkspaceConfigurationService:
                 qemu_values=qemu_values,
                 desktop_values=desktop_values,
             )
+            if qemu_values is not None and workspace.status == "running":
+                from common.utils import generate_uuid
+
+                workspace._lifecycle_task = self.tasks.create(
+                    task_id=generate_uuid(),
+                    runner=workspace.runner,
+                    task_type=TaskType.UPDATE_WORKSPACE,
+                    workspace=workspace,
+                )
             return workspace
 
     @staticmethod

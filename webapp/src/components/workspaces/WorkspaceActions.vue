@@ -17,9 +17,19 @@ const emit = defineEmits<{
   captureImage: []
 }>()
 
+function inspectRunner() {
+  window.dispatchEvent(
+    new CustomEvent('opencuria:open-settings', {
+      detail: { tab: 'runners', runnerId: props.workspace.runner_id },
+    }),
+  )
+}
+
 const workspaceStore = useWorkspaceStore()
 const isTransitioning = computed(() => workspaceStore.isWorkspaceTransitioning(props.workspace.id))
-const transitionLabel = computed(() => workspaceStore.getWorkspaceTransitionLabel(props.workspace.id))
+const transitionLabel = computed(() =>
+  workspaceStore.getWorkspaceTransitionLabel(props.workspace.id),
+)
 const isRunnerOfflineState = computed(
   () =>
     !props.workspace.runner_online &&
@@ -33,11 +43,12 @@ const canStop = computed(
 const canResume = computed(
   () => isRunnerOfflineState.value || props.workspace.status === WorkspaceStatus.STOPPED,
 )
-const canRemove = computed(() =>
-  isRunnerOfflineState.value ||
-  [WorkspaceStatus.RUNNING, WorkspaceStatus.STOPPED, WorkspaceStatus.FAILED].includes(
-    props.workspace.status,
-  ),
+const canRemove = computed(
+  () =>
+    isRunnerOfflineState.value ||
+    [WorkspaceStatus.RUNNING, WorkspaceStatus.STOPPED, WorkspaceStatus.FAILED].includes(
+      props.workspace.status,
+    ),
 )
 const canCaptureImage = computed(
   () =>
@@ -47,16 +58,22 @@ const canCaptureImage = computed(
       props.workspace.status === WorkspaceStatus.STOPPED),
 )
 const captureBlockedByCredentials = computed(
-  () => canCaptureImage.value && props.workspace.credentials_present,
+  () =>
+    canCaptureImage.value &&
+    props.workspace.status === WorkspaceStatus.STOPPED &&
+    props.workspace.credentials_present,
 )
 const captureTitle = computed(() =>
   captureBlockedByCredentials.value
     ? 'Credentials are still on disk. Stop the workspace to remove them before capturing. If it was stopped externally, resume and stop it again.'
     : 'Capture image',
 )
-const areActionsDisabled = computed(() => isTransitioning.value || isRunnerOfflineState.value)
+const areActionsDisabled = computed(
+  () =>
+    isTransitioning.value || isRunnerOfflineState.value || props.workspace.intervention_required,
+)
 
-const btnSize = computed(() => (props.size === 'sm' ? 'icon-sm' as const : 'icon' as const))
+const btnSize = computed(() => (props.size === 'sm' ? ('icon-sm' as const) : ('icon' as const)))
 
 function handleStop(e: Event): void {
   e.stopPropagation()
@@ -82,10 +99,20 @@ function handleCaptureImage(e: Event): void {
 </script>
 
 <template>
-  <div class="flex items-center gap-1">
+  <div class="flex flex-wrap items-center gap-1">
+    <p v-if="workspace.intervention_required" role="alert" class="text-xs text-destructive">
+      {{ workspace.lifecycle_diagnostic || 'Intervention required. Unsafe actions disabled.' }}
+    </p>
+    <Button
+      v-if="workspace.intervention_required"
+      variant="outline"
+      size="sm"
+      @click="inspectRunner"
+      >Inspect runner operations (admin)</Button
+    >
     <EditWorkspaceDialog :workspace="workspace" :size="size" :disabled="areActionsDisabled" />
     <Button
-      v-if="isTransitioning"
+      v-if="isTransitioning && !workspace.intervention_required"
       variant="ghost"
       :size="btnSize"
       :title="transitionLabel || 'Workspace action in progress'"
