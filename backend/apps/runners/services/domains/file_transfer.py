@@ -59,6 +59,7 @@ class FileTransferMixin:
         if workspace is None:
             return
 
+        self._ensure_workspace_available(workspace)
         runner = workspace.runner
         if event in ("files:upload_chunk", "files:upload_finish"):
             if not runner.is_online:

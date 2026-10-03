@@ -23,6 +23,8 @@ const authStore = {
 }
 
 const workspaceStore = {
+  getWorkspaceTransitionLabel: () => null,
+  isWorkspaceTransitioning: () => false,
   workspaces: [
     {
       id: 'ws-1',

@@ -747,7 +747,7 @@ async def stop_desktop(
 
 @workspace_router.post(
     "/{workspace_id}/desktop/take-control/",
-    response={200: DesktopTakeControlOut, 403: ErrorOut, 404: ErrorOut},
+    response={200: DesktopTakeControlOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
     summary="Take desktop control from computer-use",
 )
 async def take_desktop_control(
@@ -770,6 +770,8 @@ async def take_desktop_control(
         if not is_admin and workspace.created_by_id != request.user.id:
             raise NotFoundError("Workspace", str(workspace_id))
 
+        await sync_to_async(service._ensure_workspace_available)(workspace)
+
         from apps.harness.harness_service import get_harness_service
 
         harness = get_harness_service()
@@ -779,11 +781,13 @@ async def take_desktop_control(
         )
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
 
 
 @workspace_router.get(
     "/{workspace_id}/desktop/status/",
-    response={200: DesktopStatusOut, 403: ErrorOut, 404: ErrorOut},
+    response={200: DesktopStatusOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
     summary="Get desktop session status",
 )
 async def desktop_status(
@@ -804,6 +808,8 @@ async def desktop_status(
         if not is_admin and workspace.created_by_id != request.user.id:
             raise NotFoundError("Workspace", str(workspace_id))
 
+        await sync_to_async(service._ensure_workspace_available)(workspace)
+
         desktop_info = await sync_to_async(service.get_desktop_info)(str(workspace_id))
         is_active = desktop_info is not None
         proxy_url = f"/ws/desktop/{workspace_id}/" if is_active else None
@@ -817,6 +823,8 @@ async def desktop_status(
         )
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
 
 
 @workspace_router.post(
@@ -1859,7 +1867,7 @@ def list_image_artifacts(request: HttpRequest):
 
 @image_artifact_router.post(
     "/",
-    response={202: ImageArtifactCreateOut, 403: ErrorOut, 404: ErrorOut},
+    response={202: ImageArtifactCreateOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
     summary="Create an image artifact from a workspace",
 )
 async def create_image_artifact_global(
@@ -1881,7 +1889,6 @@ async def create_image_artifact_global(
             workspace_id=payload.workspace_id,
             name=payload.name,
             organization_id=org_id,
-            stop_and_restart=payload.stop_and_restart,
         )
         return 202, ImageArtifactCreateOut(task_id=task.id, workspace_id=workspace.id)
     except ConflictError as e:
@@ -2053,7 +2060,7 @@ def list_workspace_image_artifacts(request: HttpRequest, workspace_id: uuid.UUID
 
 @workspace_image_artifact_router.post(
     "/{workspace_id}/image-artifacts/",
-    response={202: ImageArtifactCreateOut, 404: ErrorOut, 409: ErrorOut},
+    response={202: ImageArtifactCreateOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
     summary="Create an image artifact from a workspace",
 )
 async def create_workspace_image_artifact(
@@ -2072,7 +2079,6 @@ async def create_workspace_image_artifact(
             workspace_id=workspace_id,
             name=payload.name,
             organization_id=org_id,
-            stop_and_restart=payload.stop_and_restart,
         )
         return 202, ImageArtifactCreateOut(task_id=task.id, workspace_id=workspace.id)
     except ConflictError as e:

@@ -18,6 +18,7 @@ import structlog
 
 from ...models import WorkspaceInfo
 from ...runtime.base import ProcessHandle, RuntimeBackend
+from ..capture_fence import CaptureFence, live_interaction
 from ..exec_kernel import sanitize_exec_workdir
 
 logger = structlog.get_logger(__name__)
@@ -245,6 +246,7 @@ class StreamManager:
         get_runtime: Callable[[uuid.UUID], RuntimeBackend] | None = None,
         sanitize_exec_workdir: Callable[[str], str] | None = None,
     ) -> None:
+        self.capture_fence: CaptureFence | None = None
         self._runtimes = runtimes if runtimes is not None else {}
         self._get_cached = get_cached
         self._get_runtime = get_runtime
@@ -321,6 +323,7 @@ class StreamManager:
             if session.workspace_id == workspace_id and not session.closed
         )
 
+    @live_interaction
     async def stream_start_process(
         self,
         workspace_id: uuid.UUID,
@@ -383,6 +386,7 @@ class StreamManager:
             await runtime.process_close(handle)
         raise ValueError(f"Duplicate connection_id: {conn_id!r}")
 
+    @live_interaction
     async def stream_start_tcp(
         self,
         workspace_id: uuid.UUID,
@@ -500,6 +504,7 @@ class StreamManager:
             if not emitted:
                 return
 
+    @live_interaction
     async def stream_read_once(
         self,
         connection_id: str,
@@ -515,6 +520,7 @@ class StreamManager:
         )
         return bytes(data)
 
+    @live_interaction
     async def stream_write(self, connection_id: str, data: bytes) -> None:
         """Write bounded bytes to the stream stdin (per-connection locked)."""
         if not isinstance(data, (bytes, bytearray)) or not data:
@@ -527,6 +533,7 @@ class StreamManager:
                 session.handle, bytes(data)
             )
 
+    @live_interaction
     async def stream_write_eof(self, connection_id: str) -> None:
         """Half-close the stream stdin (graceful EOF)."""
         session = self.get_stream(connection_id)

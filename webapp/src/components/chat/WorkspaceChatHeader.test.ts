@@ -316,3 +316,15 @@ describe('WorkspaceChatHeader', () => {
     expect(wrapper.emitted('open-session')).toEqual([['missing-parent']])
   })
 })
+
+it('disables actions including an already-open rename during capture', async () => {
+  const wrapper = mountHeader()
+  await wrapper.get('[data-testid="workspace-chat-header-name"]').trigger('click')
+  await wrapper.setProps({ transitionLabel: 'Capturing', canPrompt: false })
+  for (const id of ['new-chat', 'toggle-processes', 'more', 'toggle-side-panel', 'name-input', 'name-save', 'delete-workspace']) {
+    expect(wrapper.get(`[data-testid="workspace-chat-header-${id}"]`).attributes('disabled')).toBeDefined()
+  }
+  await wrapper.get('[data-testid="workspace-chat-header-name-cancel"]').trigger('click')
+  expect(wrapper.get('[data-testid="workspace-chat-header-name"]').attributes('disabled')).toBeDefined()
+  wrapper.unmount()
+})

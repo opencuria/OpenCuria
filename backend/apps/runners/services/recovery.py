@@ -18,7 +18,22 @@ class RecoveryService:
         await sync_to_async(DeletionRepository.tick)()
         from ..capture_repository import CaptureRepository
 
-        await sync_to_async(CaptureRepository.tick)()
+        finished = await sync_to_async(CaptureRepository.tick)()
+        if finished:
+            from . import RunnerService
+
+            service = RunnerService(transport)
+            for result in finished:
+                workspace_id = result["workspace_id"]
+                await sync_to_async(service._forward_workspace_operation)(
+                    workspace_id, None
+                )
+                if result["diagnostic"]:
+                    await sync_to_async(service._forward_to_frontend)(
+                        "workspace:error",
+                        {"workspace_id": workspace_id, "error": result["diagnostic"]},
+                        workspace_id,
+                    )
         from ..inventory_repository import InventoryRepository
 
         refreshes = await sync_to_async(InventoryRepository.refresh_candidates)()

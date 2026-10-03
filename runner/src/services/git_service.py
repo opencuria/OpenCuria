@@ -58,6 +58,7 @@ import structlog
 from .. import git as git_ops
 from ..models import WorkspaceInfo
 from ..runtime.base import RuntimeBackend
+from .capture_fence import CaptureFence, live_interaction
 from .exec_kernel import KeyedLockMap
 
 logger = structlog.get_logger(__name__)
@@ -82,6 +83,7 @@ class GitService:
         get_cached: Callable[[uuid.UUID], WorkspaceInfo] | None = None,
         get_runtime: Callable[[uuid.UUID], RuntimeBackend] | None = None,
     ) -> None:
+        self.capture_fence: CaptureFence | None = None
         self._runtimes = runtimes if runtimes is not None else {}
         self._get_cached = get_cached
         self._get_runtime = get_runtime
@@ -578,6 +580,7 @@ class GitService:
                     break
         return sorted(set(roots))[: git_ops.GIT_DISCOVERY_MAX_REPOS]
 
+    @live_interaction
     async def list_git_repositories(
         self, workspace_id: uuid.UUID
     ) -> list[str]:
@@ -1359,6 +1362,7 @@ class GitService:
 
     # -- git RPC entry point ---------------------------------------------------
 
+    @live_interaction
     async def execute_git_operation(
         self,
         workspace_id: uuid.UUID,

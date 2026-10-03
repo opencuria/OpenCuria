@@ -319,6 +319,23 @@ class HarnessSessionRepository:
     model = HarnessSession
 
     @staticmethod
+    def ensure_interactions_available(workspace_id: uuid.UUID) -> None:
+        """Guard live chat access using persisted state, not cached relations.
+
+        Saved history readers deliberately do not call this guard.
+        """
+        from apps.runners.models import Workspace
+        from common.exceptions import ConflictError
+
+        workspace = Workspace.objects.get(id=workspace_id)
+        if workspace.active_operation == "capturing_image":
+            raise ConflictError("Workspace is currently capturing image")
+        if workspace.current_task_id and not workspace.active_operation:
+            raise ConflictError(
+                "Workspace lifecycle outcome unresolved; intervention required"
+            )
+
+    @staticmethod
     def create(
         *,
         workspace_id: uuid.UUID,
@@ -379,29 +396,25 @@ class HarnessSessionRepository:
     def reserve_workspace_run(
         session_id: uuid.UUID, *, scheduled: bool = False
     ) -> bool:
-        """Atomically reserve a session; scheduled roots also gate on workspace activity.
+        """Reserve every root/child under runner then workspace write locks.
 
         The workspace row serializes the short admission transaction. A scheduled
         launch rejects any other busy root observed at that boundary. Manual roots
         still acquire the same lock, but do not reject an already-running chat, so
         a scheduled run never blocks a user's later chat.
         """
+        from apps.runners.locking import lock_runner
         from apps.runners.models import Workspace
 
         session = HarnessSession.objects.get(id=session_id)
-        if session.parent_id is not None:
-            with transaction.atomic():
-                return (
-                    HarnessSession.objects.filter(id=session_id)
-                    .exclude(status=HarnessSessionStatus.BUSY)
-                    .update(status=HarnessSessionStatus.BUSY)
-                    == 1
-                )
-
         with transaction.atomic():
             # Acquire the workspace write lock before reading eligibility. This
             # serializes scheduled/manual launch admission across all sessions,
             # including on SQLite where select_for_update() is unavailable.
+            runner_id = Workspace.objects.values_list("runner_id", flat=True).get(
+                id=session.workspace_id
+            )
+            lock_runner(runner_id)
             workspace_query = Workspace.objects.filter(id=session.workspace_id)
             if scheduled:
                 workspace_query = workspace_query.filter(
@@ -411,6 +424,7 @@ class HarnessSessionRepository:
             reserved_workspace = workspace_query.update(updated_at=F("updated_at"))
             if not reserved_workspace:
                 return False
+            HarnessSessionRepository.ensure_interactions_available(session.workspace_id)
             session = HarnessSession.objects.get(id=session_id)
             if session.status == HarnessSessionStatus.BUSY:
                 return False

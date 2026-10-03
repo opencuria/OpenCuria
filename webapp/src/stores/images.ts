@@ -12,6 +12,7 @@ import type {
   RunnerImageBuild,
 } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
+import { useWorkspaceStore } from './workspaces'
 import { useNotificationStore } from './notifications'
 
 export const useImageStore = defineStore('images', () => {
@@ -56,7 +57,13 @@ export const useImageStore = defineStore('images', () => {
 
   async function createImageArtifact(data: ImageArtifactCreateIn): Promise<boolean> {
     try {
-      await workspacesApi.createImageArtifact(data)
+      if (
+        !data.workspace_id ||
+        !(await useWorkspaceStore().captureImage(data.workspace_id, () =>
+          workspacesApi.createImageArtifact(data),
+        ))
+      )
+        return false
       await fetchImages()
       notifications.success(
         'Image creating',

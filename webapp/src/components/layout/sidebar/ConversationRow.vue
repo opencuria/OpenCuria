@@ -3,7 +3,7 @@
  * One-line conversation row: status slot, truncated title, trailing
  * time/workspace replaced by a hover menu (rename / mark read / unread / delete).
  */
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import {
   Check,
   CircleAlert,
@@ -34,8 +34,9 @@ const props = withDefaults(
     conversation: HarnessConversation
     active?: boolean
     showWorkspace?: boolean
+    actionsDisabled?: boolean
   }>(),
-  { active: false, showWorkspace: false },
+  { active: false, showWorkspace: false, actionsDisabled: false },
 )
 
 const emit = defineEmits<{
@@ -73,6 +74,7 @@ function handleSelect(): void {
 }
 
 async function startRename(): Promise<void> {
+  if (props.actionsDisabled) return
   editing.value = true
   editTitle.value = title.value
   await nextTick()
@@ -86,11 +88,19 @@ function cancelRename(): void {
 }
 
 function confirmRename(): void {
+  if (props.actionsDisabled) return
   const nextTitle = editTitle.value.trim()
   if (!nextTitle) return
   editing.value = false
   emit('rename', props.conversation, nextTitle)
 }
+
+watch(
+  () => props.actionsDisabled,
+  (disabled) => {
+    if (disabled) cancelRename()
+  },
+)
 
 function tooltipDate(): string {
   return new Date(props.conversation.last_message_at).toLocaleString('en-US', {
@@ -225,7 +235,7 @@ function tooltipDate(): string {
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" class="w-48">
-          <DropdownMenuItem @click="startRename">
+          <DropdownMenuItem :disabled="props.actionsDisabled" @click="startRename">
             <Pencil class="size-4" />
             Rename
           </DropdownMenuItem>
@@ -245,7 +255,11 @@ function tooltipDate(): string {
             <Mail class="size-4" />
             Mark as unread
           </DropdownMenuItem>
-          <DropdownMenuItem variant="destructive" @click="emit('delete', props.conversation)">
+          <DropdownMenuItem
+            variant="destructive"
+            :disabled="props.actionsDisabled"
+            @click="!props.actionsDisabled && emit('delete', props.conversation)"
+          >
             <Trash2 class="size-4" />
             Delete
           </DropdownMenuItem>

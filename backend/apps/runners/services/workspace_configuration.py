@@ -113,7 +113,9 @@ class WorkspaceConfigurationService:
                 or workspace.runner.organization_id != organization_id
             ):
                 raise NotFoundError("Workspace", str(workspace_id))
-            if workspace.current_task_id:
+            # The capture parent keeps its hold between child tasks, when
+            # current_task_id has already been cleared. Recheck both under lock.
+            if workspace.active_operation or workspace.current_task_id:
                 from common.exceptions import ConflictError
 
                 raise ConflictError("Workspace lifecycle outcome unresolved")

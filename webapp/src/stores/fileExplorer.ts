@@ -13,6 +13,7 @@ import {
   stripBase64Whitespace,
   type ChunkedTransferStore,
 } from '@/lib/fileChunks'
+import { useWorkspaceStore } from './workspaces'
 import { useNotificationStore } from '@/stores/notifications'
 import { useSidePanelStore } from '@/stores/sidePanel'
 
@@ -443,6 +444,7 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     updateTree: boolean,
     signal?: AbortSignal,
   ): Promise<FileEntryRaw[] | null> {
+    if (useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return Promise.resolve(null)
     if (updateTree) loadingPaths.value.add(path)
     const requestId = nextRequestId()
     return new Promise((resolve) => {
@@ -525,6 +527,7 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
   }
 
   function fetchFileContent(workspaceId: string, path: string): void {
+    if (useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
     // A newer click actively cancels the older in-flight read so its late
     // chunks/results can never populate the viewer.
     cancelContentTransfer(activeContentRequestId.value)
@@ -543,6 +546,7 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
   }
 
   function downloadFile(workspaceId: string, path: string): void {
+    if (useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
     const requestId = nextRequestId()
     pendingRequests.value.set(requestId, () => {})
     pendingDownloadPaths.set(requestId, path)

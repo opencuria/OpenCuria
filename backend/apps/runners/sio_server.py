@@ -15,10 +15,13 @@ import logging
 import os
 import uuid
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
+from functools import wraps
 
 import socketio
 from asgiref.sync import sync_to_async
 
+from common.exceptions import ConflictError
 from common.utils import hash_token
 
 logger = logging.getLogger(__name__)
@@ -1203,6 +1206,47 @@ def _extract_bearer_token(environ: dict) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _frontend_conflict_response(
+    sio: socketio.AsyncServer, event: str, **defaults: object
+) -> Callable:
+    """Translate conflicts into one requester-scoped protocol completion.
+
+    The handler retains its authorization check before service dispatch. Read and
+    chunked upload errors use the runner's content_result and upload_result events
+    to settle existing client waiters, without duplicate completion callbacks.
+    """
+
+    def decorate(handler: Callable[..., Awaitable]) -> Callable:
+        @wraps(handler)
+        async def wrapped(sid: str, data: dict) -> object:
+            try:
+                return await handler(sid, data)
+            except ConflictError as exc:
+                payload = {
+                    **defaults,
+                    **{
+                        key: data[key]
+                        for key in (
+                            "workspace_id",
+                            "request_id",
+                            "upload_id",
+                            "terminal_id",
+                            "path",
+                            "query",
+                        )
+                        if key in data
+                    },
+                    "error": exc.message,
+                    "code": exc.code,
+                }
+                await sio.emit(event, payload, to=sid, namespace="/frontend")
+                return None
+
+        return wrapped
+
+    return decorate
+
+
 def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
     """Register Socket.IO event handlers for the /frontend namespace."""
 
@@ -1283,6 +1327,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
     # --- Terminal events from frontend ---
 
     @sio.on("frontend:terminal_input", namespace="/frontend")
+    @_frontend_conflict_response(sio, "terminal:error")
     async def on_frontend_terminal_input(sid: str, data: dict):
         """Forward terminal input from frontend to the runner."""
         if not await _ensure_frontend_workspace_access(
@@ -1298,6 +1343,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         )
 
     @sio.on("frontend:terminal_resize", namespace="/frontend")
+    @_frontend_conflict_response(sio, "terminal:error")
     async def on_frontend_terminal_resize(sid: str, data: dict):
         """Forward terminal resize from frontend to the runner."""
         if not await _ensure_frontend_workspace_access(
@@ -1314,6 +1360,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         )
 
     @sio.on("frontend:terminal_close", namespace="/frontend")
+    @_frontend_conflict_response(sio, "terminal:error")
     async def on_frontend_terminal_close(sid: str, data: dict):
         """Forward terminal close from frontend to the runner."""
         if not await _ensure_frontend_workspace_access(
@@ -1330,6 +1377,9 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
     # --- File explorer events from frontend ---
 
     @sio.on("frontend:files_list", namespace="/frontend")
+    @_frontend_conflict_response(
+        sio, "files:list_result", entries=[], path="/workspace", request_id=""
+    )
     async def on_frontend_files_list(sid: str, data: dict):
         """Forward file list request from frontend to the runner."""
         if not await _ensure_frontend_workspace_access(
@@ -1345,6 +1395,9 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         )
 
     @sio.on("frontend:files_find", namespace="/frontend")
+    @_frontend_conflict_response(
+        sio, "files:find_result", paths=[], truncated=False, query="", request_id=""
+    )
     async def on_frontend_files_find(sid: str, data: dict):
         """Forward workspace file search from frontend to the runner."""
         if not await _ensure_frontend_workspace_access(
@@ -1360,6 +1413,15 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         )
 
     @sio.on("frontend:files_read", namespace="/frontend")
+    @_frontend_conflict_response(
+        sio,
+        "files:content_result",
+        content="",
+        size=0,
+        truncated=False,
+        path="/workspace",
+        request_id="",
+    )
     async def on_frontend_files_read(sid: str, data: dict):
         """Forward file read request from frontend to the runner."""
         if not await _ensure_frontend_workspace_access(
@@ -1375,6 +1437,9 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         )
 
     @sio.on("frontend:files_upload", namespace="/frontend")
+    @_frontend_conflict_response(
+        sio, "files:upload_result", status="error", path="/workspace", request_id=""
+    )
     async def on_frontend_files_upload(sid: str, data: dict):
         """Forward file upload from frontend to the runner."""
         if not await _ensure_frontend_workspace_access(
@@ -1390,6 +1455,9 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         )
 
     @sio.on("frontend:files_upload_start", namespace="/frontend")
+    @_frontend_conflict_response(
+        sio, "files:upload_result", status="error", path="/workspace", request_id=""
+    )
     async def on_frontend_files_upload_start(sid: str, data: dict):
         """Forward a chunked upload start from frontend to the runner."""
         if not await _ensure_frontend_workspace_access(
@@ -1405,6 +1473,9 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         )
 
     @sio.on("frontend:files_upload_chunk", namespace="/frontend")
+    @_frontend_conflict_response(
+        sio, "files:upload_result", status="error", path="/workspace", request_id=""
+    )
     async def on_frontend_files_upload_chunk(sid: str, data: dict):
         """Forward one upload chunk from frontend to the runner."""
         if not await _ensure_frontend_workspace_access(
@@ -1420,6 +1491,9 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         )
 
     @sio.on("frontend:files_upload_finish", namespace="/frontend")
+    @_frontend_conflict_response(
+        sio, "files:upload_result", status="error", path="/workspace", request_id=""
+    )
     async def on_frontend_files_upload_finish(sid: str, data: dict):
         """Forward an upload finish marker from frontend to the runner."""
         if not await _ensure_frontend_workspace_access(
@@ -1435,6 +1509,16 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         )
 
     @sio.on("frontend:files_download", namespace="/frontend")
+    @_frontend_conflict_response(
+        sio,
+        "files:download_result",
+        content="",
+        filename="",
+        is_archive=False,
+        size=0,
+        path="/workspace",
+        request_id="",
+    )
     async def on_frontend_files_download(sid: str, data: dict):
         """Forward file download request from frontend to the runner."""
         if not await _ensure_frontend_workspace_access(

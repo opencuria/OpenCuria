@@ -1,12 +1,15 @@
 import { nextTick } from 'vue'
-import { afterEach, describe, expect, it } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
+import { beforeEach, afterEach, describe, expect, it } from 'vitest'
 import { enableAutoUnmount, mount } from '@vue/test-utils'
+import { useWorkspaceStore } from '@/stores/workspaces'
 import ConversationWorkspaceList from './ConversationWorkspaceList.vue'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import type { Workspace } from '@/types'
 import type { HarnessConversation } from '@/types/harness'
 
 enableAutoUnmount(afterEach)
+beforeEach(() => setActivePinia(createPinia()))
 
 const stubs = {
   Tooltip: { template: '<div><slot /></div>' },
@@ -15,7 +18,11 @@ const stubs = {
   DropdownMenu: { template: '<div><slot /></div>' },
   DropdownMenuTrigger: { template: '<div><slot /></div>' },
   DropdownMenuContent: { template: '<div><slot /></div>' },
-  DropdownMenuItem: { template: '<button @click="$emit(\'click\')"><slot /></button>' },
+  DropdownMenuItem: {
+    props: ['disabled'],
+    emits: ['click'],
+    template: '<button :disabled="disabled" @click="$emit(\'click\')"><slot /></button>',
+  },
 }
 
 function workspace(id: string, overrides: Partial<Workspace> = {}): Workspace {
@@ -244,6 +251,27 @@ describe('ConversationWorkspaceList', () => {
     const wrapper = mountList({ workspaces: [], conversations: chats('Alpha', 1) })
     expect(wrapper.get(groupSelector('Alpha')).attributes('data-online')).toBe('false')
     expect(wrapper.find('[aria-label="Open chat Alpha chat 0"]').exists()).toBe(true)
+  })
+
+  it.each([
+    { active_operation: WorkspaceOperation.CAPTURING_IMAGE },
+    { intervention_required: true },
+  ])('disables only transitioning workspace chat mutations: %j', async (transition) => {
+    const workspaces = [workspace('Alpha', transition), workspace('Beta')]
+    useWorkspaceStore().workspaces = workspaces
+    const wrapper = mountList({
+      workspaces,
+      conversations: [...chats('Alpha', 1), ...chats('Beta', 1)],
+    })
+    for (const id of ['Alpha', 'Beta']) {
+      const group = wrapper.get(groupSelector(id))
+      for (const label of ['Rename', 'Delete']) {
+        const action = group.findAll('button').find((button) => button.text() === label)!
+        expect(action.attributes('disabled') !== undefined).toBe(id === 'Alpha')
+      }
+    }
+    await wrapper.get(groupSelector('Alpha')).get(rows).trigger('click')
+    expect(wrapper.emitted('select')?.[0]?.[0]).toMatchObject({ session_id: 'Alpha-0' })
   })
 
   it('forwards workspace and keyboard chat selection plus chat management events', async () => {

@@ -71,7 +71,12 @@ describe('processes store', () => {
   it('coalesces process list requests and ignores stale results after clearing workspace', async () => {
     const store = useProcessesStore()
     let resolve!: (rows: WorkspaceProcess[]) => void
-    vi.mocked(workspacesApi.listProcesses).mockImplementationOnce(() => new Promise((r) => { resolve = r }))
+    vi.mocked(workspacesApi.listProcesses).mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r
+        }),
+    )
     const first = store.fetchProcesses('workspace-1')
     const second = store.fetchProcesses('workspace-1')
     expect(workspacesApi.listProcesses).toHaveBeenCalledTimes(1)
@@ -380,4 +385,23 @@ describe('processes store', () => {
     store.reset()
     expect(store.processesByWorkspace).toEqual({})
   })
+})
+
+it('blocks process mutations and live polling during optimistic capture', async () => {
+  setActivePinia(createPinia())
+  vi.clearAllMocks()
+  const { useWorkspaceStore } = await import('./workspaces')
+  const workspaces = useWorkspaceStore()
+  const processes = useProcessesStore()
+  void workspaces.captureImage('workspace-1', () => new Promise(() => {}))
+  expect(await processes.startProcess('workspace-1', { command: 'test' } as never)).toEqual({
+    ok: false,
+  })
+  expect(await processes.stopProcess('workspace-1', 'p')).toBe(false)
+  expect(await processes.restartProcess('workspace-1', 'p')).toBe(false)
+  expect(await processes.deleteProcess('workspace-1', 'p')).toBe(false)
+  await processes.fetchProcesses('workspace-1', { live: true })
+  expect(workspacesApi.startProcess).not.toHaveBeenCalled()
+  expect(workspacesApi.stopProcess).not.toHaveBeenCalled()
+  expect(workspacesApi.listLiveProcesses).not.toHaveBeenCalled()
 })

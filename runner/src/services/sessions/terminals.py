@@ -20,6 +20,7 @@ import structlog
 
 from ...models import WorkspaceInfo
 from ...runtime.base import PtyHandle, RuntimeBackend
+from ..capture_fence import CaptureFence, live_interaction
 
 logger = structlog.get_logger(__name__)
 
@@ -30,6 +31,7 @@ class TerminalSession:
 
     handle: PtyHandle
     runtime: RuntimeBackend
+    workspace_id: uuid.UUID | None = None
 
 
 class TerminalManager:
@@ -64,6 +66,7 @@ class TerminalManager:
         evict_workspace: Callable[[uuid.UUID], None] | None = None,
         credential_env_file: str = "/root/.opencuria-env.sh",
     ) -> None:
+        self.capture_fence: CaptureFence | None = None
         self._runtimes = runtimes if runtimes is not None else {}
         self._get_cached = get_cached
         self._get_runtime = get_runtime
@@ -71,6 +74,7 @@ class TerminalManager:
         self._credential_env_file = credential_env_file
         self._terminals: dict[str, TerminalSession] = {}
 
+    @live_interaction
     async def start_terminal(
         self,
         workspace_id: uuid.UUID,
@@ -119,6 +123,7 @@ class TerminalManager:
         self._terminals[terminal_id] = TerminalSession(
             handle=handle,
             runtime=runtime,
+            workspace_id=workspace_id,
         )
         log.info("terminal_started", terminal_id=terminal_id)
         return terminal_id
@@ -140,6 +145,7 @@ class TerminalManager:
                 break
             yield data
 
+    @live_interaction
     async def write_terminal(self, terminal_id: str, data: bytes) -> None:
         """Write raw bytes (user input) to the PTY stdin."""
         entry = self._terminals.get(terminal_id)
@@ -149,6 +155,7 @@ class TerminalManager:
         runtime = entry.runtime
         await runtime.pty_write(handle, data)
 
+    @live_interaction
     async def resize_terminal(self, terminal_id: str, cols: int, rows: int) -> None:
         """Resize the PTY window."""
         entry = self._terminals.get(terminal_id)

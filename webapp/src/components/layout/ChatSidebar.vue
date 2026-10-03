@@ -136,6 +136,7 @@ function handleMarkAllRead(): void {
 }
 
 async function handleRename(conversation: HarnessConversation, title: string): Promise<void> {
+  if (workspaceStore.isWorkspaceTransitioning(conversation.workspace_id)) return
   await harnessStore.renameSession(conversation.session_id, title)
   await conversationStore.fetchConversations()
 }
@@ -149,11 +150,12 @@ function handleMarkUnread(conversation: HarnessConversation): void {
 }
 
 function requestDelete(conversation: HarnessConversation): void {
+  if (workspaceStore.isWorkspaceTransitioning(conversation.workspace_id)) return
   deleteTarget.value = conversation
 }
 
 async function confirmDelete(): Promise<void> {
-  if (!deleteTarget.value) return
+  if (!deleteTarget.value || workspaceStore.isWorkspaceTransitioning(deleteTarget.value.workspace_id)) return
   const sessionId = deleteTarget.value.session_id
   deleteTarget.value = null
   await harnessStore.removeSession(sessionId)
@@ -271,6 +273,8 @@ function setupSocketListeners(): void {
       workspaceStore.updateWorkspaceOperation(
         data.workspace_id,
         data.active_operation as WorkspaceOperation | null,
+        data.intervention_required,
+        data.lifecycle_diagnostic,
       )
     }),
   )
@@ -438,7 +442,11 @@ watch(
       </DialogHeader>
       <DialogFooter>
         <Button variant="outline" @click="deleteTarget = null">Cancel</Button>
-        <Button variant="destructive" @click="confirmDelete">Delete</Button>
+        <Button
+          variant="destructive"
+          :disabled="Boolean(deleteTarget && workspaceStore.isWorkspaceTransitioning(deleteTarget.workspace_id))"
+          @click="confirmDelete"
+        >Delete</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

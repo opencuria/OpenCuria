@@ -21,6 +21,7 @@ vi.mock('@/services/workspaces.api', async (importOriginal) => {
     ...actual,
     updateWorkspace: vi.fn(),
     getWorkspace: vi.fn(),
+    listWorkspaces: vi.fn(),
   }
 })
 
@@ -53,6 +54,8 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     credential_ids: overrides.credential_ids ?? [],
     plugin_ids: overrides.plugin_ids ?? [],
     credentials_present: overrides.credentials_present ?? false,
+    intervention_required: overrides.intervention_required,
+    lifecycle_diagnostic: overrides.lifecycle_diagnostic,
   }
 }
 
@@ -240,4 +243,270 @@ describe('workspace credential updates', () => {
       }),
     )
   })
+})
+
+describe('automatic capture fence', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    vi.mocked(workspacesApi.getWorkspace).mockResolvedValue(
+      makeWorkspace({ active_operation: WorkspaceOperation.CAPTURING_IMAGE }) as never,
+    )
+  })
+
+  it.each([WorkspaceStatus.RUNNING, WorkspaceStatus.STOPPED])(
+    'keeps Capturing through stop/resume from %s until authoritative completion',
+    async (status) => {
+      const store = useWorkspaceStore()
+      store.workspaces = [makeWorkspace({ status })]
+      let accept!: () => void
+      const request = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            accept = resolve
+          }),
+      )
+      const flight = store.captureImage('workspace-1', request)
+      expect(request).toHaveBeenCalledOnce()
+      expect(store.isWorkspaceTransitioning('workspace-1')).toBe(true)
+      expect(store.canUseWorkspace('workspace-1')).toBe(false)
+      expect(store.getWorkspaceTransitionLabel('workspace-1')).toBe('Capturing')
+      store.updateWorkspaceOperation('workspace-1', null) // old event during POST
+      store.updateWorkspaceStatus('workspace-1', WorkspaceStatus.STOPPED)
+      expect(store.isWorkspaceTransitioning('workspace-1')).toBe(true)
+      store.updateWorkspaceOperation('workspace-1', WorkspaceOperation.CAPTURING_IMAGE)
+      store.updateWorkspaceStatus('workspace-1', status)
+      accept()
+      expect(await flight).toBe(true)
+      expect(store.getWorkspaceTransitionLabel('workspace-1')).toBe('Capturing')
+      store.updateWorkspaceOperation('workspace-1', null)
+      expect(store.isWorkspaceTransitioning('workspace-1')).toBe(false)
+      expect(store.canUseWorkspace('workspace-1')).toBe(status === WorkspaceStatus.RUNNING)
+    },
+  )
+
+  it('rolls back failed requests and prevents duplicate capture and workspace mutations', async () => {
+    const store = useWorkspaceStore()
+    store.workspaces = [makeWorkspace()]
+    let reject!: (error: Error) => void
+    const flight = store.captureImage(
+      'workspace-1',
+      () =>
+        new Promise((_, fail) => {
+          reject = fail
+        }),
+    )
+    const duplicate = vi.fn()
+    expect(await store.captureImage('workspace-1', duplicate)).toBe(false)
+    expect(duplicate).not.toHaveBeenCalled()
+    expect(await store.updateWorkspace('workspace-1', { name: 'blocked' })).toBe(false)
+    expect(workspacesApi.updateWorkspace).not.toHaveBeenCalled()
+    reject(new Error('409 busy'))
+    await expect(flight).rejects.toThrow('409 busy')
+    expect(store.canUseWorkspace('workspace-1')).toBe(true)
+  })
+
+  it('ignores a pre-request REST null and reconciles a fresh REST completion after acceptance', async () => {
+    const store = useWorkspaceStore()
+    store.workspaces = [makeWorkspace()]
+    let resolveDetail!: (value: never) => void
+    vi.mocked(workspacesApi.getWorkspace).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveDetail = resolve
+        }),
+    )
+    const detail = store.fetchWorkspaceDetail('workspace-1')
+    await store.captureImage('workspace-1', async () => {})
+    resolveDetail(makeWorkspace() as never)
+    await detail
+    expect(store.isWorkspaceTransitioning('workspace-1')).toBe(true)
+    vi.mocked(workspacesApi.getWorkspace).mockResolvedValue(makeWorkspace() as never)
+    await store.fetchWorkspaceDetail('workspace-1')
+    expect(store.isWorkspaceTransitioning('workspace-1')).toBe(false)
+  })
+})
+
+it.each(['list', 'detail'])(
+  'preserves newer operation events during deferred %s responses',
+  async (kind) => {
+    setActivePinia(createPinia())
+    const store = useWorkspaceStore()
+    store.workspaces = [makeWorkspace()]
+    for (const operation of [WorkspaceOperation.CAPTURING_IMAGE, null]) {
+      let resolve!: () => void
+      const stale = makeWorkspace({
+        active_operation: operation === null ? WorkspaceOperation.CAPTURING_IMAGE : null,
+      })
+      if (kind === 'list') {
+        vi.mocked(workspacesApi.listWorkspaces).mockImplementationOnce(
+          () =>
+            new Promise((done) => {
+              resolve = () => done([stale])
+            }),
+        )
+      } else {
+        vi.mocked(workspacesApi.getWorkspace).mockImplementationOnce(
+          () =>
+            new Promise((done) => {
+              resolve = () => done(stale as never)
+            }),
+        )
+      }
+      const flight =
+        kind === 'list' ? store.fetchWorkspaces() : store.fetchWorkspaceDetail('workspace-1')
+      store.updateWorkspaceOperation('workspace-1', operation)
+      resolve()
+      await flight
+      expect(store.workspaces[0]?.active_operation).toBe(operation)
+    }
+  },
+)
+
+it('reconciles missed completion via a fresh fetch after acceptance, without joining older detail loads', async () => {
+  setActivePinia(createPinia())
+  vi.clearAllMocks()
+  const store = useWorkspaceStore()
+  store.workspaces = [makeWorkspace()]
+  let resolve!: () => void
+  vi.mocked(workspacesApi.getWorkspace)
+    .mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = () => done(makeWorkspace() as never)
+        }),
+    )
+    .mockResolvedValueOnce(makeWorkspace() as never)
+  const old = store.fetchWorkspaceDetail('workspace-1')
+  await store.captureImage('workspace-1', async () => {})
+  expect(workspacesApi.getWorkspace).toHaveBeenCalledTimes(2)
+  expect(store.isWorkspaceTransitioning('workspace-1')).toBe(false)
+  resolve()
+  await old
+})
+
+it('resets completed on a newer capture while acceptance is pending', async () => {
+  setActivePinia(createPinia())
+  const store = useWorkspaceStore()
+  store.workspaces = [makeWorkspace()]
+  let accept!: () => void
+  vi.mocked(workspacesApi.getWorkspace).mockRejectedValueOnce(new Error('offline'))
+  const flight = store.captureImage(
+    'workspace-1',
+    () =>
+      new Promise<void>((done) => {
+        accept = done
+      }),
+  )
+  store.updateWorkspaceOperation('workspace-1', WorkspaceOperation.CAPTURING_IMAGE)
+  store.updateWorkspaceOperation('workspace-1', null)
+  store.updateWorkspaceOperation('workspace-1', WorkspaceOperation.CAPTURING_IMAGE)
+  expect(store.pendingCaptures['workspace-1']?.completed).toBe(false)
+  accept()
+  await flight
+  expect(store.pendingCaptures['workspace-1']).toBeDefined()
+  store.updateWorkspaceOperation('workspace-1', null)
+  expect(store.isWorkspaceTransitioning('workspace-1')).toBe(false)
+})
+
+it('releases Capturing on unknown completion but preserves intervention until explicitly cleared', async () => {
+  setActivePinia(createPinia())
+  const store = useWorkspaceStore()
+  store.workspaces = [makeWorkspace()]
+  vi.mocked(workspacesApi.getWorkspace).mockResolvedValue(
+    makeWorkspace({ active_operation: WorkspaceOperation.CAPTURING_IMAGE }) as never,
+  )
+  await store.captureImage('workspace-1', async () => {})
+  store.updateWorkspaceOperation('workspace-1', null, true, 'Capture outcome unknown')
+  expect(store.getWorkspaceTransitionLabel('workspace-1')).toBe('Needs intervention')
+  expect(store.pendingCaptures['workspace-1']).toBeUndefined()
+  expect(store.canUseWorkspace('workspace-1')).toBe(false)
+  expect(store.isWorkspaceTransitioning('workspace-1')).toBe(true)
+  expect(await store.captureImage('workspace-1', async () => {})).toBe(false)
+  expect(await store.updateWorkspace('workspace-1', { name: 'unsafe' })).toBe(false)
+  store.handleWorkspaceError('workspace-1', 'Capture failed')
+  store.updateWorkspaceOperation('workspace-1', null)
+  expect(store.workspaces[0]?.intervention_required).toBe(true)
+  expect(store.workspaces[0]?.lifecycle_diagnostic).toBe('Capture outcome unknown')
+  expect(store.canUseWorkspace('workspace-1')).toBe(false)
+  store.updateWorkspaceOperation('workspace-1', null, false, '')
+  expect(store.isWorkspaceTransitioning('workspace-1')).toBe(false)
+  expect(store.canUseWorkspace('workspace-1')).toBe(true)
+  expect(store.getWorkspaceTransitionLabel('workspace-1')).toBeNull()
+})
+
+it('restores persisted intervention and preserves newer intervention flags during deferred REST', async () => {
+  setActivePinia(createPinia())
+  const store = useWorkspaceStore()
+  store.workspaces = [makeWorkspace({ intervention_required: true })]
+  expect(store.canUseWorkspace('workspace-1')).toBe(false)
+  let resolve!: () => void
+  vi.mocked(workspacesApi.getWorkspace).mockImplementationOnce(
+    () =>
+      new Promise((done) => {
+        resolve = () => done(makeWorkspace({ intervention_required: false }) as never)
+      }),
+  )
+  const flight = store.fetchWorkspaceDetail('workspace-1')
+  store.updateWorkspaceOperation('workspace-1', null, true, 'Unknown')
+  store.handleWorkspaceError('workspace-1', 'Failed')
+  resolve()
+  await flight
+  expect(store.activeWorkspace?.intervention_required).toBe(true)
+  expect(store.activeWorkspace?.lifecycle_diagnostic).toBe('Unknown')
+  expect(store.canUseWorkspace('workspace-1')).toBe(false)
+})
+
+it('keeps an observed capture reserved after a child error until authoritative completion', async () => {
+  setActivePinia(createPinia())
+  const store = useWorkspaceStore()
+  store.workspaces = [makeWorkspace()]
+  store.updateWorkspaceOperation('workspace-1', WorkspaceOperation.CAPTURING_IMAGE)
+  store.handleWorkspaceError('workspace-1', 'Resume failed')
+  expect(store.getWorkspaceTransitionLabel('workspace-1')).toBe('Capturing')
+  expect(store.isWorkspaceTransitioning('workspace-1')).toBe(true)
+  expect(store.canUseWorkspace('workspace-1')).toBe(false)
+  expect(await store.updateWorkspace('workspace-1', { name: 'unsafe' })).toBe(false)
+  expect(await store.captureImage('workspace-1', async () => {})).toBe(false)
+  store.updateWorkspaceOperation('workspace-1', null, false, '')
+  expect(store.isWorkspaceTransitioning('workspace-1')).toBe(false)
+  expect(store.canUseWorkspace('workspace-1')).toBe(true)
+  store.handleWorkspaceError('workspace-1', 'Definitive capture failure')
+  expect(store.getWorkspaceTransitionLabel('workspace-1')).toBeNull()
+})
+
+it('preserves pre-acceptance capture on error but clears the optimistic lock on API rejection', async () => {
+  setActivePinia(createPinia())
+  const store = useWorkspaceStore()
+  store.workspaces = [makeWorkspace()]
+  let reject!: (error: Error) => void
+  const flight = store.captureImage(
+    'workspace-1',
+    () =>
+      new Promise((_, fail) => {
+        reject = fail
+      }),
+  )
+  store.handleWorkspaceError('workspace-1', 'Child failed')
+  expect(store.pendingCaptures['workspace-1']?.requesting).toBe(true)
+  expect(store.pendingCaptures['workspace-1']?.completed).toBe(false)
+  expect(store.getWorkspaceTransitionLabel('workspace-1')).toBe('Capturing')
+  expect(store.canUseWorkspace('workspace-1')).toBe(false)
+  reject(new Error('Capture refused'))
+  await expect(flight).rejects.toThrow('Capture refused')
+  expect(store.pendingCaptures['workspace-1']).toBeUndefined()
+  expect(store.isWorkspaceTransitioning('workspace-1')).toBe(false)
+})
+
+it('preserves legacy noncapture error cleanup', () => {
+  setActivePinia(createPinia())
+  const store = useWorkspaceStore()
+  store.workspaces = [makeWorkspace({ active_operation: WorkspaceOperation.STARTING })]
+  store.pendingWorkspaceOperations['workspace-1'] = {
+    operation: 'start',
+    expectedStatus: WorkspaceStatus.RUNNING,
+  }
+  store.handleWorkspaceError('workspace-1', 'Start failed')
+  expect(store.workspaces[0]?.active_operation).toBeNull()
+  expect(store.pendingWorkspaceOperations['workspace-1']).toBeUndefined()
 })

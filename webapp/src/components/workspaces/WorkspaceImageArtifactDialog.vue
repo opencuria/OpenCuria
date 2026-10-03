@@ -14,7 +14,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import type { Workspace } from '@/types'
@@ -30,7 +29,6 @@ const emit = defineEmits<{
 
 const workspaceStore = useWorkspaceStore()
 
-const approved = ref(false)
 const error = ref('')
 const name = ref('')
 const submitting = ref(false)
@@ -40,7 +38,8 @@ const isValid = computed(
     name.value.trim().length > 0 &&
     props.workspace.runtime_type === 'qemu' &&
     !props.workspace.intervention_required &&
-    (props.workspace.status !== 'running' || approved.value),
+    !workspaceStore.isWorkspaceTransitioning(props.workspace.id) &&
+    (props.workspace.status === 'running' || props.workspace.status === 'stopped'),
 )
 
 async function handleSubmit(): Promise<void> {
@@ -48,7 +47,6 @@ async function handleSubmit(): Promise<void> {
   submitting.value = true
   const ok = await workspaceStore.createImageArtifact(props.workspace.id, {
     name: name.value.trim(),
-    stop_and_restart: props.workspace.status === 'running' && approved.value,
   })
   submitting.value = false
   if (ok) handleClose()
@@ -61,7 +59,6 @@ function handleClose(): void {
   emit('update:open', false)
   setTimeout(() => {
     name.value = ''
-    approved.value = false
     error.value = ''
   }, 200)
 }
@@ -73,23 +70,21 @@ function handleClose(): void {
       <DialogHeader>
         <DialogTitle>Capture Image</DialogTitle>
         <DialogDescription>
-          Save the current state of this workspace as an image. Credentials must be off disk first —
-          stop the workspace to strip them, then capture. If it was stopped externally, resume and
-          stop it again.
+          Capture a point-in-time image. A running workspace automatically stops and restarts; a
+          stopped workspace stays stopped. Live interactions are unavailable during capture.
         </DialogDescription>
       </DialogHeader>
 
       <DialogBody>
         <p v-if="error" role="alert" class="text-destructive">{{ error }}</p>
-        <label v-if="workspace.status === 'running'" class="flex gap-2 items-start mb-4"
-          ><Checkbox v-model="approved" />I approve Stop → capture → restart. The workspace will be
-          unavailable during capture. A failed restart preserves a valid image; inspect runner
-          operations for diagnostics.</label
-        >
         <form id="capture-image-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
           <div>
             <label class="text-sm font-medium text-foreground mb-1.5 block">Image name</label>
-            <Input v-model="name" placeholder="e.g. before-refactor" />
+            <Input
+              :disabled="submitting || workspaceStore.isWorkspaceTransitioning(workspace.id)"
+              v-model="name"
+              placeholder="e.g. before-refactor"
+            />
             <p class="text-xs text-muted-foreground mt-1">
               Workspace: <span class="font-mono">{{ workspace.name }}</span>
             </p>
@@ -100,7 +95,7 @@ function handleClose(): void {
       <DialogFooter>
         <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
         <Button type="submit" form="capture-image-form" :disabled="!isValid || submitting">
-          {{ submitting ? 'Capturing…' : 'Capture Image' }}
+          {{ submitting ? 'Capturing' : 'Capture Image' }}
         </Button>
       </DialogFooter>
     </DialogContent>

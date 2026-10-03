@@ -623,6 +623,7 @@ class ProcessManagerMixin:
         runner = workspace.runner
         merged: dict[str, dict] = {}
         try:
+            self._ensure_workspace_available(workspace)
             for offset in range(0, len(candidates), self._PROCESS_VERIFY_BATCH_SIZE):
                 batch = candidates[offset:offset + self._PROCESS_VERIFY_BATCH_SIZE]
                 request_id = uuid.uuid4().hex
@@ -995,6 +996,9 @@ class ProcessManagerMixin:
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
 
+        if live:
+            self._ensure_workspace_available(workspace)
+
         if (
             live
             and workspace.status == WorkspaceStatus.RUNNING
@@ -1076,6 +1080,7 @@ class ProcessManagerMixin:
             and process.workspace.status == WorkspaceStatus.RUNNING
             and process.workspace.runner.is_online
         ):
+            self._ensure_workspace_available(process.workspace)
             try:
                 request_id = uuid.uuid4().hex
                 result = await self._await_process_result(
@@ -1180,9 +1185,17 @@ class ProcessManagerMixin:
         stopped: list["WorkspaceProcess"] = []
         for row in rows:
             try:
-                final = await self.stop_process(
-                    workspace_id, row.id, session_id=parsed_session
+                # Internal session cleanup is not a user live interaction.
+                # Preserve it during lifecycle holds; runner results and cleanup
+                # must remain able to settle their existing process records.
+                workspace = await sync_to_async(self.workspaces.get_by_id)(
+                    workspace_id
                 )
+                if workspace is None:
+                    raise WorkspaceNotFoundError(str(workspace_id))
+                if not workspace.runner.is_online:
+                    raise RunnerOfflineError(str(workspace.runner.id))
+                final = await self._stop_running_process(workspace, row)
             except (ConflictError, RunnerOfflineError, RuntimeError) as exc:
                 logger.warning(
                     "session process cleanup stop failed",

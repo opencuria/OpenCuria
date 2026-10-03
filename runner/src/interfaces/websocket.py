@@ -31,6 +31,7 @@ import structlog
 from ..config import RunnerSettings
 from ..git import GIT_OPERATIONS, git_timeout_for
 from ..service import WorkspaceService
+from ..services.capture_fence import CaptureFence, live_interaction
 from .base import Interface
 
 logger = structlog.get_logger(__name__)
@@ -83,6 +84,7 @@ class WebSocketInterface(Interface):
     def __init__(self, service: WorkspaceService, settings: RunnerSettings) -> None:
         super().__init__(service)
         self._settings = settings
+        self.capture_fence: CaptureFence | None = getattr(service, "capture_fence", None)
         self._sio = socketio.AsyncClient(
             reconnection=True,
             reconnection_attempts=0,  # unlimited
@@ -180,6 +182,37 @@ class WebSocketInterface(Interface):
                 },
             )
 
+    async def _workspace_failure_evidence(
+        self, workspace_id: uuid.UUID
+    ) -> dict[str, object]:
+        """Report inspected runtime state and incarnation-bound credential proof."""
+        evidence: dict[str, object] = {"outcome_known": False}
+        try:
+            observed = await self._service.workspace_incarnation(str(workspace_id))
+            if not observed or observed[1] not in {"running", "exited", "stopped"}:
+                return evidence
+            incarnation, state = observed
+            evidence["observed_status"] = state
+            proof = self._operations.journal.proof(str(workspace_id), incarnation)
+            # Lifecycle marks credentials unknown before a potentially partial scrub.
+            # An older running checkpoint cannot prove what remains after that write.
+            registry = getattr(self._service, "registry", None)
+            if registry is not None:
+                info = registry.get_cached(workspace_id)
+                if info.credentials_present is None:
+                    return evidence
+            if proof and proof.get("state") == state:
+                credentials_present = proof.get("credentials_present")
+                if isinstance(credentials_present, bool):
+                    evidence.update(
+                        credentials_present=credentials_present, outcome_known=True
+                    )
+        except Exception:
+            # Neither stale cache entries nor a failed inspection prove an outcome.
+            pass
+        return evidence
+
+    @live_interaction
     async def _fetch_desktop_http(
         self,
         workspace_id: uuid.UUID,
@@ -253,6 +286,7 @@ class WebSocketInterface(Interface):
         finally:
             await self._finalize_desktop_proxy_tunnel(tunnel_id, close_code=close_code)
 
+    @live_interaction
     async def _open_desktop_proxy_tunnel(
         self,
         workspace_id: uuid.UUID,
@@ -318,6 +352,7 @@ class WebSocketInterface(Interface):
             return None
         return state
 
+    @live_interaction
     async def _send_desktop_proxy_tunnel_message(
         self,
         tunnel_id: str,
@@ -999,7 +1034,11 @@ class WebSocketInterface(Interface):
             except Exception as exc:
                 await sio.emit(
                     "workspace:error",
-                    {"task_id": task_id, "error": str(exc)},
+                    {
+                        "task_id": task_id,
+                        "error": str(exc),
+                        **await self._workspace_failure_evidence(workspace_id),
+                    },
                 )
                 log.exception("stop_failed")
 
@@ -1030,7 +1069,11 @@ class WebSocketInterface(Interface):
             except Exception as exc:
                 await sio.emit(
                     "workspace:error",
-                    {"task_id": task_id, "error": str(exc)},
+                    {
+                        "task_id": task_id,
+                        "error": str(exc),
+                        **await self._workspace_failure_evidence(workspace_id),
+                    },
                 )
                 log.exception("resume_failed")
 

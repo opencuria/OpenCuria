@@ -43,11 +43,11 @@ preserve runner bytes/journal before deploying both components together.
 - Force requires exact approved structural fingerprint, not a blanket bypass.
   Reconfirmation is required when dependencies change; foreign/shared resources
   cannot be forcibly adopted. Deferred intent waits without pretending execution.
-- QEMU capture requires explicit stop/restart approval for running guests and
+- QEMU capture automatically stops and restarts running guests, and requires
   durable scrub evidence bound to unchanged domain/disk incarnation. Capture is
   standalone QCOW2, not an overlay. Stopped observation alone is not scrub proof.
   Only injected credentials are scrubbed; arbitrary user secrets are not sanitized.
-  Failed capture may resume only its previously approved guest; unknown outcomes
+  Failed capture may resume only its previously running guest; unknown outcomes
   retain fences. A successful capture survives a failed restart. Docker capture
   remains unsupported (legacy captures remain readable).
 - Ordinary QEMU removal checks the reverse graph before destroying its domain
@@ -179,15 +179,22 @@ optimized immutable-file caching needs independent validation.
 
 ### Capture pipeline
 
-Existing artifact-create REST/MCP now accepts `stop_and_restart: boolean = false`.
-For running QEMU guests approval is mandatory. Request, deterministic image ID,
-first child Task/current_task and sanitized outbox are committed atomically.
+Artifact-create REST/MCP automatically stops and restarts running QEMU sources;
+stopped sources remain stopped. No restart flag is accepted. Request, deterministic
+image ID, first child Task/current_task and sanitized outbox are committed atomically.
 Independent worker advances stop → capture → resume after each terminal callback;
 no request-thread or GET-driven progression. Resume credentials use the existing
 CredentialSvc resolution. Only injected credentials are scrubbed, not arbitrary
 user secrets. Known safe capture failure may resume an explicitly prior-running
-source; failed restart retains the successful capture. Later explicit stop/remove
-suppresses restart approval. Docker capture remains rejected.
+source; failed restart retains the successful capture. While capture owns the
+workspace, user stop/remove and all other live interactions are rejected and cannot
+suppress automatic restart. Active agents and pending credential synchronization
+must finish before capture is admitted. Docker capture remains rejected.
+
+API migration: callers must stop sending `stop_and_restart`; it is removed from
+REST/MCP schemas. Capturing a running source now restarts it automatically, without
+opt-in. The webapp displays one Capturing operation through stop/capture/resume;
+only navigation and saved history remain available until completion.
 
 Unknown/intervention child outcomes retain the workspace fence and diagnostic;
 no blind resume is attempted. A stopped source with credential presence returns a

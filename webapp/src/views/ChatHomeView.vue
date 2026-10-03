@@ -19,11 +19,7 @@ import CreateWorkspaceDialog from '@/components/workspaces/CreateWorkspaceDialog
 import WorkspacePicker from '@/components/workspaces/WorkspacePicker.vue'
 import WorkspaceToolsSplit from '@/components/workspaces/WorkspaceToolsSplit.vue'
 import { Button } from '@/components/ui/button'
-import {
-  HOME_EXIT_MS,
-  armComposerTransition,
-  prefersReducedMotion,
-} from '@/lib/composerTransition'
+import { HOME_EXIT_MS, armComposerTransition, prefersReducedMotion } from '@/lib/composerTransition'
 import { buildComposerSheets } from '@/lib/composerSheets'
 import { getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
 import type { MentionCandidate } from '@/lib/harnessMentions'
@@ -168,17 +164,13 @@ function onHomeDrop(event: DragEvent): void {
 }
 
 function isWorkspaceAvailable(workspace: {
+  id: string
   status: WorkspaceStatus
   runner_online: boolean
   active_operation: string | null
   has_active_session: boolean
 }): boolean {
-  return (
-    workspace.status === WorkspaceStatus.RUNNING &&
-    workspace.runner_online &&
-    !workspace.active_operation &&
-    !workspace.has_active_session
-  )
+  return workspaceStore.canUseWorkspace(workspace.id) && !workspace.has_active_session
 }
 
 const greetingName = computed(() => {
@@ -191,12 +183,7 @@ const readyWorkspace = computed(() => {
   const workspace = workspaceStore.workspaces.find(
     (entry) => entry.id === selectedWorkspaceId.value,
   )
-  if (
-    workspace &&
-    workspace.status === WorkspaceStatus.RUNNING &&
-    workspace.runner_online &&
-    !workspace.active_operation
-  ) {
+  if (workspace && workspaceStore.canUseWorkspace(workspace.id)) {
     return workspace
   }
   return null
@@ -211,6 +198,8 @@ const busyMessage = computed(() => {
     (entry) => entry.id === selectedWorkspaceId.value,
   )
   if (!workspace) return 'Select a running workspace'
+  if (workspaceStore.isWorkspaceTransitioning(workspace.id))
+    return workspaceStore.getWorkspaceTransitionLabel(workspace.id) ?? 'Workspace is busy…'
   if (workspace.status !== WorkspaceStatus.RUNNING || !workspace.runner_online) {
     return 'Workspace is not ready — runner offline or stopped'
   }

@@ -396,7 +396,6 @@ class ImageArtifactUpdateIn(Schema):
 class ImageArtifactCreateIn(Schema):
     """Request schema for creating an image artifact."""
 
-    stop_and_restart: bool = False
     name: str
     workspace_id: uuid.UUID | None = None
 

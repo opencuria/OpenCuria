@@ -460,7 +460,8 @@ class OperationExecutor:
                 if proof:
                     event, result = proof
                     result.pop("failure_event", None)
-                    result.update(execution_finished=True, outcome_known=True)
+                    result.update(execution_finished=True)
+                    result.setdefault("outcome_known", True)
                     self.journal.finish(interrupted_id, event, result)
                 else:
                     failure = identity.pop("failure_event")

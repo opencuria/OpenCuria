@@ -12,7 +12,9 @@ const dropdownStubs = {
   DropdownMenuTrigger: { template: '<div><slot /></div>' },
   DropdownMenuContent: { template: '<div><slot /></div>' },
   DropdownMenuItem: {
-    template: '<button type="button" @click="$emit(\'click\')"><slot /></button>',
+    props: ['disabled'],
+    emits: ['click'],
+    template: '<button type="button" :disabled="disabled" @click="$emit(\'click\')"><slot /></button>',
   },
 }
 
@@ -133,6 +135,36 @@ describe('ConversationRow', () => {
     await input.trigger('keydown.enter')
 
     expect(wrapper.emitted('rename')?.[0]?.[1]).toBe('Renamed chat')
+  })
+
+  it('disables mutations but keeps navigation and read state available', async () => {
+    const wrapper = mountRow({}, { actionsDisabled: true })
+    const rename = wrapper.findAll('button').find((button) => button.text() === 'Rename')!
+    const remove = wrapper.findAll('button').find((button) => button.text() === 'Delete')!
+
+    expect(rename.attributes('disabled')).toBeDefined()
+    expect(remove.attributes('disabled')).toBeDefined()
+    await rename.trigger('click')
+    await remove.trigger('click')
+    expect(wrapper.find('[data-testid="conversation-rename-input"]').exists()).toBe(false)
+    expect(wrapper.emitted('delete')).toBeUndefined()
+
+    await wrapper.get('[data-testid="conversation-row"]').trigger('click')
+    await wrapper.get('[data-testid="conversation-row"]').trigger('keydown.enter')
+    expect(wrapper.emitted('select')).toHaveLength(2)
+    await wrapper.get('[data-testid="mark-unread-item"]').trigger('click')
+    expect(wrapper.emitted('mark-unread')).toHaveLength(1)
+  })
+
+  it('closes an in-progress rename when workspace actions become disabled', async () => {
+    const wrapper = mountRow()
+    await wrapper.findAll('button').find((button) => button.text() === 'Rename')!.trigger('click')
+    await wrapper.get('[data-testid="conversation-rename-input"]').setValue('Renamed')
+    await wrapper.setProps({ actionsDisabled: true })
+
+    expect(wrapper.find('[data-testid="conversation-rename-input"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="conversation-row"]').exists()).toBe(true)
+    expect(wrapper.emitted('rename')).toBeUndefined()
   })
 
   it('cancels rename on Escape', async () => {

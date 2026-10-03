@@ -302,7 +302,7 @@ const isSubagentSession = computed(() => Boolean(activeSession.value?.parent_id)
 
 /** No message edit/fork while a run is active or inside a subagent session. */
 const messageActionsDisabled = computed(
-  () => isSubagentSession.value || activeSession.value?.status === 'busy',
+  () => !props.canPrompt || isSubagentSession.value || activeSession.value?.status === 'busy',
 )
 
 const inputDisabled = computed(() => !props.canPrompt || activeSession.value?.status === 'busy')
@@ -569,7 +569,7 @@ async function handleSend(
   skillIds: string[],
   effort: string,
 ): Promise<void> {
-  if (isSubagentSession.value) return
+  if (!props.canPrompt || isSubagentSession.value) return
   sending.value = true
   try {
     if (!harness.activeSessionId) {
@@ -588,7 +588,7 @@ async function handleSend(
 }
 
 async function handleStop(): Promise<void> {
-  if (!harness.activeSessionId) return
+  if (!props.canPrompt || !harness.activeSessionId) return
   await harness.abortSession(harness.activeSessionId)
 }
 
@@ -597,7 +597,7 @@ async function handleResolve(
   response: 'once' | 'always' | 'reject',
 ): Promise<void> {
   const request = activeRequests.value.find((item) => item.request_id === requestId)
-  if (!request) return
+  if (!props.canPrompt || !request) return
   resolving.value = true
   try {
     await harness.resolvePermission(request.session_id, request.request_id, response)
@@ -608,7 +608,7 @@ async function handleResolve(
 
 async function handleQuestionSubmit(requestId: string, answers: string[]): Promise<void> {
   const request = activeQuestions.value.find((item) => item.request_id === requestId)
-  if (!request) return
+  if (!props.canPrompt || !request) return
   answeringQuestion.value = true
   try {
     await harness.resolveQuestion(request.session_id, request.request_id, answers)
@@ -619,7 +619,7 @@ async function handleQuestionSubmit(requestId: string, answers: string[]): Promi
 
 async function handleQuestionSkip(requestId: string): Promise<void> {
   const request = activeQuestions.value.find((item) => item.request_id === requestId)
-  if (!request) return
+  if (!props.canPrompt || !request) return
   answeringQuestion.value = true
   try {
     await harness.resolveQuestion(request.session_id, request.request_id, [], true)
@@ -636,7 +636,7 @@ function handleOpenSubtask(childSessionId: string): void {
 }
 
 async function handleEditMessage(messageId: string, text: string): Promise<void> {
-  if (!harness.activeSessionId || isSubagentSession.value) return
+  if (!props.canPrompt || !harness.activeSessionId || isSubagentSession.value) return
   await harness.editMessage(harness.activeSessionId, messageId, text)
 }
 
@@ -646,7 +646,7 @@ async function handleEditMessage(messageId: string, text: string): Promise<void>
  * text. Never auto-sends.
  */
 async function handleForkMessage(messageId: string): Promise<void> {
-  if (!harness.activeSessionId || isSubagentSession.value) return
+  if (!props.canPrompt || !harness.activeSessionId || isSubagentSession.value) return
   const result = await harness.forkSession(harness.activeSessionId, messageId)
   if (!result?.prefill) return
   chatInputRef.value?.setPrompt(result.prefill)
@@ -684,8 +684,8 @@ async function handleForkMessage(messageId: string): Promise<void> {
       <div class="flex min-w-0 flex-1 flex-col">
         <HarnessSheetStack
           :sheets="composerSheets"
-          :question-submitting="answeringQuestion"
-          :permission-resolving="resolving"
+          :question-submitting="answeringQuestion || !canPrompt"
+          :permission-resolving="resolving || !canPrompt"
           @mention-select="handleMentionSelect"
           @mention-hover="handleMentionHover"
           @question-submit="handleQuestionSubmit"

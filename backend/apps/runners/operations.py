@@ -1,5 +1,6 @@
 """Durable lifecycle repository. Task.status remains the execution truth."""
 
+import uuid
 from datetime import timedelta
 
 from django.db import transaction
@@ -37,7 +38,7 @@ class OperationRepository:
     """Lock allocation, sanitized outbox, leases and terminal reconciliation."""
 
     @staticmethod
-    def allocate(task: Task) -> None:
+    def allocate(task: Task, *, capture_request_id: uuid.UUID | None = None) -> None:
         """Allocate inside the task creation transaction."""
         if task.type not in LIFECYCLE_TYPES:
             return
@@ -45,8 +46,19 @@ class OperationRepository:
             ws = Workspace.objects.select_for_update().get(pk=task.workspace_id)
             if ws.current_task_id and ws.current_task_id != task.id:
                 raise ConflictError("Workspace has an unresolved lifecycle operation")
+            from .models import CaptureRequest
+
+            capture = (
+                CaptureRequest.objects.filter(workspace=ws)
+                .exclude(phase__in=["completed", "failed"])
+                .first()
+            )
+            if capture and capture.id != capture_request_id:
+                raise ConflictError("Workspace is capturing image")
             ws.current_task_id = task.id
-            ws.active_operation = OPERATIONS.get(task.type)
+            ws.active_operation = (
+                "capturing_image" if capture else OPERATIONS.get(task.type)
+            )
             ws.save(update_fields=["current_task", "active_operation"])
         LifecycleCommand.objects.get_or_create(
             task=task,
@@ -213,23 +225,31 @@ class OperationRepository:
     @staticmethod
     def intervene(task: Task, reason: str) -> None:
         """Fence late results without guessing runtime effects or scrub proof."""
-        Task.objects.filter(pk=task.id, status__in=["pending", "in_progress"]).update(
-            status="failed", error=reason, completed_at=timezone.now()
-        )
-        LifecycleCommand.objects.filter(task=task).update(phase="intervention")
-        # Keep current_task as an intervention fence. Explicit deletion is allowed
-        # only after operator resolves this identity, not on GET or heartbeat.
-        Workspace.objects.filter(current_task=task).update(active_operation=None)
-        if task.type in {"create_workspace", "create_workspace_from_image_artifact"}:
-            Workspace.objects.filter(current_task=task).update(status="failed")
-        from .models import ImageInstance
+        with transaction.atomic():
+            lock_runner(task.runner_id)
+            if task.workspace_id:
+                Workspace.objects.select_for_update().get(pk=task.workspace_id)
+            Task.objects.select_for_update().get(pk=task.id)
+            Task.objects.filter(
+                pk=task.id, status__in=["pending", "in_progress"]
+            ).update(status="failed", error=reason, completed_at=timezone.now())
+            LifecycleCommand.objects.filter(task=task).update(phase="intervention")
+            # Keep current_task as an intervention fence. Explicit deletion is allowed
+            # only after operator resolves this identity, not on GET or heartbeat.
+            Workspace.objects.filter(current_task=task).update(active_operation=None)
+            if task.type in {
+                "create_workspace",
+                "create_workspace_from_image_artifact",
+            }:
+                Workspace.objects.filter(current_task=task).update(status="failed")
+            from .models import ImageInstance
 
-        ImageInstance.objects.filter(
-            creating_task=task, status__in=["creating", "building", "capturing"]
-        ).update(status="failed")
-        ImageInstance.objects.filter(deleting_task=task, status="deleting").update(
-            status="delete_failed", delete_last_error=reason
-        )
+            ImageInstance.objects.filter(
+                creating_task=task, status__in=["creating", "building", "capturing"]
+            ).update(status="failed")
+            ImageInstance.objects.filter(deleting_task=task, status="deleting").update(
+                status="delete_failed", delete_last_error=reason
+            )
 
     @staticmethod
     def validate_result(runner_id: str, data: dict) -> bool:
@@ -357,6 +377,17 @@ def apply_result(service, runner_id: str, event: str, data: dict) -> bool:
             OperationRepository.intervene(
                 task, "Unknown outcome; intervention required"
             )
+            if task.workspace_id:
+                service._forward_workspace_operation(str(task.workspace_id), None)
+                service._forward_to_frontend(
+                    "workspace:error",
+                    {
+                        "workspace_id": str(task.workspace_id),
+                        "task_id": str(task.id),
+                        "error": "Unknown outcome; intervention required",
+                    },
+                    str(task.workspace_id),
+                )
             return False
         if task.status in {"completed", "failed"}:
             if task.status == "failed" and row.phase == "intervention":
@@ -420,7 +451,7 @@ def apply_result(service, runner_id: str, event: str, data: dict) -> bool:
                     current_task=task, active_operation=None
                 )
             return False
-        Workspace.objects.filter(current_task=task).update(
-            current_task=None, active_operation=None
-        )
+        from .repositories import TaskRepository
+
+        TaskRepository.release_workspace(task)
         return True

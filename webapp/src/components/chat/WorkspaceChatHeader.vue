@@ -137,8 +137,8 @@ const statusDotClass = computed(() => {
 })
 
 const statusText = computed(() => {
-  if (props.runnerOffline) return 'Runner offline'
   if (props.transitionLabel) return props.transitionLabel
+  if (props.runnerOffline) return 'Runner offline'
   if (props.autoStopLabel) return props.autoStopLabel
   return props.workspace.status
 })
@@ -176,6 +176,7 @@ function cancelWorkspaceRename(): void {
 }
 
 function saveWorkspaceRename(): void {
+  if (props.transitionLabel) { cancelWorkspaceRename(); return }
   const trimmed = workspaceNameInput.value.trim()
   editingWorkspace.value = false
   workspaceNameInput.value = ''
@@ -299,6 +300,7 @@ watch(
             maxlength="255"
             placeholder="Workspace name"
             data-testid="workspace-chat-header-name-input"
+            :disabled="isTransitioning"
             @keydown.enter.prevent="saveWorkspaceRename"
             @keydown.esc.prevent="cancelWorkspaceRename"
           />
@@ -308,6 +310,7 @@ watch(
             class="h-6 w-6 shrink-0"
             title="Save workspace name"
             data-testid="workspace-chat-header-name-save"
+            :disabled="isTransitioning"
             @click="saveWorkspaceRename"
           >
             <Check :size="14" />
@@ -334,6 +337,7 @@ watch(
             :class="transitionLabel ? 'cursor-default' : 'cursor-pointer'"
             title="Rename workspace"
             data-testid="workspace-chat-header-name"
+            :disabled="isTransitioning"
             @click="startWorkspaceRename"
           >
             {{ workspace.name }}
@@ -363,6 +367,7 @@ watch(
         size="icon-sm"
         title="New chat"
         data-testid="workspace-chat-header-new-chat"
+            :disabled="isTransitioning"
         @click="emit('new-chat')"
       >
         <Plus :size="16" />
@@ -372,6 +377,7 @@ watch(
         size="icon-sm"
         title="Background processes"
         data-testid="workspace-chat-header-toggle-processes"
+            :disabled="isTransitioning"
         @click="emit('toggle-processes')"
       >
         <span class="relative inline-flex">
@@ -397,6 +403,7 @@ watch(
             size="icon-sm"
             title="Workspace actions"
             data-testid="workspace-chat-header-more"
+            :disabled="isTransitioning"
           >
             <Ellipsis :size="16" />
           </Button>
@@ -419,7 +426,7 @@ watch(
           <DropdownMenuItem
             class="text-xs"
             data-testid="workspace-chat-header-capture-image"
-            :disabled="!canPrompt"
+            :disabled="isTransitioning || !canPrompt"
             @select="emit('capture-image')"
           >
             <Camera :size="14" />
@@ -429,6 +436,7 @@ watch(
             class="text-xs"
             variant="destructive"
             data-testid="workspace-chat-header-delete-workspace"
+            :disabled="isTransitioning"
             @select="emit('delete-workspace')"
           >
             <Trash2 :size="14" />
@@ -437,7 +445,7 @@ watch(
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <SidePanelToggle :open="sidePanelOpen" @toggle="emit('toggle-side-panel')" />
+      <SidePanelToggle :open="sidePanelOpen" :disabled="isTransitioning" @toggle="emit('toggle-side-panel')" />
     </div>
   </header>
 </template>

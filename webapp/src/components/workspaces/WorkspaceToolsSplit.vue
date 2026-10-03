@@ -69,7 +69,12 @@ function resetToolStores(options: { resetDesktop?: boolean } = {}): void {
 watch(
   () => props.canPrompt,
   (ok) => {
-    if (!ok) desktopStore.close()
+    if (!ok) {
+      desktopStore.close()
+      terminalStore.close()
+      fileExplorerStore.reset()
+      gitStore.reset()
+    }
   },
 )
 
@@ -96,16 +101,10 @@ onUnmounted(() => {
       <div class="flex min-w-0 flex-1 flex-col">
         <slot name="header" />
         <div class="flex min-h-0 flex-1 flex-col overflow-x-hidden">
-          <GitDiffViewer
-            v-if="showingGitDiff"
-            :workspace-id="workspaceId"
-          />
-          <FileViewer
-            v-else-if="showingFile"
-            :workspace-id="workspaceId"
-          />
+          <GitDiffViewer v-if="canPrompt && showingGitDiff" :workspace-id="workspaceId" />
+          <FileViewer v-else-if="canPrompt && showingFile" :workspace-id="workspaceId" />
           <div
-            v-show="!showingOverlay"
+            v-show="!canPrompt || !showingOverlay"
             class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
           >
             <slot />
@@ -126,9 +125,6 @@ onUnmounted(() => {
       :key="workspaceId"
       :workspace-id="workspaceId"
     />
-    <WorkspaceDesktop
-      v-if="hasWorkspace"
-      :workspace-id="workspaceId"
-    />
+    <WorkspaceDesktop v-if="canPrompt && hasWorkspace" :workspace-id="workspaceId" />
   </div>
 </template>

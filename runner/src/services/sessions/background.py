@@ -33,6 +33,7 @@ import structlog
 
 from ...models import WorkspaceInfo
 from ...runtime.base import RuntimeBackend
+from ..capture_fence import CaptureFence, live_interaction
 from ..credentials import WORKSPACE_CREDENTIAL_ENV_FILE as _CREDENTIAL_ENV_FILE
 from ..exec_kernel import KeyedLockMap
 from ..exec_kernel import sanitize_exec_workdir as _canonical_sanitize_exec_workdir
@@ -119,6 +120,7 @@ class BackgroundProcessManager:
         sanitize_exec_workdir: Callable[[str], str] | None = None,
         credential_env_file: str = _CREDENTIAL_ENV_FILE,
     ) -> None:
+        self.capture_fence: CaptureFence | None = None
         self._runtimes = runtimes if runtimes is not None else {}
         self._get_cached = get_cached
         self._get_runtime = get_runtime
@@ -338,6 +340,7 @@ class BackgroundProcessManager:
                 old_pid=pid,
             )
 
+    @live_interaction
     async def verify_and_reattach_background_processes(
         self,
         workspace_id: uuid.UUID,
@@ -557,6 +560,7 @@ class BackgroundProcessManager:
             )
         return count
 
+    @live_interaction
     async def start_background_process(
         self,
         workspace_id: uuid.UUID,
@@ -624,6 +628,8 @@ class BackgroundProcessManager:
             workspace_id, cleaned_process_id
         )
         async with start_lock:
+            if self.capture_fence is not None:
+                self.capture_fence.check_current(workspace_id)
             async with self._background_lock:
                 old_entry = self._background_processes.get(
                     workspace_id, {}
@@ -713,6 +719,7 @@ class BackgroundProcessManager:
             )
         return entry
 
+    @live_interaction
     async def get_background_status(
         self,
         workspace_id: uuid.UUID,
@@ -731,6 +738,7 @@ class BackgroundProcessManager:
             entry = self._get_background_entry(workspace_id, process_id)
         return await self._background_status_locked(runtime, info.instance_id, entry)
 
+    @live_interaction
     async def list_background_processes(
         self,
         workspace_id: uuid.UUID,
@@ -763,6 +771,7 @@ class BackgroundProcessManager:
             )
         return results
 
+    @live_interaction
     async def stop_background_process(
         self,
         workspace_id: uuid.UUID,

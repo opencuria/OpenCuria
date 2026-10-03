@@ -496,18 +496,26 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         )
 
     async def create_image_artifact(
-        self, workspace_id: uuid.UUID, name: str,
+        self,
+        workspace_id: uuid.UUID,
+        name: str,
         organization_id: uuid.UUID | None = None,
-        stop_and_restart: bool = False,
     ) -> tuple["Workspace", "Task"]:
-        """Persist approved discrete QEMU capture phases; worker owns progression."""
+        """Reserve an automatic QEMU capture; recovery owns child progression."""
         from ...capture_repository import CaptureRepository
+
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
-        if workspace is None or (organization_id and
-                workspace.runner.organization_id != organization_id):
+        if workspace is None or (
+            organization_id and workspace.runner.organization_id != organization_id
+        ):
             raise WorkspaceNotFoundError(str(workspace_id))
-        return await sync_to_async(CaptureRepository.allocate)(
-            workspace_id, name, stop_and_restart)
+        workspace, task = await sync_to_async(CaptureRepository.allocate)(
+            workspace_id, name
+        )
+        await sync_to_async(self._forward_workspace_operation)(
+            str(workspace_id), "capturing_image"
+        )
+        return workspace, task
 
     def handle_image_artifact_created(
         self,

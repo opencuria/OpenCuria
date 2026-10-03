@@ -32,6 +32,7 @@ vi.mock('@/stores/credentials', () => ({
 }))
 vi.mock('@/stores/workspaces', () => ({
   useWorkspaceStore: () => ({
+    isWorkspaceTransitioning: () => false,
     updateWorkspace: mocks.updateWorkspace,
     fetchWorkspaceDetail: mocks.fetchWorkspaceDetail,
   }),

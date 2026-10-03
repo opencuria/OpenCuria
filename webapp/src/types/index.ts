@@ -687,7 +687,6 @@ export interface ImageArtifact {
 }
 
 export interface ImageArtifactCreateIn {
-  stop_and_restart?: boolean
   name: string
   workspace_id?: string
 }

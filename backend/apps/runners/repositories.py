@@ -24,6 +24,7 @@ from .enums import (
     WorkspaceOperation,
     WorkspaceStatus,
 )
+from .locking import lock_runner
 from .models import (
     ImageBuildJob,
     ImageDefinition,
@@ -38,9 +39,6 @@ from .models import (
 # ---------------------------------------------------------------------------
 # Runner Repository
 # ---------------------------------------------------------------------------
-
-
-from .locking import lock_runner
 
 
 class RunnerRepository:
@@ -488,7 +486,11 @@ class WorkspaceRepository:
         active_operation: WorkspaceOperation | None,
     ) -> Workspace:
         """Update the currently active blocking operation for a workspace."""
-        workspace.active_operation = active_operation
+        from .capture_repository import CaptureRepository
+
+        workspace.active_operation = CaptureRepository.operation(
+            workspace.id, active_operation
+        )
         workspace.save(update_fields=["active_operation", "updated_at"])
         return workspace
 
@@ -1010,6 +1012,7 @@ class TaskRepository:
         task_type: TaskType,
         workspace: Workspace | None = None,
         operation_payload: dict | None = None,
+        capture_request_id: uuid.UUID | None = None,
     ) -> Task:
         """Create a new task record."""
         from .operations import OperationRepository
@@ -1018,6 +1021,14 @@ class TaskRepository:
             lock_runner(runner.id)
             if workspace is not None:
                 workspace = Workspace.objects.select_for_update().get(pk=workspace.id)
+                from .capture_repository import CaptureRepository
+
+                if capture_request_id is None and CaptureRepository.active(
+                    workspace.id
+                ):
+                    from common.exceptions import ConflictError
+
+                    raise ConflictError("Workspace is capturing image")
             task = Task.objects.create(
                 id=task_id,
                 runner=runner,
@@ -1025,7 +1036,7 @@ class TaskRepository:
                 type=task_type,
                 status=TaskStatus.PENDING,
             )
-            OperationRepository.allocate(task)
+            OperationRepository.allocate(task, capture_request_id=capture_request_id)
             if operation_payload is not None or task_type in {
                 TaskType.STOP_WORKSPACE,
                 TaskType.RESUME_WORKSPACE,
@@ -1058,27 +1069,47 @@ class TaskRepository:
         return task
 
     @staticmethod
+    def release_workspace(task: Task) -> None:
+        """Release a child identity, never its enclosing capture reservation."""
+        from .capture_repository import CaptureRepository
+
+        operation = (
+            CaptureRepository.operation(task.workspace_id, None)
+            if task.workspace_id
+            else None
+        )
+        Workspace.objects.filter(current_task=task).update(
+            current_task=None, active_operation=operation
+        )
+
+    @staticmethod
     def complete(task: Task) -> Task:
         """Mark a task as completed."""
-        task.status = TaskStatus.COMPLETED
-        task.completed_at = timezone.now()
-        task.save(update_fields=["status", "completed_at"])
-        Workspace.objects.filter(current_task=task).update(
-            current_task=None, active_operation=None
-        )
-        return task
+        with transaction.atomic():
+            lock_runner(task.runner_id)
+            if task.workspace_id:
+                Workspace.objects.select_for_update().get(pk=task.workspace_id)
+            Task.objects.select_for_update().get(pk=task.id)
+            task.status = TaskStatus.COMPLETED
+            task.completed_at = timezone.now()
+            task.save(update_fields=["status", "completed_at"])
+            TaskRepository.release_workspace(task)
+            return task
 
     @staticmethod
     def fail(task: Task, error: str) -> Task:
         """Mark a task as failed with an error message."""
-        task.status = TaskStatus.FAILED
-        task.error = error
-        task.completed_at = timezone.now()
-        task.save(update_fields=["status", "error", "completed_at"])
-        Workspace.objects.filter(current_task=task).update(
-            current_task=None, active_operation=None
-        )
-        return task
+        with transaction.atomic():
+            lock_runner(task.runner_id)
+            if task.workspace_id:
+                Workspace.objects.select_for_update().get(pk=task.workspace_id)
+            Task.objects.select_for_update().get(pk=task.id)
+            task.status = TaskStatus.FAILED
+            task.error = error
+            task.completed_at = timezone.now()
+            task.save(update_fields=["status", "error", "completed_at"])
+            TaskRepository.release_workspace(task)
+            return task
 
 
 # ---------------------------------------------------------------------------

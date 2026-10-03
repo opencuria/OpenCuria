@@ -61,6 +61,7 @@ import { loadAgentConfigsCached } from '@/lib/agentConfigs'
 import { recordRecentModelUsage } from '@/lib/recentModels'
 import type { AgentConfig } from '@/lib/harnessAgents'
 import { resolveCatalogModel, snapEffort, type ProviderModel } from '@/lib/harnessModels'
+import { useWorkspaceStore } from './workspaces'
 import { useNotificationStore } from './notifications'
 import { useHarnessConversationStore } from './harnessConversations'
 
@@ -564,6 +565,11 @@ export const useHarnessStore = defineStore('harness', () => {
     await flight
   }
 
+  function sessionTransitioning(sessionId: string): boolean {
+    const session = sessions.value.find((item) => item.id === sessionId)
+    return Boolean(session && useWorkspaceStore().isWorkspaceTransitioning(session.workspace_id))
+  }
+
   async function createSession(
     workspaceId: string,
     prompt: string,
@@ -572,6 +578,7 @@ export const useHarnessStore = defineStore('harness', () => {
     skillIds: string[] = [],
     reasoningEffort = '',
   ): Promise<HarnessSession | null> {
+    if (useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return null
     const notifications = useNotificationStore()
     try {
       const session = await createHarnessSession(workspaceId, {
@@ -614,6 +621,7 @@ export const useHarnessStore = defineStore('harness', () => {
       reasoningEffort?: string
     } = {},
   ): Promise<void> {
+    if (sessionTransitioning(sessionId)) return
     const notifications = useNotificationStore()
     try {
       const session = await sendHarnessMessage(sessionId, {
@@ -635,6 +643,7 @@ export const useHarnessStore = defineStore('harness', () => {
   }
 
   async function renameSession(sessionId: string, title: string): Promise<void> {
+    if (sessionTransitioning(sessionId)) return
     const notifications = useNotificationStore()
     try {
       const updated = await patchHarnessSession(sessionId, { title })
@@ -645,6 +654,7 @@ export const useHarnessStore = defineStore('harness', () => {
   }
 
   async function removeSession(sessionId: string): Promise<void> {
+    if (sessionTransitioning(sessionId)) return
     const notifications = useNotificationStore()
     try {
       await deleteHarnessSession(sessionId)
@@ -661,6 +671,7 @@ export const useHarnessStore = defineStore('harness', () => {
   }
 
   async function updateSessionMode(sessionId: string, mode: HarnessSessionMode): Promise<void> {
+    if (sessionTransitioning(sessionId)) return
     const notifications = useNotificationStore()
     try {
       const updated = await setSessionMode(sessionId, mode)
@@ -671,6 +682,7 @@ export const useHarnessStore = defineStore('harness', () => {
   }
 
   async function abortSession(sessionId: string): Promise<void> {
+    if (sessionTransitioning(sessionId)) return
     const notifications = useNotificationStore()
     try {
       const session = await abortHarnessSession(sessionId)
@@ -690,6 +702,7 @@ export const useHarnessStore = defineStore('harness', () => {
     sessionId: string,
     messageId?: string,
   ): Promise<{ session: HarnessSession; prefill: string } | null> {
+    if (sessionTransitioning(sessionId)) return null
     const notifications = useNotificationStore()
     try {
       const prefill =
@@ -725,6 +738,7 @@ export const useHarnessStore = defineStore('harness', () => {
       reasoningEffort?: string
     } = {},
   ): Promise<void> {
+    if (sessionTransitioning(sessionId)) return
     const notifications = useNotificationStore()
     try {
       invalidatePartDetails(sessionId, true)
@@ -971,6 +985,7 @@ export const useHarnessStore = defineStore('harness', () => {
     answers: string[],
     reject = false,
   ): Promise<void> {
+    if (sessionTransitioning(sessionId)) return
     const notifications = useNotificationStore()
     if (!pendingQuestions.value[requestId]) return
     try {
@@ -986,6 +1001,7 @@ export const useHarnessStore = defineStore('harness', () => {
     requestId: string,
     response: HarnessPermissionResponse,
   ): Promise<void> {
+    if (sessionTransitioning(sessionId)) return
     const notifications = useNotificationStore()
     const request = pendingPermissions.value[requestId]
     if (!request) return

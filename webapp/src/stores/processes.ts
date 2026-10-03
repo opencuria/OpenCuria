@@ -9,14 +9,11 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
-import type {
-  ProcessRemovedEvent,
-  ProcessStatusChangedEvent,
-  WorkspaceProcess,
-} from '@/types'
+import type { ProcessRemovedEvent, ProcessStatusChangedEvent, WorkspaceProcess } from '@/types'
 import { ProcessKind } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 import type { ProcessStartIn } from '@/services/workspaces.api'
+import { useWorkspaceStore } from './workspaces'
 import { useNotificationStore } from './notifications'
 
 export const useProcessesStore = defineStore('processes', () => {
@@ -85,7 +82,11 @@ export const useProcessesStore = defineStore('processes', () => {
 
   // --- Actions ---
 
-  async function fetchProcesses(workspaceId: string, options: { live?: boolean } = {}): Promise<void> {
+  async function fetchProcesses(
+    workspaceId: string,
+    options: { live?: boolean } = {},
+  ): Promise<void> {
+    if (options.live && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
     const key = `${workspaceId}:${options.live ? 'live' : 'db'}`
     let flight = fetchFlights.get(key)
     if (flight) {
@@ -139,10 +140,8 @@ export const useProcessesStore = defineStore('processes', () => {
     await flight
   }
 
-  async function stopProcess(
-    workspaceId: string,
-    processId: string,
-  ): Promise<boolean> {
+  async function stopProcess(workspaceId: string, processId: string): Promise<boolean> {
+    if (useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return false
     const notifications = useNotificationStore()
     const next = new Set(stoppingIds.value)
     next.add(processId)
@@ -170,6 +169,7 @@ export const useProcessesStore = defineStore('processes', () => {
     workspaceId: string,
     data: ProcessStartIn,
   ): Promise<{ ok: boolean; process?: WorkspaceProcess }> {
+    if (useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return { ok: false }
     const notifications = useNotificationStore()
     try {
       const created = await workspacesApi.startProcess(workspaceId, data)
@@ -193,10 +193,8 @@ export const useProcessesStore = defineStore('processes', () => {
     }
   }
 
-  async function restartProcess(
-    workspaceId: string,
-    processId: string,
-  ): Promise<boolean> {
+  async function restartProcess(workspaceId: string, processId: string): Promise<boolean> {
+    if (useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return false
     const notifications = useNotificationStore()
     const next = new Set(restartingIds.value)
     next.add(processId)
@@ -220,10 +218,8 @@ export const useProcessesStore = defineStore('processes', () => {
     }
   }
 
-  async function deleteProcess(
-    workspaceId: string,
-    processId: string,
-  ): Promise<boolean> {
+  async function deleteProcess(workspaceId: string, processId: string): Promise<boolean> {
+    if (useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return false
     const notifications = useNotificationStore()
     const next = new Set(deletingIds.value)
     next.add(processId)

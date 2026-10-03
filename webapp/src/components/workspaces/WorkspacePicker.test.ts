@@ -7,6 +7,17 @@ import { WorkspaceStatus } from '@/types'
 import type { Workspace } from '@/types'
 
 const workspaceStore = {
+  isWorkspaceTransitioning(id: string): boolean {
+    return Boolean(this.workspaces.find((w) => w.id === id)?.active_operation)
+  },
+  canUseWorkspace(id: string): boolean {
+    const w = this.workspaces.find((w) => w.id === id)
+    return Boolean(
+      w?.status === WorkspaceStatus.RUNNING &&
+      w.runner_online &&
+      !this.isWorkspaceTransitioning(id),
+    )
+  },
   workspaces: [] as Workspace[],
   fetchWorkspaces: vi.fn(),
   getWorkspaceTransitionLabel: vi.fn().mockReturnValue('Starting…'),

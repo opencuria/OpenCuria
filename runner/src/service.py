@@ -534,6 +534,16 @@ class WorkspaceService:
         # manager's map so tests poking
         # ``service._desktop_locks.get(...)`` keep working.
 
+        from .services.capture_fence import CaptureFence
+
+        self.capture_fence: CaptureFence = CaptureFence(self._registry)
+        for manager in (
+            self._images, self._terminals_manager, self._streams_manager,
+            self._background, self._files_manager, self._harness,
+            self._git, self._desktop, self._lifecycle,
+        ):
+            manager.capture_fence = self.capture_fence
+
     # -- Step 8 composer accessors ---------------------------------------
     # ``_cache`` stays readable/writable as a dict alias onto the
     # registry-owned store so tests poking ``service._cache[...]``

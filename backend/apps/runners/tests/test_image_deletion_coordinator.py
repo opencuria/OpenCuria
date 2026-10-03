@@ -353,7 +353,7 @@ def test_retirement_blocks_clone_and_capture(runner, user):
     with transaction.atomic(), pytest.raises(ConflictError, match="ready"):
         ImageGenerationRepository.validate_selection(base.id)
     with pytest.raises(ConflictError, match="retired"):
-        CaptureRepository.allocate(ws.id, "new capture", False)
+        CaptureRepository.allocate(ws.id, "new capture")
 
 
 def test_false_and_stale_task_success_fenced(runner, user):

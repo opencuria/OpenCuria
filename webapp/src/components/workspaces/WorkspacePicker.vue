@@ -53,11 +53,7 @@ const selectedWorkspace = computed<Workspace | null>(
 )
 
 function isWorkspaceReady(workspace: Workspace): boolean {
-  return (
-    workspace.status === WorkspaceStatus.RUNNING &&
-    workspace.runner_online &&
-    !workspace.active_operation
-  )
+  return workspaceStore.canUseWorkspace(workspace.id)
 }
 
 const isReady = computed(() =>
@@ -73,7 +69,9 @@ const filteredWorkspaces = computed<Workspace[]>(() => {
 })
 
 function isWorkspaceBusy(workspace: Workspace): boolean {
-  return Boolean(workspace.active_operation || workspace.has_active_session)
+  return Boolean(
+    workspaceStore.isWorkspaceTransitioning(workspace.id) || workspace.has_active_session,
+  )
 }
 
 function statusDotClass(workspace: Workspace): string {
@@ -82,7 +80,7 @@ function statusDotClass(workspace: Workspace): string {
 }
 
 function statusLabel(workspace: Workspace): string {
-  if (workspace.active_operation) {
+  if (workspaceStore.isWorkspaceTransitioning(workspace.id)) {
     return workspaceStore.getWorkspaceTransitionLabel(workspace.id) ?? workspace.status
   }
   if (workspace.has_active_session) {

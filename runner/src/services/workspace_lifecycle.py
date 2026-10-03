@@ -47,37 +47,44 @@ composer exposes it as a read-through alias.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 import uuid
-import inspect
-from functools import wraps
 from collections.abc import Awaitable, Callable
+from functools import wraps
 from typing import Any
 
 import structlog
 
 from ..models import WorkspaceInfo
 from ..runtime.base import RuntimeBackend, WorkspaceConfig
+from .capture_fence import CaptureFence, Method
 from .sessions.desktop import DESKTOP_HOLDER_VIEWER
 from .workspace_registry import WorkspaceRegistry
 
 logger = structlog.get_logger(__name__)
 
 
-def coordinated(method):
+def coordinated(method: Method) -> Method:
     """Fence awaited lifecycle effects against stale registry observations."""
     signature = inspect.signature(method)
 
     @wraps(method)
-    async def wrapped(self, *args, **kwargs):
+    async def wrapped(self: WorkspaceLifecycle, *args: Any, **kwargs: Any) -> Any:
         bound = signature.bind(self, *args, **kwargs)
         workspace_id = bound.arguments.get("workspace_id")
         if workspace_id is None:
             workspace_id = uuid.uuid4()
             bound.arguments["workspace_id"] = workspace_id
+        fence = self.capture_fence
+        if fence is not None:
+            fence.check_available(workspace_id)
         async with self._registry.lifecycle(workspace_id):
-            return await method(*bound.args, **bound.kwargs)
-    return wrapped
+            if fence is None:
+                return await method(*bound.args, **bound.kwargs)
+            async with fence.interaction(workspace_id, coordinated=True):
+                return await method(*bound.args, **bound.kwargs)
+    return wrapped  # type: ignore[return-value]
 
 
 class WorkspaceLifecycle:
@@ -112,6 +119,7 @@ class WorkspaceLifecycle:
         streams: Any | None = None,
         desktop: Any | None = None,
     ) -> None:
+        self.capture_fence: CaptureFence | None = None
         self.checkpoint_hook = None
         self.scrub_proof_hook = None
         self._registry = registry

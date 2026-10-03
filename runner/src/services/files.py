@@ -36,6 +36,7 @@ import structlog
 
 from ..models import WorkspaceInfo
 from ..runtime.base import RuntimeBackend
+from .capture_fence import CaptureFence, live_interaction
 from .exec_kernel import sanitize_filename as _sanitize_filename
 from .exec_kernel import sanitize_path as _sanitize_path
 
@@ -167,6 +168,7 @@ class FileManager:
         get_cached: Callable[[uuid.UUID], WorkspaceInfo] | None = None,
         get_runtime: Callable[[uuid.UUID], RuntimeBackend] | None = None,
     ) -> None:
+        self.capture_fence: CaptureFence | None = None
         self._runtimes = runtimes if runtimes is not None else {}
         self._get_cached = get_cached
         self._get_runtime = get_runtime
@@ -227,6 +229,7 @@ class FileManager:
             raise ValueError(f"Path escapes /workspace: {path}")
         return real
 
+    @live_interaction
     async def list_files(
         self,
         workspace_id: uuid.UUID,
@@ -284,6 +287,7 @@ class FileManager:
         entries.sort(key=lambda e: (e["type"] != "directory", e["name"].lower()))
         return entries
 
+    @live_interaction
     async def find_files(
         self,
         workspace_id: uuid.UUID,
@@ -332,6 +336,7 @@ class FileManager:
         truncated = len(paths) > capped
         return {"paths": paths[:capped], "truncated": truncated}
 
+    @live_interaction
     async def read_file(
         self,
         workspace_id: uuid.UUID,
@@ -374,6 +379,8 @@ class FileManager:
                 )
 
         async with sem:
+            if self.capture_fence is not None:
+                self.capture_fence.check_current(workspace_id)
             safe_path = await self._realpath_under_workspace(
                 runtime, info.instance_id, safe_path, allow_external=allow_external
             )
@@ -428,6 +435,7 @@ class FileManager:
             "mime_type": mime_type,
         }
 
+    @live_interaction
     async def upload_file(
         self,
         workspace_id: uuid.UUID,
@@ -498,6 +506,7 @@ class FileManager:
             filename=safe_filename,
         )
 
+    @live_interaction
     async def download_file(
         self,
         workspace_id: uuid.UUID,
@@ -602,6 +611,7 @@ class FileManager:
             "size": raw_size,
         }
 
+    @live_interaction
     async def stat_path(
         self,
         workspace_id: uuid.UUID,
@@ -654,6 +664,7 @@ class FileManager:
             "mime_type": mime_type,
         }
 
+    @live_interaction
     async def write_file_content(
         self,
         workspace_id: uuid.UUID,

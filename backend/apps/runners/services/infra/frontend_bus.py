@@ -17,7 +17,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from asgiref.sync import async_to_sync
+from asgiref.sync import async_to_sync, sync_to_async
+from django.db import transaction
 
 from ...enums import WorkspaceStatus
 
@@ -45,6 +46,17 @@ class FrontendBusMixin:
         Otherwise the previous lazy ``emit_to_frontend`` path is kept
         unchanged (including monkeypatch compatibility).
         """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            transaction.on_commit(
+                lambda: self._emit_frontend_event(event, dict(data), workspace_id)
+            )
+        else:
+            self._emit_frontend_event(event, data, workspace_id)
+
+    def _emit_frontend_event(self, event: str, data: dict, workspace_id: str) -> None:
+        """Deliver an event only after its originating transaction committed."""
         injected = getattr(self, "_frontend_bus", None)
         if injected is not None:
             try:
@@ -144,14 +156,36 @@ class FrontendBusMixin:
         active_operation: str | None,
     ) -> None:
         """Forward workspace operation changes to subscribed frontend clients."""
-        self._forward_to_frontend(
-            "workspace:operation_changed",
-            {
-                "workspace_id": workspace_id,
-                "active_operation": active_operation,
-            },
-            workspace_id,
-        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            # Several dispatch paths are async. Projection performs ORM reads
+            # and must run in the same sync boundary as lifecycle persistence.
+            loop.create_task(
+                sync_to_async(self._forward_workspace_operation)(
+                    workspace_id, active_operation
+                )
+            )
+            return
+
+        def publish() -> None:
+            from ...capture_repository import CaptureRepository
+
+            workspace = self.workspaces.get_by_id(workspace_id)
+            operation = CaptureRepository.operation(workspace_id, active_operation)
+            payload = {"workspace_id": workspace_id, "active_operation": operation}
+            if workspace is not None:
+                payload.update(
+                    intervention_required=workspace.intervention_required,
+                    lifecycle_diagnostic=workspace.lifecycle_diagnostic,
+                )
+            self._forward_to_frontend(
+                "workspace:operation_changed", payload, workspace_id
+            )
+
+        transaction.on_commit(publish)
 
     def _forward_workspace_status(
         self,

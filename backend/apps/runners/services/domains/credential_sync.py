@@ -101,6 +101,11 @@ class CredentialSyncMixin:
             fresh = await sync_to_async(self.workspaces.get_by_id)(workspace.id)
             if fresh is None:
                 return None
+            # Heartbeat candidates may have been queued before capture acquired
+            # its parent hold. Only ordinary reconciliation is fenced here;
+            # lifecycle delivery supplies explicitly resolved credentials.
+            if fresh.active_operation or fresh.current_task_id:
+                return None
             workspace = fresh
             runner = workspace.runner
             resolved = await sync_to_async(self._credential_resolve_call(workspace))(

@@ -614,10 +614,6 @@ class WorkspaceLifecycleMixin:
         auto_stop: bool = False,
     ) -> Task:
         """Stop a running workspace; auto-stop uses a fresh atomic busy guard."""
-        if not auto_stop:
-            from ...capture_repository import CaptureRepository
-
-            await sync_to_async(CaptureRepository.suppress_resume)(workspace_id)
         if auto_stop:
             workspace = await sync_to_async(
                 self.workspaces.get_by_id, thread_sensitive=True
@@ -768,9 +764,6 @@ class WorkspaceLifecycleMixin:
         sets status to ``deleting``.  If the runner is offline, sets status to
         ``pending_deletion`` — the job will be delivered on reconnect.
         """
-        from ...capture_repository import CaptureRepository
-
-        await sync_to_async(CaptureRepository.suppress_resume)(workspace_id)
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
@@ -1015,7 +1008,12 @@ class WorkspaceLifecycleMixin:
         self._forward_workspace_operation(workspace_id, None)
 
     def handle_workspace_error(
-        self, task_id: str, error: str, runner_id: str | None = None
+        self,
+        task_id: str,
+        error: str,
+        runner_id: str | None = None,
+        observed_status: str | None = None,
+        credentials_present: bool | None = None,
     ) -> None:
         """Handle workspace:error event from a runner."""
         task = self.tasks.get_by_id(uuid.UUID(task_id))
@@ -1050,10 +1048,25 @@ class WorkspaceLifecycleMixin:
         elif workspace and task.type == TaskType.REMOVE_WORKSPACE:
             self.workspaces.mark_delete_failed(workspace.id, error=error)
 
+        if workspace and task.type in {
+            TaskType.RESUME_WORKSPACE, TaskType.STOP_WORKSPACE
+        }:
+            status = {
+                "running": WorkspaceStatus.RUNNING,
+                "exited": WorkspaceStatus.STOPPED,
+                "stopped": WorkspaceStatus.STOPPED,
+            }.get(observed_status)
+            if status is not None:
+                self.workspaces.update_status(workspace, status)
+            if isinstance(credentials_present, bool):
+                self.workspaces.update_credentials_present(workspace, credentials_present)
+
         self.tasks.fail(task, error)
         logger.error("Workspace error (task=%s): %s", task_id, error)
 
         if workspace_id:
+            if workspace and observed_status is not None:
+                self._forward_workspace_status(workspace, task_id=task_id)
             if workspace and task.type == TaskType.REMOVE_WORKSPACE:
                 self._forward_to_frontend(
                     "workspace:status_changed",

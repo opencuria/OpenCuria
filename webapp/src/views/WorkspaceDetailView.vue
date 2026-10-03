@@ -5,11 +5,7 @@ import { useWorkspaceStore } from '@/stores/workspaces'
 import { useHarnessStore } from '@/stores/harness'
 import { useProcessesStore } from '@/stores/processes'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
-import {
-  subscribeToWorkspace,
-  onEvent,
-  onReconnect,
-} from '@/services/socket'
+import { subscribeToWorkspace, onEvent, onReconnect } from '@/services/socket'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
 import { isComposerTransitionPending } from '@/lib/composerTransition'
@@ -36,12 +32,7 @@ const imageArtifactDialogOpen = ref(false)
 /** Header entrance animation only when arriving from the home composer send. */
 const animateEntrance = ref(isComposerTransitionPending())
 
-const canPrompt = computed(
-  () =>
-    workspace.value?.status === WorkspaceStatus.RUNNING &&
-    workspace.value?.runner_online &&
-    !workspace.value?.active_operation,
-)
+const canPrompt = computed(() => workspaceStore.canUseWorkspace(workspaceId.value))
 const isRunnerOfflineState = computed(
   () =>
     !workspace.value?.runner_online &&
@@ -68,9 +59,7 @@ const showImminentAutoStop = computed(() => {
 
 const harnessStore = useHarnessStore()
 
-const activeChatTitle = computed(
-  () => harnessStore.activeSession?.title?.trim() || null,
-)
+const activeChatTitle = computed(() => harnessStore.activeSession?.title?.trim() || null)
 
 function handleNewHarnessChat(): void {
   harnessStore.setActiveSession(null)
@@ -93,14 +82,11 @@ function handleStopWorkspace(): void {
   void workspaceStore.stopWorkspace(workspace.value.id)
 }
 
-const runningProcessCount = computed(() =>
-  processesStore.runningCountFor(workspaceId.value),
-)
-const isProcessesPanelVisible = computed(
-  () => processesOpen.value && canPrompt.value,
-)
+const runningProcessCount = computed(() => processesStore.runningCountFor(workspaceId.value))
+const isProcessesPanelVisible = computed(() => processesOpen.value && canPrompt.value)
 
 function toggleProcessesPanel(): void {
+  if (!canPrompt.value) return
   processesOpen.value = !processesOpen.value
   if (processesOpen.value) {
     void processesStore.fetchProcesses(workspaceId.value)
@@ -132,6 +118,8 @@ function setupSocketListeners(): void {
         workspaceStore.updateWorkspaceOperation(
           data.workspace_id,
           data.active_operation as WorkspaceOperation | null,
+          data.intervention_required,
+          data.lifecycle_diagnostic,
         )
       }
     }),
@@ -161,10 +149,12 @@ function setupSocketListeners(): void {
     }),
   )
 
-  cleanupFns.push(onReconnect(() => {
-    void workspaceStore.fetchWorkspaceDetail(workspaceId.value)
-    if (processesOpen.value) void processesStore.fetchProcesses(workspaceId.value, { live: true })
-  }))
+  cleanupFns.push(
+    onReconnect(() => {
+      void workspaceStore.fetchWorkspaceDetail(workspaceId.value)
+      if (processesOpen.value) void processesStore.fetchProcesses(workspaceId.value, { live: true })
+    }),
+  )
   cleanupFns.push(
     onEvent('process:status_changed', (data) => {
       if (data.workspace_id === workspaceId.value) {
@@ -270,7 +260,7 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
           @start-workspace="handleStartWorkspace"
           @stop-workspace="handleStopWorkspace"
           @save-workspace-name="handleSaveWorkspaceName"
-          @toggle-side-panel="sidePanelStore.toggle()"
+          @toggle-side-panel="canPrompt && sidePanelStore.toggle()"
           @toggle-processes="toggleProcessesPanel"
           @capture-image="imageArtifactDialogOpen = true"
           @delete-workspace="handleDeleteWorkspace"

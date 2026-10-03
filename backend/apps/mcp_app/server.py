@@ -360,13 +360,15 @@ _TOOLS: list[Tool] = [
     ),
     Tool(
         name="create_image_artifact",
-        description="Create an image artifact of a workspace.",
+        description=(
+            "Create an image artifact of a workspace. Running sources are stopped "
+            "and restarted automatically; stopped sources remain stopped."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
                 "workspace_id": {"type": "string", "description": "Workspace UUID."},
                 "name": {"type": "string", "description": "Image artifact name."},
-                "stop_and_restart": {"type": "boolean", "default": False},
             },
             "required": ["workspace_id", "name"],
         },
@@ -2095,7 +2097,6 @@ def _call_create_image_artifact(api_key, org_id, args: dict) -> list[TextContent
             return await svc.create_image_artifact(
                 workspace_id=workspace_id,
                 name=name,
-                stop_and_restart=bool(args.get("stop_and_restart", False)),
                 organization_id=org_id,
             )
 

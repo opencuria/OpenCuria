@@ -1,3 +1,5 @@
+import { useWorkspaceStore } from '@/stores/workspaces'
+import { getActivePinia } from 'pinia'
 /**
  * Socket.IO client for real-time frontend updates.
  *
@@ -12,7 +14,14 @@ import { io, type Socket } from 'socket.io-client'
 import { ref } from 'vue'
 import { getConfig } from './config'
 import { tryRefreshToken } from './api'
-import { FILE_CHUNK_B64_SIZE, MAX_UPLOAD_CHUNKS_PER_TRANSFER, UPLOAD_MAX_BYTES, decodedBase64Size, splitBase64Chunks, stripBase64Whitespace } from '@/lib/fileChunks'
+import {
+  FILE_CHUNK_B64_SIZE,
+  MAX_UPLOAD_CHUNKS_PER_TRANSFER,
+  UPLOAD_MAX_BYTES,
+  decodedBase64Size,
+  splitBase64Chunks,
+  stripBase64Whitespace,
+} from '@/lib/fileChunks'
 import type {
   FilesListResultEvent,
   FilesFindResultEvent,
@@ -61,7 +70,10 @@ let hasConnectedOnce = false
 /** Workspace subscription owners, keyed by ID. A room is joined once while at least one consumer needs it. */
 const subscribedWorkspaces = new Map<string, number>()
 
-function emitWorkspaceSubscriptions(event: 'frontend:subscribe_workspace' | 'frontend:unsubscribe_workspace', ids: Iterable<string>): void {
+function emitWorkspaceSubscriptions(
+  event: 'frontend:subscribe_workspace' | 'frontend:unsubscribe_workspace',
+  ids: Iterable<string>,
+): void {
   if (!socket?.connected) return
   for (const workspaceId of ids) {
     socket.emit(event, { workspace_id: workspaceId })
@@ -101,6 +113,8 @@ export interface WorkspaceStatusEvent {
 export interface WorkspaceOperationEvent {
   workspace_id: string
   active_operation: string | null
+  intervention_required?: boolean
+  lifecycle_diagnostic?: string
 }
 
 export interface WorkspaceErrorEvent {
@@ -388,11 +402,8 @@ export function onReconnect(callback: () => void): () => void {
 /**
  * Send terminal stdin input to the backend (base64-encoded).
  */
-export function sendTerminalInput(
-  workspaceId: string,
-  terminalId: string,
-  data: string,
-): void {
+export function sendTerminalInput(workspaceId: string, terminalId: string, data: string): void {
+  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
   socket?.emit('frontend:terminal_input', {
     workspace_id: workspaceId,
     terminal_id: terminalId,
@@ -409,6 +420,7 @@ export function sendTerminalResize(
   cols: number,
   rows: number,
 ): void {
+  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
   socket?.emit('frontend:terminal_resize', {
     workspace_id: workspaceId,
     terminal_id: terminalId,
@@ -420,10 +432,8 @@ export function sendTerminalResize(
 /**
  * Request terminal close.
  */
-export function sendTerminalClose(
-  workspaceId: string,
-  terminalId: string,
-): void {
+export function sendTerminalClose(workspaceId: string, terminalId: string): void {
+  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
   socket?.emit('frontend:terminal_close', {
     workspace_id: workspaceId,
     terminal_id: terminalId,
@@ -437,11 +447,8 @@ export function sendTerminalClose(
 /**
  * Request a directory listing inside the workspace container.
  */
-export function sendFilesList(
-  workspaceId: string,
-  requestId: string,
-  path: string,
-): void {
+export function sendFilesList(workspaceId: string, requestId: string, path: string): void {
+  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
   socket?.emit('frontend:files_list', {
     workspace_id: workspaceId,
     request_id: requestId,
@@ -461,6 +468,7 @@ export function sendFilesFind(
   query: string,
   limit: number,
 ): boolean {
+  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return false
   if (!socket) return false
   socket.emit('frontend:files_find', {
     workspace_id: workspaceId,
@@ -480,6 +488,7 @@ export function sendFilesRead(
   path: string,
   maxSize?: number,
 ): void {
+  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
   socket?.emit('frontend:files_read', {
     workspace_id: workspaceId,
     request_id: requestId,
@@ -501,7 +510,11 @@ export function sendFilesRead(
  * bytes, so an oversize upload never emits a partial stream.
  */
 export interface FilesUploadPlannedEvent {
-  event: 'frontend:files_upload' | 'frontend:files_upload_start' | 'frontend:files_upload_chunk' | 'frontend:files_upload_finish'
+  event:
+    | 'frontend:files_upload'
+    | 'frontend:files_upload_start'
+    | 'frontend:files_upload_chunk'
+    | 'frontend:files_upload_finish'
   payload: Record<string, unknown>
 }
 
@@ -518,9 +531,7 @@ export function planFilesUpload(
   // before any event is planned.
   const rawSize = decodedBase64Size(clean)
   if (rawSize > UPLOAD_MAX_BYTES) {
-    throw new Error(
-      `Upload exceeds the ${UPLOAD_MAX_BYTES / (1024 * 1024)} MB limit.`,
-    )
+    throw new Error(`Upload exceeds the ${UPLOAD_MAX_BYTES / (1024 * 1024)} MB limit.`)
   }
   if (clean.length <= FILE_CHUNK_B64_SIZE) {
     return [
@@ -540,9 +551,7 @@ export function planFilesUpload(
   const chunks = splitBase64Chunks(clean)
   const totalChunks = chunks.length
   if (totalChunks > MAX_UPLOAD_CHUNKS_PER_TRANSFER) {
-    throw new Error(
-      `Upload exceeds the ${MAX_UPLOAD_CHUNKS_PER_TRANSFER}-chunk limit.`,
-    )
+    throw new Error(`Upload exceeds the ${MAX_UPLOAD_CHUNKS_PER_TRANSFER}-chunk limit.`)
   }
   const planned: FilesUploadPlannedEvent[] = [
     {
@@ -602,6 +611,7 @@ export function sendFilesUpload(
   content: string,
   isDirectory: boolean = false,
 ): void {
+  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
   if (!socket) return
   for (const planned of planFilesUpload(
     workspaceId,
@@ -618,11 +628,8 @@ export function sendFilesUpload(
 /**
  * Download a file or directory from the workspace container.
  */
-export function sendFilesDownload(
-  workspaceId: string,
-  requestId: string,
-  path: string,
-): void {
+export function sendFilesDownload(workspaceId: string, requestId: string, path: string): void {
+  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
   socket?.emit('frontend:files_download', {
     workspace_id: workspaceId,
     request_id: requestId,

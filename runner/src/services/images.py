@@ -27,13 +27,15 @@ Extraction owner: Step 2 (leaf cluster: terminals + images).
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
 import structlog
 
 from ..models import WorkspaceInfo
 from ..runtime.base import ImageArtifactInfo, RuntimeBackend
+from .capture_fence import CaptureFence
 
 logger = structlog.get_logger(__name__)
 
@@ -74,6 +76,7 @@ class ImageManager:
         ]
         | None = None,
     ) -> None:
+        self.capture_fence: CaptureFence | None = None
         self._runtimes = runtimes if runtimes is not None else {}
         self._get_cached = get_cached
         self._get_runtime = get_runtime
@@ -146,6 +149,25 @@ class ImageManager:
 
         raise RuntimeError(f"Unsupported runtime_type for image build: {runtime_type}")
 
+    @asynccontextmanager
+    async def _capture_context(self, workspace_id: uuid.UUID) -> AsyncIterator[None]:
+        fence = self.capture_fence
+        if fence is None:
+            if self.lifecycle_context is None:
+                yield
+            else:
+                async with self.lifecycle_context(workspace_id):
+                    yield
+        else:
+            async with fence.capture(workspace_id):
+                if self.lifecycle_context is None:
+                    await fence.drain(workspace_id)
+                    yield
+                else:
+                    async with self.lifecycle_context(workspace_id):
+                        await fence.drain(workspace_id)
+                        yield
+
     async def create_image_artifact(
         self,
         workspace_id: uuid.UUID,
@@ -159,31 +181,32 @@ class ImageManager:
 
         The runtime must support artifact capture.
         """
-        if self._get_cached is None or self._get_runtime is None:
-            raise RuntimeError("ImageManager has no workspace lookup configured")
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not runtime.supports_image_artifacts:
-            raise RuntimeError(
-                f"Runtime '{info.runtime_type}' does not support image artifact capture"
+        async with self._capture_context(workspace_id):
+            if self._get_cached is None or self._get_runtime is None:
+                raise RuntimeError("ImageManager has no workspace lookup configured")
+            info = self._get_cached(workspace_id)
+            runtime = self._get_runtime(workspace_id)
+            if not runtime.supports_image_artifacts:
+                raise RuntimeError(
+                    f"Runtime '{info.runtime_type}' does not support image artifact capture"
+                )
+            proven_clean = False
+            if self.scrub_proof_hook is not None:
+                proven_clean = await self.scrub_proof_hook(workspace_id)
+            artifact = await runtime.create_image_artifact(
+                info.instance_id,
+                name,
+                artifact_id=artifact_id,
+                operation_id=operation_id,
+                credential_clean=proven_clean,
             )
-        proven_clean = False
-        if self.scrub_proof_hook is not None:
-            proven_clean = await self.scrub_proof_hook(workspace_id)
-        artifact = await runtime.create_image_artifact(
-            info.instance_id,
-            name,
-            artifact_id=artifact_id,
-            operation_id=operation_id,
-            credential_clean=proven_clean,
-        )
-        logger.info(
-            "image_artifact_created",
-            workspace_id=str(workspace_id),
-            image_artifact_id=artifact.artifact_id,
-            name=name,
-        )
-        return artifact
+            logger.info(
+                "image_artifact_created",
+                workspace_id=str(workspace_id),
+                image_artifact_id=artifact.artifact_id,
+                name=name,
+            )
+            return artifact
 
     async def list_image_artifacts(
         self,

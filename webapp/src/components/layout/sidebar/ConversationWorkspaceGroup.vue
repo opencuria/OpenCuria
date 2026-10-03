@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** One workspace's chat history with independent four-row pagination. */
 import { computed, watch } from 'vue'
+import { useWorkspaceStore } from '@/stores/workspaces'
 import { Loader2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
@@ -33,16 +34,27 @@ const visibleConversations = computed(() => props.group.conversations.slice(0, v
 const nextPageSize = computed(() =>
   Math.min(WORKSPACE_CONVERSATION_PAGE_SIZE, props.group.conversations.length - visibleCount.value),
 )
-const operating = computed(
-  () => props.group.workspace && isOperatingWorkspace(props.group.workspace),
+const workspaceStore = useWorkspaceStore()
+const actionsDisabled = computed(() =>
+  workspaceStore.isWorkspaceTransitioning(props.group.workspaceId),
+)
+const transitionLabel = computed(() =>
+  workspaceStore.getWorkspaceTransitionLabel(props.group.workspaceId),
+)
+const operating = computed(() =>
+  Boolean(
+    transitionLabel.value || (props.group.workspace && isOperatingWorkspace(props.group.workspace)),
+  ),
 )
 const busy = computed(
   () =>
     props.group.workspace?.has_active_session ||
     props.group.conversations.some((conversation) => conversation.status === 'busy'),
 )
-const statusLabel = computed(() =>
-  operating.value ? 'In progress' : props.group.online ? 'Online' : 'Offline',
+const statusLabel = computed(
+  () =>
+    transitionLabel.value ??
+    (operating.value ? 'In progress' : props.group.online ? 'Online' : 'Offline'),
 )
 
 // Also runs when history arrives after the route or a refresh changes its order.
@@ -86,8 +98,11 @@ watch(
         "
       />
       <span class="min-w-0 flex-1 truncate text-[13px] font-semibold">{{ props.group.name }}</span>
+      <span v-if="transitionLabel" class="text-xs text-muted-foreground">{{
+        transitionLabel
+      }}</span>
       <Loader2
-        v-if="busy"
+        v-if="busy || operating"
         data-testid="workspace-busy"
         class="size-3 shrink-0 animate-spin text-primary"
       />
@@ -98,6 +113,7 @@ watch(
         v-for="conversation in visibleConversations"
         :key="conversation.session_id"
         :conversation="conversation"
+        :actions-disabled="actionsDisabled"
         :active="props.activeSessionId === conversation.session_id"
         @select="emit('select', $event)"
         @rename="(row, title) => emit('rename', row, title)"

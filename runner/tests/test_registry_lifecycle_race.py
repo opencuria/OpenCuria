@@ -228,13 +228,28 @@ async def test_live_running_status_overrides_stale_stopped_cache(tmp_path):
 
 async def test_failed_live_observation_never_scrubs_or_stops(tmp_path):
     ws_id, runtime, service, interface = setup(tmp_path)
+    canonical = service._get_cached(ws_id)
     runtime.get_workspace_status = AsyncMock(side_effect=OSError("unreachable"))
     await interface._sio.handlers["/"]["task:stop_workspace"](command(ws_id, "failed"))
     event, result = interface._operations.journal.pending("failed")[0]
     assert event == "workspace:error"
-    assert result["outcome_known"] is True  # real handler caught a known failed stop
+    # Catching the failure proves execution finished, not credential cleanliness.
+    # Fresh incarnation evidence reports status but supplies no scrub checkpoint.
+    assert result["outcome_known"] is False
+    assert result["execution_finished"] is True
+    assert result["observed_status"] == "stopped"
+    assert "credentials_present" not in result
+    assert "intervention" in result["error"]
     assert not runtime.scrubs
     assert not runtime.entered.is_set()
+    assert service._get_cached(ws_id) is canonical
+    assert canonical.status == "stopped"
+    assert canonical.credentials_present is None
+    assert interface._operations.journal.proof(
+        str(ws_id), (await runtime.workspace_incarnation(str(ws_id)))[0]
+    ) is None
+    assert not service.registry._active
+    assert not interface._operations.running
     interface._operations.journal.close()
 
 

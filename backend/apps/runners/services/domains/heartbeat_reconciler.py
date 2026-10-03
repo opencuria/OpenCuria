@@ -271,6 +271,7 @@ class HeartbeatReconcilerMixin:
                 if (
                     credentials_resolved
                     and not ws.current_task_id
+                    and not ws.active_operation
                     and ws.status != WorkspaceStatus.FAILED
                     and ws.credentials_present != has_credentials
                 ):

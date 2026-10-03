@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -100,7 +100,7 @@ class WorkspaceRegistry:
     # -- cache ownership -------------------------------------------------
 
     @asynccontextmanager
-    async def lifecycle(self, workspace_id: uuid.UUID):
+    async def lifecycle(self, workspace_id: uuid.UUID) -> AsyncIterator[None]:
         """Serialize one resource, not heartbeats or unrelated workspaces.
 
         Epochs fence inventory which started before/during an awaited operation.
@@ -115,6 +115,22 @@ class WorkspaceRegistry:
             finally:
                 self._active.remove(workspace_id)
                 self._epochs[workspace_id] += 1
+
+    @asynccontextmanager
+    async def live_boundary(self, workspace_id: uuid.UUID) -> AsyncIterator[None]:
+        """Admit live work after pending lifecycle effects, rejecting stale waits.
+
+        Share the lifecycle mutex only for admission, not the runtime operation:
+        stop must remain able to close processes whose reads are in flight.
+        """
+        epoch = self._epochs.get(workspace_id, 0)
+        lock = self._lifecycle_locks.setdefault(workspace_id, asyncio.Lock())
+        async with lock:
+            if epoch != self._epochs.get(workspace_id, 0):
+                # Preserve the established missing-workspace error after remove.
+                self.get_cached(workspace_id)
+                raise RuntimeError("Workspace lifecycle changed while waiting")
+            yield
 
     async def sync_from_runtime(self) -> None:
         """Merge observations without detaching lifecycle-owned cache objects."""
