@@ -107,6 +107,8 @@ describe('AgentConfigTab', () => {
     providerCatalog.resetProviderCatalogCache()
     vi.spyOn(agentConfigs, 'loadAgentConfigsCached').mockResolvedValue(configs)
     vi.spyOn(providerCatalog, 'loadProviderModelsCached').mockResolvedValue(catalog)
+    vi.spyOn(harnessApi, 'getSubagentConfig').mockResolvedValue({ max_depth: 2 })
+    vi.spyOn(harnessApi, 'saveSubagentConfig').mockImplementation(async (payload) => payload)
     vi.spyOn(harnessApi, 'saveAgentConfigs').mockImplementation(async (payload) =>
       payload.map(
         (c, i) =>
@@ -141,6 +143,7 @@ describe('AgentConfigTab', () => {
     await flushPromises()
     const save = vi.mocked(harnessApi.saveAgentConfigs)
     expect(save).toHaveBeenCalled()
+    expect(harnessApi.saveSubagentConfig).not.toHaveBeenCalled()
     const payload = save.mock.calls[0]![0]
     const general = payload.find((c) => c.agent === 'general')!
     expect(general.model).toBe('')
@@ -169,5 +172,152 @@ describe('AgentConfigTab', () => {
     const wrapper = mountTab()
     await flushPromises()
     expect(wrapper.find('[data-testid="agent-s-config-panel"]').exists()).toBe(true)
+  })
+  it('loads default depth and explains the org-wide limit', async () => {
+    const wrapper = mountTab()
+    await flushPromises()
+    expect(
+      (wrapper.get('[data-testid="subagent-max-depth"]').element as HTMLInputElement).value,
+    ).toBe('2')
+    expect(wrapper.text()).toContain('Main agent is depth 0.')
+    expect(wrapper.get('#subagent-depth-scope').text()).toBe(
+      'Default: 2 · New runs · Organization-wide',
+    )
+    expect(wrapper.get('[data-testid="save-agent-configs"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('integrates depth as the first row of the shared subagent group', async () => {
+    const wrapper = mountTab()
+    await flushPromises()
+    const group = wrapper.get('[data-testid="subagent-settings-group"]')
+    expect(
+      Array.from(group.element.children).map((row) => row.getAttribute('data-testid')),
+    ).toEqual([
+      'subagent-depth-row',
+      'agent-row-general',
+      'agent-row-explore',
+      'agent-row-computeruse',
+    ])
+    const row = group.get('[data-testid="subagent-depth-row"]')
+    expect(row.get('label').attributes('for')).toBe('subagent-max-depth')
+    expect(row.get('input').attributes('aria-describedby')).toBe(
+      'subagent-depth-hint subagent-depth-scope',
+    )
+    await row.get('input').setValue('0')
+    expect(row.get('input').attributes('aria-describedby')).toBe(
+      'subagent-depth-hint subagent-depth-scope subagent-depth-error',
+    )
+  })
+
+  it('loads a stored override', async () => {
+    vi.mocked(harnessApi.getSubagentConfig).mockResolvedValue({ max_depth: 4 })
+    const wrapper = mountTab()
+    await flushPromises()
+    expect(
+      (wrapper.get('[data-testid="subagent-max-depth"]').element as HTMLInputElement).value,
+    ).toBe('4')
+  })
+
+  it('saves depth alone without primary models and reloads persisted depth', async () => {
+    vi.mocked(agentConfigs.loadAgentConfigsCached).mockResolvedValue([])
+    let persisted = { max_depth: 2 }
+    vi.mocked(harnessApi.getSubagentConfig).mockImplementation(async () => persisted)
+    vi.mocked(harnessApi.saveSubagentConfig).mockImplementation(async (payload) => {
+      persisted = payload
+      return persisted
+    })
+    const wrapper = mountTab()
+    await flushPromises()
+    await wrapper.get('[data-testid="subagent-max-depth"]').setValue('3')
+    expect(wrapper.get('[data-testid="agent-configs-status"]').text()).toBe('Unsaved changes')
+    expect(wrapper.get('[data-testid="save-agent-configs"]').attributes('disabled')).toBeUndefined()
+    await wrapper.get('[data-testid="save-agent-configs"]').trigger('click')
+    await flushPromises()
+    expect(harnessApi.saveSubagentConfig).toHaveBeenCalledWith({ max_depth: 3 })
+    expect(harnessApi.saveAgentConfigs).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="agent-configs-status"]').text()).toBe('All changes saved')
+    wrapper.unmount()
+    const reloaded = mountTab()
+    await flushPromises()
+    expect(
+      (reloaded.get('[data-testid="subagent-max-depth"]').element as HTMLInputElement).value,
+    ).toBe('3')
+  })
+
+  it.each(['0', '-1', '1.5', '', '2147483648'])(
+    'rejects invalid depth %j inline and remains dirty',
+    async (value) => {
+      const wrapper = mountTab()
+      await flushPromises()
+      await wrapper.get('[data-testid="subagent-max-depth"]').setValue(value)
+      expect(wrapper.get('[data-testid="subagent-depth-error"]').text()).toContain(
+        'Enter an integer',
+      )
+      expect(wrapper.get('[data-testid="agent-configs-status"]').text()).toBe('Unsaved changes')
+      expect(wrapper.get('[data-testid="save-agent-configs"]').attributes('disabled')).toBeDefined()
+      await wrapper.get('[data-testid="save-agent-configs"]').trigger('click')
+      expect(harnessApi.saveSubagentConfig).not.toHaveBeenCalled()
+      expect(harnessApi.saveAgentConfigs).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each([1, 2147483647])('accepts depth bound %s', async (value) => {
+    const wrapper = mountTab()
+    await flushPromises()
+    await wrapper.get('[data-testid="subagent-max-depth"]').setValue(String(value))
+    await wrapper.get('[data-testid="save-agent-configs"]').trigger('click')
+    await flushPromises()
+    expect(harnessApi.saveSubagentConfig).toHaveBeenCalledWith({ max_depth: value })
+  })
+
+  it('retains depth input and dirty state on save failure', async () => {
+    vi.mocked(harnessApi.saveSubagentConfig).mockRejectedValueOnce(new Error('depth failed'))
+    const wrapper = mountTab()
+    await flushPromises()
+    await wrapper.get('[data-testid="subagent-max-depth"]').setValue('5')
+    await wrapper.get('[data-testid="save-agent-configs"]').trigger('click')
+    await flushPromises()
+    expect(
+      (wrapper.get('[data-testid="subagent-max-depth"]').element as HTMLInputElement).value,
+    ).toBe('5')
+    expect(wrapper.get('[data-testid="agent-configs-status"]').text()).toBe('Unsaved changes')
+    expect(toast.error).toHaveBeenCalledWith('Failed to save agent settings', {
+      description: 'depth failed',
+      duration: 8000,
+    })
+  })
+
+  it.each(['models', 'depth'])(
+    'reflects partial success when %s save fails and retries only failure',
+    async (failed) => {
+      if (failed === 'models')
+        vi.mocked(harnessApi.saveAgentConfigs).mockRejectedValueOnce(new Error('failed'))
+      else vi.mocked(harnessApi.saveSubagentConfig).mockRejectedValueOnce(new Error('failed'))
+      const wrapper = mountTab()
+      await flushPromises()
+      await wrapper.get('[data-testid="subagent-max-depth"]').setValue('3')
+      await wrapper.get('[data-testid="agent-mode-inherit-computeruse"]').trigger('change')
+      await wrapper.get('[data-testid="save-agent-configs"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('[data-testid="agent-configs-status"]').text()).toBe('Unsaved changes')
+      expect(toast.error).toHaveBeenCalled()
+      await wrapper.get('[data-testid="save-agent-configs"]').trigger('click')
+      await flushPromises()
+      expect(harnessApi.saveAgentConfigs).toHaveBeenCalledTimes(failed === 'models' ? 2 : 1)
+      expect(harnessApi.saveSubagentConfig).toHaveBeenCalledTimes(failed === 'depth' ? 2 : 1)
+      expect(wrapper.get('[data-testid="agent-configs-status"]').text()).toBe('All changes saved')
+    },
+  )
+
+  it('still requires primary models when model settings change', async () => {
+    vi.mocked(agentConfigs.loadAgentConfigsCached).mockResolvedValue(
+      configs.map((c) => ({ ...c, model: '' })),
+    )
+    const wrapper = mountTab()
+    await flushPromises()
+    await wrapper.get('[data-testid="subagent-max-depth"]').setValue('3')
+    await wrapper.get('[data-testid="agent-mode-inherit-computeruse"]').trigger('change')
+    expect(wrapper.get('[data-testid="save-agent-configs"]').attributes('disabled')).toBeDefined()
+    expect(harnessApi.saveSubagentConfig).not.toHaveBeenCalled()
   })
 })

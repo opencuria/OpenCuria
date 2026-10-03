@@ -48,6 +48,7 @@ from .compaction import (
     is_overflow,
     select,
 )
+from .constants import DEFAULT_MAX_DEPTH
 from .images import build_tool_message_content, hydrate_workspace_images
 from .max_steps import MAX_STEPS_PROMPT, MAX_STEPS_TOOL_ERROR
 from .permissions.evaluator import (
@@ -73,11 +74,6 @@ from .providers.resolver import ResolvedModel, StaticModelResolver
 from .tools.base import ToolContext, ToolRegistry, ToolResult
 
 log = structlog.get_logger(__name__)
-
-#: Default subagent nesting limit (M5): depth 0 is the top-level turn,
-#: each ``task`` child runs at depth+1. ``task`` is withheld at
-#: ``depth >= max_depth``; ``todowrite`` is withheld from any child.
-DEFAULT_MAX_DEPTH = 1
 
 #: Max fingerprints kept for the doom-loop guard. The guard only reads
 #: the last 3 entries, so trimming is behavior-preserving.
@@ -866,7 +862,6 @@ class HarnessRunner:
             # calling tools, unless RunOptions or the agent sets one.
             max_steps = options.max_steps or agent.steps
         max_depth = options.max_depth if options.max_depth > 0 else DEFAULT_MAX_DEPTH
-        depth = max(0, options.depth)
         depth = max(0, options.depth)
         if depth > max_depth:
             raise ValueError(f"depth {depth} exceeds max_depth {max_depth}")

@@ -60,7 +60,7 @@ from .repositories import (
 )
 from .runner import HarnessRunner, RunOptions
 from .tools import default_tool_registry
-from .tools.subagents import TaskArgs
+from .tools.subagents import TaskArgs, validate_subagent_delegation
 from .tools.todos import TodoWriteTool, repository_for_session
 from .tools.truncate import truncate_tool_output
 
@@ -893,8 +893,12 @@ class HarnessService:
         user_id: int | None = None,
         skill_ids: list[str] | None = None,
         scheduled: bool = False,
+        max_depth: int | None = None,
     ) -> HarnessMessage:
         """Persist user+assistant messages and start the runner task.
+
+        Depth comes from persisted ancestry, including resumed children.
+        Child runs inherit the root run's maximum; root runs read org settings.
 
         Raises:
             ConflictError: When a run is already active for the session.
@@ -921,6 +925,14 @@ class HarnessService:
             )
             session.status = HarnessSessionStatus.IDLE
         org_id = organization_id or session.organization_id
+        from .services import SubagentConfigService
+
+        depth = await sync_to_async(self.sessions.get_depth)(session.id)
+        if max_depth is None:
+            config = await sync_to_async(SubagentConfigService().get_or_default)(org_id)
+            max_depth = config["max_depth"]
+        if depth > max_depth:
+            raise ValueError(f"depth {depth} exceeds max_depth {max_depth}")
         if skill_ids is not None and user_id is not None:
             session = await sync_to_async(self.update_skill_ids)(
                 session.id,
@@ -1011,6 +1023,8 @@ class HarnessService:
                     assistant=assistant,
                     provider=provider,
                     organization_id=org_id,
+                    depth=depth,
+                    max_depth=max_depth,
                 )
             )
             self._tasks[key] = task
@@ -1514,6 +1528,8 @@ class HarnessService:
         assistant: HarnessMessage,
         provider: ProviderAdapter | None,
         organization_id: uuid.UUID,
+        depth: int,
+        max_depth: int,
     ) -> None:
         """Run the loop, persist events, and finalize the assistant message."""
         from .providers.resolver import StaticModelResolver
@@ -1658,6 +1674,8 @@ class HarnessService:
                     chat_options=ChatOptions(reasoning_effort=effort),
                 )
             opts = RunOptions(
+                depth=depth,
+                max_depth=max_depth,
                 history=history,
                 session_id=key,
                 workspace_id=str(session.workspace_id),
@@ -3146,6 +3164,12 @@ class HarnessService:
         from .tools.base import ToolError, ToolResult
         from .tools.subagents import TASK_OUTPUT_MAX_CHARS, render_task_output
 
+        if ctx.depth >= ctx.max_depth:
+            raise ToolError(
+                f"Subagent depth limit reached (depth={ctx.depth}, "
+                f"max_depth={ctx.max_depth}); nested task calls are not allowed.",
+                tool="task",
+            )
         agent = (args.agent or args.subagent_type or "general").strip().lower()
         configs = dict(agent_configs or {}) or self._agent_configs_map(organization_id)
         # Deprecated compat: explicit legacy kwargs act as fixed config
@@ -3210,6 +3234,7 @@ class HarnessService:
             agent = (
                 child.agent_name or agent or "general"
             ).strip().lower() or "general"
+        validate_subagent_delegation(parent.agent_name, agent)
         if inherit:
             if strategy in ("lowest", "medium", "highest"):
                 catalog_efforts = self._catalog_efforts_for_model(
@@ -3270,6 +3295,7 @@ class HarnessService:
                 args.prompt,
                 organization_id=organization_id,
                 workspace_id=str(parent.workspace_id),
+                max_depth=ctx.max_depth,
             )
             child_task = self._tasks.get(str(child.id))
             if child_task is not None:

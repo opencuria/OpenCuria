@@ -21,6 +21,7 @@ import uuid
 from django.db import models
 from django.utils import timezone
 
+from .constants import DEFAULT_MAX_DEPTH
 from .enums import ProviderType
 from .permissions.models import PermissionAllowlist, PermissionRequest
 
@@ -37,6 +38,7 @@ __all__ = [
     "ProviderType",
     "QuestionRequest",
     "RecentModel",
+    "SubagentConfig",
     "Todo",
 ]
 
@@ -277,6 +279,34 @@ class AgentSConfig(models.Model):
     def __str__(self) -> str:
         """Return a short representation of the config."""
         return f"AgentSConfig(org={self.organization_id})"
+
+
+class SubagentConfig(models.Model):
+    """Org-wide maximum subagent nesting depth (no secrets)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.OneToOneField(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="harness_subagent_config",
+    )
+    max_depth = models.PositiveIntegerField(default=DEFAULT_MAX_DEPTH)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "harness_subagent_config"
+        ordering = ["-updated_at"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(max_depth__gte=1),
+                name="harness_subagent_config_depth_gte_1",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        """Return a short representation of the config."""
+        return f"SubagentConfig(org={self.organization_id})"
 
 
 class HarnessSession(models.Model):

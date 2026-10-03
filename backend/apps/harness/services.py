@@ -13,11 +13,13 @@ from typing import Any
 
 import structlog
 
+from apps.organizations.repositories import OrganizationRepository
 from common.exceptions import ConflictError, NotFoundError
 from common.utils import decrypt_value, encrypt_value
 
 from .agent_s.config import AgentSRunConfig
 from .agents.definitions import AGENT_DEFINITIONS
+from .constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
 from .models import AgentSConfig, ProviderConfig, ProviderConnection
 from .providers.base import ProviderAdapter
 from .providers.bedrock import BedrockAdapter
@@ -38,6 +40,7 @@ from .repositories import (
     AgentSConfigRepository,
     ProviderConfigRepository,
     ProviderConnectionRepository,
+    SubagentConfigRepository,
 )
 
 log = structlog.get_logger(__name__)
@@ -158,6 +161,31 @@ class AgentConfigService:
             )
             log.info("agent_config_saved", organization_id=str(org_id), agent=agent)
         return self.list_configs(org_id)
+
+
+class SubagentConfigService:
+    """Read and persist org-wide maximum subagent nesting depth."""
+
+    def __init__(
+        self, repository: type[SubagentConfigRepository] | None = None
+    ) -> None:
+        self.repository = repository or SubagentConfigRepository
+
+    def get_or_default(self, org_id: uuid.UUID) -> dict[str, int]:
+        """Return the configured depth or defaults without creating a row."""
+        row = self.repository.get_by_org(org_id)
+        return {"max_depth": row.max_depth if row else DEFAULT_MAX_DEPTH}
+
+    def save_config(self, org_id: uuid.UUID, max_depth: int) -> dict[str, int]:
+        """Validate and upsert depth for an existing organization."""
+        if type(max_depth) is not int or not 1 <= max_depth <= MAX_SUBAGENT_DEPTH:
+            raise ValueError(
+                f"max_depth must be an integer in 1..{MAX_SUBAGENT_DEPTH}"
+            )
+        if OrganizationRepository.get_by_id(org_id) is None:
+            raise NotFoundError("Organization", str(org_id))
+        row = self.repository.upsert(org_id, max_depth)
+        return {"max_depth": row.max_depth}
 
 
 class AgentSConfigService:

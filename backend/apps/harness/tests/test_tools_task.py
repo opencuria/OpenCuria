@@ -212,15 +212,17 @@ async def test_task_in_task_blocked_by_runner_loop(fake_accessor) -> None:
     assert errors and "depth limit" in errors[0]["error"]
 
 
-async def test_task_withholds_task_and_todowrite_from_child(fake_accessor) -> None:
-    """Child runs never offer task or todowrite to the provider."""
+async def test_task_allows_nested_task_but_withholds_todowrite_from_child(
+    fake_accessor,
+) -> None:
+    """A child below the default depth limit offers task but not todowrite."""
     events: list[dict[str, Any]] = []
     ctx, provider = _task_ctx(fake_accessor, events, [_text_step("researched")])
     await TaskTool().execute(
         {"description": "d", "prompt": "p", "subagent_type": "explore"}, ctx
     )
     offered = provider.calls[0]["tools"]
-    assert "task" not in offered
+    assert "task" in offered
     assert "todowrite" not in offered
 
 

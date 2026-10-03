@@ -20,6 +20,7 @@ import structlog
 from pydantic import BaseModel
 
 from ..access.base import WorkspaceAccessor
+from ..constants import DEFAULT_MAX_DEPTH
 from ..providers.base import ToolSchema
 from .truncate import truncate_tool_output
 
@@ -59,7 +60,7 @@ class ToolContext:
     agent_name: str = ""
     directory: str = "/workspace"
     depth: int = 0
-    max_depth: int = 1
+    max_depth: int = DEFAULT_MAX_DEPTH
     model: str = ""
     parent_emit: Callable[[dict[str, Any]], Awaitable[None]] | None = None
     provider: Any | None = None

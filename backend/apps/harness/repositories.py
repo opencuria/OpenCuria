@@ -27,6 +27,7 @@ from .models import (
     QuestionRequest,
     QuestionRequestStatus,
     RecentModel,
+    SubagentConfig,
     Todo,
 )
 from .timeline import append_part_display, build_part_display
@@ -180,6 +181,23 @@ class AgentSConfigRepository:
             update_fields.append(name)
         config.save(update_fields=update_fields)
         return config
+
+
+class SubagentConfigRepository:
+    """Data access for org-wide subagent depth configuration."""
+
+    @staticmethod
+    def get_by_org(org_id: uuid.UUID) -> SubagentConfig | None:
+        """Fetch the subagent config for an organization."""
+        return SubagentConfig.objects.filter(organization_id=org_id).first()
+
+    @staticmethod
+    def upsert(org_id: uuid.UUID, max_depth: int) -> SubagentConfig:
+        """Create or update the organization's subagent depth."""
+        row, _ = SubagentConfig.objects.update_or_create(
+            organization_id=org_id, defaults={"max_depth": max_depth}
+        )
+        return row
 
 
 class ProviderConnectionRepository:
@@ -431,6 +449,28 @@ class HarnessSessionRepository:
     def get_by_id(session_id: uuid.UUID) -> HarnessSession | None:
         """Fetch a session by ID."""
         return HarnessSession.objects.filter(id=session_id).first()
+
+    @staticmethod
+    def get_depth(session_id: uuid.UUID) -> int:
+        """Count persisted ancestors; reject broken or cross-scope ancestry."""
+        session = HarnessSession.objects.get(id=session_id)
+        depth = 0
+        seen = {session.id}
+        parent_id = session.parent_id
+        while parent_id is not None:
+            if parent_id in seen:
+                raise ValueError("Cyclic subagent session ancestry")
+            seen.add(parent_id)
+            parent = HarnessSession.objects.filter(
+                id=parent_id,
+                organization_id=session.organization_id,
+                workspace_id=session.workspace_id,
+            ).only("parent_id").first()
+            if parent is None:
+                raise ValueError("Invalid subagent session ancestry")
+            depth += 1
+            parent_id = parent.parent_id
+        return depth
 
     @staticmethod
     def get_for_workspace(

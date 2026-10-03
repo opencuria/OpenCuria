@@ -31,6 +31,7 @@ from typing import Any
 
 from django.http import HttpRequest
 from ninja import Router, Schema
+from pydantic import Field
 
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
@@ -39,6 +40,7 @@ from apps.harness.providers.openrouter import DEFAULT_BASE_URL
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
+from .constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
 from .timeline import project_question_definitions, timeline_part_payload
 
 harness_router = Router(tags=["harness"])
@@ -342,6 +344,20 @@ class RecentModelSaveIn(Schema):
 
     model: str
     effort: str = ""
+
+
+class SubagentConfigIn(Schema):
+    """Request schema for org-wide subagent depth."""
+
+    max_depth: int = Field(
+        default=DEFAULT_MAX_DEPTH, strict=True, ge=1, le=MAX_SUBAGENT_DEPTH
+    )
+
+
+class SubagentConfigOut(Schema):
+    """Response schema for org-wide subagent depth."""
+
+    max_depth: int = DEFAULT_MAX_DEPTH
 
 
 class AgentSConfigIn(Schema):
@@ -1797,6 +1813,64 @@ def save_org_agent_configs(request: HttpRequest, payload: AgentConfigSaveIn):
             [item.model_dump() for item in payload.configs],
         )
         return 200, [_agent_config_to_out(row) for row in rows]
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+def _fetch_org_subagent_config(org_id: uuid.UUID) -> SubagentConfigOut:
+    """Return the organization's subagent config view."""
+    from apps.harness.services import SubagentConfigService
+
+    return SubagentConfigOut(**SubagentConfigService().get_or_default(org_id))
+
+
+def _save_org_subagent_config(
+    org_id: uuid.UUID, payload: SubagentConfigIn
+) -> SubagentConfigOut:
+    """Persist the organization's validated subagent config."""
+    from apps.harness.services import SubagentConfigService
+
+    return SubagentConfigOut(
+        **SubagentConfigService().save_config(org_id, payload.max_depth)
+    )
+
+
+@harness_router.get(
+    "/subagent-config/",
+    response={200: SubagentConfigOut, 401: dict, 403: dict, 404: dict},
+    summary="Get the org-wide subagent depth config",
+)
+def get_org_subagent_config(request: HttpRequest):
+    """Return the org subagent config (defaults when unstored)."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
+        return _perm_denied(APIKeyPermission.HARNESS_READ)
+    try:
+        org_id = _get_org_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        return 200, _fetch_org_subagent_config(org_id)
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+
+
+@harness_router.put(
+    "/subagent-config/",
+    response={200: SubagentConfigOut, 400: dict, 401: dict, 403: dict, 404: dict},
+    summary="Save (upsert) the org-wide subagent depth config",
+)
+def save_org_subagent_config(request: HttpRequest, payload: SubagentConfigIn):
+    """Validate and upsert the org subagent config."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+    try:
+        org_id = _get_org_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        return 200, _save_org_subagent_config(org_id, payload)
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:

@@ -49,6 +49,8 @@ Tools and their required permissions
 - list_provider_connections → harness:providers
 - save_provider_connection → harness:providers
 - delete_provider_connection → harness:providers
+- get_subagent_config → harness:read
+- save_subagent_config → harness:run
 - get_agent_s_config → harness:read
 - save_agent_s_config → harness:run
 - chatgpt_oauth_start → harness:providers
@@ -113,6 +115,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount
 
 from apps.accounts.models import APIKeyPermission
+from apps.harness.constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
 
 logger = logging.getLogger(__name__)
 
@@ -539,6 +542,26 @@ _TOOLS: list[Tool] = [
                 }
             },
             "required": ["provider"],
+        },
+    ),
+    Tool(
+        name="get_subagent_config",
+        description="Get org-wide subagent depth (defaults when unstored).",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="save_subagent_config",
+        description="Save (upsert) the org-wide maximum subagent depth.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "max_depth": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_SUBAGENT_DEPTH,
+                    "default": DEFAULT_MAX_DEPTH,
+                },
+            },
         },
     ),
     Tool(
@@ -1301,6 +1324,8 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "list_provider_connections": APIKeyPermission.HARNESS_PROVIDERS,
     "save_provider_connection": APIKeyPermission.HARNESS_PROVIDERS,
     "delete_provider_connection": APIKeyPermission.HARNESS_PROVIDERS,
+    "get_subagent_config": APIKeyPermission.HARNESS_READ,
+    "save_subagent_config": APIKeyPermission.HARNESS_RUN,
     "get_agent_s_config": APIKeyPermission.HARNESS_READ,
     "save_agent_s_config": APIKeyPermission.HARNESS_RUN,
     "chatgpt_oauth_start": APIKeyPermission.HARNESS_PROVIDERS,
@@ -2964,6 +2989,28 @@ def _call_save_provider_connection(api_key, org_id, args: dict) -> list[TextCont
         return _error(str(exc))
 
     return _text(connection.model_dump(mode="json"))
+
+
+def _call_get_subagent_config(api_key, org_id, args: dict) -> list[TextContent]:
+    """Return subagent config after checking organization membership."""
+    from apps.harness.api import _fetch_org_subagent_config
+    from apps.organizations.services import OrganizationService
+
+    OrganizationService().require_membership(api_key.user, org_id)
+    return _text(_fetch_org_subagent_config(org_id).model_dump(mode="json"))
+
+
+def _call_save_subagent_config(api_key, org_id, args: dict) -> list[TextContent]:
+    """Validate and save subagent config with REST-equivalent semantics."""
+    from apps.harness.api import SubagentConfigIn, _save_org_subagent_config
+    from apps.organizations.services import OrganizationService
+
+    OrganizationService().require_membership(api_key.user, org_id)
+    try:
+        payload = SubagentConfigIn(**args)
+        return _text(_save_org_subagent_config(org_id, payload).model_dump(mode="json"))
+    except (ValueError, KeyError, TypeError) as exc:
+        return _error(str(exc))
 
 
 def _call_get_agent_s_config(api_key, org_id, args: dict) -> list[TextContent]:
@@ -4863,6 +4910,8 @@ _TOOL_HANDLERS = {
     "list_provider_connections": _call_list_provider_connections,
     "save_provider_connection": _call_save_provider_connection,
     "delete_provider_connection": _call_delete_provider_connection,
+    "get_subagent_config": _call_get_subagent_config,
+    "save_subagent_config": _call_save_subagent_config,
     "get_agent_s_config": _call_get_agent_s_config,
     "save_agent_s_config": _call_save_agent_s_config,
     "chatgpt_oauth_start": _call_chatgpt_oauth_start,

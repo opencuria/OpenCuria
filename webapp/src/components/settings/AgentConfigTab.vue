@@ -10,6 +10,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import AgentSConfigPanel from './AgentSConfigPanel.vue'
@@ -29,7 +30,12 @@ import {
 import { invalidateAgentConfigs, loadAgentConfigsCached } from '@/lib/agentConfigs'
 import { formatEffort, resolveCatalogModel, type ProviderModel } from '@/lib/harnessModels'
 import { loadProviderModelsCached } from '@/lib/providerCatalog'
-import { saveAgentConfigs, type AgentConfigIn } from '@/services/harness.api'
+import {
+  getSubagentConfig,
+  saveSubagentConfig,
+  saveAgentConfigs,
+  type AgentConfigIn,
+} from '@/services/harness.api'
 import { useNotificationStore } from '@/stores/notifications'
 
 const notifications = useNotificationStore()
@@ -39,6 +45,20 @@ const saving = ref(false)
 const error = ref<string | null>(null)
 const catalog = ref<ProviderModel[]>([])
 const loaded = ref<AgentConfig[]>([])
+const loadedMaxDepth = ref(2)
+const maxDepth = ref<string | number>('2')
+
+const parsedMaxDepth = computed(() => {
+  const raw = String(maxDepth.value).trim()
+  const value = Number(raw)
+  return /^\d+$/.test(raw) && Number.isSafeInteger(value) && value >= 1 && value <= 2147483647
+    ? value
+    : null
+})
+const depthError = computed(() =>
+  parsedMaxDepth.value === null ? 'Enter an integer 1–2147483647.' : '',
+)
+const depthDirty = computed(() => parsedMaxDepth.value !== loadedMaxDepth.value)
 
 interface AgentState {
   model: string
@@ -84,12 +104,15 @@ async function loadState(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    const [configs, models] = await Promise.all([
+    const [configs, subagentConfig, models] = await Promise.all([
       loadAgentConfigsCached(),
+      getSubagentConfig(),
       loadProviderModelsCached().catch(() => [] as ProviderModel[]),
     ])
     catalog.value = models
     applyConfigs(configs)
+    loadedMaxDepth.value = subagentConfig.max_depth
+    maxDepth.value = String(subagentConfig.max_depth)
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : 'Failed to load agent settings'
   } finally {
@@ -111,7 +134,7 @@ function strategyHint(agent: AgentConfigId): string {
   return preview ? `${label} → ${formatEffort(preview)}` : `${label} effort of the parent model`
 }
 
-const dirty = computed(() => {
+const modelsDirty = computed(() => {
   const byAgent = new Map(loaded.value.map((c) => [c.agent, c]))
   for (const agent of CONFIGURABLE_AGENTS) {
     const s = agentState(agent)
@@ -124,17 +147,25 @@ const dirty = computed(() => {
     if (model !== (c?.model ?? '')) return true
     if (effort !== (c?.effort ?? '')) return true
     if (inherit !== (c?.inherit_model ?? false)) return true
-    if (strategy !== (c?.effort_strategy ?? '')) return true
+    if (strategy !== (c?.effort_strategy ?? 'fixed')) return true
   }
   return false
 })
+
+const dirty = computed(() => modelsDirty.value || depthDirty.value)
 
 const primaryMissing = computed(() =>
   (PRIMARY_AGENTS as string[]).some((a) => !agentState(a as AgentConfigId).model.trim()),
 )
 
 async function handleSave(): Promise<void> {
-  if (saving.value || !dirty.value || primaryMissing.value) return
+  if (
+    saving.value ||
+    !dirty.value ||
+    depthError.value ||
+    (modelsDirty.value && primaryMissing.value)
+  )
+    return
   saving.value = true
   try {
     const payload: AgentConfigIn[] = CONFIGURABLE_AGENTS.map((agent) => {
@@ -160,12 +191,35 @@ async function handleSave(): Promise<void> {
         effort_strategy: 'fixed',
       }
     })
-    const saved = await saveAgentConfigs(payload)
-    applyConfigs(saved)
-    invalidateAgentConfigs()
-    notifications.success('Agent models saved')
+    const saves: Promise<void>[] = []
+    const savingModels = modelsDirty.value
+    const savingDepth = depthDirty.value
+    if (savingModels) {
+      saves.push(
+        saveAgentConfigs(payload).then((saved) => {
+          applyConfigs(saved)
+          invalidateAgentConfigs()
+        }),
+      )
+    }
+    if (savingDepth) {
+      saves.push(
+        saveSubagentConfig({ max_depth: parsedMaxDepth.value! }).then((saved) => {
+          loadedMaxDepth.value = saved.max_depth
+          maxDepth.value = String(saved.max_depth)
+        }),
+      )
+    }
+    // Wait for both outcomes so successful parts become the new baseline even on partial failure.
+    const results = await Promise.allSettled(saves)
+    const failed = results.find((result) => result.status === 'rejected')
+    if (failed?.status === 'rejected') throw failed.reason
+    notifications.success(savingDepth ? 'Agent settings saved' : 'Agent models saved')
   } catch (e: unknown) {
-    notifications.error('Failed to save agent models', e instanceof Error ? e.message : undefined)
+    notifications.error(
+      depthDirty.value ? 'Failed to save agent settings' : 'Failed to save agent models',
+      e instanceof Error ? e.message : undefined,
+    )
   } finally {
     saving.value = false
   }
@@ -226,7 +280,52 @@ onMounted(() => {
         title="Subagents"
         description="Helper agents spawned during a run. Inherit the parent run model or pick a custom model."
       >
-        <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
+        <div
+          class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
+          data-testid="subagent-settings-group"
+        >
+          <div
+            class="flex flex-col gap-2 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
+            data-testid="subagent-depth-row"
+          >
+            <div class="min-w-0 space-y-1">
+              <Label for="subagent-max-depth" class="block text-sm font-medium">
+                Maximum nesting depth
+              </Label>
+              <p id="subagent-depth-hint" class="text-sm text-muted-foreground">
+                Limits nested delegation. Main agent is depth 0.
+              </p>
+            </div>
+            <div class="w-full shrink-0 space-y-1 sm:w-80">
+              <Input
+                id="subagent-max-depth"
+                v-model="maxDepth"
+                type="number"
+                min="1"
+                max="2147483647"
+                step="1"
+                data-testid="subagent-max-depth"
+                :disabled="saving"
+                :aria-invalid="!!depthError"
+                :aria-describedby="
+                  depthError
+                    ? 'subagent-depth-hint subagent-depth-scope subagent-depth-error'
+                    : 'subagent-depth-hint subagent-depth-scope'
+                "
+              />
+              <p id="subagent-depth-scope" class="text-xs text-muted-foreground">
+                Default: 2 · New runs · Organization-wide
+              </p>
+              <p
+                v-if="depthError"
+                id="subagent-depth-error"
+                class="text-xs text-destructive"
+                data-testid="subagent-depth-error"
+              >
+                {{ depthError }}
+              </p>
+            </div>
+          </div>
           <div
             v-for="agent in SUBAGENT_IDS"
             :key="agent"
@@ -320,7 +419,7 @@ onMounted(() => {
         </p>
         <Button
           size="sm"
-          :disabled="saving || !dirty || primaryMissing"
+          :disabled="saving || !dirty || !!depthError || (modelsDirty && primaryMissing)"
           data-testid="save-agent-configs"
           @click="handleSave"
         >

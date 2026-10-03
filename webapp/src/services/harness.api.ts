@@ -346,6 +346,24 @@ export function listProviderConnections(): Promise<ProviderConnection[]> {
   return get<ProviderConnection[]>('/provider-config/providers/')
 }
 
+/** Org-wide nesting limit, applied to new runs (default 2). */
+export interface SubagentConfig {
+  max_depth: number
+}
+
+/** Strict integer from 1 through 2147483647. */
+export interface SubagentConfigIn {
+  max_depth: number
+}
+
+export function getSubagentConfig(): Promise<SubagentConfig> {
+  return get<SubagentConfig>('/subagent-config/')
+}
+
+export function saveSubagentConfig(data: SubagentConfigIn): Promise<SubagentConfig> {
+  return put<SubagentConfig>('/subagent-config/', data)
+}
+
 /**
  * Load the org-wide Agent-S harness config (defaults when unstored).
  * Mirrors `GET /agent-s-config/`.

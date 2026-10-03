@@ -268,6 +268,20 @@ runner on the same machine, use the same QEMU runner flow above, but point
 `RUNNER_BACKEND_URL` at your local backend and run the runner in the foreground
 with `python -m src` while iterating.
 
+## Subagent nesting
+
+**Settings → Agents → Subagents → Maximum nesting depth** sets the organization-wide
+limit for new runs (default: **2**, minimum: **1**). The main agent is depth 0;
+depth 2 allows a subagent to delegate to another subagent, but blocks a third
+subagent level. This limits nesting, not the number of parallel tasks. Children
+inherit their root run's limit, and resumed tasks retain their persisted depth.
+Changes do not alter an active run's limit.
+
+REST: `GET/PUT /api/v1/subagent-config/` with `{"max_depth": 2}`.
+Matching MCP tools: `get_subagent_config` and `save_subagent_config`.
+Reading requires `harness:read`; saving requires `harness:run` and organization
+membership. Run backend migrations before using this setting.
+
 ## MCP OAuth integrations
 
 OAuth-capable HTTP MCP plugins (including the seeded Notion plugin) can connect named personal or organization accounts from **Settings → Credentials**. Configure the fixed HTTPS callback and frontend return URLs on the backend before enabling this in production. See [MCP OAuth setup and operations](./docs/mcp-oauth.md) for required environment configuration, workspace attachment, security notes, and provider requirements.

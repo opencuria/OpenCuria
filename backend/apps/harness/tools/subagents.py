@@ -46,6 +46,15 @@ class TaskArgs(BaseModel):
     )
 
 
+def validate_subagent_delegation(parent_agent: str, child_agent: str) -> None:
+    """Keep a read-only researcher from delegating to a writable agent."""
+    if parent_agent == "explore" and child_agent != "explore":
+        raise ToolError(
+            "Read-only explore agents can only delegate to explore subagents.",
+            tool="task",
+        )
+
+
 def render_task_output(task_id: str, text: str, *, state: str = "completed") -> str:
     """Wrap child text in an OpenCode-style ``<task>`` envelope.
 
@@ -116,6 +125,9 @@ class TaskTool(Tool):
                 f"expected one of {', '.join(ALLOWED_SUBAGENT_TYPES)}.",
                 tool=self.name,
             )
+        # Persistent resume resolves the stored child agent in the service.
+        if ctx.run_subagent is None:
+            validate_subagent_delegation(ctx.agent_name, agent)
         if ctx.depth >= ctx.max_depth:
             raise ToolError(
                 f"Subagent depth limit reached (depth={ctx.depth}, "
@@ -286,10 +298,10 @@ def _child_registry(registry: Any, agent_name: str = "") -> Any:
 
     Depth enforcement is belt-and-braces: the runner also withholds
     ``task`` at the depth limit and ``TaskTool`` rejects direct calls.
-    Filtering here keeps nested ``task`` and ``todowrite`` out of the
-    child tool schemas entirely (OpenCode parity: subagents get no
-    todowrite). ``computeruse`` (Agent-S) children receive an empty
-    registry: Agent-S plans never see OpenCuria tool schemas.
+    Filtering here removes ``todowrite``; ``task`` stays available below
+    the depth limit enforced by the runner. ``computeruse`` (Agent-S)
+    children receive an empty registry: Agent-S plans never see OpenCuria
+    tool schemas.
     """
     from . import agent_s_tool_registry
     from .base import ToolRegistry
@@ -306,7 +318,7 @@ def _child_registry(registry: Any, agent_name: str = "") -> Any:
     child = ToolRegistry()
     for tool in registry.list():
         key = (tool.name or "").strip().lower()
-        if key in ("task", "todowrite"):
+        if key == "todowrite":
             continue
         child.register(tool)
     for hook in getattr(registry, "before_hooks", []):

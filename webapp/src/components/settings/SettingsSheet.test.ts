@@ -14,6 +14,7 @@ vi.mock('@/services/harness.api', async () => {
   return {
     ...actual,
     getProviderConfig: vi.fn(),
+    getSubagentConfig: vi.fn(async () => ({ max_depth: 2 })),
     saveProviderConfig: vi.fn(),
     deleteProviderConfig: vi.fn(),
     listProviderConnections: vi.fn(),
