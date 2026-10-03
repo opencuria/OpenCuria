@@ -73,7 +73,10 @@ def _mock_client(
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-async def test_chat_stream_happy_path_text_toolcall_reasoning_usage() -> None:
+@pytest.mark.parametrize("event_type", ["response.completed", "response.done"])
+async def test_chat_stream_happy_path_text_toolcall_reasoning_usage(
+    event_type: str,
+) -> None:
     """Text, reasoning, tool call, and usage deltas stream correctly."""
     payload = _responses_sse(
         [
@@ -89,7 +92,7 @@ async def test_chat_stream_happy_path_text_toolcall_reasoning_usage() -> None:
                 },
             },
             {
-                "type": "response.completed",
+                "type": event_type,
                 "response": {
                     "status": "completed",
                     "usage": {
@@ -117,6 +120,7 @@ async def test_chat_stream_happy_path_text_toolcall_reasoning_usage() -> None:
     assert tool_calls[0]["id"] == "call_1"
     assert tool_calls[0]["name"] == "read"
     usages = [d.usage for d in deltas if d.usage is not None]
+    assert len(usages) == 1
     assert usages[-1].prompt_tokens == 10
     assert usages[-1].completion_tokens == 5
     # input_tokens is the inclusive total: cached_tokens (2) is a subset.
@@ -574,12 +578,15 @@ async def test_context_length_exceeded_stream_error_code_message_format() -> Non
     assert is_context_overflow_error(error)
 
 
-async def test_incomplete_max_output_tokens_maps_to_length_and_total() -> None:
+@pytest.mark.parametrize("event_type", ["response.incomplete", "response.done"])
+async def test_incomplete_max_output_tokens_maps_to_length_and_total(
+    event_type: str,
+) -> None:
     """incomplete_details.reason drives finish; provider total is honored."""
     payload = _responses_sse(
         [
             {
-                "type": "response.incomplete",
+                "type": event_type,
                 "response": {
                     "status": "incomplete",
                     "incomplete_details": {"reason": "max_output_tokens"},
@@ -607,12 +614,15 @@ async def test_incomplete_max_output_tokens_maps_to_length_and_total() -> None:
     assert deltas[-1].usage.total_tokens == 15
 
 
-async def test_incomplete_content_filter_maps_to_content_filter() -> None:
+@pytest.mark.parametrize("event_type", ["response.incomplete", "response.done"])
+async def test_incomplete_content_filter_maps_to_content_filter(
+    event_type: str,
+) -> None:
     """incomplete_details content_filter aborts with content_filter reason."""
     payload = _responses_sse(
         [
             {
-                "type": "response.incomplete",
+                "type": event_type,
                 "response": {
                     "status": "incomplete",
                     "incomplete_details": {"reason": "content_filter"},
@@ -635,17 +645,51 @@ async def test_incomplete_content_filter_maps_to_content_filter() -> None:
     assert deltas[-1].usage.total_tokens == 4
 
 
-async def test_failed_status_in_completed_event_raises_response_error() -> None:
-    """A completed-carried status 'failed' surfaces ProviderResponseError."""
+@pytest.mark.parametrize("event_type", ["response.completed", "response.done"])
+async def test_failed_status_in_terminal_event_raises_response_error(
+    event_type: str,
+) -> None:
+    """A terminal-carried status 'failed' surfaces ProviderResponseError."""
     payload = _responses_sse(
         [
             {
-                "type": "response.completed",
-                "response": {"status": "failed", "error": {"message": "boom"}}},
+                "type": event_type,
+                "response": {"status": "failed", "error": {"message": "boom"}},
+            },
         ]
     )
     adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
     with pytest.raises(ProviderResponseError, match="boom"):
+        async for _ in adapter.chat_stream("gpt-5.4", [], []):
+            pass
+
+
+@pytest.mark.parametrize("response", [None, {}, {"usage": None}])
+async def test_done_without_usage_still_finishes(response: Any) -> None:
+    """Missing usage does not prevent a terminal event from finishing the step."""
+    payload = _responses_sse([{"type": "response.done", "response": response}])
+    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    deltas = [d async for d in adapter.chat_stream("gpt-5.4", [], [])]
+    assert len(deltas) == 1
+    assert deltas[0].finish_reason == "stop"
+    assert deltas[0].usage is None
+
+
+async def test_done_with_failed_authorization_raises_auth_error() -> None:
+    """Done events keep the same plan-authorization handling as failed events."""
+    payload = _responses_sse(
+        [
+            {
+                "type": "response.done",
+                "response": {
+                    "status": "failed",
+                    "error": {"code": "usage_not_included"},
+                },
+            }
+        ]
+    )
+    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    with pytest.raises(ProviderAuthError, match=USAGE_NOT_INCLUDED_MESSAGE):
         async for _ in adapter.chat_stream("gpt-5.4", [], []):
             pass
 
