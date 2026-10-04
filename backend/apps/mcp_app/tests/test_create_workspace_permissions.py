@@ -37,7 +37,12 @@ def test_create_workspace_empty_plugin_ids_does_not_require_plugins_write(
         async def create_workspace(self, **kwargs):
             assert kwargs["plugin_ids"] == []
             return (
-                SimpleNamespace(id="workspace-id", status="creating"),
+                SimpleNamespace(
+                    id="workspace-id",
+                    status="creating",
+                    intervention_required=False,
+                    lifecycle_diagnostic="",
+                ),
                 SimpleNamespace(id="task-id"),
             )
 

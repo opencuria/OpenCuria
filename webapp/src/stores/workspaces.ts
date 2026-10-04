@@ -36,11 +36,25 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
   const loading = ref(false)
   const error = ref<string | null>(null)
   const imageArtifacts = ref<ImageArtifact[]>([])
+  const pendingCaptures = ref<
+    Record<string, { requesting: boolean; observed: boolean; completed: boolean }>
+  >({})
   const pendingWorkspaceOperations = ref<Record<string, PendingWorkspaceOperation>>({})
 
   // Keep duplicate loads single-flight while isolating organization contexts.
   const workspaceListFlights = new Map<string, Promise<Workspace[]>>()
   const workspaceDetailFlights = new Map<string, Promise<WorkspaceDetail>>()
+  // Local WS revisions prevent in-flight REST snapshots from rolling back operations.
+  let operationRevision = 0
+  const operationEvents = new Map<
+    string,
+    {
+      revision: number
+      operation: WorkspaceOperation | null
+      intervention_required?: boolean
+      lifecycle_diagnostic?: string
+    }
+  >()
   let workspaceListGeneration = 0
   let workspaceListContext = requestContext()
   let activeListRequestKey: string | null = null
@@ -51,6 +65,48 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
 
   function requestContext(): string {
     return localStorage.getItem('kern_active_org_id') ?? ''
+  }
+
+  function reconcileRestOperation<T extends Workspace>(workspace: T, revision: number): T {
+    const event = operationEvents.get(`${requestContext()}:${workspace.id}`)
+    return event && event.revision > revision
+      ? {
+          ...workspace,
+          active_operation: event.operation,
+          ...(event.intervention_required !== undefined ? { intervention_required: event.intervention_required } : {}),
+          ...(event.lifecycle_diagnostic !== undefined ? { lifecycle_diagnostic: event.lifecycle_diagnostic } : {}),
+        }
+      : workspace
+  }
+
+  async function refreshCapture(workspaceId: string): Promise<void> {
+    const context = requestContext()
+    const revision = operationRevision
+    try {
+      const result = await workspacesApi.getWorkspace(workspaceId)
+      if (context !== requestContext()) return
+      const fresh = reconcileRestOperation(result, revision)
+      operationEvents.set(`${context}:${workspaceId}`, {
+        revision: ++operationRevision,
+        operation: fresh.active_operation,
+        intervention_required: fresh.intervention_required,
+        lifecycle_diagnostic: fresh.lifecycle_diagnostic,
+      })
+      reconcileCapture(workspaceId, fresh.active_operation, true)
+      const workspace = workspaces.value.find((item) => item.id === workspaceId)
+      if (workspace) {
+        workspace.active_operation = fresh.active_operation
+        workspace.intervention_required = fresh.intervention_required
+        workspace.lifecycle_diagnostic = fresh.lifecycle_diagnostic
+      }
+      if (activeWorkspace.value?.id === workspaceId) {
+        activeWorkspace.value.active_operation = fresh.active_operation
+        activeWorkspace.value.intervention_required = fresh.intervention_required
+        activeWorkspace.value.lifecycle_diagnostic = fresh.lifecycle_diagnostic
+      }
+    } catch {
+      // Acceptance succeeded: keep the fence until WS or a later REST refresh confirms completion.
+    }
   }
 
   // --- Getters ---
@@ -93,7 +149,58 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     return ws?.name || `Workspace ${workspaceId.slice(0, 8)}`
   }
 
+  function canUseWorkspace(workspaceId: string): boolean {
+    const workspace =
+      workspaces.value.find((item) => item.id === workspaceId) ??
+      (activeWorkspace.value?.id === workspaceId ? activeWorkspace.value : null)
+    return Boolean(
+      workspace?.status === WorkspaceStatus.RUNNING &&
+      workspace.runner_online &&
+      !isWorkspaceTransitioning(workspaceId),
+    )
+  }
+
+  /** Shared optimistic capture fence; status changes never release it. */
+  async function captureImage(
+    workspaceId: string,
+    request: () => Promise<unknown>,
+  ): Promise<boolean> {
+    if (isWorkspaceTransitioning(workspaceId)) return false
+    const pending = { requesting: true, observed: false, completed: false }
+    pendingCaptures.value[workspaceId] = pending
+    try {
+      await request()
+      const current = pendingCaptures.value[workspaceId]
+      if (current) {
+        current.requesting = false
+        if (current.completed) delete pendingCaptures.value[workspaceId]
+      }
+      await refreshCapture(workspaceId)
+      return true
+    } catch (e) {
+      delete pendingCaptures.value[workspaceId]
+      throw e
+    }
+  }
+
+  function reconcileCapture(
+    workspaceId: string,
+    operation: WorkspaceOperation | null,
+    authoritativeNull = false,
+  ): void {
+    const pending = pendingCaptures.value[workspaceId]
+    if (!pending) return
+    if (operation === WorkspaceOperation.CAPTURING_IMAGE) {
+      pending.observed = true
+      pending.completed = false
+    } else if (operation === null && (pending.observed || authoritativeNull)) {
+      pending.completed = true
+      if (!pending.requesting) delete pendingCaptures.value[workspaceId]
+    }
+  }
+
   function isWorkspaceTransitioning(workspaceId: string): boolean {
+    if (pendingCaptures.value[workspaceId]) return true
     const workspace =
       workspaces.value.find((item) => item.id === workspaceId) ??
       (activeWorkspace.value?.id === workspaceId ? activeWorkspace.value : null)
@@ -105,7 +212,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       WorkspaceStatus.REMOVED,
       WorkspaceStatus.DELETED,
     ]
-    if (deletionStates.includes(workspace.status)) return true
+    if (workspace.intervention_required || deletionStates.includes(workspace.status)) return true
     return Boolean(workspace.active_operation || pendingWorkspaceOperations.value[workspaceId])
   }
 
@@ -113,6 +220,12 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     const workspace =
       workspaces.value.find((item) => item.id === workspaceId) ??
       (activeWorkspace.value?.id === workspaceId ? activeWorkspace.value : null)
+    if (
+      pendingCaptures.value[workspaceId] ||
+      workspace?.active_operation === WorkspaceOperation.CAPTURING_IMAGE
+    )
+      return 'Capturing'
+    if (workspace?.intervention_required) return 'Needs intervention'
     switch (workspace?.active_operation) {
       case WorkspaceOperation.CREATING:
         return 'Creating…'
@@ -124,8 +237,6 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
         return 'Restarting…'
       case WorkspaceOperation.REMOVING:
         return 'Removing…'
-      case WorkspaceOperation.CAPTURING_IMAGE:
-        return 'Capturing image…'
     }
 
     const pending = pendingWorkspaceOperations.value[workspaceId]
@@ -209,6 +320,10 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     }
     let flight = workspaceListFlights.get(key)
     if (!flight) {
+      const revision = operationRevision
+      const captureSnapshot = new Set(
+        Object.keys(pendingCaptures.value).filter((id) => !pendingCaptures.value[id]?.requesting),
+      )
       const generation = ++workspaceListGeneration
       flight = workspacesApi
         .listWorkspaces(runnerId)
@@ -219,9 +334,17 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
               workspaces.value.map((workspace) => [workspace.id, workspace.status]),
             )
             const previousWorkspaceIds = new Set(workspaces.value.map((workspace) => workspace.id))
+            result = result.map((workspace) => reconcileRestOperation(workspace, revision))
             workspaces.value = result
             const currentWorkspaceIds = new Set(result.map((workspace) => workspace.id))
             for (const workspace of result) {
+              if (workspace.active_operation !== null || captureSnapshot.has(workspace.id)) {
+                reconcileCapture(
+                  workspace.id,
+                  workspace.active_operation,
+                  captureSnapshot.has(workspace.id),
+                )
+              }
               reconcilePendingWorkspaceOperation(
                 workspace.id,
                 workspace.status,
@@ -279,6 +402,10 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     }
     let flight = workspaceDetailFlights.get(key)
     if (!flight) {
+      const revision = operationRevision
+      const captureEligible = Boolean(
+        pendingCaptures.value[id] && !pendingCaptures.value[id]?.requesting,
+      )
       const generation = workspaceDetailGeneration
       flight = workspacesApi
         .getWorkspace(id)
@@ -288,7 +415,12 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
             requestedDetailId === id &&
             context === requestContext()
           ) {
+            fresh = reconcileRestOperation(fresh, revision)
+            if (fresh.active_operation !== null || captureEligible)
+              reconcileCapture(id, fresh.active_operation, captureEligible)
             activeWorkspace.value = fresh
+            const index = workspaces.value.findIndex((workspace) => workspace.id === id)
+            if (index >= 0) workspaces.value[index] = fresh
           }
           return fresh
         })
@@ -387,6 +519,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     opts: { notify?: boolean } = {},
   ): Promise<boolean> {
     const notifications = useNotificationStore()
+    if (isWorkspaceTransitioning(id)) return false
 
     if (data.name !== undefined && !data.name.trim()) {
       if (opts.notify !== false) {
@@ -538,7 +671,12 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     const notifications = useNotificationStore()
     const imageStore = useImageStore()
     try {
-      await workspacesApi.createWorkspaceImageArtifact(workspaceId, data)
+      if (
+        !(await captureImage(workspaceId, () =>
+          workspacesApi.createWorkspaceImageArtifact(workspaceId, data),
+        ))
+      )
+        return false
       await imageStore.fetchImages()
       notifications.success('Image capturing', 'Image is being captured.')
       return true
@@ -631,12 +769,29 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
   function updateWorkspaceOperation(
     workspaceId: string,
     activeOperation: WorkspaceOperation | null,
+    interventionRequired?: boolean,
+    lifecycleDiagnostic?: string,
   ): void {
+    const key = `${requestContext()}:${workspaceId}`
+    const previous = operationEvents.get(key)
+    operationEvents.set(`${requestContext()}:${workspaceId}`, {
+      revision: ++operationRevision,
+      operation: activeOperation,
+      intervention_required: interventionRequired ?? previous?.intervention_required,
+      lifecycle_diagnostic: lifecycleDiagnostic ?? previous?.lifecycle_diagnostic,
+    })
+    reconcileCapture(workspaceId, activeOperation)
     const ws = workspaces.value.find((w) => w.id === workspaceId)
-    if (ws) ws.active_operation = activeOperation
+    if (ws) {
+      ws.active_operation = activeOperation
+      if (interventionRequired !== undefined) ws.intervention_required = interventionRequired
+      if (lifecycleDiagnostic !== undefined) ws.lifecycle_diagnostic = lifecycleDiagnostic
+    }
 
     if (activeWorkspace.value?.id === workspaceId) {
       activeWorkspace.value.active_operation = activeOperation
+      if (interventionRequired !== undefined) activeWorkspace.value.intervention_required = interventionRequired
+      if (lifecycleDiagnostic !== undefined) activeWorkspace.value.lifecycle_diagnostic = lifecycleDiagnostic
     }
 
     if (activeOperation === null) {
@@ -658,6 +813,17 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     const notifications = useNotificationStore()
     const workspaceName = getWorkspaceName(workspaceId)
     notifications.error('Workspace error', `${workspaceName}: ${errorMsg}`)
+    // Child stop/resume errors are notifications, not capture coordinator completion.
+    if (
+      pendingCaptures.value[workspaceId] ||
+      workspaces.value.some(
+        (workspace) =>
+          workspace.id === workspaceId &&
+          workspace.active_operation === WorkspaceOperation.CAPTURING_IMAGE,
+      ) ||
+      (activeWorkspace.value?.id === workspaceId &&
+        activeWorkspace.value.active_operation === WorkspaceOperation.CAPTURING_IMAGE)
+    ) return
     updateWorkspaceOperation(workspaceId, null)
     clearPendingWorkspaceOperation(workspaceId)
   }
@@ -670,6 +836,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     error,
     imageArtifacts,
     pendingWorkspaceOperations,
+    pendingCaptures,
     // Getters
     runningWorkspaces,
     workspacesByStatus,
@@ -689,6 +856,8 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     createWorkspaceFromImageArtifact,
     // Real-time
     isWorkspaceTransitioning,
+    canUseWorkspace,
+    captureImage,
     getWorkspaceTransitionLabel,
     updateWorkspaceStatus,
     updateWorkspaceOperation,

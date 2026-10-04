@@ -216,6 +216,7 @@ class InteractiveSessionsMixin:
         if workspace is None:
             return
 
+        self._ensure_workspace_available(workspace)
         runner = workspace.runner
         if not runner.is_online:
             return
@@ -245,6 +246,7 @@ class InteractiveSessionsMixin:
         if workspace is None:
             return
 
+        self._ensure_workspace_available(workspace)
         runner = workspace.runner
         if not runner.is_online:
             return
@@ -272,6 +274,7 @@ class InteractiveSessionsMixin:
         if workspace is None:
             return
 
+        self._ensure_workspace_available(workspace)
         runner = workspace.runner
         if not runner.is_online:
             return
@@ -346,6 +349,7 @@ class InteractiveSessionsMixin:
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
 
+        self._ensure_workspace_available(workspace)
         runner = workspace.runner
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))

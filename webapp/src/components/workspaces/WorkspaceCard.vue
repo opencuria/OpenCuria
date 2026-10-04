@@ -67,6 +67,7 @@ const statusVariant = computed(() => {
 })
 
 const statusLabel = computed(() => {
+  if (transitionLabel.value) return transitionLabel.value
   if (isRunnerOfflineState.value) {
     return 'Runner offline'
   }

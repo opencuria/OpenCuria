@@ -23,6 +23,8 @@ const authStore = {
 }
 
 const workspaceStore = {
+  getWorkspaceTransitionLabel: vi.fn<(id: string) => string | null>(() => null),
+  isWorkspaceTransitioning: vi.fn<(id: string) => boolean>(() => false),
   workspaces: [
     {
       id: 'ws-1',
@@ -148,7 +150,10 @@ const sidebarStubs = {
   DropdownMenu: { template: '<div><slot /></div>' },
   DropdownMenuTrigger: { template: '<div><slot /></div>' },
   DropdownMenuContent: { template: '<div><slot /></div>' },
-  DropdownMenuItem: { template: '<button @click="$emit(\'click\')"><slot /></button>' },
+  DropdownMenuItem: {
+    props: ['disabled'],
+    template: '<button :disabled="disabled" @click="$emit(\'click\')"><slot /></button>',
+  },
   DropdownMenuSeparator: true,
 }
 
@@ -171,6 +176,8 @@ describe('ChatSidebar', () => {
   beforeEach(() => {
     localStorage.clear()
     vi.clearAllMocks()
+    workspaceStore.getWorkspaceTransitionLabel.mockReturnValue(null)
+    workspaceStore.isWorkspaceTransitioning.mockReturnValue(false)
     conversationStore.conversations = [makeConversation({ unread: true })]
     conversationStore.uniqueWorkspaceIds = ['ws-1']
     workspaceStore.workspaces = [
@@ -374,6 +381,36 @@ describe('ChatSidebar', () => {
     expect(
       JSON.parse(localStorage.getItem('opencuria-sidebar-collapsed-workspaces:1:org-1')!),
     ).toEqual([])
+  })
+
+  it('keeps collapsed inbox results readable while capture disables their mutations', async () => {
+    workspaceStore.isWorkspaceTransitioning.mockImplementation((id) => id === 'ws-1')
+    workspaceStore.getWorkspaceTransitionLabel.mockImplementation((id) =>
+      id === 'ws-1' ? 'Capturing' : null,
+    )
+    const wrapper = mountSidebar()
+    await wrapper.get('[aria-label="Collapse workspace Alpha"]').trigger('click')
+    const group = wrapper.get('[data-testid="workspace-conversation-group"]')
+    expect(group.find('[data-testid="conversation-row"]').exists()).toBe(false)
+    expect(group.find('[data-testid="workspace-busy"]').exists()).toBe(true)
+    expect(group.get('[data-testid="workspace-row"]').attributes('title')).toBe('Alpha — Capturing')
+    const inbox = wrapper.get('[data-testid="inbox-section"]')
+    expect(inbox.get('[data-testid="inbox-result-icon"]').attributes('data-kind')).toBe('build')
+    for (const label of ['Rename', 'Delete']) {
+      const action = inbox.findAll('button').find((button) => button.text() === label)!
+      expect(action.attributes('disabled')).toBeDefined()
+      await action.trigger('click')
+    }
+    expect(inbox.find('[data-testid="conversation-rename-input"]').exists()).toBe(false)
+    expect(harnessStore.renameSession).not.toHaveBeenCalled()
+    expect(harnessStore.removeSession).not.toHaveBeenCalled()
+    await inbox.get('[data-testid="mark-read-item"]').trigger('click')
+    expect(conversationStore.markAsRead).toHaveBeenCalledWith('s-1')
+    await inbox.get('[data-testid="conversation-row"]').trigger('keydown.enter')
+    expect(routerPush).toHaveBeenCalledWith({
+      path: '/workspaces/ws-1',
+      query: { session: 's-1' },
+    })
   })
 
   it('renders new chat and search actions', () => {

@@ -23,6 +23,8 @@ the ``src.services`` extraction (Steps 1-8) must preserve:
 
 from __future__ import annotations
 
+import tempfile
+
 import io
 import tarfile
 import uuid
@@ -37,7 +39,7 @@ from src.service import WorkspaceService
 def _make_service(runtimes: dict | None = None) -> WorkspaceService:
     if runtimes is None:
         runtimes = {}
-    return WorkspaceService(runtimes=runtimes, settings=RunnerSettings())
+    return WorkspaceService(runtimes=runtimes, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
 
 
 def test_workspace_context_preamble_error_shapes() -> None:
@@ -415,7 +417,7 @@ async def test_step2_image_build_error_paths(monkeypatch) -> None:
 
     # docker SDK missing -> RuntimeError via manager and facade delegate.
     for caller in (svc.images.build_image, svc.build_image):
-        with pytest.raises(RuntimeError, match="docker SDK is not available"):
+        with pytest.raises(RuntimeError, match="Runtime .*docker.* is not enabled"):
             await caller(
                 runtime_type="docker",
                 build_job_id="job-1",
@@ -1401,7 +1403,7 @@ async def test_step8_creating_entry_survives_sync() -> None:
     assert svc._cache[creating_id].status == "creating"
 
     # Same guarantee through the manager directly.
-    registry = WorkspaceRegistry(runtimes={}, settings=RunnerSettings())
+    registry = WorkspaceRegistry(runtimes={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
     registry._cache[creating_id] = WorkspaceInfo(
         workspace_id=creating_id,
         instance_id="",
@@ -1447,7 +1449,7 @@ async def test_step8_remove_workspace_teardown_kills_all() -> None:
         workspace_id, reason="remove"
     )
     svc._interrupt_desktop_recordings.assert_awaited_once_with(workspace_id)
-    assert removed == ["instance-1"]
+    assert removed == [str(workspace_id)]
 
 
 def test_step8_workspace_exists_replaces_cache_poke() -> None:

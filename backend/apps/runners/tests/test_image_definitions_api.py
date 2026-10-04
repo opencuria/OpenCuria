@@ -252,6 +252,7 @@ def test_list_user_images_includes_source_runner_online_flag(client: Client):
         created_by=admin,
     )
     image_online = ImageInstance.objects.create(
+            is_legacy=True,
         runner=runner_online,
         runtime_type="docker",
         origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -262,6 +263,7 @@ def test_list_user_images_includes_source_runner_online_flag(client: Client):
         status=ImageInstance.Status.READY,
     )
     image_offline = ImageInstance.objects.create(
+            is_legacy=True,
         runner=runner_offline,
         runtime_type="docker",
         origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -306,6 +308,7 @@ def test_list_captured_image_without_origin_includes_runner_metadata(client: Cli
         organization=org,
     )
     image = ImageInstance.objects.create(
+            is_legacy=True,
         runner=runner,
         runtime_type="docker",
         origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -364,6 +367,7 @@ def test_clone_captured_image_while_origin_deleting(client: Client, monkeypatch)
         runtime_type="docker",
     )
     artifact = ImageInstance.objects.create(
+            is_legacy=True,
         runner=runner,
         runtime_type="docker",
         origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -418,6 +422,7 @@ def test_clone_workspace_from_offline_image_returns_runner_offline(client: Clien
         created_by=admin,
     )
     image_offline = ImageInstance.objects.create(
+            is_legacy=True,
         runner=runner_offline,
         runtime_type="docker",
         origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -505,6 +510,7 @@ def test_clone_workspace_from_image_rejects_incompatible_runtime(client: Client)
         qemu_disk_size_gb=50,
     )
     artifact = ImageInstance.objects.create(
+            is_legacy=True,
         runner=runner,
         runtime_type="qemu",
         origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -558,6 +564,7 @@ def test_list_runner_builds_includes_image_artifact_id(client: Client):
     )
     runner_ref = "/var/lib/opencuria/base-images/artifact.qcow2"
     artifact = ImageInstance.objects.create(
+            is_legacy=True,
         runner=runner,
         runtime_type="qemu",
         origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
@@ -568,6 +575,8 @@ def test_list_runner_builds_includes_image_artifact_id(client: Client):
         name="Artifact Image",
         status=ImageInstance.Status.READY,
     )
+    build.current_generation = artifact
+    build.save()
 
     token = _create_api_key(
         user=admin,
@@ -640,6 +649,7 @@ def test_delete_in_use_image_retires_it_and_returns_conflict(client: Client):
         available_runtimes=["docker"],
     )
     image = ImageInstance.objects.create(
+            is_legacy=True,
         runner=runner,
         runtime_type="docker",
         origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
@@ -666,10 +676,9 @@ def test_delete_in_use_image_retires_it_and_returns_conflict(client: Client):
         **_auth_headers(token, str(org.id)),
     )
 
-    assert response.status_code == 409
-    assert "still used by 1 workspace(s)" in response.json()["detail"]
+    assert response.status_code == 204
     image.refresh_from_db()
-    assert image.status == ImageInstance.Status.READY
+    assert image.status == ImageInstance.Status.PENDING_DELETION
 
 
 @pytest.mark.django_db
@@ -704,7 +713,10 @@ def test_create_runner_build_returns_pending_build_without_artifact(client: Clie
 
     monkeypatch.setattr(
         "apps.runners.api._get_service",
-        lambda: SimpleNamespace(trigger_build_job=_trigger_build_job),
+        lambda: SimpleNamespace(
+            trigger_build_job=_trigger_build_job,
+            get_visible_image_definition=lambda *_: definition,
+        ),
     )
 
     token = _create_api_key(
@@ -799,7 +811,10 @@ def test_rebuild_runner_build_allows_global_definition_builds(client: Client, mo
 
     monkeypatch.setattr(
         "apps.runners.api._get_service",
-        lambda: SimpleNamespace(trigger_build_job=_trigger_build_job),
+        lambda: SimpleNamespace(
+            trigger_build_job=_trigger_build_job,
+            get_visible_image_definition=lambda *_: definition,
+        ),
     )
 
     token = _create_api_key(
@@ -844,6 +859,7 @@ def test_list_image_artifacts_returns_valid_json_without_credential_ids(client: 
         created_by=admin,
     )
     ImageInstance.objects.create(
+            is_legacy=True,
         runner=runner,
         runtime_type="docker",
         origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -912,6 +928,7 @@ def test_clone_workspace_from_image_sends_explicit_credential_ids(client: Client
         created_by=admin,
     )
     artifact = ImageInstance.objects.create(
+            is_legacy=True,
         runner=runner,
         runtime_type="docker",
         origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -1329,19 +1346,24 @@ def test_handle_image_build_progress_appends_atomically_and_caps_log():
         build_log="old\n",
     )
 
+    from apps.runners.repositories import ImageGenerationRepository
+    build, image, task = ImageGenerationRepository.request(
+        definition=definition, runner=runner, rendered_input={}, created_by=admin
+    )
+    ImageBuildJob.objects.filter(id=build.id).update(build_log="old\n")
     service = RunnerService(sio_server=None)
     service.handle_image_build_progress(
-        str(build.id), "new line", runner_id=str(runner.id)
+        str(build.id), "new line", runner_id=str(runner.id), task_id=str(task.id)
     )
 
     build.refresh_from_db()
-    assert build.status == ImageBuildJob.Status.BUILDING
+    assert build.status == ImageBuildJob.Status.PENDING
     assert build.build_log == "old\nnew line\n"
 
     # Over-long stored logs are trimmed to the tail cap atomically.
     big = "y" * (RunnerService.BUILD_LOG_MAX_CHARS + 100)
     ImageBuildJob.objects.filter(id=build.id).update(build_log=big)
-    service.handle_image_build_progress(str(build.id), "tail", runner_id=None)
+    service.handle_image_build_progress(str(build.id), "tail", runner_id=None, task_id=str(task.id))
     build.refresh_from_db()
     assert len(build.build_log) == RunnerService.BUILD_LOG_MAX_CHARS
     assert build.build_log.endswith("tail\n")
@@ -1356,3 +1378,38 @@ def test_handle_image_build_progress_appends_atomically_and_caps_log():
     service.handle_image_build_progress(
         "00000000-0000-0000-0000-000000000000", "noop", runner_id=None
     )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("action", ["activate", "deactivate", "delete"])
+def test_global_recipe_lifecycle_is_read_only_for_org_admin(client, action):
+    user = get_user_model().objects.create_user(email="readonly@test.com", password="secret")
+    org = Organization.objects.create(name="Readonly org", slug="readonly-org")
+    Membership.objects.create(user=user, organization=org, role=MembershipRole.ADMIN)
+    definition = ImageDefinition.objects.create(name="Readonly global", organization=None)
+    token = _create_api_key(user=user, permissions=[APIKeyPermission.IMAGE_DEFINITIONS_WRITE.value])
+    url = f"/api/v1/image-definitions/{definition.id}/"
+    response = (client.delete(url, **_auth_headers(token, str(org.id))) if action == "delete"
+                else client.post(url + action + "/", **_auth_headers(token, str(org.id))))
+    assert response.status_code == 404
+    definition.refresh_from_db()
+    assert definition.status == "active"
+
+
+@pytest.mark.django_db
+def test_image_artifact_get_does_not_run_timeout_recovery(client, monkeypatch):
+    from apps.runners.sio_server import get_runner_service
+
+    user = get_user_model().objects.create_user(email="readonly-capture@test.com", password="secret")
+    org = Organization.objects.create(name="Read only", slug="readonly-capture")
+    Membership.objects.create(user=user, organization=org, role=MembershipRole.ADMIN)
+    token = _create_api_key(user=user, permissions=[APIKeyPermission.IMAGES_READ.value])
+    def forbidden(*args, **kwargs):
+        raise AssertionError("GET must not execute lifecycle timeout recovery")
+    monkeypatch.setattr(get_runner_service(), "timeout_stale_image_artifacts", forbidden)
+    response = client.get("/api/v1/image-artifacts/", **_auth_headers(token, str(org.id)))
+    assert response.status_code == 200
+    from apps.mcp_app.server import _call_list_image_artifacts
+    # The MCP read shares the same independent-recovery contract.
+    key = APIKey.objects.get(user=user)
+    assert _call_list_image_artifacts(key, org.id, {})

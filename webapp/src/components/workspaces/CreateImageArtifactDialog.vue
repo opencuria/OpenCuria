@@ -39,17 +39,17 @@ const selectedWorkspaceId = ref('')
 const submitting = ref(false)
 
 const snappableWorkspaces = computed(() =>
-  workspaceStore.workspaces.filter(
-    (w) => {
-      const runner = runnerStore.runnerById(w.runner_id)
-      return (
-        w.runtime_type === RuntimeType.QEMU &&
-        !w.credentials_present &&
-        (w.status === WorkspaceStatus.RUNNING || w.status === WorkspaceStatus.STOPPED) &&
-        runnerSupportsRuntime(runner, RuntimeType.QEMU)
-      )
-    },
-  ),
+  workspaceStore.workspaces.filter((w) => {
+    const runner = runnerStore.runnerById(w.runner_id)
+    return (
+      w.runtime_type === RuntimeType.QEMU &&
+      !w.intervention_required &&
+      !workspaceStore.isWorkspaceTransitioning(w.id) &&
+      (w.status === WorkspaceStatus.RUNNING || !w.credentials_present) &&
+      (w.status === WorkspaceStatus.RUNNING || w.status === WorkspaceStatus.STOPPED) &&
+      runnerSupportsRuntime(runner, RuntimeType.QEMU)
+    )
+  }),
 )
 
 const blockedByCredentials = computed(() =>
@@ -62,15 +62,26 @@ const blockedByCredentials = computed(() =>
 )
 
 const workspaceOptions = computed(() => [
-  { value: '', label: '— Select a workspace —' },
   ...snappableWorkspaces.value.map((w) => ({
     value: w.id,
     label: w.name || w.id.slice(0, 8),
   })),
 ])
 
+const captureBlocked = computed(
+  () =>
+    submitting.value ||
+    (!!selectedWorkspaceId.value &&
+      workspaceStore.isWorkspaceTransitioning(selectedWorkspaceId.value)),
+)
+const selected = computed(() =>
+  snappableWorkspaces.value.find((w) => w.id === selectedWorkspaceId.value),
+)
 const isValid = computed(
-  () => name.value.trim().length > 0 && selectedWorkspaceId.value !== '',
+  () =>
+    name.value.trim().length > 0 &&
+    !!selected.value &&
+    !workspaceStore.isWorkspaceTransitioning(selected.value.id),
 )
 
 onMounted(async () => {
@@ -105,10 +116,7 @@ function handleClose(): void {
 </script>
 
 <template>
-  <Dialog
-    :open="open"
-    @update:open="(v) => (v ? (open = true) : handleClose())"
-  >
+  <Dialog :open="open" @update:open="(v) => (v ? (open = true) : handleClose())">
     <DialogTrigger as-child>
       <Button size="sm" @click="open = true">Capture Image</Button>
     </DialogTrigger>
@@ -117,55 +125,57 @@ function handleClose(): void {
       <DialogHeader>
         <DialogTitle>Capture Image</DialogTitle>
         <DialogDescription>
-          Capture a point-in-time image of a QEMU workspace. Credentials must be
-          removed first — stop the workspace to strip them, then capture. If it
-          was stopped externally, resume and stop it again.
+          Capture a point-in-time image. A running workspace automatically stops and restarts; a
+          stopped workspace stays stopped. Live interactions are unavailable during capture.
         </DialogDescription>
       </DialogHeader>
 
       <DialogBody>
-      <form id="create-image-artifact-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
-        <div>
-          <label class="text-sm font-medium text-foreground mb-1.5 block">Image name</label>
-          <Input v-model="name" placeholder="e.g. before-refactor" />
-        </div>
+        <p v-if="imageArtifactStore.error" role="alert" class="text-destructive">
+          {{ imageArtifactStore.error }}
+        </p>
+        <form
+          id="create-image-artifact-form"
+          class="flex flex-col gap-4"
+          @submit.prevent="handleSubmit"
+        >
+          <div>
+            <label class="text-sm font-medium text-foreground mb-1.5 block">Image name</label>
+            <Input :disabled="captureBlocked" v-model="name" placeholder="e.g. before-refactor" />
+          </div>
 
-        <div>
-          <label class="text-sm font-medium text-foreground mb-1.5 block">Source workspace</label>
-          <Select v-model="selectedWorkspaceId">
-            <SelectTrigger>
-              <SelectValue placeholder="Select a workspace" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem
-                v-for="opt in workspaceOptions"
-                :key="opt.value || 'empty'"
-                :value="opt.value"
-                :disabled="opt.value === ''"
-              >
-                {{ opt.label }}
-              </SelectItem>
-            </SelectContent>
-          </Select>
-          <p v-if="snappableWorkspaces.length === 0" class="text-xs text-muted-foreground mt-1">
-            No capturable QEMU workspaces found. Capture requires a running or
-            stopped QEMU workspace without credentials on disk.
-          </p>
-          <p v-else class="text-xs text-muted-foreground mt-1">
-            Only QEMU workspaces without credentials on disk are shown.
-          </p>
-          <p v-if="blockedByCredentials" class="text-xs text-muted-foreground mt-1">
-            Credentials are still on disk. Stop the workspace to remove them before capturing. If it was stopped externally, resume and stop it again.
-          </p>
-        </div>
-
-      </form>
+          <div>
+            <label class="text-sm font-medium text-foreground mb-1.5 block">Source workspace</label>
+            <Select v-model="selectedWorkspaceId" :disabled="captureBlocked">
+              <SelectTrigger>
+                <SelectValue placeholder="Select a workspace" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="opt in workspaceOptions" :key="opt.value" :value="opt.value">
+                  {{ opt.label }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <p v-if="snappableWorkspaces.length === 0" class="text-xs text-muted-foreground mt-1">
+              No capturable QEMU workspaces found. Capture requires a QEMU workspace with no
+              intervention fence. Running workspaces automatically stop and restart.
+            </p>
+            <p v-else class="text-xs text-muted-foreground mt-1">
+              Stopped workspaces require controlled credential scrub proof. Running workspaces
+              automatically stop and restart.
+            </p>
+            <p v-if="blockedByCredentials" class="text-xs text-muted-foreground mt-1">
+              Stopped workspace credentials require controlled resume/stop scrub proof. Unknown
+              proof is rejected by the runner, never assumed clean.
+            </p>
+          </div>
+        </form>
       </DialogBody>
 
       <DialogFooter>
         <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
         <Button type="submit" form="create-image-artifact-form" :disabled="!isValid || submitting">
-          {{ submitting ? 'Capturing…' : 'Capture Image' }}
+          {{ submitting ? 'Capturing' : 'Capture Image' }}
         </Button>
       </DialogFooter>
     </DialogContent>

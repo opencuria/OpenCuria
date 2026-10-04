@@ -23,6 +23,7 @@ class WorkspaceInfo:
     workspace_id: uuid.UUID
     instance_id: str
     status: str  # "running", "exited", "creating", etc.
+    credentials_present: bool | None = None
     runtime_type: str = "docker"  # "docker" or "qemu"
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 

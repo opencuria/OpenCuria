@@ -35,6 +35,8 @@ class OwnershipMixin:
             raise ConflictError(
                 f"Workspace '{workspace.id}' is pending deletion and cannot be modified"
             )
+        if workspace.current_task_id and not workspace.active_operation:
+            raise ConflictError("Workspace lifecycle outcome unresolved; intervention required")
         if workspace.active_operation:
             raise ConflictError(
                 f"Workspace '{workspace.id}' is currently {self._workspace_operation_label(workspace.active_operation)}"
@@ -132,8 +134,8 @@ class OwnershipMixin:
     def _ensure_process_dispatchable(self, workspace: "Workspace") -> "Runner":
         """Validate that a process RPC may be dispatched (sync).
 
-        Processes never set ``active_operation``; only deletion states and
-        non-running status block dispatch.
+        Processes never set ``active_operation``, but live dispatch must
+        respect lifecycle holds as well as deletion and non-running states.
         """
         if workspace.status in (
             WorkspaceStatus.PENDING_DELETION,
@@ -149,6 +151,7 @@ class OwnershipMixin:
                 f"Workspace '{workspace.id}' is '{workspace.status}', "
                 f"must be '{WorkspaceStatus.RUNNING}' for background processes"
             )
+        self._ensure_workspace_available(workspace)
         runner = workspace.runner
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))

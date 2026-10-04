@@ -60,6 +60,7 @@ import structlog
 
 from ...models import DesktopReleaseResult, DesktopSession, WorkspaceInfo
 from ...runtime.base import RuntimeBackend
+from ..capture_fence import CaptureFence, live_interaction
 from ..exec_kernel import KeyedLockMap
 from ..exec_kernel import sanitize_path as _sanitize_path
 from .xdotool import (
@@ -139,6 +140,7 @@ class DesktopManager:
             | None
         ) = None,
     ) -> None:
+        self.capture_fence: CaptureFence | None = None
         self._runtimes = runtimes if runtimes is not None else {}
         self._get_cached = get_cached
         self._get_runtime = get_runtime
@@ -386,6 +388,7 @@ class DesktopManager:
             "generation": session.generation,
         }
 
+    @live_interaction
     async def ensure_desktop_process(
         self,
         workspace_id: uuid.UUID,
@@ -403,6 +406,8 @@ class DesktopManager:
         """
         lock = await self._desktop_lock(workspace_id)
         async with lock:
+            if self.capture_fence is not None:
+                self.capture_fence.check_current(workspace_id)
             return await self._ensure_desktop_process_locked(
                 workspace_id, width=width, height=height
             )
@@ -489,6 +494,7 @@ class DesktopManager:
         log.info("desktop_started", port=session.port, generation=session.generation)
         return session
 
+    @live_interaction
     async def acquire_desktop(
         self,
         workspace_id: uuid.UUID,
@@ -513,6 +519,8 @@ class DesktopManager:
             self._sanitize_run_id(str(run_id or ""))
         lock = await self._desktop_lock(workspace_id)
         async with lock:
+            if self.capture_fence is not None:
+                self.capture_fence.check_current(workspace_id)
             # ``seen`` cannot change under us: every other acquire/release
             # path takes the same lock, which we currently hold. The merge
             # below only matters when ensure *replaces* the cache entry
@@ -549,6 +557,7 @@ class DesktopManager:
             )
             return session
 
+    @live_interaction
     async def release_desktop(
         self,
         workspace_id: uuid.UUID,
@@ -572,6 +581,8 @@ class DesktopManager:
             self._sanitize_run_id(str(run_id or ""))
         lock = await self._desktop_lock(workspace_id)
         async with lock:
+            if self.capture_fence is not None:
+                self.capture_fence.check_current(workspace_id)
             if force:
                 session = self._desktop_sessions.get(workspace_id)
                 has_recordings = any(
@@ -636,6 +647,7 @@ class DesktopManager:
         # always share one serialising lock (see _desktop_lock).
         return stopped_result
 
+    @live_interaction
     async def start_desktop(
         self,
         workspace_id: uuid.UUID,
@@ -651,6 +663,7 @@ class DesktopManager:
             height=height,
         )
 
+    @live_interaction
     async def stop_desktop(self, workspace_id: uuid.UUID) -> DesktopReleaseResult:
         """Release the viewer lease. Stops Xvnc only when no computer-use hold remains."""
         return await self.release_desktop(workspace_id, holder=DESKTOP_HOLDER_VIEWER)
@@ -828,6 +841,7 @@ class DesktopManager:
 
         return DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT
 
+    @live_interaction
     async def desktop_action(
         self,
         workspace_id: uuid.UUID,
@@ -1370,6 +1384,7 @@ class DesktopManager:
             "stderr": stderr,
         }
 
+    @live_interaction
     async def write_desktop_clipboard(self, workspace_id: uuid.UUID, text: str) -> None:
         """Write plain text into the desktop clipboard inside the workspace VM/container."""
         if not await self._is_desktop_session_live(workspace_id):
@@ -1404,6 +1419,7 @@ class DesktopManager:
         if exit_code != 0:
             raise RuntimeError(f"Failed to write desktop clipboard: {output}")
 
+    @live_interaction
     async def read_desktop_clipboard(self, workspace_id: uuid.UUID) -> str:
         """Read plain text from the desktop clipboard inside the workspace VM/container."""
         if not await self._is_desktop_session_live(workspace_id):

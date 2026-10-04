@@ -1935,6 +1935,7 @@ async def create_harness_accessor(
 
     from asgiref.sync import sync_to_async
 
+    from apps.harness.repositories import HarnessSessionRepository
     from apps.runners.exceptions import (
         RunnerOfflineError,
         WorkspaceNotFoundError,
@@ -1958,6 +1959,9 @@ async def create_harness_accessor(
     )
     if workspace is None:
         raise WorkspaceNotFoundError(workspace_id)
+    await sync_to_async(HarnessSessionRepository.ensure_interactions_available)(
+        workspace.id
+    )
     runner = workspace.runner
     if not runner.is_online or not runner.sid:
         raise RunnerOfflineError(str(runner.id))
@@ -1971,6 +1975,9 @@ async def create_harness_accessor(
             raise RunnerAccessorError(
                 f"{event} failed: workspace {workspace_id} not found"
             )
+        await sync_to_async(HarnessSessionRepository.ensure_interactions_available)(
+            current.id
+        )
         live_runner = current.runner
         if not live_runner.is_online or not live_runner.sid:
             raise RunnerAccessorError(
@@ -1993,6 +2000,9 @@ async def create_harness_accessor(
         )
         if current is None:
             return DEFAULT_DESKTOP_WIDTH, DEFAULT_DESKTOP_HEIGHT
+        await sync_to_async(HarnessSessionRepository.ensure_interactions_available)(
+            current.id
+        )
         return int(current.desktop_width), int(current.desktop_height)
 
     async def _call(
@@ -2006,6 +2016,9 @@ async def create_harness_accessor(
             raise RunnerAccessorError(
                 f"{event} failed: workspace {workspace_id} not found"
             )
+        await sync_to_async(HarnessSessionRepository.ensure_interactions_available)(
+            current.id
+        )
         live_runner = current.runner
         if not live_runner.is_online or not live_runner.sid:
             raise RunnerAccessorError(

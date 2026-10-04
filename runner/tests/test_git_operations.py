@@ -21,6 +21,8 @@ deterministic and never overfit the host ``/tmp`` layout.
 
 from __future__ import annotations
 
+import tempfile
+
 import asyncio
 import os
 import shutil
@@ -337,7 +339,7 @@ def _make_repo(path: str, *, branch: str = "main") -> str:
 
 def _service_for(root: str) -> tuple[WorkspaceService, FakeGitRuntime, uuid.UUID]:
     runtime = FakeGitRuntime(root)
-    service = WorkspaceService(runtimes={"docker": runtime}, settings=RunnerSettings())
+    service = WorkspaceService(runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
     workspace_id = uuid.uuid4()
     service._cache[workspace_id] = WorkspaceInfo(
         workspace_id=workspace_id,
@@ -1989,7 +1991,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                     runtime = _ScriptedMetadataRuntime(tmp, **kwargs)  # type: ignore[arg-type]
                     service = WorkspaceService(
                         runtimes={"docker": runtime},
-                        settings=RunnerSettings(),
+                        settings=RunnerSettings(state_dir=tempfile.mkdtemp()),
                     )
                     ws_id = uuid.uuid4()
                     service._cache[ws_id] = WorkspaceInfo(
@@ -2017,7 +2019,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                 tmp, realpath_fail_prefixes=("/workspace/repo",)
             )
             service = WorkspaceService(
-                runtimes={"docker": runtime}, settings=RunnerSettings()
+                runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
             )
             ws_id = uuid.uuid4()
             service._cache[ws_id] = WorkspaceInfo(
@@ -2039,7 +2041,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                 tmp, realpath_fail_prefixes=("/workspace/repo/.git",)
             )
             service2 = WorkspaceService(
-                runtimes={"docker": runtime2}, settings=RunnerSettings()
+                runtimes={"docker": runtime2}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
             )
             ws_id2 = uuid.uuid4()
             service2._cache[ws_id2] = WorkspaceInfo(
@@ -2061,7 +2063,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
             # Relative ".git" resolves under the workspace: accepted.
             runtime = _OldGitCommonDirRuntime(tmp, ".git\n")
             service = WorkspaceService(
-                runtimes={"docker": runtime}, settings=RunnerSettings()
+                runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
             )
             ws_id = uuid.uuid4()
             service._cache[ws_id] = WorkspaceInfo(
@@ -2084,7 +2086,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                     runtime_bad = _OldGitCommonDirRuntime(tmp, plain)
                     service_bad = WorkspaceService(
                         runtimes={"docker": runtime_bad},
-                        settings=RunnerSettings(),
+                        settings=RunnerSettings(state_dir=tempfile.mkdtemp()),
                     )
                     ws_bad = uuid.uuid4()
                     service_bad._cache[ws_bad] = WorkspaceInfo(
@@ -3855,7 +3857,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
             _make_repo(os.path.join(tmp, "repo"))
             runtime = AskpassRuntime(tmp)
             service = WorkspaceService(
-                runtimes={"docker": runtime}, settings=RunnerSettings()
+                runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
             )
             ws_id = uuid.uuid4()
             service._cache[ws_id] = WorkspaceInfo(
@@ -3914,7 +3916,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory():
             service = WorkspaceService(
-                runtimes={"docker": NoGitRuntime()}, settings=RunnerSettings()
+                runtimes={"docker": NoGitRuntime()}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
             )
             ws_id = uuid.uuid4()
             service._cache[ws_id] = WorkspaceInfo(
@@ -3969,7 +3971,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
             Path(os.path.join(repo, "not found notes.txt")).write_text("x\n")
             service = WorkspaceService(
                 runtimes={"docker": NotFoundTextRuntime(tmp)},
-                settings=RunnerSettings(),
+                settings=RunnerSettings(state_dir=tempfile.mkdtemp()),
             )
             ws_id = uuid.uuid4()
             service._cache[ws_id] = WorkspaceInfo(
@@ -4003,7 +4005,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory():
             service = WorkspaceService(
-                runtimes={"docker": Exit1Runtime()}, settings=RunnerSettings()
+                runtimes={"docker": Exit1Runtime()}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
             )
             ws_id = uuid.uuid4()
             service._cache[ws_id] = WorkspaceInfo(
@@ -4038,7 +4040,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory():
             service = WorkspaceService(
                 runtimes={"docker": NoGitRuntime127()},
-                settings=RunnerSettings(),
+                settings=RunnerSettings(state_dir=tempfile.mkdtemp()),
             )
             ws_id = uuid.uuid4()
             service._cache[ws_id] = WorkspaceInfo(
@@ -4082,7 +4084,7 @@ class GitSerialisationTests(unittest.IsolatedAsyncioTestCase):
 
 
 def _ws_interface(service) -> WebSocketInterface:
-    interface = WebSocketInterface(service, RunnerSettings())
+    interface = WebSocketInterface(service, RunnerSettings(state_dir=tempfile.mkdtemp()))
     interface._sio.emit = AsyncMock()
     return interface
 
@@ -4154,7 +4156,7 @@ class GitWebsocketTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("code", payload)
 
     async def test_git_operation_cancel(self) -> None:
-        service = WorkspaceService(runtimes={}, settings=RunnerSettings())
+        service = WorkspaceService(runtimes={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
 
         async def _slow(*args, **kwargs):
             await asyncio.sleep(30)
@@ -4574,7 +4576,7 @@ class GitWebsocketValidationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(interface._running_tasks, {})
 
     async def test_duplicate_request_id_rejected_conflict(self) -> None:
-        service = WorkspaceService(runtimes={}, settings=RunnerSettings())
+        service = WorkspaceService(runtimes={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
 
         async def _slow(*args, **kwargs):
             await asyncio.sleep(30)

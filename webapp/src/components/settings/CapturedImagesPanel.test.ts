@@ -4,6 +4,22 @@ import { flushPromises, mount } from '@vue/test-utils'
 import CapturedImagesPanel from './CapturedImagesPanel.vue'
 import type { ImageArtifact } from '@/types'
 
+const { requestDeletion } = vi.hoisted(() => ({
+  requestDeletion: vi.fn(async () => ({
+    id: 'request',
+    phase: 'waiting_dependency',
+    diagnostic: 'Pinned workspace',
+    can_cancel: true,
+  })),
+}))
+vi.mock('@/stores/auth', () => ({ useAuthStore: () => ({ isAdmin: false }) }))
+vi.mock('@/services/runnerStorage.api', () => ({
+  listDeletions: vi.fn(async () => []),
+  requestDeletion,
+  cancelDeletion: vi.fn(),
+  previewDeletion: vi.fn(),
+}))
+
 const deleteImageArtifact = vi.fn(async () => undefined)
 const fetchImages = vi.fn(async () => undefined)
 const renameImageArtifact = vi.fn(async () => undefined)
@@ -69,15 +85,23 @@ describe('CapturedImagesPanel', () => {
       await flushPromises()
 
       expect(confirmSpy).not.toHaveBeenCalled()
-      expect(wrapper.text()).toContain('Delete Before refactor')
+      expect(wrapper.text()).toContain('Before refactor')
       expect(deleteImageArtifact).not.toHaveBeenCalled()
 
-      const deleteBtn = wrapper.findAll('button').find((b) => b.text() === 'Delete')
+      const deleteBtn = wrapper
+        .findAll('button')
+        .find((b) => b.text() === 'Store deferred deletion intent')
       expect(deleteBtn).toBeTruthy()
       await deleteBtn!.trigger('click')
       await flushPromises()
 
-      expect(deleteImageArtifact).toHaveBeenCalledWith('img-1')
+      expect(requestDeletion).toHaveBeenCalledWith(
+        { target_type: 'image', target_id: 'img-1' },
+        'deferred',
+        '',
+      )
+      expect(wrapper.text()).toContain('waiting_dependency')
+      expect(wrapper.text()).toContain('Pinned workspace')
     } finally {
       wrapper.unmount()
       confirmSpy.mockRestore()

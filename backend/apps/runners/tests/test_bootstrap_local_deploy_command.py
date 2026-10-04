@@ -148,7 +148,8 @@ def test_bootstrap_preserves_active_build(db) -> None:
     build.status = ImageBuildJob.Status.ACTIVE
     build.built_at = timezone.now()
     build.save(update_fields=["status", "built_at"])
-    ImageInstance.objects.create(
+    image = ImageInstance.objects.create(
+        is_legacy=True,
         runner=runner,
         runtime_type=RuntimeType.DOCKER,
         origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
@@ -158,6 +159,9 @@ def test_bootstrap_preserves_active_build(db) -> None:
         name="Local Docker Workspace (active-runner)",
         status=ImageInstance.Status.READY,
     )
+
+    build.current_generation = image
+    build.save(update_fields=["current_generation"])
 
     # Run bootstrap again
     call_command(

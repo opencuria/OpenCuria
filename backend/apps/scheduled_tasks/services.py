@@ -317,7 +317,7 @@ class ScheduledTaskService:
             await self._interrupt_if_claimed(run)
             raise
         except ConflictError as exc:
-            return await self._skip(run, "other_chat_active", str(exc))
+            return await self._skip_admission_conflict(task, run, exc)
         except Exception as exc:
             log.exception("scheduled_task_manual_run_failed", task_id=str(task.id))
             return await sync_to_async(self.repository.update_run)(
@@ -388,13 +388,7 @@ class ScheduledTaskService:
             await self._interrupt_if_claimed(claim)
             raise
         except ConflictError as exc:
-            await sync_to_async(self.repository.update_run)(
-                claim,
-                status=ScheduledTaskRun.Status.SKIPPED,
-                reason="other_chat_active",
-                finished_at=timezone.now(),
-                error=str(exc),
-            )
+            await self._skip_admission_conflict(task, claim, exc)
         except Exception as exc:
             log.exception("scheduled_task_dispatch_failed", task_id=str(task.id))
             await sync_to_async(self.repository.update_run)(
@@ -413,8 +407,16 @@ class ScheduledTaskService:
     ) -> None:
         """Delete an empty scheduled chat when admission failed before a run."""
         try:
-            await service.delete_session(session.id)
-            await sync_to_async(self.repository.update_run)(run, session=None)
+            deleted = await sync_to_async(self.repository.delete_unstarted_session)(
+                run.id,
+                session.id,
+                task_id=task.id,
+                workspace_id=task.workspace_id,
+                organization_id=task.organization_id,
+            )
+            if deleted:
+                run.session = None
+                await service._emit_conversations_changed(task.workspace_id)
         except Exception:
             log.exception(
                 "scheduled_task_unstarted_session_cleanup_failed",
@@ -480,9 +482,15 @@ class ScheduledTaskService:
             task, scheduled_for
         )
         task = self._task_for_run(task, run)
-        status, active_operation, runner_status, owner_is_active = await sync_to_async(
-            self.repository.workspace_resume_state
-        )(task.workspace_id)
+        (
+            status,
+            active_operation,
+            runner_status,
+            owner_is_active,
+            current_task_id,
+        ) = await sync_to_async(self.repository.workspace_resume_state)(
+            task.workspace_id
+        )
         owned = await sync_to_async(self.repository.workspace_is_owned)(
             task.workspace_id,
             organization_id=task.organization_id,
@@ -491,6 +499,12 @@ class ScheduledTaskService:
         if status is None or not owned or not owner_is_active:
             return await self._skip(
                 run, "workspace_unavailable", "Workspace is no longer available"
+            )
+        if current_task_id and not active_operation:
+            return await self._skip(
+                run,
+                "workspace_lifecycle_unresolved",
+                "Workspace lifecycle outcome unresolved; intervention required",
             )
         if status == WorkspaceStatus.RUNNING:
             if runner_status != "online" or active_operation:
@@ -522,6 +536,8 @@ class ScheduledTaskService:
                             "workspace_resume_failed",
                             "Workspace did not finish resuming before timeout",
                         )
+                except ConflictError as exc:
+                    return await self._skip_admission_conflict(task, run, exc)
                 except Exception as exc:
                     return await self._skip(run, "workspace_resume_failed", str(exc))
         elif status == "resuming":
@@ -544,9 +560,15 @@ class ScheduledTaskService:
             return await self._skip(
                 run, "workspace_not_running", f"Workspace is {status}"
             )
-        status, active_operation, runner_status, owner_is_active = await sync_to_async(
-            self.repository.workspace_resume_state
-        )(task.workspace_id)
+        (
+            status,
+            active_operation,
+            runner_status,
+            owner_is_active,
+            current_task_id,
+        ) = await sync_to_async(self.repository.workspace_resume_state)(
+            task.workspace_id
+        )
         owned = await sync_to_async(self.repository.workspace_is_owned)(
             task.workspace_id,
             organization_id=task.organization_id,
@@ -555,6 +577,12 @@ class ScheduledTaskService:
         if not owner_is_active or not owned:
             return await self._skip(
                 run, "workspace_unavailable", "Workspace is no longer available"
+            )
+        if current_task_id and not active_operation:
+            return await self._skip(
+                run,
+                "workspace_lifecycle_unresolved",
+                "Workspace lifecycle outcome unresolved; intervention required",
             )
         if (
             status != WorkspaceStatus.RUNNING
@@ -693,6 +721,32 @@ class ScheduledTaskService:
                 return False
             await asyncio.sleep(1)
         return False
+
+    async def _skip_admission_conflict(
+        self, task: ScheduledTask, run: ScheduledTaskRun, exc: ConflictError
+    ) -> ScheduledTaskRun:
+        """Classify admission races from persisted lifecycle state, not error text."""
+        task = self._task_for_run(task, run)
+        (
+            status,
+            operation,
+            runner_status,
+            owner_active,
+            current_task_id,
+        ) = await sync_to_async(self.repository.workspace_resume_state)(
+            task.workspace_id
+        )
+        if status is None or not owner_active:
+            reason = "workspace_unavailable"
+        elif current_task_id and not operation:
+            reason = "workspace_lifecycle_unresolved"
+        elif operation or runner_status != "online":
+            reason = "workspace_operation_active"
+        elif status != WorkspaceStatus.RUNNING:
+            reason = "workspace_not_running" if status else "workspace_unavailable"
+        else:
+            reason = "other_chat_active"
+        return await self._skip(run, reason, str(exc))
 
     async def _skip(
         self, run: ScheduledTaskRun, reason: str, error: str

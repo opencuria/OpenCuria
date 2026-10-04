@@ -258,6 +258,100 @@ _TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="preview_image_deletion",
+        description="Read-only exact physical cascade preview (org admin).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "target_type": {
+                    "type": "string",
+                    "enum": ["image", "assignment", "definition"],
+                },
+                "target_id": {"type": "string"},
+            },
+            "required": ["target_type", "target_id"],
+        },
+    ),
+    Tool(
+        name="request_image_deletion",
+        description="Retire and queue deletion; force requires org admin and preview fingerprint.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "target_type": {"type": "string"},
+                "target_id": {"type": "string"},
+                "mode": {"type": "string", "enum": ["deferred", "force"]},
+                "fingerprint": {"type": "string"},
+            },
+            "required": ["target_type", "target_id"],
+        },
+    ),
+    Tool(
+        name="cancel_image_deletion",
+        description="Cancel before any physical deletion command is released.",
+        inputSchema={
+            "type": "object",
+            "properties": {"request_id": {"type": "string"}},
+            "required": ["request_id"],
+        },
+    ),
+    Tool(
+        name="list_image_deletions",
+        description="List durable requests or exact request status.",
+        inputSchema={
+            "type": "object",
+            "properties": {"request_id": {"type": "string"}},
+            "required": [],
+        },
+    ),
+    Tool(
+        name="list_lifecycle_operations",
+        description="List sanitized lifecycle operations visible to owner or org admin.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="inspect_lifecycle_operation",
+        description="Fresh journal evidence and inventory; offline is unknown, never clears fences.",
+        inputSchema={
+            "type": "object",
+            "properties": {"operation_id": {"type": "string"}},
+            "required": ["operation_id"],
+        },
+    ),
+    Tool(
+        name="dispose_lifecycle_operation",
+        description="Explicit reconcile/retry safe known failure or admin acknowledge interruption; preserves resources.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "operation_id": {"type": "string"},
+                "action": {
+                    "type": "string",
+                    "enum": ["reconcile", "retry", "acknowledge_interrupted"],
+                },
+            },
+            "required": ["operation_id", "action"],
+        },
+    ),
+    Tool(
+        name="get_runner_storage",
+        description="Inspect actual cached storage, generations and freshness (org admin).",
+        inputSchema={
+            "type": "object",
+            "properties": {"runner_id": {"type": "string"}},
+            "required": ["runner_id"],
+        },
+    ),
+    Tool(
+        name="refresh_runner_storage",
+        description="Request a full runner storage scan (org admin).",
+        inputSchema={
+            "type": "object",
+            "properties": {"runner_id": {"type": "string"}},
+            "required": ["runner_id"],
+        },
+    ),
+    Tool(
         name="list_runners",
         description="List runners in the active organization.",
         inputSchema={"type": "object", "properties": {}},
@@ -269,7 +363,10 @@ _TOOLS: list[Tool] = [
     ),
     Tool(
         name="create_image_artifact",
-        description="Create an image artifact of a workspace.",
+        description=(
+            "Create an image artifact of a workspace. Running sources are stopped "
+            "and restarted automatically; stopped sources remain stopped."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -1294,6 +1391,15 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "resume_workspace": APIKeyPermission.WORKSPACES_RESUME,
     "remove_workspace": APIKeyPermission.WORKSPACES_DELETE,
     "list_runners": APIKeyPermission.RUNNERS_READ,
+    "preview_image_deletion": APIKeyPermission.IMAGES_DELETE,
+    "request_image_deletion": APIKeyPermission.IMAGES_DELETE,
+    "cancel_image_deletion": APIKeyPermission.IMAGES_DELETE,
+    "list_image_deletions": APIKeyPermission.IMAGES_DELETE,
+    "list_lifecycle_operations": APIKeyPermission.RUNNERS_READ,
+    "inspect_lifecycle_operation": APIKeyPermission.RUNNERS_READ,
+    "dispose_lifecycle_operation": APIKeyPermission.WORKSPACES_UPDATE,
+    "get_runner_storage": APIKeyPermission.RUNNERS_READ,
+    "refresh_runner_storage": APIKeyPermission.RUNNERS_READ,
     "list_image_artifacts": APIKeyPermission.IMAGES_READ,
     "create_image_artifact": APIKeyPermission.IMAGES_CREATE,
     "list_image_definitions": APIKeyPermission.IMAGE_DEFINITIONS_READ,
@@ -1465,6 +1571,8 @@ def _call_list_workspaces(api_key, org_id, args: dict) -> list[TextContent]:
             "id": str(w.id),
             "name": w.name,
             "status": str(w.status),
+            "intervention_required": w.intervention_required,
+            "lifecycle_diagnostic": w.lifecycle_diagnostic,
             "runner_id": str(w.runner_id),
             "runtime_type": str(w.runtime_type),
             "created_at": w.created_at.isoformat(),
@@ -1493,6 +1601,8 @@ def _call_get_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         "id": str(workspace.id),
         "name": workspace.name,
         "status": str(workspace.status),
+        "intervention_required": workspace.intervention_required,
+        "lifecycle_diagnostic": workspace.lifecycle_diagnostic,
         "runner_id": str(workspace.runner_id),
         "runtime_type": str(workspace.runtime_type),
         "desktop_width": workspace.desktop_width,
@@ -1598,6 +1708,8 @@ def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
                 "workspace_id": str(workspace.id),
                 "task_id": str(task.id),
                 "status": str(workspace.status),
+                "intervention_required": workspace.intervention_required,
+                "lifecycle_diagnostic": workspace.lifecycle_diagnostic,
                 "plugin_ids": plugin_ids_out,
                 "credential_sync_status": "not_required",
                 "message": "Workspace creation started. Use get_workspace to check status.",
@@ -1820,6 +1932,124 @@ def _call_remove_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         return _error(str(e))
 
 
+def _call_preview_image_deletion(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.runners.services.deletion import DeletionService
+
+    return _text(
+        DeletionService().preview(
+            api_key.user, org_id, args["target_type"], uuid.UUID(args["target_id"])
+        )
+    )
+
+
+def _call_request_image_deletion(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.runners.services.deletion import DeletionService
+
+    return _text(
+        DeletionService().request(
+            api_key.user,
+            org_id,
+            args["target_type"],
+            uuid.UUID(args["target_id"]),
+            args.get("mode", "deferred"),
+            args.get("fingerprint", ""),
+        )
+    )
+
+
+def _call_cancel_image_deletion(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.runners.services.deletion import DeletionService
+
+    return _text(
+        DeletionService().cancel(api_key.user, org_id, uuid.UUID(args["request_id"]))
+    )
+
+
+def _call_list_image_deletions(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.runners.services.deletion import DeletionService
+
+    return _text(DeletionService().list(api_key.user, org_id, args.get("request_id")))
+
+
+def _call_list_lifecycle_operations(
+    api_key, org_id: uuid.UUID, args: dict
+) -> list[TextContent]:
+    from apps.runners.disposition_repository import DispositionRepository
+
+    return _text({"operations": DispositionRepository.listing(api_key.user, org_id)})
+
+
+def _call_inspect_lifecycle_operation(
+    api_key, org_id: uuid.UUID, args: dict
+) -> list[TextContent]:
+    from apps.runners.services.disposition import DispositionService
+    from apps.runners.sio_server import get_runner_service
+
+    return _text(
+        asyncio.run(
+            DispositionService().inspect(
+                get_runner_service(),
+                api_key.user,
+                org_id,
+                uuid.UUID(args["operation_id"]),
+            )
+        )
+    )
+
+
+def _call_dispose_lifecycle_operation(
+    api_key, org_id: uuid.UUID, args: dict
+) -> list[TextContent]:
+    from apps.runners.services.disposition import DispositionService
+    from apps.runners.sio_server import get_runner_service
+
+    if args["action"] == "retry":
+        from apps.runners.disposition_repository import DispositionRepository
+
+        row = DispositionRepository.authorized(
+            api_key.user, org_id, uuid.UUID(args["operation_id"])
+        )
+        scope = {
+            "stop_workspace": APIKeyPermission.WORKSPACES_STOP,
+            "resume_workspace": APIKeyPermission.WORKSPACES_RESUME,
+            "remove_workspace": APIKeyPermission.WORKSPACES_DELETE,
+        }.get(row.task.type)
+        if scope is None or not api_key.has_permission(scope):
+            raise PermissionError("Operation-specific lifecycle scope required")
+    return _text(
+        asyncio.run(
+            DispositionService().act(
+                get_runner_service(),
+                api_key.user,
+                org_id,
+                uuid.UUID(args["operation_id"]),
+                args["action"],
+            )
+        )
+    )
+
+
+def _call_get_runner_storage(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.runners.services.storage import StorageService
+
+    return _text(
+        StorageService().detail(api_key.user, org_id, uuid.UUID(args["runner_id"]))
+    )
+
+
+def _call_refresh_runner_storage(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.runners.services.storage import StorageService
+    from apps.runners.sio_server import get_runner_service
+
+    return _text(
+        asyncio.run(
+            StorageService().refresh(
+                get_runner_service(), api_key.user, org_id, uuid.UUID(args["runner_id"])
+            )
+        )
+    )
+
+
 def _call_list_runners(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.organizations.services import OrganizationService
     from apps.runners.sio_server import get_runner_service
@@ -1847,7 +2077,6 @@ def _call_list_image_artifacts(api_key, org_id, args: dict) -> list[TextContent]
     svc = get_runner_service()
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
-    svc.timeout_stale_image_artifacts(timeout_hours=1)
     artifacts = svc.list_image_artifacts_for_user(user=api_key.user)
     result = [
         {
@@ -1869,7 +2098,7 @@ def _call_create_image_artifact(api_key, org_id, args: dict) -> list[TextContent
     import asyncio
     import uuid as _uuid
 
-    from common.exceptions import NotFoundError
+    from common.exceptions import ConflictError, NotFoundError
 
     workspace_id_str = args.get("workspace_id")
     name = args.get("name")
@@ -1897,10 +2126,12 @@ def _call_create_image_artifact(api_key, org_id, args: dict) -> list[TextContent
             )
 
         loop = asyncio.new_event_loop()
-        workspace, task = loop.run_until_complete(_create())
-        loop.close()
+        try:
+            workspace, task = loop.run_until_complete(_create())
+        finally:
+            loop.close()
         return _text({"task_id": str(task.id), "workspace_id": str(workspace.id)})
-    except (NotFoundError, ValueError) as e:
+    except (NotFoundError, ConflictError, ValueError) as e:
         return _error(str(e))
 
 
@@ -2064,7 +2295,7 @@ def _call_update_image_definition(api_key, org_id, args: dict) -> list[TextConte
         return _error("Admin role required")
 
     definition = ImageDefinitionRepository.get_by_id_and_org(definition_id, org_id)
-    if definition is None:
+    if definition is None or definition.organization_id != org_id:
         return _error("Image definition not found")
 
     runtime_type = args.get("runtime_type") or definition.runtime_type
@@ -2074,7 +2305,7 @@ def _call_update_image_definition(api_key, org_id, args: dict) -> list[TextConte
             "QEMU image definitions currently require an ubuntu:<version> base distro"
         )
 
-    for field in [
+    fields = [
         "name",
         "description",
         "runtime_type",
@@ -2084,10 +2315,12 @@ def _call_update_image_definition(api_key, org_id, args: dict) -> list[TextConte
         "custom_dockerfile",
         "custom_init_script",
         "is_active",
-    ]:
-        if field in args and args[field] is not None:
-            setattr(definition, field, args[field])
-    definition.save()
+    ]
+    from apps.runners.sio_server import get_runner_service
+
+    definition = get_runner_service().update_image_recipe(
+        definition.id, {field: args[field] for field in fields if field in args}
+    )
     return _text({"id": str(definition.id), "name": definition.name})
 
 
@@ -2114,7 +2347,7 @@ def _call_delete_image_definition(api_key, org_id, args: dict) -> list[TextConte
         return _error("Admin role required")
 
     definition = ImageDefinitionRepository.get_by_id_and_org(definition_id, org_id)
-    if definition is None:
+    if definition is None or definition.organization_id != org_id:
         return _error("Image definition not found")
 
     svc = get_runner_service()
@@ -2176,6 +2409,12 @@ def _call_list_build_jobs(api_key, org_id, args: dict) -> list[TextContent]:
                     else ""
                 ),
                 "id": str(build.id),
+                "current_generation_id": str(build.current_generation_id)
+                if build.current_generation_id
+                else None,
+                "pending_generation_id": str(build.pending_generation_id)
+                if build.pending_generation_id
+                else None,
                 "image_definition_id": str(build.image_definition_id),
                 "runner_id": str(build.runner_id),
                 "status": build.status,
@@ -2281,9 +2520,7 @@ def _call_update_build_job(api_key, org_id, args: dict) -> list[TextContent]:
             svc.ensure_definition_mutable(build.image_definition)
         except ConflictError as e:
             return _error(e.message)
-        build.status = ImageBuildJob.Status.DEACTIVATED
-        build.deactivated_at = timezone.now()
-        build.save(update_fields=["status", "deactivated_at", "updated_at"])
+        build = svc.deactivate_runner_image(build)
         return _text({"id": str(build.id), "status": build.status})
 
     if action not in {"activate", "rebuild"}:
@@ -2345,18 +2582,18 @@ def _call_delete_build_job(api_key, org_id, args: dict) -> list[TextContent]:
     svc = get_runner_service()
 
     async def _delete():
-        await svc.delete_build_job(build.id)
+        return await svc.delete_build_job(build.id)
 
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(_delete())
+        result = loop.run_until_complete(_delete())
     except ConflictError as e:
         return _error(e.message)
     except ValueError as e:
         return _error(str(e))
     finally:
         loop.close()
-    return _text({"deleted": True})
+    return _text(result)
 
 
 def _call_get_build_job_log(api_key, org_id, args: dict) -> list[TextContent]:
@@ -2602,9 +2839,7 @@ def _call_connect_credential_oauth(api_key, org_id, args: dict):
 
     try:
         if credential_id:
-            credential = CredentialRepository.get_by_id(
-                _uuid.UUID(str(credential_id))
-            )
+            credential = CredentialRepository.get_by_id(_uuid.UUID(str(credential_id)))
             if (
                 credential is None
                 or credential.service.credential_type != CredentialType.MCP_OAUTH
@@ -2658,6 +2893,8 @@ def _call_connect_credential_oauth(api_key, org_id, args: dict):
         return _error("Invalid OAuth service or credential ID")
     except Exception as exc:
         return _error(str(exc))
+
+
 def _call_disconnect_credential_oauth(api_key, org_id, args: dict):
     import uuid as _uuid
 
@@ -4880,6 +5117,15 @@ _TOOL_HANDLERS = {
     "resume_workspace": _call_resume_workspace,
     "remove_workspace": _call_remove_workspace,
     "list_runners": _call_list_runners,
+    "preview_image_deletion": _call_preview_image_deletion,
+    "request_image_deletion": _call_request_image_deletion,
+    "cancel_image_deletion": _call_cancel_image_deletion,
+    "list_image_deletions": _call_list_image_deletions,
+    "list_lifecycle_operations": _call_list_lifecycle_operations,
+    "inspect_lifecycle_operation": _call_inspect_lifecycle_operation,
+    "dispose_lifecycle_operation": _call_dispose_lifecycle_operation,
+    "get_runner_storage": _call_get_runner_storage,
+    "refresh_runner_storage": _call_refresh_runner_storage,
     "list_image_artifacts": _call_list_image_artifacts,
     "create_image_artifact": _call_create_image_artifact,
     "list_image_definitions": _call_list_image_definitions,

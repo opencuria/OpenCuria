@@ -22,6 +22,7 @@ async def test_create_workspace_resolves_credentials_without_api_pre_resolution(
     socket_server = AsyncMock()
     service = RunnerService(sio_server=socket_server)
     artifact = ImageInstance.objects.create(
+        is_legacy=True,
         runner=runner,
         runtime_type="docker",
         origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -126,6 +127,7 @@ async def test_create_workspace_fallback_requires_user_and_organization(runner, 
     socket_server = AsyncMock()
     service = RunnerService(sio_server=socket_server)
     artifact = ImageInstance.objects.create(
+        is_legacy=True,
         runner=runner,
         runtime_type="docker",
         origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
@@ -166,6 +168,7 @@ async def test_create_workspace_fallback_validates_credential_ownership(runner, 
     socket_server = AsyncMock()
     service = RunnerService(sio_server=socket_server)
     artifact = ImageInstance.objects.create(
+        is_legacy=True,
         runner=runner,
         runtime_type="docker",
         origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,

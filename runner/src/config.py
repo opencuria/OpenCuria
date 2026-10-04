@@ -25,6 +25,8 @@ class RunnerSettings(BaseSettings):
         extra="ignore",
     )
 
+    state_dir: str = str(Path.home() / ".local/share/opencuria/runner")
+
     # Backend connection
     backend_url: str = "wss://api.opencuria.example.com"
     # backend_url: str = "http://localhost:8000"
@@ -52,6 +54,7 @@ class RunnerSettings(BaseSettings):
     qemu_ssh_timeout: int = 60  # seconds to wait for VM SSH readiness
 
     # Heartbeat
+    inventory_interval: int = 120
     heartbeat_interval: int = 15  # seconds between heartbeats to backend
 
     # SSH health check — self-healing for QEMU workspaces that become unreachable

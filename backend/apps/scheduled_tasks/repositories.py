@@ -60,6 +60,58 @@ class ScheduledTaskRepository:
         task.save(update_fields=["is_deleted", "enabled", "updated_at"])
 
     @staticmethod
+    def delete_unstarted_session(
+        run_id: uuid.UUID,
+        session_id: uuid.UUID,
+        *,
+        task_id: uuid.UUID,
+        workspace_id: uuid.UUID,
+        organization_id: uuid.UUID,
+    ) -> bool:
+        """Atomically discard only this claim's empty, idle root conversation.
+
+        Share admission's runner/workspace serialization, without applying the
+        user-facing lifecycle fence to internal rollback of an unstarted chat.
+        """
+        from apps.harness.models import HarnessSession, HarnessSessionStatus
+        from apps.runners.locking import lock_runner
+        from apps.runners.models import Workspace
+
+        runner_id = Workspace.objects.filter(pk=workspace_id).values_list(
+            "runner_id", flat=True
+        ).first()
+        if runner_id is None:
+            return False
+        with transaction.atomic():
+            lock_runner(runner_id)
+            Workspace.objects.select_for_update().get(pk=workspace_id)
+            session = HarnessSession.objects.select_for_update().filter(
+                pk=session_id,
+                workspace_id=workspace_id,
+                organization_id=organization_id,
+                parent__isnull=True,
+                status=HarnessSessionStatus.IDLE,
+            ).first()
+            if session is None:
+                return False
+            claim = ScheduledTaskRun.objects.select_for_update().filter(
+                pk=run_id,
+                scheduled_task_id=task_id,
+                session_id=session_id,
+                status=ScheduledTaskRun.Status.CLAIMED,
+                started_at__isnull=True,
+                assistant_message__isnull=True,
+            ).first()
+            if claim is None or session.messages.exists() or session.children.exists():
+                return False
+            if session.scheduled_task_runs.exclude(pk=run_id).exists():
+                return False
+            claim.session = None
+            claim.save(update_fields=["session"])
+            session.delete()
+            return True
+
+    @staticmethod
     def has_active_run(task_id: uuid.UUID) -> bool:
         return ScheduledTaskRun.objects.filter(
             scheduled_task_id=task_id,
@@ -130,17 +182,21 @@ class ScheduledTaskRepository:
     @staticmethod
     def workspace_resume_state(
         workspace_id: uuid.UUID,
-    ) -> tuple[str | None, str | None, str | None, bool]:
+    ) -> tuple[str | None, str | None, str | None, bool, uuid.UUID | None]:
         from apps.runners.models import Workspace
 
         row = (
             Workspace.objects.filter(id=workspace_id)
             .values_list(
-                "status", "active_operation", "runner__status", "created_by__is_active"
+                "status",
+                "active_operation",
+                "runner__status",
+                "created_by__is_active",
+                "current_task_id",
             )
             .first()
         )
-        return row or (None, None, None, False)
+        return row or (None, None, None, False, None)
 
     @staticmethod
     def workspace_status(workspace_id: uuid.UUID) -> str | None:

@@ -30,6 +30,15 @@ from apps.runners.models import Runner
 from common.utils import hash_token
 
 
+@pytest.fixture(autouse=True)
+def available_desktop_workspace(monkeypatch):
+    """Existing isolated proxy tests model an available workspace."""
+    monkeypatch.setattr(
+        "apps.runners.desktop_proxy._desktop_workspace_available",
+        AsyncMock(return_value=True),
+    )
+
+
 async def _call_http(scope: dict) -> list[dict]:
     """Execute the proxy app for a single HTTP request and collect ASGI events."""
     events: list[dict] = []

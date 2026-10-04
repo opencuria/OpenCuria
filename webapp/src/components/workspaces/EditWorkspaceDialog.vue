@@ -39,6 +39,12 @@ const open = defineModel<boolean>('open', { default: false })
 const emit = defineEmits<{ draftError: [message: string] }>()
 const credentialStore = useCredentialStore()
 const workspaceStore = useWorkspaceStore()
+watch(
+  () => workspaceStore.isWorkspaceTransitioning(props.workspace.id),
+  (busy) => {
+    if (busy) open.value = false
+  },
+)
 const runnerStore = useRunnerStore()
 const authStore = useAuthStore()
 const notifications = useNotificationStore()

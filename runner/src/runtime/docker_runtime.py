@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import queue as _queue
 import threading
 import uuid
@@ -34,6 +35,8 @@ from .docker_frames import (
     DockerFrameError,
     DockerFrameParser,
 )
+from .inventory import RuntimeInventory, StorageResource
+from .storage import storage_mutation
 from .stream_wrapper import stream_wrapper_argv
 
 logger = structlog.get_logger(__name__)
@@ -76,7 +79,11 @@ class DockerRuntime(RuntimeBackend):
         client = self._get_client()
         network_name = self._workspace_network_name(workspace_id)
         try:
-            client.networks.get(network_name)
+            network = client.networks.get(network_name)
+            if (network.attrs.get("Labels") or {}).get(
+                "opencuria.workspace-id"
+            ) != workspace_id:
+                raise RuntimeError("Refusing foreign workspace network")
             return network_name
         except NetworkNotFound:
             pass
@@ -101,16 +108,16 @@ class DockerRuntime(RuntimeBackend):
         except NetworkNotFound:
             return
 
+        if (network.attrs.get("Labels") or {}).get(
+            "opencuria.workspace-id"
+        ) != workspace_id:
+            raise RuntimeError("Refusing foreign workspace network")
+        network.remove()
         try:
-            network.remove()
-        except Exception:
-            logger.warning(
-                "workspace_network_remove_failed",
-                workspace_id=workspace_id,
-                network=network_name,
-                exc_info=True,
-            )
-            raise
+            self._get_client().networks.get(network_name)
+        except NetworkNotFound:
+            return
+        raise RuntimeError("Workspace network remains after removal")
 
     def get_container_ip(self, instance_id: str, workspace_id: str) -> str:
         """Return the container IP on its workspace network."""
@@ -141,7 +148,10 @@ class DockerRuntime(RuntimeBackend):
             network.connect(container_name)
         except Exception as exc:
             # Already connected is fine
-            if "already exists" in str(exc).lower() or "endpoint with name" in str(exc).lower():
+            if (
+                "already exists" in str(exc).lower()
+                or "endpoint with name" in str(exc).lower()
+            ):
                 return
             raise
 
@@ -154,12 +164,44 @@ class DockerRuntime(RuntimeBackend):
         except Exception:
             pass  # Already disconnected or network gone
 
+    def _volume_labels(self, workspace_id: str) -> dict[str, str]:
+        return {
+            "opencuria.runtime-type": "docker",
+            "opencuria.workspace-id": workspace_id,
+            "opencuria.workspace-volume": "true",
+            "opencuria.mount-destination": "/workspace",
+            "opencuria.container-name": f"opencuria-workspace-{workspace_id}",
+        }
+
+    def _ensure_workspace_volume(self, config: WorkspaceConfig) -> None:
+        """Claim only the configured canonical workspace data mount."""
+        name = f"opencuria-workspace-{config.workspace_id}"
+        spec = config.volumes.get(name)
+        if spec is None:
+            return
+        if spec != {"bind": "/workspace", "mode": "rw"}:
+            raise RuntimeError("Invalid canonical workspace volume mount")
+        client = self._get_client()
+        try:
+            volume = client.volumes.get(name)
+        except ContainerNotFound:
+            client.volumes.create(
+                name=name, labels=self._volume_labels(config.workspace_id)
+            )
+            return
+        if volume.attrs.get("Labels") != self._volume_labels(config.workspace_id):
+            raise RuntimeError("Refusing existing unowned workspace volume")
+        if client.containers.list(all=True, filters={"volume": name}):
+            raise RuntimeError("Workspace volume already has consumers")
+
     # -- lifecycle -------------------------------------------------------------
 
+    @storage_mutation
     async def create_workspace(self, config: WorkspaceConfig) -> str:
         def _create() -> str:
             client = self._get_client()
             container_name = f"opencuria-workspace-{config.workspace_id}"
+            self._ensure_workspace_volume(config)
             network_name = self._ensure_workspace_network(config.workspace_id)
             try:
                 container = client.containers.run(
@@ -171,6 +213,7 @@ class DockerRuntime(RuntimeBackend):
                     network=network_name,
                     labels={
                         **(config.labels or {}),
+                        "opencuria.workspace-id": config.workspace_id,
                         "opencuria.workspace-network": network_name,
                     },
                     # Default CMD in Dockerfile is tail -f /dev/null, keeps alive
@@ -190,6 +233,7 @@ class DockerRuntime(RuntimeBackend):
         )
         return instance_id
 
+    @storage_mutation
     async def stop_workspace(self, instance_id: str) -> None:
         def _stop() -> None:
             self._container(instance_id).stop(timeout=10)
@@ -197,6 +241,7 @@ class DockerRuntime(RuntimeBackend):
         await asyncio.to_thread(_stop)
         logger.info("workspace_stopped", instance_id=instance_id[:12])
 
+    @storage_mutation
     async def start_workspace(self, instance_id: str) -> None:
         def _start() -> None:
             self._container(instance_id).start()
@@ -204,20 +249,101 @@ class DockerRuntime(RuntimeBackend):
         await asyncio.to_thread(_start)
         logger.info("workspace_started", instance_id=instance_id[:12])
 
+    @storage_mutation
     async def remove_workspace(self, instance_id: str) -> None:
         def _remove() -> None:
-            workspace_id: str | None = None
+            client = self._get_client()
+            container = None
+            workspace_id = None
             try:
                 container = self._container(instance_id)
                 container.reload()
-                labels = container.labels or {}
-                workspace_id = labels.get("opencuria.workspace-id") or None
-                container.remove(force=True)
+                workspace_id = (container.labels or {}).get("opencuria.workspace-id")
             except ContainerNotFound:
-                logger.info("workspace_container_already_absent", instance_id=instance_id[:12])
-
-            if workspace_id:
-                self._remove_workspace_network(workspace_id)
+                try:
+                    uuid.UUID(instance_id)
+                    workspace_id = instance_id
+                    container = self._container(f"opencuria-workspace-{instance_id}")
+                    container.reload()
+                    if (container.labels or {}).get(
+                        "opencuria.workspace-id"
+                    ) != instance_id:
+                        raise RuntimeError("Workspace container identity mismatch")
+                except ContainerNotFound:
+                    pass
+                except ValueError:
+                    raise RuntimeError(
+                        "Cannot prove absent container workspace identity"
+                    )
+            if not workspace_id:
+                raise RuntimeError("Container lacks workspace ownership identity")
+            name = f"opencuria-workspace-{workspace_id}"
+            volumes = []
+            for volume in client.volumes.list(
+                filters={"label": f"opencuria.workspace-id={workspace_id}"}
+            ):
+                if volume.name != name or volume.attrs.get(
+                    "Labels"
+                ) != self._volume_labels(workspace_id):
+                    raise RuntimeError("Foreign workspace volume ownership")
+                volumes.append(volume)
+            if container is None and not volumes:
+                try:
+                    client.volumes.get(name)
+                except ContainerNotFound:
+                    pass
+                else:
+                    raise RuntimeError(
+                        "Unattributed legacy volume remains; manual review required"
+                    )
+            try:
+                network = client.networks.get(
+                    self._workspace_network_name(workspace_id)
+                )
+            except NetworkNotFound:
+                network = None
+            if network is not None:
+                if (network.attrs.get("Labels") or {}).get(
+                    "opencuria.workspace-id"
+                ) != workspace_id:
+                    raise RuntimeError("Refusing foreign workspace network")
+                peers = network.attrs.get("Containers") or {}
+                if any(container is None or peer != container.id for peer in peers):
+                    raise RuntimeError("Workspace network has external consumers")
+            if container is not None:
+                for mount in container.attrs.get("Mounts", []):
+                    if mount.get("Type") != "volume" or mount.get("Name") != name:
+                        continue
+                    volume = client.volumes.get(name)
+                    labels = volume.attrs.get("Labels") or {}
+                    canonical = (
+                        container.name == name
+                        and mount.get("Destination") == "/workspace"
+                    )
+                    if not canonical or (
+                        labels and labels != self._volume_labels(workspace_id)
+                    ):
+                        raise RuntimeError("Refusing foreign canonical workspace mount")
+                    if all(v.name != name for v in volumes):
+                        volumes.append(volume)
+            # Stopped consumers count too; force never bypasses ownership.
+            for volume in volumes:
+                consumers = client.containers.list(
+                    all=True, filters={"volume": volume.name}
+                )
+                if any(container is None or c.id != container.id for c in consumers):
+                    raise RuntimeError("Workspace volume has external consumers")
+            if container is not None:
+                container.remove(force=True)
+            for volume in volumes:
+                volume.remove()  # daemon atomically rechecks consumers; no force
+                try:
+                    client.volumes.get(volume.name)
+                except ContainerNotFound:
+                    pass
+                else:
+                    raise RuntimeError("Workspace volume remains after removal")
+            self._remove_workspace_network(workspace_id)
 
         await asyncio.to_thread(_remove)
         logger.info("workspace_removed", instance_id=instance_id[:12])
@@ -410,20 +536,20 @@ class DockerRuntime(RuntimeBackend):
         is the pidfile path, passed as ``$1``.
         """
         script = (
-            "pidfile=\"$1\"; "
-            "pid=\"\"; "
-            "if [ -f \"$pidfile\" ]; then "
-            "pid=$(cat \"$pidfile\" 2>/dev/null); fi; "
+            'pidfile="$1"; '
+            'pid=""; '
+            'if [ -f "$pidfile" ]; then '
+            'pid=$(cat "$pidfile" 2>/dev/null); fi; '
             "case \"$pid\" in ''|*[!0-9]*) exit 0;; esac; "
-            "kill -TERM -\"$pid\" 2>/dev/null || "
-            "kill -TERM \"$pid\" 2>/dev/null || true; "
+            'kill -TERM -"$pid" 2>/dev/null || '
+            'kill -TERM "$pid" 2>/dev/null || true; '
             "for _ in 1 2 3 4 5 6 7 8 9 10; do "
-            "kill -0 \"$pid\" 2>/dev/null || break; "
+            'kill -0 "$pid" 2>/dev/null || break; '
             "sleep 0.2; "
             "done; "
-            "kill -KILL -\"$pid\" 2>/dev/null || "
-            "kill -KILL \"$pid\" 2>/dev/null || true; "
-            "rm -f \"$pidfile\""
+            'kill -KILL -"$pid" 2>/dev/null || '
+            'kill -KILL "$pid" 2>/dev/null || true; '
+            'rm -f "$pidfile"'
         )
         return ["sh", "-c", script, "opencuria-stream-kill", pidfile]
 
@@ -491,18 +617,10 @@ class DockerRuntime(RuntimeBackend):
                         handle.metadata.setdefault("frame_error", "frame_error")
                     break
                 for stream, payload in frames:
-                    target = (
-                        stdout_queue
-                        if stream == "stdout"
-                        else stderr_queue
-                    )
+                    target = stdout_queue if stream == "stdout" else stderr_queue
                     # Lossless re-chunk: never truncate payloads >64KiB.
-                    for offset in range(
-                        0, len(payload), DOCKER_QUEUE_CHUNK_SIZE
-                    ):
-                        piece = payload[
-                            offset : offset + DOCKER_QUEUE_CHUNK_SIZE
-                        ]
+                    for offset in range(0, len(payload), DOCKER_QUEUE_CHUNK_SIZE):
+                        piece = payload[offset : offset + DOCKER_QUEUE_CHUNK_SIZE]
                         if not piece:
                             continue
                         if stop.is_set():
@@ -833,9 +951,7 @@ class DockerRuntime(RuntimeBackend):
 
         await asyncio.to_thread(_write)
 
-    async def pty_resize(
-        self, handle: PtyHandle, cols: int, rows: int
-    ) -> None:
+    async def pty_resize(self, handle: PtyHandle, cols: int, rows: int) -> None:
         """Resize the PTY window."""
         if handle.closed:
             return
@@ -861,3 +977,306 @@ class DockerRuntime(RuntimeBackend):
 
         await asyncio.to_thread(_close)
         logger.info("pty_closed", exec_id=handle.metadata["exec_id"][:12])
+
+    @staticmethod
+    def _managed_tag(tag: str) -> bool:
+        """Recognize both immutable generation tags and historical tags."""
+        return tag.startswith(("opencuria/", "opencuria-", "opencuria:"))
+
+    @storage_mutation
+    async def inventory(self) -> RuntimeInventory:
+        """Deduplicate physical image IDs; retain foreign consumers as blockers."""
+        journal = getattr(self, "_publication_journal", None)
+        published = journal.publications() if journal else {}
+
+        def collect():
+            scan = RuntimeInventory("docker")
+            try:
+                client = self._get_client()
+                images = client.images.list(all=True)
+                containers = client.containers.list(all=True)
+                managed_ids = set()
+                for image in images:
+                    attrs = image.attrs
+                    tags = attrs.get("RepoTags") or []
+                    labels = attrs.get("Config", {}).get("Labels") or {}
+                    managed = bool(labels.get("opencuria.image-instance-id")) or any(
+                        self._managed_tag(t) for t in tags
+                    )
+                    if not managed:
+                        scan.foreign_resource_count += 1
+                        continue
+                    managed_ids.add(image.id)
+                    generation = labels.get("opencuria.image-instance-id")
+                    operation = labels.get("opencuria.operation-id")
+                    expected = f"opencuria/generations:{generation}"
+                    binding = published.get(image.id, {})
+                    conflicting = any(
+                        physical != image.id
+                        and proof.get("generation_id") == generation
+                        for physical, proof in published.items()
+                    )
+                    if conflicting and expected in tags:
+                        scan.errors.append(
+                            "Generation tag conflicts with published physical ID"
+                        )
+                    final = bool(
+                        not conflicting
+                        and generation
+                        and operation
+                        and (
+                            expected in tags
+                            or (
+                                binding.get("generation_id") == generation
+                                and binding.get("operation_id") == operation
+                                and binding.get("image_tag") == expected
+                            )
+                        )
+                    )
+                    metadata = {
+                        k: v
+                        for k, v in labels.items()
+                        if k
+                        in {"opencuria.image-instance-id", "opencuria.operation-id"}
+                    }
+                    if final:
+                        metadata["published_image_id"] = image.id
+                        metadata["expected_image_tag"] = expected
+                    scan.resources.append(
+                        StorageResource(
+                            image.id,
+                            "build_cache" if generation and not final else "image",
+                            True,
+                            aliases=tags,
+                            state="observed",
+                            logical_bytes=attrs.get("Size"),
+                            provenance="docker-inspect (layers overlap; not additive)",
+                            metadata=metadata,
+                        )
+                    )
+                for container in containers:
+                    attrs = container.attrs
+                    image_id = attrs.get("Image")
+                    managed = bool(
+                        (attrs.get("Config", {}).get("Labels") or {}).get(
+                            "opencuria.workspace-id"
+                        )
+                    )
+                    if not managed:
+                        scan.foreign_resource_count += 1
+                    if managed or image_id in managed_ids:
+                        mounts = attrs.get("Mounts") or []
+                        deps = [image_id] if image_id else []
+                        deps += [
+                            "volume:" + m["Name"]
+                            for m in mounts
+                            if m.get("Type") == "volume" and m.get("Name")
+                        ]
+                        scan.resources.append(
+                            StorageResource(
+                                container.id,
+                                "workspace" if managed else "foreign_reference",
+                                managed,
+                                dependencies=deps,
+                                state=attrs.get("State", {}).get("Status", "unknown"),
+                                metadata={
+                                    "workspace_id": (
+                                        attrs.get("Config", {}).get("Labels") or {}
+                                    ).get("opencuria.workspace-id")
+                                },
+                            )
+                        )
+                usage = client.api.df()
+                for volume in usage.get("Volumes") or []:
+                    name = volume["Name"]
+                    labels = volume.get("Labels") or {}
+                    if any(
+                        "volume:" + name in r.dependencies and r.managed
+                        for r in scan.resources
+                    ) or labels.get("opencuria.workspace-id"):
+                        scan.resources.append(
+                            StorageResource(
+                                "volume:" + name,
+                                "volume",
+                                labels
+                                == self._volume_labels(
+                                    labels.get("opencuria.workspace-id", "")
+                                )
+                                and name
+                                == f"opencuria-workspace-{labels.get('opencuria.workspace-id')}",
+                                metadata={
+                                    "workspace_id": labels.get("opencuria.workspace-id")
+                                },
+                                allocated_bytes=(volume.get("UsageData") or {}).get(
+                                    "Size"
+                                )
+                                if (volume.get("UsageData") or {}).get("Size", -1) >= 0
+                                else None,
+                                logical_bytes=(volume.get("UsageData") or {}).get(
+                                    "Size"
+                                )
+                                if (volume.get("UsageData") or {}).get("Size", -1) >= 0
+                                else None,
+                            )
+                        )
+                for cache in usage.get("BuildCache") or []:
+                    # Docker does not reliably identify build cache ownership.
+                    scan.foreign_resource_count += 1
+                for image in usage.get("Images") or []:
+                    item = next(
+                        (r for r in scan.resources if r.resource_id == image.get("Id")),
+                        None,
+                    )
+                    if item:
+                        shared = image.get("SharedSize", -1)
+                        item.metadata["docker_df_shared_bytes"] = (
+                            shared if shared >= 0 else None
+                        )
+                        item.metadata["docker_df_size_bytes"] = image.get("Size")
+                        # df and inspect can describe different engine accounting units.
+                        item.shared_bytes = (
+                            shared
+                            if shared >= 0
+                            and (
+                                item.logical_bytes is not None
+                                and shared <= item.logical_bytes
+                            )
+                            else None
+                        )
+                        item.provenance += (
+                            "; shared: docker-system-df (only comparable values)"
+                        )
+                filesystem = {
+                    "path": None,
+                    "capacity_bytes": None,
+                    "available_bytes": None,
+                    "used_bytes": None,
+                }
+                try:
+                    root = client.info().get("DockerRootDir")
+                    filesystem["path"] = root if isinstance(root, str) else None
+                    if self._base_url.startswith("unix://") and isinstance(root, str):
+                        stat = os.statvfs(root)
+                        filesystem.update(
+                            capacity_bytes=stat.f_blocks * stat.f_frsize,
+                            available_bytes=stat.f_bavail * stat.f_frsize,
+                            used_bytes=(stat.f_blocks - stat.f_bfree) * stat.f_frsize,
+                        )
+                except (OSError, docker.errors.DockerException):
+                    pass
+                scan.filesystems.append(filesystem)
+                scan.complete = not scan.errors
+            except Exception:
+                scan.errors.append("Docker enumeration/usage failed")
+            return scan
+
+        return await asyncio.to_thread(collect)
+
+    @storage_mutation
+    async def delete_image_reference(self, image_ref: str) -> str:
+        """Never force removal; only remove owned aliases after a full graph scan."""
+        scan = await self.inventory()
+        if not scan.complete:
+            raise RuntimeError("Incomplete inventory blocks deletion")
+        resource = next(
+            (
+                r
+                for r in scan.resources
+                if r.kind == "image"
+                and (image_ref == r.resource_id or image_ref in r.aliases)
+            ),
+            None,
+        )
+        if resource is None:
+            # Prove absent through daemon lookup, not absence from managed list.
+            from docker.errors import ImageNotFound
+
+            try:
+                await asyncio.to_thread(self._get_client().images.get, image_ref)
+            except ImageNotFound:
+                return "already_absent"
+            raise RuntimeError("Unmanaged image deletion refused")
+        if any(resource.resource_id in r.dependencies for r in scan.resources):
+            raise RuntimeError("Image has container dependents")
+        if any(not self._managed_tag(tag) for tag in resource.aliases):
+            raise RuntimeError("Foreign/shared aliases block deletion")
+        client = self._get_client()
+        for alias in resource.aliases:
+            await asyncio.to_thread(client.images.remove, image=alias, force=False)
+        if not resource.aliases:
+            raise RuntimeError("Untagged image requires operator inspection")
+        from docker.errors import ImageNotFound
+
+        try:
+            await asyncio.to_thread(client.images.get, resource.resource_id)
+        except ImageNotFound:
+            return "deleted"
+        raise RuntimeError("Physical image still present")
+
+    @storage_mutation
+    async def build_image(
+        self,
+        *,
+        dockerfile_content: str,
+        image_tag: str,
+        operation_id: str,
+        image_instance_id: str,
+        progress_callback=None,
+    ) -> dict:
+        """Publish unique generation tag with durable daemon identity labels."""
+        import io
+        import tarfile
+
+        if image_tag != f"opencuria/generations:{uuid.UUID(image_instance_id)}":
+            raise ValueError("Build tag must contain immutable image UUID")
+        client = self._get_client()
+        from docker.errors import ImageNotFound
+
+        try:
+            await asyncio.to_thread(client.images.get, image_tag)
+        except ImageNotFound:
+            pass
+        else:
+            raise FileExistsError("Build target already exists")
+        context = io.BytesIO()
+        with tarfile.open(fileobj=context, mode="w") as archive:
+            content = dockerfile_content.encode()
+            info = tarfile.TarInfo("Dockerfile")
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+        context.seek(0)
+        image, logs = await asyncio.to_thread(
+            client.images.build,
+            fileobj=context,
+            custom_context=True,
+            rm=True,
+            tag=image_tag,
+            pull=False,
+            forcerm=True,
+            labels={
+                "opencuria.image-instance-id": image_instance_id,
+                "opencuria.operation-id": operation_id,
+            },
+        )
+        if progress_callback:
+            for entry in logs:
+                try:
+                    await progress_callback(
+                        str(entry.get("stream") or entry.get("status") or "").strip()
+                    )
+                except Exception:
+                    pass
+        final = await asyncio.to_thread(client.images.get, image_tag)
+        if final.id != image.id:
+            raise RuntimeError("Final generation tag identity changed")
+        journal = getattr(self, "_publication_journal", None)
+        if journal:
+            journal.publish_image(
+                image.id,
+                {
+                    "generation_id": image_instance_id,
+                    "operation_id": operation_id,
+                    "image_tag": image_tag,
+                },
+            )
+        return {"image_tag": image_tag, "image_id": image.id}

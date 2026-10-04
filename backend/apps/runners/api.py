@@ -22,7 +22,7 @@ from django.core.exceptions import ObjectDoesNotExist, SynchronousOnlyOperation
 from django.db.models import Q
 from django.http import HttpRequest
 from django.utils import timezone
-from ninja import Router
+from ninja import Schema, Router
 
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
@@ -34,6 +34,7 @@ from common.utils import generate_api_token, hash_token
 from .enums import RunnerStatus as RS
 from .enums import WorkspaceStatus
 from .exceptions import RunnerOfflineError
+from .storage_schemas import RunnerStorageOut
 from .repositories import RunnerRepository, RunnerSystemMetricsRepository
 from .schemas import (
     DesktopClipboardReadOut,
@@ -149,6 +150,8 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
         runner_id=workspace.runner_id,
         status=workspace.status,
         active_operation=workspace.active_operation,
+        intervention_required=workspace.intervention_required,
+        lifecycle_diagnostic=workspace.lifecycle_diagnostic,
         name=workspace.name,
         runtime_type=workspace.runtime_type,
         qemu_vcpus=workspace.qemu_vcpus,
@@ -204,34 +207,7 @@ def _get_org_service() -> OrganizationService:
 
 def _org_image_definition_copy_name(base_name: str, org_id: uuid.UUID) -> str:
     """Return a unique image definition copy name scoped to an organization."""
-    from .models import ImageDefinition
-
-    base = (base_name or "").strip() or "image"
-    if len(base) > 255:
-        base = base[:255]
-
-    candidate = base
-    if not ImageDefinition.objects.filter(
-        organization_id=org_id, name=candidate
-    ).exists():
-        return candidate
-
-    suffix = " (Copy)"
-    candidate = f"{base[: 255 - len(suffix)]}{suffix}"
-    if not ImageDefinition.objects.filter(
-        organization_id=org_id, name=candidate
-    ).exists():
-        return candidate
-
-    index = 2
-    while True:
-        suffix = f" (Copy {index})"
-        candidate = f"{base[: 255 - len(suffix)]}{suffix}"
-        if not ImageDefinition.objects.filter(
-            organization_id=org_id, name=candidate
-        ).exists():
-            return candidate
-        index += 1
+    return _get_service().image_definition_copy_name(base_name, org_id)
 
 
 def _validate_image_definition_runtime(runtime_type: str, base_distro: str):
@@ -316,13 +292,7 @@ async def _get_owned_workspace_artifact_async(
 
 def _get_image_definition_for_org(org_id: uuid.UUID, definition_id: uuid.UUID):
     """Return a visible image definition for an organization."""
-    from .models import ImageDefinition
-
-    return (
-        ImageDefinition.objects.filter(id=definition_id)
-        .filter(Q(organization__isnull=True) | Q(organization_id=org_id))
-        .first()
-    )
+    return _get_service().get_visible_image_definition(definition_id, org_id)
 
 
 def _get_build_job_for_org(
@@ -343,7 +313,9 @@ def _get_build_job_for_org(
             Q(image_definition__organization_id=org_id)
             | Q(image_definition__organization__isnull=True)
         )
-        .select_related("image_definition", "runner", "build_task", "image_instance")
+        .select_related(
+            "image_definition", "runner", "build_task", "current_generation"
+        )
         .first()
     )
 
@@ -353,6 +325,18 @@ def _get_build_job_for_org(
 # ===========================================================================
 
 runner_router = Router(tags=["runners"])
+
+
+@runner_router.get("/operations/", response={200: dict, 403: ErrorOut})
+def list_lifecycle_operations(request: HttpRequest):
+    """List sanitized lifecycle state visible to the current owner/admin."""
+    from .disposition_repository import DispositionRepository
+
+    if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
+        return _perm_denied(APIKeyPermission.RUNNERS_READ)
+    return {
+        "operations": DispositionRepository.listing(request.user, _get_org_id(request))
+    }
 
 
 @runner_router.get(
@@ -632,6 +616,8 @@ def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
             runner_id=workspace.runner_id,
             status=workspace.status,
             active_operation=workspace.active_operation,
+            intervention_required=workspace.intervention_required,
+            lifecycle_diagnostic=workspace.lifecycle_diagnostic,
             name=workspace.name,
             runtime_type=workspace.runtime_type,
             qemu_vcpus=workspace.qemu_vcpus,
@@ -761,7 +747,7 @@ async def stop_desktop(
 
 @workspace_router.post(
     "/{workspace_id}/desktop/take-control/",
-    response={200: DesktopTakeControlOut, 403: ErrorOut, 404: ErrorOut},
+    response={200: DesktopTakeControlOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
     summary="Take desktop control from computer-use",
 )
 async def take_desktop_control(
@@ -784,6 +770,8 @@ async def take_desktop_control(
         if not is_admin and workspace.created_by_id != request.user.id:
             raise NotFoundError("Workspace", str(workspace_id))
 
+        await sync_to_async(service._ensure_workspace_available)(workspace)
+
         from apps.harness.harness_service import get_harness_service
 
         harness = get_harness_service()
@@ -793,11 +781,13 @@ async def take_desktop_control(
         )
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
 
 
 @workspace_router.get(
     "/{workspace_id}/desktop/status/",
-    response={200: DesktopStatusOut, 403: ErrorOut, 404: ErrorOut},
+    response={200: DesktopStatusOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
     summary="Get desktop session status",
 )
 async def desktop_status(
@@ -818,6 +808,8 @@ async def desktop_status(
         if not is_admin and workspace.created_by_id != request.user.id:
             raise NotFoundError("Workspace", str(workspace_id))
 
+        await sync_to_async(service._ensure_workspace_available)(workspace)
+
         desktop_info = await sync_to_async(service.get_desktop_info)(str(workspace_id))
         is_active = desktop_info is not None
         proxy_url = f"/ws/desktop/{workspace_id}/" if is_active else None
@@ -831,6 +823,8 @@ async def desktop_status(
         )
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
 
 
 @workspace_router.post(
@@ -977,6 +971,8 @@ async def update_workspace(
             name=workspace.name,
             updated_at=workspace.updated_at,
             active_operation=workspace.active_operation,
+            intervention_required=workspace.intervention_required,
+            lifecycle_diagnostic=workspace.lifecycle_diagnostic,
             credential_ids=_workspace_credential_ids(workspace),
             plugin_ids=persisted_plugin_ids,
             credential_sync_status=getattr(
@@ -1741,13 +1737,18 @@ def _image_artifact_to_out(artifact) -> ImageArtifactOut:
         image_definition = getattr(runner_build, "image_definition", None)
         if image_definition is not None:
             source_definition_name = image_definition.name
-            runtime_type = image_definition.runtime_type
         is_deactivated = getattr(runner_build, "status", "") == "deactivated"
     if getattr(artifact, "status", "") == "retired":
         is_deactivated = True
 
     return ImageArtifactOut(
         id=artifact.id,
+        revision_id=artifact.revision_id,
+        generation=artifact.generation,
+        is_legacy=artifact.is_legacy,
+        is_current=bool(
+            runner_build and runner_build.current_generation_id == artifact.id
+        ),
         source_workspace_id=artifact.origin_workspace_id,
         runner_artifact_id=artifact.runner_ref,
         name=artifact.name,
@@ -1772,6 +1773,80 @@ def _image_artifact_to_out(artifact) -> ImageArtifactOut:
     )
 
 
+class ImageDeletionIn(Schema):
+    target_type: str
+    target_id: uuid.UUID
+    mode: str = "deferred"
+    fingerprint: str = ""
+
+
+def _deletion_response(request, action, *args):
+    from .services.deletion import DeletionService
+
+    if not check_api_key_permission(request, APIKeyPermission.IMAGES_DELETE):
+        return _perm_denied(APIKeyPermission.IMAGES_DELETE)
+    try:
+        return getattr(DeletionService(), action)(
+            request.user, _get_org_id(request), *args
+        )
+    except AuthenticationError as exc:
+        return 403, ErrorOut(detail=exc.message, code=exc.code)
+    except NotFoundError as exc:
+        return 404, ErrorOut(detail=exc.message, code=exc.code)
+    except ConflictError as exc:
+        return 409, ErrorOut(detail=exc.message, code=exc.code)
+
+
+@image_artifact_router.post(
+    "/deletions/preview/",
+    response={200: dict, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+)
+def preview_image_deletion(request: HttpRequest, payload: ImageDeletionIn):
+    """Read-only structural cascade preview; no retirement or tasks."""
+    return _deletion_response(
+        request, "preview", payload.target_type, payload.target_id
+    )
+
+
+@image_artifact_router.post(
+    "/deletions/", response={200: dict, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut}
+)
+def request_image_deletion(request: HttpRequest, payload: ImageDeletionIn):
+    """Retire now and persist deferred or exact fingerprint-approved force intent."""
+    return _deletion_response(
+        request,
+        "request",
+        payload.target_type,
+        payload.target_id,
+        payload.mode,
+        payload.fingerprint,
+    )
+
+
+@image_artifact_router.get(
+    "/deletions/",
+    response={200: list[dict], 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+)
+def list_image_deletions(request: HttpRequest):
+    return _deletion_response(request, "list")
+
+
+@image_artifact_router.get(
+    "/deletions/{request_id}/",
+    response={200: list[dict], 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+)
+def image_deletion_status(request: HttpRequest, request_id: uuid.UUID):
+    return _deletion_response(request, "list", request_id)
+
+
+@image_artifact_router.post(
+    "/deletions/{request_id}/cancel/",
+    response={200: dict, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+)
+def cancel_image_deletion(request: HttpRequest, request_id: uuid.UUID):
+    return _deletion_response(request, "cancel", request_id)
+
+
 @image_artifact_router.get(
     "/",
     response=list[ImageArtifactOut],
@@ -1786,14 +1861,13 @@ def list_image_artifacts(request: HttpRequest):
     org_service.require_membership(request.user, org_id)
 
     service = _get_service()
-    service.timeout_stale_image_artifacts(timeout_hours=1)
     artifacts = service.list_image_artifacts_for_user(user=request.user)
     return [_image_artifact_to_out(artifact) for artifact in artifacts]
 
 
 @image_artifact_router.post(
     "/",
-    response={202: ImageArtifactCreateOut, 403: ErrorOut, 404: ErrorOut},
+    response={202: ImageArtifactCreateOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
     summary="Create an image artifact from a workspace",
 )
 async def create_image_artifact_global(
@@ -1817,6 +1891,8 @@ async def create_image_artifact_global(
             organization_id=org_id,
         )
         return 202, ImageArtifactCreateOut(task_id=task.id, workspace_id=workspace.id)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=str(e), code="conflict")
     except (NotFoundError, ValueError) as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
 
@@ -1873,13 +1949,16 @@ async def delete_image_artifact_global(
         artifact = await sync_to_async(service.get_image_artifact)(image_artifact_id)
         if artifact is None:
             return 404, ErrorOut(detail="Image artifact not found", code="not_found")
-        if artifact.created_by != request.user:
-            return 403, ErrorOut(
-                detail="Not authorized to delete this image artifact",
-                code="forbidden",
-            )
-        await service.delete_image_artifact(image_artifact_id)
+        from .services.deletion import DeletionService
+
+        await sync_to_async(DeletionService().request)(
+            request.user, org_id, "image", image_artifact_id
+        )
         return 204, None
+    except AuthenticationError as e:
+        return 403, ErrorOut(detail=e.message, code=e.code)
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
     except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
     except ConflictError as e:
@@ -1950,7 +2029,9 @@ async def create_workspace_from_image_artifact_global(
     except RunnerOfflineError as e:
         return 409, ErrorOut(detail=str(e), code="runner_offline")
     except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code, gaps=getattr(e, "gaps", None))
+        return 409, ErrorOut(
+            detail=e.message, code=e.code, gaps=getattr(e, "gaps", None)
+        )
     except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
 
@@ -1979,7 +2060,7 @@ def list_workspace_image_artifacts(request: HttpRequest, workspace_id: uuid.UUID
 
 @workspace_image_artifact_router.post(
     "/{workspace_id}/image-artifacts/",
-    response={202: ImageArtifactCreateOut, 404: ErrorOut},
+    response={202: ImageArtifactCreateOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
     summary="Create an image artifact from a workspace",
 )
 async def create_workspace_image_artifact(
@@ -2000,13 +2081,15 @@ async def create_workspace_image_artifact(
             organization_id=org_id,
         )
         return 202, ImageArtifactCreateOut(task_id=task.id, workspace_id=workspace.id)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=str(e), code="conflict")
     except (NotFoundError, ValueError) as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
 
 
 @workspace_image_artifact_router.delete(
     "/{workspace_id}/image-artifacts/{image_artifact_id}/",
-    response={204: None, 404: ErrorOut, 409: ErrorOut},
+    response={204: None, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
     summary="Delete an image artifact",
 )
 async def delete_workspace_image_artifact(
@@ -2022,14 +2105,17 @@ async def delete_workspace_image_artifact(
 
     service = _get_service()
     try:
-        await _get_owned_workspace_artifact_async(
-            request,
-            org_id,
-            workspace_id,
-            image_artifact_id,
+        from .services.deletion import DeletionService
+
+        artifact = await sync_to_async(service.get_image_artifact)(image_artifact_id)
+        if artifact is None or artifact.origin_workspace_id != workspace_id:
+            raise NotFoundError("Image artifact", str(image_artifact_id))
+        await sync_to_async(DeletionService().request)(
+            request.user, org_id, "image", image_artifact_id
         )
-        await service.delete_image_artifact(image_artifact_id)
         return 204, None
+    except AuthenticationError as e:
+        return 403, ErrorOut(detail=e.message, code=e.code)
     except (NotFoundError, ValueError) as e:
         detail = e.message if isinstance(e, NotFoundError) else str(e)
         return 404, ErrorOut(detail=detail, code="not_found")
@@ -2094,7 +2180,9 @@ async def create_workspace_from_workspace_image_artifact(
     except RunnerOfflineError as e:
         return 409, ErrorOut(detail=str(e), code="runner_offline")
     except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code, gaps=getattr(e, "gaps", None))
+        return 409, ErrorOut(
+            detail=e.message, code=e.code, gaps=getattr(e, "gaps", None)
+        )
     except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
 
@@ -2148,6 +2236,8 @@ def _build_job_to_out(build) -> ImageBuildJobOut:
         image_definition_id=build.image_definition_id,
         runner_id=build.runner_id,
         image_artifact_id=getattr(artifact, "id", None),
+        current_generation_id=build.current_generation_id,
+        pending_generation_id=build.pending_generation_id,
         status=build.status,
         build_log=getattr(build, "build_log", "") or "",
         build_task_id=build.build_task_id,
@@ -2174,6 +2264,8 @@ def _build_job_to_list_out(build) -> ImageBuildJobListOut:
         image_definition_id=build.image_definition_id,
         runner_id=build.runner_id,
         image_artifact_id=getattr(artifact, "id", None),
+        current_generation_id=build.current_generation_id,
+        pending_generation_id=build.pending_generation_id,
         status=build.status,
         build_log_size=int(getattr(build, "build_log_size", 0) or 0),
         build_task_id=build.build_task_id,
@@ -2215,7 +2307,6 @@ def create_image_definition(request: HttpRequest, payload: ImageDefinitionCreate
     org_id = _get_org_id(request)
     if not _is_org_admin(request.user, org_id):
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
-    from .models import ImageDefinition
 
     validation_error = _validate_image_definition_runtime(
         payload.runtime_type,
@@ -2224,7 +2315,7 @@ def create_image_definition(request: HttpRequest, payload: ImageDefinitionCreate
     if validation_error is not None:
         return validation_error
 
-    definition = ImageDefinition.objects.create(
+    definition = _get_service().create_image_definition(
         organization_id=org_id,
         created_by=request.user,
         name=payload.name,
@@ -2258,13 +2349,7 @@ def duplicate_image_definition(
     if org_service.get_user_role(request.user, org_id) != "admin":
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
 
-    from .models import ImageDefinition
-
-    source = (
-        ImageDefinition.objects.filter(id=definition_id)
-        .filter(Q(organization__isnull=True) | Q(organization_id=org_id))
-        .first()
-    )
+    source = _get_service().get_visible_image_definition(definition_id, org_id)
     if source is None:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
 
@@ -2272,7 +2357,7 @@ def duplicate_image_definition(
         return 400, ErrorOut(detail="name cannot be empty", code="validation_error")
 
     target_name = _org_image_definition_copy_name(payload.name or source.name, org_id)
-    copied = ImageDefinition.objects.create(
+    copied = _get_service().create_image_definition(
         organization_id=org_id,
         created_by=request.user,
         name=target_name,
@@ -2301,12 +2386,9 @@ def update_image_definition(
     org_id = _get_org_id(request)
     if not _is_org_admin(request.user, org_id):
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
-    from .models import ImageDefinition
 
-    definition = ImageDefinition.objects.filter(
-        id=definition_id, organization_id=org_id
-    ).first()
-    if definition is None:
+    definition = _get_service().get_visible_image_definition(definition_id, org_id)
+    if definition is None or definition.organization_id != org_id:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
 
     validation_error = _validate_image_definition_runtime(
@@ -2316,7 +2398,7 @@ def update_image_definition(
     if validation_error is not None:
         return validation_error
 
-    for field in [
+    fields = [
         "name",
         "description",
         "runtime_type",
@@ -2326,11 +2408,10 @@ def update_image_definition(
         "custom_dockerfile",
         "custom_init_script",
         "is_active",
-    ]:
-        value = getattr(payload, field, None)
-        if value is not None:
-            setattr(definition, field, value)
-    definition.save()
+    ]
+    definition = _get_service().update_image_recipe(
+        definition.id, {field: getattr(payload, field, None) for field in fields}
+    )
     return 200, _image_definition_to_out(definition)
 
 
@@ -2359,7 +2440,7 @@ async def delete_image_definition(request: HttpRequest, definition_id: uuid.UUID
     definition = await sync_to_async(_get_image_definition_for_org)(
         org_id, definition_id
     )
-    if definition is None:
+    if definition is None or definition.organization_id != org_id:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
 
     service = _get_service()
@@ -2393,7 +2474,7 @@ async def deactivate_image_definition(request: HttpRequest, definition_id: uuid.
     definition = await sync_to_async(_get_image_definition_for_org)(
         org_id, definition_id
     )
-    if definition is None:
+    if definition is None or definition.organization_id != org_id:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
 
     service = _get_service()
@@ -2421,7 +2502,7 @@ async def activate_image_definition(request: HttpRequest, definition_id: uuid.UU
     definition = await sync_to_async(_get_image_definition_for_org)(
         org_id, definition_id
     )
-    if definition is None:
+    if definition is None or definition.organization_id != org_id:
         return 404, ErrorOut(detail="Image definition not found", code="not_found")
 
     service = _get_service()
@@ -2510,8 +2591,6 @@ async def update_image_definition_runner_build(
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
     from django.utils import timezone
 
-    from .models import ImageBuildJob
-
     build = await sync_to_async(_get_build_job_for_org)(
         org_id,
         definition_id,
@@ -2527,11 +2606,7 @@ async def update_image_definition_runner_build(
             service.ensure_definition_mutable(build.image_definition)
         except ConflictError as e:
             return 409, ErrorOut(detail=e.message, code=e.code)
-        build.status = ImageBuildJob.Status.DEACTIVATED
-        build.deactivated_at = timezone.now()
-        await sync_to_async(build.save)(
-            update_fields=["status", "deactivated_at", "updated_at"]
-        )
+        build = await sync_to_async(service.deactivate_runner_image)(build)
         return 200, _build_job_to_out(build)
 
     if action not in {"activate", "rebuild"}:
@@ -2614,3 +2689,102 @@ def get_image_definition_runner_build_log(
     if build is None:
         return 404, ErrorOut(detail="Runner image build not found", code="not_found")
     return 200, {"build_log": build.build_log}
+
+
+@runner_router.get(
+    "/{runner_id}/storage/", response={200: RunnerStorageOut, 403: ErrorOut, 404: ErrorOut}
+)
+def runner_storage(request: HttpRequest, runner_id: uuid.UUID):
+    """Actual cached runner storage graph, including freshness and unknown sizes."""
+    from .services.storage import StorageService
+
+    if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
+        return _perm_denied(APIKeyPermission.RUNNERS_READ)
+    try:
+        return StorageService().detail(request.user, _get_org_id(request), runner_id)
+    except AuthenticationError as exc:
+        return 403, ErrorOut(detail=exc.message, code=exc.code)
+    except NotFoundError as exc:
+        return 404, ErrorOut(detail=exc.message, code=exc.code)
+
+
+@runner_router.post(
+    "/{runner_id}/storage/refresh/",
+    response={202: dict, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+)
+async def refresh_runner_storage(request: HttpRequest, runner_id: uuid.UUID):
+    """Explicitly request a full inventory scan; cached GET never dispatches."""
+    from .services.storage import StorageService
+
+    if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
+        return _perm_denied(APIKeyPermission.RUNNERS_READ)
+    try:
+        result = await StorageService().refresh(
+            _get_service(), request.user, _get_org_id(request), runner_id
+        )
+        return 202, result
+    except AuthenticationError as exc:
+        return 403, ErrorOut(detail=exc.message, code=exc.code)
+    except NotFoundError as exc:
+        return 404, ErrorOut(detail=exc.message, code=exc.code)
+    except RunnerOfflineError as exc:
+        return 409, ErrorOut(detail=str(exc), code="runner_offline")
+
+
+@runner_router.get(
+    "/operations/{operation_id}/", response={200: dict, 403: ErrorOut, 404: ErrorOut}
+)
+async def inspect_lifecycle_operation(request: HttpRequest, operation_id: uuid.UUID):
+    """Read fresh journal evidence, or explicit unknown when offline."""
+    from .services.disposition import DispositionService
+
+    if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
+        return _perm_denied(APIKeyPermission.RUNNERS_READ)
+    try:
+        return await DispositionService().inspect(
+            _get_service(), request.user, _get_org_id(request), operation_id
+        )
+    except AuthenticationError as exc:
+        return 403, ErrorOut(detail=exc.message, code=exc.code)
+    except NotFoundError as exc:
+        return 404, ErrorOut(detail=exc.message, code=exc.code)
+
+
+@runner_router.post(
+    "/operations/{operation_id}/{action}/",
+    response={200: dict, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+)
+async def dispose_lifecycle_operation(
+    request: HttpRequest, operation_id: uuid.UUID, action: str
+):
+    """Reconcile, retry safe known failure, or admin acknowledge interruption."""
+    from .services.disposition import DispositionService
+
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_UPDATE):
+        return _perm_denied(APIKeyPermission.WORKSPACES_UPDATE)
+    try:
+        if action == "retry":
+            from .disposition_repository import DispositionRepository
+
+            row = await sync_to_async(DispositionRepository.authorized)(
+                request.user, _get_org_id(request), operation_id
+            )
+            permission = {
+                "stop_workspace": APIKeyPermission.WORKSPACES_STOP,
+                "resume_workspace": APIKeyPermission.WORKSPACES_RESUME,
+                "remove_workspace": APIKeyPermission.WORKSPACES_DELETE,
+            }.get(row.task.type)
+            if permission is None or not check_api_key_permission(request, permission):
+                return 403, ErrorOut(
+                    detail="Operation-specific lifecycle scope required",
+                    code="forbidden",
+                )
+        return await DispositionService().act(
+            _get_service(), request.user, _get_org_id(request), operation_id, action
+        )
+    except AuthenticationError as exc:
+        return 403, ErrorOut(detail=exc.message, code=exc.code)
+    except NotFoundError as exc:
+        return 404, ErrorOut(detail=exc.message, code=exc.code)
+    except ConflictError as exc:
+        return 409, ErrorOut(detail=exc.message, code=exc.code)

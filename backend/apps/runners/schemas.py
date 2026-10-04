@@ -108,6 +108,8 @@ class WorkspaceOut(Schema):
     runner_id: uuid.UUID
     status: str
     active_operation: str | None = None
+    intervention_required: bool = False
+    lifecycle_diagnostic: str = ""
     name: str
     runtime_type: str = "docker"
     qemu_vcpus: int | None = None
@@ -195,6 +197,8 @@ class WorkspaceUpdateOut(Schema):
     name: str
     updated_at: datetime
     active_operation: str | None = None
+    intervention_required: bool = False
+    lifecycle_diagnostic: str = ""
     credential_ids: list[uuid.UUID] = []
     plugin_ids: list[uuid.UUID] = []
     credentials_present: bool = False
@@ -363,9 +367,13 @@ class ImageArtifactOut(Schema):
     source_workspace_id: uuid.UUID | None = None
     runner_artifact_id: str
     name: str
-    size_bytes: int
+    size_bytes: int | None
     status: str
     artifact_kind: str = "captured"
+    revision_id: uuid.UUID | None = None
+    generation: int | None = None
+    is_legacy: bool = False
+    is_current: bool = False
     build_job_id: uuid.UUID | None = None
     source_definition_name: str | None = None
     source_runner_id: uuid.UUID | None = None
@@ -439,6 +447,8 @@ class ImageBuildJobOut(Schema):
     image_definition_id: uuid.UUID
     runner_id: uuid.UUID
     image_artifact_id: uuid.UUID | None = None
+    current_generation_id: uuid.UUID | None = None
+    pending_generation_id: uuid.UUID | None = None
     status: str
     build_log: str
     build_task_id: uuid.UUID | None = None
@@ -463,6 +473,8 @@ class ImageBuildJobListOut(Schema):
     image_definition_id: uuid.UUID
     runner_id: uuid.UUID
     image_artifact_id: uuid.UUID | None = None
+    current_generation_id: uuid.UUID | None = None
+    pending_generation_id: uuid.UUID | None = None
     status: str
     build_log_size: int = 0
     build_task_id: uuid.UUID | None = None

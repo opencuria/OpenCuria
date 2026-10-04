@@ -396,15 +396,17 @@ describe('groupConversationsByWorkspace', () => {
   )
 
   it.each(nonRunningStatuses)(
-    'excludes %s workspaces with chats, even during active operations',
+    'excludes ordinary %s workspaces with chats during non-capture operations',
     (status) => {
       const workspaces = [
         workspace({ id: 'running' }),
         workspace({ id: `${status}-history`, status }),
-        ...Object.values(WorkspaceOperation).flatMap((active_operation) => [
-          workspace({ id: `${status}-${active_operation}-history`, status, active_operation }),
-          workspace({ id: `${status}-${active_operation}-empty`, status, active_operation }),
-        ]),
+        ...Object.values(WorkspaceOperation)
+          .filter((operation) => operation !== WorkspaceOperation.CAPTURING_IMAGE)
+          .flatMap((active_operation) => [
+            workspace({ id: `${status}-${active_operation}-history`, status, active_operation }),
+            workspace({ id: `${status}-${active_operation}-empty`, status, active_operation }),
+          ]),
       ]
       const conversations = workspaces
         .filter(({ id }) => !id.endsWith('-empty'))
@@ -424,6 +426,34 @@ describe('groupConversationsByWorkspace', () => {
       expect(groups[0]?.conversations).toEqual([conversations[0]])
     },
   )
+
+  it.each([
+    { active_operation: WorkspaceOperation.CAPTURING_IMAGE },
+    { intervention_required: true },
+  ])('retains stopped reserved history but never deletion states: %j', (reservation) => {
+    const workspaces = Object.values(WorkspaceStatus).map((status) =>
+      workspace({ id: status, status, ...reservation }),
+    )
+    const groups = groupConversationsByWorkspace(
+      workspaces,
+      workspaces.map(({ id }) => conversation({ workspace_id: id })),
+    )
+    expect(groups.map((group) => group.workspaceId)).toContain(WorkspaceStatus.STOPPED)
+    for (const status of [
+      WorkspaceStatus.REMOVED,
+      WorkspaceStatus.DELETED,
+      WorkspaceStatus.DELETING,
+      WorkspaceStatus.PENDING_DELETION,
+    ])
+      expect(groups.map((group) => group.workspaceId)).not.toContain(status)
+    expect(groups.every((group) => group.conversations.length === 1)).toBe(true)
+    expect(
+      groupConversationsByWorkspace(
+        [workspace({ status: WorkspaceStatus.STOPPED })],
+        [conversation()],
+      ),
+    ).toEqual([])
+  })
 
   it('shows empty running workspaces, including literal running status with an offline runner', () => {
     const groups = groupConversationsByWorkspace(

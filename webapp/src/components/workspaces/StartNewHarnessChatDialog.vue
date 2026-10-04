@@ -32,10 +32,7 @@ const composerMode = ref<HarnessSessionMode>('build')
 const creating = ref(false)
 
 const runningWorkspaces = computed(() =>
-  workspaceStore.workspaces.filter(
-    (workspace) =>
-      workspace.status === WorkspaceStatus.RUNNING && workspace.runner_online,
-  ),
+  workspaceStore.workspaces.filter((workspace) => workspaceStore.canUseWorkspace(workspace.id)),
 )
 
 onMounted(async () => {
@@ -58,6 +55,7 @@ function handleOpenChange(isOpen: boolean): void {
 }
 
 function selectWorkspace(workspace: Workspace): void {
+  if (!workspaceStore.canUseWorkspace(workspace.id)) return
   selectedWorkspace.value = workspace
   step.value = 'prompt'
 }
@@ -70,7 +68,7 @@ async function handleCreateSession(
   effort: string,
 ): Promise<void> {
   const workspace = selectedWorkspace.value
-  if (!workspace || creating.value) return
+  if (!workspace || creating.value || !workspaceStore.canUseWorkspace(workspace.id)) return
   creating.value = true
   try {
     const session = await harnessStore.createSession(
@@ -136,24 +134,28 @@ async function handleCreateSession(
         </ScrollArea>
       </div>
 
-      <div v-else-if="selectedWorkspace" class="space-y-3">
-        <Button variant="ghost" size="sm" class="px-0" @click="step = 'workspace'">
-          <ArrowLeft :size="14" class="mr-1" />
-          Back
-        </Button>
-        <HarnessChatInput
-          :workspace-id="selectedWorkspace.id"
-          :mode="composerMode"
-          :model="harnessStore.modelInput"
-          :effort="harnessStore.effortInput"
-          :skill-options="skillStore.skills"
-          :disabled="creating"
-          @update:mode="composerMode = $event"
-          @update:model="harnessStore.setComposerModel($event)"
-          @update:effort="harnessStore.setComposerEffort($event)"
-          @send="handleCreateSession"
-        />
-      </div>
+        <div v-else-if="selectedWorkspace" class="space-y-3">
+          <Button variant="ghost" size="sm" class="px-0" @click="step = 'workspace'">
+            <ArrowLeft :size="14" class="mr-1" />
+            Back
+          </Button>
+          <HarnessChatInput
+            :workspace-id="selectedWorkspace.id"
+            :mode="composerMode"
+            :model="harnessStore.modelInput"
+            :effort="harnessStore.effortInput"
+            :skill-options="skillStore.skills"
+            :disabled="
+              creating ||
+              !selectedWorkspace ||
+              !workspaceStore.canUseWorkspace(selectedWorkspace.id)
+            "
+            @update:mode="composerMode = $event"
+            @update:model="harnessStore.setComposerModel($event)"
+            @update:effort="harnessStore.setComposerEffort($event)"
+            @send="handleCreateSession"
+          />
+        </div>
       </DialogBody>
     </DialogContent>
   </Dialog>

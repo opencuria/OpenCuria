@@ -3,7 +3,10 @@
  * Shared inbox for pending gates and unread, idle plan/build chats.
  */
 import type { HarnessConversation } from '@/types/harness'
+import { useWorkspaceStore } from '@/stores/workspaces'
 import ConversationRow from './ConversationRow.vue'
+
+const workspaceStore = useWorkspaceStore()
 
 const props = defineProps<{
   conversations: HarnessConversation[]
@@ -37,6 +40,7 @@ const emit = defineEmits<{
         v-for="conversation in props.conversations"
         :key="conversation.session_id"
         :conversation="conversation"
+        :actions-disabled="workspaceStore.isWorkspaceTransitioning(conversation.workspace_id)"
         :active="props.activeSessionId === conversation.session_id"
         inbox
         show-workspace

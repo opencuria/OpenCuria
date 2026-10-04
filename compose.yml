@@ -1,37 +1,39 @@
 name: opencuria-local
-
 services:
   backend:
     image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:-latest}
-    build:
+    build: &backend_build
       context: ./backend
       dockerfile: Dockerfile
     container_name: opencuria_local_backend
     restart: unless-stopped
-    environment:
+    environment: &id002
       DJANGO_ENV: development
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-dev-secret-key-change-me}
       DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,backend
       SQLITE_PATH: /data/db.sqlite3
-      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY
+        is required}
       MCP_OAUTH_CALLBACK_URL: ${MCP_OAUTH_CALLBACK_URL:-http://127.0.0.1:8000/api/v1/mcp-oauth/callback/}
       MCP_OAUTH_FRONTEND_RETURN_URL: ${MCP_OAUTH_FRONTEND_RETURN_URL:-http://127.0.0.1:8080/?settings=credentials}
       DJANGO_SUPERUSER_EMAIL: ${LOCAL_ADMIN_EMAIL:-admin@localhost.test}
       DJANGO_SUPERUSER_PASSWORD: ${LOCAL_ADMIN_PASSWORD:-CHANGE_ME_local_admin_password}
-    volumes:
-      - backend-data:/data
-      - /var/run/docker.sock:/var/run/docker.sock
+      REDIS_URL: redis://redis:6379/0
+    volumes: &id003
+    - backend-data:/data
+    - /var/run/docker.sock:/var/run/docker.sock
     ports:
-      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
-    networks:
-      - opencuria-local
+    - 127.0.0.1:${BACKEND_PORT:-8000}:8000
+    networks: &id004
+    - opencuria-local
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/')\""]
+      test:
+      - CMD-SHELL
+      - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/')"
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 10s
-
   webapp:
     image: ghcr.io/opencuria/webapp:${OPENCURIA_TAG:-latest}
     build:
@@ -46,41 +48,41 @@ services:
       VITE_API_BASE_URL: http://127.0.0.1:${BACKEND_PORT:-8000}/api/v1
       VITE_WS_BASE_URL: http://127.0.0.1:${BACKEND_PORT:-8000}
     ports:
-      - "127.0.0.1:${WEBAPP_PORT:-8080}:80"
+    - 127.0.0.1:${WEBAPP_PORT:-8080}:80
     networks:
-      - opencuria-local
-
+    - opencuria-local
   bootstrap:
     image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:-latest}
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: opencuria_local_bootstrap
-    restart: "no"
+    restart: 'no'
     depends_on:
       backend:
         condition: service_healthy
     entrypoint:
-      - python
-      - manage.py
-      - bootstrap_local_deploy
-      - --admin-email
-      - ${LOCAL_ADMIN_EMAIL:-admin@localhost.test}
-      - --admin-password
-      - ${LOCAL_ADMIN_PASSWORD:-CHANGE_ME_local_admin_password}
-      - --organization-name
-      - ${LOCAL_ORGANIZATION_NAME:-Local}
-      - --runner-name
-      - ${LOCAL_RUNNER_NAME:-local-docker}
-      - --runner-token
-      - ${LOCAL_RUNNER_API_TOKEN:-local-runner-token-change-me}
-      - --image-definition-name
-      - ${LOCAL_IMAGE_DEFINITION_NAME:-Local Docker Workspace}
+    - python
+    - manage.py
+    - bootstrap_local_deploy
+    - --admin-email
+    - ${LOCAL_ADMIN_EMAIL:-admin@localhost.test}
+    - --admin-password
+    - ${LOCAL_ADMIN_PASSWORD:-CHANGE_ME_local_admin_password}
+    - --organization-name
+    - ${LOCAL_ORGANIZATION_NAME:-Local}
+    - --runner-name
+    - ${LOCAL_RUNNER_NAME:-local-docker}
+    - --runner-token
+    - ${LOCAL_RUNNER_API_TOKEN:-local-runner-token-change-me}
+    - --image-definition-name
+    - ${LOCAL_IMAGE_DEFINITION_NAME:-Local Docker Workspace}
     environment:
       DJANGO_ENV: development
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-dev-secret-key-change-me}
       SQLITE_PATH: /data/db.sqlite3
-      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY
+        is required}
       MCP_OAUTH_CALLBACK_URL: ${MCP_OAUTH_CALLBACK_URL:-http://127.0.0.1:8000/api/v1/mcp-oauth/callback/}
       MCP_OAUTH_FRONTEND_RETURN_URL: ${MCP_OAUTH_FRONTEND_RETURN_URL:-http://127.0.0.1:8080/?settings=credentials}
       LOCAL_ADMIN_EMAIL: ${LOCAL_ADMIN_EMAIL:-admin@localhost.test}
@@ -90,10 +92,9 @@ services:
       LOCAL_RUNNER_API_TOKEN: ${LOCAL_RUNNER_API_TOKEN:-local-runner-token-change-me}
       LOCAL_IMAGE_DEFINITION_NAME: ${LOCAL_IMAGE_DEFINITION_NAME:-Local Docker Workspace}
     volumes:
-      - backend-data:/data
+    - backend-data:/data
     networks:
-      - opencuria-local
-
+    - opencuria-local
   runner:
     image: ghcr.io/opencuria/runner:${OPENCURIA_TAG:-latest}
     build:
@@ -111,14 +112,35 @@ services:
       RUNNER_LOG_LEVEL: ${RUNNER_LOG_LEVEL:-INFO}
       RUNNER_LOG_FORMAT: ${RUNNER_LOG_FORMAT:-console}
       RUNNER_ENABLED_RUNTIMES: docker
+      RUNNER_STATE_DIR: /var/lib/opencuria/runner
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+    - /var/run/docker.sock:/var/run/docker.sock
+    - runner-state:/var/lib/opencuria/runner
     networks:
-      - opencuria-local
-
+    - opencuria-local
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+    - opencuria-local
+  recovery:
+    image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:-latest}
+    build: *backend_build
+    restart: unless-stopped
+    environment: *id002
+    volumes: *id003
+    networks: *id004
+    container_name: opencuria_local_recovery
+    entrypoint:
+    - python
+    - manage.py
+    - recover_lifecycle
+    depends_on:
+      backend:
+        condition: service_healthy
 volumes:
-  backend-data:
-
+  backend-data: null
+  runner-state: null
 networks:
   opencuria-local:
     name: opencuria-local

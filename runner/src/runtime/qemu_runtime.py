@@ -6,12 +6,12 @@ cloning.  All command execution is performed over SSH.
 
 from __future__ import annotations
 
-import abc
 import asyncio
 import contextlib
 import io
 import ipaddress
 import json
+import os
 import re
 import shlex
 import shutil
@@ -21,10 +21,8 @@ import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import asyncssh
 import libvirt
@@ -41,6 +39,8 @@ from .base import (
     ImageArtifactInfo,
     WorkspaceConfig,
 )
+from .storage import storage_mutation
+from .inventory import RuntimeInventory, StorageResource
 from .stream_wrapper import shell_quote_argv, stream_wrapper_argv
 
 logger = structlog.get_logger(__name__)
@@ -171,6 +171,10 @@ class QemuRuntime(RuntimeBackend):
     """QEMU/KVM runtime using libvirt for VM lifecycle and asyncssh for exec."""
 
     def __init__(self, settings: RunnerSettings) -> None:
+        import threading
+
+        self._publication_hash_cache: dict[str, tuple[tuple, str]] = {}
+        self._publication_hash_lock = threading.Lock()
         self._settings = settings
         self._conn: libvirt.virConnect | None = None
         self._ssh_connections: dict[str, asyncssh.SSHClientConnection] = {}
@@ -189,15 +193,13 @@ class QemuRuntime(RuntimeBackend):
         self._ensure_host_directory(
             self._snapshot_dir,
             writable_hint=(
-                "sudo install -d -o $USER -g $USER -m 755 "
-                f"'{self._snapshot_dir}'"
+                f"sudo install -d -o $USER -g $USER -m 755 '{self._snapshot_dir}'"
             ),
         )
 
         # Load or generate SSH keypair for VM access
         self._ssh_key_path = Path(
-            settings.qemu_ssh_key_path
-            or str(self._disk_dir / "opencuria-qemu-key")
+            settings.qemu_ssh_key_path or str(self._disk_dir / "opencuria-qemu-key")
         )
         self._ssh_user = settings.qemu_ssh_user
         self._ssh_timeout = settings.qemu_ssh_timeout
@@ -227,17 +229,20 @@ class QemuRuntime(RuntimeBackend):
             self._ssh_key_path.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(
                 [
-                    "ssh-keygen", "-t", "ed25519",
-                    "-f", str(self._ssh_key_path),
-                    "-N", "",  # no passphrase
-                    "-C", "opencuria-qemu-runtime",
+                    "ssh-keygen",
+                    "-t",
+                    "ed25519",
+                    "-f",
+                    str(self._ssh_key_path),
+                    "-N",
+                    "",  # no passphrase
+                    "-C",
+                    "opencuria-qemu-runtime",
                 ],
                 check=True,
                 capture_output=True,
             )
-            logger.info(
-                "ssh_keypair_generated", path=str(self._ssh_key_path)
-            )
+            logger.info("ssh_keypair_generated", path=str(self._ssh_key_path))
 
     def _ensure_host_directory(
         self, path: Path, *, writable_hint: str | None = None
@@ -249,15 +254,12 @@ class QemuRuntime(RuntimeBackend):
         except PermissionError as exc:
             hint = writable_hint or f"sudo install -d -m 755 '{path}'"
             raise RuntimeError(
-                "Missing permissions for QEMU host directory "
-                f"'{path}'. Run: {hint}"
+                f"Missing permissions for QEMU host directory '{path}'. Run: {hint}"
             ) from exc
 
     def _get_ssh_public_key(self) -> str:
         """Read the SSH public key."""
-        pub_path = self._ssh_key_path.with_suffix(
-            self._ssh_key_path.suffix + ".pub"
-        )
+        pub_path = self._ssh_key_path.with_suffix(self._ssh_key_path.suffix + ".pub")
         return pub_path.read_text().strip()
 
     def _libvirt_conn(self) -> libvirt.virConnect:
@@ -285,9 +287,7 @@ class QemuRuntime(RuntimeBackend):
         try:
             return conn.lookupByName(name)
         except libvirt.libvirtError as exc:
-            raise RuntimeError(
-                f"VM '{name}' not found: {exc}"
-            ) from exc
+            raise RuntimeError(f"VM '{name}' not found: {exc}") from exc
 
     async def _create_overlay_disk(
         self,
@@ -302,15 +302,17 @@ class QemuRuntime(RuntimeBackend):
             raise RuntimeError("QEMU overlay creation requires an explicit base image")
         backing = base_image
         if not Path(backing).exists():
-            raise RuntimeError(
-                f"QEMU base image not found: {backing}"
-            )
+            raise RuntimeError(f"QEMU base image not found: {backing}")
 
         cmd = [
-            "qemu-img", "create",
-            "-f", "qcow2",
-            "-F", "qcow2",
-            "-b", backing,
+            "qemu-img",
+            "create",
+            "-f",
+            "qcow2",
+            "-F",
+            "qcow2",
+            "-b",
+            backing,
             str(disk),
             f"{disk_size_gb}G",
         ]
@@ -321,9 +323,7 @@ class QemuRuntime(RuntimeBackend):
         )
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
-            raise RuntimeError(
-                f"Failed to create overlay disk: {stderr.decode()}"
-            )
+            raise RuntimeError(f"Failed to create overlay disk: {stderr.decode()}")
         # libvirt-qemu runs as a different uid — ensure it can read the file.
         disk.chmod(0o644)
         return disk
@@ -359,6 +359,16 @@ class QemuRuntime(RuntimeBackend):
         )
         target = images_dir / f"ubuntu-{normalized_version}-server-cloudimg-amd64.img"
         if target.exists():
+            proc = subprocess.run(
+                ["qemu-img", "info", "--output=json", str(target)],
+                capture_output=True,
+                check=True,
+                timeout=60,
+            )
+            if json.loads(proc.stdout).get("format") != "qcow2":
+                raise RuntimeError(
+                    "Existing cached cloud image is invalid; preserve for inspection"
+                )
             return target
 
         url = (
@@ -366,7 +376,7 @@ class QemuRuntime(RuntimeBackend):
             f"{normalized_version}/release/"
             f"ubuntu-{normalized_version}-server-cloudimg-amd64.img"
         )
-        tmp_target = target.with_suffix(f"{target.suffix}.tmp")
+        tmp_target = target.with_suffix(f"{target.suffix}.{uuid.uuid4().hex}.tmp")
         try:
             with urllib.request.urlopen(url, timeout=300) as response:
                 with tmp_target.open("wb") as f:
@@ -375,6 +385,16 @@ class QemuRuntime(RuntimeBackend):
                         if not chunk:
                             break
                         f.write(chunk)
+            proc = subprocess.run(
+                ["qemu-img", "info", "--output=json", str(tmp_target)],
+                capture_output=True,
+                check=True,
+                timeout=60,
+            )
+            if json.loads(proc.stdout).get("format") != "qcow2":
+                raise RuntimeError("Downloaded cloud image is not QCOW2")
+            with tmp_target.open("rb") as downloaded:
+                os.fsync(downloaded.fileno())
             tmp_target.chmod(0o644)
             tmp_target.replace(target)
             target.chmod(0o644)
@@ -439,9 +459,7 @@ class QemuRuntime(RuntimeBackend):
         work_dir.mkdir(parents=True, exist_ok=True)
 
         meta = _CLOUD_INIT_META.format(instance_id=instance_id)
-        user = _CLOUD_INIT_USER.format(
-            ssh_public_key=self._get_ssh_public_key()
-        )
+        user = _CLOUD_INIT_USER.format(ssh_public_key=self._get_ssh_public_key())
 
         (work_dir / "meta-data").write_text(meta)
         (work_dir / "user-data").write_text(user)
@@ -453,9 +471,7 @@ class QemuRuntime(RuntimeBackend):
             str(work_dir / "meta-data"),
         ]
         if vm_ip and gateway:
-            network_cfg = _CLOUD_INIT_NETWORK.format(
-                vm_ip=vm_ip, gateway=gateway
-            )
+            network_cfg = _CLOUD_INIT_NETWORK.format(vm_ip=vm_ip, gateway=gateway)
             (work_dir / "network-config").write_text(network_cfg)
             files_to_include.append(str(work_dir / "network-config"))
 
@@ -464,8 +480,10 @@ class QemuRuntime(RuntimeBackend):
             if shutil.which(tool):
                 cmd = [
                     tool,
-                    "-output", str(iso_path),
-                    "-volid", "cidata",
+                    "-output",
+                    str(iso_path),
+                    "-volid",
+                    "cidata",
                     "-joliet",
                     "-rock",
                     *files_to_include,
@@ -554,9 +572,7 @@ class QemuRuntime(RuntimeBackend):
                         continue
                     cidr = parts[3]
                     try:
-                        reserved.append(
-                            ipaddress.IPv4Network(cidr, strict=False)
-                        )
+                        reserved.append(ipaddress.IPv4Network(cidr, strict=False))
                     except ValueError:
                         continue
         except OSError:
@@ -622,9 +638,7 @@ class QemuRuntime(RuntimeBackend):
             "No available /30 subnet in 10.100.0.0/16 — all 16 384 blocks in use"
         )
 
-    async def _create_workspace_network(
-        self, instance_id: str
-    ) -> tuple[str, str]:
+    async def _create_workspace_network(self, instance_id: str) -> tuple[str, str]:
         """Create a dedicated isolated /30 NAT network for this workspace.
 
         Each workspace gets its own libvirt network with a unique /30 subnet
@@ -634,6 +648,7 @@ class QemuRuntime(RuntimeBackend):
 
         Returns ``(gateway_ip, vm_ip)``.
         """
+
         def _create() -> tuple[str, str]:
             gateway, vm_ip, netmask = self._pick_workspace_subnet()
             net_name = self._workspace_network_name(instance_id)
@@ -686,9 +701,7 @@ class QemuRuntime(RuntimeBackend):
                 pass
 
         await asyncio.to_thread(_destroy)
-        logger.info(
-            "vm_network_destroyed", instance_id=instance_id, network=net_name
-        )
+        logger.info("vm_network_destroyed", instance_id=instance_id, network=net_name)
 
     def _get_workspace_vm_ip(self, instance_id: str) -> str:
         """Derive the VM's IP from its dedicated libvirt network XML.
@@ -833,9 +846,7 @@ class QemuRuntime(RuntimeBackend):
             f"within {self._ssh_timeout}s"
         )
 
-    async def _get_ssh(
-        self, instance_id: str
-    ) -> asyncssh.SSHClientConnection:
+    async def _get_ssh(self, instance_id: str) -> asyncssh.SSHClientConnection:
         """Get an existing SSH connection or reconnect.
 
         A per-instance lock ensures that only one coroutine at a time
@@ -922,6 +933,7 @@ class QemuRuntime(RuntimeBackend):
 
     # ── RuntimeBackend implementation ─────────────────────────────────
 
+    @storage_mutation
     async def create_workspace(self, config: WorkspaceConfig) -> str:
         """Create a new QEMU/KVM VM workspace.
 
@@ -982,6 +994,7 @@ class QemuRuntime(RuntimeBackend):
         )
         return instance_id
 
+    @storage_mutation
     async def stop_workspace(self, instance_id: str) -> None:
         """Gracefully shut down the VM (ACPI shutdown)."""
         # Close SSH connection and remove associated lock
@@ -1006,6 +1019,7 @@ class QemuRuntime(RuntimeBackend):
 
         logger.info("vm_workspace_stopped", instance_id=instance_id)
 
+    @storage_mutation
     async def start_workspace(self, instance_id: str) -> None:
         """Start a previously stopped VM."""
         domain = await asyncio.to_thread(self._get_domain, instance_id)
@@ -1047,6 +1061,7 @@ class QemuRuntime(RuntimeBackend):
         await self._wait_for_ssh(instance_id)
         logger.info("vm_workspace_force_restarted", instance_id=instance_id)
 
+    @storage_mutation
     async def reconfigure_workspace(
         self,
         instance_id: str,
@@ -1072,7 +1087,9 @@ class QemuRuntime(RuntimeBackend):
         root = ET.fromstring(xml)
         disk_source = root.find("./devices/disk[@device='disk']/source")
         if disk_source is None:
-            raise RuntimeError(f"Could not locate disk source in VM XML for {instance_id}")
+            raise RuntimeError(
+                f"Could not locate disk source in VM XML for {instance_id}"
+            )
         disk_path = disk_source.get("file")
         if not disk_path:
             raise RuntimeError(f"Could not resolve disk path for VM {instance_id}")
@@ -1090,6 +1107,7 @@ class QemuRuntime(RuntimeBackend):
         if info_proc.returncode != 0:
             raise RuntimeError(f"Failed to inspect disk image: {info_stderr.decode()}")
         import json
+
         disk_info = json.loads(info_stdout.decode() or "{}")
         current_virtual_size = int(disk_info.get("virtual-size", 0))
         requested_size_bytes = qemu_disk_size_gb * 1024 * 1024 * 1024
@@ -1106,7 +1124,9 @@ class QemuRuntime(RuntimeBackend):
             )
             _, resize_stderr = await resize_proc.communicate()
             if resize_proc.returncode != 0:
-                raise RuntimeError(f"Failed to resize disk image: {resize_stderr.decode()}")
+                raise RuntimeError(
+                    f"Failed to resize disk image: {resize_stderr.decode()}"
+                )
 
         memory_kib = qemu_memory_mb * 1024
         memory_node = root.find("./memory")
@@ -1146,8 +1166,12 @@ class QemuRuntime(RuntimeBackend):
             restarted=should_start,
         )
 
+    @storage_mutation
     async def remove_workspace(self, instance_id: str) -> None:
         """Destroy and undefine the VM, its network, disk files and host key."""
+        disk = self._disk_path(instance_id)
+        await self._assert_workspace_resources_unconsumed(instance_id)
+
         # Close SSH connection and remove associated lock
         conn = self._ssh_connections.pop(instance_id, None)
         if conn:
@@ -1156,18 +1180,29 @@ class QemuRuntime(RuntimeBackend):
 
         try:
             domain = await asyncio.to_thread(self._get_domain, instance_id)
-            state, _ = await asyncio.to_thread(domain.state)
+        except RuntimeError:
+            # Only exact absence on successful enumeration permits disk cleanup.
+            domains = await asyncio.to_thread(
+                lambda: self._libvirt_conn().listAllDomains(0)
+            )
+            if any(d.name() == self._domain_name(instance_id) for d in domains):
+                raise
+            domain = None
+        try:
+            if domain is not None:
+                state, _ = await asyncio.to_thread(domain.state)
+            else:
+                state = libvirt.VIR_DOMAIN_SHUTOFF
             if state == libvirt.VIR_DOMAIN_RUNNING:
                 await asyncio.to_thread(domain.destroy)
-            await asyncio.to_thread(
-                domain.undefineFlags,
-                libvirt.VIR_DOMAIN_UNDEFINE_NVRAM
-                | libvirt.VIR_DOMAIN_UNDEFINE_MANAGED_SAVE,
-            )
+            if domain is not None:
+                await asyncio.to_thread(
+                    domain.undefineFlags,
+                    libvirt.VIR_DOMAIN_UNDEFINE_NVRAM
+                    | libvirt.VIR_DOMAIN_UNDEFINE_MANAGED_SAVE,
+                )
         except libvirt.libvirtError:
-            logger.warning(
-                "vm_undefine_failed", instance_id=instance_id
-            )
+            raise RuntimeError("Domain removal failed; disks retained")
 
         # ── Tear down the per-workspace network ───────────────────────
         # Must happen *after* the domain is destroyed so libvirt doesn't
@@ -1175,7 +1210,7 @@ class QemuRuntime(RuntimeBackend):
         await self._destroy_workspace_network(instance_id)
 
         # Clean up disk files
-        disk = self._disk_path(instance_id)
+        await self._assert_workspace_resources_unconsumed(instance_id)
         if disk.exists():
             disk.unlink()
         iso = self._cloud_init_iso_path(instance_id)
@@ -1205,7 +1240,9 @@ class QemuRuntime(RuntimeBackend):
             domain = await asyncio.to_thread(self._get_domain, instance_id)
             state, _ = await asyncio.to_thread(domain.state)
         except RuntimeError:
-            return RuntimeStatus(instance_id=instance_id, status="removed", name=domain_name)
+            return RuntimeStatus(
+                instance_id=instance_id, status="removed", name=domain_name
+            )
 
         state_map = {
             libvirt.VIR_DOMAIN_RUNNING: "running",
@@ -1289,6 +1326,7 @@ class QemuRuntime(RuntimeBackend):
                 parts.append(f"export {k}='{escaped_v}'")
         if workdir:
             parts.append(f"cd '{workdir}'")
+
         # Join the actual command — each arg is single-quoted with internal
         # single quotes escaped via the '"'"' technique so that arbitrary
         # prompt text (including newlines and quotes) is passed verbatim.
@@ -1344,9 +1382,7 @@ class QemuRuntime(RuntimeBackend):
         process: asyncssh.SSHClientProcess = handle.handle  # type: ignore[assignment]
         process.stdin.write(data)
 
-    async def pty_resize(
-        self, handle: PtyHandle, cols: int, rows: int
-    ) -> None:
+    async def pty_resize(self, handle: PtyHandle, cols: int, rows: int) -> None:
         """Resize the PTY terminal."""
         process: asyncssh.SSHClientProcess = handle.handle  # type: ignore[assignment]
         process.change_terminal_size(cols, rows)
@@ -1380,19 +1416,19 @@ class QemuRuntime(RuntimeBackend):
         quoted = "'" + pidfile.replace("'", "'\\''") + "'"
         return (
             f"pidfile={quoted}; "
-            "pid=\"\"; "
-            "if [ -f \"$pidfile\" ]; then "
-            "pid=$(cat \"$pidfile\" 2>/dev/null); fi; "
+            'pid=""; '
+            'if [ -f "$pidfile" ]; then '
+            'pid=$(cat "$pidfile" 2>/dev/null); fi; '
             "case \"$pid\" in ''|*[!0-9]*) exit 0;; esac; "
-            "kill -TERM -\"$pid\" 2>/dev/null || "
-            "kill -TERM \"$pid\" 2>/dev/null || true; "
+            'kill -TERM -"$pid" 2>/dev/null || '
+            'kill -TERM "$pid" 2>/dev/null || true; '
             "for _ in 1 2 3 4 5 6 7 8 9 10; do "
-            "kill -0 \"$pid\" 2>/dev/null || break; "
+            'kill -0 "$pid" 2>/dev/null || break; '
             "sleep 0.2; "
             "done; "
-            "kill -KILL -\"$pid\" 2>/dev/null || "
-            "kill -KILL \"$pid\" 2>/dev/null || true; "
-            "rm -f \"$pidfile\""
+            'kill -KILL -"$pid" 2>/dev/null || '
+            'kill -KILL "$pid" 2>/dev/null || true; '
+            'rm -f "$pidfile"'
         )
 
     async def _kill_stream_tree(self, instance_id: str, pidfile: str) -> None:
@@ -1598,12 +1634,13 @@ class QemuRuntime(RuntimeBackend):
             for dom_id in conn.listDomainsID() or []:
                 try:
                     dom = conn.lookupByID(dom_id)
-                    domains.append((dom.name(), libvirt.VIR_DOMAIN_RUNNING))
+                    domains.append((dom.name(), dom.state()[0]))
                 except libvirt.libvirtError:
                     pass
             # Defined but not running
             for name in conn.listDefinedDomains() or []:
-                domains.append((name, libvirt.VIR_DOMAIN_SHUTOFF))
+                dom = conn.lookupByName(name)
+                domains.append((name, dom.state()[0]))
             return domains
 
         domains = await asyncio.to_thread(_list)
@@ -1665,7 +1702,9 @@ class QemuRuntime(RuntimeBackend):
                 disk_target = root.find("./devices/disk[@device='disk']/target")
                 target_dev = disk_target.get("dev") if disk_target is not None else None
                 if target_dev:
-                    disk_capacity_bytes, disk_used_bytes, _ = domain.blockInfo(target_dev, 0)
+                    disk_capacity_bytes, disk_used_bytes, _ = domain.blockInfo(
+                        target_dev, 0
+                    )
 
             return {
                 "cpu_time_ns": cpu_time_ns,
@@ -1681,9 +1720,7 @@ class QemuRuntime(RuntimeBackend):
         except libvirt.libvirtError:
             return None
 
-    async def put_archive(
-        self, instance_id: str, path: str, data: bytes
-    ) -> None:
+    async def put_archive(self, instance_id: str, path: str, data: bytes) -> None:
         """Upload a tar archive to the VM and extract it at the given path."""
         ssh = await self._get_ssh(instance_id)
         quoted_path = shlex.quote(path)
@@ -1700,23 +1737,27 @@ class QemuRuntime(RuntimeBackend):
         process.stdin.write_eof()
         await process.wait()
 
+    @storage_mutation
     async def build_image(
         self,
         *,
         base_distro: str,
         init_script: str,
         image_path: str,
+        operation_id: str | None = None,
+        image_instance_id: str | None = None,
         progress_callback=None,
     ) -> dict[str, str]:
         """Build a reusable QCOW2 base image by provisioning a temporary VM."""
         base_image = self._resolve_build_base_image(base_distro)
         instance_id = f"image-build-{uuid.uuid4()}"
-        target_path = Path(image_path)
+        target_path = self._managed_image_path(image_path)
+        if not operation_id or not image_instance_id:
+            raise RuntimeError("Build requires operation and image identity")
         self._ensure_host_directory(
             target_path.parent,
             writable_hint=(
-                "sudo install -d -o $USER -g $USER -m 755 "
-                f"'{target_path.parent}'"
+                f"sudo install -d -o $USER -g $USER -m 755 '{target_path.parent}'"
             ),
         )
 
@@ -1774,26 +1815,16 @@ class QemuRuntime(RuntimeBackend):
 
             await self.stop_workspace(instance_id)
 
-            tmp_target = target_path.with_suffix(f"{target_path.suffix}.tmp")
-            if tmp_target.exists():
-                tmp_target.unlink()
-            proc = await asyncio.create_subprocess_exec(
-                "qemu-img",
-                "convert",
-                "-f",
-                "qcow2",
-                "-O",
-                "qcow2",
-                str(disk),
-                str(tmp_target),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            await self._publish_image(
+                disk,
+                target_path,
+                {
+                    "kind": "build",
+                    "operation_id": operation_id,
+                    "artifact_id": image_instance_id,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                },
             )
-            _, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                raise RuntimeError(f"Failed to finalize QEMU image: {stderr.decode()}")
-            tmp_target.chmod(0o644)
-            tmp_target.replace(target_path)
 
             if progress_callback is not None:
                 await progress_callback(f"QEMU image finalized at {target_path}")
@@ -1807,110 +1838,523 @@ class QemuRuntime(RuntimeBackend):
 
     # ── Image artifact operations ─────────────────────────────────────
 
-    async def create_image_artifact(
-        self, instance_id: str, name: str
-    ) -> ImageArtifactInfo:
-        """Create an image artifact by copying the QCOW2 overlay."""
-        disk = self._disk_path(instance_id)
-        if not disk.exists():
-            raise RuntimeError(
-                f"Disk not found for instance {instance_id}"
+    def _managed_image_path(self, reference: str) -> Path:
+        """Reject traversal and symlink components, including nonexistent targets."""
+        roots = [
+            self._snapshot_dir,
+            Path(
+                getattr(
+                    getattr(self, "_settings", None),
+                    "qemu_image_cache_dir",
+                    self._snapshot_dir.parent / "images",
+                )
+            ),
+        ]
+        path = Path(reference)
+        if not path.is_absolute():
+            import re
+
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", reference):
+                raise ValueError("Invalid artifact ID")
+            path = self._snapshot_dir / f"{reference}.qcow2"
+        if path.suffix != ".qcow2" or ".." in path.parts:
+            raise ValueError("Invalid image path")
+        if not any(path.is_relative_to(root.absolute()) for root in roots):
+            raise ValueError("Image outside managed storage")
+        if any(parent.is_symlink() for parent in [path, *path.parents]):
+            raise ValueError("Symlink image path refused")
+        return path.absolute()
+
+    def _publication_digest(self, path: Path) -> str:
+        """Cache content verification only for unchanged regular publications.
+
+        Open without following symlinks and compare descriptor/path stat before
+        and after reading. ctime prevents same-size/mtime replacement reuse.
+        No cache is used for active workspace disks or mutable image info.
+        """
+        import hashlib
+        import os
+        import stat
+        import threading
+
+        # Initialized lazily for runtimes constructed without __init__ in tests.
+        if not hasattr(self, "_publication_hash_lock"):
+            self._publication_hash_cache = {}
+            self._publication_hash_lock = threading.Lock()
+
+        def identity(value):
+            return (
+                value.st_dev,
+                value.st_ino,
+                value.st_size,
+                value.st_mtime_ns,
+                value.st_ctime_ns,
             )
 
-        snapshot_id = str(uuid.uuid4())
-        snapshot_path = self._snapshot_dir / f"{snapshot_id}.qcow2"
+        with self._publication_hash_lock:
+            before = path.stat(follow_symlinks=False)
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError("Publication is not a regular file")
+            key = str(path.absolute())
+            signature = identity(before)
+            cached = self._publication_hash_cache.get(key)
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as stream:
+                opened = os.fstat(stream.fileno())
+                if not stat.S_ISREG(opened.st_mode) or identity(opened) != signature:
+                    raise ValueError("Publication changed during inspection")
+                digest = (
+                    cached[1]
+                    if cached and cached[0] == signature
+                    else hashlib.file_digest(stream, "sha256").hexdigest()
+                )
+                if (
+                    identity(os.fstat(stream.fileno())) != signature
+                    or identity(path.stat(follow_symlinks=False)) != signature
+                ):
+                    self._publication_hash_cache.pop(key, None)
+                    raise ValueError("Publication changed during verification")
+            # Bound memory even if an operator creates many immutable images.
+            if len(self._publication_hash_cache) >= 1024:
+                self._publication_hash_cache.clear()
+            self._publication_hash_cache[key] = (signature, digest)
+            return digest
 
-        # For a running VM, we need to do a live snapshot
+    async def _image_info(self, path: Path) -> dict:
+        proc = await asyncio.create_subprocess_exec(
+            "qemu-img",
+            "info",
+            "--force-share",
+            "--output=json",
+            str(path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        output, _ = await proc.communicate()
+        if proc.returncode:
+            raise RuntimeError("Image inspection failed")
+        return json.loads(output)
+
+    async def _assert_workspace_resources_unconsumed(self, instance_id: str) -> None:
+        """Fence every file we unlink, before destroy and again before cleanup."""
+        scan = await self.inventory()
+        if not scan.complete:
+            raise RuntimeError("Incomplete inventory blocks workspace deletion")
+        owned_paths = {
+            str(self._disk_path(instance_id).absolute()),
+            str(self._cloud_init_iso_path(instance_id).absolute()),
+        }
+        own_domain = "domain:" + self._domain_name(instance_id)
+        if any(
+            owned_paths.intersection(resource.dependencies)
+            and resource.resource_id != own_domain
+            for resource in scan.resources
+        ):
+            raise RuntimeError("Workspace storage has physical dependents; retained")
+
+    async def workspace_incarnation(self, workspace_id: str) -> tuple[dict, str] | None:
+        """Inspect the source independently of unrelated failed capture outputs."""
+
+        def observe():
+            matches = [
+                d
+                for d in self._libvirt_conn().listAllDomains(0)
+                if d.name() == self._domain_name(workspace_id)
+            ]
+            if len(matches) != 1:
+                return None
+            domain = matches[0]
+            root = ET.fromstring(domain.XMLDesc(0))
+            paths = [
+                Path(n.attrib["file"]).absolute()
+                for n in root.findall("./devices/disk/source")
+                if "file" in n.attrib
+            ]
+            if not paths or self._disk_path(workspace_id).absolute() not in paths:
+                return None
+            disks = []
+            for path in paths:
+                if any(p.is_symlink() for p in [path, *path.parents]):
+                    return None
+                stat = path.stat()
+                with path.open("rb") as stream:
+                    stream.read(1)
+                disks.append(
+                    {
+                        "path": str(path),
+                        "device": stat.st_dev,
+                        "inode": stat.st_ino,
+                        "size": stat.st_size,
+                        "mtime_ns": stat.st_mtime_ns,
+                        "ctime_ns": stat.st_ctime_ns,
+                    }
+                )
+            state, _ = domain.state()
+            if state not in {libvirt.VIR_DOMAIN_RUNNING, libvirt.VIR_DOMAIN_SHUTOFF}:
+                return None
+            return (
+                {
+                    "runtime": "qemu",
+                    "resource_id": "domain:" + domain.name(),
+                    "dependencies": sorted(str(p) for p in paths),
+                    "metadata": {
+                        "workspace_id": workspace_id,
+                        "domain_uuid": domain.UUIDString(),
+                        "disks": disks,
+                    },
+                },
+                "running" if state == libvirt.VIR_DOMAIN_RUNNING else "exited",
+            )
+
+        try:
+            result = await asyncio.to_thread(observe)
+            if result:
+                for path in result[0]["dependencies"]:
+                    await self._image_info(Path(path))
+                if await asyncio.to_thread(observe) != result:
+                    return None
+            return result
+        except Exception:
+            return None
+
+    @storage_mutation
+    async def inventory(self) -> RuntimeInventory:
+        """Inspect all owned directories and all libvirt disk references recursively."""
+        import os
+        import xml.etree.ElementTree as ET
+
+        scan = RuntimeInventory("qemu")
+        paths: set[Path] = set()
+        workspace_disks: dict[str, set[str]] = {}
+        roots = [
+            self._disk_dir,
+            self._snapshot_dir,
+            Path(
+                getattr(
+                    getattr(self, "_settings", None),
+                    "qemu_image_cache_dir",
+                    self._snapshot_dir.parent / "images",
+                )
+            ),
+        ]
+        try:
+            for root in roots:
+                for directory, _, files in os.walk(
+                    root, onerror=lambda e: scan.errors.append("Directory unreadable")
+                ):
+                    for name in files:
+                        path = Path(directory) / name
+                        if name.endswith((".qcow2", ".img", ".iso", ".tmp")) or ".tmp-" in name:
+                            paths.add(path.absolute())
+                stat = os.statvfs(root)
+                scan.filesystems.append(
+                    {
+                        "path": str(root),
+                        "capacity_bytes": stat.f_blocks * stat.f_frsize,
+                        "available_bytes": stat.f_bavail * stat.f_frsize,
+                        "used_bytes": (stat.f_blocks - stat.f_bfree) * stat.f_frsize,
+                    }
+                )
+
+            def domains():
+                return [
+                    (d.name(), d.XMLDesc(0), d.UUIDString(), d.isActive())
+                    for d in self._libvirt_conn().listAllDomains(0)
+                ]
+
+            for name, xml, domain_uuid, active in await asyncio.to_thread(domains):
+                refs = [
+                    Path(n.attrib["file"]).absolute()
+                    for n in ET.fromstring(xml).findall("./devices/disk/source")
+                    if "file" in n.attrib
+                ]
+                managed = name.startswith("opencuria-workspace-")
+                if managed:
+                    for disk in refs:
+                        workspace_disks.setdefault(str(disk), set()).add(
+                            name.removeprefix("opencuria-workspace-")
+                        )
+                    scan.resources.append(
+                        StorageResource(
+                            "domain:" + name,
+                            "workspace",
+                            True,
+                            state="running" if active else "exited",
+                            dependencies=[str(p) for p in refs],
+                            metadata={
+                                "workspace_id": name.removeprefix(
+                                    "opencuria-workspace-"
+                                ),
+                                "domain_uuid": domain_uuid,
+                                "disks": [
+                                    {
+                                        "path": str(p),
+                                        "device": p.stat().st_dev,
+                                        "inode": p.stat().st_ino,
+                                    }
+                                    for p in refs
+                                ],
+                            },
+                        )
+                    )
+                else:
+                    scan.foreign_resource_count += 1
+                    scan.resources.append(
+                        StorageResource(
+                            "foreign-domain:" + name,
+                            "foreign_reference",
+                            False,
+                            dependencies=[str(p) for p in refs],
+                        )
+                    )
+                paths.update(refs)
+        except Exception:
+            scan.errors.append("Runtime/directory enumeration failed")
+        visited: dict[str, StorageResource] = {}
+
+        async def inspect(path: Path, chain: set[str]):
+            key = str(path.absolute())
+            if key in chain:
+                scan.errors.append("Backing cycle: " + key)
+                return
+            if key in visited:
+                return
+            managed = any(path.is_relative_to(root.absolute()) for root in roots)
+            resource = StorageResource(key, "disk", managed, aliases=[key])
+            visited[key] = resource
+            scan.resources.append(resource)
+            try:
+                if any(p.is_symlink() for p in [path, *path.parents]):
+                    raise ValueError("Symlink")
+                stat = path.stat()
+                resource.allocated_bytes = stat.st_blocks * 512
+                resource.logical_bytes = stat.st_size
+                info = await self._image_info(path)
+                resource.virtual_bytes = info.get("virtual-size")
+                marker = path.with_suffix(".manifest.json")
+                if marker.exists():
+                    manifest = json.loads(marker.read_text())
+                    if (
+                        manifest.get("image_path") != key
+                        or manifest.get("size_bytes") != stat.st_size
+                        or manifest.get("sha256")
+                        != await asyncio.to_thread(self._publication_digest, path)
+                    ):
+                        raise ValueError("Invalid publication marker")
+                    resource.metadata = manifest
+                    resource.state = "ready"
+                    resource.kind = "image"
+                elif path.with_suffix(".meta").exists():
+                    resource.state = "legacy"
+                    resource.kind = "image"
+                elif path.suffix == ".iso":
+                    # Directory placement or an arbitrary managed-domain reference
+                    # is not ownership. Only the exact workspace's seed path is.
+                    owners = workspace_disks.get(key, set())
+                    if len(owners) == 1:
+                        owner = next(iter(owners))
+                        if path == self._cloud_init_iso_path(owner).absolute():
+                            resource.state = "observed"
+                            resource.metadata = {
+                                "workspace_id": owner,
+                                "role": "cloud_init",
+                            }
+                elif path.parent == self._disk_dir:
+                    resource.state = "observed"
+                    owners = workspace_disks.get(key, set())
+                    if len(owners) == 1:
+                        resource.metadata = {"workspace_id": next(iter(owners))}
+                    elif not owners:
+                        try:
+                            resource.metadata = {
+                                "workspace_id": str(uuid.UUID(path.stem)),
+                                "partial_create": True,
+                            }
+                        except ValueError:
+                            pass
+                else:
+                    resource.state = "unknown"
+                backing = info.get("full-backing-filename") or info.get(
+                    "backing-filename"
+                )
+                if backing:
+                    base = Path(backing)
+                    if not base.is_absolute():
+                        base = path.parent / base
+                    import os
+
+                    base = Path(os.path.abspath(base))
+                    resource.dependencies.append(str(base))
+                    await inspect(base, chain | {key})
+            except Exception:
+                scan.errors.append("Image inspection failed: " + key)
+
+        for path in sorted(paths):
+            await inspect(path, set())
+        scan.complete = not scan.errors
+        from datetime import datetime, timezone
+
+        scan.collected_at = datetime.now(timezone.utc).isoformat()
+        return scan
+
+    async def _publish_image(self, disk: Path, target: Path, manifest: dict) -> dict:
+        """Commit immutable self-contained disk, then durable JSON commit marker."""
+        import os
+
+        target = self._managed_image_path(str(target))
+        marker = target.with_suffix(".manifest.json")
+        if target.exists() or marker.exists():
+            raise FileExistsError("Publication target already exists")
+        temp = target.with_name(target.name + ".tmp-" + str(uuid.uuid4()))
+        # Failed publication files remain discoverable; never silently clean unknown files.
+        proc = await asyncio.create_subprocess_exec(
+            "qemu-img",
+            "convert",
+            "-f",
+            "qcow2",
+            "-O",
+            "qcow2",
+            str(disk),
+            str(temp),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+        if proc.returncode:
+            raise RuntimeError("Image conversion failed")
+        info = await self._image_info(temp)
+        if info.get("backing-filename") or info.get("full-backing-filename"):
+            raise RuntimeError("Published image must be self-contained")
+        proc = await asyncio.create_subprocess_exec(
+            "qemu-img",
+            "check",
+            str(temp),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+        if proc.returncode:
+            raise RuntimeError("Image integrity check failed")
+        with temp.open("rb") as stream:
+            os.fsync(stream.fileno())
+        os.link(temp, target)  # exclusive, never replaces a published inode
+        temp.unlink()
+        import hashlib
+
+        def digest():
+            with target.open("rb") as stream:
+                return hashlib.file_digest(stream, "sha256").hexdigest()
+
+        manifest = {
+            **manifest,
+            "sha256": await asyncio.to_thread(digest),
+            "version": 1,
+            "image_path": str(target),
+            "size_bytes": target.stat().st_size,
+            "self_contained": True,
+        }
+        directory = os.open(target.parent, os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+            tmp_marker = marker.with_name(marker.name + ".tmp-" + str(uuid.uuid4()))
+            with tmp_marker.open("x") as stream:
+                json.dump(manifest, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.link(tmp_marker, marker)
+            tmp_marker.unlink()
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        return manifest
+
+    @storage_mutation
+    async def create_image_artifact(
+        self,
+        instance_id: str,
+        name: str,
+        *,
+        artifact_id: str | None = None,
+        operation_id: str | None = None,
+        credential_clean: bool = False,
+    ) -> ImageArtifactInfo:
+        """Capture only a proven scrubbed, fully shut off guest; no live freeze."""
+        if not credential_clean or not artifact_id or not operation_id:
+            raise RuntimeError(
+                "Capture requires deterministic identity and scrub proof"
+            )
+        artifact_id = str(uuid.UUID(artifact_id))
+        target = self._managed_image_path(artifact_id)
         domain = await asyncio.to_thread(self._get_domain, instance_id)
         state, _ = await asyncio.to_thread(domain.state)
-
-        if state == libvirt.VIR_DOMAIN_RUNNING:
-            # Create an external snapshot using qemu-img
-            # First, flush disk buffers via guest agent if available
-            try:
-                await asyncio.to_thread(
-                    domain.fsFreeze,
-                )
-            except libvirt.libvirtError:
-                pass  # Guest agent may not be available
-
-            # Copy the disk — use -U (force share) to read the image
-            # while QEMU holds a write lock.  fsFreeze above ensures
-            # filesystem consistency.
-            proc = await asyncio.create_subprocess_exec(
-                "qemu-img", "convert",
-                "-U",
-                "-f", "qcow2", "-O", "qcow2",
-                str(disk), str(snapshot_path),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await proc.communicate()
-
-            # Thaw filesystem
-            try:
-                await asyncio.to_thread(domain.fsThaw)
-            except libvirt.libvirtError:
-                pass
-
-            if proc.returncode != 0:
-                raise RuntimeError(
-                    f"Failed to create snapshot: {stderr.decode()}"
-                )
-        else:
-            # VM is stopped — simple copy
-            await asyncio.to_thread(shutil.copy2, str(disk), str(snapshot_path))
-
-        # Write snapshot metadata
-        meta_path = snapshot_path.with_suffix(".meta")
-        size_bytes = snapshot_path.stat().st_size
-        created_at = datetime.now(timezone.utc).isoformat()
-        meta_path.write_text(
-            f"snapshot_id={snapshot_id}\n"
-            f"name={name}\n"
-            f"instance_id={instance_id}\n"
-            f"created_at={created_at}\n"
-            f"size_bytes={size_bytes}\n"
+        if state != libvirt.VIR_DOMAIN_SHUTOFF:
+            raise RuntimeError("Capture requires shut off guest")
+        manifest = await self._publish_image(
+            self._disk_path(instance_id),
+            target,
+            {
+                "operation_id": operation_id,
+                "artifact_id": artifact_id,
+                "instance_id": instance_id,
+                "name": name,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "credential_clean": True,
+                "kind": "capture",
+            },
         )
-
-        logger.info(
-            "vm_snapshot_created",
-            instance_id=instance_id,
-            snapshot_id=snapshot_id,
-            name=name,
-            size_bytes=size_bytes,
-        )
-
         return ImageArtifactInfo(
-            artifact_id=snapshot_id,
-            workspace_id=instance_id,
-            name=name,
-            created_at=datetime.fromisoformat(created_at),
-            size_bytes=size_bytes,
+            artifact_id,
+            instance_id,
+            name,
+            datetime.fromisoformat(manifest["created_at"]),
+            manifest["size_bytes"],
         )
 
+    @storage_mutation
     async def delete_image_artifact(self, artifact_id: str) -> None:
-        """Delete an image artifact and its metadata."""
-        snapshot_path = self._snapshot_dir / f"{artifact_id}.qcow2"
-        meta_path = snapshot_path.with_suffix(".meta")
-        dependent_workspaces = await self._find_snapshot_dependents(snapshot_path)
-        if dependent_workspaces:
-            workspace_list = ", ".join(sorted(dependent_workspaces))
+        """Full graph rescan; unknown inspection never proves zero dependencies."""
+        target = self._managed_image_path(artifact_id)
+        scan = await self.inventory()
+        if not scan.complete:
+            raise RuntimeError("Incomplete inventory blocks deletion")
+        key = str(target)
+        if any(key in item.dependencies for item in scan.resources):
             raise RuntimeError(
-                "Cannot delete image artifact because it is still used by "
-                f"workspace disk(s): {workspace_list}"
+                "Image has physical dependents: "
+                + ", ".join(
+                    r.resource_id for r in scan.resources if key in r.dependencies
+                )
             )
-        if snapshot_path.exists():
-            snapshot_path.unlink()
-        if meta_path.exists():
-            meta_path.unlink()
-        logger.info("vm_snapshot_deleted", snapshot_id=artifact_id)
+        resource = next((r for r in scan.resources if r.resource_id == key), None)
+        if resource and resource.state not in {"ready", "legacy"}:
+            raise RuntimeError("Unknown image cannot be deleted")
+        if target.exists():
+            target.unlink()
+        for suffix in (".manifest.json", ".meta"):
+            target.with_suffix(suffix).unlink(missing_ok=True)
+        if target.exists() or any(
+            target.with_suffix(s).exists() for s in (".manifest.json", ".meta")
+        ):
+            raise RuntimeError("Image deletion incomplete")
 
-    async def list_image_artifacts(
-        self, instance_id: str
-    ) -> list[ImageArtifactInfo]:
+    async def list_image_artifacts(self, instance_id: str) -> list[ImageArtifactInfo]:
         """List all image artifacts for a given workspace instance."""
         snapshots: list[ImageArtifactInfo] = []
+        for marker in self._snapshot_dir.glob("*.manifest.json"):
+            meta = json.loads(marker.read_text())
+            if (
+                meta.get("instance_id") == instance_id
+                and Path(meta["image_path"]).exists()
+            ):
+                snapshots.append(
+                    ImageArtifactInfo(
+                        meta["artifact_id"],
+                        instance_id,
+                        meta["name"],
+                        datetime.fromisoformat(meta["created_at"]),
+                        meta["size_bytes"],
+                    )
+                )
         for meta_path in self._snapshot_dir.glob("*.meta"):
             meta = {}
             for line in meta_path.read_text().strip().splitlines():
@@ -1928,6 +2372,7 @@ class QemuRuntime(RuntimeBackend):
                 )
         return snapshots
 
+    @storage_mutation
     async def create_workspace_from_image_artifact(
         self,
         artifact_id: str,
@@ -1944,17 +2389,28 @@ class QemuRuntime(RuntimeBackend):
         """
         snapshot_path = self._resolve_image_artifact_path(artifact_id)
         if not snapshot_path.exists():
-            raise RuntimeError(
-                f"Image artifact {artifact_id} not found"
-            )
+            raise RuntimeError(f"Image artifact {artifact_id} not found")
 
+        if not (
+            snapshot_path.with_suffix(".manifest.json").exists()
+            or snapshot_path.with_suffix(".meta").exists()
+        ):
+            raise RuntimeError("Clone requires published or legacy image metadata")
+        # Failed clones remain as observed owned disks for intervention, not deleted
+        # while a partially defined domain might still reference them.
         # Create overlay backed by the snapshot
         new_disk = self._disk_path(new_instance_id)
+        if new_disk.exists() or new_disk.is_symlink():
+            raise FileExistsError("Clone disk already exists")
         cmd = [
-            "qemu-img", "create",
-            "-f", "qcow2",
-            "-F", "qcow2",
-            "-b", str(snapshot_path),
+            "qemu-img",
+            "create",
+            "-f",
+            "qcow2",
+            "-F",
+            "qcow2",
+            "-b",
+            str(snapshot_path),
             str(new_disk),
         ]
         proc = await asyncio.create_subprocess_exec(
@@ -1964,9 +2420,7 @@ class QemuRuntime(RuntimeBackend):
         )
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
-            raise RuntimeError(
-                f"Failed to create clone overlay: {stderr.decode()}"
-            )
+            raise RuntimeError(f"Failed to create clone overlay: {stderr.decode()}")
 
         # ── Dedicated isolated network for the clone ─────────────────
         gateway, vm_ip = await self._create_workspace_network(new_instance_id)
@@ -1988,7 +2442,9 @@ class QemuRuntime(RuntimeBackend):
         )
         _, resize_stderr = await resize_proc.communicate()
         if resize_proc.returncode != 0:
-            raise RuntimeError(f"Failed to resize clone overlay: {resize_stderr.decode()}")
+            raise RuntimeError(
+                f"Failed to resize clone overlay: {resize_stderr.decode()}"
+            )
 
         # Define and start the VM
         domain_xml = _domain_xml(
@@ -2017,10 +2473,7 @@ class QemuRuntime(RuntimeBackend):
 
     def _resolve_image_artifact_path(self, artifact_id: str) -> Path:
         """Resolve a clone source from either a snapshot id or a built image path."""
-        artifact_path = Path(artifact_id)
-        if artifact_path.is_absolute():
-            return artifact_path
-        return self._snapshot_dir / f"{artifact_id}.qcow2"
+        return self._managed_image_path(artifact_id)
 
     async def _find_snapshot_dependents(self, snapshot_path: Path) -> list[str]:
         """Return workspace IDs whose QCOW2 overlays directly depend on a snapshot."""
@@ -2038,7 +2491,7 @@ class QemuRuntime(RuntimeBackend):
                     disk_path=str(disk_path),
                     error=str(exc),
                 )
-                continue
+                raise RuntimeError("Incomplete backing inspection") from exc
             if backing_path is None:
                 continue
             if backing_path == target:

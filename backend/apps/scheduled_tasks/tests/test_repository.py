@@ -6,7 +6,7 @@ import pytest
 from apps.accounts.models import User
 from apps.organizations.models import Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
-from apps.runners.models import Runner, Workspace
+from apps.runners.models import Runner, Task, Workspace
 from apps.scheduled_tasks.models import ScheduledTask, ScheduledTaskRun
 from apps.scheduled_tasks.repositories import ScheduledTaskRepository
 
@@ -117,4 +117,44 @@ def test_owner_queries_are_scoped_by_owner_and_organization():
             schedule.id, organization_id=organization.id, owner_id=owner.id
         )
         is None
+    )
+
+
+@pytest.mark.django_db
+def test_workspace_resume_snapshot_includes_unresolved_lifecycle_task():
+    organization = Organization.objects.create(
+        name="Org", slug=f"org-{uuid.uuid4().hex}"
+    )
+    owner = User.objects.create_user(
+        email=f"{uuid.uuid4().hex}@example.com", password="secret"
+    )
+    runner = Runner.objects.create(
+        organization=organization,
+        api_token_hash=uuid.uuid4().hex,
+        status=RunnerStatus.ONLINE,
+    )
+    lifecycle_task = Task.objects.create(
+        runner=runner, type="create_image_artifact", status="failed"
+    )
+    task_id = lifecycle_task.id
+    workspace = Workspace.objects.create(
+        runner=runner,
+        created_by=owner,
+        name="intervention",
+        status=WorkspaceStatus.RUNNING,
+        current_task_id=task_id,
+    )
+    assert ScheduledTaskRepository.workspace_resume_state(workspace.id) == (
+        WorkspaceStatus.RUNNING,
+        None,
+        RunnerStatus.ONLINE,
+        True,
+        task_id,
+    )
+    assert ScheduledTaskRepository.workspace_resume_state(uuid.uuid4()) == (
+        None,
+        None,
+        None,
+        False,
+        None,
     )

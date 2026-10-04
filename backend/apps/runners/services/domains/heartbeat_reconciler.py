@@ -67,7 +67,7 @@ class HeartbeatReconcilerMixin:
         """Return True if inactivity policy requires stopping the workspace."""
         if workspace.status != WorkspaceStatus.RUNNING:
             return False
-        if workspace.active_operation:
+        if workspace.active_operation or workspace.current_task_id:
             return False
         if getattr(workspace, "has_active_harness_session", False):
             return False
@@ -181,16 +181,7 @@ class HeartbeatReconcilerMixin:
             if key[1] not in runner_ws_states:
                 self._pending_unknown_workspace_cleanup.discard(key)
 
-        # Runner reported instances that backend does not know: request cleanup.
-        unknown_workspace_ids = sorted(
-            set(runner_ws_states.keys()) - backend_workspace_ids
-        )
-        for unknown_workspace_id in unknown_workspace_ids:
-            self._request_workspace_cleanup(
-                runner,
-                workspace_id=unknown_workspace_id,
-                reason="unknown_runtime_workspace",
-            )
+        # Unknown resources are inventory evidence, never cleanup authority.
 
         credential_sync_ids: list[uuid.UUID] = []
         # Vanished process rows collected during the sync reconcile pass.
@@ -204,18 +195,7 @@ class HeartbeatReconcilerMixin:
             runner_status = runner_ws_states.get(ws_id_str)
             runner_payload = runner_ws_payloads.get(ws_id_str, {})
 
-            if ws.status in (
-                WorkspaceStatus.FAILED,
-                WorkspaceStatus.REMOVED,
-            ):
-                if runner_status is not None:
-                    self._request_workspace_cleanup(
-                        runner,
-                        workspace_id=ws_id_str,
-                        reason=f"backend_terminal_state:{ws.status}",
-                    )
-                else:
-                    self._pending_unknown_workspace_cleanup.discard(cleanup_key)
+            if ws.status in (WorkspaceStatus.FAILED, WorkspaceStatus.REMOVED):
                 continue
 
             if ws.status in (
@@ -231,28 +211,8 @@ class HeartbeatReconcilerMixin:
             self._pending_unknown_workspace_cleanup.discard(cleanup_key)
 
             if runner_status is None:
-                # Workspace exists in backend but not on runner —
-                # container was removed externally. Terminal states
-                # (FAILED/REMOVED/...) are steady: never touch them here
-                # (a reconnecting runner whose cache is still syncing
-                # would otherwise flip FAILED back and forth, and a
-                # FAILED workspace must stay usable for its sessions
-                # until the user deletes it).
-                if ws.status in (
-                    WorkspaceStatus.RUNNING,
-                    WorkspaceStatus.STOPPED,
-                ):
-                    logger.warning(
-                        "Workspace %s missing from runner %s, marking failed",
-                        ws_id_str,
-                        runner.id,
-                    )
-                    self.workspaces.update_status(ws, WorkspaceStatus.FAILED)
-                    self._forward_workspace_status(ws, status="failed")
-                    self.mark_processes_killed(
-                        ws_id_str, reason="workspace_missing_from_runner"
-                    )
-                self._cleanup_desktop_state(ws_id_str)
+                # Absence from a partial/failed scan proves nothing.
+                continue
             else:
                 # Map Docker container status to workspace status
                 new_status = self._map_instance_status(runner_status)
@@ -261,7 +221,7 @@ class HeartbeatReconcilerMixin:
                     # Only the explicit workspace:created event (sent after
                     # repos are cloned and SSH is established) may do that.
                     if (
-                        ws.status == WorkspaceStatus.CREATING
+                        ws.status in {WorkspaceStatus.CREATING, WorkspaceStatus.FAILED}
                         and new_status == WorkspaceStatus.RUNNING
                     ):
                         continue
@@ -308,7 +268,13 @@ class HeartbeatReconcilerMixin:
                         "workspace %s",
                         ws_id_str,
                     )
-                if credentials_resolved and ws.credentials_present != has_credentials:
+                if (
+                    credentials_resolved
+                    and not ws.current_task_id
+                    and not ws.active_operation
+                    and ws.status != WorkspaceStatus.FAILED
+                    and ws.credentials_present != has_credentials
+                ):
                     # Reconcile ordinary material against the runner-acknowledged
                     # state; OAuth remains server-side and is never injected.
                     credential_sync_ids.append(ws.id)

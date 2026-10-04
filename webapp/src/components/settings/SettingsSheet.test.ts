@@ -173,6 +173,12 @@ function mountSheet() {
         // create-*/edit-Dialoge rendern DialogTrigger ohne DialogRoot (gestubbt)
         DialogTrigger: { template: '<div><slot /></div>' },
         ScrollArea: { template: '<div><slot /></div>' },
+        RunnersPanel: {
+          name: 'RunnersPanel',
+          props: ['runnerId', 'contextVersion'],
+          emits: ['detail-change'],
+          template: '<div />',
+        },
       },
     },
   })
@@ -314,6 +320,43 @@ describe('SettingsSheet', () => {
     await flushPromises()
     await wrapper.vm.$nextTick()
     expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Plugins')
+  })
+
+  it('widens only runner detail and resets context on tab switch and close', async () => {
+    const wrapper = mountSheet()
+    const openRunner = () =>
+      window.dispatchEvent(
+        new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'runners', runnerId: 'r' } }),
+      )
+    openRunner()
+    await flushPromises()
+    const panel = () => wrapper.get('[role="tabpanel"]')
+    const runners = () => wrapper.findComponent({ name: 'RunnersPanel' })
+    expect(panel().classes()).toContain('max-w-3xl')
+    const version = runners().props('contextVersion')
+    runners().vm.$emit('detail-change', true)
+    await wrapper.vm.$nextTick()
+    expect(panel().classes()).toContain('max-w-none')
+    runners().vm.$emit('detail-change', false)
+    await wrapper.vm.$nextTick()
+    expect(panel().classes()).toContain('max-w-3xl')
+    openRunner()
+    await flushPromises()
+    expect(runners().props('contextVersion')).toBeGreaterThan(version)
+    runners().vm.$emit('detail-change', true)
+    await wrapper.find('[data-testid="settings-nav-general"]').trigger('click')
+    expect(panel().classes()).toContain('max-w-3xl')
+    await wrapper.find('[data-testid="settings-nav-runners"]').trigger('click')
+    expect(runners().props('runnerId')).toBeUndefined()
+    openRunner()
+    await flushPromises()
+    runners().vm.$emit('detail-change', true)
+    window.dispatchEvent(new Event('opencuria:close-settings'))
+    await flushPromises()
+    expect(panel().classes()).toContain('max-w-3xl')
+    expect(runners().props('runnerId')).toBeUndefined()
+    expect(wrapper.get('[data-testid="settings-sheet"]').classes()).toContain('min-w-0')
+    expect(wrapper.get('nav').classes()).toContain('min-w-0')
   })
 
   it('pins the 80rem dialog width with the Tailwind v4 important modifier', () => {

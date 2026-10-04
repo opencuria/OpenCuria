@@ -29,58 +29,73 @@ const emit = defineEmits<{
 
 const workspaceStore = useWorkspaceStore()
 
+const error = ref('')
 const name = ref('')
 const submitting = ref(false)
 
-const isValid = computed(() => name.value.trim().length > 0)
+const isValid = computed(
+  () =>
+    name.value.trim().length > 0 &&
+    props.workspace.runtime_type === 'qemu' &&
+    !props.workspace.intervention_required &&
+    !workspaceStore.isWorkspaceTransitioning(props.workspace.id) &&
+    (props.workspace.status === 'running' || props.workspace.status === 'stopped'),
+)
 
 async function handleSubmit(): Promise<void> {
   if (!isValid.value) return
   submitting.value = true
-  await workspaceStore.createImageArtifact(props.workspace.id, { name: name.value.trim() })
+  const ok = await workspaceStore.createImageArtifact(props.workspace.id, {
+    name: name.value.trim(),
+  })
   submitting.value = false
-  handleClose()
+  if (ok) handleClose()
+  else
+    error.value =
+      'Capture refused. A stopped workspace requires controlled credential scrub proof; resume and stop it if externally stopped. Check notifications and runner operations for the exact diagnostic.'
 }
 
 function handleClose(): void {
   emit('update:open', false)
   setTimeout(() => {
     name.value = ''
+    error.value = ''
   }, 200)
 }
 </script>
 
 <template>
-  <Dialog
-    :open="open"
-    @update:open="(v) => (!v ? handleClose() : undefined)"
-  >
+  <Dialog :open="open" @update:open="(v) => (!v ? handleClose() : undefined)">
     <DialogContent>
       <DialogHeader>
         <DialogTitle>Capture Image</DialogTitle>
         <DialogDescription>
-          Save the current state of this workspace as an image. Credentials must
-          be off disk first — stop the workspace to strip them, then capture.
-          If it was stopped externally, resume and stop it again.
+          Capture a point-in-time image. A running workspace automatically stops and restarts; a
+          stopped workspace stays stopped. Live interactions are unavailable during capture.
         </DialogDescription>
       </DialogHeader>
 
       <DialogBody>
-      <form id="capture-image-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
-        <div>
-          <label class="text-sm font-medium text-foreground mb-1.5 block">Image name</label>
-          <Input v-model="name" placeholder="e.g. before-refactor" />
-          <p class="text-xs text-muted-foreground mt-1">
-            Workspace: <span class="font-mono">{{ workspace.name }}</span>
-          </p>
-        </div>
-      </form>
+        <p v-if="error" role="alert" class="text-destructive">{{ error }}</p>
+        <form id="capture-image-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+          <div>
+            <label class="text-sm font-medium text-foreground mb-1.5 block">Image name</label>
+            <Input
+              :disabled="submitting || workspaceStore.isWorkspaceTransitioning(workspace.id)"
+              v-model="name"
+              placeholder="e.g. before-refactor"
+            />
+            <p class="text-xs text-muted-foreground mt-1">
+              Workspace: <span class="font-mono">{{ workspace.name }}</span>
+            </p>
+          </div>
+        </form>
       </DialogBody>
 
       <DialogFooter>
         <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
         <Button type="submit" form="capture-image-form" :disabled="!isValid || submitting">
-          {{ submitting ? 'Capturing…' : 'Capture Image' }}
+          {{ submitting ? 'Capturing' : 'Capture Image' }}
         </Button>
       </DialogFooter>
     </DialogContent>

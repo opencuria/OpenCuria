@@ -24,3 +24,5 @@ dist/
 # IDE
 .vscode/
 .idea/
+# Local verification artifacts
+/.opencuria/

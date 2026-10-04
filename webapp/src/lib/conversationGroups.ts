@@ -1,4 +1,4 @@
-import { WorkspaceStatus } from '@/types'
+import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import type { Workspace } from '@/types'
 import type { HarnessConversation } from '@/types/harness'
 
@@ -98,8 +98,8 @@ export function extractInboxConversations(
 }
 
 /**
- * Group running workspaces' chats, online first and alphabetically within each
- * partition. Include empty running workspaces; omit stopped and unknown history.
+ * Group running and lifecycle-reserved workspaces' chats, online first.
+ * Ordinary stopped, deleted and unknown history stays outside grouped navigation.
  */
 export function groupConversationsByWorkspace(
   workspaces: Workspace[],
@@ -107,7 +107,7 @@ export function groupConversationsByWorkspace(
 ): WorkspaceConversationGroup[] {
   const groups = new Map<string, WorkspaceConversationGroup>()
   for (const workspace of workspaces) {
-    if (workspace.status !== WorkspaceStatus.RUNNING) continue
+    if (!isConversationWorkspaceEligible(workspace)) continue
     groups.set(workspace.id, {
       workspaceId: workspace.id,
       name:
@@ -164,6 +164,16 @@ export function selectSidebarWorkspaces(
       )
     })
     .slice(0, limit)
+}
+
+/** Capture/recovery reserves history navigation even while the runtime is stopped. */
+export function isConversationWorkspaceEligible(workspace: Workspace): boolean {
+  if (HIDDEN_WORKSPACE_STATUSES.has(workspace.status)) return false
+  return (
+    workspace.status === WorkspaceStatus.RUNNING ||
+    workspace.active_operation === WorkspaceOperation.CAPTURING_IMAGE ||
+    Boolean(workspace.intervention_required)
+  )
 }
 
 export function isLiveWorkspace(workspace: Workspace): boolean {

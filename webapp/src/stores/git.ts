@@ -68,6 +68,7 @@ import {
   type RawGitRepoSummary,
   type RawGitStash,
 } from '@/services/git.api'
+import { useWorkspaceStore } from './workspaces'
 import { useNotificationStore } from '@/stores/notifications'
 
 export type { GitRefTag } from '@/types/git'
@@ -428,6 +429,16 @@ export const useGitStore = defineStore('git', () => {
 
   /** Bumped on initialize/reset; async results with an older gen are dropped. */
   let loadGen = 0
+
+  /** Requests remain current only outside workspace transitions (including capture). */
+  function isCurrentWorkspaceRequest(wsId: string, gen: number): boolean {
+    return (
+      gen === loadGen &&
+      workspaceId.value === wsId &&
+      !useWorkspaceStore().isWorkspaceTransitioning(wsId)
+    )
+  }
+
   /** Workspace id the in-flight `refresh` belongs to (null when idle). */
   let refreshFor: string | null = null
   /** Generation the in-flight `refresh` belongs to (join only on match). */
@@ -813,6 +824,7 @@ export const useGitStore = defineStore('git', () => {
     options?: { silent?: boolean; withDetails?: boolean },
   ): Promise<boolean> {
     const wsId = workspaceId.value
+    if (wsId && !isCurrentWorkspaceRequest(wsId, loadGen)) return false
     if (!wsId) return false
     // Workspace-safe overlap guard: an in-flight refresh is only joined when
     // it belongs to the same workspace AND generation. A newer `initialize`
@@ -836,7 +848,7 @@ export const useGitStore = defineStore('git', () => {
       }
       try {
         const res = await getGitRepos(wsId)
-        if (gen !== loadGen || workspaceId.value !== wsId) return false
+        if (!isCurrentWorkspaceRequest(wsId, gen)) return false
         applyRepoSummaries((res.repos ?? []).map(normalizeRepoSummary))
         if (!silent) {
           loading.value = false
@@ -845,11 +857,11 @@ export const useGitStore = defineStore('git', () => {
         if (withDetails) {
           const selected = selectedSummary()
           if (selected) await ensureDetails(selected.path)
-          if (gen !== loadGen || workspaceId.value !== wsId) return false
+          if (!isCurrentWorkspaceRequest(wsId, gen)) return false
         }
         return true
       } catch (e: unknown) {
-        if (gen !== loadGen || workspaceId.value !== wsId) return false
+        if (!isCurrentWorkspaceRequest(wsId, gen)) return false
         const message = errorMessage(e)
         if (silent) {
           // Silent polling must never turn the whole tab into a global
@@ -886,6 +898,7 @@ export const useGitStore = defineStore('git', () => {
     options?: { force?: boolean; silent?: boolean },
   ): Promise<boolean> {
     const wsId = workspaceId.value
+    if (wsId && !isCurrentWorkspaceRequest(wsId, loadGen)) return false
     if (!wsId || !repoPath) return false
     if (detailsInFlight.has(repoPath)) return false
     if (!options?.force && repoDetails.value[repoPath]) return true
@@ -895,11 +908,11 @@ export const useGitStore = defineStore('git', () => {
     try {
       if (options?.force) invalidateRepoCaches(repoPath)
       const res = await getGitRepo(wsId, repoPath)
-      if (gen !== loadGen || workspaceId.value !== wsId) return false
+      if (!isCurrentWorkspaceRequest(wsId, gen)) return false
       applyRepoSnapshot(normalizeRepoSnapshot(res.snapshot))
       return true
     } catch (e: unknown) {
-      if (gen !== loadGen || workspaceId.value !== wsId) return false
+      if (!isCurrentWorkspaceRequest(wsId, gen)) return false
       const message = errorMessage(e)
       if (!options?.silent && Object.keys(repoDetails.value).length === 0) {
         error.value = message
@@ -973,6 +986,7 @@ export const useGitStore = defineStore('git', () => {
   /** Silent reload of the selected repo's details (slow timer). */
   async function pollDetails(generation: number): Promise<void> {
     const wsId = workspaceId.value
+    if (wsId && !isCurrentWorkspaceRequest(wsId, loadGen)) return
     if (generation !== pollingGeneration || !wsId || busyOperation.value !== null) return
     const selected = selectedSummary()
     if (!selected || !repoDetails.value[selected.path]) return
@@ -1006,6 +1020,7 @@ export const useGitStore = defineStore('git', () => {
   async function pollSummaries(generation: number): Promise<void> {
     if (generation !== pollingGeneration || !tabVisible() || summaryPollInFlight) return
     const wsId = workspaceId.value
+    if (wsId && !isCurrentWorkspaceRequest(wsId, loadGen)) return
     if (!wsId || isRefreshInFlight() || busyOperation.value !== null) return
     const gen = loadGen
     summaryPollInFlight = true
@@ -1091,6 +1106,7 @@ export const useGitStore = defineStore('git', () => {
     force?: boolean
   }): Promise<void> {
     const wsId = workspaceId.value
+    if (wsId && !isCurrentWorkspaceRequest(wsId, loadGen)) return
     const repo = currentRepo.value
     if (!wsId || !repo) return
     const repoPath = repo.path
@@ -1156,6 +1172,7 @@ export const useGitStore = defineStore('git', () => {
   /** Load commit details for the current repo+hash (cached per repo+hash). */
   async function ensureCommitDetails(hash: string): Promise<void> {
     const wsId = workspaceId.value
+    if (wsId && !isCurrentWorkspaceRequest(wsId, loadGen)) return
     const repo = currentRepo.value
     if (!wsId || !repo) return
     const key = commitDetailsKey(repo.path, hash)
@@ -1207,6 +1224,7 @@ export const useGitStore = defineStore('git', () => {
   ): Promise<boolean> {
     const silent = options?.silent === true
     const wsId = workspaceId.value
+    if (wsId && !isCurrentWorkspaceRequest(wsId, loadGen)) return false
     const repo = currentRepo.value
     if (!wsId || !repo) {
       if (!silent) notifications.error('No repository selected')
@@ -1225,7 +1243,7 @@ export const useGitStore = defineStore('git', () => {
     // state (including clearing a newer operation's busy label).
     const gen = loadGen
     const task = opQueue.then(async (): Promise<boolean> => {
-      if (gen !== loadGen || workspaceId.value !== wsId) return false
+      if (!isCurrentWorkspaceRequest(wsId, gen)) return false
       const current = repos.value.find((r) => r.path === repoPath) ?? null
       if (!current) {
         if (!silent) notifications.error('No repository selected')
@@ -1235,7 +1253,7 @@ export const useGitStore = defineStore('git', () => {
       busyOperation.value = label
       try {
         const res = await runGitOperation(wsId, { ...payload, repo_path: repoPath })
-        if (gen !== loadGen || workspaceId.value !== wsId) return false
+        if (!isCurrentWorkspaceRequest(wsId, gen)) return false
         applyRepoSnapshot(normalizeRepoSnapshot(res.snapshot))
         invalidateRepoCaches(repoPath)
         const updated = currentRepo.value?.path === repoPath ? currentRepo.value : null
@@ -1251,7 +1269,7 @@ export const useGitStore = defineStore('git', () => {
         }
         return true
       } catch (e: unknown) {
-        if (gen !== loadGen || workspaceId.value !== wsId) return false
+        if (!isCurrentWorkspaceRequest(wsId, gen)) return false
         if (e instanceof ApiRequestError && e.status === 409 && e.code === 'conflict') {
           const snapshot = conflictSnapshotOf(e.data)
           if (snapshot) {
@@ -1767,6 +1785,7 @@ export const useGitStore = defineStore('git', () => {
    */
   async function loadMoreHistory(branchName?: string): Promise<boolean> {
     const wsId = workspaceId.value
+    if (wsId && !isCurrentWorkspaceRequest(wsId, loadGen)) return false
     const repo = currentRepo.value
     if (!wsId || !repo || !repo.hasMore || historyLoading.value) return false
     const repoPath = repo.path
@@ -1780,7 +1799,7 @@ export const useGitStore = defineStore('git', () => {
         skip,
         ...(branchName ? { branch: branchName } : {}),
       })
-      if (gen !== loadGen || workspaceId.value !== wsId) return false
+      if (!isCurrentWorkspaceRequest(wsId, gen)) return false
       const current = repoDetails.value[repoPath]
       if (!current || currentRepo.value?.path !== repoPath) return false
       const seen = new Set(current.commits.map((c) => c.hash))
@@ -1813,7 +1832,7 @@ export const useGitStore = defineStore('git', () => {
       }
       return true
     } catch (e: unknown) {
-      if (gen !== loadGen || workspaceId.value !== wsId) return false
+      if (!isCurrentWorkspaceRequest(wsId, gen)) return false
       notifications.error('Failed to load more history', errorMessage(e))
       return false
     } finally {

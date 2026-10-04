@@ -205,6 +205,33 @@ def _user_can_access_workspace(user_id: str, workspace_id: str) -> bool:
     return workspace.created_by_id == user_id_int
 
 
+@sync_to_async
+def _desktop_workspace_available(workspace_id: str) -> bool:
+    """Check the shared lifecycle gate without changing desktop authorization."""
+    from common.exceptions import ConflictError
+
+    from .repositories import WorkspaceRepository
+    from .sio_server import get_runner_service
+
+    workspace = WorkspaceRepository.get_by_id(uuid.UUID(workspace_id))
+    if workspace is None:
+        return False
+    try:
+        get_runner_service()._ensure_workspace_available(workspace)
+    except ConflictError:
+        return False
+    return True
+
+
+async def _reject_unavailable_desktop(scope, send) -> None:
+    """Reject live desktop traffic while a lifecycle hold owns the workspace."""
+    if scope["type"] == "websocket":
+        await send({"type": "websocket.close", "code": 4009})
+    else:
+        await send({"type": "http.response.start", "status": 409, "headers": []})
+        await send({"type": "http.response.body", "body": b"Workspace unavailable"})
+
+
 async def desktop_proxy_app(scope, receive, send):
     """ASGI application that proxies HTTP and WebSocket traffic to KasmVNC."""
     path = scope.get("path", "")
@@ -263,6 +290,10 @@ async def desktop_proxy_app(scope, receive, send):
         else:
             await send({"type": "http.response.start", "status": 404, "headers": []})
             await send({"type": "http.response.body", "body": b"Not Found"})
+        return
+
+    if not await _desktop_workspace_available(workspace_id):
+        await _reject_unavailable_desktop(scope, send)
         return
 
     proxy_target = await _get_desktop_proxy_target(workspace_id)
@@ -330,6 +361,10 @@ async def _proxy_http(
     cookie_header,
 ):
     """Reverse-proxy HTTP requests to KasmVNC through the runner."""
+    if not await _desktop_workspace_available(workspace_id):
+        await _reject_unavailable_desktop(scope, send)
+        return
+
     # If rest_path is just "/" redirect to the vnc.html page
     if rest_path == "/":
         # Always scale locally. ``resize=remote`` asks KasmVNC to send
@@ -410,6 +445,10 @@ async def _proxy_websocket(
     query_string,
 ):
     """Reverse-proxy WebSocket connections to KasmVNC through the runner."""
+    if not await _desktop_workspace_available(workspace_id):
+        await _reject_unavailable_desktop(scope, send)
+        return
+
     # Negotiate subprotocol — KasmVNC uses "binary"
     client_protocols = [
         p.decode() if isinstance(p, bytes) else p
@@ -444,6 +483,7 @@ async def _proxy_websocket(
             tunnel_id=tunnel_id,
             runner_sid=runner_sid,
             queue=queue,
+            workspace_id=workspace_id,
         )
     except SocketIOTimeoutError:
         logger.error("Desktop WebSocket proxy via runner timed out")
@@ -474,12 +514,15 @@ def _sanitize_websocket_close_code(value) -> int:
     return code
 
 
-async def _ws_proxy_loop(receive, send, *, tunnel_id, runner_sid, queue):
+async def _ws_proxy_loop(
+    receive, send, *, tunnel_id, runner_sid, queue, workspace_id=None
+):
     """Bidirectional proxy between client ASGI WebSocket and the runner tunnel."""
 
     from .sio_server import get_sio_server
 
     runner_close_task: asyncio.Task | None = None
+    unavailable_close_sent = False
 
     async def emit_runner_tunnel_close():
         try:
@@ -499,6 +542,12 @@ async def _ws_proxy_loop(receive, send, *, tunnel_id, runner_sid, queue):
         # Shield the close emit from cancellation of either forwarding task.
         await asyncio.shield(runner_close_task)
 
+    async def close_unavailable_client():
+        nonlocal unavailable_close_sent
+        if not unavailable_close_sent:
+            unavailable_close_sent = True
+            await send({"type": "websocket.close", "code": 4009})
+
     async def client_to_upstream():
         """Forward messages from the browser to KasmVNC."""
         try:
@@ -507,6 +556,11 @@ async def _ws_proxy_loop(receive, send, *, tunnel_id, runner_sid, queue):
                 msg_type = message.get("type", "")
 
                 if msg_type == "websocket.receive":
+                    if workspace_id is not None and not await (
+                        _desktop_workspace_available(workspace_id)
+                    ):
+                        await close_unavailable_client()
+                        return
                     if "bytes" in message and message["bytes"]:
                         await get_sio_server().emit(
                             "desktop:proxy_ws_send",
@@ -560,11 +614,23 @@ async def _ws_proxy_loop(receive, send, *, tunnel_id, runner_sid, queue):
         except Exception:
             logger.error("Desktop WebSocket runner-to-client proxy failed")
 
+    async def monitor_workspace():
+        """Retire an idle tunnel promptly when Capture acquires the workspace."""
+        try:
+            while await _desktop_workspace_available(workspace_id):
+                await asyncio.sleep(0.1)
+        except Exception:
+            # A failed lifecycle check must never leave an input tunnel usable.
+            logger.error("Desktop WebSocket lifecycle check failed")
+        await close_unavailable_client()
+
     # Run both directions concurrently and always await/cancel the other side.
     tasks = [
         asyncio.create_task(client_to_upstream()),
         asyncio.create_task(upstream_to_client()),
     ]
+    if workspace_id is not None:
+        tasks.append(asyncio.create_task(monitor_workspace()))
 
     async def cleanup():
         for task in tasks:

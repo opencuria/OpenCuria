@@ -180,6 +180,7 @@ class HarnessService:
         user_id: int | None = None,
     ) -> HarnessSession:
         """Create a session row (prompt persisted on run start)."""
+        self.sessions.ensure_interactions_available(workspace_id)
         normalized_mode = (mode or "build").strip().lower()
         if normalized_mode not in ("plan", "build"):
             raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
@@ -278,6 +279,7 @@ class HarnessService:
         if normalized not in ("plan", "build"):
             raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
         session = self.get_session(session_id)
+        self.sessions.ensure_interactions_available(session.workspace_id)
         updated = self.sessions.set_mode(session, normalized)
         if updated.parent_id is None:
             self._emit_conversations_changed_sync(updated.workspace_id)
@@ -286,6 +288,7 @@ class HarnessService:
     def set_model(self, session_id: uuid.UUID, model: str) -> HarnessSession:
         """Persist a model override for subsequent runs."""
         session = self.get_session(session_id)
+        self.sessions.ensure_interactions_available(session.workspace_id)
         return self.sessions.set_model(session, (model or "").strip())
 
     def set_reasoning_effort(
@@ -293,6 +296,7 @@ class HarnessService:
     ) -> HarnessSession:
         """Persist a reasoning-effort override for subsequent runs."""
         session = self.get_session(session_id)
+        self.sessions.ensure_interactions_available(session.workspace_id)
         return self.sessions.set_reasoning_effort(
             session, normalize_reasoning_effort(reasoning_effort)
         )
@@ -300,6 +304,7 @@ class HarnessService:
     def update_title(self, session_id: uuid.UUID, title: str) -> HarnessSession:
         """Rename a session (title only)."""
         session = self.get_session(session_id)
+        self.sessions.ensure_interactions_available(session.workspace_id)
         normalized = (title or "").strip()
         if not normalized:
             raise ValueError("title must not be empty")
@@ -318,6 +323,7 @@ class HarnessService:
     ) -> HarnessSession:
         """Persist skill selection after validating visibility."""
         session = self.get_session(session_id)
+        self.sessions.ensure_interactions_available(session.workspace_id)
         normalized = _normalize_skill_ids(skill_ids)
         if normalized:
             resolve_skill_bodies(
@@ -330,6 +336,9 @@ class HarnessService:
     async def delete_session(self, session_id: uuid.UUID) -> None:
         """Delete a session, aborting any active run first."""
         session = await sync_to_async(self.get_session)(session_id)
+        await sync_to_async(self.sessions.ensure_interactions_available)(
+            session.workspace_id
+        )
         if self.is_running(session.id):
             await self.abort_run(session.id)
         await sync_to_async(self.sessions.delete)(session)
@@ -348,6 +357,9 @@ class HarnessService:
         only); no file rollback or snapshot is performed here.
         """
         session = await sync_to_async(self.get_session)(session_id)
+        await sync_to_async(self.sessions.ensure_interactions_available)(
+            session.workspace_id
+        )
         self.ensure_user_promptable(session)
         # Fork is read-only (no assertNotBusy, like OpenCode): it must
         # also work while the source session has an active run.
@@ -395,6 +407,9 @@ class HarnessService:
         if not prompt or not prompt.strip():
             raise ValueError("prompt must not be empty")
         session = await sync_to_async(self.get_session)(session_id)
+        await sync_to_async(self.sessions.ensure_interactions_available)(
+            session.workspace_id
+        )
         self.ensure_user_promptable(session)
         if self.is_running(session.id):
             raise ConflictError(
@@ -913,6 +928,9 @@ class HarnessService:
         """
         if not prompt or not prompt.strip():
             raise ValueError("prompt must not be empty")
+        await sync_to_async(self.sessions.ensure_interactions_available)(
+            session.workspace_id
+        )
         key = str(session.id)
         if self.is_running(session.id):
             raise ConflictError(
@@ -1116,6 +1134,14 @@ class HarnessService:
     async def abort_run(self, session_id: uuid.UUID) -> HarnessSession:
         """Cancel the active run task, reject pending user gates, and mark aborted."""
         session = await sync_to_async(self.get_session)(session_id)
+        await sync_to_async(self.sessions.ensure_interactions_available)(
+            session.workspace_id
+        )
+        return await self._abort_run_tree(session)
+
+    async def _abort_run_tree(self, session: HarnessSession) -> HarnessSession:
+        """Join an authorized stop tree, even if capture begins during cleanup."""
+        session_id = session.id
         key = str(session.id)
         task = self._tasks.get(key) or self._admissions.get(key)
         if task is None or task.done():
@@ -1168,7 +1194,7 @@ class HarnessService:
         # Admissions may have added children after the initial stop traversal.
         children = await sync_to_async(self.sessions.list_children)(session_id)
         for child in children:
-            await self.abort_run(child.id)
+            await self._abort_run_tree(child)
         self._abort_requested.discard(key)
         return session
 
@@ -1197,6 +1223,9 @@ class HarnessService:
             raise NotFoundError("PermissionRequest", str(request_id))
         if str(record.session_id) != str(session.id):
             raise NotFoundError("PermissionRequest", str(request_id))
+        await sync_to_async(self.sessions.ensure_interactions_available)(
+            session.workspace_id
+        )
         result = await sync_to_async(self.permissions.resolve)(request_id, response)
         future = self._pending_permissions.pop(str(request_id), None)
         if future is not None and not future.done():
@@ -1235,6 +1264,9 @@ class HarnessService:
             raise NotFoundError("QuestionRequest", str(question_id))
         if str(record.session_id) != str(session.id):
             raise NotFoundError("QuestionRequest", str(question_id))
+        await sync_to_async(self.sessions.ensure_interactions_available)(
+            session.workspace_id
+        )
         status = "rejected" if reject else "answered"
         await sync_to_async(QuestionRequestRepository.resolve)(
             record,

@@ -24,6 +24,7 @@ import structlog
 
 from ..models import WorkspaceInfo
 from ..runtime.base import RuntimeBackend
+from .capture_fence import CaptureFence, live_interaction
 from .credentials import WORKSPACE_CREDENTIAL_ENV_FILE
 from .exec_kernel import sanitize_exec_workdir as _sanitize_exec_workdir
 
@@ -56,6 +57,7 @@ class HarnessExecService:
         sanitize_exec_workdir: Callable[[str], str] | None = None,
         credential_env_file: str | None = None,
     ) -> None:
+        self.capture_fence: CaptureFence | None = None
         self._runtimes = runtimes if runtimes is not None else {}
         self._get_cached = get_cached
         self._get_runtime = get_runtime
@@ -70,6 +72,7 @@ class HarnessExecService:
             else credential_env_file
         )
 
+    @live_interaction
     async def exec_harness_command(
         self,
         workspace_id: uuid.UUID,
@@ -121,6 +124,7 @@ class HarnessExecService:
         stdout, stderr = self._parse_harness_exec_output(output)
         return exit_code, stdout, stderr
 
+    @live_interaction
     async def exec_harness_command_stream(
         self,
         workspace_id: uuid.UUID,

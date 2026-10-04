@@ -37,6 +37,31 @@ class RunnerTransportMixin:
         data: dict,
     ) -> None:
         """Send a Socket.IO event to a specific runner by its SID."""
+        from ...operations import LIFECYCLE_TYPES, OperationRepository
+        from asgiref.sync import sync_to_async
+
+        lifecycle_type = event.removeprefix("task:")
+        if lifecycle_type == "delete_image_artifact":
+            lifecycle_type = "delete_image"
+        if lifecycle_type in LIFECYCLE_TYPES:
+            command = await sync_to_async(OperationRepository.prepare)(
+                data["task_id"], event, data
+            )
+            durable = await sync_to_async(OperationRepository.delivery_payload)(command)
+            # Every delivery hashes the same durable inputs. Resolved credential
+            # material is transient and deliberately outside journal fingerprint.
+            durable.update(
+                {k: data[k] for k in ("env_vars", "files", "ssh_keys") if k in data}
+            )
+            data = await sync_to_async(OperationRepository.envelope)(command, durable)
+            # Lost emit is recoverable from the DB outbox, not an operation failure.
+            if not runner.sid or self.sio is None:
+                return
+            try:
+                await self.sio.emit(event, data, to=runner.sid)
+            except Exception:
+                logger.warning("Lifecycle delivery deferred: %s", data["task_id"])
+            return
         if self.sio is None:
             logger.error("No Socket.IO server configured — cannot emit events")
             raise RuntimeError("Socket.IO server is not configured")
@@ -50,7 +75,7 @@ class RunnerTransportMixin:
             raise RunnerOfflineError(str(runner.id))
 
         await self.sio.emit(event, data, to=runner.sid)
-        logger.debug("Emitted %s to runner %s: %s", event, runner.id, data)
+        logger.debug("Emitted %s to runner %s", event, runner.id)
 
     async def _call_runner(
         self,
@@ -74,18 +99,14 @@ class RunnerTransportMixin:
             raise RunnerOfflineError(str(runner.id))
 
         try:
-            response = await self.sio.call(
-                event, data, to=runner.sid, timeout=timeout
-            )
+            response = await self.sio.call(event, data, to=runner.sid, timeout=timeout)
         except SocketIOTimeoutError:
             # No ACK from the runner handler: try reply-event
             # correlation for stream control events, otherwise surface
             # the timeout.
             waiter = self._call_reply_waiter(event, data)
             if waiter is None:
-                raise RuntimeError(
-                    f"Runner call timed out for event '{event}'"
-                )
+                raise RuntimeError(f"Runner call timed out for event '{event}'")
             request_id, future = waiter
             try:
                 try:

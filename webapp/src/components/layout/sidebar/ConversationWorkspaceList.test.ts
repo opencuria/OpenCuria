@@ -1,12 +1,15 @@
 import { nextTick } from 'vue'
-import { afterEach, describe, expect, it } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
+import { beforeEach, afterEach, describe, expect, it } from 'vitest'
 import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
+import { useWorkspaceStore } from '@/stores/workspaces'
 import ConversationWorkspaceList from './ConversationWorkspaceList.vue'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import type { Workspace } from '@/types'
 import type { HarnessConversation } from '@/types/harness'
 
 enableAutoUnmount(afterEach)
+beforeEach(() => setActivePinia(createPinia()))
 
 const stubs = {
   Tooltip: { template: '<div><slot /></div>' },
@@ -15,7 +18,11 @@ const stubs = {
   DropdownMenu: { template: '<div><slot /></div>' },
   DropdownMenuTrigger: { template: '<div><slot /></div>' },
   DropdownMenuContent: { template: '<div><slot /></div>' },
-  DropdownMenuItem: { template: '<button @click="$emit(\'click\')"><slot /></button>' },
+  DropdownMenuItem: {
+    props: ['disabled'],
+    emits: ['click'],
+    template: '<button :disabled="disabled" @click="$emit(\'click\')"><slot /></button>',
+  },
 }
 
 function workspace(id: string, overrides: Partial<Workspace> = {}): Workspace {
@@ -304,6 +311,107 @@ describe('ConversationWorkspaceList', () => {
     expect(wrapper.find('[data-testid="mark-all-read"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('No running workspaces')
   })
+
+  it.each([
+    { active_operation: WorkspaceOperation.CAPTURING_IMAGE },
+    { intervention_required: true },
+  ])('disables only transitioning workspace chat mutations: %j', async (transition) => {
+    const workspaces = [workspace('Alpha', transition), workspace('Beta')]
+    useWorkspaceStore().workspaces = workspaces
+    const wrapper = mountList({
+      workspaces,
+      conversations: [...chats('Alpha', 1), ...chats('Beta', 1)],
+    })
+    for (const id of ['Alpha', 'Beta']) {
+      const group = wrapper.get(groupSelector(id))
+      for (const label of ['Rename', 'Delete']) {
+        const action = group.findAll('button').find((button) => button.text() === label)!
+        expect(action.attributes('disabled') !== undefined).toBe(id === 'Alpha')
+      }
+    }
+    await wrapper.get(groupSelector('Alpha')).get(rows).trigger('click')
+    expect(wrapper.emitted('select')?.[0]?.[0]).toMatchObject({ session_id: 'Alpha-0' })
+  })
+
+  it('preserves collapse and pagination while capture starts and finishes', async () => {
+    const store = useWorkspaceStore()
+    store.workspaces = [workspace('Alpha'), workspace('Beta')]
+    const wrapper = mountList()
+    await wrapper.get(groupSelector('Alpha')).get(more).trigger('click')
+    await wrapper.setProps({ collapsedWorkspaceIds: ['Alpha'] })
+    store.updateWorkspaceOperation('Alpha', WorkspaceOperation.CAPTURING_IMAGE)
+    await flushPromises()
+    const alpha = wrapper.get(groupSelector('Alpha'))
+    expect(alpha.find(rows).exists()).toBe(false)
+    expect(alpha.find('[data-testid="workspace-busy"]').exists()).toBe(true)
+    expect(alpha.get('[data-testid="workspace-row"]').attributes('title')).toBe('Alpha — Capturing')
+    await alpha.get('[data-testid="workspace-row"]').trigger('click')
+    expect(wrapper.emitted('open')?.[0]).toEqual(['Alpha'])
+    await wrapper.setProps({ collapsedWorkspaceIds: [] })
+    await flushPromises()
+    expect(alpha.findAll(rows)).toHaveLength(8)
+    expect(
+      alpha
+        .findAll('button')
+        .find((button) => button.text() === 'Rename')!
+        .attributes('disabled'),
+    ).toBeDefined()
+    store.updateWorkspaceOperation('Alpha', null)
+    await flushPromises()
+    expect(alpha.find('[data-testid="workspace-busy"]').exists()).toBe(false)
+    expect(alpha.findAll(rows)).toHaveLength(8)
+    expect(
+      alpha
+        .findAll('button')
+        .find((button) => button.text() === 'Rename')!
+        .attributes('disabled'),
+    ).toBeUndefined()
+  })
+
+  it.each([
+    { active_operation: WorkspaceOperation.CAPTURING_IMAGE },
+    { intervention_required: true },
+  ])(
+    'retains collapsed paginated history through stopped reservation and clears it afterwards: %j',
+    async (reservation) => {
+      const store = useWorkspaceStore()
+      store.workspaces = [workspace('Alpha'), workspace('Beta')]
+      const wrapper = mountList()
+      await wrapper.get(groupSelector('Alpha')).get(more).trigger('click')
+      await wrapper.setProps({ collapsedWorkspaceIds: ['Alpha'] })
+      const reserved = workspace('Alpha', { status: WorkspaceStatus.STOPPED, ...reservation })
+      store.workspaces = [reserved, workspace('Beta')]
+      await wrapper.setProps({ workspaces: store.workspaces })
+      await flushPromises()
+      const alpha = wrapper.get(groupSelector('Alpha'))
+      expect(alpha.find(rows).exists()).toBe(false)
+      expect(
+        alpha.get('[data-testid="workspace-collapse-toggle"]').attributes('aria-expanded'),
+      ).toBe('false')
+      expect(alpha.find('[data-testid="workspace-busy"]').exists()).toBe(true)
+      await wrapper.setProps({ collapsedWorkspaceIds: [] })
+      await flushPromises()
+      expect(alpha.findAll(rows)).toHaveLength(8)
+      expect(
+        alpha
+          .findAll('button')
+          .find((button) => button.text() === 'Rename')!
+          .attributes('disabled'),
+      ).toBeDefined()
+      await alpha.findAll(rows)[0]!.trigger('click')
+      expect(wrapper.emitted('select')?.[0]?.[0]).toMatchObject({ session_id: 'Alpha-0' })
+      store.workspaces = [
+        workspace('Alpha', { status: WorkspaceStatus.STOPPED }),
+        workspace('Beta'),
+      ]
+      await wrapper.setProps({ workspaces: store.workspaces })
+      expect(wrapper.find(groupSelector('Alpha')).exists()).toBe(false)
+      store.workspaces = [workspace('Alpha'), workspace('Beta')]
+      await wrapper.setProps({ workspaces: store.workspaces })
+      await flushPromises()
+      expect(wrapper.get(groupSelector('Alpha')).findAll(rows)).toHaveLength(8)
+    },
+  )
 
   it('forwards workspace and keyboard chat selection plus chat management events', async () => {
     const wrapper = mountList({ conversations: chats('Alpha', 1) })

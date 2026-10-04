@@ -54,7 +54,7 @@ const HarnessChatInputStub = {
   name: 'HarnessChatInput',
   template: '<div data-testid="harness-chat-input"><div data-testid="composer-card" /></div>',
   props: ['disabled', 'workspaceId', 'sessionId', 'uploadDrag'],
-  emits: ['prefill'],
+  emits: ['prefill', 'send', 'stop'],
   methods: {
     setPrompt(prompt: string) {
       ;(this as unknown as { $emit: (event: string, ...args: unknown[]) => void }).$emit(
@@ -656,6 +656,41 @@ describe('HarnessChatPanel', () => {
 
     const container = wrapper.findComponent({ name: 'HarnessChatContainer' })
     expect(container.props('disabled')).toBe(false)
+  })
+
+  it('keeps unread history viewable but blocks mutations when the workspace cannot prompt', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: { workspaceId: 'ws-1', canPrompt: true },
+      global: { plugins: [router], stubs },
+    })
+    await flushPromises()
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ unread: true })]
+    store.setActiveSession('session-root')
+    await flushPromises()
+    await wrapper.setProps({ canPrompt: false })
+    expect(vi.mocked(markHarnessSessionRead)).toHaveBeenCalledWith('session-root')
+    const container = wrapper.findComponent({ name: 'HarnessChatContainer' })
+    const input = wrapper.findComponent(HarnessChatInputStub)
+    const stack = wrapper.findComponent({ name: 'HarnessSheetStack' })
+    expect(container.props('disabled')).toBe(true)
+    expect(input.props('disabled')).toBe(true)
+    expect(stack.props('permissionResolving')).toBe(true)
+    expect(stack.props('questionSubmitting')).toBe(true)
+    const edit = vi.spyOn(store, 'editMessage').mockResolvedValue(undefined)
+    const fork = vi.spyOn(store, 'forkSession').mockResolvedValue(null)
+    const send = vi.spyOn(store, 'sendMessage').mockResolvedValue(undefined)
+    const stop = vi.spyOn(store, 'abortSession').mockResolvedValue(undefined)
+    container.vm.$emit('edit', 'user-1', 'edited')
+    container.vm.$emit('fork', 'user-1')
+    input.vm.$emit('send', 'blocked', 'build', 'm', [], '')
+    input.vm.$emit('stop')
+    await flushPromises()
+    for (const action of [edit, fork, send, stop]) expect(action).not.toHaveBeenCalled()
+    await wrapper.setProps({ canPrompt: true })
+    expect(container.props('disabled')).toBe(false)
+    expect(input.props('disabled')).toBe(false)
+    wrapper.unmount()
   })
 
   it('forwards container edit events to the store editMessage action', async () => {

@@ -11,14 +11,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
+import ImageDeletionDialog from '@/components/images/ImageDeletionDialog.vue'
 import SettingsSection from './SettingsSection.vue'
 import SettingsRow from './SettingsRow.vue'
 import CreateImageArtifactDialog from '@/components/workspaces/CreateImageArtifactDialog.vue'
@@ -41,7 +34,6 @@ import type { ImageArtifact } from '@/types'
 
 const imageStore = useImageStore()
 
-const deletingId = ref<string | null>(null)
 const pendingDelete = ref<ImageArtifact | null>(null)
 const editingId = ref<string | null>(null)
 const editName = ref('')
@@ -68,7 +60,7 @@ onMounted(() => {
 })
 
 function formatBytes(bytes: number | null): string {
-  if (!bytes) return '—'
+  if (bytes == null) return 'Unknown'
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
@@ -83,14 +75,6 @@ function iconClassFor(imageArtifact: ImageArtifact): string {
 
 function requestDelete(imageArtifact: ImageArtifact): void {
   pendingDelete.value = imageArtifact
-}
-
-async function confirmDelete(): Promise<void> {
-  if (!pendingDelete.value) return
-  deletingId.value = pendingDelete.value.id
-  await imageStore.deleteImageArtifact(pendingDelete.value.id)
-  deletingId.value = null
-  pendingDelete.value = null
 }
 
 function startRename(imageArtifact: ImageArtifact): void {
@@ -208,11 +192,12 @@ async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
                 imageArtifact.runtime_type === 'qemu' ? 'QEMU' : imageArtifact.runtime_type
               }}</Badge>
               <Badge v-if="isCaptureInProgress(imageArtifact)" variant="outline">Creating…</Badge>
-              <Badge v-else-if="imageArtifact.status === 'failed'" variant="destructive">Failed</Badge>
-              <Badge
-                v-else-if="imageArtifact.status === 'pending_deletion'"
-                variant="destructive"
-              >Pending deletion</Badge>
+              <Badge v-else-if="imageArtifact.status === 'failed'" variant="destructive"
+                >Failed</Badge
+              >
+              <Badge v-else-if="imageArtifact.status === 'pending_deletion'" variant="destructive"
+                >Pending deletion</Badge
+              >
               <Badge
                 v-else-if="imageArtifact.status === 'deleting'"
                 variant="destructive"
@@ -235,10 +220,7 @@ async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
               </Badge>
             </div>
 
-            <p
-              v-if="imageArtifact.source_definition_name"
-              class="text-xs text-muted-foreground"
-            >
+            <p v-if="imageArtifact.source_definition_name" class="text-xs text-muted-foreground">
               Built from: {{ imageArtifact.source_definition_name }}
             </p>
             <p
@@ -283,37 +265,23 @@ async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
               variant="ghost"
               size="icon-sm"
               title="Delete image"
+              aria-label="Delete image or inspect pending request"
               class="text-destructive hover:text-destructive"
-              :disabled="
-                deletingId === imageArtifact.id ||
-                ['pending_deletion', 'deleting'].includes(imageArtifact.status)
-              "
+              :disabled="imageArtifact.status === 'deleting'"
               @click="requestDelete(imageArtifact)"
             >
-              <LoadingSpinner v-if="deletingId === imageArtifact.id" :size="14" />
-              <Trash2 v-else />
+              <Trash2 />
             </Button>
           </template>
         </SettingsRow>
       </div>
     </SettingsSection>
 
-    <Dialog
-      :open="pendingDelete !== null"
-      @update:open="(open) => !open && (pendingDelete = null)"
-    >
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Delete image</DialogTitle>
-          <DialogDescription>
-            Delete {{ pendingDelete?.name }}? This cannot be undone.
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" @click="pendingDelete = null">Cancel</Button>
-          <Button variant="destructive" @click="confirmDelete">Delete</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <ImageDeletionDialog
+      :target="pendingDelete ? { target_type: 'image', target_id: pendingDelete.id } : null"
+      :name="pendingDelete?.name"
+      @close="pendingDelete = null"
+      @requested="imageStore.fetchImages"
+    />
   </div>
 </template>

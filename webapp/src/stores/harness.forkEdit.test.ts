@@ -200,3 +200,17 @@ describe('harness store fork/edit', () => {
     expect(store.sessions.map((row) => row.id)).toContain('session-fork')
   })
 })
+
+it('blocks message editing and forks while a workspace is capturing', async () => {
+  setActivePinia(createPinia())
+  vi.clearAllMocks()
+  const { useWorkspaceStore } = await import('./workspaces')
+  const workspaces = useWorkspaceStore()
+  const harness = useHarnessStore()
+  harness.sessions = [{ id: 's', workspace_id: 'w' }] as HarnessSession[]
+  void workspaces.captureImage('w', () => new Promise(() => {}))
+  await harness.editMessage('s', 'm', 'blocked')
+  expect(await harness.forkSession('s', 'm')).toBeNull()
+  expect(editMock).not.toHaveBeenCalled()
+  expect(forkMock).not.toHaveBeenCalled()
+})

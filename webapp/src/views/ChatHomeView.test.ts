@@ -9,6 +9,17 @@ import { clearComposerTransition, isComposerTransitionPending } from '@/lib/comp
 import { subscribeToWorkspace } from '@/services/socket'
 
 const workspaceStore = {
+  isWorkspaceTransitioning(id: string): boolean {
+    return Boolean(this.workspaces.find((w) => w.id === id)?.active_operation)
+  },
+  canUseWorkspace(id: string): boolean {
+    const w = this.workspaces.find((w) => w.id === id)
+    return Boolean(
+      w?.status === WorkspaceStatus.RUNNING &&
+      w.runner_online &&
+      !this.isWorkspaceTransitioning(id),
+    )
+  },
   workspaces: [] as Workspace[],
   activeWorkspace: null as Workspace | null,
   fetchWorkspaces: vi.fn().mockResolvedValue(undefined),

@@ -1,5 +1,7 @@
+import tempfile
 import unittest
 import uuid
+import tempfile
 from unittest.mock import AsyncMock
 
 from src.config import RunnerSettings
@@ -102,19 +104,25 @@ class DummyService:
 class WebSocketLegacyPromptRemovedTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_prompt_handler_is_gone(self) -> None:
         """Negative test: task:run_prompt no longer exists on the runner."""
-        interface = WebSocketInterface(DummyService(), RunnerSettings())
+        interface = WebSocketInterface(
+            DummyService(), RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
         assert "task:run_prompt" not in interface._sio.handlers["/"]
 
     async def test_cancel_prompt_handler_is_gone(self) -> None:
         """Negative test: task:cancel_prompt no longer exists on the runner."""
-        interface = WebSocketInterface(DummyService(), RunnerSettings())
+        interface = WebSocketInterface(
+            DummyService(), RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
         assert "task:cancel_prompt" not in interface._sio.handlers["/"]
 
 
 class WebSocketMetricsPathTests(unittest.TestCase):
     def test_socketio_client_raises_http_buffer_size(self) -> None:
         """aiohttp inbound WS messages must accept 200 MiB like the backend."""
-        interface = WebSocketInterface(DummyService(), RunnerSettings())
+        interface = WebSocketInterface(
+            DummyService(), RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
         self.assertEqual(SOCKETIO_MAX_HTTP_BUFFER_SIZE, 200 * 1024 * 1024)
         self.assertEqual(
             interface._sio.eio.websocket_extra_options["max_msg_size"],
@@ -123,15 +131,19 @@ class WebSocketMetricsPathTests(unittest.TestCase):
 
     def test_storage_root_defaults_to_var_lib_opencuria(self) -> None:
         settings = RunnerSettings(
+            state_dir=tempfile.mkdtemp(),
             qemu_image_cache_dir="/var/lib/opencuria/images",
             qemu_disk_dir="/var/lib/opencuria/disks",
             qemu_snapshot_dir="/var/lib/opencuria/snapshots",
         )
         interface = WebSocketInterface(DummyService(), settings)
-        self.assertEqual(interface._storage_root_path().as_posix(), "/var/lib/opencuria")
+        self.assertEqual(
+            interface._storage_root_path().as_posix(), "/var/lib/opencuria"
+        )
 
     def test_storage_root_respects_custom_common_base(self) -> None:
         settings = RunnerSettings(
+            state_dir=tempfile.mkdtemp(),
             qemu_image_cache_dir="/mnt/kern-store/images",
             qemu_disk_dir="/mnt/kern-store/disks",
             qemu_snapshot_dir="/mnt/kern-store/snapshots",
@@ -141,6 +153,7 @@ class WebSocketMetricsPathTests(unittest.TestCase):
 
     def test_resolve_disk_usage_path_falls_back_to_existing_parent(self) -> None:
         settings = RunnerSettings(
+            state_dir=tempfile.mkdtemp(),
             qemu_image_cache_dir="/tmp/runner-metrics-test/images",
             qemu_disk_dir="/tmp/runner-metrics-test/disks",
             qemu_snapshot_dir="/tmp/runner-metrics-test/snapshots",
@@ -158,7 +171,9 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         service = DummyService()
         workspaces = [{"workspace_id": str(uuid.uuid4()), "status": "running"}]
         service.get_workspace_heartbeat_statuses = AsyncMock(return_value=workspaces)
-        interface = WebSocketInterface(service, RunnerSettings())
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
         interface._sio.connected = True
         emitted = asyncio.Event()
 
@@ -195,24 +210,60 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        interface = WebSocketInterface(service, RunnerSettings())
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
         interface._sio.emit = AsyncMock()
 
         await interface._sio.handlers["/"]["connect"]()
 
-        service.sync_from_runtime.assert_awaited_once()
-        service.recover_desktop_sessions_from_runtime.assert_awaited_once()
+        # Registration must finish before slow observation starts.
+        service.sync_from_runtime.assert_not_awaited()
         interface._sio.emit.assert_any_await(
-            "desktop:process",
+            "runner:register",
             {
-                "workspace_id": service.get_workspace_heartbeat_statuses.return_value[0]["workspace_id"],
-                "port": 6901,
-                "container_ip": "127.0.0.1",
-                "network_name": "workspace-net",
-                "viewer": False,
-                "computer_use": False,
+                "supported_runtimes": [],
+                "status": "ready",
             },
         )
+        await interface.stop()
+
+    async def test_blocked_inventory_does_not_block_health_or_operation_lease(self):
+        import asyncio
+
+        service = DummyService()
+        blocked = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def scan():
+            entered.set()
+            await blocked.wait()
+
+        service.inventory_for_runner = AsyncMock(side_effect=scan)
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
+        interface._sio.connected = True
+        emitted = asyncio.Event()
+
+        async def emit(event, data):
+            if (
+                event == "runner:heartbeat"
+                and data.get("workspace_states_observed") is False
+            ):
+                assert data["snapshot_complete"] is False
+                emitted.set()
+
+        interface._sio.emit = AsyncMock(side_effect=emit)
+        interface._operations.replay = AsyncMock()
+        observation = asyncio.create_task(interface._observation_loop())
+        await asyncio.wait_for(entered.wait(), 1)
+        heartbeat = asyncio.create_task(interface._heartbeat_loop())
+        await asyncio.wait_for(emitted.wait(), 1)
+        interface._operations.replay.assert_any_await(recover=False)
+        heartbeat.cancel()
+        observation.cancel()
+        await asyncio.gather(heartbeat, observation)
 
     async def test_start_desktop_emits_qemu_proxy_metadata(self) -> None:
         service = DummyService()
@@ -224,16 +275,14 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             )()
         )
         service.start_desktop = service.desktop.start_desktop
-        service.desktop.get_desktop_container_ip = (
-            lambda workspace_id: "10.100.0.2"
-        )
-        service.get_desktop_container_ip = (
-            service.desktop.get_desktop_container_ip
-        )
+        service.desktop.get_desktop_container_ip = lambda workspace_id: "10.100.0.2"
+        service.get_desktop_container_ip = service.desktop.get_desktop_container_ip
         service.desktop.get_desktop_network_name = lambda workspace_id: ""
         service.get_desktop_network_name = service.desktop.get_desktop_network_name
 
-        interface = WebSocketInterface(service, RunnerSettings())
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
         interface._sio.emit = AsyncMock()
 
         task_id = "desktop-task-1"
@@ -260,7 +309,9 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_desktop_emits_stopped_when_process_ends(self) -> None:
         service = DummyService()
-        interface = WebSocketInterface(service, RunnerSettings())
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
         interface._sio.emit = AsyncMock()
         task_id = "desktop-stop-1"
         workspace_id = uuid.uuid4()
@@ -294,7 +345,9 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             )()
         )
         service.stop_desktop = service.desktop.stop_desktop
-        interface = WebSocketInterface(service, RunnerSettings())
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
         interface._sio.emit = AsyncMock()
         task_id = "desktop-stop-2"
         workspace_id = uuid.uuid4()
@@ -313,7 +366,9 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_desktop_proxy_http_request_uses_runner_local_fetch(self) -> None:
         service = DummyService()
-        interface = WebSocketInterface(service, RunnerSettings())
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
         interface._fetch_desktop_http = AsyncMock(
             return_value={
                 "status": 200,
@@ -342,7 +397,9 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_desktop_proxy_ws_open_uses_runner_local_tunnel(self) -> None:
         service = DummyService()
-        interface = WebSocketInterface(service, RunnerSettings())
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
         interface._open_desktop_proxy_tunnel = AsyncMock(
             return_value={"ok": True, "subprotocol": "binary"}
         )
@@ -366,7 +423,9 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_desktop_proxy_ws_send_forwards_payload(self) -> None:
         service = DummyService()
-        interface = WebSocketInterface(service, RunnerSettings())
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
         interface._send_desktop_proxy_tunnel_message = AsyncMock()
 
         handler = interface._sio.handlers["/"]["desktop:proxy_ws_send"]
@@ -393,8 +452,10 @@ class WebSocketCloneWorkspaceTests(unittest.IsolatedAsyncioTestCase):
             side_effect=RuntimeError("boom")
         )
 
-        interface = WebSocketInterface(service, RunnerSettings())
-        interface._sio.emit = AsyncMock()
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
+        interface._operations.emit = AsyncMock()
 
         task_id = "clone-task-1"
         workspace_id = uuid.uuid4()
@@ -411,24 +472,30 @@ class WebSocketCloneWorkspaceTests(unittest.IsolatedAsyncioTestCase):
         handler = interface._sio.handlers["/"][
             "task:create_workspace_from_image_artifact"
         ]
+        payload.update(
+            operation_id=task_id,
+            attempt=1,
+            target=str(workspace_id),
+            runner_id="runner",
+        )
         await handler(payload)
 
-        interface._sio.emit.assert_awaited_with(
-            "workspace:error",
-            {
-                "task_id": task_id,
-                "workspace_id": str(workspace_id),
-                "error": "boom",
-            },
-        )
+        packet = interface._operations.emit.await_args.args
+        self.assertEqual(packet[0], "operation:result")
+        self.assertEqual(packet[1]["event"], "workspace:error")
+        self.assertEqual(packet[1]["data"]["workspace_id"], str(workspace_id))
+        self.assertIn("execution finished", packet[1]["data"]["error"])
+        self.assertTrue(packet[1]["data"]["outcome_known"])
 
 
 class WebSocketCreateWorkspaceTests(unittest.IsolatedAsyncioTestCase):
     async def test_forwards_env_and_ssh_credentials(self) -> None:
         service = DummyService()
 
-        interface = WebSocketInterface(service, RunnerSettings())
-        interface._sio.emit = AsyncMock()
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
+        interface._operations.emit = AsyncMock()
 
         task_id = "create-task-1"
         workspace_id = uuid.uuid4()
@@ -439,11 +506,19 @@ class WebSocketCreateWorkspaceTests(unittest.IsolatedAsyncioTestCase):
             "runtime_type": "docker",
             "image_tag": "opencuria/workspace:test",
             "env_vars": {"GITHUB_TOKEN": "secret"},
-            "ssh_keys": ["-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----"],
+            "ssh_keys": [
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----"
+            ],
             "configure_commands": [],
         }
 
         handler = interface._sio.handlers["/"]["task:create_workspace"]
+        payload.update(
+            operation_id=task_id,
+            attempt=1,
+            target=str(workspace_id),
+            runner_id="runner",
+        )
         await handler(payload)
 
         self.assertEqual(len(service.create_workspace_calls), 1)
@@ -455,7 +530,9 @@ class WebSocketCreateWorkspaceTests(unittest.IsolatedAsyncioTestCase):
 class WebSocketCredentialInjectTests(unittest.IsolatedAsyncioTestCase):
     async def test_inject_credentials_acks_presence_and_emits_event(self) -> None:
         service = DummyService()
-        interface = WebSocketInterface(service, RunnerSettings())
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
         interface._sio.emit = AsyncMock()
         task_id = "inject-task-1"
         workspace_id = uuid.uuid4()
@@ -483,7 +560,9 @@ class WebSocketCredentialInjectTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_inject_credentials_empty_set_acks_absent(self) -> None:
         service = DummyService()
-        interface = WebSocketInterface(service, RunnerSettings())
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
         interface._sio.emit = AsyncMock()
         workspace_id = uuid.uuid4()
 

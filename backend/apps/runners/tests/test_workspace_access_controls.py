@@ -82,6 +82,7 @@ def workspace_access_setup(db):
         created_by=foreign_admin,
     )
     artifact = ImageInstance.objects.create(
+        is_legacy=True,
         runner=runner,
         origin_workspace=owner_workspace,
         created_by=owner,
@@ -294,7 +295,14 @@ def test_foreign_workspace_endpoints_return_not_found(
             content_type="application/json",
         )
 
-    assert response.status_code == 404
+    if method == 'delete' and '/image-artifacts/' in path_template:
+        expected = 204 if actor_key == 'foreign_admin' else 403
+        assert response.status_code == expected
+        workspace_access_setup['artifact'].refresh_from_db()
+        assert workspace_access_setup['artifact'].status == (
+            'pending_deletion' if expected == 204 else 'ready')
+    else:
+        assert response.status_code == 404
 
 
 @pytest.mark.django_db

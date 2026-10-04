@@ -47,19 +47,44 @@ composer exposes it as a read-through alias.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from functools import wraps
 from typing import Any
 
 import structlog
 
 from ..models import WorkspaceInfo
 from ..runtime.base import RuntimeBackend, WorkspaceConfig
+from .capture_fence import CaptureFence, Method
 from .sessions.desktop import DESKTOP_HOLDER_VIEWER
 from .workspace_registry import WorkspaceRegistry
 
 logger = structlog.get_logger(__name__)
+
+
+def coordinated(method: Method) -> Method:
+    """Fence awaited lifecycle effects against stale registry observations."""
+    signature = inspect.signature(method)
+
+    @wraps(method)
+    async def wrapped(self: WorkspaceLifecycle, *args: Any, **kwargs: Any) -> Any:
+        bound = signature.bind(self, *args, **kwargs)
+        workspace_id = bound.arguments.get("workspace_id")
+        if workspace_id is None:
+            workspace_id = uuid.uuid4()
+            bound.arguments["workspace_id"] = workspace_id
+        fence = self.capture_fence
+        if fence is not None:
+            fence.check_available(workspace_id)
+        async with self._registry.lifecycle(workspace_id):
+            if fence is None:
+                return await method(*bound.args, **bound.kwargs)
+            async with fence.interaction(workspace_id, coordinated=True):
+                return await method(*bound.args, **bound.kwargs)
+    return wrapped  # type: ignore[return-value]
 
 
 class WorkspaceLifecycle:
@@ -94,6 +119,9 @@ class WorkspaceLifecycle:
         streams: Any | None = None,
         desktop: Any | None = None,
     ) -> None:
+        self.capture_fence: CaptureFence | None = None
+        self.checkpoint_hook = None
+        self.scrub_proof_hook = None
         self._registry = registry
         self._settings = settings
         self._runtimes = runtimes if runtimes is not None else {}
@@ -112,29 +140,22 @@ class WorkspaceLifecycle:
             Callable[[RuntimeBackend, str, Any], Awaitable[None]] | None
         ) = None
         self.inject_hook: (
-            Callable[
-                [RuntimeBackend, str, Any, Any, Any, Any], Awaitable[bool]
-            ]
-            | None
+            Callable[[RuntimeBackend, str, Any, Any, Any, Any], Awaitable[bool]] | None
         ) = None
         self.exec_hook: (
             Callable[[RuntimeBackend, str, dict], Awaitable[tuple[int, str]]] | None
         ) = None
-        self.close_streams_hook: (
-            Callable[[uuid.UUID, str], Awaitable[int]] | None
-        ) = None
-        self.kill_all_hook: (
-            Callable[[uuid.UUID, str], Awaitable[None]] | None
-        ) = None
-        self.drop_tracking_hook: (
-            Callable[[uuid.UUID, str], Awaitable[int]] | None
-        ) = None
+        self.close_streams_hook: Callable[[uuid.UUID, str], Awaitable[int]] | None = (
+            None
+        )
+        self.kill_all_hook: Callable[[uuid.UUID, str], Awaitable[None]] | None = None
+        self.drop_tracking_hook: Callable[[uuid.UUID, str], Awaitable[int]] | None = (
+            None
+        )
         self.release_hook: (
             Callable[[uuid.UUID, str, Any, bool], Awaitable[Any]] | None
         ) = None
-        self.interrupt_hook: (
-            Callable[[uuid.UUID], Awaitable[None]] | None
-        ) = None
+        self.interrupt_hook: Callable[[uuid.UUID], Awaitable[None]] | None = None
         self.desktop_lock_hook: (
             Callable[[uuid.UUID], Awaitable[asyncio.Lock]] | None
         ) = None
@@ -187,6 +208,17 @@ class WorkspaceLifecycle:
         log: Any,
     ) -> bool:
         """Inject credentials (hook-aware, so service overrides apply)."""
+        if self.checkpoint_hook is not None:
+            workspace_id = next(
+                (
+                    key
+                    for key, info in self._registry._cache.items()
+                    if info.instance_id == instance_id
+                ),
+                None,
+            )
+            if workspace_id is not None:
+                await self.checkpoint_hook(workspace_id, None, "injecting")
         if self.inject_hook is not None:
             return await self.inject_hook(
                 runtime, instance_id, env_vars, files, ssh_keys, log
@@ -210,9 +242,7 @@ class WorkspaceLifecycle:
         """Close every stream bound to *workspace_id* (hook-aware)."""
         if self.close_streams_hook is not None:
             return await self.close_streams_hook(workspace_id, reason)
-        return await self._streams.close_workspace_streams(
-            workspace_id, reason=reason
-        )
+        return await self._streams.close_workspace_streams(workspace_id, reason=reason)
 
     async def _call_kill_all(self, workspace_id: uuid.UUID, reason: str) -> None:
         """Kill every tracked background process (hook-aware)."""
@@ -223,9 +253,7 @@ class WorkspaceLifecycle:
                 workspace_id, reason=reason
             )
 
-    async def _call_drop_tracking(
-        self, workspace_id: uuid.UUID, reason: str
-    ) -> int:
+    async def _call_drop_tracking(self, workspace_id: uuid.UUID, reason: str) -> int:
         """Drop background tracking after a reboot (hook-aware)."""
         if self.drop_tracking_hook is not None:
             return await self.drop_tracking_hook(workspace_id, reason)
@@ -262,6 +290,7 @@ class WorkspaceLifecycle:
 
     # -- lifecycle ---------------------------------------------------------
 
+    @coordinated
     async def create_workspace(
         self,
         repos: list[str],
@@ -346,16 +375,13 @@ class WorkspaceLifecycle:
             instance_id = await runtime.create_workspace(config)
         except Exception:
             log.exception("workspace_creation_failed")
-            self._registry._cache.pop(workspace_id, None)
+            # A thrown error need not mean runtime creation had no effects.
+            # Keep the incomplete entry for reconciliation/operator recovery.
+            self._registry.get_cached(workspace_id).credentials_present = None
             raise
 
         # Update cache with the real instance_id now that the runtime has assigned it.
-        self._registry._cache[workspace_id] = WorkspaceInfo(
-            workspace_id=workspace_id,
-            instance_id=instance_id,
-            status="creating",
-            runtime_type=runtime_type,
-        )
+        self._registry.get_cached(workspace_id).instance_id = instance_id
 
         credentials_present = await self._call_inject(
             runtime,
@@ -384,10 +410,16 @@ class WorkspaceLifecycle:
                 log.info("repo_cloned", repo=repo_url)
 
         self._registry._cache[workspace_id].status = "running"
+        self._registry._cache[workspace_id].credentials_present = credentials_present
 
+        if self.checkpoint_hook is not None:
+            await self.checkpoint_hook(
+                workspace_id, credentials_present, "workspace:created"
+            )
         log.info("workspace_ready", credentials_present=credentials_present)
         return workspace_id, credentials_present
 
+    @coordinated
     async def stop_workspace(self, workspace_id: uuid.UUID) -> bool:
         """Remove credentials then stop a running workspace.
 
@@ -401,18 +433,35 @@ class WorkspaceLifecycle:
 
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
+        # Security decisions require a live observation, not heartbeat cache.
+        status = await runtime.get_workspace_status(info.instance_id)
+        info.status = status.status
+        if info.status in {"exited", "stopped"}:
+            if self.scrub_proof_hook is not None and await self.scrub_proof_hook(
+                workspace_id
+            ):
+                info.credentials_present = False
+                return False
+            raise RuntimeError(
+                "Stopped guest has no exact scrub proof; manual intervention required"
+            )
+        if info.status != "running":
+            raise RuntimeError("Workspace live status is unknown or not running")
 
+        info.credentials_present = None
         await self._call_remove(runtime, info.instance_id, log)
         await self._call_kill_all(workspace_id, reason="stop")
         await self._call_close_streams(workspace_id, reason="stop")
-        await self._call_release(
-            workspace_id, holder=DESKTOP_HOLDER_VIEWER, force=True
-        )
+        await self._call_release(workspace_id, holder=DESKTOP_HOLDER_VIEWER, force=True)
         await runtime.stop_workspace(info.instance_id)
         info.status = "exited"
+        info.credentials_present = False
+        if self.checkpoint_hook is not None:
+            await self.checkpoint_hook(workspace_id, False, "scrubbed")
         log.info("workspace_stopped")
         return False
 
+    @coordinated
     async def resume_workspace(
         self,
         workspace_id: uuid.UUID,
@@ -426,10 +475,14 @@ class WorkspaceLifecycle:
         """Resume a stopped workspace and re-inject persistent credentials."""
         log = logger.bind(workspace_id=str(workspace_id))
         info = self._registry.get_cached(workspace_id)
+        info.credentials_present = None
         runtime = self._registry.get_runtime(workspace_id)
 
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
+
+        if self.checkpoint_hook is not None:
+            await self.checkpoint_hook(workspace_id, None, "injecting")
 
         if info.runtime_type == "qemu":
             if (
@@ -448,6 +501,7 @@ class WorkspaceLifecycle:
 
         await runtime.start_workspace(info.instance_id)
         info.status = "running"
+        info.credentials_present = None
         credentials_present = await self._call_inject(
             runtime,
             info.instance_id,
@@ -457,8 +511,10 @@ class WorkspaceLifecycle:
             log,
         )
         log.info("workspace_resumed", credentials_present=credentials_present)
+        info.credentials_present = credentials_present
         return credentials_present
 
+    @coordinated
     async def inject_credentials(
         self,
         workspace_id: uuid.UUID,
@@ -481,6 +537,7 @@ class WorkspaceLifecycle:
             log,
         )
 
+    @coordinated
     async def update_workspace_resources(
         self,
         workspace_id: uuid.UUID,
@@ -500,9 +557,7 @@ class WorkspaceLifecycle:
             raise RuntimeError("Workspace has no instance assigned")
         # Reconfigure restarts the VM: all in-workspace stream processes
         # die with it, so close the tracked sessions first.
-        await self._call_close_streams(
-            workspace_id, reason="reconfigure_resources"
-        )
+        await self._call_close_streams(workspace_id, reason="reconfigure_resources")
         await runtime.reconfigure_workspace(
             info.instance_id,
             qemu_vcpus=qemu_vcpus,
@@ -513,11 +568,10 @@ class WorkspaceLifecycle:
         # The VM rebooted: every RAM process is dead, so drop tracking.
         # Keeping entries would report stale exited rows and risk
         # signalling a reused foreign PID after the reboot.
-        await self._call_drop_tracking(
-            workspace_id, reason="reconfigure_resources"
-        )
+        await self._call_drop_tracking(workspace_id, reason="reconfigure_resources")
         info.status = "running"
 
+    @coordinated
     async def remove_workspace(self, workspace_id: uuid.UUID) -> None:
         """Remove a workspace and clean up resources.
 
@@ -558,7 +612,7 @@ class WorkspaceLifecycle:
                     "desktop_recording_interrupt_failed",
                     workspace_id=str(workspace_id),
                 )
-            info = self._registry._cache.pop(workspace_id, None)
+            info = self._registry._cache.get(workspace_id)
             self._desktop._desktop_sessions.pop(workspace_id, None)
             # Final sweep for entries added during the interrupt awaits
             # (record_start is lock-free); still under the same hold, so
@@ -569,13 +623,34 @@ class WorkspaceLifecycle:
                 if key[0] != workspace_id
             }
 
+        if info is None:
+            # Explicit user removal may target a failed partial create whose
+            # domain was never defined. Inventory proof is still mandatory.
+            for runtime in self._runtimes.values():
+                scan = await runtime.inventory()
+                if not scan.complete:
+                    raise RuntimeError(
+                        "Runtime inventory incomplete; no deletion performed"
+                    )
+                matched = any(
+                    r.managed and r.metadata.get("workspace_id") == str(workspace_id)
+                    for r in scan.resources
+                )
+                if matched:
+                    await runtime.remove_workspace(str(workspace_id))
         if info and info.instance_id:
             runtime = self._runtimes.get(info.runtime_type)
             if runtime:
-                await runtime.remove_workspace(info.instance_id)
+                await runtime.remove_workspace(
+                    str(workspace_id)
+                    if info.runtime_type == "docker"
+                    else info.instance_id
+                )
 
+        self._registry._cache.pop(workspace_id, None)
         log.info("workspace_removed")
 
+    @coordinated
     async def cleanup_unknown_workspace(self, workspace_id: uuid.UUID) -> bool:
         """Best-effort cleanup for a runtime workspace unknown to the backend.
 
@@ -589,12 +664,8 @@ class WorkspaceLifecycle:
         dropped) so queued waiters keep sharing one lock object.
         """
         log = logger.bind(workspace_id=str(workspace_id))
-        await self._call_close_streams(
-            workspace_id, reason="cleanup_unknown"
-        )
-        await self._call_kill_all(
-            workspace_id, reason="cleanup_unknown"
-        )
+        await self._call_close_streams(workspace_id, reason="cleanup_unknown")
+        await self._call_kill_all(workspace_id, reason="cleanup_unknown")
         lock = await self._call_desktop_lock(workspace_id)
         async with lock:
             # Same ordering as remove_workspace: interrupt while the cache
@@ -608,7 +679,7 @@ class WorkspaceLifecycle:
                     "desktop_recording_interrupt_failed",
                     workspace_id=str(workspace_id),
                 )
-            info = self._registry._cache.pop(workspace_id, None)
+            info = self._registry._cache.get(workspace_id)
             self._unreachable_since.pop(workspace_id, None)
             self._desktop._desktop_sessions.pop(workspace_id, None)
             self._desktop._desktop_recordings = {
@@ -628,8 +699,11 @@ class WorkspaceLifecycle:
             )
 
         if info.instance_id:
-            await runtime.remove_workspace(info.instance_id)
+            await runtime.remove_workspace(
+                str(workspace_id) if info.runtime_type == "docker" else info.instance_id
+            )
 
+        self._registry._cache.pop(workspace_id, None)
         log.warning(
             "unknown_workspace_cleaned",
             runtime_type=info.runtime_type,
@@ -663,15 +737,7 @@ class WorkspaceLifecycle:
             return False
 
     async def run_health_check_loop(self) -> None:
-        """Periodically probe running workspaces and restart unreachable ones.
-
-        Runs indefinitely; cancel the task to stop it.
-
-        A workspace is restarted when it has been continuously unreachable for
-        more than ``settings.ssh_unreachable_timeout`` seconds.  After a
-        restart, the unreachable timer is cleared so the workspace gets a
-        fresh chance to come up.
-        """
+        """Report unreachable guests without altering their runtime state."""
         interval = self._settings.ssh_health_check_interval
         timeout = self._settings.ssh_unreachable_timeout
 
@@ -714,40 +780,12 @@ class WorkspaceLifecycle:
                         threshold_s=timeout,
                     )
 
+                    # Unreachable SSH is health evidence, never reset authority.
                     if unreachable_for >= timeout:
                         log.error(
-                            "workspace_self_healing_restart",
+                            "workspace_unhealthy_requires_intervention",
                             workspace_id=str(ws_id),
-                            runtime=info.runtime_type,
                         )
-                        try:
-                            runtime = self._runtimes.get(info.runtime_type)
-                            if runtime and info.instance_id:
-                                # Hard reset kills all in-workspace stream
-                                # processes: close tracked sessions first.
-                                await self._call_close_streams(
-                                    ws_id, reason="self_healing_restart"
-                                )
-                                await runtime.restart_workspace(info.instance_id)
-                                # The VM rebooted: drop background tracking
-                                # (RAM processes are dead; stale PIDs must
-                                # never be signalled after a reboot).
-                                await self._call_drop_tracking(
-                                    ws_id, reason="self_healing_restart"
-                                )
-                                # Reset status and clear the failure timer.
-                                if ws_id in self._registry._cache:
-                                    self._registry._cache[ws_id].status = "running"
-                                self._unreachable_since.pop(ws_id, None)
-                                log.info(
-                                    "workspace_self_healed",
-                                    workspace_id=str(ws_id),
-                                )
-                        except Exception:
-                            log.exception(
-                                "workspace_self_heal_failed",
-                                workspace_id=str(ws_id),
-                            )
 
             except asyncio.CancelledError:
                 log.info("health_check_loop_stopped")

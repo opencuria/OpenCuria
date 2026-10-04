@@ -47,16 +47,11 @@ class TaskDispatchMixin:
         operation: WorkspaceOperation | None = None,
     ) -> None:
         """Set busy state, emit the task to the runner, and roll back on dispatch failure."""
-        try:
-            if workspace is not None and operation is not None:
-                await self._set_workspace_operation(workspace, operation)
-            await self._emit_to_runner(runner, event, payload)
-            await sync_to_async(self.tasks.mark_in_progress)(task)
-        except Exception as exc:
-            if workspace is not None and operation is not None:
-                await self._set_workspace_operation(workspace, None)
-            await sync_to_async(self.tasks.fail)(task, str(exc))
-            raise
+        if workspace is not None and operation is not None:
+            workspace.active_operation = operation
+            self._forward_workspace_operation(str(workspace.id), operation)
+        await self._emit_to_runner(runner, event, payload)
+        await sync_to_async(self.tasks.mark_in_progress)(task)
 
     @staticmethod
     def _resolve_qemu_resources(

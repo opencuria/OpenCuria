@@ -54,11 +54,14 @@ class FakeRepository:
             setattr(task, key, value)
         return task
 
+    def delete_unstarted_session(self, run_id, session_id, **scope):
+        return True
+
     def workspace_status(self, workspace_id):
         return self.status
 
     def workspace_resume_state(self, workspace_id):
-        return self.status, None, "online", True
+        return self.status, None, "online", True, None
 
     def workspace_is_owned(self, workspace_id, *, organization_id, owner_id):
         return True
@@ -91,7 +94,10 @@ class FakeRepository:
 
 
 @pytest.mark.asyncio
-async def test_auto_stop_reconciles_via_runner_auto_stop_guard_and_ignores_conflict():
+@pytest.mark.parametrize("diagnostic", ["workspace became busy", "capturing image"])
+async def test_auto_stop_reconciles_via_runner_auto_stop_guard_and_ignores_conflict(
+    diagnostic,
+):
     now = datetime.now(timezone.utc)
     workspace_id = uuid.uuid4()
     repo = FakeRepository()
@@ -109,7 +115,7 @@ async def test_auto_stop_reconciles_via_runner_auto_stop_guard_and_ignores_confl
 
         async def stop_workspace(self, workspace_id, *, auto_stop=False):
             self.calls.append((workspace_id, auto_stop))
-            raise ConflictError("workspace became busy")
+            raise ConflictError(diagnostic)
 
     runner = FakeRunner()
     service = ScheduledTaskService(repository=repo, runner=runner)
@@ -187,8 +193,8 @@ async def test_existing_starting_operation_waits_for_resume_confirmation(monkeyp
     repo.status = "stopped"
     resume_states = iter(
         [
-            ("stopped", WorkspaceOperation.STARTING, "online", True),
-            ("running", None, "online", True),
+            ("stopped", WorkspaceOperation.STARTING, "online", True, None),
+            ("running", None, "online", True, None),
         ]
     )
     repo.workspace_resume_state = lambda workspace_id: next(resume_states)
@@ -248,6 +254,7 @@ async def test_running_workspace_is_skipped_when_runner_unavailable_or_busy(stat
         operation,
         runner,
         True,
+        None,
     )
     task = SimpleNamespace(
         id=uuid.uuid4(),
@@ -280,8 +287,8 @@ async def test_resume_revalidates_state_before_start(monkeypatch):
     repo.workspace_status = lambda workspace_id: next(statuses)
     state_reads = iter(
         [
-            ("stopped", WorkspaceOperation.STARTING, "online", True),
-            ("running", WorkspaceOperation.STOPPING, "online", True),
+            ("stopped", WorkspaceOperation.STARTING, "online", True, None),
+            ("running", WorkspaceOperation.STOPPING, "online", True, None),
         ]
     )
     repo.workspace_resume_state = lambda workspace_id: next(state_reads)
@@ -465,6 +472,7 @@ async def test_resume_is_skipped_when_runner_offline():
         None,
         "offline",
         True,
+        None,
     )
     service = ScheduledTaskService(repository=repo, runner=RunnerOffline())
     run = await service.run_now(task)
@@ -555,3 +563,100 @@ async def test_manual_run_skips_busy_workspace_without_changing_schedule():
     assert run.status == ScheduledTaskRun.Status.SKIPPED
     assert run.reason == "other_chat_active"
     assert task.next_run_at == scheduled
+
+
+def lifecycle_task():
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        workspace_id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        owner_id=1,
+        next_run_at=datetime.now(timezone.utc),
+        prompt="Review",
+        mode="build",
+        model="",
+        reasoning_effort="",
+        skill_ids=[],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["running", "stopped"])
+async def test_intervention_fence_skips_before_chat_creation_or_resume(status):
+    repo = FakeRepository()
+    repo.workspace_resume_state = lambda _: (status, None, "online", True, uuid.uuid4())
+
+    class UnexpectedHarness:
+        def create_session(self, **values):
+            pytest.fail("intervention must block chat creation")
+
+    class UnexpectedRunner:
+        async def resume_workspace(self, workspace_id):
+            pytest.fail("intervention must block resume")
+
+    service = ScheduledTaskService(
+        repository=repo, harness=UnexpectedHarness(), runner=UnexpectedRunner()
+    )
+    run = await service.run_now(lifecycle_task())
+    assert run.status == ScheduledTaskRun.Status.SKIPPED
+    assert run.reason == "workspace_lifecycle_unresolved"
+    assert "intervention required" in run.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("manual", [True, False])
+@pytest.mark.parametrize("admission", ["create", "start"])
+@pytest.mark.parametrize(
+    "operation,current_task,reason",
+    [
+        (
+            WorkspaceOperation.CAPTURING_IMAGE,
+            uuid.uuid4(),
+            "workspace_operation_active",
+        ),
+        (None, uuid.uuid4(), "workspace_lifecycle_unresolved"),
+        (None, None, "other_chat_active"),
+    ],
+)
+async def test_admission_conflict_uses_fresh_lifecycle_state(
+    manual, admission, operation, current_task, reason
+):
+    repo = FakeRepository()
+    task = lifecycle_task()
+    cleaned = []
+
+    def conflict():
+        repo.workspace_resume_state = lambda _: (
+            "running",
+            operation,
+            "online",
+            True,
+            current_task,
+        )
+        # Deliberately unrelated wording: persisted state determines the reason.
+        raise ConflictError("Admission denied")
+
+    class Harness:
+        def create_session(self, **values):
+            if admission == "create":
+                conflict()
+            return SimpleNamespace(id=uuid.uuid4(), **values)
+
+        async def start_run(self, session, prompt, **values):
+            conflict()
+
+        async def _emit_conversations_changed(self, workspace_id):
+            cleaned.append(workspace_id)
+
+    service = ScheduledTaskService(repository=repo, harness=Harness())
+    if manual:
+        run = await service.run_now(task)
+    else:
+        run = repo.create_run(task, task.next_run_at)
+        await service._dispatch_claimed(task, task.next_run_at, ledger=run)
+    assert run.status == ScheduledTaskRun.Status.SKIPPED
+    assert run.reason == reason
+    assert run.error == "Admission denied"
+    assert len(cleaned) == (admission == "start")
+    if admission == "start":
+        assert run.session is None
