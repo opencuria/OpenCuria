@@ -12,6 +12,7 @@ vi.mock('@/services/workspaces.api', () => ({
   getDesktopStatus: vi.fn(),
   startDesktop: vi.fn(),
   stopDesktop: vi.fn(),
+  renewDesktop: vi.fn(),
   takeDesktopControl: vi.fn(),
   writeDesktopClipboard: vi.fn(),
   readDesktopClipboard: vi.fn(),
@@ -189,8 +190,14 @@ describe('DesktopSurface', () => {
     store.open()
     await flushPromises()
 
-    expect(getDesktopStatus).toHaveBeenCalledWith('ws-1')
-    expect(startDesktop).toHaveBeenCalledWith('ws-1')
+    expect(getDesktopStatus).toHaveBeenCalledWith('ws-1', expect.any(String))
+    expect(startDesktop).toHaveBeenCalledWith(
+      'ws-1',
+      expect.objectContaining({
+        viewer_client_id: expect.any(String),
+        intent_revision: expect.any(Number),
+      }),
+    )
   })
 
   it('shows the computer-use overlay over the fixed surface', async () => {
@@ -315,7 +322,7 @@ describe('DesktopSurface', () => {
     expect(store.viewerGeneration).toBe(0)
   })
 
-  it('stops the session on unmount', async () => {
+  it('does not stop a globally inherited session on unmount', async () => {
     const store = useDesktopStore()
     store.setConnected('ws-1', '/ws/desktop/ws-1/')
 
@@ -324,7 +331,7 @@ describe('DesktopSurface', () => {
     wrapper.unmount()
     await flushPromises()
 
-    expect(stopDesktop).toHaveBeenCalledWith('ws-1')
+    expect(stopDesktop).not.toHaveBeenCalled()
   })
 
   it('shows connecting content until Kasm reports connected', async () => {

@@ -47,6 +47,7 @@ export interface PluginMcpForm {
   uid: string
   name: string
   transport: PluginMcpTransportOption
+  desktop: 'none' | 'server_start' | 'first_tool'
   command: string
   argsText: string
   cwd: string
@@ -111,6 +112,7 @@ export function emptyMcpForm(): PluginMcpForm {
     uid: newUid('mcp'),
     name: '',
     transport: 'stdio',
+    desktop: 'none',
     command: '',
     argsText: '',
     cwd: '/workspace',
@@ -184,6 +186,7 @@ export function pluginToForm(plugin: Plugin): PluginFormModel {
       uid: newUid('mcp'),
       name: m.name,
       transport: toTransport(m.transport),
+      desktop: m.resources?.desktop ? (m.resources.desktop.activation ?? 'server_start') : 'none',
       command: m.command ?? '',
       argsText: (m.args ?? []).join('\n'),
       cwd: m.cwd || '/workspace',
@@ -257,6 +260,8 @@ function mcpToIn(mcp: PluginMcpForm): PluginMcpServerIn {
       command: mcp.command.trim(),
       args: parseArgsText(mcp.argsText),
       env: rowsToDict(mcp.env),
+      resources:
+        !mcp.desktop || mcp.desktop === 'none' ? {} : { desktop: { activation: mcp.desktop } },
       url: '',
       headers: {},
     }
@@ -268,6 +273,7 @@ function mcpToIn(mcp: PluginMcpForm): PluginMcpServerIn {
     command: '',
     args: [],
     env: {},
+    resources: {},
     url: mcp.url.trim(),
     headers: rowsToDict(mcp.headers),
   }
@@ -370,6 +376,15 @@ export function validatePluginForm(form: PluginFormModel): string[] {
     else if (mcp.name.trim().length > 255) errors.push(`${label}: name is too long.`)
     else if (!isDerivableSlug(mcp.name)) {
       errors.push(`${label}: name must contain letters or digits so an identifier can be derived.`)
+    }
+    if (mcp.desktop && mcp.desktop !== 'none') {
+      if (mcp.transport !== 'stdio')
+        errors.push(`${label}: managed desktop requires stdio transport.`)
+      if (mcp.env.some((row) => ['DISPLAY', 'XAUTHORITY'].includes(row.key.trim()))) {
+        errors.push(
+          `${label}: managed desktop supplies DISPLAY and XAUTHORITY; remove those env entries or select no managed desktop.`,
+        )
+      }
     }
     if (mcp.transport === 'stdio') {
       const command = mcp.command.trim()

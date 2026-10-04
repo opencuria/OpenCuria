@@ -14,7 +14,21 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+
+@dataclass(frozen=True)
+class DesktopResourceSnapshot:
+    """Immutable managed display policy."""
+
+    activation: Literal["server_start", "first_tool"] = "server_start"
+
+
+@dataclass(frozen=True)
+class PluginResourcesSnapshot:
+    """Immutable declared resources."""
+
+    desktop: DesktopResourceSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -44,6 +58,7 @@ class PluginMcpServerSnapshot:
     command: str
     args: tuple[str, ...] = ()
     cwd: str = "/workspace"
+    resources: PluginResourcesSnapshot = field(default_factory=PluginResourcesSnapshot)
     env: dict[str, str] = field(default_factory=dict)
     url: str = ""
     headers: dict[str, str] = field(default_factory=dict)

@@ -112,6 +112,8 @@ class TestDesktopStateCleanup:
             "network_name": "workspace-net",
             "viewer": True,
             "computer_use": False,
+            "mcp": False,
+            "holder_count": 0,
         }
         emit.assert_awaited_once()
 
@@ -149,6 +151,8 @@ class TestDesktopStateCleanup:
             "network_name": "",
             "viewer": True,
             "computer_use": False,
+            "mcp": False,
+            "holder_count": 0,
         }
         emit.assert_awaited_once()
 
@@ -235,6 +239,8 @@ class TestDesktopStateCleanup:
             "network_name": "workspace-net",
             "viewer": False,
             "computer_use": False,
+            "mcp": False,
+            "holder_count": 0,
         }
         assert service._desktop_workspace_runner[str(workspace.id)] == str(runner.id)
 
@@ -326,6 +332,8 @@ class TestDesktopStateCleanup:
             "network_name": "workspace-net",
             "viewer": False,
             "computer_use": True,
+            "mcp": False,
+            "holder_count": 0,
         }
 
     @pytest.mark.asyncio
@@ -357,6 +365,8 @@ class TestDesktopStateCleanup:
             "network_name": "workspace-net",
             "viewer": False,
             "computer_use": True,
+            "mcp": False,
+            "holder_count": 0,
         }
         emit.assert_awaited_once()
         assert emit.await_args.args[0] == "desktop:started"
@@ -511,6 +521,8 @@ class TestDesktopStateCleanup:
             "network_name": "workspace-net",
             "viewer": False,
             "computer_use": True,
+            "mcp": False,
+            "holder_count": 0,
         }
         emit.assert_not_called()
 
@@ -732,6 +744,8 @@ class TestDesktopStateCleanup:
             "network_name": "workspace-net",
             "viewer": False,
             "computer_use": True,
+            "mcp": False,
+            "holder_count": 0,
         }
         emit.assert_awaited_once()
         assert emit.await_args.args[0] == "desktop:viewer_released"

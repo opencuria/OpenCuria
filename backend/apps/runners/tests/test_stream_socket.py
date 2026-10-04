@@ -296,3 +296,26 @@ async def test_handle_stream_reply_returns_accepted_bool():
         )
         is False
     )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_stream_close_result_delegated_and_unauthenticated(fresh_sio):
+    server, service = fresh_sio
+    runner, _ = _make_runner_workspace(sid="sid", prefix="close-result")
+    server.get_session = AsyncMock(return_value={"runner_id": str(runner.id)})
+    service.handle_stream_reply.return_value = True
+    data = {
+        "workspace_id": str(uuid.uuid4()), "connection_id": "conn",
+        "close_request_id": "attempt", "ok": True, "closed": False,
+    }
+    result = await _handler(server, "workspace:stream_close_result")("sid", data)
+    assert result == {"ok": True}
+    service.handle_stream_reply.assert_called_once_with(
+        "workspace:stream_close_result", data, runner_id=str(runner.id)
+    )
+    service.handle_stream_reply.reset_mock()
+    server.get_session = AsyncMock(return_value={})
+    result = await _handler(server, "workspace:stream_close_result")("sid", data)
+    assert result["ok"] is False
+    service.handle_stream_reply.assert_not_called()

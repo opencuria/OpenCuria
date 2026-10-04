@@ -211,6 +211,7 @@ class PluginMcpServerRepository:
             "args",
             "cwd",
             "env",
+            "resources",
             "url",
             "headers",
             "auth_type",

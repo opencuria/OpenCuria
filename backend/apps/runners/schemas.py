@@ -261,6 +261,21 @@ class TerminalStartOut(Schema):
 # ---------------------------------------------------------------------------
 
 
+class DesktopViewerIntentIn(Schema):
+    """A tab-local viewer intent, scoped to the authenticated user."""
+
+    viewer_client_id: uuid.UUID
+    intent_revision: int = Field(gt=0, strict=True)
+
+
+class DesktopRenewOut(Schema):
+    """Own renewable viewer intent only."""
+
+    viewer_lease_state: str
+    revision: int | None = None
+    epoch: str | None = None
+
+
 class DesktopStartOut(Schema):
     """Response schema after desktop start is dispatched."""
 
@@ -280,6 +295,11 @@ class DesktopStatusOut(Schema):
     proxy_url: str | None = None
     viewer_held: bool = False
     computer_use_active: bool = False
+    mcp_active: bool = False
+    holder_count: int = 0
+    viewer_lease_state: str = "unknown"
+    revision: int | None = None
+    epoch: str | None = None
 
 
 class DesktopTakeControlOut(Schema):

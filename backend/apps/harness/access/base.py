@@ -353,8 +353,10 @@ class WorkspaceAccessor(abc.ABC):
         workdir: str = HARNESS_WORKSPACE_ROOT,
         env: dict[str, str] | None = None,
         timeout: float | None = None,
+        *,
+        owner: dict[str, str] | None = None,
     ) -> WorkspaceByteStream:
-        """Open a workspace-local stdio process stream (argv, least privilege)."""
+        """Open stdio, optionally associated with a reserved desktop owner."""
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support open_process"
         )

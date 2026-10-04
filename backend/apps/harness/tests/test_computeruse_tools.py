@@ -20,7 +20,7 @@ from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import Delta, ProviderAdapter, Usage
 from apps.harness.repositories import HarnessSessionRepository
 from apps.harness.runner import HarnessRunner
-from apps.harness.tests.conftest import FakeAccessor
+from apps.harness.tests.conftest import FakeAccessor as BaseFakeAccessor
 from apps.harness.tools import (
     agent_s_tool_registry,
     computeruse_tool_registry,
@@ -33,6 +33,69 @@ from apps.harness.tools.subagents import (
     TaskTool,
     _child_registry,
 )
+
+
+class FakeAccessor(BaseFakeAccessor):
+    """Computer-use fixture implementing epoch-bound desktop ownership."""
+
+    async def desktop_action(
+        self,
+        action: str,
+        args: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        result = await super().desktop_action(action, args, timeout)
+        if action in {"binding", "reserve", "hold", "renew", "release"}:
+            result.update(
+                ok=True,
+                epoch="computeruse-fixture-epoch",
+                display=":1",
+                xauthority="/root/.Xauthority",
+                protocol_version=1,
+                lease_ttl_seconds=180,
+                renew_interval_seconds=45,
+            )
+            if action != "binding":
+                assert args is not None
+                assert args["epoch"] == result["epoch"]
+                assert args["revision"] == 1
+                from uuid import UUID
+
+                UUID(args["lease_id"])
+                if action != "renew":
+                    UUID(args["owner_id"])
+                    assert args["kind"] == "computeruse"
+                result["lease_state"] = {
+                    "reserve": "reserved",
+                    "hold": "held",
+                    "renew": "held",
+                    "release": "released",
+                }[action]
+        return result
+
+
+def assert_desktop_lifecycle(accessor: FakeAccessor, *, recording: bool) -> None:
+    """Pin attempt identity and ordered opt-in resource cleanup."""
+    calls = accessor.desktop_calls
+    expected = ["binding", "reserve", "hold"]
+    if recording:
+        expected += ["record_start", "record_stop"]
+    expected += ["release"]
+    actions = [call[0] for call in calls]
+    assert [
+        action for action in actions if action not in {"display_info", "screenshot"}
+    ] == expected
+    for index, action in enumerate(actions):
+        if action in {"display_info", "screenshot"}:
+            assert actions.index("hold") < index < actions.index("release")
+    ownership = [
+        args for action, args, _ in calls if action in {"reserve", "hold", "release"}
+    ]
+    assert ownership[0] == ownership[1] == ownership[2]
+    if recording:
+        for action, args, _ in calls:
+            if action in {"record_start", "record_stop"}:
+                assert args["run_id"] == ownership[0]["owner_id"]
 
 
 class ComputerUseTextProvider(ProviderAdapter):
@@ -270,7 +333,8 @@ async def test_computeruse_subagent_model_resolution(
     assert children[0].agent_name == "computeruse"
     assert children[0].model == expected_model
     actions = [call[0] for call in accessor.desktop_calls]
-    # Recording defaults to off: only the hold/release lease runs.
+    assert_desktop_lifecycle(accessor, recording=False)
+    # Recording defaults to off: reserve/hold/release ownership runs.
     assert "hold" in actions
     assert "record_start" not in actions
     assert "record_stop" not in actions
@@ -554,6 +618,7 @@ async def test_computeruse_subagent_run_recording_opt_in(harness_workspace) -> N
         computer_use_model="cu-model",
     )
     actions = [call[0] for call in accessor.desktop_calls]
+    assert_desktop_lifecycle(accessor, recording=True)
     assert actions.count("hold") == 1
     assert "record_start" in actions
     assert "record_stop" in actions

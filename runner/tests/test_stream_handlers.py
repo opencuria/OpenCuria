@@ -62,6 +62,45 @@ def _setup():
 
 
 class StreamHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_close_emits_correlated_unverified_and_error_results(self) -> None:
+        svc, _rt, ws_id, interface, handlers = _setup()
+        svc.streams.stream_close = AsyncMock(return_value={"closed": False})
+        payload = {
+            "workspace_id": str(ws_id), "connection_id": "close-test",
+            "close_request_id": "attempt-1",
+        }
+        result = await handlers["workspace:stream_close"](payload)
+        self.assertFalse(result["closed"])
+        interface._sio.emit.assert_awaited_with(
+            "workspace:stream_close_result", result
+        )
+        self.assertEqual(result["close_request_id"], "attempt-1")
+        svc.streams.stream_close.side_effect = RuntimeError("unverified")
+        payload["close_request_id"] = "attempt-2"
+        result = await handlers["workspace:stream_close"](payload)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["closed"])
+        interface._sio.emit.assert_awaited_with(
+            "workspace:stream_close_result", result
+        )
+        self.assertEqual(result["close_request_id"], "attempt-2")
+
+    async def test_natural_eof_does_not_confirm_unverified_termination(self) -> None:
+        svc, _rt, ws_id, interface, handlers = _setup()
+        svc.streams.stream_close = AsyncMock(return_value={"closed": False})
+        await handlers["workspace:stream_start"]({
+            "workspace_id": str(ws_id), "connection_id": "eof-unverified",
+            "kind": "process", "command": ["true"],
+        })
+        task = interface._running_tasks.get("stream:eof-unverified")
+        if task:
+            await task
+        notices = [call.args[1] for call in interface._sio.emit.await_args_list
+                   if call.args[0] == "workspace:stream_closed"]
+        self.assertTrue(notices)
+        self.assertFalse(notices[-1]["closed"])
+        self.assertIn("unverified", notices[-1]["error"])
+
     async def test_start_process_returns_ack(self) -> None:
         _svc, _rt, ws_id, _if, handlers = _setup()
         result = await handlers["workspace:stream_start"](

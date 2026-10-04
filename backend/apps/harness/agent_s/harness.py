@@ -48,6 +48,8 @@ from typing import Any
 
 import structlog
 
+from ..desktop_leases import DesktopLease
+
 log = structlog.get_logger(__name__)
 
 EmitCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -468,10 +470,15 @@ async def run_agent_s_computeruse(
 
     total_usage = Usage()
     max_steps = int(config.max_steps)
-    run_id = sanitize_run_id(run_id or "session")
+    owner_task = asyncio.current_task()
+    lease = DesktopLease(
+        accessor,
+        kind="computeruse",
+        on_failure=owner_task.cancel if owner_task is not None else None,
+    )
+    run_id = lease.owner_id
     enable_recording = bool(getattr(config, "enable_recording", False))
     recording_path = default_recording_path(run_id) if enable_recording else ""
-    held = False
     record_started = False
     steps = 0
     finish = "max_steps"
@@ -486,8 +493,8 @@ async def run_agent_s_computeruse(
         collected_usages.append(usage)
 
     try:
-        await accessor.desktop_action("hold", {"kind": "computeruse", "run_id": run_id})
-        held = True
+        await lease.reserve()
+        await lease.hold()
         # Real desktop geometry only exists after hold (the cold desktop
         # is not live before the lease). Explicit persisted desktop dims
         # are not present in this phase, so the live geometry wins over
@@ -556,6 +563,7 @@ async def run_agent_s_computeruse(
         enable_recording = bool(getattr(resolved_config, "enable_recording", False))
         if enable_recording:
             recording_path = default_recording_path(run_id)
+            record_started = True
             try:
                 start = await accessor.desktop_action(
                     "record_start", {"run_id": run_id}
@@ -564,7 +572,6 @@ async def run_agent_s_computeruse(
                 raise RuntimeError(f"Computer-use record_start failed: {exc}") from exc
             if not (isinstance(start, dict) and start.get("ok")):
                 raise RuntimeError(f"Computer-use record_start failed: {start!r}")
-            record_started = True
             start_path = str(start.get("path") or "")
             # Only trust canonical workspace-internal recording paths; an
             # unexpected runner path must never reach output/metadata.
@@ -722,12 +729,8 @@ async def run_agent_s_computeruse(
                         run_id=run_id,
                         path=stop_path[:200],
                     )
-        if held:
-            _, release_error, release_cancelled = await _run_cleanup_rpc(
-                lambda: accessor.desktop_action(
-                    "release", {"kind": "computeruse", "run_id": run_id}
-                )
-            )
+        if lease.attempted:
+            _, release_error, release_cancelled = await _run_cleanup_rpc(lease.aclose)
             cleanup_cancelled = cleanup_cancelled or release_cancelled
             if release_error is not None:  # pragma: no cover - best effort
                 log.warning(

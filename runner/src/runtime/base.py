@@ -8,11 +8,13 @@ must implement every abstract method defined here.
 from __future__ import annotations
 
 import abc
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from .inventory import RuntimeInventory
+from .managed_process import managed_close_argv, TOKEN_PROBE_CODE, validate_guest_token
 
 
 @dataclass(frozen=True)
@@ -251,18 +253,39 @@ class RuntimeBackend(abc.ABC):
     STREAM_MAX_FRAME_SIZE = 16 * 1024 * 1024
     STREAM_READ_TIMEOUT = 300.0
 
+    @property
+    def supports_managed_process(self) -> bool:
+        """Whether durable fenced stream launch/close is implemented."""
+        return False
+
+    async def probe_managed_token(self, instance_id: str) -> dict[str, str]:
+        """Read boot + PID1 starttime before a managed launch is committed."""
+        code, output = await self.exec_command_wait(
+            instance_id, ["python3", "-c", TOKEN_PROBE_CODE],
+        )
+        if code != 0:
+            raise RuntimeError("Managed guest token probe failed")
+        return validate_guest_token(json.loads(output))
+
     async def spawn_process(
         self,
         instance_id: str,
         command: list[str],
         workdir: str | None = None,
         env: dict[str, str] | None = None,
+        *,
+        control_path: str | None = None,
+        expected_token: dict[str, str] | None = None,
     ) -> ProcessHandle:
         """Spawn a non-TTY bidirectional process inside the workspace.
 
         Args:
             instance_id: Runtime-specific instance identifier.
             command: argv list (never shell-joined by the caller).
+            control_path: Optional runner-selected durable guest control directory.
+                Managed callers must persist this identity before spawning.
+            expected_token: Immutable guest incarnation token sampled before
+                the managed intent commit; never supplied by an external RPC.
             workdir: Working directory inside the workspace.
             env: Extra environment for the child only (least privilege:
                 persistent workspace credentials are NOT sourced).
@@ -305,8 +328,30 @@ class RuntimeBackend(abc.ABC):
             f"{self.__class__.__name__} does not support process_wait"
         )
 
-    async def process_close(self, handle: ProcessHandle) -> None:
-        """Terminate the process tree and release resources."""
+    async def close_managed_process(
+        self, instance_id: str, control_path: str,
+    ) -> bool:
+        """Fence late starts and verify group termination; raise if unknown."""
+        code, _ = await self.exec_command_wait(
+            instance_id, managed_close_argv(control_path),
+        )
+        if code != 0:
+            raise RuntimeError("Managed stream termination unverified")
+        return True
+
+    async def process_detach(self, handle: ProcessHandle) -> None:
+        """Release local transport only after lifecycle proves guest death.
+
+        Must never exec or signal the guest. Unsupported runtimes fail closed.
+        """
+        raise NotImplementedError("Local stream detach unsupported")
+
+    async def process_close(self, handle: ProcessHandle) -> bool | None:
+        """Terminate the tree and release transport resources.
+
+        Managed handles return True only after confirmed fenced group closure,
+        or raise on unknown outcome. Legacy unmanaged runtimes may return None.
+        """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support process_close"
         )

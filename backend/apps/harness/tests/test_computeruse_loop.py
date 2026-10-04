@@ -20,7 +20,10 @@ from apps.harness.agent_s.harness import (
 )
 from apps.harness.agents.definitions import get_agent
 from apps.harness.runner import HarnessRunner, RunOptions
-from apps.harness.tests.conftest import FakeAccessor
+from apps.harness.tests.test_computeruse_tools import (
+    FakeAccessor,
+    assert_desktop_lifecycle,
+)
 from apps.harness.tools import (
     agent_s_tool_registry,
     computeruse_tool_registry,
@@ -206,6 +209,7 @@ async def test_harness_runner_computeruse_completion_sees_no_tools() -> None:
         sleep=lambda _delay: _noop(),
     )
     assert result.finish_reason == "stop"
+    assert_desktop_lifecycle(accessor, recording=False)
     assert provider.calls == [[]]
     # The Agent-S wire carries no function calls: message parts are only
     # text/image (never tool calls) and tools=[] is pinned in adapters.
@@ -222,9 +226,7 @@ async def _noop() -> None:
     return None
 
 
-async def test_runner_computeruse_path_delegates_without_tool_schemas(
-    fake_accessor,
-) -> None:
+async def test_runner_computeruse_path_delegates_without_tool_schemas() -> None:
     """HarnessRunner routes computeruse through Agent-S (no legacy tools)."""
     from apps.harness.providers.base import (
         Delta,
@@ -244,6 +246,7 @@ async def test_runner_computeruse_path_delegates_without_tool_schemas(
                 usage=Usage(1, 1, 2),
             )
 
+    fake_accessor = FakeAccessor()
     events: list[dict[str, Any]] = []
 
     async def _emit(event: dict[str, Any]) -> None:
@@ -263,6 +266,7 @@ async def test_runner_computeruse_path_delegates_without_tool_schemas(
         RunOptions(auto_approve=True, session_id="regression-cu"),
     )
     assert result.finish_reason == "stop"
+    assert_desktop_lifecycle(fake_accessor, recording=False)
     # Recording defaults to off: no phantom video on the parent output.
     assert result.output.count("![Computer use](") == 0
     assert "recording_path" not in result.metadata

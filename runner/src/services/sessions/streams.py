@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import structlog
 
@@ -20,6 +23,7 @@ from ...models import WorkspaceInfo
 from ...runtime.base import ProcessHandle, RuntimeBackend
 from ..capture_fence import CaptureFence, live_interaction
 from ..exec_kernel import sanitize_exec_workdir
+from .stream_intents import StreamIntentStore
 
 logger = structlog.get_logger(__name__)
 
@@ -28,6 +32,11 @@ STREAM_MAX_PER_WORKSPACE = 8
 
 #: Max raw bytes per stream chunk in either direction.
 STREAM_CHUNK_SIZE = 64 * 1024
+
+# Persistent guest root; close tombstones must survive runner/guest restart.
+STREAM_SETTLE_TIMEOUT = 5.0
+
+STREAM_CONTROL_ROOT = "/var/lib/opencuria/streams"
 
 #: Env keys never forwarded into a stream process (shell/runtime hijack
 #: surface).  Mirrors the backend harness guard.
@@ -212,6 +221,9 @@ class StreamSession:
     runtime: RuntimeBackend
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     closed: bool = False
+    owner: dict[str, str] | None = None
+    spawn_settled: asyncio.Event = field(default_factory=asyncio.Event)
+    closing: asyncio.Task | None = None
 
 
 class StreamManager:
@@ -245,7 +257,14 @@ class StreamManager:
         get_cached: Callable[[uuid.UUID], WorkspaceInfo] | None = None,
         get_runtime: Callable[[uuid.UUID], RuntimeBackend] | None = None,
         sanitize_exec_workdir: Callable[[str], str] | None = None,
+        *,
+        state_dir: str | Path | None = None,
+        lease_store: object | None = None,
+        epoch: str | None = None,
     ) -> None:
+        self.epoch = epoch
+        self.lease_store = lease_store
+        self.intent_store = StreamIntentStore(state_dir) if state_dir else None
         self.capture_fence: CaptureFence | None = None
         self._runtimes = runtimes if runtimes is not None else {}
         self._get_cached = get_cached
@@ -331,6 +350,8 @@ class StreamManager:
         command: list[str],
         workdir: str | None = None,
         env: dict[str, str] | None = None,
+        *,
+        owner: dict[str, str] | None = None,
     ) -> StreamSession:
         """Spawn a workspace-bound stdio process stream (least-privilege env).
 
@@ -349,6 +370,62 @@ class StreamManager:
         runtime = self._get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
+        control_path = None
+        expected_token = None
+        if owner is not None:
+            if (
+                not isinstance(owner, dict)
+                or set(owner) != {"lease_id", "epoch"}
+                or not all(
+                    isinstance(v, str) and 0 < len(v) <= 128 for v in owner.values()
+                )
+            ):
+                raise ValueError("Invalid stream owner")
+            if self.lease_store is None or self.intent_store is None:
+                raise RuntimeError(
+                    "Managed streams require durable lease and intent stores"
+                )
+            owner = dict(owner)
+            lease = await self.lease_store.get(owner["lease_id"])
+            if (
+                not lease
+                or lease["kind"] != "mcp"
+                or lease["epoch"] != owner["epoch"]
+                or (self.epoch is not None and owner["epoch"] != self.epoch)
+                or not isinstance(lease.get("expires_at"), (int, float))
+                or not lease["expires_at"] > time.time()
+                or not getattr(runtime, "supports_managed_process", False)
+                or lease["state"] not in ("reserved", "held")
+                or str(lease["workspace_id"]) != str(workspace_id)
+                or lease["instance_id"] != info.instance_id
+            ):
+                raise ValueError("Invalid or ended stream lease")
+            # Hash validated identity; never accept a caller-selected guest path.
+            identity = "\0".join(
+                (
+                    str(workspace_id),
+                    info.instance_id,
+                    owner["lease_id"],
+                    owner["epoch"],
+                    conn_id,
+                )
+            )
+            control_path = (
+                STREAM_CONTROL_ROOT
+                + "/"
+                + hashlib.sha256(identity.encode()).hexdigest()
+            )
+        if owner is not None:
+            expected_token = await runtime.probe_managed_token(info.instance_id)
+            # Probe may have queued through a restart/release. Revalidate after it.
+            lease = await self.lease_store.get(owner["lease_id"])
+            if (
+                not lease
+                or lease["state"] not in {"reserved", "held"}
+                or lease["epoch"] != owner["epoch"]
+                or lease["expires_at"] <= time.time()
+            ):
+                raise ValueError("Stream lease ended during guest probe")
         async with self._streams_guard:
             if conn_id in self._streams:
                 raise ValueError(f"Duplicate connection_id: {conn_id!r}")
@@ -356,34 +433,71 @@ class StreamManager:
                 STREAM_MAX_PER_WORKSPACE
             ):
                 raise ValueError("too many streams for workspace")
-            # Placeholder reservation (handle=None until spawn commits).
-            self._streams[conn_id] = StreamSession(
+            if owner is not None:
+                await self.intent_store.reserve(
+                    {
+                        "connection_id": conn_id,
+                        "workspace_id": str(workspace_id),
+                        "instance_id": info.instance_id,
+                        "runtime_type": runtime.runtime_type,
+                        "lease_id": owner["lease_id"],
+                        "epoch": owner["epoch"],
+                        "control_path": control_path,
+                        "guest_token": expected_token,
+                        "state": "starting",
+                    }
+                )
+            reserved = StreamSession(
                 connection_id=conn_id,
                 workspace_id=workspace_id,
                 kind="process",
                 handle=None,
                 runtime=runtime,
+                owner=owner,
             )
-        try:
-            handle = await runtime.spawn_process(
+            self._streams[conn_id] = reserved
+
+        async def spawn() -> ProcessHandle:
+            kwargs = (
+                {"control_path": control_path, "expected_token": expected_token}
+                if owner
+                else {}
+            )
+            return await runtime.spawn_process(
                 info.instance_id,
                 command=argv,
                 workdir=safe_workdir,
                 env=clean_env,
+                **kwargs,
             )
-        except Exception:
-            async with self._streams_guard:
-                reserved = self._streams.get(conn_id)
-                if reserved is not None and reserved.handle is None:
-                    del self._streams[conn_id]
+
+        task = asyncio.create_task(spawn())
+        try:
+            # Cancellation must not turn an in-flight transport into an orphan.
+            handle = await asyncio.shield(task) if owner else await task
+        except BaseException:
+            if owner:
+
+                async def settle() -> None:
+                    try:
+                        reserved.handle = await task
+                    except BaseException:
+                        pass
+                    finally:
+                        reserved.spawn_settled.set()
+                    await self.stream_close(conn_id)
+
+                asyncio.create_task(settle())
+            else:
+                async with self._streams_guard:
+                    self._streams.pop(conn_id, None)
             raise
+        reserved.handle = handle
+        reserved.spawn_settled.set()
         async with self._streams_guard:
-            reserved = self._streams.get(conn_id)
-            if reserved is not None and reserved.handle is None:
-                reserved.handle = handle
+            if self._streams.get(conn_id) is reserved and not reserved.closed:
                 return reserved
-        with contextlib.suppress(Exception):
-            await runtime.process_close(handle)
+        await runtime.process_close(handle)
         raise ValueError(f"Duplicate connection_id: {conn_id!r}")
 
     @live_interaction
@@ -529,9 +643,7 @@ class StreamManager:
             raise ValueError("stream write exceeds 64KiB chunk limit")
         session = self.get_stream(connection_id)
         async with session.write_lock:
-            await session.runtime.process_write(
-                session.handle, bytes(data)
-            )
+            await session.runtime.process_write(session.handle, bytes(data))
 
     @live_interaction
     async def stream_write_eof(self, connection_id: str) -> None:
@@ -559,14 +671,27 @@ class StreamManager:
         return code
 
     async def stream_close(self, connection_id: str) -> dict[str, object]:
-        """Close one stream and kill its process tree (idempotent-ish).
+        """Close a stream; managed failures remain durable and retryable.
 
-        ``process_close`` returns ``None`` by contract; the exit code is
-        intentionally not collected here (it is reported by the pump via
-        ``stream_wait`` on natural EOF). Reservations still spawning
-        (``handle is None``) are dropped without touching the runtime —
-        the racing spawn rolls itself back on commit.
+        Managed callers join the same shielded closing task through spawn
+        settlement. Unmanaged reservations retain the legacy rollback behavior.
         """
+        conn_id = self._sanitize_stream_connection_id(connection_id)
+        session = self._streams.get(conn_id)
+        record = await self.intent_store.get(conn_id) if self.intent_store else None
+        if record:
+            if record["state"] == "closed":
+                return {"connection_id": conn_id, "closed": True}
+            if session:
+                if session.closing is None or session.closing.done():
+                    session.closed = True
+                    session.closing = asyncio.create_task(
+                        self._close_intent(record, session)
+                    )
+                closed = await asyncio.shield(session.closing)
+            else:
+                closed = await self._close_intent(record, None)
+            return {"connection_id": conn_id, "closed": closed}
         conn_id = self._sanitize_stream_connection_id(connection_id)
         async with self._streams_guard:
             session = self._streams.pop(conn_id, None)
@@ -589,18 +714,189 @@ class StreamManager:
             "closed": True,
         }
 
+    async def stream_record(self, connection_id: str) -> dict | None:
+        """Return a persisted association including closing/closed tombstones."""
+        if self.intent_store:
+            return await self.intent_store.get(
+                self._sanitize_stream_connection_id(connection_id)
+            )
+        return None
+
+    async def _close_intent(
+        self,
+        record: dict,
+        session: StreamSession | None,
+    ) -> bool:
+        await self.intent_store.set_state(record["connection_id"], "closing")
+        try:
+            workspace_id = uuid.UUID(record["workspace_id"])
+            # Resolve by the persisted runtime, not the replacement workspace.
+            runtime = self._runtimes.get(record["runtime_type"])
+            if runtime is None:
+                candidate = self._get_runtime(workspace_id)
+                if candidate.runtime_type != record["runtime_type"]:
+                    return False
+                runtime = candidate
+            try:
+                info = self._get_cached(workspace_id)
+                same_instance = info.instance_id == record["instance_id"]
+            except ValueError:
+                same_instance = False
+            if same_instance:
+                try:
+                    fenced = await runtime.close_managed_process(
+                        record["instance_id"],
+                        record["control_path"],
+                    )
+                except Exception:
+                    fenced = False
+                if fenced is True:
+                    if session:
+                        await asyncio.wait_for(
+                            session.spawn_settled.wait(), STREAM_SETTLE_TIMEOUT
+                        )
+                        if session.handle:
+                            outcome = await runtime.process_close(session.handle)
+                            if outcome is not True:
+                                return False
+                else:
+                    if session:
+                        await asyncio.wait_for(
+                            session.spawn_settled.wait(), STREAM_SETTLE_TIMEOUT
+                        )
+                    if not await self._incarnation_gone(runtime, record["instance_id"]):
+                        return False
+            else:
+                # Status/existence evidence must concern the OLD bound instance.
+                # Never exec or signal a replacement, even if it is stopped.
+                if session:
+                    await asyncio.wait_for(
+                        session.spawn_settled.wait(), STREAM_SETTLE_TIMEOUT
+                    )
+                if not await self._incarnation_gone(runtime, record["instance_id"]):
+                    return False
+            await self.intent_store.set_state(record["connection_id"], "closed")
+            if session:
+                async with self._streams_guard:
+                    if self._streams.get(session.connection_id) is session:
+                        del self._streams[session.connection_id]
+            return True
+        except Exception:
+            logger.exception(
+                "managed_stream_close_unverified", connection_id=record["connection_id"]
+            )
+            return False
+
+    @staticmethod
+    async def _incarnation_gone(runtime: RuntimeBackend, instance_id: str) -> bool:
+        """Accept only successful, explicit old-incarnation death evidence.
+
+        Paused/suspended guests retain their processes. Exceptions and unknown
+        status are not evidence. Runtime status implementations must distinguish
+        those states from power-off and confirmed domain/container absence.
+        """
+        try:
+            status = await runtime.get_workspace_status(instance_id)
+            if status.instance_id == instance_id and status.status in {
+                "stopped",
+                "exited",
+                "dead",
+                "removed",
+            }:
+                return True
+            return False
+        except Exception:
+            try:
+                return await runtime.workspace_exists(instance_id) is False
+            except Exception:
+                return False
+
+    async def confirm_workspace_ended(
+        self,
+        workspace_id: uuid.UUID,
+        instance_id: str,
+    ) -> bool:
+        """Internal post-stop/remove hook; never expose as an untrusted RPC.
+
+        Inspect the bound OLD runtime independently of current cache. A pending
+        spawn must settle before death evidence is accepted; timeout retains all
+        protective intents, because cancellation cannot undo Docker thread work.
+        Lifecycle must serialize stop/remove and resume with this hook.
+        """
+        if not self.intent_store:
+            return True
+        rows = await self.intent_store.list_unfinished(str(workspace_id), instance_id)
+        try:
+            sessions = [
+                self._streams[r["connection_id"]]
+                for r in rows
+                if r["connection_id"] in self._streams
+            ]
+            for session in sessions:
+                session.closed = True
+                await asyncio.wait_for(
+                    session.spawn_settled.wait(), STREAM_SETTLE_TIMEOUT
+                )
+            for runtime_type in {r["runtime_type"] for r in rows}:
+                runtime = self._runtimes.get(runtime_type)
+                if runtime is None and self._get_runtime:
+                    candidate = self._get_runtime(workspace_id)
+                    if candidate.runtime_type == runtime_type:
+                        runtime = candidate
+                if runtime is None or not await self._incarnation_gone(
+                    runtime, instance_id
+                ):
+                    return False
+            for session in sessions:
+                if session.handle:
+                    await session.runtime.process_detach(session.handle)
+            await self.intent_store.finish_workspace(str(workspace_id), instance_id)
+            async with self._streams_guard:
+                for session in sessions:
+                    if self._streams.get(session.connection_id) is session:
+                        del self._streams[session.connection_id]
+            return True
+        except Exception:
+            logger.exception(
+                "workspace_stream_confirmation_unverified", instance_id=instance_id
+            )
+            return False
+
+    async def close_owner_streams(self, lease_id: str) -> bool:
+        """Fence and kill an owner's tracked and recovery intents, never adopt."""
+        if self.intent_store is None:
+            return not any(
+                getattr(s, "owner", None) and s.owner["lease_id"] == lease_id
+                for s in self._streams.values()
+            )
+        rows = await self.intent_store.owner_rows(lease_id)
+        outcomes = await asyncio.gather(
+            *(self.stream_close(r["connection_id"]) for r in rows)
+        )
+        return all(r["closed"] is True for r in outcomes)
+
     async def close_workspace_streams(
         self, workspace_id: uuid.UUID, *, reason: str = ""
     ) -> int:
         """Close every stream bound to *workspace_id*; return closed count."""
+        managed = [
+            s.connection_id
+            for s in self._streams.values()
+            if s.workspace_id == workspace_id and getattr(s, "owner", None)
+        ]
+        managed_closed = 0
+        for connection_id in managed:
+            result = await self.stream_close(connection_id)
+            managed_closed += int(result["closed"])
         async with self._streams_guard:
             targets = [
                 conn_id
                 for conn_id, session in self._streams.items()
                 if session.workspace_id == workspace_id
+                and not getattr(session, "owner", None)
             ]
             sessions = [self._streams.pop(conn_id) for conn_id in targets]
-        closed = 0
+        closed = managed_closed
         for session in sessions:
             session.closed = True
             if session.handle is None:
@@ -625,10 +921,20 @@ class StreamManager:
 
     async def close_all_streams(self, *, reason: str = "") -> int:
         """Close every tracked stream (shutdown/disconnect path)."""
+        managed = [
+            s.connection_id for s in self._streams.values() if getattr(s, "owner", None)
+        ]
+        managed_closed = 0
+        for connection_id in managed:
+            result = await self.stream_close(connection_id)
+            managed_closed += int(result["closed"])
         async with self._streams_guard:
-            sessions = list(self._streams.values())
-            self._streams.clear()
-        closed = 0
+            sessions = [
+                s for s in self._streams.values() if not getattr(s, "owner", None)
+            ]
+            for session in sessions:
+                self._streams.pop(session.connection_id)
+        closed = managed_closed
         for session in sessions:
             session.closed = True
             if session.handle is None:
@@ -643,7 +949,5 @@ class StreamManager:
                     reason=reason,
                 )
         if sessions:
-            logger.info(
-                "all_streams_closed", count=closed, reason=reason
-            )
+            logger.info("all_streams_closed", count=closed, reason=reason)
         return closed

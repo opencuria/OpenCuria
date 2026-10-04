@@ -84,7 +84,9 @@ class WebSocketInterface(Interface):
     def __init__(self, service: WorkspaceService, settings: RunnerSettings) -> None:
         super().__init__(service)
         self._settings = settings
-        self.capture_fence: CaptureFence | None = getattr(service, "capture_fence", None)
+        self.capture_fence: CaptureFence | None = getattr(
+            service, "capture_fence", None
+        )
         self._sio = socketio.AsyncClient(
             reconnection=True,
             reconnection_attempts=0,  # unlimited
@@ -103,6 +105,7 @@ class WebSocketInterface(Interface):
         self._inventory_sequence = 0
         self._last_inventory_at = 0.0
         self._running_tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
+        self._desktop_lease_task: asyncio.Task | None = None
         self._observation_task: asyncio.Task | None = None
         self._inventory_lock = asyncio.Lock()
         self._cached_heartbeat_workspaces: list[dict] = []
@@ -130,6 +133,9 @@ class WebSocketInterface(Interface):
             lifecycle.checkpoint_hook = self._checkpoint_workspace
             lifecycle.scrub_proof_hook = self._workspace_scrub_proof
         self._service._journal = self._operations.journal
+        configure = getattr(self._service, "configure_desktop_leases", None)
+        if configure is not None:
+            configure(settings.state_dir, self._inventory_epoch)
         images = getattr(self._service, "images", None)
         if images is not None:
             images.scrub_proof_hook = self._workspace_scrub_proof
@@ -352,6 +358,120 @@ class WebSocketInterface(Interface):
             return None
         return state
 
+    @staticmethod
+    def _viewer_lease_payload(data: dict) -> dict:
+        """Forward the backend-derived viewer identity without replacing it."""
+        return {
+            key: data[key]
+            for key in (
+                "lease_id",
+                "kind",
+                "owner_id",
+                "revision",
+                "epoch",
+                "desktop_width",
+                "desktop_height",
+            )
+            if key in data
+        }
+
+    async def _announce_desktop_change(
+        self, workspace_id: uuid.UUID, before: object, result: dict
+    ) -> None:
+        """Publish lifecycle before replies; only invalidate replaced processes."""
+        after = self._service.desktop.get_desktop_session(workspace_id)
+        stopped = bool(result.get("stopped")) or (before is not None and after is None)
+        if after is not before or stopped:
+            await self._close_desktop_proxy_tunnels_for_workspace(workspace_id)
+        if stopped:
+            await self._sio.emit(
+                "desktop:stopped",
+                {
+                    "workspace_id": str(workspace_id),
+                    **result,
+                },
+            )
+        elif after is not None or result.get("process_alive"):
+            state = self._desktop_lifecycle_payload(workspace_id)
+            if state is not None:
+                await self._sio.emit(
+                    "desktop:process",
+                    {
+                        **state,
+                        **{
+                            key: result[key]
+                            for key in (
+                                "viewer",
+                                "computer_use",
+                                "mcp",
+                                "mcp_active",
+                                "holder_count",
+                            )
+                            if key in result
+                        },
+                    },
+                )
+
+    async def _desktop_lease_tick(self) -> None:
+        """Maintain workspaces concurrently without an unbounded task backlog."""
+        desktop = self._service.desktop
+        store = desktop.lease_store
+        workspace_ids = await desktop.maintenance_workspace_ids()
+
+        async def maintain(workspace_id: uuid.UUID) -> None:
+            before = desktop.get_desktop_session(workspace_id)
+            previous = self._desktop_lifecycle_payload(workspace_id)
+            try:
+                helper = getattr(desktop, "maintain_workspace", None)
+                if helper is not None:
+                    await helper(workspace_id)
+                else:
+                    await desktop.recover_workspace(workspace_id)
+                    for row in await store.list_expired():
+                        if row["workspace_id"] == str(workspace_id):
+                            await desktop._release_lease(
+                                workspace_id, row, terminal_state="expired"
+                            )
+                    # Until the manager exposes workspace maintenance, keep
+                    # recording cleanup scoped too; never invoke a global reap
+                    # that can let the first hung guest starve all others.
+                    for recording in await store.recordings():
+                        if recording["workspace_id"] != str(workspace_id):
+                            continue
+                        waiter = desktop._recording_waiters.get(
+                            recording["recording_id"]
+                        )
+                        if recording["state"] == "closing" or (
+                            waiter is not None and waiter.done()
+                        ):
+                            await desktop._cleanup_lease_recordings(
+                                recording["lease_id"]
+                            )
+            finally:
+                current = self._desktop_lifecycle_payload(workspace_id)
+                if previous != current or before is not desktop.get_desktop_session(
+                    workspace_id
+                ):
+                    if self._sio.connected:
+                        await self._announce_desktop_change(
+                            workspace_id, before, {"stopped": current is None}
+                        )
+                    elif before is not desktop.get_desktop_session(workspace_id):
+                        await self._close_desktop_proxy_tunnels_for_workspace(workspace_id)
+
+        await self._service.run_desktop_workers(workspace_ids, maintain)
+
+    async def _desktop_lease_loop(self) -> None:
+        """Maintain durable owners independently of transport and inventory scans."""
+        while True:
+            try:
+                await self._desktop_lease_tick()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("desktop_lease_tick_failed")
+            await asyncio.sleep(self._settings.desktop_lease_interval)
+
     @live_interaction
     async def _send_desktop_proxy_tunnel_message(
         self,
@@ -481,7 +601,25 @@ class WebSocketInterface(Interface):
         while True:
             try:
                 await self._service.sync_from_runtime()
+                desktop = getattr(self._service, "desktop", None)
+                previous_desktops = (
+                    {
+                        workspace_id: (
+                            desktop.get_desktop_session(workspace_id),
+                            self._desktop_lifecycle_payload(workspace_id),
+                        )
+                        for workspace_id in getattr(self._service, "_cache", {})
+                    }
+                    if desktop is not None
+                    else {}
+                )
                 await self._service.recover_desktop_sessions_from_runtime()
+                for workspace_id, (before, previous) in previous_desktops.items():
+                    current = self._desktop_lifecycle_payload(workspace_id)
+                    if previous != current and self._sio.connected:
+                        await self._announce_desktop_change(
+                            workspace_id, before, {"stopped": current is None}
+                        )
                 for workspace_id, info in getattr(
                     getattr(self._service, "_registry", None), "_cache", {}
                 ).items():
@@ -521,6 +659,9 @@ class WebSocketInterface(Interface):
                                     "network_name": desktop["network_name"],
                                     "viewer": bool(desktop.get("viewer")),
                                     "computer_use": bool(desktop.get("computer_use")),
+                                    "mcp": bool(desktop.get("mcp")),
+                                    "mcp_active": bool(desktop.get("mcp_active")),
+                                    "holder_count": desktop.get("holder_count", 0),
                                 },
                             )
                     await self._operations.replay()
@@ -666,12 +807,22 @@ class WebSocketInterface(Interface):
                 {
                     "supported_runtimes": self._service.supported_runtimes,
                     "status": "ready",
+                    "inventory_epoch": self._inventory_epoch,
+                    "desktop_leases": {
+                        "protocol_version": 1,
+                        "epoch": self._inventory_epoch,
+                    },
                 },
             )
             if self._heartbeat_task is None or self._heartbeat_task.done():
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
             if self._observation_task is None or self._observation_task.done():
                 self._observation_task = asyncio.create_task(self._observation_loop())
+            if self._desktop_lease_task is None or self._desktop_lease_task.done():
+                if getattr(self._service, "configure_desktop_leases", None) is not None:
+                    self._desktop_lease_task = asyncio.create_task(
+                        self._desktop_lease_loop()
+                    )
             # Start system metrics loop
             if self._metrics_task is None or self._metrics_task.done():
                 self._metrics_task = asyncio.create_task(self._metrics_loop())
@@ -1299,6 +1450,24 @@ class WebSocketInterface(Interface):
 
             try:
                 before = self._service.desktop.get_desktop_session(workspace_id)
+                if data.get("lease_id"):
+                    result = await self._service.desktop.desktop_action(
+                        workspace_id, "hold", self._viewer_lease_payload(data)
+                    )
+                    if not result.get("ok"):
+                        raise RuntimeError("Viewer lease could not be held")
+                    await self._announce_desktop_change(workspace_id, before, result)
+                    state = self._desktop_lifecycle_payload(workspace_id) or {}
+                    await sio.emit(
+                        "desktop:started",
+                        {
+                            **state,
+                            **result,
+                            "task_id": task_id,
+                            "workspace_id": str(workspace_id),
+                        },
+                    )
+                    return
                 session = await self._service.desktop.start_desktop(
                     workspace_id,
                     width=data.get("desktop_width"),
@@ -1353,6 +1522,25 @@ class WebSocketInterface(Interface):
             log.info("task_received", task="stop_desktop")
 
             try:
+                if data.get("lease_id"):
+                    before = self._service.desktop.get_desktop_session(workspace_id)
+                    result = await self._service.desktop.desktop_action(
+                        workspace_id, "release", self._viewer_lease_payload(data)
+                    )
+                    if not result.get("ok"):
+                        raise RuntimeError(
+                            "Viewer lease cleanup could not be confirmed"
+                        )
+                    await self._announce_desktop_change(workspace_id, before, result)
+                    await sio.emit(
+                        "desktop:viewer_released",
+                        {
+                            **result,
+                            "task_id": task_id,
+                            "workspace_id": str(workspace_id),
+                        },
+                    )
+                    return
                 result = await self._service.desktop.stop_desktop(workspace_id)
                 if result.stopped or not result.process_alive:
                     await self._close_desktop_proxy_tunnels_for_workspace(workspace_id)
@@ -1521,6 +1709,16 @@ class WebSocketInterface(Interface):
                 raise ValueError("stream data exceeds 64KiB chunk limit")
             return decoded
 
+        async def _close_stream_evidence(connection_id: str) -> dict:
+            """Report termination only when stream_close verifies it."""
+            try:
+                result = await self._service.streams.stream_close(connection_id)
+                if result.get("closed") is True:
+                    return {"closed": True}
+                return {"closed": False, "error": "stream termination unverified"}
+            except Exception as exc:
+                return {"closed": False, "error": str(exc)}
+
         async def _pump_stream_to_backend(
             *,
             connection_id: str,
@@ -1623,13 +1821,13 @@ class WebSocketInterface(Interface):
                 # that the exit code is known.  Pop the task key first
                 # so a concurrent full close cannot double-cancel.
                 self._running_tasks.pop(task_key, None)
-                with contextlib.suppress(Exception):
-                    await self._service.streams.stream_close(connection_id)
+                close_evidence = await _close_stream_evidence(connection_id)
                 await sio.emit(
                     "workspace:stream_closed",
                     {
                         "connection_id": connection_id,
                         "workspace_id": workspace_id,
+                        **close_evidence,
                         **(
                             {"exit_code": int(exit_code)}
                             if exit_code is not None
@@ -1639,8 +1837,8 @@ class WebSocketInterface(Interface):
                 )
             except asyncio.CancelledError:
                 # Our own teardown (full close / disconnect / shutdown):
-                # clean up silently with a plain closed event (no error),
-                # then re-raise so task bookkeeping stays correct.
+                # report only verified cleanup evidence, then re-raise
+                # so task bookkeeping stays correct.
                 for reader in readers:
                     if not reader.done():
                         reader.cancel()
@@ -1651,16 +1849,14 @@ class WebSocketInterface(Interface):
                 with contextlib.suppress(Exception):
                     if sender is not None:
                         await sender
-                try:
-                    await self._service.streams.stream_close(connection_id)
-                except Exception:
-                    pass
+                close_evidence = await _close_stream_evidence(connection_id)
                 with contextlib.suppress(Exception):
                     await sio.emit(
                         "workspace:stream_closed",
                         {
                             "connection_id": connection_id,
                             "workspace_id": workspace_id,
+                            **close_evidence,
                         },
                     )
                 raise
@@ -1678,16 +1874,14 @@ class WebSocketInterface(Interface):
                 with contextlib.suppress(Exception):
                     if sender is not None:
                         await sender
-                try:
-                    await self._service.streams.stream_close(connection_id)
-                except Exception:
-                    pass
+                close_evidence = await _close_stream_evidence(connection_id)
                 with contextlib.suppress(Exception):
                     await sio.emit(
                         "workspace:stream_closed",
                         {
                             "connection_id": connection_id,
                             "workspace_id": workspace_id,
+                            **close_evidence,
                             "error": "stream output ACK timed out",
                         },
                     )
@@ -1703,16 +1897,14 @@ class WebSocketInterface(Interface):
                 with contextlib.suppress(Exception):
                     if sender is not None:
                         await sender
-                try:
-                    await self._service.streams.stream_close(connection_id)
-                except Exception:
-                    pass
+                close_evidence = await _close_stream_evidence(connection_id)
                 with contextlib.suppress(Exception):
                     await sio.emit(
                         "workspace:stream_closed",
                         {
                             "connection_id": connection_id,
                             "workspace_id": workspace_id,
+                            **close_evidence,
                             "error": str(exc),
                         },
                     )
@@ -1746,6 +1938,11 @@ class WebSocketInterface(Interface):
                         command,
                         workdir=raw.get("workdir", raw.get("cwd", "/workspace")),
                         env=raw.get("env", {}),
+                        **(
+                            {"owner": raw["owner"]}
+                            if raw.get("owner") is not None
+                            else {}
+                        ),
                     )
                 elif kind == "tcp":
                     await self._service.streams.stream_start_tcp(
@@ -1835,6 +2032,13 @@ class WebSocketInterface(Interface):
         async def on_workspace_stream_close(data: dict) -> dict:
             ws_echo, conn_echo = _stream_echo(data)
             raw = data if isinstance(data, dict) else {}
+
+            async def reply(result: dict) -> dict:
+                """Send the exact correlated outcome before returning an ACK."""
+                result["close_request_id"] = raw.get("close_request_id", "")
+                await sio.emit("workspace:stream_close_result", result)
+                return result
+
             try:
                 workspace_id = uuid.UUID(ws_echo)
                 if conn_echo:
@@ -1842,19 +2046,24 @@ class WebSocketInterface(Interface):
                         session = self._service.streams.get_stream(conn_echo)
                     except ValueError:
                         session = None
+                    if session is None:
+                        reader = getattr(self._service.streams, "stream_record", None)
+                        record = await reader(conn_echo) if reader else None
+                        if record and record["workspace_id"] != str(workspace_id):
+                            raise ValueError("workspace mismatch for stream")
                     if session is not None and (session.workspace_id != workspace_id):
                         raise ValueError("workspace mismatch for stream")
                 if raw.get("eof") and conn_echo:
                     # Half-close: deliver stdin EOF but NEVER cancel the
                     # output pump — the process reply still follows.
-                    with contextlib.suppress(Exception):
-                        await self._service.streams.stream_write_eof(conn_echo)
-                    return {
+                    await self._service.streams.stream_write_eof(conn_echo)
+                    return await reply({
                         "ok": True,
                         "connection_id": conn_echo,
                         "workspace_id": str(workspace_id),
                         "eof": True,
-                    }
+                        "closed": False,
+                    })
                 # Full close: stop the pump exactly once (guard against
                 # a concurrently finishing natural-EOF pump), then kill
                 # the process tree.
@@ -1864,24 +2073,25 @@ class WebSocketInterface(Interface):
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
                 result = await self._service.streams.stream_close(conn_echo)
-                return {
+                return await reply({
                     "ok": True,
                     "connection_id": conn_echo,
                     "workspace_id": str(workspace_id),
-                    "closed": bool(result.get("closed", True)),
-                }
+                    "closed": result.get("closed") is True,
+                })
             except Exception as exc:
                 logger.warning(
                     "stream_close_rejected",
                     connection_id=conn_echo,
                     error=str(exc),
                 )
-                return {
+                return await reply({
                     "ok": False,
                     "connection_id": conn_echo,
                     "workspace_id": ws_echo,
+                    "closed": False,
                     "error": str(exc),
-                }
+                })
 
         @sio.on("harness:exec_stream")
         async def on_harness_exec_stream(data: dict) -> None:
@@ -2348,39 +2558,10 @@ class WebSocketInterface(Interface):
                     result = await self._service.desktop.desktop_action(
                         workspace_id, action, args
                     )
-                    # Lifecycle announcements are emitted *before* the
-                    # action result: the backend caches proxy state on
-                    # desktop:process, and the harness child may mount a
-                    # mini viewer as soon as it sees the result — showing
-                    # it a frame early would hit an uncached proxy target.
-                    # A fresh Xvnc incarnation (stale restart/recovery)
-                    # invalidates tunnels bound to the old process: close
-                    # them before desktop:process so the mini viewer never
-                    # attaches to a recycled Xvnc via a stale socket.
-                    if action in {"ensure", "hold"} and result.get("ok"):
-                        after = self._service.desktop.get_desktop_session(workspace_id)
-                        if after is not None and after is not before:
-                            await self._close_desktop_proxy_tunnels_for_workspace(
-                                workspace_id
-                            )
-                        state = self._desktop_lifecycle_payload(workspace_id)
-                        if state is not None:
-                            await sio.emit("desktop:process", state)
-                    elif action == "release" and result.get("ok"):
-                        if result.get("stopped") or not result.get(
-                            "process_alive", True
-                        ):
-                            await self._close_desktop_proxy_tunnels_for_workspace(
-                                workspace_id
-                            )
-                            await sio.emit(
-                                "desktop:stopped",
-                                {"workspace_id": str(workspace_id)},
-                            )
-                        else:
-                            state = self._desktop_lifecycle_payload(workspace_id)
-                            if state is not None:
-                                await sio.emit("desktop:process", state)
+                    if action in {"ensure", "hold", "release"} and result.get("ok"):
+                        await self._announce_desktop_change(
+                            workspace_id, before, result
+                        )
                     await _harness_result(
                         "harness:desktop_action_result",
                         {
@@ -2665,9 +2846,9 @@ class WebSocketInterface(Interface):
                         {
                             "workspace_id": workspace_echo,
                             "request_id": request_id,
-                            "operation": operation
-                            if isinstance(operation, str)
-                            else "",
+                            "operation": (
+                                operation if isinstance(operation, str) else ""
+                            ),
                             "ok": False,
                             "code": "invalid_request",
                             "message": "request_id and operation are required non-empty strings",
@@ -3240,9 +3421,11 @@ class WebSocketInterface(Interface):
                         "workspace_id": str(workspace_id),
                         "image_artifact_id": artifact.artifact_id,
                         "name": artifact.name,
-                        "created_at": artifact.created_at.isoformat()
-                        if isinstance(artifact.created_at, datetime)
-                        else str(artifact.created_at),
+                        "created_at": (
+                            artifact.created_at.isoformat()
+                            if isinstance(artifact.created_at, datetime)
+                            else str(artifact.created_at)
+                        ),
                         "size_bytes": artifact.size_bytes,
                     },
                 )
@@ -3426,8 +3609,19 @@ class WebSocketInterface(Interface):
                 *self._operations.running.values(), return_exceptions=True
             )
 
-        with contextlib.suppress(Exception):
-            await self._service.streams.close_all_streams(reason="runner_shutdown")
+        if self._desktop_lease_task is not None:
+            self._desktop_lease_task.cancel()
+            await asyncio.gather(self._desktop_lease_task, return_exceptions=True)
+            self._desktop_lease_task = None
+        try:
+            await asyncio.wait_for(
+                self._service.streams.close_all_streams(reason="runner_shutdown"),
+                self._settings.stream_shutdown_timeout,
+            )
+        except Exception:
+            # Durable closing ownership remains protective for the next retry.
+            # A timeout is not evidence of guest-side process termination.
+            logger.warning("stream_shutdown_unconfirmed", exc_info=True)
         # Cancel heartbeat
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()

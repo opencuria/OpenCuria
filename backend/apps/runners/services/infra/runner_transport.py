@@ -98,25 +98,29 @@ class RunnerTransportMixin:
         if not runner.sid:
             raise RunnerOfflineError(str(runner.id))
 
+        if event == "workspace:stream_close":
+            # An attempt token isolates concurrent closes and late retry replies.
+            data = dict(data)
+            data["close_request_id"] = str(uuid.uuid4())
+        waiter = self._call_reply_waiter(event, data)
         try:
-            response = await self.sio.call(event, data, to=runner.sid, timeout=timeout)
-        except SocketIOTimeoutError:
-            # No ACK from the runner handler: try reply-event
-            # correlation for stream control events, otherwise surface
-            # the timeout.
-            waiter = self._call_reply_waiter(event, data)
-            if waiter is None:
-                raise RuntimeError(f"Runner call timed out for event '{event}'")
-            request_id, future = waiter
             try:
+                response = await self.sio.call(
+                    event, data, to=runner.sid, timeout=timeout
+                )
+            except SocketIOTimeoutError:
+                if waiter is None:
+                    raise RuntimeError(f"Runner call timed out for event '{event}'")
+                _, future = waiter
                 try:
                     response = await asyncio.wait_for(future, timeout)
                 except asyncio.TimeoutError as exc:
                     raise RuntimeError(
                         f"Runner call timed out for event '{event}'"
                     ) from exc
-            finally:
-                self._discard_call_reply_waiter(event, request_id)
+        finally:
+            if waiter is not None:
+                self._discard_call_reply_waiter(event, waiter[0])
         if response is None:
             return {}
         if isinstance(response, dict):

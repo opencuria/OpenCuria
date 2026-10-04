@@ -492,6 +492,11 @@ export interface SkillUpdateIn {
 
 // --- Plugins ---
 
+export type DesktopActivation = 'server_start' | 'first_tool'
+export interface PluginResources {
+  desktop?: { activation?: DesktopActivation }
+}
+
 export type PluginMcpTransport = 'stdio' | 'streamable_http' | 'sse'
 
 export type PluginCredentialServiceType = 'env' | 'file' | 'ssh_key' | 'mcp_oauth'
@@ -521,6 +526,7 @@ export interface PluginMcpServer {
   command: string
   args: string[]
   cwd: string
+  resources?: PluginResources
   env: Record<string, string>
   url: string
   headers: Record<string, string>
@@ -537,6 +543,7 @@ export interface PluginMcpServerIn {
   command?: string
   args?: string[]
   cwd?: string
+  resources?: PluginResources
   env?: Record<string, string>
   url?: string
   headers?: Record<string, string>

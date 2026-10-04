@@ -59,7 +59,27 @@ _KASM_IDLE_GUARD_SCRIPT = (
 )
 
 
-def build_vnc_redirect_url(workspace_id: str, token: str | None) -> str:
+def _viewer_query(query_string: str | bytes) -> dict:
+    """Extract a validated manual-viewer association; observers have none."""
+    query = parse_qs(
+        query_string.decode() if isinstance(query_string, bytes) else query_string
+    )
+    try:
+        client = str(uuid.UUID(query["viewer_client_id"][0]))
+        revision = int(query["intent_revision"][0])
+        if revision < 1:
+            return {}
+        return {"viewer_client_id": client, "intent_revision": revision}
+    except (KeyError, ValueError, TypeError, IndexError):
+        return {}
+
+
+def build_vnc_redirect_url(
+    workspace_id: str,
+    token: str | None,
+    viewer_client_id: str | None = None,
+    intent_revision: int | None = None,
+) -> str:
     """Return the Location for the KasmVNC client, with a safe WebSocket path.
 
     ``path`` is query-encoded so ``?token=`` stays inside the KasmVNC
@@ -70,6 +90,13 @@ def build_vnc_redirect_url(workspace_id: str, token: str | None) -> str:
     """
     token_value = token or ""
     ws_path = f"ws/desktop/{workspace_id}/?token={token_value}"
+    association = {}
+    if viewer_client_id is not None and intent_revision is not None:
+        association = {
+            "viewer_client_id": viewer_client_id,
+            "intent_revision": intent_revision,
+        }
+        ws_path += "&" + urlencode(association)
     query = urlencode(
         {
             "token": token_value,
@@ -77,6 +104,7 @@ def build_vnc_redirect_url(workspace_id: str, token: str | None) -> str:
             "resize": "scale",
             "reconnect": "false",
             "path": ws_path,
+            **association,
         }
     )
     return f"/ws/desktop/{workspace_id}/vnc.html?{query}"
@@ -305,10 +333,12 @@ async def desktop_proxy_app(scope, receive, send):
             await send({"type": "websocket.close", "code": 4004})
         else:
             await send({"type": "http.response.start", "status": 404, "headers": []})
-            await send({
-                "type": "http.response.body",
-                "body": b"No active desktop session",
-            })
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": b"No active desktop session",
+                }
+            )
         return
 
     cookie_header = None
@@ -331,6 +361,7 @@ async def desktop_proxy_app(scope, receive, send):
             proxy_target["runner_sid"],
             proxy_target["runner_id"],
             query_string,
+            user_id=user_id_str,
         )
     elif scope["type"] == "http":
         await _proxy_http(
@@ -370,15 +401,18 @@ async def _proxy_http(
         # Always scale locally. ``resize=remote`` asks KasmVNC to send
         # SetDesktopSize and would shrink/grow the real X11 framebuffer
         # when switching between the chat mini viewer and fullscreen.
-        redirect_url = build_vnc_redirect_url(workspace_id, token)
+        association = _viewer_query(query_string)
+        redirect_url = build_vnc_redirect_url(workspace_id, token, **association)
         resp_headers = [[b"location", redirect_url.encode()]]
         if cookie_header:
             resp_headers.append([b"set-cookie", cookie_header.encode()])
-        await send({
-            "type": "http.response.start",
-            "status": 302,
-            "headers": resp_headers,
-        })
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 302,
+                "headers": resp_headers,
+            }
+        )
         await send({"type": "http.response.body", "body": b""})
         return
 
@@ -398,8 +432,7 @@ async def _proxy_http(
         )
 
         headers = [
-            [key.encode(), value.encode()]
-            for key, value in response.get("headers", [])
+            [key.encode(), value.encode()] for key, value in response.get("headers", [])
         ]
         if cookie_header:
             headers.append([b"set-cookie", cookie_header.encode()])
@@ -412,19 +445,21 @@ async def _proxy_http(
         else:
             body_bytes = bytes(body)
 
-        headers, body_bytes = apply_vnc_client_patches(
-            rest_path, headers, body_bytes
-        )
+        headers, body_bytes = apply_vnc_client_patches(rest_path, headers, body_bytes)
 
-        await send({
-            "type": "http.response.start",
-            "status": int(response.get("status", 200)),
-            "headers": headers,
-        })
-        await send({
-            "type": "http.response.body",
-            "body": body_bytes,
-        })
+        await send(
+            {
+                "type": "http.response.start",
+                "status": int(response.get("status", 200)),
+                "headers": headers,
+            }
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": body_bytes,
+            }
+        )
     except SocketIOTimeoutError:
         logger.error("Desktop HTTP proxy via runner timed out")
         await send({"type": "http.response.start", "status": 504, "headers": []})
@@ -443,6 +478,7 @@ async def _proxy_websocket(
     runner_sid,
     runner_id,
     query_string,
+    user_id=None,
 ):
     """Reverse-proxy WebSocket connections to KasmVNC through the runner."""
     if not await _desktop_workspace_available(workspace_id):
@@ -451,8 +487,7 @@ async def _proxy_websocket(
 
     # Negotiate subprotocol — KasmVNC uses "binary"
     client_protocols = [
-        p.decode() if isinstance(p, bytes) else p
-        for p in scope.get("subprotocols", [])
+        p.decode() if isinstance(p, bytes) else p for p in scope.get("subprotocols", [])
     ]
     tunnel_id = uuid.uuid4().hex
     queue = _register_ws_tunnel(tunnel_id, workspace_id, runner_id)
@@ -484,6 +519,8 @@ async def _proxy_websocket(
             runner_sid=runner_sid,
             queue=queue,
             workspace_id=workspace_id,
+            query_string=query_string,
+            user_id=user_id,
         )
     except SocketIOTimeoutError:
         logger.error("Desktop WebSocket proxy via runner timed out")
@@ -515,7 +552,15 @@ def _sanitize_websocket_close_code(value) -> int:
 
 
 async def _ws_proxy_loop(
-    receive, send, *, tunnel_id, runner_sid, queue, workspace_id=None
+    receive,
+    send,
+    *,
+    tunnel_id,
+    runner_sid,
+    queue,
+    workspace_id=None,
+    query_string="",
+    user_id=None,
 ):
     """Bidirectional proxy between client ASGI WebSocket and the runner tunnel."""
 
@@ -556,8 +601,9 @@ async def _ws_proxy_loop(
                 msg_type = message.get("type", "")
 
                 if msg_type == "websocket.receive":
-                    if workspace_id is not None and not await (
-                        _desktop_workspace_available(workspace_id)
+                    if (
+                        workspace_id is not None
+                        and not await _desktop_workspace_available(workspace_id)
                     ):
                         await close_unavailable_client()
                         return
@@ -594,15 +640,19 @@ async def _ws_proxy_loop(
             while True:
                 msg = await queue.get()
                 if msg["type"] == "binary":
-                    await send({
-                        "type": "websocket.send",
-                        "bytes": msg["data"],
-                    })
+                    await send(
+                        {
+                            "type": "websocket.send",
+                            "bytes": msg["data"],
+                        }
+                    )
                 elif msg["type"] == "text":
-                    await send({
-                        "type": "websocket.send",
-                        "text": msg["data"],
-                    })
+                    await send(
+                        {
+                            "type": "websocket.send",
+                            "text": msg["data"],
+                        }
+                    )
                 elif msg["type"] == "close":
                     try:
                         await close_runner_tunnel()
@@ -624,6 +674,36 @@ async def _ws_proxy_loop(
             logger.error("Desktop WebSocket lifecycle check failed")
         await close_unavailable_client()
 
+    async def renew_viewer():
+        """Tunnel liveness extends existing ownership, independent of tab visibility."""
+        association = _viewer_query(query_string)
+        if not association or not user_id:
+            return
+        from django.contrib.auth import get_user_model
+
+        from .sio_server import get_runner_service
+
+        service = get_runner_service()
+        try:
+            user = await sync_to_async(get_user_model().objects.get)(pk=user_id)
+            workspace = await sync_to_async(service.get_workspace)(
+                uuid.UUID(workspace_id)
+            )
+            while True:
+                await service.renew_desktop(
+                    uuid.UUID(workspace_id),
+                    user=user,
+                    organization_id=workspace.runner.organization_id,
+                    viewer_client_id=uuid.UUID(association["viewer_client_id"]),
+                    intent_revision=association["intent_revision"],
+                )
+                await asyncio.sleep(45)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Failure closes only this tunnel; never acquire or release here.
+            await close_unavailable_client()
+
     # Run both directions concurrently and always await/cancel the other side.
     tasks = [
         asyncio.create_task(client_to_upstream()),
@@ -631,6 +711,9 @@ async def _ws_proxy_loop(
     ]
     if workspace_id is not None:
         tasks.append(asyncio.create_task(monitor_workspace()))
+
+    if user_id and _viewer_query(query_string):
+        tasks.append(asyncio.create_task(renew_viewer()))
 
     async def cleanup():
         for task in tasks:

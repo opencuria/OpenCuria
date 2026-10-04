@@ -65,28 +65,44 @@ export function startTerminal(
 
 // --- Desktop API ---
 
-export function startDesktop(id: string): Promise<{ task_id: string }> {
-  return post<{ task_id: string }>(`/workspaces/${id}/desktop/`)
+export interface DesktopViewerIntent {
+  viewer_client_id: string
+  intent_revision: number
 }
 
-export function stopDesktop(id: string): Promise<{ task_id: string }> {
-  return post<{ task_id: string }>(`/workspaces/${id}/desktop/stop/`)
-}
-
-export function getDesktopStatus(
-  id: string,
-): Promise<{
+export interface DesktopStatus {
   active: boolean
   proxy_url: string | null
   viewer_held: boolean
   computer_use_active: boolean
-}> {
-  return get<{
-    active: boolean
-    proxy_url: string | null
-    viewer_held: boolean
-    computer_use_active: boolean
-  }>(`/workspaces/${id}/desktop/status/`)
+  mcp_active?: boolean
+  holder_count?: number
+  viewer_lease_state?: string
+  revision?: number
+  intent_revision?: number
+  epoch?: string | null
+}
+
+export function startDesktop(
+  id: string,
+  intent: DesktopViewerIntent,
+): Promise<{ task_id: string }> {
+  return post<{ task_id: string }>(`/workspaces/${id}/desktop/`, intent)
+}
+
+export function stopDesktop(id: string, intent: DesktopViewerIntent): Promise<{ task_id: string }> {
+  return post<{ task_id: string }>(`/workspaces/${id}/desktop/stop/`, intent)
+}
+
+export function renewDesktop(id: string, intent: DesktopViewerIntent): Promise<DesktopStatus> {
+  return post<DesktopStatus>(`/workspaces/${id}/desktop/renew/`, intent)
+}
+
+export function getDesktopStatus(id: string, viewerClientId?: string): Promise<DesktopStatus> {
+  const query = viewerClientId
+    ? `?${new URLSearchParams({ viewer_client_id: viewerClientId })}`
+    : ''
+  return get<DesktopStatus>(`/workspaces/${id}/desktop/status/${query}`)
 }
 
 export function takeDesktopControl(

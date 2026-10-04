@@ -37,6 +37,7 @@ from .docker_frames import (
 )
 from .inventory import RuntimeInventory, StorageResource
 from .storage import storage_mutation
+from .managed_process import managed_argv
 from .stream_wrapper import stream_wrapper_argv
 
 logger = structlog.get_logger(__name__)
@@ -639,20 +640,34 @@ class DockerRuntime(RuntimeBackend):
             _offer_eof(stdout_queue)
             _offer_eof(stderr_queue)
 
+    @property
+    def supports_managed_process(self) -> bool:
+        """Support durable guest stream supervision and fenced recovery."""
+        return True
+
     async def spawn_process(
         self,
         instance_id: str,
         command: list[str],
         workdir: str | None = None,
         env: dict[str, str] | None = None,
+        *,
+        control_path: str | None = None,
+        expected_token: dict[str, str] | None = None,
     ) -> ProcessHandle:
         """Spawn a non-TTY bidirectional process (stdin/stdout/stderr)."""
         if not command or not all(isinstance(part, str) for part in command):
             raise ValueError("command must be a non-empty argv list of str")
         if any("\x00" in part for part in command):
             raise ValueError("command must not contain NUL bytes")
+        if control_path and expected_token is None:
+            expected_token = await self.probe_managed_token(instance_id)
         pidfile = self._stream_pidfile()
-        argv = stream_wrapper_argv(pidfile, workdir, env, list(command))
+        argv = (
+            managed_argv(control_path, workdir, env, list(command), expected_token=expected_token)
+            if control_path else
+            stream_wrapper_argv(pidfile, workdir, env, list(command))
+        )
 
         def _spawn() -> tuple[object, str]:
             api = self._get_client().api
@@ -690,6 +705,8 @@ class DockerRuntime(RuntimeBackend):
             {
                 "exec_id": exec_id,
                 "pidfile": pidfile,
+                "control_path": control_path,
+                "expected_token": expected_token,
                 "stdout_queue": stdout_queue,
                 "stderr_queue": stderr_queue,
                 "stop": stop,
@@ -811,7 +828,26 @@ class DockerRuntime(RuntimeBackend):
 
         return await asyncio.to_thread(_inspect)
 
-    async def process_close(self, handle: ProcessHandle) -> None:
+    async def process_detach(self, handle: ProcessHandle) -> None:
+        """Close only local Docker socket/pump, without any guest exec."""
+        stop = handle.metadata.get("stop")
+        if stop is not None:
+            stop.set()
+        def close() -> None:
+            import socket
+            raw = getattr(handle.handle, "_sock", handle.handle)
+            with contextlib.suppress(OSError):
+                if hasattr(raw, "shutdown"):
+                    raw.shutdown(socket.SHUT_RDWR)
+            if hasattr(raw, "close"):
+                raw.close()
+        await asyncio.to_thread(close)
+        pump = handle.metadata.get("pump")
+        if pump is not None:
+            await asyncio.to_thread(pump.join, 5)
+        handle.closed = True
+
+    async def process_close(self, handle: ProcessHandle) -> bool | None:
         """Graceful stdin EOF, TERM/KILL the process group, close socket.
 
         Ordering matters: stdin EOF first while the handle is still open
@@ -820,8 +856,11 @@ class DockerRuntime(RuntimeBackend):
         stop, kill the tree, close the socket (which releases a blocked
         pump thread), and finally join the pump.
         """
+        control_path = handle.metadata.get("control_path")
+        if control_path:
+            await self.close_managed_process(handle.instance_id, control_path)
         if handle.closed:
-            return
+            return True if control_path else None
         with contextlib.suppress(Exception):
             await self.process_write_eof(handle)
         handle.closed = True
@@ -829,7 +868,7 @@ class DockerRuntime(RuntimeBackend):
         if stop is not None:
             stop.set()
         pidfile = str(handle.metadata.get("pidfile", ""))
-        if pidfile:
+        if pidfile and not control_path:
             kill_argv = self._build_stream_kill_script(pidfile)
 
             def _kill() -> None:
@@ -881,6 +920,7 @@ class DockerRuntime(RuntimeBackend):
             pidfile=pidfile,
             frame_error=frame_error,
         )
+        return True if control_path else None
 
     # -- PTY / interactive terminal --------------------------------------------
 

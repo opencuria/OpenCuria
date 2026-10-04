@@ -48,11 +48,37 @@ def interaction_service():
         ("forward_terminal_close", ("terminal",)),
     ],
 )
-async def test_capture_blocks_interactive_dispatch(interaction_service, method, args):
+async def test_capture_blocks_interactive_dispatch(
+    interaction_service, method, args, monkeypatch
+):
     service, workspace = interaction_service
     workspace_id = str(workspace.id) if method.startswith("forward") else workspace.id
+    kwargs = {}
+    if method in {"start_desktop", "stop_desktop"}:
+        # Supply authenticated ownership without bypassing the real capture guard.
+        user = SimpleNamespace(id=uuid.uuid4())
+        org_id = uuid.uuid4()
+        workspace.created_by_id = user.id
+        workspace.runner.organization_id = org_id
+        monkeypatch.setattr(
+            "apps.organizations.services.OrganizationService.require_membership",
+            lambda self, user, organization_id: None,
+        )
+        monkeypatch.setattr(
+            "apps.organizations.services.OrganizationService.get_user_role",
+            lambda self, user, organization_id: "member",
+        )
+        service._viewer_rpc = AsyncMock()
+        kwargs = {
+            "user": user,
+            "organization_id": org_id,
+            "viewer_client_id": uuid.uuid4(),
+            "intent_revision": 1,
+        }
     with pytest.raises(ConflictError):
-        await getattr(service, method)(workspace_id, *args)
+        await getattr(service, method)(workspace_id, *args, **kwargs)
+    if kwargs:
+        service._viewer_rpc.assert_not_awaited()
     service._emit_to_runner.assert_not_awaited()
     service._call_runner.assert_not_awaited()
     service.tasks.create.assert_not_called()

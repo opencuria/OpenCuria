@@ -1755,6 +1755,7 @@ class HarnessService:
                     accessor=accessor,
                     core_tool_names=tools.names(),
                     snapshot=mcp_snapshot,
+                    owner_id=str(uuid.uuid4()),
                 )
                 mcp_runtime.register_tools(tools)
                 if mcp_runtime.skipped:

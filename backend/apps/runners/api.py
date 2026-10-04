@@ -39,10 +39,12 @@ from .repositories import RunnerRepository, RunnerSystemMetricsRepository
 from .schemas import (
     DesktopClipboardReadOut,
     DesktopClipboardWriteIn,
+    DesktopRenewOut,
     DesktopStartOut,
     DesktopStatusOut,
     DesktopStopOut,
     DesktopTakeControlOut,
+    DesktopViewerIntentIn,
     ErrorOut,
     GitCommitQuery,
     GitDiffQuery,
@@ -691,22 +693,18 @@ async def start_terminal(
 async def start_desktop(
     request: HttpRequest,
     workspace_id: uuid.UUID,
+    payload: DesktopViewerIntentIn,
 ):
     """Start a KasmVNC desktop session in a workspace container."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     org_id = _get_org_id(request)
-    is_admin = await _get_org_admin_flag_async(request, org_id)
-
     service = _get_service()
     try:
-        workspace = await sync_to_async(service.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            raise NotFoundError("Workspace", str(workspace_id))
-        if not is_admin and workspace.created_by_id != request.user.id:
-            raise NotFoundError("Workspace", str(workspace_id))
-
-        task = await service.start_desktop(workspace_id)
+        task = await service.start_desktop(
+            workspace_id, user=request.user, organization_id=org_id,
+            viewer_client_id=payload.viewer_client_id,
+            intent_revision=payload.intent_revision)
         return 202, DesktopStartOut(task_id=task.id)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
@@ -722,23 +720,41 @@ async def start_desktop(
 async def stop_desktop(
     request: HttpRequest,
     workspace_id: uuid.UUID,
+    payload: DesktopViewerIntentIn,
 ):
     """Release the viewer lease. The display stays up if computer-use holds it."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     org_id = _get_org_id(request)
-    is_admin = await _get_org_admin_flag_async(request, org_id)
-
     service = _get_service()
     try:
-        workspace = await sync_to_async(service.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            raise NotFoundError("Workspace", str(workspace_id))
-        if not is_admin and workspace.created_by_id != request.user.id:
-            raise NotFoundError("Workspace", str(workspace_id))
-
-        task = await service.stop_desktop(workspace_id)
+        task = await service.stop_desktop(
+            workspace_id, user=request.user, organization_id=org_id,
+            viewer_client_id=payload.viewer_client_id,
+            intent_revision=payload.intent_revision)
         return 202, DesktopStopOut(task_id=task.id)
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
+
+
+@workspace_router.post(
+    "/{workspace_id}/desktop/renew/",
+    response={200: DesktopRenewOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    summary="Renew existing viewer intent",
+)
+async def renew_desktop(request: HttpRequest, workspace_id: uuid.UUID,
+                        payload: DesktopViewerIntentIn):
+    """Renew only the authenticated tab's existing held lease."""
+    if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
+        return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
+    try:
+        result = await _get_service().renew_desktop(
+            workspace_id, user=request.user, organization_id=_get_org_id(request),
+            viewer_client_id=payload.viewer_client_id,
+            intent_revision=payload.intent_revision)
+        return 200, DesktopRenewOut(**result)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
@@ -793,34 +809,18 @@ async def take_desktop_control(
 async def desktop_status(
     request: HttpRequest,
     workspace_id: uuid.UUID,
+    viewer_client_id: uuid.UUID | None = None,
 ):
     """Check whether a desktop session is active for the workspace."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     org_id = _get_org_id(request)
-    is_admin = await _get_org_admin_flag_async(request, org_id)
-
     service = _get_service()
     try:
-        workspace = await sync_to_async(service.get_workspace)(workspace_id)
-        if workspace.runner.organization_id != org_id:
-            raise NotFoundError("Workspace", str(workspace_id))
-        if not is_admin and workspace.created_by_id != request.user.id:
-            raise NotFoundError("Workspace", str(workspace_id))
-
-        await sync_to_async(service._ensure_workspace_available)(workspace)
-
-        desktop_info = await sync_to_async(service.get_desktop_info)(str(workspace_id))
-        is_active = desktop_info is not None
-        proxy_url = f"/ws/desktop/{workspace_id}/" if is_active else None
-        viewer_held = bool((desktop_info or {}).get("viewer"))
-        computer_use_active = bool((desktop_info or {}).get("computer_use"))
-        return 200, DesktopStatusOut(
-            active=is_active,
-            proxy_url=proxy_url,
-            viewer_held=viewer_held,
-            computer_use_active=computer_use_active,
-        )
+        result = await service.viewer_desktop_status(
+            workspace_id, user=request.user, organization_id=org_id,
+            viewer_client_id=viewer_client_id)
+        return 200, DesktopStatusOut(**result)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:

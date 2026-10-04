@@ -207,10 +207,15 @@ def test_playwright_seed_shape():
     assert server.command == "npx"
     assert list(server.args or []) == PLAYWRIGHT_MCP_ARGS
     assert server.args[server.args.index("--output-dir") + 1].startswith("/workspace/")
-    # Headed on the shared desktop: no --headless, DISPLAY/XAUTHORITY set.
+    # Headed desktop is declared; bindings are resolved at runtime.
     assert "--headless" not in list(server.args or [])
-    for key, value in PLAYWRIGHT_MCP_ENV.items():
-        assert dict(server.env or {}).get(key) == value
+    assert server.env == PLAYWRIGHT_MCP_ENV == {}
+    assert server.resources == {"desktop": {"activation": "first_tool"}}
+    assert "headless Chromium" not in plugin.description
+    assert (
+        "headless Chromium"
+        not in plugin.plugin_skills.get(slug="playwright-basics").body
+    )
     assert PluginSkill.objects.filter(plugin=plugin).exists()
     # Explicit opt-in: no org activations created by the seed.
     assert not OrgPluginActivation.objects.filter(plugin=plugin).exists()
@@ -228,13 +233,18 @@ def test_playwright_artifact_migration_preserves_custom_commands():
         "apps.plugins.migrations.0005_playwright_workspace_artifacts"
     )
     seeded = PluginMcpServer.objects.get(
-        plugin__slug="playwright", plugin__organization__isnull=True,
+        plugin__slug="playwright",
+        plugin__organization__isnull=True,
         slug="playwright",
     )
     custom = Plugin.objects.create(name="Custom", slug="custom-playwright")
     other = PluginMcpServer.objects.create(
-        plugin=custom, name="Playwright", slug="playwright", transport="stdio",
-        command="npx", args=migration.OLD_ARGS,
+        plugin=custom,
+        name="Playwright",
+        slug="playwright",
+        transport="stdio",
+        command="npx",
+        args=migration.OLD_ARGS,
     )
     seeded.args = migration.OLD_ARGS
     seeded.save(update_fields=["args"])
@@ -272,3 +282,49 @@ def test_member_orgs_do_not_auto_enable_playwright():
     assert not OrgPluginActivation.objects.filter(
         organization=org, plugin=playwright
     ).exists()
+
+
+@pytest.mark.django_db
+def test_managed_desktop_migration_preserves_custom_and_org_copies():
+    import importlib
+
+    from django.apps import apps as django_apps
+
+    from apps.organizations.models import Organization
+
+    migration = importlib.import_module(
+        "apps.plugins.migrations.0009_managed_desktop_resources"
+    )
+    seed = Plugin.objects.get(slug="playwright", organization__isnull=True)
+    server = seed.mcp_servers.get(slug="playwright")
+    server.resources = {}
+    server.env = migration.headed.PLAYWRIGHT_MCP_ENV_V3
+    server.save()
+    org = Organization.objects.create(name="Copy org", slug="copy-org")
+    copy = Plugin.objects.create(name="Playwright", slug="playwright", organization=org)
+    values = dict(
+        name="Playwright",
+        slug="playwright",
+        command="npx",
+        args=migration.artifacts.NEW_ARGS,
+        env=server.env,
+        startup_timeout_seconds=120,
+    )
+    org_server = PluginMcpServer.objects.create(plugin=copy, **values)
+    migration.upgrade_playwright(django_apps, None)
+    server.refresh_from_db()
+    org_server.refresh_from_db()
+    assert server.resources == {"desktop": {"activation": "first_tool"}}
+    assert server.env == {}
+    assert org_server.resources == {}
+    assert org_server.env == migration.headed.PLAYWRIGHT_MCP_ENV_V3
+    for field, value in [("args", ["custom"]), ("env", {"DISPLAY": ":9"})]:
+        server.resources = {}
+        server.env = migration.headed.PLAYWRIGHT_MCP_ENV_V3
+        server.args = migration.artifacts.NEW_ARGS
+        setattr(server, field, value)
+        server.save()
+        migration.upgrade_playwright(django_apps, None)
+        server.refresh_from_db()
+        assert server.resources == {}
+        assert getattr(server, field) == value
