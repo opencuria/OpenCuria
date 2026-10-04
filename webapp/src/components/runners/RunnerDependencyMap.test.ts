@@ -40,7 +40,7 @@ it('offers keyboard-accessible selection and distinguishes lifecycle, observatio
   expect(wrapper.find('button[aria-label="Inspect Base image"]').exists()).toBe(false)
   wrapper.unmount()
 })
-it('discloses unassigned count without showing raw IDs, while retaining linked unresolved targets', async () => {
+it('discloses other resource count without showing raw IDs, while retaining linked unresolved targets', async () => {
   const runtimes = [
     {
       runtime_type: 'qemu',
@@ -58,13 +58,13 @@ it('discloses unassigned count without showing raw IDs, while retaining linked u
   ] as unknown as StorageRuntime[]
   const wrapper = mount(RunnerDependencyMap, { props: { runtimes, generations: [] } })
   await flushPromises()
-  expect(wrapper.text()).toContain('unassigned (1)')
+  expect(wrapper.text()).toContain('Other resources (2)')
   expect(wrapper.text()).toContain('Unresolved · missing')
   expect(wrapper.text()).not.toContain('/private/disks')
   expect(wrapper.find('button[aria-label="Inspect loose"]').exists()).toBe(false)
   await wrapper
     .findAll('button')
-    .find((b) => b.text().includes('Show unassigned'))!
+    .find((b) => b.text().includes('Other resources (2)'))!
     .trigger('click')
   expect(wrapper.find('button[aria-label="Inspect loose"]').exists()).toBe(true)
   wrapper.unmount()
@@ -114,10 +114,10 @@ it('shows valid normalized VM telemetry only on physical QEMU workspace nodes', 
   expect(wrapper.get('button[aria-label="Inspect VM"]').text()).toContain(
     'VM CPU 25% · RAM 1.0 KiB / 4.0 KiB',
   )
-  const disk = wrapper.get('button[aria-label="Inspect VM · Workspace disk"]')
-  expect(disk.text()).not.toContain('VM CPU')
-  expect(disk.text()).not.toContain('Lifecycle')
-  expect(disk.text()).toContain('2.0 KiB allocated')
+  expect(wrapper.find('button[aria-label="Inspect VM · Workspace disk"]').exists()).toBe(false)
+  expect(wrapper.get('button[aria-label="Inspect VM"]').text()).toContain('Used 2.0 KiB')
+  expect(wrapper.find('.topology-columns.grid-cols-2').exists()).toBe(true)
+  expect(wrapper.find('section[aria-label="Other resources"]').exists()).toBe(false)
   await wrapper.setProps({ vmMetrics: { ws: { ...sample, cpu_usage_percent: 250 } } })
   expect(wrapper.text()).not.toContain('VM CPU')
   await wrapper.setProps({ vmMetrics: { ws: { ...sample, ram_used_bytes: -1 } } })
@@ -163,7 +163,7 @@ it('retains distinct allocated and generation accounting in compact image cards'
   wrapper.unmount()
 })
 
-it('groups multiple runtime diagrams and hides only auxiliary leaf seeds with disclosure', async () => {
+it('groups runtime diagrams and searches collapsed boot seed members without a separate toggle', async () => {
   const runtimes = [
     {
       runtime_type: 'qemu',
@@ -204,18 +204,15 @@ it('groups multiple runtime diagrams and hides only auxiliary leaf seeds with di
   })
   await flushPromises()
   expect(wrapper.find('button[aria-label="Inspect VM · Boot seed"]').exists()).toBe(false)
-  expect(wrapper.get('button[aria-label="Inspect VM"]').text()).toContain(
-    '1 boot seed · hidden auxiliary dependency',
-  )
-  expect(wrapper.find('button[aria-label="Inspect VM · Workspace disk"]').exists()).toBe(true)
+  expect(wrapper.get('button[aria-label="Inspect VM"]').text()).toContain('partial (2 unknown)')
+  expect(wrapper.find('button[aria-label="Inspect VM · Workspace disk"]').exists()).toBe(false)
   expect(wrapper.get('section[aria-label="qemu dependency map"]').text()).toContain('QEMU')
   expect(wrapper.get('section[aria-label="docker dependency map"]').text()).toContain('Docker')
-  const toggle = wrapper.findAll('button').find((b) => b.text() === 'Boot seeds (1)')!
-  await toggle.trigger('click')
-  expect(wrapper.find('button[aria-label="Inspect VM · Boot seed"]').exists()).toBe(true)
-  await toggle.trigger('click')
+  expect(wrapper.findAll('button').some((b) => b.text().includes('Boot seeds'))).toBe(false)
   await wrapper.get('input').setValue('cloud-init')
-  expect(wrapper.find('button[aria-label="Inspect VM · Boot seed"]').exists()).toBe(true)
+  expect(wrapper.text()).toContain('1 matches')
+  expect(wrapper.find('button[aria-label="Inspect VM"]').exists()).toBe(true)
+  expect(wrapper.find('button[aria-label="Inspect VM · Boot seed"]').exists()).toBe(false)
   wrapper.unmount()
 })
 
@@ -260,5 +257,112 @@ it('does not color cached observed states as current or show telemetry on an exi
     },
   })
   expect(wrapper.text()).not.toContain('VM CPU')
+  wrapper.unmount()
+})
+
+it('accepts a parent projection, translates physical selection and searches member aliases', async () => {
+  const { buildRunnerTopology, projectRunnerTopology } = await import('@/lib/runnerTopology')
+  const runtimes = [
+    {
+      runtime_type: 'qemu',
+      resources: [
+        {
+          physical_id: 'disk',
+          kind: 'disk',
+          state: 'running',
+          workspace: { id: 'ws', name: 'Disk-only workspace', observed_state: 'unknown' },
+          dependencies: [],
+          aliases: ['member-alias'],
+          allocated_bytes: 1024,
+          virtual_bytes: 8192,
+        },
+        {
+          physical_id: 'missing-size',
+          kind: 'file',
+          state: 'present',
+          workspace: { id: 'ws', name: 'Disk-only workspace', observed_state: 'unknown' },
+          dependencies: [],
+          aliases: [],
+          allocated_bytes: null,
+        },
+      ],
+    },
+  ] as unknown as StorageRuntime[]
+  const topology = projectRunnerTopology(buildRunnerTopology(runtimes, []))
+  const wrapper = mount(RunnerDependencyMap, {
+    props: {
+      runtimes: [],
+      generations: [],
+      topology,
+      selectedKey: JSON.stringify(['qemu', 'physical', 'disk']),
+      vmMetrics: {
+        ws: {
+          cpu_usage_percent: 25,
+          ram_used_bytes: 1024,
+          ram_total_bytes: 4096,
+          disk_used_bytes: 0,
+          disk_total_bytes: 4096,
+        },
+      },
+    },
+  })
+  const card = wrapper.get('button[aria-label="Inspect Disk-only workspace"]')
+  expect(card.attributes('aria-pressed')).toBe('true')
+  expect(card.text()).toContain('Used 1.0 KiB · partial (1 unknown)')
+  expect(card.text()).toContain('Disk capacity 8.0 KiB')
+  expect(card.text()).toContain('Observed: unknown')
+  expect(card.text()).not.toContain('VM CPU')
+  await wrapper.get('input').setValue('member-alias')
+  expect(wrapper.text()).toContain('1 matches')
+  await card.trigger('click')
+  expect(wrapper.emitted('select')?.[0]?.[0]).toEqual(topology.nodes[0])
+  wrapper.unmount()
+})
+
+it('hides shared and foreign exceptions behind Other resources unless selected or searched', async () => {
+  const runtimes = [
+    {
+      runtime_type: 'qemu',
+      resources: [
+        {
+          physical_id: 'a',
+          kind: 'workspace',
+          workspace: { id: 'a', name: 'A' },
+          dependencies: ['shared'],
+          aliases: [],
+        },
+        {
+          physical_id: 'b',
+          kind: 'workspace',
+          workspace: { id: 'b', name: 'B' },
+          dependencies: ['shared'],
+          aliases: [],
+        },
+        { physical_id: 'shared', kind: 'disk', dependencies: [], aliases: [] },
+        {
+          physical_id: 'foreign',
+          kind: 'workspace',
+          managed: false,
+          dependencies: [],
+          aliases: [],
+        },
+      ],
+    },
+  ] as unknown as StorageRuntime[]
+  const wrapper = mount(RunnerDependencyMap, { props: { runtimes, generations: [] } })
+  expect(wrapper.text()).toContain('Other resources (2)')
+  expect(wrapper.find('section[aria-label="Other resources"]').exists()).toBe(false)
+  await wrapper
+    .findAll('button')
+    .find((button) => button.text().includes('Other resources (2)'))!
+    .trigger('click')
+  expect(wrapper.get('section[aria-label="Other resources"]').text()).toContain('foreign')
+  expect(wrapper.find('button[aria-label="Inspect shared"]').exists()).toBe(true)
+  await wrapper
+    .findAll('button')
+    .find((button) => button.text().includes('Other resources (2)'))!
+    .trigger('click')
+  await wrapper.setProps({ selectedKey: JSON.stringify(['qemu', 'physical', 'shared']) })
+  expect(wrapper.find('button[aria-label="Inspect shared"]').exists()).toBe(true)
   wrapper.unmount()
 })

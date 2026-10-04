@@ -11,6 +11,9 @@ import type {
 } from '@/types/runnerStorage'
 import RunnerStorageDetail from './RunnerStorageDetail.vue'
 import RunnerDependencyMap from './RunnerDependencyMap.vue'
+import RunnerStorageDonut from './RunnerStorageDonut.vue'
+import RunnerNodeInspector from './RunnerNodeInspector.vue'
+import type { RunnerTopology } from '@/lib/runnerTopology'
 import { buildRunnerTopology } from '@/lib/runnerTopology'
 
 const state = vi.hoisted(() => ({
@@ -45,7 +48,7 @@ vi.mock('./RunnerResourceOverview.vue', () => ({
 }))
 vi.mock('./RunnerDependencyMap.vue', () => ({
   default: defineComponent({
-    props: ['runtimes', 'generations', 'selectedKey'],
+    props: ['runtimes', 'generations', 'selectedKey', 'topology'],
     emits: ['select'],
     template: '<section aria-label="Dependency map">Dependency map</section>',
   }),
@@ -212,9 +215,9 @@ afterEach(() => {
   document.body.innerHTML = ''
   vi.useRealTimers()
 })
-async function setup() {
+async function setup(selectedRunner: Runner = runner) {
   w = mount(RunnerStorageDetail, {
-    props: { runner },
+    props: { runner: selectedRunner },
     attachTo: document.body,
     global: {
       stubs: {
@@ -646,5 +649,234 @@ describe('effective cached inventory freshness', () => {
     expect(effectiveRuntime().fresh).toBe(false)
     expect(w.text()).toContain('Stale inventory')
     expect(data.value!.runtimes[0]!.fresh).toBe(true)
+  })
+})
+
+describe('storage chart selection integration', () => {
+  const KiB = 1024
+  const workspaceKey = JSON.stringify(['qemu', 'workspace', 'ws'])
+  const imageKey = JSON.stringify(['qemu', 'generation', 'current'])
+
+  beforeEach(() => {
+    const workspace = {
+      id: 'ws',
+      name: 'Measured workspace',
+      owner_id: 'alice',
+      owner_label: 'Alice',
+      status: 'stopped',
+      observed_state: 'present',
+      last_activity_at: '2026-10-01',
+    }
+    data.value!.generations = [generation({ dependencies: [workspace] })]
+    data.value!.runtimes[0] = {
+      ...data.value!.runtimes[0]!,
+      filesystems: [
+        {
+          filesystem_id: 'disk-fs',
+          path: '/images',
+          capacity_bytes: 100 * KiB,
+          used_bytes: 50 * KiB,
+          available_bytes: 50 * KiB,
+        },
+      ],
+      resources: [
+        resource({
+          filesystem_id: 'disk-fs',
+          file_identity: 'base-inode',
+          allocated_bytes: 10 * KiB,
+          state: 'present',
+        }),
+        resource({
+          physical_id: 'domain:ws',
+          kind: 'workspace',
+          image_id: null,
+          allocated_bytes: null,
+          workspace,
+          state: 'present',
+          dependencies: ['/workspaces/ws/disk.qcow2', '/workspaces/ws/seed.iso'],
+        }),
+        resource({
+          physical_id: '/workspaces/ws/disk.qcow2',
+          kind: 'disk',
+          image_id: null,
+          filesystem_id: 'disk-fs',
+          file_identity: 'disk-inode',
+          allocated_bytes: 20 * KiB,
+          logical_bytes: 40 * KiB,
+          virtual_bytes: 80 * KiB,
+          workspace,
+          state: 'present',
+          dependencies: ['/images/base.qcow2'],
+        }),
+        resource({
+          physical_id: '/workspaces/ws/seed.iso',
+          kind: 'file',
+          image_id: null,
+          filesystem_id: 'disk-fs',
+          file_identity: 'seed-inode',
+          allocated_bytes: 2 * KiB,
+          logical_bytes: 2 * KiB,
+          virtual_bytes: 2 * KiB,
+          workspace,
+          state: 'present',
+        }),
+      ],
+    }
+  })
+
+  function metric(label: string) {
+    const term = w
+      .get('[aria-label="Selected resource"]')
+      .findAll('dt')
+      .find((item) => item.text() === label)!
+    return term.element.nextElementSibling?.textContent?.trim()
+  }
+  function graph(): RunnerTopology {
+    return w.getComponent(RunnerDependencyMap).props('topology')!
+  }
+  function assertSharedSelection(key: string, label: string) {
+    const donut = w.getComponent(RunnerStorageDonut)
+    expect(w.getComponent(RunnerDependencyMap).props('selectedKey')).toBe(key)
+    expect(donut.props('selectedKey')).toBe(key)
+    expect(donut.props('topology')).toBe(graph())
+    expect(donut.find('path[aria-pressed="true"]').attributes('aria-label')).toContain(`${label}:`)
+  }
+  function assertGraph() {
+    expect(
+      graph()
+        .nodes.map((node) => node.key)
+        .sort(),
+    ).toEqual([imageKey, workspaceKey].sort())
+    expect(graph().edges).toEqual([{ from: workspaceKey, to: imageKey, kind: 'physical' }])
+  }
+  async function selectSlice(label: string) {
+    const donut = w.getComponent(RunnerStorageDonut)
+    const slice = donut
+      .findAll('path[role="button"]')
+      .find((path) => path.attributes('aria-label')?.startsWith(`${label}:`))!
+    expect(slice).toBeDefined()
+    await slice.trigger('click')
+    await flushPromises()
+    return donut
+  }
+
+  it('resolves real donut selection to a projected workspace with real inspector metrics and shared map props', async () => {
+    await setup()
+    const donut = await selectSlice('Measured workspace')
+    const projected = graph().nodes.find((node) => node.key === workspaceKey)!
+    expect(donut.emitted('select')![0]![0]).toBe(projected)
+    expect(w.getComponent(RunnerNodeInspector).props('node')).toBe(projected)
+    expect(projected.storage!.resources).toHaveLength(2)
+    expect(projected.resource!.physical_id).toBe('domain:ws')
+    expect(metric('Used storage')).toBe('22.0 KiB')
+    expect(metric('Disk capacity')).toBe('80.0 KiB')
+    expect(metric('File size')).toBe('40.0 KiB')
+    assertSharedSelection(workspaceKey, 'Measured workspace')
+    assertGraph()
+  })
+
+  it('updates selected metrics from replacement resources without duplicating graph nodes or edges', async () => {
+    await setup()
+    await selectSlice('Measured workspace')
+    const previousNode = w.getComponent(RunnerNodeInspector).props('node')
+    data.value = {
+      ...data.value!,
+      latest_snapshot_id: 5,
+      runtimes: data.value!.runtimes.map((runtime) => ({
+        ...runtime,
+        snapshot_id: 5,
+        resources: runtime.resources.map((member) => ({
+          ...member,
+          ...(member.kind === 'disk'
+            ? { allocated_bytes: 30 * KiB, logical_bytes: 45 * KiB, virtual_bytes: 90 * KiB }
+            : {}),
+        })),
+      })),
+    }
+    await flushPromises()
+    const selected = w.getComponent(RunnerNodeInspector).props('node')
+    expect(selected).not.toBe(previousNode)
+    expect(selected.key).toBe(workspaceKey)
+    expect(selected).toBe(graph().nodes.find((node) => node.key === workspaceKey))
+    expect(metric('Used storage')).toBe('32.0 KiB')
+    expect(metric('Disk capacity')).toBe('90.0 KiB')
+    expect(metric('File size')).toBe('45.0 KiB')
+    assertSharedSelection(workspaceKey, 'Measured workspace')
+    assertGraph()
+    expect(
+      w.getComponent(RunnerStorageDonut).find('path[aria-pressed="true"]').attributes('aria-label'),
+    ).toContain('32.0 KiB')
+  })
+
+  it('inspects disk and seed separately in Inventory and highlights their projected workspace back on Overview', async () => {
+    await setup()
+    for (const [label, id, allocated] of [
+      ['Measured workspace · Workspace disk', '/workspaces/ws/disk.qcow2', '20.0 KiB'],
+      ['Measured workspace · Boot seed', '/workspaces/ws/seed.iso', '2.0 KiB'],
+    ]) {
+      await tab('Inventory')
+      if (!w.find(`[aria-label="Inspect resource ${label}"]`).exists()) {
+        await button('Physical resources').trigger('click')
+        await flushPromises()
+      }
+      await w.get(`[aria-label="Inspect resource ${label}"]`).trigger('click')
+      await flushPromises()
+      const selected = w.getComponent(RunnerNodeInspector).props('node')
+      expect(selected.resource!.physical_id).toBe(id)
+      expect(selected.storage).toBeUndefined()
+      expect(metric('Allocated')).toBe(allocated)
+      const physicalKey = selected.key
+      await tab('Overview')
+      expect(graph().physicalToPresentation!.get(physicalKey)).toBe(workspaceKey)
+      assertSharedSelection(workspaceKey, 'Measured workspace')
+      // Physical evidence remains selected in the inspector; the graph highlights its workspace.
+      expect(w.getComponent(RunnerNodeInspector).props('node').key).toBe(physicalKey)
+    }
+  })
+
+  it('retains a donut-selected image when generation-only evidence gains a physical resource', async () => {
+    const base = data.value!.runtimes[0]!.resources[0]!
+    data.value!.runtimes[0]!.resources = data.value!.runtimes[0]!.resources.slice(1)
+    await setup()
+    const donut = w.getComponent(RunnerStorageDonut)
+    // An unmeasured image still has an inspectable legend entry.
+    await donut
+      .findAll('button')
+      .find((item) => item.text().includes('Base v2'))!
+      .trigger('click')
+    await flushPromises()
+    await donut.get('[aria-label="Inspect storage Base v2"]').trigger('click')
+    await flushPromises()
+    expect(donut.emitted('select')![0]![0]).toBe(
+      graph().nodes.find((node) => node.key === imageKey),
+    )
+    expect(w.getComponent(RunnerNodeInspector).props('node').key).toBe(imageKey)
+    expect(w.getComponent(RunnerNodeInspector).props('node').resource).toBeUndefined()
+    data.value = {
+      ...data.value!,
+      runtimes: data.value!.runtimes.map((runtime) => ({
+        ...runtime,
+        resources: [{ ...base }, ...runtime.resources],
+      })),
+    }
+    await flushPromises()
+    const selected = w.getComponent(RunnerNodeInspector).props('node')
+    expect(selected.key).toBe(imageKey)
+    expect(selected.generation!.id).toBe('current')
+    expect(selected.resource!.physical_id).toBe(base.physical_id)
+    expect(metric('Allocated')).toBe('10.0 KiB')
+    assertSharedSelection(imageKey, 'Base v2')
+    assertGraph()
+  })
+
+  it('never mounts the QEMU chart for a Docker-only runner', async () => {
+    data.value!.generations = [generation({ runtime_type: 'docker', dependencies: [] })]
+    data.value!.runtimes = [{ ...data.value!.runtimes[0]!, runtime_type: 'docker', resources: [] }]
+    await setup({ ...runner, available_runtimes: ['docker'] })
+    expect(w.findComponent(RunnerStorageDonut).exists()).toBe(false)
+    expect(w.find('[aria-label="QEMU storage breakdown"]').exists()).toBe(false)
+    await tab('Inventory')
+    await tab('Overview')
+    expect(w.findComponent(RunnerStorageDonut).exists()).toBe(false)
   })
 })

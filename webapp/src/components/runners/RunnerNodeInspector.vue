@@ -103,7 +103,30 @@ function openWorkspace() {
           <dd class="mt-1 font-medium tabular-nums">{{ storageBytes(image.size_bytes) }}</dd>
           <dd class="text-[11px] text-muted-foreground">{{ image.size_source }}</dd>
         </div>
-        <template v-if="resource">
+        <template v-if="node.storage">
+          <div>
+            <dt class="text-muted-foreground">Used storage</dt>
+            <dd class="mt-1 font-medium tabular-nums">
+              {{ storageBytes(node.storage.allocatedBytes) }}
+            </dd>
+            <dd v-if="node.storage.unknownCount" class="text-[11px] text-muted-foreground">
+              Partial known total · {{ node.storage.unknownCount }} resource(s) unknown
+            </dd>
+          </div>
+          <div>
+            <dt class="text-muted-foreground">Disk capacity</dt>
+            <dd class="mt-1 font-medium tabular-nums">
+              {{ storageBytes(node.storage.virtualBytes) }}
+            </dd>
+          </div>
+          <div>
+            <dt class="text-muted-foreground">File size</dt>
+            <dd class="mt-1 font-medium tabular-nums">
+              {{ storageBytes(node.storage.logicalBytes) }}
+            </dd>
+          </div>
+        </template>
+        <template v-else-if="resource && !['workspace', 'container'].includes(resource.kind)">
           <div
             v-for="(value, label) in {
               Allocated: resource.allocated_bytes,
@@ -184,6 +207,46 @@ function openWorkspace() {
             Physical dependencies: {{ resource.dependencies.join(', ') || 'None' }}
           </p>
           <p v-if="resource">Provenance: {{ resource.provenance || 'Unknown' }}</p>
+          <Collapsible v-if="node.storage?.resources.length">
+            <CollapsibleTrigger as-child>
+              <Button variant="ghost" size="sm" class="px-0 text-xs"
+                >Storage resources ({{ node.storage.resources.length }})<ChevronDown
+              /></Button>
+            </CollapsibleTrigger>
+            <CollapsibleContent class="space-y-3 pt-2">
+              <div
+                v-for="member in node.storage.resources"
+                :key="member.physical_id"
+                class="space-y-1 rounded-lg border p-3"
+              >
+                <p>
+                  Physical ID: <code>{{ member.physical_id }}</code>
+                </p>
+                <p>
+                  {{ member.kind }} · Observed: {{ runnerStateLabel(member.state) }} ·
+                  {{ member.managed ? 'Managed' : 'Unmanaged' }}
+                </p>
+                <dl class="grid grid-cols-2 gap-2">
+                  <div
+                    v-for="(value, label) in {
+                      Allocated: member.allocated_bytes,
+                      Logical: member.logical_bytes,
+                      Virtual: member.virtual_bytes,
+                      Shared: member.shared_bytes,
+                      Reclaimable: member.reclaimable_bytes,
+                    }"
+                    :key="label"
+                  >
+                    <dt>{{ label }}</dt>
+                    <dd>{{ storageBytes(value) }}</dd>
+                  </div>
+                </dl>
+                <p>Aliases: {{ member.aliases.join(', ') || 'None' }}</p>
+                <p>Physical dependencies: {{ member.dependencies.join(', ') || 'None' }}</p>
+                <p>Provenance: {{ member.provenance || 'Unknown' }}</p>
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
           <p v-if="image">
             Image ID: <code>{{ image.id }}</code>
           </p>

@@ -377,6 +377,9 @@ class InventoryRepository:
                             else None,
                             "workspace": {
                                 "id": str(ws.id),
+                                "base_image_instance_id": str(ws.base_image_instance_id)
+                                if ws.base_image_instance_id
+                                else None,
                                 "owner_id": str(ws.created_by_id),
                                 "owner_label": InventoryRepository.owner_label(
                                     ws.created_by
@@ -386,6 +389,12 @@ class InventoryRepository:
                                 "last_activity_at": ws.last_activity_at,
                             }
                             if ws
+                            else None,
+                            "filesystem_id": resource.metadata.get("filesystem_id")
+                            if isinstance(resource.metadata.get("filesystem_id"), str)
+                            else None,
+                            "file_identity": resource.metadata.get("file_identity")
+                            if isinstance(resource.metadata.get("file_identity"), str)
                             else None,
                             "provenance": resource.provenance,
                         }
@@ -547,6 +556,9 @@ class InventoryRepository:
                     "dependencies": [
                         {
                             "id": str(w.id),
+                            "base_image_instance_id": str(w.base_image_instance_id)
+                            if w.base_image_instance_id
+                            else None,
                             "name": w.name,
                             "owner_id": str(w.created_by_id),
                             "owner_label": InventoryRepository.owner_label(

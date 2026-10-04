@@ -2037,24 +2037,39 @@ class QemuRuntime(RuntimeBackend):
                 )
             ),
         ]
-        try:
-            for root in roots:
-                for directory, _, files in os.walk(
-                    root, onerror=lambda e: scan.errors.append("Directory unreadable")
-                ):
-                    for name in files:
-                        path = Path(directory) / name
-                        if name.endswith((".qcow2", ".img", ".iso", ".tmp")) or ".tmp-" in name:
-                            paths.add(path.absolute())
-                stat = os.statvfs(root)
+        filesystem_ids: set[str] = set()
+
+        def inspect_filesystem(path: Path, filesystem_id: str) -> None:
+            if filesystem_id in filesystem_ids:
+                return
+            filesystem_ids.add(filesystem_id)
+            try:
+                stat = os.statvfs(path)
                 scan.filesystems.append(
                     {
-                        "path": str(root),
+                        "filesystem_id": filesystem_id,
+                        "path": str(path),
                         "capacity_bytes": stat.f_blocks * stat.f_frsize,
                         "available_bytes": stat.f_bavail * stat.f_frsize,
                         "used_bytes": (stat.f_blocks - stat.f_bfree) * stat.f_frsize,
                     }
                 )
+            except OSError:
+                scan.errors.append("Filesystem inspection failed: " + str(path))
+
+        try:
+            for root in roots:
+                inspect_filesystem(root, str(root.stat().st_dev))
+                for directory, _, files in os.walk(
+                    root, onerror=lambda e: scan.errors.append("Directory unreadable")
+                ):
+                    for name in files:
+                        path = Path(directory) / name
+                        if (
+                            name.endswith((".qcow2", ".img", ".iso", ".tmp"))
+                            or ".tmp-" in name
+                        ):
+                            paths.add(path.absolute())
 
             def domains():
                 return [
@@ -2129,6 +2144,11 @@ class QemuRuntime(RuntimeBackend):
                 stat = path.stat()
                 resource.allocated_bytes = stat.st_blocks * 512
                 resource.logical_bytes = stat.st_size
+                resource.metadata = {
+                    "filesystem_id": str(stat.st_dev),
+                    "file_identity": f"{stat.st_dev}:{stat.st_ino}",
+                }
+                inspect_filesystem(path, str(stat.st_dev))
                 info = await self._image_info(path)
                 resource.virtual_bytes = info.get("virtual-size")
                 marker = path.with_suffix(".manifest.json")
@@ -2141,7 +2161,7 @@ class QemuRuntime(RuntimeBackend):
                         != await asyncio.to_thread(self._publication_digest, path)
                     ):
                         raise ValueError("Invalid publication marker")
-                    resource.metadata = manifest
+                    resource.metadata = {**manifest, **resource.metadata}
                     resource.state = "ready"
                     resource.kind = "image"
                 elif path.with_suffix(".meta").exists():
@@ -2155,21 +2175,25 @@ class QemuRuntime(RuntimeBackend):
                         owner = next(iter(owners))
                         if path == self._cloud_init_iso_path(owner).absolute():
                             resource.state = "observed"
-                            resource.metadata = {
-                                "workspace_id": owner,
-                                "role": "cloud_init",
-                            }
+                            resource.metadata.update(
+                                {
+                                    "workspace_id": owner,
+                                    "role": "cloud_init",
+                                }
+                            )
                 elif path.parent == self._disk_dir:
                     resource.state = "observed"
                     owners = workspace_disks.get(key, set())
                     if len(owners) == 1:
-                        resource.metadata = {"workspace_id": next(iter(owners))}
+                        resource.metadata.update({"workspace_id": next(iter(owners))})
                     elif not owners:
                         try:
-                            resource.metadata = {
-                                "workspace_id": str(uuid.UUID(path.stem)),
-                                "partial_create": True,
-                            }
+                            resource.metadata.update(
+                                {
+                                    "workspace_id": str(uuid.UUID(path.stem)),
+                                    "partial_create": True,
+                                }
+                            )
                         except ValueError:
                             pass
                 else:

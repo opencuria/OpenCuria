@@ -3,6 +3,7 @@
 import asyncio
 import subprocess
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -711,11 +712,21 @@ async def test_cloud_init_inventory_exact_ownership_and_orphans(tmp_path):
     scan = await r.inventory()
     assert scan.complete
     by_id = {resource.resource_id: resource for resource in scan.resources}
-    assert by_id[str(iso)].metadata == {"workspace_id": ws, "role": "cloud_init"}
+    assert by_id[str(iso)].metadata == {
+        "workspace_id": ws,
+        "role": "cloud_init",
+        "filesystem_id": str(iso.stat().st_dev),
+        "file_identity": f"{iso.stat().st_dev}:{iso.stat().st_ino}",
+    }
+    assert by_id[str(disk)].metadata["workspace_id"] == ws
+    assert by_id[str(disk)].metadata["file_identity"] == (
+        f"{disk.stat().st_dev}:{disk.stat().st_ino}"
+    )
     assert by_id[str(iso)].state == "observed"
     for path in (arbitrary, orphan):
         assert by_id[str(path)].state == "unknown"
-        assert not by_id[str(path)].metadata
+        assert "workspace_id" not in by_id[str(path)].metadata
+        assert by_id[str(path)].metadata["filesystem_id"] == str(path.stat().st_dev)
 
 
 @pytest.mark.asyncio
@@ -780,3 +791,104 @@ async def test_standalone_capture_survives_origin_disk_and_seed_removal(tmp_path
     assert scan.complete
     published = next(x for x in scan.resources if x.resource_id == str(target))
     assert published.state == "ready" and not published.dependencies
+    assert published.metadata["artifact_id"] == image_id
+    assert published.metadata["filesystem_id"] == str(target.stat().st_dev)
+    assert published.metadata["file_identity"] == (
+        f"{target.stat().st_dev}:{target.stat().st_ino}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_qemu_empty_roots_and_hardlinks_deduplicate_filesystems(
+    tmp_path, monkeypatch
+):
+    import os
+
+    r = runtime(tmp_path)
+    statvfs = os.statvfs
+    calls = []
+
+    def counted(path):
+        calls.append(path)
+        return statvfs(path)
+
+    monkeypatch.setattr(os, "statvfs", counted)
+    empty = await r.inventory()
+    assert empty.complete and len(empty.filesystems) == 1
+    assert empty.filesystems[0]["filesystem_id"] == str(r._disk_dir.stat().st_dev)
+    assert calls == [r._disk_dir]
+    calls.clear()
+    disk = r._disk_dir / "workspace.qcow2"
+    qcow(disk)
+    alias = r._snapshot_dir / "hardlink.qcow2"
+    os.link(disk, alias)
+    scan = await r.inventory()
+    assert scan.complete and len(scan.filesystems) == 1
+    assert calls == [r._disk_dir]
+    resources = {item.resource_id: item for item in scan.resources}
+    assert set(resources) == {str(disk), str(alias)}
+    assert resources[str(disk)].metadata == resources[str(alias)].metadata
+    assert resources[str(disk)].allocated_bytes == disk.stat().st_blocks * 512
+    assert resources[str(disk)].metadata["file_identity"] == (
+        f"{disk.stat().st_dev}:{disk.stat().st_ino}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested", [False, True])
+async def test_qemu_external_backing_filesystem_and_unavailable_capacity(
+    tmp_path, monkeypatch, nested
+):
+    import os
+
+    r = runtime(tmp_path)
+    directory = r._snapshot_dir / "nested" if nested else tmp_path
+    directory.mkdir(exist_ok=True)
+    external = directory / "external.qcow2"
+    qcow(external)
+    disk = r._disk_dir / "workspace.qcow2"
+    qcow(disk, external)
+    real_stat = Path.stat
+    real_statvfs = os.statvfs
+    calls = []
+
+    def stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if path == external:
+            return SimpleNamespace(
+                st_dev=987654,
+                st_mode=result.st_mode,
+                st_ino=result.st_ino,
+                st_blocks=result.st_blocks,
+                st_size=result.st_size,
+            )
+        return result
+
+    def statvfs(path):
+        calls.append(path)
+        return real_statvfs(path)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setattr(os, "statvfs", statvfs)
+    scan = await r.inventory()
+    assert scan.complete
+    assert calls == [r._disk_dir, external]
+    assert {fs["filesystem_id"] for fs in scan.filesystems} == {
+        str(r._disk_dir.stat().st_dev),
+        "987654",
+    }
+    resources = {item.resource_id: item for item in scan.resources}
+    assert resources[str(disk)].dependencies == [str(external)]
+    assert resources[str(external)].managed is nested
+    assert resources[str(external)].metadata["filesystem_id"] == "987654"
+
+    def unavailable(path):
+        if path == external:
+            raise OSError("unavailable")
+        return real_statvfs(path)
+
+    monkeypatch.setattr(os, "statvfs", unavailable)
+    scan = await r.inventory()
+    assert not scan.complete
+    assert len(scan.filesystems) == 1
+    assert any("Filesystem inspection failed" in error for error in scan.errors)

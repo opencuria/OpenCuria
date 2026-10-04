@@ -630,3 +630,100 @@ def test_unpublished_capture_without_reference_is_not_missing(runner):
         InventoryRepository.detail(runner)["generations"][0]["observed_state"]
         == "not_published"
     )
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        None,
+        {"filesystem_id": "123", "file_identity": "123:456"},
+        {"filesystem_id": 123, "file_identity": [456]},
+    ],
+)
+def test_sanitized_storage_identity_serialization(runner, workspace, identity):
+    from apps.runners.storage_schemas import RunnerStorageOut
+
+    metadata = {
+        "workspace_id": str(workspace.id),
+        "private_recipe": "secret",
+        **(identity or {}),
+    }
+    assert InventoryRepository.record(
+        str(runner.id),
+        runner.sid,
+        scan(
+            resources=[
+                {
+                    "resource_id": "disk",
+                    "kind": "disk",
+                    "managed": True,
+                    "metadata": metadata,
+                }
+            ]
+        ),
+    )
+    detail = InventoryRepository.detail(runner)
+    serialized = RunnerStorageOut.model_validate(detail).model_dump(mode="json")
+    for runtime in serialized["runtimes"]:
+        observed = runtime["resources"][0]
+        assert observed["filesystem_id"] == (
+            "123" if identity and isinstance(identity["filesystem_id"], str) else None
+        )
+        assert observed["file_identity"] == (
+            "123:456"
+            if identity and isinstance(identity["file_identity"], str)
+            else None
+        )
+        assert observed["workspace"]["base_image_instance_id"] is None
+        assert "metadata" not in observed and "private_recipe" not in observed
+        assert "secret" not in str(observed)
+        assert observed["allocated_bytes"] is None
+        # REST clients may still validate older payloads without these fields.
+        from apps.runners.storage_schemas import StorageResourceOut
+
+        old = dict(observed)
+        old.pop("filesystem_id")
+        old.pop("file_identity")
+        old["workspace"] = dict(old["workspace"])
+        old["workspace"].pop("base_image_instance_id")
+        validated = StorageResourceOut.model_validate(old)
+        assert validated.filesystem_id is None and validated.file_identity is None
+        assert validated.workspace.base_image_instance_id is None
+
+
+def test_exact_base_pin_serialized_without_physical_base(runner, workspace):
+    from apps.runners.models import ImageInstance
+    from apps.runners.storage_schemas import RunnerStorageOut
+
+    image = ImageInstance.objects.create(
+        runner=runner,
+        name="Orphan base",
+        runtime_type="qemu",
+        runner_ref="",
+    )
+    workspace.base_image_instance = image
+    workspace.save(update_fields=["base_image_instance"])
+    assert InventoryRepository.record(
+        str(runner.id),
+        runner.sid,
+        scan(
+            resources=[
+                {
+                    "resource_id": "domain",
+                    "kind": "workspace",
+                    "managed": True,
+                    "metadata": {"workspace_id": str(workspace.id)},
+                }
+            ]
+        ),
+    )
+    serialized = RunnerStorageOut.model_validate(
+        InventoryRepository.detail(runner)
+    ).model_dump(mode="json")
+    assert serialized["generations"][0]["dependencies"][0][
+        "base_image_instance_id"
+    ] == str(image.id)
+    for runtime in serialized["runtimes"]:
+        assert runtime["resources"][0]["workspace"]["base_image_instance_id"] == str(
+            image.id
+        )

@@ -3,9 +3,14 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } fro
 import { ArrowRight, HardDrive, Image, Monitor, Search } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { storageBytes } from '@/composables/useRunnerStorage'
-import { buildRunnerTopology, topologyPath, type RunnerTopologyNode } from '@/lib/runnerTopology'
+import {
+  buildRunnerTopology,
+  projectRunnerTopology,
+  topologyPath,
+  type RunnerTopology,
+  type RunnerTopologyNode,
+} from '@/lib/runnerTopology'
 import { generationLabel, runnerStateClass, runnerStateLabel } from '@/lib/runnerPresentation'
 import type { VmSystemMetrics } from '@/types'
 import type { StorageGeneration, StorageRuntime } from '@/types/runnerStorage'
@@ -13,20 +18,24 @@ import type { StorageGeneration, StorageRuntime } from '@/types/runnerStorage'
 const props = defineProps<{
   runtimes: StorageRuntime[]
   generations: StorageGeneration[]
+  topology?: RunnerTopology
   selectedKey?: string | null
   vmMetrics?: Record<string, VmSystemMetrics>
   metricsTimestamp?: string
 }>()
 const emit = defineEmits<{ select: [node: RunnerTopologyNode] }>()
-const graph = computed(() => buildRunnerTopology(props.runtimes, props.generations))
-const query = ref('')
-const showUnassigned = ref(false)
-const showAll = ref(false)
-const showAuxiliary = ref(false)
-const localSelection = ref<string | null>(null)
-const selected = computed(() =>
-  props.selectedKey === undefined ? localSelection.value : props.selectedKey,
+const graph = computed(
+  () =>
+    props.topology ?? projectRunnerTopology(buildRunnerTopology(props.runtimes, props.generations)),
 )
+const query = ref('')
+const showOther = ref(false)
+const showAll = ref(false)
+const localSelection = ref<string | null>(null)
+const selected = computed(() => {
+  const key = props.selectedKey === undefined ? localSelection.value : props.selectedKey
+  return key ? (graph.value.physicalToPresentation?.get(key) ?? key) : key
+})
 const selectedPath = computed(() =>
   topologyPath(selected.value ? [selected.value] : [], graph.value.edges),
 )
@@ -38,6 +47,10 @@ const matches = computed(() => {
           n.label,
           n.resource?.physical_id,
           ...(n.resource?.aliases ?? []),
+          ...(n.storage?.resources.flatMap((resource) => [
+            resource.physical_id,
+            ...resource.aliases,
+          ]) ?? []),
           n.generation?.id,
           n.generation?.runner_ref,
           n.workspace?.id,
@@ -51,65 +64,49 @@ const matchedPath = computed(() =>
     graph.value.edges,
   ),
 )
-const unassigned = computed(() => graph.value.nodes.filter((n) => n.unassigned).length)
-const auxiliary = computed(
-  () =>
-    new Set(
-      graph.value.nodes
-        .filter(
-          (node) =>
-            node.resource &&
-            node.label.endsWith('Boot seed') &&
-            /(?:cloud[-_]?init|seed).*\.iso$/i.test(
-              node.resource.physical_id.split('/').pop() || '',
-            ) &&
-            !node.resource.dependencies.length &&
-            !graph.value.edges.some((edge) => edge.from === node.key) &&
-            graph.value.edges.some((edge) => edge.kind === 'physical' && edge.to === node.key),
-        )
-        .map((node) => node.key),
-    ),
-)
+const isOther = (node: RunnerTopologyNode) => !node.storage && !node.generation
+const otherCount = computed(() => graph.value.nodes.filter(isOther).length)
 const eligible = computed(() =>
-  graph.value.nodes.filter((n) => {
-    if (query.value.trim()) return matchedPath.value.has(n.key)
-    if (
-      auxiliary.value.has(n.key) &&
-      !showAuxiliary.value &&
-      !showAll.value &&
-      selected.value !== n.key
+  graph.value.nodes.filter((node) => {
+    if (query.value.trim()) return matchedPath.value.has(node.key)
+    return (
+      !isOther(node) ||
+      showOther.value ||
+      (node.unresolved && !node.unassigned) ||
+      selectedPath.value.has(node.key)
     )
-      return false
-    return !n.unassigned || showUnassigned.value || selectedPath.value.has(n.key)
   }),
 )
 const runtimeScopes = computed(() => [...new Set(graph.value.nodes.map((n) => n.runtime))].sort())
-function hiddenSeeds(node: RunnerTopologyNode) {
-  return graph.value.edges.filter(
-    (edge) =>
-      edge.from === node.key &&
-      auxiliary.value.has(edge.to) &&
-      !visible.value.some((n) => n.key === edge.to),
-  ).length
-}
 const visible = computed(() => {
   if (showAll.value || query.value.trim()) return eligible.value
   // A focused path remains visible even beyond the initial preview.
   const preview = new Set(
     [0, 1, 2].flatMap((column) =>
       eligible.value
-        .filter((n) => n.column === column)
+        .filter((n) => displayColumn(n) === column)
         .slice(0, 12)
         .map((n) => n.key),
     ),
   )
-  return eligible.value.filter((n) => preview.has(n.key) || selectedPath.value.has(n.key))
+  return eligible.value.filter(
+    (n) => preview.has(n.key) || selectedPath.value.has(n.key) || (n.unresolved && !n.unassigned),
+  )
 })
 const visibleEdges = computed(() => {
   const keys = new Set(visible.value.map((n) => n.key))
   return graph.value.edges.filter((e) => keys.has(e.from) && keys.has(e.to))
 })
-const columns = ['Workspaces', 'Disks / volumes', 'Images']
+const columns = computed(() => [
+  { title: 'Workspaces', column: 0, icon: Monitor },
+  ...(visible.value.some(isOther)
+    ? [{ title: 'Other resources', column: 1, icon: HardDrive }]
+    : []),
+  { title: 'Images', column: 2, icon: Image },
+])
+function displayColumn(node: RunnerTopologyNode) {
+  return isOther(node) ? 1 : node.column
+}
 const canvas = ref<HTMLElement | null>(null)
 const markerId = `topology-arrow-${useId().replace(/[^a-zA-Z0-9-]/g, '')}`
 const lines = ref<{ key: string; d: string; usage: boolean; highlighted: boolean }[]>([])
@@ -242,24 +239,13 @@ function vmSample(node: RunnerTopologyNode) {
         />
       </div>
       <Button
-        v-if="auxiliary.size"
+        v-if="otherCount"
         variant="outline"
         size="sm"
-        :aria-expanded="showAuxiliary"
-        @click="showAuxiliary = !showAuxiliary"
-        >Boot seeds ({{ auxiliary.size }})</Button
+        :aria-expanded="showOther"
+        @click="showOther = !showOther"
+        >Other resources ({{ otherCount }})</Button
       >
-      <Collapsible v-model:open="showUnassigned">
-        <CollapsibleTrigger as-child
-          ><Button variant="outline" size="sm"
-            >{{ showUnassigned ? 'Hide' : 'Show' }} unassigned ({{ unassigned }})</Button
-          ></CollapsibleTrigger
-        >
-        <CollapsibleContent class="pt-2 text-xs text-muted-foreground"
-          >Resources with no linked workspace or generation are included in the map
-          below.</CollapsibleContent
-        >
-      </Collapsible>
     </div>
     <p v-if="query.trim()" role="status" class="text-xs text-muted-foreground">
       {{ matches.length }} matches · showing their dependency paths
@@ -306,21 +292,26 @@ function vmSample(node: RunnerTopologyNode) {
         <h3 v-if="runtimeScopes.length > 1" class="border-b pb-2 text-xs font-semibold">
           {{ scope === 'qemu' ? 'QEMU' : scope === 'docker' ? 'Docker' : scope }}
         </h3>
-        <div class="topology-columns relative grid grid-cols-3 gap-10">
+        <div
+          class="topology-columns relative grid gap-10"
+          :class="columns.length === 3 ? 'grid-cols-3' : 'grid-cols-2'"
+        >
           <section
-            v-for="(title, column) in columns"
+            v-for="{ title, column, icon } in columns"
             :key="title"
             class="min-w-0 space-y-2"
             :aria-label="title"
           >
             <h4 class="mb-3 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
-              <component :is="[Monitor, HardDrive, Image][column]" class="size-3.5" />{{ title
+              <component :is="icon" class="size-3.5" />{{ title
               }}<span class="ml-auto tabular-nums">{{
-                visible.filter((n) => n.runtime === scope && n.column === column).length
+                visible.filter((n) => n.runtime === scope && displayColumn(n) === column).length
               }}</span>
             </h4>
             <Button
-              v-for="node in visible.filter((n) => n.runtime === scope && n.column === column)"
+              v-for="node in visible.filter(
+                (n) => n.runtime === scope && displayColumn(n) === column,
+              )"
               :key="node.key"
               variant="outline"
               :data-node-key="node.key"
@@ -337,10 +328,7 @@ function vmSample(node: RunnerTopologyNode) {
             >
               <span class="block w-full min-w-0 space-y-0.5 leading-tight">
                 <span class="flex min-w-0 items-center gap-1.5 text-xs font-medium">
-                  <component
-                    :is="[Monitor, HardDrive, Image][node.column]"
-                    class="size-3.5 shrink-0 text-muted-foreground"
-                  />
+                  <component :is="icon" class="size-3.5 shrink-0 text-muted-foreground" />
                   <span class="truncate">{{ node.label }}</span>
                 </span>
                 <span class="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
@@ -387,7 +375,7 @@ function vmSample(node: RunnerTopologyNode) {
                   class="flex flex-wrap justify-between gap-x-2 text-[11px] text-muted-foreground"
                 >
                   <span>{{ node.runtime }}</span>
-                  <span v-if="node.resource?.allocated_bytes != null"
+                  <span v-if="!node.storage && node.resource?.allocated_bytes != null"
                     >{{ storageBytes(node.resource.allocated_bytes) }} allocated</span
                   >
                   <span
@@ -408,13 +396,17 @@ function vmSample(node: RunnerTopologyNode) {
                   {{ storageBytes(vmSample(node)!.ram_used_bytes) }} /
                   {{ storageBytes(vmSample(node)!.ram_total_bytes) }}</span
                 >
-                <span
-                  v-if="hiddenSeeds(node)"
-                  class="block text-[11px] text-muted-foreground"
-                  :title="'Hidden auxiliary dependencies · expand Boot seeds to inspect'"
-                  >{{ hiddenSeeds(node) }} boot seed{{ hiddenSeeds(node) === 1 ? '' : 's'
-                  }}<span class="sr-only"> · hidden auxiliary dependency</span></span
-                >
+                <template v-if="node.storage">
+                  <span class="block text-[11px] text-muted-foreground">
+                    Used {{ storageBytes(node.storage.allocatedBytes)
+                    }}<template v-if="node.storage.unknownCount">
+                      · partial ({{ node.storage.unknownCount }} unknown)</template
+                    >
+                  </span>
+                  <span class="block text-[11px] text-muted-foreground"
+                    >Disk capacity {{ storageBytes(node.storage.virtualBytes) }}</span
+                  >
+                </template>
                 <span class="mobile-relations space-y-1 pt-1 text-[11px] text-muted-foreground"
                   ><span
                     v-for="edge in visibleEdges.filter((e) => e.from === node.key)"
@@ -429,7 +421,7 @@ function vmSample(node: RunnerTopologyNode) {
               </span>
             </Button>
             <p
-              v-if="!visible.some((n) => n.runtime === scope && n.column === column)"
+              v-if="!visible.some((n) => n.runtime === scope && displayColumn(n) === column)"
               class="text-xs text-muted-foreground"
             >
               None in this view

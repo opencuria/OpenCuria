@@ -10,6 +10,13 @@ export interface RunnerTopologyNode {
   runtime: string
   label: string
   column: number
+  storage?: {
+    resources: StorageResource[]
+    allocatedBytes: number | null
+    logicalBytes: number | null
+    virtualBytes: number | null
+    unknownCount: number
+  }
   resource?: StorageResource
   generation?: StorageGeneration
   workspace?: StorageWorkspace
@@ -22,6 +29,7 @@ export interface RunnerTopologyEdge {
   kind: 'physical' | 'usage'
 }
 export interface RunnerTopology {
+  physicalToPresentation?: Map<string, string>
   nodes: RunnerTopologyNode[]
   edges: RunnerTopologyEdge[]
 }
@@ -204,6 +212,221 @@ export function buildRunnerTopology(
   )
   for (const node of nodes) node.unassigned = !linked.has(node.key)
   return { nodes: orderTopologyNodes(nodes, edges), edges }
+}
+
+/**
+ * Collapse only exclusive workspace storage, without rewriting physical evidence.
+ * Allocated bytes are the known subtotal (null when none are known); unknownCount
+ * counts unique storage identities without an allocated size. Logical/virtual
+ * capacity requires all disk/volume members to be known and consistent within
+ * each identity. Conflicting allocations count as unknown identities. Files (including boot ISOs) are not capacity.
+ * Allocated totals deduplicate filesystem/file identities; all member records
+ * remain inspectable. Resource objects remain the original inventory/state authority.
+ */
+export function projectRunnerTopology(graph: RunnerTopology): RunnerTopology {
+  const byKey = new Map(graph.nodes.map((node) => [node.key, node]))
+  const incoming = new Map<string, string[]>()
+  for (const edge of graph.edges) {
+    if (edge.kind !== 'physical') continue
+    const from = byKey.get(edge.from)
+    const to = byKey.get(edge.to)
+    if (!from || !to || from.runtime !== to.runtime) continue
+    incoming.set(edge.to, [...(incoming.get(edge.to) ?? []), edge.from])
+  }
+  const isDomain = (node: RunnerTopologyNode) =>
+    ['workspace', 'container'].includes(node.resource?.kind ?? '')
+  const isImage = (node: RunnerTopologyNode) =>
+    !!node.generation ||
+    (!isDomain(node) && !!node.resource?.image_id) ||
+    node.resource?.kind === 'image'
+  const identity = (node: Pick<RunnerTopologyNode, 'key' | 'runtime' | 'resource'>) => {
+    const resource = node.resource
+    return resource?.file_identity && resource.filesystem_id
+      ? JSON.stringify([node.runtime, resource.filesystem_id, resource.file_identity])
+      : node.key
+  }
+  // Hardlink aliases share ownership evidence even without physical dependency
+  // edges. Keep conflicting identities inspectable, including their descendants.
+  const identities = new Map<string, string[]>()
+  for (const node of graph.nodes) {
+    if (!node.resource || isDomain(node)) continue
+    const id = identity(node)
+    identities.set(id, [...(identities.get(id) ?? []), node.key])
+  }
+  // Propagate ownership to a fixed point so aliases and cycles cannot pick an
+  // arbitrary first consumer. Images are boundaries, not workspace storage.
+  const owners = new Map<string, Set<string>>()
+  const foreign = new Set<string>()
+  for (const node of graph.nodes) {
+    owners.set(node.key, new Set(node.workspace && !isImage(node) ? [node.workspace.id] : []))
+    if (
+      isImage(node) ||
+      node.unresolved ||
+      node.resource?.kind === 'foreign_reference' ||
+      (!node.workspace &&
+        (['workspace', 'container'].includes(node.resource?.kind ?? '') ||
+          !incoming.get(node.key)?.length))
+    )
+      foreign.add(node.key)
+  }
+  // Seed uncertain roots from actual physical consumers before adding identity
+  // peers: a hardlink alone is not evidence that an unowned alias belongs to a VM.
+  for (const peers of identities.values())
+    for (const key of peers)
+      incoming.set(key, [...(incoming.get(key) ?? []), ...peers.filter((peer) => peer !== key)])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const node of graph.nodes) {
+      if (isImage(node)) continue
+      const own = owners.get(node.key)!
+      for (const source of incoming.get(node.key) ?? []) {
+        for (const owner of owners.get(source)!) {
+          if (!own.has(owner)) {
+            own.add(owner)
+            changed = true
+          }
+        }
+        if (foreign.has(source) && !foreign.has(node.key)) {
+          foreign.add(node.key)
+          changed = true
+        }
+      }
+    }
+  }
+  const workspaces = new Map<string, RunnerTopologyNode>()
+  const workspaceRanks = new Map<string, number>()
+  for (const node of graph.nodes) {
+    if (!node.workspace) continue
+    const key = keyFor(node.runtime, 'workspace', node.workspace.id)
+    const rank = isDomain(node) ? 2 : !node.resource ? 1 : 0
+    const existing = workspaces.get(key)
+    if (existing && rank > workspaceRanks.get(key)!) {
+      existing.workspace = node.workspace
+      existing.label = node.workspace.name
+    }
+    workspaceRanks.set(key, Math.max(workspaceRanks.get(key) ?? -1, rank))
+    if (!existing)
+      workspaces.set(key, {
+        key,
+        runtime: node.runtime,
+        label: node.workspace.name,
+        column: 0,
+        workspace: node.workspace,
+        storage: {
+          resources: [],
+          allocatedBytes: null,
+          logicalBytes: null,
+          virtualBytes: null,
+          unknownCount: 0,
+        },
+      })
+  }
+  const physicalToPresentation = new Map<string, string>()
+  const nodes: RunnerTopologyNode[] = []
+  for (const node of graph.nodes) {
+    let key = node.key
+    const own = owners.get(node.key)!
+    const owner = [...own][0]
+    const exclusive = own.size === 1 && !foreign.has(node.key) && !isImage(node)
+    const workspace = owner ? workspaces.get(keyFor(node.runtime, 'workspace', owner)) : undefined
+    if (node.generation) {
+      key = keyFor(node.runtime, 'generation', node.generation.id)
+      nodes.push({ ...node, key })
+    } else if (
+      workspace &&
+      exclusive &&
+      (!node.resource ||
+        ['workspace', 'container', 'disk', 'file', 'volume'].includes(node.resource.kind))
+    ) {
+      key = workspace.key
+      if (node.resource) {
+        if (isDomain(node)) {
+          if (!workspace.resource) {
+            workspace.resource = node.resource
+            workspace.workspace = node.workspace
+            workspace.label = node.workspace?.name ?? workspace.label
+          }
+        } else workspace.storage!.resources.push(node.resource)
+      }
+    } else nodes.push({ ...node })
+    physicalToPresentation.set(node.key, key)
+  }
+  for (const workspace of workspaces.values()) {
+    const storage = workspace.storage!
+    const members = new Map<string, StorageResource[]>()
+    for (const resource of storage.resources) {
+      const id = identity({
+        key: keyFor(workspace.runtime, 'physical', resource.physical_id),
+        runtime: workspace.runtime,
+        resource,
+      })
+      members.set(id, [...(members.get(id) ?? []), resource])
+    }
+    function measured(
+      resources: StorageResource[],
+      metric: 'allocated_bytes' | 'logical_bytes' | 'virtual_bytes',
+      requireComplete: boolean,
+    ): number | null {
+      const values = resources.map((resource) => resource[metric])
+      if (requireComplete && values.some((value) => value == null)) return null
+      const known = new Set(values.filter((value): value is number => value != null))
+      return known.size === 1 ? [...known][0]! : null
+    }
+    const allocations = [...members.values()].map((resources) =>
+      measured(resources, 'allocated_bytes', false),
+    )
+    const known = allocations.filter((value): value is number => value != null)
+    storage.allocatedBytes = known.length ? known.reduce((sum, value) => sum + value, 0) : null
+    storage.unknownCount = allocations.length - known.length
+    const capacity = [...members.values()]
+      .map((resources) =>
+        resources.filter(
+          (resource) =>
+            ['disk', 'volume'].includes(resource.kind) && !/\.iso$/i.test(resource.physical_id),
+        ),
+      )
+      .filter((resources) => resources.length)
+    for (const [field, metric] of [
+      ['logicalBytes', 'logical_bytes'],
+      ['virtualBytes', 'virtual_bytes'],
+    ] as const) {
+      const values = capacity.map((resources) => measured(resources, metric, true))
+      storage[field] =
+        values.length && values.every((value) => value != null)
+          ? values.reduce<number>((sum, value) => sum + value!, 0)
+          : null
+    }
+    nodes.push(workspace)
+  }
+  const edgeKeys = new Set<string>()
+  const edges: RunnerTopologyEdge[] = []
+  for (const edge of graph.edges) {
+    const from = physicalToPresentation.get(edge.from) ?? edge.from
+    const to = physicalToPresentation.get(edge.to) ?? edge.to
+    const key = JSON.stringify([from, to, edge.kind])
+    if (from === to || edgeKeys.has(key)) continue
+    edgeKeys.add(key)
+    edges.push({ from, to, kind: edge.kind })
+  }
+  const physicalPairs = new Set(
+    edges
+      .filter((edge) => edge.kind === 'physical')
+      .map((edge) => JSON.stringify([edge.from, edge.to])),
+  )
+  const presentationEdges = edges.filter(
+    (edge) => edge.kind === 'physical' || !physicalPairs.has(JSON.stringify([edge.from, edge.to])),
+  )
+  const linked = topologyPath(
+    nodes.filter((node) => node.workspace || node.generation).map((node) => node.key),
+    presentationEdges,
+  )
+  for (const node of nodes) node.unassigned = !linked.has(node.key)
+  return {
+    nodes: orderTopologyNodes(nodes, presentationEdges),
+    edges: presentationEdges,
+    physicalToPresentation,
+  }
 }
 
 /** Align dependencies with their upstream consumers without changing graph evidence. */

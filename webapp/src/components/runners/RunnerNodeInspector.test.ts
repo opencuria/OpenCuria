@@ -260,3 +260,91 @@ describe('selected runner resource inspector', () => {
     expect(w.find('[aria-label="Image actions"]').exists()).toBe(false)
   })
 })
+
+it('shows aggregate sizes instead of domain metrics, with original members behind technical disclosure', async () => {
+  const member = {
+    ...resource,
+    physical_id: '/workspace/disk.qcow2',
+    kind: 'disk',
+    image_id: null,
+    workspace,
+    state: 'present',
+    allocated_bytes: 2048,
+    logical_bytes: 4096,
+    virtual_bytes: 8192,
+    dependencies: ['base'],
+    aliases: ['disk-alias'],
+    provenance: 'workspace overlay',
+  }
+  setup({
+    generation: undefined,
+    label: workspace.name,
+    column: 0,
+    workspace,
+    resource: {
+      ...resource,
+      kind: 'workspace',
+      state: 'exited',
+      allocated_bytes: 999999,
+      virtual_bytes: 999999,
+    },
+    storage: {
+      resources: [
+        member,
+        { ...member, physical_id: 'seed.iso', kind: 'file', allocated_bytes: null },
+      ],
+      allocatedBytes: 2048,
+      logicalBytes: 4096,
+      virtualBytes: 8192,
+      unknownCount: 1,
+    },
+  })
+  expect(w.text()).toContain('Observed: exited')
+  expect(w.text()).toContain('Lifecycle: stopped')
+  expect(w.text()).toContain('Used storage2.0 KiB')
+  expect(w.text()).toContain('Partial known total · 1 resource(s) unknown')
+  expect(w.text()).toContain('Disk capacity8.0 KiB')
+  expect(w.text()).toContain('File size4.0 KiB')
+  expect(w.text()).not.toContain('976.6 KiB')
+  expect(w.text()).not.toContain('/workspace/disk.qcow2')
+  await button('Technical details').trigger('click')
+  await flushPromises()
+  expect(w.text()).toContain('Storage resources (2)')
+  expect(w.text()).not.toContain('/workspace/disk.qcow2')
+  await button('Storage resources').trigger('click')
+  await flushPromises()
+  for (const text of [
+    '/workspace/disk.qcow2',
+    'seed.iso',
+    'disk-alias',
+    'Physical dependencies: base',
+    'workspace overlay',
+    'Allocated',
+    'Logical',
+    'Virtual',
+    'Shared',
+    'Reclaimable',
+    'Observed: present',
+  ])
+    expect(w.text()).toContain(text)
+  expect(w.find('[aria-label="Image actions"]').exists()).toBe(false)
+})
+
+it('does not infer observed workspace state from aggregate disk members or expose domain sizes', () => {
+  setup({
+    generation: undefined,
+    workspace,
+    resource: undefined,
+    storage: {
+      resources: [{ ...resource, kind: 'disk', state: 'running' }],
+      allocatedBytes: null,
+      logicalBytes: null,
+      virtualBytes: null,
+      unknownCount: 1,
+    },
+  })
+  expect(w.text()).toContain('Observed: unknown')
+  expect(w.text()).toContain('Used storageUnknown')
+  expect(w.text()).toContain('Disk capacityUnknown')
+  expect(w.text()).not.toContain('Observed: running')
+})

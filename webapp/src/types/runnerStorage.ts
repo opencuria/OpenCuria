@@ -5,9 +5,12 @@ export interface StorageWorkspace {
   owner_label: string
   status: string
   observed_state?: string
+  base_image_instance_id?: string | null
   last_activity_at: string | null
 }
 export interface StorageResource {
+  filesystem_id?: string | null
+  file_identity?: string | null
   physical_id: string
   kind: string
   managed: boolean
@@ -30,6 +33,7 @@ export interface StorageRuntime {
   collected_at: string | null
   received_at: string | null
   filesystems: {
+    filesystem_id?: string | null
     path: string
     capacity_bytes: number | null
     used_bytes: number | null

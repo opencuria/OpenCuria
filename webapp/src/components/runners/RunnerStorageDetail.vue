@@ -21,7 +21,11 @@ import { useAuthStore } from '@/stores/auth'
 import { useRunnerStorage, storageBytes } from '@/composables/useRunnerStorage'
 import { cancelDeletion } from '@/services/runnerStorage.api'
 import { updateRunnerImageBuild } from '@/services/workspaces.api'
-import { buildRunnerTopology, type RunnerTopologyNode } from '@/lib/runnerTopology'
+import {
+  buildRunnerTopology,
+  projectRunnerTopology,
+  type RunnerTopologyNode,
+} from '@/lib/runnerTopology'
 import {
   currentRunnerDefault,
   generationLabel,
@@ -47,6 +51,7 @@ import ImageDeletionDialog from '@/components/images/ImageDeletionDialog.vue'
 import EditRunnerResourcesDialog from './EditRunnerResourcesDialog.vue'
 import RunnerResourceOverview from './RunnerResourceOverview.vue'
 import RunnerDependencyMap from './RunnerDependencyMap.vue'
+import RunnerStorageDonut from './RunnerStorageDonut.vue'
 import RunnerNodeInspector from './RunnerNodeInspector.vue'
 import RunnerActivityList from './RunnerActivityList.vue'
 
@@ -112,8 +117,30 @@ const visibleGenerations = computed(() =>
 const topology = computed(() =>
   buildRunnerTopology(data.value?.runtimes ?? [], data.value?.generations ?? []),
 )
+const presentation = computed(() => projectRunnerTopology(topology.value))
+const visibleTopology = computed(() => {
+  const nodes = presentation.value.nodes.filter(
+    (node) =>
+      node.generation?.status !== 'deleted' &&
+      (runtimeFilter.value === 'all' || node.runtime === runtimeFilter.value),
+  )
+  const keys = new Set(nodes.map((node) => node.key))
+  return {
+    ...presentation.value,
+    nodes,
+    edges: presentation.value.edges.filter((edge) => keys.has(edge.from) && keys.has(edge.to)),
+  }
+})
 const selected = computed(
-  () => topology.value.nodes.find((n) => n.key === selectedKey.value) ?? null,
+  () =>
+    presentation.value.nodes.find((n) => n.key === selectedKey.value) ??
+    topology.value.nodes.find((n) => n.key === selectedKey.value) ??
+    null,
+)
+const presentationSelectedKey = computed(() =>
+  selectedKey.value
+    ? (presentation.value.physicalToPresentation?.get(selectedKey.value) ?? selectedKey.value)
+    : null,
 )
 const knownWorkspaces = computed(
   () => new Set(topology.value.nodes.flatMap((n) => (n.workspace ? [n.workspace.id] : []))).size,
@@ -223,7 +250,8 @@ function selectNode(node: RunnerTopologyNode) {
   selectedKey.value = node.key
 }
 function selectImage(image: StorageGeneration) {
-  selectedKey.value = topology.value.nodes.find((n) => n.generation?.id === image.id)?.key ?? null
+  selectedKey.value =
+    presentation.value.nodes.find((n) => n.generation?.id === image.id)?.key ?? null
 }
 function requestDelete(value: DeletionTarget, name: string) {
   target.value = value
@@ -289,7 +317,7 @@ async function rebuild(definition: string) {
         ><ArrowLeft />Back to runners</Button
       >
       <div class="flex min-w-0 flex-wrap items-start justify-between gap-3">
-        <div class="flex min-w-0 flex-1 items-center gap-3">
+        <div class="flex min-w-0 flex-1 basis-64 items-center gap-3">
           <div
             class="flex size-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary"
           >
@@ -403,6 +431,13 @@ async function rebuild(definition: string) {
             ><TriangleAlert />Activity needs review · {{ activityProblems }}</Button
           >
         </div>
+        <RunnerStorageDonut
+          v-if="runtimeFilter !== 'docker' && runtimeTypes.includes('qemu') && data"
+          :runtimes="visibleRuntimes"
+          :topology="visibleTopology"
+          :selected-key="presentationSelectedKey"
+          @select="selectNode"
+        />
         <section class="min-w-0 space-y-3" aria-label="Runner dependencies">
           <div class="flex flex-wrap items-start justify-between gap-2">
             <div>
@@ -421,17 +456,18 @@ async function rebuild(definition: string) {
           </div>
           <div
             v-if="loading && !data"
-            class="grid grid-cols-3 gap-4"
+            class="grid grid-cols-2 gap-4"
             role="status"
             aria-label="Loading last confirmed inventory"
           >
-            <Skeleton v-for="i in 3" :key="i" class="h-32 rounded-lg" />
+            <Skeleton v-for="i in 2" :key="i" class="h-32 rounded-lg" />
           </div>
           <RunnerDependencyMap
             v-else
             :runtimes="visibleRuntimes"
             :generations="visibleGenerations"
-            :selected-key="selectedKey"
+            :topology="visibleTopology"
+            :selected-key="presentationSelectedKey"
             :vm-metrics="freshMetrics?.vm_metrics"
             :metrics-timestamp="freshMetrics?.timestamp"
             @select="selectNode"

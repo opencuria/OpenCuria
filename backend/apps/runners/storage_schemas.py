@@ -14,6 +14,7 @@ class StorageWorkspaceOut(Schema):
     status: str
     last_activity_at: datetime | None
     observed_state: str | None = None
+    base_image_instance_id: str | None = None
 
 
 class StorageResourceOut(Schema):
@@ -31,6 +32,8 @@ class StorageResourceOut(Schema):
     image_id: str | None
     workspace: StorageWorkspaceOut | None
     provenance: str
+    filesystem_id: str | None = None
+    file_identity: str | None = None
 
 
 class StorageRuntimeOut(Schema):
