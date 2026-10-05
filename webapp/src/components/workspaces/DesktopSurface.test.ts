@@ -4,6 +4,10 @@ import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 
 import DesktopSurface from './DesktopSurface.vue'
+import {
+  closeDesktopViewer,
+  desktopViewerSession,
+} from '@/composables/useDesktopSessionCoordinator'
 import { useDesktopStore } from '@/stores/desktop'
 import { sidebarDesktopHost, modalDesktopHost } from '@/lib/desktopSurfaceHost'
 import * as workspacesApi from '@/services/workspaces.api'
@@ -120,8 +124,11 @@ describe('DesktopSurface', () => {
     stopDesktop.mockResolvedValue({ task_id: 'task-2' })
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     while (wrappers.length) wrappers.pop()?.unmount()
+    // The viewer session is module state shared across tests.
+    await closeDesktopViewer('ws-1')
+    desktopViewerSession('ws-1').status = null
     sidebarDesktopHost.value = null
     modalDesktopHost.value = null
     document.body.innerHTML = ''
@@ -206,7 +213,6 @@ describe('DesktopSurface', () => {
     const store = useDesktopStore()
     store.setConnected('ws-1', '/ws/desktop/ws-1/')
     store.setComputerUseActive(true)
-
     mountSurface()
     await nextTick()
 

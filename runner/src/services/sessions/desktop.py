@@ -100,6 +100,16 @@ DESKTOP_EXECUTE_TIMEOUT_S = 120.0
 _RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 DESKTOP_HOLDER_VIEWER = "viewer"
 DESKTOP_HOLDER_COMPUTERUSE = "computeruse"
+DESKTOP_STOP_SCRIPT = "/usr/local/bin/opencuria-desktop-stop"
+#: Exit 0 once Xvnc is gone (bounded ~5 s wait after SIGTERM). Older guest
+#: stop scripts kill every ``pgrep -f 'Xvnc.*:1'`` match, so neither this
+#: argv nor the stop invocation may contain a literal ``Xvnc``; the
+#: bracketed first letters keep the regex while hiding the literal name.
+DESKTOP_STOPPED_PROBE = (
+    "i=0; while [ \"$i\" -lt 20 ]; do "
+    "pgrep -f '^(/usr/bin/)?X[v]nc :1|^(/usr/bin/)?X[t]igervnc :1' "
+    ">/dev/null || exit 0; i=$((i+1)); sleep 0.25; done; exit 1"
+)
 _SCROLL_BUTTONS = {
     "up": 4,
     "down": 5,
@@ -1500,23 +1510,20 @@ class DesktopManager:
             runtime = self._get_runtime(workspace_id)
             info = self._get_cached(workspace_id)
             exit_code, output = await runtime.exec_command_wait(
-                info.instance_id,
-                (
-                    ["/usr/local/bin/opencuria-desktop-stop"]
-                    if self._legacy_mode
-                    else [
-                        "sh",
-                        "-lc",
-                        "/usr/local/bin/opencuria-desktop-stop; "
-                        "! pgrep -f '^(/usr/bin/)?Xvnc :1|^(/usr/bin/)?Xtigervnc :1' >/dev/null",
-                    ]
-                ),
+                info.instance_id, [DESKTOP_STOP_SCRIPT]
             )
             if exit_code != 0:
                 log.warning("desktop_stop_nonzero", exit_code=exit_code, output=output)
-                if not self._legacy_mode:
-                    raise RuntimeError("Desktop stop was not confirmed")
             if not self._legacy_mode:
+                # A separate exec: the stop script must never see this argv.
+                exit_code, output = await runtime.exec_command_wait(
+                    info.instance_id, ["sh", "-lc", DESKTOP_STOPPED_PROBE]
+                )
+                if exit_code != 0:
+                    log.warning(
+                        "desktop_stop_unconfirmed", exit_code=exit_code, output=output
+                    )
+                    raise RuntimeError("Desktop stop was not confirmed")
                 self._desktop_sessions.pop(workspace_id, None)
         except Exception:
             log.exception("desktop_stop_failed")

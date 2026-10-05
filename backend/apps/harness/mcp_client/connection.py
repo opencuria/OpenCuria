@@ -87,6 +87,31 @@ def _safe_stderr_excerpt(accessor: Any) -> str:
         return ""
 
 
+def _first_leaf(exc: BaseException) -> BaseException:
+    """Return the first actionable leaf of a (nested) exception group."""
+    nested = getattr(exc, "exceptions", None)
+    while isinstance(nested, tuple) and nested:
+        leaves = [
+            item for item in nested if not isinstance(item, asyncio.CancelledError)
+        ]
+        exc = (leaves or list(nested))[0]
+        nested = getattr(exc, "exceptions", None)
+    return exc
+
+
+def _exc_note(exc: BaseException) -> str:
+    """Bounded single-line note (type + first message line) for logs."""
+    text = str(exc).strip()
+    detail = text.splitlines()[0][:200] if text else ""
+    return type(exc).__name__ + (f": {detail}" if detail else "")
+
+
+def _owner_cancelled() -> bool:
+    """True while the current task has a pending external cancellation."""
+    task = asyncio.current_task()
+    return task is not None and bool(task.cancelling())
+
+
 class _AllowExtraArgs(BaseModel):
     """Container validating raw MCP args without lossy type mapping."""
 
@@ -505,6 +530,7 @@ class McpServerConnection:
                 # Pass the active exception through the nested scopes in LIFO
                 # order. fail_after must see its own cancellation to turn it
                 # into TimeoutError; aclose() would lose that exception state.
+                cancelled = isinstance(exc, asyncio.CancelledError)
                 try:
                     suppressed = await stack.__aexit__(
                         type(exc), exc, exc.__traceback__
@@ -516,12 +542,26 @@ class McpServerConnection:
                     # SDK task groups may wrap the original health error in an
                     # ExceptionGroup. Keep the actionable startup failure, as
                     # before, while logging unexpected teardown failures.
+                    cause = _first_leaf(close_exc)
                     log.warning(
                         "mcp_server_open_close_failed",
                         server=self.desc,
                         error=f"{type(close_exc).__name__}",
+                        cause=_exc_note(cause),
                     )
+                    if cancelled and not _owner_cancelled():
+                        # A failed SDK child cancelled this task through the
+                        # SDK's own (now exited) scope. That is a server
+                        # failure, never an abort of the run.
+                        raise McpServerHealthError(
+                            f"MCP server {self.desc} startup failed "
+                            f"({type(cause).__name__})"
+                        ) from cause
                     raise exc
+                if cancelled and not _owner_cancelled():
+                    raise McpServerHealthError(
+                        f"MCP server {self.desc} startup was interrupted"
+                    ) from exc
                 if not suppressed:
                     raise
         except TimeoutError as exc:

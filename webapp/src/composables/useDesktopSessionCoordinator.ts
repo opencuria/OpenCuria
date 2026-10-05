@@ -44,6 +44,13 @@ const RENEW_MS = 45_000
 const POLL_MS = 1_000
 const STARTUP_MS = 30_000
 const MAX_START_ATTEMPTS = 3
+/** Navigation unmounts a surface before its replacement retains the intent. */
+export const RELEASE_GRACE_MS = 1_500
+
+interface DeferredRelease {
+  timer: ReturnType<typeof setTimeout>
+  resolve: (released: boolean) => void
+}
 
 export interface ViewerSession {
   revision: number
@@ -59,6 +66,7 @@ export interface ViewerSession {
   startupDeadline: number
   startAttempts: number
   timer: ReturnType<typeof setTimeout> | null
+  release: DeferredRelease | null
 }
 const sessions = new Map<string, ViewerSession>()
 
@@ -79,6 +87,7 @@ export function desktopViewerSession(workspaceId: string): ViewerSession {
       observation: 0,
       startupDeadline: 0,
       startAttempts: 0,
+      release: null,
     })
     sessions.set(workspaceId, session)
   }
@@ -171,8 +180,18 @@ export async function refreshDesktopViewer(workspaceId: string, renew = false): 
   }
 }
 
+function cancelDeferredRelease(session: ViewerSession): void {
+  const release = session.release
+  if (!release) return
+  session.release = null
+  clearTimeout(release.timer)
+  release.resolve(true)
+}
+
 export function retainDesktopViewer(workspaceId: string, owner: object): void {
-  desktopViewerSession(workspaceId).owners.add(owner)
+  const session = desktopViewerSession(workspaceId)
+  cancelDeferredRelease(session)
+  session.owners.add(owner)
 }
 
 function failStartup(session: ViewerSession): void {
@@ -227,6 +246,7 @@ export function acquireDesktopViewer(workspaceId: string, recovery = false): Pro
 /** Final release immediately sends a tombstone, even while start is in flight. */
 export async function closeDesktopViewer(workspaceId: string): Promise<boolean> {
   const session = desktopViewerSession(workspaceId)
+  cancelDeferredRelease(session)
   if (!session.wanted) return true
   const payload = intent(session)
   session.wanted = false
@@ -255,8 +275,18 @@ export async function closeDesktopViewer(workspaceId: string): Promise<boolean> 
   }
 }
 
+/** Last surface gone: release after a grace period unless a surface re-retains. */
 export function releaseDesktopViewer(workspaceId: string, owner: object): Promise<boolean> {
   const session = desktopViewerSession(workspaceId)
   session.owners.delete(owner)
-  return session.owners.size === 0 ? closeDesktopViewer(workspaceId) : Promise.resolve(true)
+  if (session.owners.size > 0 || !session.wanted) return Promise.resolve(true)
+  cancelDeferredRelease(session)
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      session.release = null
+      if (session.owners.size > 0) return resolve(true)
+      void closeDesktopViewer(workspaceId).then(resolve)
+    }, RELEASE_GRACE_MS)
+    session.release = { timer, resolve }
+  })
 }
