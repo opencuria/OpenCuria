@@ -91,6 +91,8 @@ describe('WorkspaceDesktop modal', () => {
     // override here.
     const modal = wrapper.get('[data-testid="workspace-desktop-modal"]')
     expect(modal.attributes('class')).toContain('sm:max-w-none!')
+    expect(modal.attributes('class')).toContain('z-(--z-desktop-modal)')
+    expect(modal.attributes('overlay-class')).toBe('z-(--z-desktop-modal)')
   })
 
   it('registers the modal host for the persistent surface while connected', () => {

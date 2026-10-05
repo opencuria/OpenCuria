@@ -57,7 +57,7 @@ const surfaceStyle = ref<CSSProperties>({
   top: '0',
   width: '1px',
   height: '1px',
-  zIndex: 60,
+  zIndex: 'var(--z-desktop-surface)',
   visibility: 'hidden',
   pointerEvents: 'none',
 })
@@ -283,7 +283,7 @@ function refreshHostBounds(): void {
       top: `${rect.top}px`,
       width: `${rect.width}px`,
       height: `${rect.height}px`,
-      zIndex: 60,
+      zIndex: 'var(--z-desktop-surface)',
       visibility: visible ? 'visible' : 'hidden',
       pointerEvents: visible ? 'auto' : 'none',
     }

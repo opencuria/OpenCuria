@@ -36,9 +36,37 @@ const Harness = defineComponent({
   `,
 })
 
+const StackHarness = defineComponent({
+  components: { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle },
+  template: `
+    <Dialog :open="true">
+      <DialogContent class="z-(--z-desktop-modal)" overlay-class="z-(--z-desktop-modal)">
+        <DialogHeader>
+          <DialogTitle>Desktop</DialogTitle>
+          <DialogDescription>Remote desktop.</DialogDescription>
+        </DialogHeader>
+      </DialogContent>
+    </Dialog>
+  `,
+})
+
 describe('DialogContent', () => {
   afterEach(() => {
     document.body.innerHTML = ''
+  })
+
+  it('lets a lower z-index replace the default dialog layer on content and overlay', async () => {
+    mount(StackHarness, { attachTo: document.body })
+    await nextTick()
+
+    const content = document.body.querySelector('[data-slot="dialog-content"]')
+    const overlay = document.body.querySelector('[data-slot="dialog-overlay"]')
+    expect(content).not.toBeNull()
+    expect(overlay).not.toBeNull()
+    expect(content!.className).toContain('z-(--z-desktop-modal)')
+    expect(content!.className).not.toContain('z-50')
+    expect(overlay!.className).toContain('z-(--z-desktop-modal)')
+    expect(overlay!.className).not.toContain('z-50')
   })
 
   it('caps the dialog height to the viewport and clips overflow', async () => {

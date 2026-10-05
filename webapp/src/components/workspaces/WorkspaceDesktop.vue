@@ -73,7 +73,8 @@ function setModalHost(el: Element | ComponentPublicInstance | null): void {
     <DialogContent
       :show-close-button="false"
       aria-describedby="workspace-desktop-description"
-      class="gap-0 overflow-hidden rounded-2xl p-0 sm:max-w-none!"
+      class="z-(--z-desktop-modal) gap-0 overflow-hidden rounded-2xl p-0 sm:max-w-none!"
+      overlay-class="z-(--z-desktop-modal)"
       :style="contentStyle"
       data-testid="workspace-desktop-modal"
       @open-auto-focus.prevent
