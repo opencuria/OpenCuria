@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises } from '@vue/test-utils'
 import { useDesktopSession } from './useDesktopSession'
 import {
+  createViewerClientId,
   desktopViewerClientId,
   desktopViewerSession,
   refreshDesktopViewer,
@@ -84,6 +85,25 @@ describe('per-tab desktop viewer intents', () => {
       viewer_client_id: desktopViewerClientId,
       intent_revision: 1,
     })
+  })
+
+  it('builds a UUID when crypto.randomUUID is missing', () => {
+    const cryptoObj = globalThis.crypto as unknown as {
+      randomUUID?: () => string
+      getRandomValues?: (bytes: Uint8Array) => Uint8Array
+    }
+    const randomUUID = cryptoObj.randomUUID
+    const getRandomValues = cryptoObj.getRandomValues
+    const uuid = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/
+    cryptoObj.randomUUID = undefined
+    try {
+      expect(createViewerClientId()).toMatch(uuid)
+      cryptoObj.getRandomValues = undefined
+      expect(createViewerClientId()).toMatch(uuid)
+    } finally {
+      cryptoObj.randomUUID = randomUUID
+      cryptoObj.getRandomValues = getRandomValues
+    }
   })
 
   it('refcounts later surfaces and sends only final release', async () => {

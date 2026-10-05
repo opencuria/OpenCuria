@@ -1,8 +1,45 @@
 import { reactive } from 'vue'
 import * as api from '@/services/workspaces.api'
 
+const UUID_RE = /^[\da-f]{8}(-[\da-f]{4}){3}-[\da-f]{12}$/
+
+function uuidFromHex(hex: string): string {
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20),
+  ].join('-')
+}
+
+/** RFC 4122 UUID. Safari and non-secure pages omit crypto.randomUUID. */
+export function createViewerClientId(): string {
+  try {
+    const uuid = globalThis.crypto?.randomUUID?.()
+    if (typeof uuid === 'string' && UUID_RE.test(uuid)) return uuid
+  } catch {
+    // randomUUID throws in some non-secure contexts; use getRandomValues.
+  }
+  try {
+    const bytes = globalThis.crypto?.getRandomValues?.(new Uint8Array(16))
+    if (bytes?.length === 16) {
+      bytes[6] = (bytes[6]! & 0x0f) | 0x40
+      bytes[8] = (bytes[8]! & 0x3f) | 0x80
+      const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+      return uuidFromHex(hex)
+    }
+  } catch {
+    // Fall through so module init never throws.
+  }
+  const nibbles = Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16))
+  nibbles[12] = '4'
+  nibbles[16] = ((Number.parseInt(nibbles[16]!, 16) & 0x3) | 0x8).toString(16)
+  return uuidFromHex(nibbles.join(''))
+}
+
 // Deliberately not persisted: another browser tab must never inherit this intent.
-export const desktopViewerClientId = crypto.randomUUID()
+export const desktopViewerClientId = createViewerClientId()
 const RENEW_MS = 45_000
 const POLL_MS = 1_000
 const STARTUP_MS = 30_000
