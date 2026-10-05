@@ -28,9 +28,11 @@ from .repositories import (
     WorkspacePluginActivationRepository,
 )
 from .runtime_snapshot import (
+    DesktopResourceSnapshot,
     EffectivePluginSnapshot,
     PluginMcpServerSnapshot,
     PluginRequirementSnapshot,
+    PluginResourcesSnapshot,
     PluginSkillSnapshot,
     WorkspacePluginSnapshot,
 )
@@ -140,6 +142,17 @@ def build_workspace_plugin_snapshot(
                 command=server.command or "",
                 args=tuple(server.args or []),
                 cwd=server.cwd or "/workspace",
+                resources=PluginResourcesSnapshot(
+                    desktop=(
+                        DesktopResourceSnapshot(
+                            activation=server.resources["desktop"].get(
+                                "activation", "server_start"
+                            )
+                        )
+                        if server.resources.get("desktop") is not None
+                        else None
+                    ),
+                ),
                 env=dict(server.env or {}),
                 url=server.url or "",
                 headers=dict(server.headers or {}),

@@ -20,13 +20,10 @@ logger = logging.getLogger(__name__)
 class RpcRegistryMixin:
     """Pending-RPC registries shared by RunnerService."""
 
-    #: Control events awaited via reply events (not Socket.IO ACKs):
-    #: ``workspace:stream_start`` is answered by an explicit ``started``
-    #: output marker from the runner (plus ``stream_closed`` carrying an
-    #: ``error`` on failure). ``input``/``close`` are only rejected
-    #: explicitly; success stays silent, so waiters resolve on
-    #: timeout-free completion via a short settle delay (see below).
+    #: Start markers retain legacy correlation; close requires a dedicated,
+    #: per-request result and never infers termination from silence or EOF.
     _CALL_REPLY_EVENTS: dict[str, tuple[str, ...]] = {
+        "workspace:stream_close": ("workspace:stream_close_result",),
         "workspace:stream_start": (
             "workspace:stream_output",
             "workspace:stream_closed",
@@ -35,6 +32,13 @@ class RpcRegistryMixin:
 
     def _call_reply_key(self, event: str, payload: dict) -> str | None:
         """Return the correlation id for a reply-awaited call event."""
+        if event == "workspace:stream_close":
+            connection_id = payload.get("connection_id")
+            request_id = payload.get("close_request_id")
+            if isinstance(connection_id, str) and isinstance(request_id, str):
+                if connection_id and request_id:
+                    return f"{connection_id}:{request_id}"
+            return None
         if event == "workspace:stream_start":
             candidate = payload.get("connection_id", "")
             key = str(candidate or "").strip()
@@ -46,11 +50,8 @@ class RpcRegistryMixin:
     ) -> tuple[str, asyncio.Future] | None:
         """Register a reply future for *event* (sync-safe creation).
 
-        The waiter is registered *after* the ``sio.call`` ACK timed out
-        (the runner is slow but alive): the late runner reply still
-        arrives as a ``workspace:stream_output`` started-marker or
-        ``workspace:stream_closed`` error, which then resolves the
-        future. Registration needs the caller's running loop.
+        Register before sending so a fast explicit reply cannot be lost.
+        Registration needs the caller's running loop.
         """
         key = self._call_reply_key(event, payload)
         if key is None:
@@ -60,6 +61,7 @@ class RpcRegistryMixin:
         except RuntimeError:
             return None
         future: asyncio.Future = loop.create_future()
+        future.expected_workspace_id = payload.get("workspace_id")
         self._call_pending.setdefault(event, {})[key] = future
         return key, future
 
@@ -92,8 +94,12 @@ class RpcRegistryMixin:
             key = str(raw_key or "").strip()
             if not key:
                 continue
+            if call_event == "workspace:stream_close":
+                key = self._call_reply_key(call_event, data)
             future = pending.get(key)
             if future is None or future.done():
+                continue
+            if data.get("workspace_id") != future.expected_workspace_id:
                 continue
             if event == "workspace:stream_output" and not bool(
                 data.get("started", False)
@@ -103,6 +109,9 @@ class RpcRegistryMixin:
                 # failed ``stream_closed``) resolves the start waiter.
                 continue
             result: dict = {"ok": True, "connection_id": key}
+            if event == "workspace:stream_close_result":
+                # Preserve false/missing close evidence verbatim.
+                result = dict(data)
             if event == "workspace:stream_closed":
                 if data.get("error"):
                     result = {

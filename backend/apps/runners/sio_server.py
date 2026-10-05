@@ -743,6 +743,18 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         )
         return {"ok": bool(accepted)}
 
+    @sio.on("workspace:stream_close_result")
+    async def on_workspace_stream_close_result(sid: str, data: dict):
+        """Correlate an authenticated runner's explicit close outcome."""
+        runner_id = await _require_runner_id(sio, sid, "workspace:stream_close_result")
+        if not runner_id:
+            return {"ok": False, "error": "unauthenticated"}
+        service = get_runner_service()
+        accepted = await sync_to_async(service.handle_stream_reply)(
+            "workspace:stream_close_result", data, runner_id=runner_id
+        )
+        return {"ok": bool(accepted)}
+
     # --- Terminal events from runner ---
 
     @sio.on("terminal:started")
@@ -804,6 +816,10 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             runner_id=runner_id,
             viewer=bool(data.get("viewer", True)),
             computer_use=bool(data.get("computer_use", False)),
+            mcp=data.get("mcp", data.get("mcp_active")),
+            holder_count=data.get("holder_count"),
+            generation=data.get("generation"),
+            epoch=data.get("epoch"),
         )
 
     @sio.on("desktop:process")
@@ -821,6 +837,10 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             runner_id=runner_id,
             viewer=bool(data.get("viewer", False)),
             computer_use=bool(data.get("computer_use", False)),
+            mcp=data.get("mcp", data.get("mcp_active")),
+            holder_count=data.get("holder_count"),
+            generation=data.get("generation"),
+            epoch=data.get("epoch"),
         )
 
     @sio.on("desktop:stopped")
@@ -848,6 +868,11 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             workspace_id=data["workspace_id"],
             runner_id=runner_id,
             computer_use_active=bool(data.get("computer_use_active", False)),
+            viewer_held=data.get("viewer_held", data.get("viewer")),
+            mcp=data.get("mcp", data.get("mcp_active")),
+            holder_count=data.get("holder_count"),
+            generation=data.get("generation"),
+            epoch=data.get("epoch"),
         )
 
     @sio.on("desktop:proxy_ws_frame")

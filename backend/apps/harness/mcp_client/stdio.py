@@ -131,6 +131,7 @@ async def workspace_stdio_client(
     env: dict[str, str] | None = None,
     server_desc: str = "",
     timeout: float | None = None,
+    owner: dict[str, str] | None = None,
 ) -> AsyncIterator[
     tuple[
         MemoryObjectReceiveStream[SessionMessage | Exception],
@@ -157,7 +158,11 @@ async def workspace_stdio_client(
     read_tx, read_rx = anyio.create_memory_object_stream[SessionMessage | Exception](0)
     write_tx, write_rx = anyio.create_memory_object_stream[SessionMessage](0)
     stream = await accessor.open_process(
-        list(command), cwd, dict(env or {}), timeout=timeout
+        list(command),
+        cwd,
+        dict(env or {}),
+        timeout=timeout,
+        **({"owner": owner} if owner is not None else {}),
     )
     desc = server_desc or " ".join(list(command)[:1]) or "stdio-server"
     supervisor_should_run = True

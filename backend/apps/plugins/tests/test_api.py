@@ -97,9 +97,7 @@ def _prepare_plugin_dependencies(body: dict, headers: dict) -> dict:
         if service_id is None:
             credential_type = nested.get("credential_type", "env")
             endpoint = (
-                servers[item["key"]]["url"]
-                if credential_type == "mcp_oauth"
-                else ""
+                servers[item["key"]]["url"] if credential_type == "mcp_oauth" else ""
             )
             service = CredentialServiceSvc().create_service(
                 name=nested.get("name") or item["key"],
@@ -116,10 +114,14 @@ def _prepare_plugin_dependencies(body: dict, headers: dict) -> dict:
                 org_id=org_id, service=service, active=True
             )
             service_id = service.id
-        requirements.append({
-            "key": item["key"], "description": item.get("description", ""),
-            "required": item.get("required", True), "service_id": str(service_id),
-        })
+        requirements.append(
+            {
+                "key": item["key"],
+                "description": item.get("description", ""),
+                "required": item.get("required", True),
+                "service_id": str(service_id),
+            }
+        )
     return {**body, "credential_requirements": requirements}
 
 
@@ -1344,3 +1346,77 @@ def test_personal_credential_delete_cross_org_fanout(client: Client):
     assert response.status_code == 409, response.content[:500]
     assert response.json()["code"] == "plugin_credentials_in_use"
     assert str(ws_a.id) in response.content.decode()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("auth", ["api_key", "jwt"])
+def test_managed_desktop_roundtrip_and_conflicts(client, auth):
+    ctx = _ctx()
+    headers = ctx["headers"]
+    if auth == "jwt":
+        from apps.accounts.auth_backends import get_auth_backend
+
+        token = get_auth_backend().generate_tokens(ctx["user"]).access_token
+        headers = {
+            "HTTP_X_ORGANIZATION_ID": str(ctx["org"].id),
+            "HTTP_AUTHORIZATION": f"Bearer {token}",
+        }
+    body = {
+        "name": "Desktop tools",
+        "mcp_servers": [
+            {
+                "name": "Tools",
+                "command": "npx",
+                "resources": {"desktop": {}},
+            }
+        ],
+    }
+    response = _post(client, "/api/v1/plugins/", headers, body)
+    assert response.status_code == 201, response.content
+    plugin = response.json()
+    assert plugin["mcp_servers"][0]["resources"] == {
+        "desktop": {"activation": "server_start"}
+    }
+    response = _patch(
+        client,
+        f"/api/v1/plugins/{plugin['id']}/",
+        headers,
+        {"description": "Preserve resources"},
+    )
+    assert response.status_code == 200
+    assert (
+        response.json()["mcp_servers"][0]["resources"]
+        == plugin["mcp_servers"][0]["resources"]
+    )
+    for key in ("DISPLAY", "XAUTHORITY"):
+        body["name"] = f"Conflict {key}"
+        body["mcp_servers"][0]["env"] = {key: "explicit"}
+        assert _post(client, "/api/v1/plugins/", headers, body).status_code == 400
+    body["name"] = "HTTP conflict"
+    body["mcp_servers"][0].update(
+        env={}, transport="sse", command="", url="https://example.com/mcp"
+    )
+    assert _post(client, "/api/v1/plugins/", headers, body).status_code == 400
+    body["mcp_servers"][0]["resources"] = {"desktop": {"activation": "invalid"}}
+    assert _post(client, "/api/v1/plugins/", headers, body).status_code == 422
+
+
+@pytest.mark.django_db
+def test_managed_desktop_write_requires_permission(client):
+    ctx = _ctx(permissions=[APIKeyPermission.PLUGINS_READ.value])
+    response = _post(
+        client,
+        "/api/v1/plugins/",
+        ctx["headers"],
+        {
+            "name": "Desktop denied",
+            "mcp_servers": [
+                {
+                    "name": "Tools",
+                    "command": "npx",
+                    "resources": {"desktop": {"activation": "first_tool"}},
+                }
+            ],
+        },
+    )
+    assert response.status_code == 403

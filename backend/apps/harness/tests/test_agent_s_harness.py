@@ -72,6 +72,19 @@ class FakeAccessor:
         self, action: str, args: dict[str, Any] | None = None, timeout=None
     ) -> dict[str, Any]:
         self.calls.append((action, dict(args or {})))
+        if action in ("binding", "reserve", "hold", "renew", "release"):
+            return {
+                "ok": True,
+                "epoch": "test-epoch",
+                "display": ":1",
+                "xauthority": "/root/.Xauthority",
+                "lease_state": {
+                    "reserve": "reserved",
+                    "hold": "held",
+                    "renew": "held",
+                    "release": "released",
+                }.get(action),
+            }
         if action == "record_start":
             run_id = str((args or {}).get("run_id") or "run")
             return {
@@ -193,7 +206,14 @@ async def test_lifecycle_hold_record_release_order() -> None:
     accessor = kwargs["_accessor"]
     events = _invoke(kwargs)
     result = await run_agent_s_computeruse(**kwargs)
-    assert accessor.actions() == ["hold", "record_start", "record_stop", "release"]
+    assert accessor.actions() == [
+        "binding",
+        "reserve",
+        "hold",
+        "record_start",
+        "record_stop",
+        "release",
+    ]
     assert result.steps == 1
     assert result.finish_reason == "stop"
     assert result.metadata["agent_s_finish"] == "DONE"
@@ -352,7 +372,14 @@ async def test_cancel_still_cleans_up_and_propagates() -> None:
     events = _invoke(kwargs)
     with pytest.raises(asyncio.CancelledError):
         await run_agent_s_computeruse(**kwargs)
-    assert accessor.actions() == ["hold", "record_start", "record_stop", "release"]
+    assert accessor.actions() == [
+        "binding",
+        "reserve",
+        "hold",
+        "record_start",
+        "record_stop",
+        "release",
+    ]
     assert [e["type"] for e in events] == ["step_start", "step_finish"]
 
 
@@ -368,7 +395,14 @@ async def test_error_still_cleans_up() -> None:
     events = _invoke(kwargs)
     with pytest.raises(RuntimeError, match="boom"):
         await run_agent_s_computeruse(**kwargs)
-    assert accessor.actions() == ["hold", "record_start", "record_stop", "release"]
+    assert accessor.actions() == [
+        "binding",
+        "reserve",
+        "hold",
+        "record_start",
+        "record_stop",
+        "release",
+    ]
     assert [e["type"] for e in events] == ["step_start", "step_finish"]
 
 
@@ -377,17 +411,24 @@ async def test_record_start_failure_skips_stop_but_releases() -> None:
 
     class NoRecord(FakeAccessor):
         async def desktop_action(self, action, args=None, timeout=None):
-            self.calls.append((action, dict(args or {})))
             if action == "record_start":
+                self.calls.append((action, dict(args or {})))
                 raise RuntimeError("ffmpeg missing")
-            return {"ok": True}
+            return await super().desktop_action(action, args, timeout)
 
     kwargs = _run_kwargs(accessor=NoRecord())
     accessor = kwargs["_accessor"]
     _invoke(kwargs)
     with pytest.raises(RuntimeError, match="record_start failed"):
         await run_agent_s_computeruse(**kwargs)
-    assert accessor.actions() == ["hold", "record_start", "release"]
+    assert accessor.actions() == [
+        "binding",
+        "reserve",
+        "hold",
+        "record_start",
+        "record_stop",
+        "release",
+    ]
 
 
 async def test_video_embedded_exactly_once() -> None:
@@ -397,7 +438,7 @@ async def test_video_embedded_exactly_once() -> None:
     result = await run_agent_s_computeruse(**kwargs)
     # FakeAccessor.record_stop returns the canonical default path, so the
     # final record_stop path wins over the record_start default.
-    canonical = "/workspace/.opencuria/computeruse/run-1/session.mp4"
+    canonical = result.metadata["recording_path"]
     marker = f"![Computer use]({canonical})"
     assert result.output.count(marker) == 1
     assert result.metadata["recording_path"] == canonical
@@ -443,7 +484,13 @@ async def test_record_stop_invalid_path_falls_back_to_start_path() -> None:
     kwargs = _run_kwargs(accessor=EvilStopAccessor())
     _invoke(kwargs)
     result = await run_agent_s_computeruse(**kwargs)
-    expected = default_recording_path("run-1")
+    expected = default_recording_path(
+        next(
+            args["run_id"]
+            for action, args in kwargs["accessor"].calls
+            if action == "record_start"
+        )
+    )
     assert result.metadata["recording_path"] == expected
     assert result.output.endswith(f"\n\n![Computer use]({expected})")
     assert "evil.example" not in result.output
@@ -493,7 +540,14 @@ async def test_cleanup_survives_outer_cancel() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert accessor.actions() == ["hold", "record_start", "record_stop", "release"]
+    assert accessor.actions() == [
+        "binding",
+        "reserve",
+        "hold",
+        "record_start",
+        "record_stop",
+        "release",
+    ]
     assert accessor.release_seen is True
 
 
@@ -523,13 +577,13 @@ async def test_real_geometry_wins_after_hold() -> None:
 
     class OrderScreenshot(FakeScreenshot):
         async def display_geometry(self):
-            assert calls[0] == "hold"
+            assert calls[0] == "binding"
             return await super().display_geometry()
 
     kwargs = _run_kwargs(accessor=OrderAccessor(), screenshot=OrderScreenshot())
     _invoke(kwargs)
     await run_agent_s_computeruse(**kwargs)
-    assert calls[0] == "hold"
+    assert calls[0] == "binding"
     assert calls.index("hold") < calls.index("record_start")
 
 
@@ -886,7 +940,7 @@ async def test_recording_disabled_skips_record_lifecycle() -> None:
     accessor = kwargs["_accessor"]
     events = _invoke(kwargs)
     result = await run_agent_s_computeruse(**kwargs)
-    assert accessor.actions() == ["hold", "release"]
+    assert accessor.actions() == ["binding", "reserve", "hold", "release"]
     assert "![Computer use](" not in result.output
     assert "recording_path" not in result.metadata
     assert result.finish_reason == "stop"
@@ -909,7 +963,7 @@ async def test_recording_disabled_cancel_still_releases_without_stop() -> None:
     _invoke(kwargs)
     with pytest.raises(asyncio.CancelledError):
         await run_agent_s_computeruse(**kwargs)
-    assert accessor.actions() == ["hold", "release"]
+    assert accessor.actions() == ["binding", "reserve", "hold", "release"]
 
 
 async def test_truncate_without_recording_never_invents_video() -> None:

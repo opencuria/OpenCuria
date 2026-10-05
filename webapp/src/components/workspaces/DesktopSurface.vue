@@ -100,7 +100,17 @@ const desktopIframeSrc = computed(() => {
   if (!desktopStore.proxyUrl) return ''
   const token = localStorage.getItem('kern_access_token') || ''
   const config = getConfig()
-  return buildDesktopIframeSrc(config.wsBaseUrl || '', desktopStore.proxyUrl, token)
+  return buildDesktopIframeSrc(
+    config.wsBaseUrl || '',
+    desktopStore.proxyUrl,
+    token,
+    desktopStore.intentRevision !== null
+      ? {
+          viewer_client_id: desktopStore.viewerClientId,
+          intent_revision: desktopStore.intentRevision,
+        }
+      : undefined,
+  )
 })
 
 // --- Clipboard shortcuts (Cmd/Ctrl+C/V synced with the VM clipboard) ---
@@ -407,8 +417,7 @@ onMounted(() => {
   if (desktopStore.workspaceId && desktopStore.workspaceId !== props.workspaceId)
     desktopStore.reset()
   setupSocketListeners()
-  if (desktopStore.isOpen && !desktopStore.isConnected && !desktopStore.isConnecting)
-    void startDesktop()
+  if (desktopStore.isOpen) void startDesktop()
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('message', handleWindowMessage)
   window.addEventListener('resize', onViewportChange)
@@ -436,7 +445,7 @@ watch(
   () => desktopStore.isOpen,
   (open) => {
     refreshHostBounds()
-    if (open && !desktopStore.isConnected && !desktopStore.isConnecting) void startDesktop()
+    if (open) void startDesktop()
   },
 )
 

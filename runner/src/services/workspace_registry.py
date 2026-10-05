@@ -87,6 +87,7 @@ class WorkspaceRegistry:
         # Optional cross-cluster hooks, set post-construction by the
         # composer (``WorkspaceService``). All default to ``None`` so
         # the registry stays unit-testable in isolation.
+        self.desktop_manager: Any | None = None
         self.desktop_sessions: dict[uuid.UUID, DesktopSession] | None = None
         self.background_entries: dict[uuid.UUID, dict[str, Any]] | None = None
         self.background_status: (
@@ -290,7 +291,6 @@ class WorkspaceRegistry:
                     # The runtime status was freshly synchronized by the
                     # heartbeat loop. A stopped workspace cannot host a live
                     # desktop, so prune without another guest exec probe.
-                    sessions.pop(workspace_id, None)
                     item["desktop"] = None
                 else:
                     try:
@@ -305,14 +305,12 @@ class WorkspaceRegistry:
                                     workspace_id, session
                                 )
                         else:
-                            sessions.pop(workspace_id, None)
                             item["desktop"] = None
                             logger.warning(
-                                "desktop_session_pruned_from_cache",
+                                "desktop_session_unhealthy",
                                 workspace_id=str(workspace_id),
                             )
                     except Exception:
-                        sessions.pop(workspace_id, None)
                         item["desktop"] = None
                         logger.exception(
                             "desktop_session_health_check_failed",
@@ -359,6 +357,10 @@ class WorkspaceRegistry:
         """Rebuild in-memory desktop sessions from live runtime state."""
         sessions = self.desktop_sessions if self.desktop_sessions is not None else {}
         for workspace_id, info in list(self._cache.items()):
+            if self.desktop_manager is not None:
+                await self.desktop_manager.recover_workspace(workspace_id)
+                # Only DesktopManager may reconcile its process cache.
+                continue
             if info.status != "running" or workspace_id in sessions:
                 continue
 

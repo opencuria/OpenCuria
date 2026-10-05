@@ -188,9 +188,35 @@ async def test_start_desktop_payload_includes_geometry(desktop_api) -> None:
 
     service = RunnerService(sio_server=AsyncMock())
     service._emit_to_runner = AsyncMock()
-    await service.start_desktop(workspace.id)
+    service._viewer_rpc = AsyncMock(return_value={"epoch": "runner-epoch"})
+    await service.start_desktop(
+        workspace.id, user=desktop_api["user"],
+        organization_id=desktop_api["org"].id,
+        viewer_client_id=uuid.uuid4(), intent_revision=1,
+    )
     event = service._emit_to_runner.await_args.args[1]
     payload = service._emit_to_runner.await_args.args[2]
     assert event == "task:start_desktop"
     assert payload["desktop_width"] == 1280
     assert payload["desktop_height"] == 720
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("route", ["desktop/", "desktop/stop/", "desktop/renew/"])
+def test_viewer_rest_requires_terminal_permission(desktop_api, route):
+    response = desktop_api["client"].post(
+        f'/api/v1/workspaces/{desktop_api["workspace"].id}/{route}',
+        data=json.dumps({"viewer_client_id": str(uuid.uuid4()), "intent_revision": 1}),
+        content_type="application/json",
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("route", ["desktop/", "desktop/stop/", "desktop/renew/"])
+def test_viewer_rest_requires_intent_payload(desktop_api, route):
+    response = desktop_api["client"].post(
+        f'/api/v1/workspaces/{desktop_api["workspace"].id}/{route}',
+        data="{}", content_type="application/json",
+    )
+    assert response.status_code == 422

@@ -59,7 +59,7 @@ import structlog
 from ..models import WorkspaceInfo
 from ..runtime.base import RuntimeBackend, WorkspaceConfig
 from .capture_fence import CaptureFence, Method
-from .sessions.desktop import DESKTOP_HOLDER_VIEWER
+from .sessions.desktop import DESKTOP_HOLDER_VIEWER, WorkspaceEndedEvidence
 from .workspace_registry import WorkspaceRegistry
 
 logger = structlog.get_logger(__name__)
@@ -84,6 +84,7 @@ def coordinated(method: Method) -> Method:
                 return await method(*bound.args, **bound.kwargs)
             async with fence.interaction(workspace_id, coordinated=True):
                 return await method(*bound.args, **bound.kwargs)
+
     return wrapped  # type: ignore[return-value]
 
 
@@ -159,6 +160,68 @@ class WorkspaceLifecycle:
         self.desktop_lock_hook: (
             Callable[[uuid.UUID], Awaitable[asyncio.Lock]] | None
         ) = None
+
+    async def _confirm_workspace_ended(
+        self, info: WorkspaceInfo, operation: str
+    ) -> None:
+        """Publish successful physical disposal before registry metadata disappears."""
+        if self._desktop is None or self._desktop._legacy_mode:
+            return
+        evidence = WorkspaceEndedEvidence(
+            info.workspace_id, info.instance_id, info.runtime_type, operation
+        )
+        confirm = getattr(self._streams, "confirm_workspace_ended", None)
+        if confirm is None:
+            raise RuntimeError(
+                "Managed stream lifecycle confirmation is not configured"
+            )
+        result = await confirm(info.workspace_id, info.instance_id)
+        if result is not True:
+            raise RuntimeError("Managed stream physical disposal confirmation failed")
+        await self._desktop.workspace_ended(
+            info.workspace_id, info.instance_id, info.runtime_type, evidence
+        )
+
+    async def _close_managed_before_end(
+        self, workspace_id: uuid.UUID, reason: str
+    ) -> None:
+        """Attempt graceful owner closure; physical disposal is the final proof."""
+        for operation in (
+            lambda: self._call_close_streams(workspace_id, reason=reason),
+            lambda: self._call_release(
+                workspace_id, holder=DESKTOP_HOLDER_VIEWER, force=True
+            ),
+        ):
+            try:
+                await operation()
+            except Exception:
+                logger.exception(
+                    "workspace_owner_preclose_unverified",
+                    workspace_id=str(workspace_id),
+                    reason=reason,
+                )
+
+    async def _remove_managed_workspace(
+        self, workspace_id: uuid.UUID, reason: str
+    ) -> bool:
+        """Keep lookup metadata and durable ownership until actual removal succeeds."""
+        info = self._registry._cache.get(workspace_id)
+        if info is None:
+            raise RuntimeError(
+                "Managed workspace removal requires physical registry identity"
+            )
+        runtime = self._runtimes.get(info.runtime_type)
+        if runtime is None or not info.instance_id:
+            raise RuntimeError("Managed workspace removal requires runtime identity")
+        await self._call_kill_all(workspace_id, reason=reason)
+        await self._close_managed_before_end(workspace_id, reason)
+        # Lifecycle's coordinated workspace lock fences replacement/start. Never
+        # publish successful death on exceptions, or remove cache before confirmation.
+        await runtime.remove_workspace(info.instance_id)
+        await self._confirm_workspace_ended(info, "remove")
+        self._registry._cache.pop(workspace_id, None)
+        self._unreachable_since.pop(workspace_id, None)
+        return True
 
     # -- hook-or-manager call sites --------------------------------------
 
@@ -451,9 +514,15 @@ class WorkspaceLifecycle:
         info.credentials_present = None
         await self._call_remove(runtime, info.instance_id, log)
         await self._call_kill_all(workspace_id, reason="stop")
-        await self._call_close_streams(workspace_id, reason="stop")
-        await self._call_release(workspace_id, holder=DESKTOP_HOLDER_VIEWER, force=True)
+        if self._desktop is not None and not self._desktop._legacy_mode:
+            await self._close_managed_before_end(workspace_id, "stop")
+        else:
+            await self._call_close_streams(workspace_id, reason="stop")
+            await self._call_release(
+                workspace_id, holder=DESKTOP_HOLDER_VIEWER, force=True
+            )
         await runtime.stop_workspace(info.instance_id)
+        await self._confirm_workspace_ended(info, "stop")
         info.status = "exited"
         info.credentials_present = False
         if self.checkpoint_hook is not None:
@@ -593,6 +662,8 @@ class WorkspaceLifecycle:
         have their own limits). Recording-interrupt errors still clear
         state and attempt runtime removal.
         """
+        if self._desktop is not None and not self._desktop._legacy_mode:
+            return await self._remove_managed_workspace(workspace_id, "remove")
         log = logger.bind(workspace_id=str(workspace_id))
         await self._call_close_streams(workspace_id, reason="remove")
         await self._call_kill_all(workspace_id, reason="remove")
@@ -663,6 +734,8 @@ class WorkspaceLifecycle:
         release in between. The lock object is retained afterwards (never
         dropped) so queued waiters keep sharing one lock object.
         """
+        if self._desktop is not None and not self._desktop._legacy_mode:
+            return await self._remove_managed_workspace(workspace_id, "cleanup_unknown")
         log = logger.bind(workspace_id=str(workspace_id))
         await self._call_close_streams(workspace_id, reason="cleanup_unknown")
         await self._call_kill_all(workspace_id, reason="cleanup_unknown")

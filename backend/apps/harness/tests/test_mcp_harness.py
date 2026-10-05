@@ -145,8 +145,11 @@ async def test_runner_run_with_fake_mcp_tool_round_trip():
 
     runner = HarnessRunner(
         model_resolver=lambda ref: ResolvedModel(
-            adapter=provider, model_id="m", provider="fake",
-            context_length=0, max_output_tokens=0,
+            adapter=provider,
+            model_id="m",
+            provider="fake",
+            context_length=0,
+            max_output_tokens=0,
         ),
         tools=registry,
         accessor=None,
@@ -233,8 +236,11 @@ async def test_runner_explore_schema_excludes_mcp():
     provider = FakeProvider()
     runner = HarnessRunner(
         model_resolver=lambda ref: ResolvedModel(
-            adapter=provider, model_id="m", provider="fake",
-            context_length=0, max_output_tokens=0,
+            adapter=provider,
+            model_id="m",
+            provider="fake",
+            context_length=0,
+            max_output_tokens=0,
         ),
         tools=registry,
         accessor=None,
@@ -288,8 +294,14 @@ async def test_harness_service_mcp_wiring_success_and_cleanup(harness_workspace)
             self.skipped: list[dict] = []
 
         async def setup(  # type: ignore[no-untyped-def]
-            self, *, workspace, organization_id, accessor, core_tool_names,
+            self,
+            *,
+            workspace,
+            organization_id,
+            accessor,
+            core_tool_names,
             snapshot=None,
+            owner_id=None,
         ):
             seen["skills"] = (
                 snapshot.snapshot.plugin_skills if snapshot is not None else []
@@ -406,8 +418,14 @@ async def test_harness_service_mcp_partial_discovery_failure(harness_workspace):
         skipped = [{"plugin": "demo", "server": "broken", "error": "boom"}]
 
         async def setup(  # type: ignore[no-untyped-def]
-            self, *, workspace, organization_id, accessor, core_tool_names,
+            self,
+            *,
+            workspace,
+            organization_id,
+            accessor,
+            core_tool_names,
             snapshot=None,
+            owner_id=None,
         ):
             return snapshot.snapshot if snapshot is not None else None
 

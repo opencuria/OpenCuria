@@ -44,6 +44,7 @@ class StreamTransportMixin:
         {
             "workspace:stream_output",
             "workspace:stream_closed",
+            "workspace:stream_close_result",
         }
     )
 
@@ -169,9 +170,12 @@ class StreamTransportMixin:
                 )
                 return False
         # Reply-awaited ``sio.call`` replacement: resolve the pending
-        # control-call future first (stream_start/input/close carry no
-        # other reply channel).
-        self._resolve_call_reply(event, data)
+        # control-call future first. Close outcomes have a dedicated channel
+        # and do not imply the live byte stream reached EOF.
+        resolved = self._resolve_call_reply(event, data)
+        if event == "workspace:stream_close_result":
+            # Control reply only: never turn it into a data-plane EOF.
+            return resolved
         # Phase-4 port: prefer the injected harness_stream_router.
         stream_router = getattr(self, "_harness_stream_router", None)
         if stream_router is not None:

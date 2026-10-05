@@ -41,6 +41,7 @@ from .base import (
 )
 from .storage import storage_mutation
 from .inventory import RuntimeInventory, StorageResource
+from .managed_process import managed_argv
 from .stream_wrapper import shell_quote_argv, stream_wrapper_argv
 
 logger = structlog.get_logger(__name__)
@@ -1230,8 +1231,12 @@ class QemuRuntime(RuntimeBackend):
         try:
             await asyncio.to_thread(self._get_domain, instance_id)
             return True
-        except RuntimeError:
-            return False
+        except RuntimeError as exc:
+            cause = exc.__cause__
+            if (isinstance(cause, libvirt.libvirtError)
+                    and cause.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN):
+                return False
+            raise
 
     async def get_workspace_status(self, instance_id: str) -> RuntimeStatus:
         """Map libvirt domain state to a RuntimeStatus."""
@@ -1239,18 +1244,22 @@ class QemuRuntime(RuntimeBackend):
         try:
             domain = await asyncio.to_thread(self._get_domain, instance_id)
             state, _ = await asyncio.to_thread(domain.state)
-        except RuntimeError:
+        except RuntimeError as exc:
+            cause = exc.__cause__
+            if (not isinstance(cause, libvirt.libvirtError)
+                    or cause.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN):
+                raise
             return RuntimeStatus(
                 instance_id=instance_id, status="removed", name=domain_name
             )
 
         state_map = {
             libvirt.VIR_DOMAIN_RUNNING: "running",
-            libvirt.VIR_DOMAIN_PAUSED: "stopped",
-            libvirt.VIR_DOMAIN_SHUTDOWN: "stopped",
+            libvirt.VIR_DOMAIN_PAUSED: "paused",
+            libvirt.VIR_DOMAIN_SHUTDOWN: "stopping",
             libvirt.VIR_DOMAIN_SHUTOFF: "stopped",
             libvirt.VIR_DOMAIN_CRASHED: "failed",
-            libvirt.VIR_DOMAIN_PMSUSPENDED: "stopped",
+            libvirt.VIR_DOMAIN_PMSUSPENDED: "suspended",
         }
         return RuntimeStatus(
             instance_id=instance_id,
@@ -1441,12 +1450,20 @@ class QemuRuntime(RuntimeBackend):
         except Exception:
             logger.warning("qemu_stream_kill_failed")
 
+    @property
+    def supports_managed_process(self) -> bool:
+        """Support durable guest stream supervision and fenced recovery."""
+        return True
+
     async def spawn_process(
         self,
         instance_id: str,
         command: list[str],
         workdir: str | None = None,
         env: dict[str, str] | None = None,
+        *,
+        control_path: str | None = None,
+        expected_token: dict[str, str] | None = None,
     ) -> ProcessHandle:
         """Spawn a non-TTY bidirectional process (stdin/stdout/stderr split)."""
         if not command or not all(isinstance(part, str) for part in command):
@@ -1454,8 +1471,14 @@ class QemuRuntime(RuntimeBackend):
         if any("\x00" in part for part in command):
             raise ValueError("command must not contain NUL bytes")
         ssh = await self._get_ssh(instance_id)
+        if control_path and expected_token is None:
+            expected_token = await self.probe_managed_token(instance_id)
         pidfile = self._stream_pidfile()
-        argv = stream_wrapper_argv(pidfile, workdir, env, list(command))
+        argv = (
+            managed_argv(control_path, workdir, env, list(command), expected_token=expected_token)
+            if control_path else
+            stream_wrapper_argv(pidfile, workdir, env, list(command))
+        )
         # Same quoting discipline as _build_shell_command: every argv
         # word is single-quoted so user values stay opaque to the shell.
         cmd_str = shell_quote_argv(argv)
@@ -1470,6 +1493,8 @@ class QemuRuntime(RuntimeBackend):
         handle.metadata.update(
             {
                 "pidfile": pidfile,
+                "control_path": control_path,
+                "expected_token": expected_token,
                 "pending_stdout": b"",
                 "pending_stderr": b"",
             }
@@ -1562,7 +1587,14 @@ class QemuRuntime(RuntimeBackend):
             code = None
         return int(code or 0)
 
-    async def process_close(self, handle: ProcessHandle) -> None:
+    async def process_detach(self, handle: ProcessHandle) -> None:
+        """Close only the existing SSH channel, never exec a replacement guest."""
+        handle.handle.close()
+        with contextlib.suppress(asyncio.TimeoutError, asyncssh.Error, OSError):
+            await asyncio.wait_for(handle.handle.wait_closed(), 5)
+        handle.closed = True
+
+    async def process_close(self, handle: ProcessHandle) -> bool | None:
         """Graceful stdin EOF, TERM/KILL the tree, close handles.
 
         Robust close order for the single-SSH-channel transport: the
@@ -1574,8 +1606,11 @@ class QemuRuntime(RuntimeBackend):
         the old double-wait could hang when the channel was already
         torn down by the kill.
         """
+        control_path = handle.metadata.get("control_path")
+        if control_path:
+            await self.close_managed_process(handle.instance_id, control_path)
         if handle.closed:
-            return
+            return True if control_path else None
         handle.closed = True
         process: asyncssh.SSHClientProcess = handle.handle  # type: ignore[assignment]
         pidfile = str(handle.metadata.get("pidfile", ""))
@@ -1598,7 +1633,7 @@ class QemuRuntime(RuntimeBackend):
             exited_early = True
         except (asyncio.TimeoutError, asyncssh.Error, OSError):
             exited_early = False
-        if pidfile:
+        if pidfile and not control_path:
             await self._kill_stream_tree(handle.instance_id, pidfile)
         try:
             process.close()
@@ -1622,6 +1657,7 @@ class QemuRuntime(RuntimeBackend):
             exit_status_at_close=exit_status,
             exit_status_final=final_status,
         )
+        return True if control_path else None
 
     async def list_workspaces(self) -> list[RuntimeWorkspaceInfo]:
         """Discover all opencuria VM workspaces."""

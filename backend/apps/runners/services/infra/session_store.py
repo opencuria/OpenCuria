@@ -37,6 +37,25 @@ class SessionStoreMixin:
             "network_name": desktop_state.get("network_name", ""),
             "viewer": bool(desktop_state.get("viewer", False)),
             "computer_use": bool(desktop_state.get("computer_use", False)),
+            "mcp": bool(
+                desktop_state.get("mcp", desktop_state.get("mcp_active", False))
+            ),
+            "holder_count": int(desktop_state.get("holder_count", 0)),
+            **{
+                key: desktop_state[key]
+                for key in ("generation", "epoch")
+                if key in desktop_state
+            },
+        }
+
+    def _desktop_public_summary(self, workspace_id: str) -> dict:
+        """Expose aggregate process state, never individual lease identities."""
+        state = self.get_desktop_info(workspace_id) or {}
+        return {
+            "viewer_held": bool(state.get("viewer")),
+            "mcp_active": bool(state.get("mcp")),
+            "holder_count": int(state.get("holder_count", 0)),
+            **{key: state[key] for key in ("generation", "epoch") if key in state},
         }
 
     def _record_active_desktop(

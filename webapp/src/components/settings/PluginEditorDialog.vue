@@ -203,6 +203,7 @@ function setMcpTransport(mcpUid: string, transport: PluginMcpTransportOption): v
     mcp.authType = 'none'
     mcp.oauthRequirementKey = ''
   } else {
+    mcp.desktop = 'none'
     mcp.command = ''
     mcp.argsText = ''
     mcp.env = []
@@ -520,6 +521,22 @@ async function handleSubmit(): Promise<void> {
                       inactive OAuth service. The MCP endpoint must exactly match the service.
                     </p>
                   </div>
+                </div>
+                <div v-if="mcp.transport === 'stdio'" class="space-y-2">
+                  <Label>Managed desktop</Label>
+                  <Select
+                    :model-value="mcp.desktop"
+                    @update:model-value="mcp.desktop = $event as typeof mcp.desktop"
+                  >
+                    <SelectTrigger :data-testid="`plugin-mcp-desktop-${index}`">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">None</SelectItem>
+                      <SelectItem value="server_start">Start with server</SelectItem>
+                      <SelectItem value="first_tool">Start on first tool</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div v-if="mcp.transport === 'stdio'" class="grid gap-3 sm:grid-cols-2">
                   <div class="space-y-2">

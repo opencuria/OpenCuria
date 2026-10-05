@@ -297,3 +297,27 @@ describe('PluginEditorDialog', () => {
     expect(payload.mcp_servers?.[0]).toMatchObject({ command: '', args: [], env: {} })
   })
 })
+
+it('offers one managed desktop selector and surfaces explicit env conflicts', async () => {
+  const wrapper = mountEditor(null)
+  await flushPromises()
+  const form = (
+    wrapper.vm as unknown as {
+      form: ReturnType<(typeof import('@/lib/pluginForms'))['emptyPluginForm']>
+    }
+  ).form
+  const { emptyMcpForm } = await import('@/lib/pluginForms')
+  const mcp = emptyMcpForm()
+  mcp.name = 'Browser'
+  mcp.command = 'npx'
+  mcp.desktop = 'first_tool'
+  mcp.env = [{ uid: 'display', key: 'DISPLAY', value: ':9' }]
+  form.name = 'Browser'
+  form.mcps.push(mcp)
+  await flushPromises()
+  expect(wrapper.find('[data-testid="plugin-mcp-desktop-0"]').exists()).toBe(true)
+  expect(wrapper.find('[data-testid="plugin-editor-validation"]').text()).toContain(
+    'remove those env entries',
+  )
+  expect(wrapper.find('[data-testid="plugin-editor-save"]').attributes('disabled')).toBeDefined()
+})

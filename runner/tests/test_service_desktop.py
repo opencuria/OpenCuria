@@ -135,9 +135,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
             return (0, "")
 
         self.runtime.exec_command_wait.side_effect = _exec
-        viewer_task = asyncio.create_task(
-            self.service.start_desktop(self.workspace_id)
-        )
+        viewer_task = asyncio.create_task(self.service.start_desktop(self.workspace_id))
         await asyncio.wait_for(entered_start.wait(), timeout=5)
         hold_task = asyncio.create_task(
             self.service.acquire_desktop(
@@ -148,17 +146,11 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         self.assertFalse(hold_task.done())
         release_start.set()
-        viewer_session, hold_session = await asyncio.gather(
-            viewer_task, hold_task
-        )
+        viewer_session, hold_session = await asyncio.gather(viewer_task, hold_task)
         # Single-flight: exactly one Xvnc start serves both holders, and
         # both leases land on the same shared session object.
-        self.assertIs(
-            self.service._desktop_sessions[self.workspace_id], viewer_session
-        )
-        self.assertIs(
-            self.service._desktop_sessions[self.workspace_id], hold_session
-        )
+        self.assertIs(self.service._desktop_sessions[self.workspace_id], viewer_session)
+        self.assertIs(self.service._desktop_sessions[self.workspace_id], hold_session)
         self.assertIs(viewer_session, hold_session)
         self.assertTrue(viewer_session.viewer_held)
         self.assertIn("run-1", viewer_session.computeruse_run_ids)
@@ -167,8 +159,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         start_calls = [
             call
             for call in self.runtime.exec_command_wait.await_args_list
-            if len(call.args[1]) > 2
-            and "/usr/bin/Xvnc :1 -geometry" in call.args[1][2]
+            if len(call.args[1]) > 2 and "/usr/bin/Xvnc :1 -geometry" in call.args[1][2]
         ]
         self.assertEqual(len(start_calls), 1)
 
@@ -215,21 +206,15 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         per ever-seen workspace (cleared on restart) is the trade-off.
         """
         self.runtime.exec_command_wait.return_value = (0, "alive")
-        await self.service.acquire_desktop(
-            self.workspace_id, holder="viewer"
-        )
+        await self.service.acquire_desktop(self.workspace_id, holder="viewer")
         lock_before = await self.service._desktop_lock(self.workspace_id)
 
         await self.service.remove_workspace(self.workspace_id)
 
         self.assertNotIn(self.workspace_id, self.service._desktop_sessions)
         # Never dropped: the same object survives removal.
-        self.assertIs(
-            self.service._desktop_locks.get(self.workspace_id), lock_before
-        )
-        self.assertIs(
-            await self.service._desktop_lock(self.workspace_id), lock_before
-        )
+        self.assertIs(self.service._desktop_locks.get(self.workspace_id), lock_before)
+        self.assertIs(await self.service._desktop_lock(self.workspace_id), lock_before)
 
     async def test_remove_workspace_clears_state_atomically_under_lock(
         self,
@@ -257,22 +242,14 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         await self.service.remove_workspace(self.workspace_id)
 
         self.assertNotIn(self.workspace_id, self.service._desktop_sessions)
-        self.assertNotIn(
-            (self.workspace_id, "run-1"), self.service._desktop_recordings
-        )
-        self.assertNotIn(
-            (self.workspace_id, "run-2"), self.service._desktop_recordings
-        )
+        self.assertNotIn((self.workspace_id, "run-1"), self.service._desktop_recordings)
+        self.assertNotIn((self.workspace_id, "run-2"), self.service._desktop_recordings)
         # Other workspaces are untouched.
         self.assertIn((other_id, "run-9"), self.service._desktop_recordings)
         # The lock entry is retained (never dropped): the same object
         # survives cleanup and is reused by later callers.
-        self.assertIs(
-            self.service._desktop_locks.get(self.workspace_id), lock_before
-        )
-        self.assertIs(
-            await self.service._desktop_lock(self.workspace_id), lock_before
-        )
+        self.assertIs(self.service._desktop_locks.get(self.workspace_id), lock_before)
+        self.assertIs(await self.service._desktop_lock(self.workspace_id), lock_before)
 
     async def test_held_lock_blocks_remove_cache_pop(self) -> None:
         """Remove pops the cache only after a lock-holding ensure finishes.
@@ -316,22 +293,16 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
             # Remove must wait for the lock: cache still present mid-ensure.
             self.assertFalse(remove_task.done())
             self.assertIn(self.workspace_id, self.service._cache)
-            await asyncio.wait_for(
-                asyncio.gather(ensure_task, remove_task), timeout=5
-            )
+            await asyncio.wait_for(asyncio.gather(ensure_task, remove_task), timeout=5)
         finally:
             self.service.desktop._ensure_desktop_process_locked = orig_ensure  # type: ignore[method-assign]
         # Ensure completed before remove popped the cache and cleared state.
-        self.assertEqual(
-            order, ["ensure-enter", "ensure-exit", "remove-done"]
-        )
+        self.assertEqual(order, ["ensure-enter", "ensure-exit", "remove-done"])
         self.assertNotIn(self.workspace_id, self.service._cache)
         self.assertNotIn(self.workspace_id, self.service._desktop_sessions)
         self.assertTrue(self.runtime.remove_workspace.awaited)
         # The lock object itself is retained and reused (never dropped).
-        self.assertIs(
-            await self.service._desktop_lock(self.workspace_id), lock
-        )
+        self.assertIs(await self.service._desktop_lock(self.workspace_id), lock)
 
     async def test_start_after_remove_fails_without_resurrect(self) -> None:
         """A queued/new start after remove fails cleanly, no session revived."""
@@ -377,9 +348,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(self.workspace_id, self.service._cache)
         self.assertNotIn(self.workspace_id, self.service._desktop_sessions)
         # Same retained lock object throughout.
-        self.assertIs(
-            await self.service._desktop_lock(self.workspace_id), lock
-        )
+        self.assertIs(await self.service._desktop_lock(self.workspace_id), lock)
         # A brand-new start after remove fails the same way.
         with self.assertRaisesRegex(ValueError, "not found"):
             await self.service.start_desktop(self.workspace_id)
@@ -420,9 +389,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await asyncio.sleep(0.05)
                 self.assertFalse(publish_task.done())
-                self.assertIn(
-                    workspace_id, self.service._desktop_sessions
-                )
+                self.assertIn(workspace_id, self.service._desktop_sessions)
                 publish_task.cancel()
                 try:
                     await publish_task
@@ -507,26 +474,20 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             self.service.desktop._ensure_desktop_process_locked = orig_ensure  # type: ignore[method-assign]
-        self.assertEqual(
-            order, ["ensure-enter", "ensure-exit"]
-        )
+        self.assertEqual(order, ["ensure-enter", "ensure-exit"])
         self.assertTrue(results[1])
         self.assertNotIn(self.workspace_id, self.service._cache)
         self.assertNotIn(self.workspace_id, self.service._desktop_sessions)
         self.assertNotIn(self.workspace_id, self.service._unreachable_since)
         self.assertTrue(self.runtime.remove_workspace.awaited)
-        self.assertIs(
-            await self.service._desktop_lock(self.workspace_id), lock
-        )
+        self.assertIs(await self.service._desktop_lock(self.workspace_id), lock)
         with self.assertRaisesRegex(ValueError, "not found"):
             await self.service.start_desktop(self.workspace_id)
 
     async def test_held_lock_blocks_remove_state_clearing(self) -> None:
         """A start holding the lock serialises remove cleanup behind it."""
         self.runtime.exec_command_wait.return_value = (0, "alive")
-        await self.service.acquire_desktop(
-            self.workspace_id, holder="viewer"
-        )
+        await self.service.acquire_desktop(self.workspace_id, holder="viewer")
         lock = await self.service._desktop_lock(self.workspace_id)
         order: list[str] = []
 
@@ -551,9 +512,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         # remove waited instead of clearing state past it (asserted via
         # order + session above). The lock object itself is retained and
         # reused (never dropped), so later callers share one lock.
-        self.assertIs(
-            await self.service._desktop_lock(self.workspace_id), lock
-        )
+        self.assertIs(await self.service._desktop_lock(self.workspace_id), lock)
 
     async def test_queued_waiter_and_third_caller_share_one_lock(self) -> None:
         """Queued waiter + third caller never run on two lock objects.
@@ -598,9 +557,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         self.service.desktop._ensure_desktop_process_locked = _blocking_ensure  # type: ignore[method-assign]
         try:
             first = asyncio.create_task(
-                self.service.acquire_desktop(
-                    self.workspace_id, holder="viewer"
-                )
+                self.service.acquire_desktop(self.workspace_id, holder="viewer")
             )
             await asyncio.wait_for(entered_first.wait(), timeout=5)
             # First waiter is queued inside the lock; a third caller must
@@ -624,9 +581,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(first, second)
         finally:
             self.service.desktop._ensure_desktop_process_locked = orig_ensure  # type: ignore[method-assign]
-        self.assertIs(
-            await self.service._desktop_lock(self.workspace_id), lock
-        )
+        self.assertIs(await self.service._desktop_lock(self.workspace_id), lock)
         session = self.service._desktop_sessions[self.workspace_id]
         self.assertTrue(session.viewer_held)
         self.assertIn("run-1", session.computeruse_run_ids)
@@ -650,9 +605,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         self.service.desktop._ensure_desktop_process_locked = _spying_ensure  # type: ignore[method-assign]
         try:
             await asyncio.gather(
-                self.service.acquire_desktop(
-                    self.workspace_id, holder="viewer"
-                ),
+                self.service.acquire_desktop(self.workspace_id, holder="viewer"),
                 self.service.acquire_desktop(
                     self.workspace_id, holder="computeruse", run_id="run-2"
                 ),
@@ -686,6 +639,8 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
                 "viewer": False,
                 "computer_use": True,
                 "generation": payload["generation"],
+                "mcp": False,
+                "holder_count": 1,
             },
         )
         self.assertEqual(payload["generation"], 1)
@@ -749,7 +704,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
                 }
             ],
         )
-        self.assertNotIn(self.workspace_id, self.service._desktop_sessions)
+        self.assertIn(self.workspace_id, self.service._desktop_sessions)
 
     async def test_recover_desktop_sessions_from_runtime_rebuilds_cache(self) -> None:
         self.runtime.exec_command_wait.return_value = (0, "alive")
@@ -770,9 +725,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_viewer_stop_keeps_process_when_computer_use_holds(self) -> None:
         self.runtime.exec_command_wait.return_value = (0, "alive")
-        await self.service.acquire_desktop(
-            self.workspace_id, holder="viewer"
-        )
+        await self.service.acquire_desktop(self.workspace_id, holder="viewer")
         await self.service.acquire_desktop(
             self.workspace_id, holder="computeruse", run_id="run-1"
         )
@@ -819,9 +772,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_computer_use_release_keeps_process_with_viewer(self) -> None:
         self.runtime.exec_command_wait.return_value = (0, "alive")
-        await self.service.acquire_desktop(
-            self.workspace_id, holder="viewer"
-        )
+        await self.service.acquire_desktop(self.workspace_id, holder="viewer")
         await self.service.acquire_desktop(
             self.workspace_id, holder="computeruse", run_id="run-1"
         )
@@ -859,9 +810,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_force_stop_kills_process_and_recordings(self) -> None:
         self.runtime.exec_command_wait.return_value = (0, "alive")
-        await self.service.acquire_desktop(
-            self.workspace_id, holder="viewer"
-        )
+        await self.service.acquire_desktop(self.workspace_id, holder="viewer")
         await self.service.acquire_desktop(
             self.workspace_id, holder="computeruse", run_id="run-1"
         )
@@ -884,9 +833,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertTrue(
             any(
-                isinstance(cmd, list)
-                and len(cmd) == 3
-                and "kill -INT 4242" in cmd[2]
+                isinstance(cmd, list) and len(cmd) == 3 and "kill -INT 4242" in cmd[2]
                 for cmd in commands
             )
         )

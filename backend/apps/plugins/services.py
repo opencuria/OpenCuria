@@ -56,13 +56,9 @@ PLAYWRIGHT_MCP_ARGS = [
     "--output-dir",
     "/workspace/.opencuria/playwright",
 ]
-#: DISPLAY is allowed through the stream env sanitizer (not in the
-#: blocked HOME/PATH/LD_… set); XAUTHORITY pins the runner-owned file
-#: so X11 clients resolve auth instead of depending on ambient state.
-PLAYWRIGHT_MCP_ENV = {
-    "DISPLAY": ":1",
-    "XAUTHORITY": "/root/.Xauthority",
-}
+#: Display bindings are supplied by the runner, never static environment.
+PLAYWRIGHT_MCP_ENV = {}
+PLAYWRIGHT_MCP_RESOURCES = {"desktop": {"activation": "first_tool"}}
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +208,18 @@ def normalize_mcp_payload(item: dict) -> dict:
     cwd = cwd.strip()
     if len(cwd) > _MAX_COMMAND_LEN or "\x00" in cwd:
         raise ValueError("MCP cwd is invalid")
+    from .schemas import PluginResources
+
+    resources = PluginResources.model_validate(item.get("resources", {}))
     env = validate_placeholder_mapping(item.get("env") or {}, field="MCP env")
+    if resources.desktop is not None:
+        if transport != PluginTransport.STDIO:
+            raise ValueError("Managed desktop resources require stdio transport")
+        if {"DISPLAY", "XAUTHORITY"} & env.keys():
+            raise ValueError(
+                "Managed desktop supplies DISPLAY and XAUTHORITY; remove these "
+                "env entries or disable the managed desktop resource"
+            )
     headers = validate_placeholder_mapping(
         item.get("headers") or {}, field="MCP headers"
     )
@@ -257,6 +264,7 @@ def normalize_mcp_payload(item: dict) -> dict:
         "args": list(args),
         "cwd": cwd,
         "env": env,
+        "resources": resources.model_dump(exclude_none=True),
         "url": url,
         "headers": headers,
         "auth_type": auth_type,
@@ -468,6 +476,7 @@ class PluginService:
                         "args": m.args,
                         "cwd": m.cwd,
                         "env": m.env,
+                        "resources": m.resources,
                         "url": m.url,
                         "headers": m.headers,
                         "auth_type": m.auth_type,
@@ -765,6 +774,7 @@ class PluginService:
                     "args": list(m.args or []),
                     "cwd": m.cwd,
                     "env": dict(m.env or {}),
+                    "resources": dict(m.resources or {}),
                     "url": m.url,
                     "headers": dict(m.headers or {}),
                     "auth_type": m.auth_type,

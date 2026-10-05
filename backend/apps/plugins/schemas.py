@@ -6,8 +6,32 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from ninja import Schema
+from pydantic import ConfigDict, Field, model_serializer
+
+
+class DesktopResource(Schema):
+    """Runner-managed display activation policy."""
+
+    model_config = ConfigDict(extra="forbid")
+    activation: Literal["server_start", "first_tool"] = "server_start"
+
+
+class PluginResources(Schema):
+    """Declared runtime resources; omission means no managed desktop."""
+
+    model_config = ConfigDict(extra="forbid")
+    desktop: DesktopResource | None = None
+
+    @model_serializer
+    def serialize_resources(self) -> dict:
+        """Absent resources serialize as {}, not a null desktop declaration."""
+        return (
+            {"desktop": self.desktop.model_dump()} if self.desktop is not None else {}
+        )
+
 
 # --- Nested component inputs ---
 
@@ -40,6 +64,7 @@ class PluginMcpServerIn(Schema):
     command: str = ""
     args: list[str] = []
     cwd: str = "/workspace"
+    resources: PluginResources = Field(default_factory=PluginResources)
     env: dict[str, str] = {}
     url: str = ""
     headers: dict[str, str] = {}
@@ -59,6 +84,7 @@ class PluginMcpServerOut(Schema):
     command: str
     args: list[str]
     cwd: str
+    resources: PluginResources = Field(default_factory=PluginResources)
     env: dict[str, str]
     url: str
     headers: dict[str, str]

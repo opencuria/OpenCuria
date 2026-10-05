@@ -105,6 +105,11 @@ def test_snapshot_only_effective_plugins(org_ctx):
     )
     payload = _make_plugin(org_ctx["org"], org_ctx["user"])
     plugin_id = payload["id"]
+    from apps.plugins.models import PluginMcpServer
+
+    PluginMcpServer.objects.filter(plugin_id=plugin_id).update(
+        resources={"desktop": {"activation": "first_tool"}}
+    )
     service_id = uuid.UUID(str(payload["credential_requirements"][0]["service_id"]))
     PluginService().set_org_activation(
         plugin_id, org_id=org_ctx["org"].id, user=org_ctx["user"], active=True
@@ -140,6 +145,9 @@ def test_snapshot_only_effective_plugins(org_ctx):
     assert [p.slug for p in snapshot.plugins] == ["p"]
     assert len(snapshot.plugins[0].skills) == 1
     assert len(snapshot.plugins[0].mcp_servers) == 1
+    assert (
+        snapshot.plugins[0].mcp_servers[0].resources.desktop.activation == "first_tool"
+    )
     assert snapshot.plugin_skills and "guide" in snapshot.plugin_skills[0].lower()
 
 
@@ -589,3 +597,19 @@ def test_stale_workspace_org_relation_fails_closed_without_query(org_ctx):
                 workspace=bare, org_id=org_ctx["org"].id
             )
     assert queries.captured_queries == []
+
+
+def test_resources_snapshot_is_typed_and_frozen():
+    from dataclasses import FrozenInstanceError
+
+    from apps.plugins.runtime_snapshot import (
+        DesktopResourceSnapshot,
+        PluginResourcesSnapshot,
+    )
+
+    desktop = DesktopResourceSnapshot()
+    snapshot = PluginResourcesSnapshot(desktop=desktop)
+    assert snapshot.desktop.activation == "server_start"
+    assert PluginResourcesSnapshot().desktop is None
+    with pytest.raises(FrozenInstanceError):
+        desktop.activation = "first_tool"

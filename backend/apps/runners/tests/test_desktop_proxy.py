@@ -363,10 +363,7 @@ async def test_proxy_loop_failures_close_runner_tunnel_once_without_reserved_cod
         {"tunnel_id": tunnel_id},
         to="runner-sid",
     )
-    assert not any(
-        event.get("code") in {1005, 1006, 1015}
-        for event in sent
-    )
+    assert not any(event.get("code") in {1005, 1006, 1015} for event in sent)
     assert "secret-token" not in caplog.text
     assert "desktop.example" not in caplog.text
 
@@ -442,8 +439,7 @@ def test_build_vnc_redirect_url_encodes_ws_path_and_disables_reconnect():
 
 def test_inject_kasm_idle_guard_inserts_into_head_and_is_idempotent():
     original = (
-        b"<html><head lang='en'><title>KasmVNC</title></head>"
-        b"<body></body></html>"
+        b"<html><head lang='en'><title>KasmVNC</title></head><body></body></html>"
     )
     patched = inject_kasm_idle_guard(original)
 
@@ -462,11 +458,11 @@ def test_kasm_idle_guard_handles_only_last_active_exception():
 
 
 def test_inject_kasm_idle_guard_inserts_after_doctype_without_head():
-    original = b"<!doctype html><html lang=\"en\"><body>vnc</body></html>"
+    original = b'<!doctype html><html lang="en"><body>vnc</body></html>'
 
     patched = inject_kasm_idle_guard(original)
 
-    assert patched.startswith(b"<!doctype html><html lang=\"en\">")
+    assert patched.startswith(b'<!doctype html><html lang="en">')
     assert patched.index(b"<!doctype html>") < patched.index(
         b"data-opencuria-kasm-idle-guard"
     )
@@ -555,3 +551,99 @@ async def test_proxy_vnc_html_injects_idle_guard(monkeypatch):
     assert b"data-opencuria-kasm-idle-guard" in body
     assert header_map[b"content-length"] == str(len(body)).encode()
     assert header_map[b"content-type"] == b"text/html"
+
+
+@pytest.mark.asyncio
+async def test_manual_tunnel_renews_existing_lease_and_closes_without_release(
+    monkeypatch,
+):
+    """Live tunnel renewal does not depend on visible-tab browser timers."""
+    from apps.runners.sio_server import get_runner_service
+
+    workspace_id, client_id = str(uuid.uuid4()), str(uuid.uuid4())
+    service = get_runner_service()
+    renewed = asyncio.Event()
+
+    async def renew(*args, **kwargs):
+        assert kwargs["viewer_client_id"] == uuid.UUID(client_id)
+        assert kwargs["intent_revision"] == 3
+        renewed.set()
+        return {"viewer_lease_state": "held"}
+
+    monkeypatch.setattr(service, "renew_desktop", renew)
+    stop = AsyncMock()
+    monkeypatch.setattr(service, "stop_desktop", stop)
+    monkeypatch.setattr(
+        service,
+        "get_workspace",
+        lambda *args: SimpleNamespace(
+            runner=SimpleNamespace(organization_id=uuid.uuid4())
+        ),
+    )
+    monkeypatch.setattr(
+        get_user_model().objects, "get", lambda **kwargs: SimpleNamespace(id=1)
+    )
+    sio = SimpleNamespace(emit=AsyncMock())
+    monkeypatch.setattr("apps.runners.sio_server.get_sio_server", lambda: sio)
+
+    async def receive():
+        await renewed.wait()
+        return {"type": "websocket.disconnect"}
+
+    await asyncio.wait_for(
+        _ws_proxy_loop(
+            receive,
+            AsyncMock(),
+            tunnel_id="renew-tunnel",
+            runner_sid="sid",
+            queue=asyncio.Queue(),
+            workspace_id=workspace_id,
+            user_id="1",
+            query_string=f"viewer_client_id={client_id}&intent_revision=3",
+        ),
+        2,
+    )
+    stop.assert_not_awaited()
+    assert sio.emit.await_args.args[0] == "desktop:proxy_ws_close"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["user", "workspace"])
+async def test_renew_lookup_failure_explicitly_closes_browser(monkeypatch, failure):
+    from apps.runners.sio_server import get_runner_service
+
+    service = get_runner_service()
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("lookup failed")
+
+    monkeypatch.setattr(
+        get_user_model().objects,
+        "get",
+        fail if failure == "user" else lambda **kwargs: SimpleNamespace(id=1),
+    )
+    monkeypatch.setattr(service, "get_workspace", fail)
+    sio = SimpleNamespace(emit=AsyncMock())
+    monkeypatch.setattr("apps.runners.sio_server.get_sio_server", lambda: sio)
+    send = AsyncMock()
+
+    async def receive():
+        await asyncio.Event().wait()
+
+    await asyncio.wait_for(
+        _ws_proxy_loop(
+            receive,
+            send,
+            tunnel_id="failed-renew",
+            runner_sid="sid",
+            queue=asyncio.Queue(),
+            workspace_id=str(uuid.uuid4()),
+            user_id="1",
+            query_string=f"viewer_client_id={uuid.uuid4()}&intent_revision=1",
+        ),
+        2,
+    )
+    assert any(
+        call.args[0]["type"] == "websocket.close" for call in send.await_args_list
+    )
+    assert sio.emit.await_args.args[0] == "desktop:proxy_ws_close"

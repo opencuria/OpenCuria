@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import structlog
@@ -1245,14 +1245,11 @@ class WorkspaceService:
                     and meta.get("image_path") != identity["image_path"]
                 ):
                     continue
-                if (
-                    scan["runtime_type"] == "docker"
-                    and (
-                        resource["kind"] != "image"
-                        or identity.get("image_tag") != f"opencuria/generations:{image}"
-                        or meta.get("published_image_id") != resource["resource_id"]
-                        or meta.get("expected_image_tag") != identity.get("image_tag")
-                    )
+                if scan["runtime_type"] == "docker" and (
+                    resource["kind"] != "image"
+                    or identity.get("image_tag") != f"opencuria/generations:{image}"
+                    or meta.get("published_image_id") != resource["resource_id"]
+                    or meta.get("expected_image_tag") != identity.get("image_tag")
                 ):
                     continue
                 failure = identity.get("failure_event")
@@ -1261,9 +1258,11 @@ class WorkspaceService:
                         **identity,
                         "image_path": meta.get("image_path", ""),
                         "image_tag": identity.get("image_tag", ""),
-                        "image_id": resource["resource_id"]
-                        if scan["runtime_type"] == "docker"
-                        else "",
+                        "image_id": (
+                            resource["resource_id"]
+                            if scan["runtime_type"] == "docker"
+                            else ""
+                        ),
                     }
                 if (
                     failure == "image_artifact:failed"
@@ -1605,7 +1604,47 @@ class WorkspaceService:
         Step 8: thin facade over
         ``WorkspaceRegistry.recover_desktop_sessions_from_runtime``.
         """
+        if self._registry.desktop_manager is not None:
+            await self.run_desktop_workers(
+                list(self._cache), self._desktop.recover_workspace
+            )
+            return
         await self._registry.recover_desktop_sessions_from_runtime()
+
+    async def run_desktop_workers(
+        self,
+        workspace_ids: list[uuid.UUID],
+        operation: Callable[[uuid.UUID], Awaitable[None]],
+    ) -> None:
+        """Run bounded, owned workers; cancel and join every worker on exit."""
+        pending = iter(workspace_ids)
+
+        async def worker() -> None:
+            for workspace_id in pending:
+                try:
+                    await asyncio.wait_for(
+                        operation(workspace_id), self._settings.desktop_lease_timeout
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "desktop_maintenance_unconfirmed",
+                        workspace_id=str(workspace_id), exc_info=True,
+                    )
+
+        workers = [
+            asyncio.create_task(worker())
+            for _ in range(min(
+                len(workspace_ids), max(1, self._settings.desktop_lease_workers)
+            ))
+        ]
+        try:
+            await asyncio.gather(*workers)
+        finally:
+            for task in workers:
+                task.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
 
     async def get_vm_metrics(self) -> dict[str, dict[str, Any]]:
         """Collect host-observed metrics for QEMU workspaces.
@@ -1665,13 +1704,20 @@ class WorkspaceService:
         command: list[str],
         workdir: str | None = None,
         env: dict[str, str] | None = None,
+        *,
+        owner: dict[str, str] | None = None,
     ) -> StreamSession:
         """Spawn a workspace-bound stdio process stream (least-privilege env).
 
         Step 3: thin facade over ``StreamManager.stream_start_process``.
         """
         return await self._streams_manager.stream_start_process(
-            workspace_id, connection_id, command, workdir=workdir, env=env
+            workspace_id,
+            connection_id,
+            command,
+            workdir=workdir,
+            env=env,
+            **({"owner": owner} if owner is not None else {}),
         )
 
     async def stream_start_tcp(
@@ -1831,6 +1877,20 @@ class WorkspaceService:
     # (``_desktop_sessions`` / ``_desktop_recordings`` /
     # ``_desktop_lock_map`` + guard) is owned by the manager and
     # exposed via property aliases above.
+
+    def configure_desktop_leases(self, state_dir: str, epoch: str) -> None:
+        """Wire durable ownership after the transport acquires its writer lock."""
+        from .services.sessions.desktop_leases import DesktopLeaseStore
+        from .services.sessions.stream_intents import StreamIntentStore
+
+        store = DesktopLeaseStore(state_dir)
+        self._streams_manager.intent_store = StreamIntentStore(state_dir)
+        self._streams_manager.lease_store = store
+        self._streams_manager.epoch = epoch
+        self._desktop.configure_leases(
+            store, epoch, self._streams_manager.close_owner_streams
+        )
+        self._registry.desktop_manager = self._desktop
 
     async def _desktop_lock(self, workspace_id: uuid.UUID) -> asyncio.Lock:
         """Return the serialising lock for one workspace desktop lifecycle.

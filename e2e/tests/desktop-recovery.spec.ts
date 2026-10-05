@@ -14,7 +14,10 @@ test.use({
   launchOptions: browserName === 'chromium' ? { executablePath: '/usr/bin/google-chrome' } : {},
 });
 
-type ApiCall = { method: string; path: string };
+type ViewerIntent = { viewer_client_id: string; intent_revision: number };
+type Lease = ViewerIntent & { state: 'held' | 'released' };
+type ApiCall = { method: string; path: string; intent?: ViewerIntent };
+
 type DiagnosticWindow = Window & {
   __iframeBoots?: number;
   __desktopDiagnostic?: {
@@ -29,7 +32,6 @@ type DiagnosticWindow = Window & {
       isConnected: boolean;
       isConnecting: boolean;
     };
-    connectMock: (workspaceId: string, proxyUrl: string) => void;
     emit: (event: string, data: unknown) => void;
   };
   __savedDesktopWindow?: Window;
@@ -113,10 +115,6 @@ const app = createApp({
       openModal: () => desktop.open(),
       closeModal: () => desktop.close(),
       switchWorkspace: (id) => { workspaceId.value = id; },
-      connectMock: (id, proxyUrl) => {
-        desktop.setConnected(id, proxyUrl);
-        desktop.setComputerUseActive(false);
-      },
       snapshot,
       emit: emitTestEvent,
     };
@@ -185,50 +183,62 @@ app.mount('#diagnostic-app');
 
   // Explicitly block all backend REST and websocket traffic. The REST routes
   // below are a complete in-browser mock, including generic API calls.
+  const leases = new Map<string, Lease>();
+  const key = (workspace: string, client: string) => `${workspace}:${client}`;
   await page.route('**/api/**', async (route) => {
     const request = route.request();
     const method = request.method();
-    const path = new URL(request.url()).pathname;
-    apiCalls.push({ method, path });
-
-    if (method === 'GET' && /\/workspaces\/A\/desktop\/status\/$/.test(path)) {
-      if (options.holdWorkspaceAStatus) await options.holdWorkspaceAStatus;
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          active: true,
-          proxy_url: '/mock-desktop/A',
-          viewer_held: true,
-          computer_use_active: false,
-        }),
-      });
+    const url = new URL(request.url());
+    const path = url.pathname;
+    const intent = method === 'POST' ? request.postDataJSON() as ViewerIntent : undefined;
+    apiCalls.push({ method, path, intent });
+    const statusMatch = path.match(/\/workspaces\/([^/]+)\/desktop\/status\/?$/);
+    if (method === 'GET' && statusMatch) {
+      const workspace = statusMatch[1];
+      const client = url.searchParams.get('viewer_client_id');
+      expect(client).toMatch(/^[\da-f]{8}(-[\da-f]{4}){3}-[\da-f]{12}$/);
+      // Capture the observation before delaying it to exercise stale responses.
+      const lease = leases.get(key(workspace, client!));
+      const observation = {
+        active: true, proxy_url: `/mock-desktop/${workspace}`,
+        viewer_held: [...leases.values()].some((entry) => entry.state === 'held'),
+        computer_use_active: false, mcp_active: true, holder_count: 2,
+        viewer_lease_state: lease?.state ?? 'unknown',
+        revision: lease?.intent_revision ?? null, epoch: 'mock-runner-epoch',
+      };
+      if (workspace === 'A' && options.holdWorkspaceAStatus) await options.holdWorkspaceAStatus;
+      await route.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify(observation) });
       return;
     }
-    if (method === 'GET' && /\/workspaces\/[^/]+\/desktop\/status\/$/.test(path)) {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          active: true,
-          proxy_url: path.includes('/B/') ? '/mock-desktop/B' : '/mock-desktop/mock',
-          viewer_held: true,
-          computer_use_active: false,
-        }),
-      });
-      return;
-    }
-
-    const startMatch = path.match(/\/workspaces\/([^/]+)\/desktop\/$/);
-    if (method === 'POST' && startMatch) {
-      if (startMatch[1] === 'A' && options.holdWorkspaceAStart) {
+    const actionMatch = path.match(/\/workspaces\/([^/]+)\/desktop\/(stop\/|renew\/)?$/);
+    if (method === 'POST' && actionMatch) {
+      const workspace = actionMatch[1];
+      const action = actionMatch[2] ?? 'start';
+      expect(intent?.viewer_client_id).toMatch(/^[\da-f]{8}(-[\da-f]{4}){3}-[\da-f]{12}$/);
+      expect(Number.isInteger(intent?.intent_revision)).toBe(true);
+      expect(intent!.intent_revision).toBeGreaterThan(0);
+      if (workspace === 'A' && action === 'start' && options.holdWorkspaceAStart)
         await options.holdWorkspaceAStart;
+      const leaseKey = key(workspace, intent!.viewer_client_id);
+      const previous = leases.get(leaseKey);
+      if (action === 'stop/') {
+        if (!previous || intent!.intent_revision >= previous.intent_revision)
+          leases.set(leaseKey, { ...intent!, state: 'released' });
+      } else if (action === 'start') {
+        // The delayed start cannot resurrect an equal-revision tombstone.
+        if (!previous || intent!.intent_revision > previous.intent_revision)
+          leases.set(leaseKey, { ...intent!, state: 'held' });
+      } else {
+        expect(previous?.state).toBe('held');
+        expect(previous?.intent_revision).toBe(intent!.intent_revision);
       }
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ task_id: `mock-start-${startMatch[1]}` }),
-      });
+      await route.fulfill({ status: action === 'renew/' ? 200 : 202,
+        contentType: 'application/json', body: JSON.stringify({
+          task_id: `mock-${action}-${workspace}`,
+          viewer_lease_state: leases.get(leaseKey)?.state,
+          revision: leases.get(leaseKey)?.intent_revision, epoch: 'mock-runner-epoch',
+        }) });
       return;
     }
 
@@ -269,9 +279,7 @@ test.describe('desktop viewer recovery regression', () => {
     await installDiagnosticPage(page, apiCalls);
 
     await page.getByTestId('open-side-panel').click();
-    await page.evaluate(() => {
-      (window as DiagnosticWindow).__desktopDiagnostic?.connectMock('A', '/mock-desktop/A');
-    });
+
     const iframe = page.locator('[data-testid="desktop-surface-iframe"]');
     await expect(iframe).toBeVisible();
     await expect(page.getByTestId('desktop-surface-loading')).toHaveCount(0);
@@ -291,9 +299,11 @@ test.describe('desktop viewer recovery regression', () => {
       }))).toEqual({ sameWindow: true, boots: 1 });
     };
 
+    expect(apiCalls.filter((call) => call.method === 'POST' && /\/A\/desktop\/$/.test(call.path))).toHaveLength(1);
     await page.getByTestId('open-desktop-modal').click();
     await expect(page.getByTestId('workspace-desktop-modal')).toBeVisible();
     await assertSameViewer();
+    expect(apiCalls.filter((call) => call.method === 'POST' && /\/A\/desktop\/$/.test(call.path))).toHaveLength(1);
     await page.getByTestId('desktop-modal-close').click();
     await expect(page.getByTestId('workspace-desktop-modal')).toHaveCount(0);
     await assertSameViewer();
@@ -347,9 +357,7 @@ test.describe('desktop viewer recovery regression', () => {
     await expect.poll(() => apiCalls.filter((call) =>
       call.method === 'POST' && /\/workspaces\/B\/desktop\/$/.test(call.path),
     ).length).toBe(1);
-    await page.evaluate(() => {
-      (window as DiagnosticWindow).__desktopDiagnostic?.connectMock('B', '/mock-desktop/B');
-    });
+
     await expect.poll(() => page.evaluate(() =>
       (window as DiagnosticWindow).__desktopDiagnostic?.snapshot(),
     )).toEqual({
@@ -362,12 +370,12 @@ test.describe('desktop viewer recovery regression', () => {
     releaseAStatus();
     await expect.poll(() => apiCalls.filter((call) =>
       call.method === 'GET' && /\/workspaces\/A\/desktop\/status\/$/.test(call.path),
-    ).length).toBe(1);
+    ).length).toBe(2);
     await page.waitForTimeout(150);
 
-    expect(apiCalls.some((call) =>
+    expect(apiCalls.filter((call) =>
       call.method === 'POST' && /\/workspaces\/A\/desktop\/$/.test(call.path),
-    )).toBe(false);
+    )).toHaveLength(1);
     expect(apiCalls.filter((call) =>
       call.method === 'POST' && /\/workspaces\/B\/desktop\/$/.test(call.path),
     )).toHaveLength(1);
@@ -382,7 +390,7 @@ test.describe('desktop viewer recovery regression', () => {
     await expect(page.getByTestId('desktop-surface-loading')).toHaveCount(0);
   });
 
-  test('waits for an in-flight A start before stopping A and preserves B', async ({ page }) => {
+  test('tombstones an in-flight A start immediately and preserves B', async ({ page }) => {
     const apiCalls: ApiCall[] = [];
     let releaseAStart!: () => void;
     const holdWorkspaceAStart = new Promise<void>((resolve) => {
@@ -405,9 +413,7 @@ test.describe('desktop viewer recovery regression', () => {
     await expect.poll(() => apiCalls.filter((call) =>
       call.method === 'POST' && /\/workspaces\/B\/desktop\/$/.test(call.path),
     ).length).toBe(1);
-    await page.evaluate(() => {
-      (window as DiagnosticWindow).__desktopDiagnostic?.connectMock('B', '/mock-desktop/B');
-    });
+
     await expect.poll(() => page.evaluate(() =>
       (window as DiagnosticWindow).__desktopDiagnostic?.snapshot(),
     )).toEqual({
@@ -417,11 +423,14 @@ test.describe('desktop viewer recovery regression', () => {
       isConnecting: false,
     });
 
-    // A's start response is still blocked, so its stop must be queued rather
-    // than racing ahead and allowing the delayed start to recreate its lease.
+    // Release is immediate. The durable same-revision tombstone must fence
+    // the delayed start rather than waiting for transport acknowledgement.
     expect(apiCalls.filter((call) =>
       call.method === 'POST' && /\/workspaces\/A\/desktop\/stop\/$/.test(call.path),
-    )).toHaveLength(0);
+    )).toHaveLength(1);
+    const aStart = apiCalls.find((call) => call.method === 'POST' && /\/A\/desktop\/$/.test(call.path))!;
+    const aStop = apiCalls.find((call) => /\/A\/desktop\/stop\/$/.test(call.path))!;
+    expect(aStop.intent).toEqual(aStart.intent);
 
     releaseAStart();
     await startAResponse;

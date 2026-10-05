@@ -50,6 +50,8 @@ class DesktopSession:
     computeruse_run_ids: set[str] = field(default_factory=set)
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     generation: int = 0
+    mcp_active: bool = False
+    holder_count: int = 0
 
 
 @dataclass
@@ -60,3 +62,5 @@ class DesktopReleaseResult:
     process_alive: bool
     viewer_held: bool
     computer_use_active: bool
+    mcp_active: bool = False
+    holder_count: int = 0

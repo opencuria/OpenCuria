@@ -317,6 +317,7 @@ class _StreamState:
         "stderr_total",
         "opened_at",
         "stdout_bytes",
+        "managed",
     )
 
     def __init__(self, connection_id: str, queue: asyncio.Queue) -> None:
@@ -333,6 +334,7 @@ class _StreamState:
         self.stderr_total = 0
         self.opened_at = 0.0
         self.stdout_bytes = 0
+        self.managed = False
 
     def append_stderr(self, data: bytes) -> None:
         """Buffer bounded stderr bytes (newest win; unbounded total kept)."""
@@ -364,6 +366,7 @@ class RunnerByteStream(WorkspaceByteStream):
         super().__init__(workspace_id, connection_id)
         self._accessor = accessor
         self._closed_locally = False
+        self._close_lock = asyncio.Lock()
 
     async def receive(self) -> bytes:
         """Return the next stdout chunk; ``b""`` marks clean EOF."""
@@ -379,10 +382,11 @@ class RunnerByteStream(WorkspaceByteStream):
 
     async def aclose(self) -> None:
         """Close the stream (idempotent; remote close follows)."""
-        if self._closed_locally:
-            return
-        self._closed_locally = True
-        await self._accessor._stream_close(self.connection_id)
+        async with self._close_lock:
+            if self._closed_locally:
+                return
+            await self._accessor._stream_close(self.connection_id)
+            self._closed_locally = True
 
     async def wait_closed(self) -> int | None:
         """Wait for the remote close; return exit code when known."""
@@ -1749,21 +1753,35 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             )
 
     async def _stream_close(self, connection_id: str) -> None:
-        """Close one stream remotely (best effort, always unregisters)."""
+        """Join remote cleanup; retain managed identity on unverified closure."""
+        from ..desktop_leases import cleanup_rpc
+
+        state = self._byte_streams.get(connection_id)
+        managed = bool(state is not None and state.managed)
         try:
-            with contextlib.suppress(Exception):
-                await asyncio.shield(
-                    self._stream_call(
-                        "workspace:stream_close",
-                        {
-                            "connection_id": connection_id,
-                            "workspace_id": self.workspace_id,
-                        },
-                        None,
-                    )
+            result = await cleanup_rpc(
+                self._stream_call(
+                    "workspace:stream_close",
+                    {
+                        "connection_id": connection_id,
+                        "workspace_id": self.workspace_id,
+                    },
+                    None,
                 )
-        finally:
+            )
+            if managed and (
+                not isinstance(result, dict)
+                or result.get("ok") is not True
+                or result.get("closed") is not True
+            ):
+                raise StreamClosedError("Managed process closure was not confirmed")
+        except Exception:
+            if managed:
+                raise
+        else:
             self._unregister_byte_stream(connection_id)
+            return
+        self._unregister_byte_stream(connection_id)
 
     async def _stream_wait_closed(self, connection_id: str) -> int | None:
         """Wait for the runner close notice (exit code when known).
@@ -1799,6 +1817,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         if connection_id in self._byte_streams:
             raise ValueError(f"Duplicate connection_id: {connection_id!r}")
         state = self._register_byte_stream(connection_id)
+        state.managed = start_payload.get("owner") is not None
         try:
             result = await self._stream_call(
                 "workspace:stream_start", start_payload, timeout
@@ -1830,8 +1849,10 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         workdir: str = "/workspace",
         env: dict[str, str] | None = None,
         timeout: float | None = None,
+        *,
+        owner: dict[str, str] | None = None,
     ) -> WorkspaceByteStream:
-        """Open a workspace-local stdio process stream."""
+        """Open stdio with an optional runner-managed desktop owner."""
         safe_workdir = sanitize_exec_workdir(workdir)
         if not isinstance(command, list) or not command:
             raise ValueError("command must be a non-empty argv list")
@@ -1858,6 +1879,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                     "command": argv,
                     "workdir": safe_workdir,
                     "env": dict(env or {}),
+                    **({"owner": dict(owner)} if owner is not None else {}),
                 },
                 timeout,
             )

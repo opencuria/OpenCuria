@@ -115,6 +115,7 @@ describe('pluginForms', () => {
       uid: 'mcp-oauth',
       name: 'Notion',
       transport: 'streamable_http',
+      desktop: 'none',
       command: '',
       argsText: '',
       cwd: '/workspace',
@@ -213,6 +214,7 @@ describe('pluginForms', () => {
       uid: 'm1',
       name: 'Runner',
       transport: 'stdio',
+      desktop: 'none',
       command: '',
       argsText: '',
       cwd: '/workspace',
@@ -254,6 +256,7 @@ describe('pluginForms', () => {
       uid: 'm1',
       name: 'Runner',
       transport: 'stdio',
+      desktop: 'none',
       command: 'npx',
       argsText: '-y',
       cwd: '/workspace',
@@ -319,6 +322,7 @@ describe('pluginForms', () => {
       uid: 'm1',
       name: 'Runner',
       transport: 'stdio',
+      desktop: 'none',
       command: 'npx --yes; rm -rf',
       argsText: '',
       cwd: '/workspace',
@@ -348,6 +352,7 @@ describe('pluginForms', () => {
       uid: 'm1',
       name: 'Runner',
       transport: 'streamable_http',
+      desktop: 'none',
       command: '',
       argsText: '',
       cwd: '/workspace',
@@ -369,4 +374,20 @@ describe('pluginForms', () => {
     form.name = 'Demo'
     expect(validatePluginForm(form).filter((e) => e.includes('identifier'))).toEqual([])
   })
+})
+
+it('round-trips managed desktop policies and rejects explicit display conflicts', () => {
+  const plugin = makePlugin()
+  plugin.mcp_servers[0]!.resources = { desktop: {} }
+  const form = pluginToForm(plugin)
+  expect(form.mcps[0]!.desktop).toBe('server_start')
+  form.mcps[0]!.desktop = 'first_tool'
+  expect(formToCreateIn(form).mcp_servers?.[0]?.resources).toEqual({
+    desktop: { activation: 'first_tool' },
+  })
+  form.mcps[0]!.env = [{ uid: 'display', key: 'DISPLAY', value: ':9' }]
+  expect(validatePluginForm(form).join(' ')).toContain('remove those env entries')
+  expect(formToCreateIn(form).mcp_servers?.[0]?.env).toEqual({ DISPLAY: ':9' })
+  form.mcps[0]!.desktop = 'none'
+  expect(formToCreateIn(form).mcp_servers?.[0]?.resources).toEqual({})
 })

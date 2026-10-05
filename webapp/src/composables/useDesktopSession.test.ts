@@ -1,550 +1,305 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { effectScope, ref } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
-
+import { flushPromises } from '@vue/test-utils'
 import { useDesktopSession } from './useDesktopSession'
+import {
+  desktopViewerClientId,
+  desktopViewerSession,
+  refreshDesktopViewer,
+} from './useDesktopSessionCoordinator'
 import { useDesktopStore } from '@/stores/desktop'
-import * as workspacesApi from '@/services/workspaces.api'
+import * as api from '@/services/workspaces.api'
 
 vi.mock('@/services/workspaces.api', () => ({
   getDesktopStatus: vi.fn(),
   startDesktop: vi.fn(),
   stopDesktop: vi.fn(),
+  renewDesktop: vi.fn(),
   takeDesktopControl: vi.fn(),
   writeDesktopClipboard: vi.fn(),
   readDesktopClipboard: vi.fn(),
 }))
-
 vi.mock('@/stores/notifications', () => ({
   useNotificationStore: () => ({ success: vi.fn(), error: vi.fn() }),
 }))
-
-type Handler = (data: Record<string, unknown>) => void
-
-const handlers = new Map<string, Handler>()
-
+const handlers = new Map<string, (data: { workspace_id: string }) => void>()
 vi.mock('@/services/socket', () => ({
-  onEvent: vi.fn((event: string, cb: Handler) => {
+  onEvent: vi.fn((event: string, cb: (data: { workspace_id: string }) => void) => {
     handlers.set(event, cb)
-    return () => {
-      handlers.delete(event)
-    }
+    return () => handlers.delete(event)
   }),
 }))
-
-const getDesktopStatus = vi.mocked(workspacesApi.getDesktopStatus)
-const startDesktopApi = vi.mocked(workspacesApi.startDesktop)
-const stopDesktopApi = vi.mocked(workspacesApi.stopDesktop)
-
-function emit(event: string, data: Record<string, unknown>): void {
-  handlers.get(event)?.(data)
+let count = 0
+const scopes: ReturnType<typeof effectScope>[] = []
+function surface(id: string, observer = false) {
+  const scope = effectScope()
+  scopes.push(scope)
+  const session = scope.run(() => useDesktopSession(ref(id), { observer }))!
+  return { scope, session }
 }
+function status(id: string, state = 'held', epoch = 'epoch-1') {
+  return {
+    active: true,
+    proxy_url: `/ws/desktop/${id}/`,
+    viewer_held: true,
+    computer_use_active: false,
+    mcp_active: true,
+    holder_count: 2,
+    viewer_lease_state: state,
+    revision: desktopViewerSession(id).revision,
+    epoch,
+  }
+}
+beforeEach(() => {
+  setActivePinia(createPinia())
+  vi.clearAllMocks()
+  handlers.clear()
+  vi.useFakeTimers()
+  vi.mocked(api.startDesktop).mockResolvedValue({ task_id: 'start' })
+  vi.mocked(api.stopDesktop).mockResolvedValue({ task_id: 'stop' })
+  vi.mocked(api.getDesktopStatus).mockImplementation(async (id) => status(id))
+  vi.mocked(api.renewDesktop).mockImplementation(async (id) => status(id))
+})
+afterEach(async () => {
+  scopes.splice(0).forEach((scope) => scope.stop())
+  await flushPromises()
+  vi.useRealTimers()
+})
 
-describe('useDesktopSession lifecycle', () => {
-  beforeEach(() => {
-    setActivePinia(createPinia())
-    handlers.clear()
-    vi.clearAllMocks()
-    stopDesktopApi.mockResolvedValue({ task_id: 'task-stop' })
-  })
-
-  it('keeps the connected iframe on viewer_released while computer-use holds', () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    const session = useDesktopSession(ref('ws-1'))
-    session.setupSocketListeners()
-
-    emit('desktop:viewer_released', {
-      workspace_id: 'ws-1',
-      task_id: 'task-1',
-      computer_use_active: true,
+describe('per-tab desktop viewer intents', () => {
+  it('uses one in-memory UUID and own status query, renews held intent', async () => {
+    const id = `viewer-${++count}`
+    const { session } = surface(id)
+    await session.startDesktop()
+    expect(desktopViewerClientId).toMatch(/^[\da-f]{8}(-[\da-f]{4}){3}-[\da-f]{12}$/)
+    expect(api.startDesktop).toHaveBeenCalledWith(id, {
+      viewer_client_id: desktopViewerClientId,
+      intent_revision: 1,
     })
-
-    expect(store.isConnected).toBe(true)
-    expect(store.proxyUrl).toBe('/ws/desktop/ws-1/')
-    expect(store.computerUseActive).toBe(true)
-    session.cleanupSocketListeners()
-  })
-
-  it('disconnects on viewer_released when nothing still holds the process', () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    const session = useDesktopSession(ref('ws-1'))
-    session.setupSocketListeners()
-
-    emit('desktop:viewer_released', {
-      workspace_id: 'ws-1',
-      task_id: 'task-1',
-      computer_use_active: false,
+    expect(api.getDesktopStatus).toHaveBeenCalledWith(id, desktopViewerClientId)
+    expect(useDesktopStore().viewerOwned).toBe(true)
+    await vi.advanceTimersByTimeAsync(45_000)
+    expect(api.renewDesktop).toHaveBeenCalledWith(id, {
+      viewer_client_id: desktopViewerClientId,
+      intent_revision: 1,
     })
-
-    expect(store.isConnected).toBe(false)
-    expect(store.proxyUrl).toBeNull()
-    expect(store.computerUseActive).toBe(false)
-    session.cleanupSocketListeners()
   })
 
-  it('syncs computer-use false on duplicate desktop:started for the same proxy URL (no remount)', () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    store.setComputerUseActive(true)
-    const session = useDesktopSession(ref('ws-1'))
-    session.setupSocketListeners()
-
-    const urlBefore = store.proxyUrl
-    emit('desktop:started', {
-      workspace_id: 'ws-1',
-      task_id: 'task-1',
-      proxy_url: '/ws/desktop/ws-1/',
-      computer_use_active: false,
+  it('refcounts later surfaces and sends only final release', async () => {
+    const id = `viewer-${++count}`
+    const first = surface(id)
+    await first.session.startDesktop()
+    const second = surface(id)
+    await second.session.startDesktop()
+    expect(api.startDesktop).toHaveBeenCalledTimes(1)
+    first.scope.stop()
+    await flushPromises()
+    expect(api.stopDesktop).not.toHaveBeenCalled()
+    second.scope.stop()
+    await flushPromises()
+    expect(api.stopDesktop).toHaveBeenCalledExactlyOnceWith(id, {
+      viewer_client_id: desktopViewerClientId,
+      intent_revision: 1,
     })
-
-    expect(store.proxyUrl).toBe(urlBefore)
-    expect(store.isConnected).toBe(true)
-    expect(store.computerUseActive).toBe(false)
-    session.cleanupSocketListeners()
   })
 
-  it('syncs computer-use false on desktop:started with a new proxy URL', () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    store.setComputerUseActive(true)
-    const session = useDesktopSession(ref('ws-1'))
-    session.setupSocketListeners()
-
-    emit('desktop:started', {
-      workspace_id: 'ws-1',
-      task_id: 'task-1',
-      proxy_url: '/ws/desktop/ws-1/?v=2',
-      computer_use_active: false,
-    })
-
-    expect(store.proxyUrl).toBe('/ws/desktop/ws-1/?v=2')
-    expect(store.isConnected).toBe(true)
-    expect(store.computerUseActive).toBe(false)
-    session.cleanupSocketListeners()
-  })
-
-  it('stopDesktop falls back to status when the socket event is missed', async () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    getDesktopStatus.mockResolvedValue({
-      active: false,
-      proxy_url: null,
-      viewer_held: false,
-      computer_use_active: false,
-    })
-    const session = useDesktopSession(ref('ws-1'))
-
-    await expect(session.stopDesktop()).resolves.toBe(true)
-
-    expect(stopDesktopApi).toHaveBeenCalledWith('ws-1')
-    expect(store.isConnected).toBe(false)
-  })
-
-  it('stopDesktop keeps the session read-only when computer-use still holds', async () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    store.setComputerUseActive(true)
-    getDesktopStatus.mockResolvedValue({
-      active: true,
-      proxy_url: '/ws/desktop/ws-1/',
-      viewer_held: false,
-      computer_use_active: true,
-    })
-    const session = useDesktopSession(ref('ws-1'))
-
-    await expect(session.stopDesktop()).resolves.toBe(true)
-
-    expect(store.isConnected).toBe(true)
-    expect(store.proxyUrl).toBe('/ws/desktop/ws-1/')
-    expect(store.computerUseActive).toBe(true)
-  })
-
-  it('stopDesktop polls through a stale viewer lease until inactive', async () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    getDesktopStatus
-      .mockResolvedValueOnce({
-        active: true,
-        proxy_url: '/ws/desktop/ws-1/',
-        viewer_held: true,
-        computer_use_active: false,
-      })
-      .mockResolvedValueOnce({
-        active: false,
-        proxy_url: null,
-        viewer_held: false,
-        computer_use_active: false,
-      })
-    const sleeps: number[] = []
-    const session = useDesktopSession(ref('ws-1'), {
-      sleep: (ms: number) => {
-        sleeps.push(ms)
-        return Promise.resolve()
-      },
-      stopPollIntervalMs: 250,
-      stopPollTimeoutMs: 5000,
-    })
-
-    await expect(session.stopDesktop()).resolves.toBe(true)
-
-    expect(getDesktopStatus).toHaveBeenCalledTimes(2)
-    expect(sleeps).toEqual([250])
-    expect(store.isConnected).toBe(false)
-    expect(store.proxyUrl).toBeNull()
-  })
-
-  it('stopDesktop keeps viewer released + CU active after a stale first read', async () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    getDesktopStatus
-      .mockResolvedValueOnce({
-        active: true,
-        proxy_url: '/ws/desktop/ws-1/',
-        viewer_held: true,
-        computer_use_active: true,
-      })
-      .mockResolvedValueOnce({
-        active: true,
-        proxy_url: '/ws/desktop/ws-1/',
-        viewer_held: false,
-        computer_use_active: true,
-      })
-    const session = useDesktopSession(ref('ws-1'), {
-      sleep: () => Promise.resolve(),
-      stopPollIntervalMs: 250,
-      stopPollTimeoutMs: 5000,
-    })
-
-    await expect(session.stopDesktop()).resolves.toBe(true)
-
-    expect(getDesktopStatus).toHaveBeenCalledTimes(2)
-    expect(store.isConnected).toBe(true)
-    expect(store.proxyUrl).toBe('/ws/desktop/ws-1/')
-    expect(store.computerUseActive).toBe(true)
-  })
-
-  it('stopDesktop disconnects locally after repeated poll errors when CU unknown', async () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    getDesktopStatus.mockRejectedValue(new Error('net down'))
-    const sleeps: number[] = []
-    const session = useDesktopSession(ref('ws-1'), {
-      sleep: (ms: number) => {
-        sleeps.push(ms)
-        return Promise.resolve()
-      },
-      stopPollIntervalMs: 250,
-      stopPollTimeoutMs: 5000,
-    })
-
-    await expect(session.stopDesktop()).resolves.toBe(true)
-
-    expect(getDesktopStatus).toHaveBeenCalledTimes(3)
-    expect(sleeps).toEqual([250, 250])
-    expect(store.isConnected).toBe(false)
-    expect(store.proxyUrl).toBeNull()
-  })
-
-  it('stopDesktop keeps the iframe when polls fail but CU is known active', async () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    store.setComputerUseActive(true)
-    getDesktopStatus.mockRejectedValue(new Error('net down'))
-    const session = useDesktopSession(ref('ws-1'), {
-      sleep: () => Promise.resolve(),
-      stopPollIntervalMs: 250,
-      stopPollTimeoutMs: 5000,
-    })
-
-    await expect(session.stopDesktop()).resolves.toBe(true)
-
-    expect(store.isConnected).toBe(true)
-    expect(store.proxyUrl).toBe('/ws/desktop/ws-1/')
-    expect(store.computerUseActive).toBe(true)
-  })
-
-  it('stopDesktop never overwrites a workspace switch during the poll', async () => {
-    const workspaceId = ref('ws-1')
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    getDesktopStatus.mockImplementation(async () => {
-      workspaceId.value = 'ws-2'
-      return {
-        active: false,
-        proxy_url: null,
-        viewer_held: false,
-        computer_use_active: false,
-      }
-    })
-    const session = useDesktopSession(workspaceId, {
-      sleep: () => Promise.resolve(),
-    })
-
-    await expect(session.stopDesktop()).resolves.toBe(true)
-
-    // Stale ws-1 status must not touch the store of the new workspace.
-    expect(store.isConnected).toBe(true)
-    expect(store.proxyUrl).toBe('/ws/desktop/ws-1/')
-  })
-
-  it('stopDesktop after cleanupSocketListeners does not mutate the store', async () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    type DesktopStatus = Awaited<ReturnType<typeof getDesktopStatus>>
-    let resolveStatus!: (status: DesktopStatus) => void
-    getDesktopStatus.mockImplementation(
-      () =>
-        new Promise<DesktopStatus>((resolve) => {
-          resolveStatus = resolve
-        }),
-    )
-    const session = useDesktopSession(ref('ws-1'), {
-      sleep: () => Promise.resolve(),
-    })
-
-    const pending = session.stopDesktop()
-    // Let the POST resolve and the first status poll start so the mock
-    // implementation (which captures resolveStatus) is installed.
-    await Promise.resolve()
-    await Promise.resolve()
-    await Promise.resolve()
-    // Simulate unmount/parallel stop invalidating the in-flight poll.
-    session.cleanupSocketListeners()
-    resolveStatus({
-      active: false,
-      proxy_url: null,
-      viewer_held: false,
-      computer_use_active: false,
-    })
-
-    await expect(pending).resolves.toBe(true)
-
-    // The invalidated poll must leave the store untouched.
-    expect(store.isConnected).toBe(true)
-    expect(store.proxyUrl).toBe('/ws/desktop/ws-1/')
-  })
-
-  it('stopDesktop invalidated during the stop POST never polls or mutates', async () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    let resolveStop!: (value: { task_id: string }) => void
-    stopDesktopApi.mockImplementationOnce(
-      () =>
-        new Promise<{ task_id: string }>((resolve) => {
-          resolveStop = resolve
-        }),
-    )
-    const session = useDesktopSession(ref('ws-1'), {
-      sleep: () => Promise.resolve(),
-    })
-
-    const pending = session.stopDesktop()
-    expect(stopDesktopApi).toHaveBeenCalledWith('ws-1')
-    // Simulate unmount/parallel stop invalidating the in-flight POST.
-    session.cleanupSocketListeners()
-    resolveStop({ task_id: 'task-stop' })
-
-    await expect(pending).resolves.toBe(true)
-
-    // The invalidated POST must not trigger any status poll or mutation.
-    expect(getDesktopStatus).not.toHaveBeenCalled()
-    expect(store.isConnected).toBe(true)
-    expect(store.proxyUrl).toBe('/ws/desktop/ws-1/')
-  })
-
-  it('stopDesktopIfActive disconnects locally even when the stop POST fails', async () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    stopDesktopApi.mockRejectedValueOnce(new Error('boom'))
-    const session = useDesktopSession(ref('ws-1'))
-
-    await session.stopDesktopIfActive('ws-1')
-
-    expect(store.isConnected).toBe(false)
-    expect(store.proxyUrl).toBeNull()
-  })
-
-  it('bumps viewer generation on reconnect without restarting a live session', () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    const session = useDesktopSession(ref('ws-1'))
-
-    session.handleReconnect()
-
-    expect(store.viewerGeneration).toBe(1)
-    expect(store.isConnected).toBe(true)
-    expect(store.proxyUrl).toBe('/ws/desktop/ws-1/')
-    expect(startDesktopApi).not.toHaveBeenCalled()
-  })
-
-  it('starts the desktop on reconnect when no session is connected', async () => {
-    startDesktopApi.mockResolvedValue({ task_id: 'task-1' })
-    getDesktopStatus.mockResolvedValue({
-      active: false,
-      proxy_url: null,
-      viewer_held: false,
-      computer_use_active: false,
-    })
-    const store = useDesktopStore()
-    const session = useDesktopSession(ref('ws-1'))
-
-    session.handleReconnect()
-    await Promise.resolve()
-
-    expect(store.isConnecting).toBe(true)
-    expect(startDesktopApi).toHaveBeenCalledWith('ws-1')
-    expect(store.viewerGeneration).toBe(0)
-  })
-
-  it('does not start the captured old workspace after switching while status is pending', async () => {
-    const workspaceId = ref('ws-1')
-    const store = useDesktopStore()
-    let resolveOldStatus!: (status: Awaited<ReturnType<typeof getDesktopStatus>>) => void
-    getDesktopStatus.mockImplementation((id) => {
-      if (id === 'ws-1') {
-        return new Promise((resolve) => {
-          resolveOldStatus = resolve
-        })
-      }
-      return Promise.resolve({
-        active: false,
-        proxy_url: null,
-        viewer_held: false,
-        computer_use_active: false,
-      })
-    })
-    startDesktopApi.mockResolvedValue({ task_id: 'task-start' })
-    const oldSession = useDesktopSession(workspaceId)
-    const oldStart = oldSession.startDesktop()
-    const oldRelease = oldSession.stopDesktopIfActive('ws-1')
-
-    workspaceId.value = 'ws-2'
-    store.reset()
-    const newSession = useDesktopSession(workspaceId)
-    const newStart = newSession.startDesktop()
-    await newStart
-    resolveOldStatus({
-      active: false,
-      proxy_url: null,
-      viewer_held: false,
-      computer_use_active: false,
-    })
-    await oldStart
-    await oldRelease
-
-    expect(getDesktopStatus.mock.calls.map(([id]) => id)).toEqual(['ws-1', 'ws-2'])
-    expect(startDesktopApi).toHaveBeenCalledTimes(1)
-    expect(startDesktopApi).toHaveBeenCalledWith('ws-2')
-    expect(store.workspaceId).toBe('ws-2')
-    expect(store.isConnecting).toBe(true)
-    expect(stopDesktopApi).toHaveBeenCalledWith('ws-1')
-  })
-
-  it('coordinates pending starts across composable instances on scope disposal', async () => {
-    const workspaceId = ref('ws-1')
-    let resolveStatus!: (status: Awaited<ReturnType<typeof getDesktopStatus>>) => void
-    getDesktopStatus.mockImplementation(
-      () => new Promise((resolve) => { resolveStatus = resolve }),
-    )
-    const sidePanelScope = effectScope()
-    const surfaceScope = effectScope()
-    const sidePanel = sidePanelScope.run(() => useDesktopSession(workspaceId))!
-    const surface = surfaceScope.run(() => useDesktopSession(workspaceId))!
-
-    const start = sidePanel.startDesktop()
-    const release = surface.stopDesktopIfActive('ws-1')
-
-    expect(getDesktopStatus).toHaveBeenCalledTimes(1)
-    expect(startDesktopApi).not.toHaveBeenCalled()
-    expect(stopDesktopApi).toHaveBeenCalledWith('ws-1')
-
-    sidePanelScope.stop()
-    resolveStatus({
-      active: false,
-      proxy_url: null,
-      viewer_held: false,
-      computer_use_active: false,
-    })
-    await Promise.all([start, release])
-
-    expect(startDesktopApi).not.toHaveBeenCalled()
-    expect(stopDesktopApi).toHaveBeenCalledTimes(1)
-    surfaceScope.stop()
-  })
-
-  it('waits for an in-flight start POST before issuing the globally deduplicated stop', async () => {
-    const store = useDesktopStore()
-    const workspaceId = ref('ws-1')
-    getDesktopStatus.mockResolvedValue({
-      active: false,
-      proxy_url: null,
-      viewer_held: false,
-      computer_use_active: false,
-    })
-    let resolveStart!: (value: { task_id: string }) => void
-    startDesktopApi.mockImplementationOnce(
-      () => new Promise((resolve) => { resolveStart = resolve }),
-    )
-    const firstScope = effectScope()
-    const secondScope = effectScope()
-    const starter = firstScope.run(() => useDesktopSession(workspaceId))!
-    const releaser = secondScope.run(() => useDesktopSession(workspaceId))!
-
-    const start = starter.startDesktop()
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(startDesktopApi).toHaveBeenCalledWith('ws-1')
-
-    const release = releaser.stopDesktopIfActive('ws-1')
-    expect(stopDesktopApi).not.toHaveBeenCalled()
-    resolveStart({ task_id: 'task-start' })
-    await Promise.all([start, release])
-    await Promise.resolve()
-
-    expect(stopDesktopApi).toHaveBeenCalledTimes(1)
-    expect(stopDesktopApi).toHaveBeenCalledWith('ws-1')
-    firstScope.stop()
-    secondScope.stop()
-  })
-
-  it('releases a remembered old lease after the shared store has been reset', async () => {
-    const workspaceId = ref('ws-1')
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    const session = useDesktopSession(workspaceId)
-
-    // WorkspaceToolsSplit may reset the shared store before child teardown.
-    store.reset()
-    workspaceId.value = 'ws-2'
-    store.setConnected('ws-2', '/ws/desktop/ws-2/')
-    await session.stopDesktopIfActive('ws-1')
-
-    expect(stopDesktopApi).toHaveBeenCalledTimes(1)
-    expect(stopDesktopApi).toHaveBeenCalledWith('ws-1')
-    expect(store.workspaceId).toBe('ws-2')
-    expect(store.proxyUrl).toBe('/ws/desktop/ws-2/')
-  })
-
-  it('sends only one stop for concurrent old-workspace teardowns', async () => {
-    const store = useDesktopStore()
-    store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    const session = useDesktopSession(ref('ws-1'))
-    let resolveStop!: (value: { task_id: string }) => void
-    stopDesktopApi.mockImplementationOnce(
-      () => new Promise((resolve) => {
-        resolveStop = resolve
+  it('tombstones immediately before a delayed start finishes and ignores late completion', async () => {
+    const id = `viewer-${++count}`
+    let finish!: (value: { task_id: string }) => void
+    vi.mocked(api.startDesktop).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve
       }),
     )
+    const first = surface(id)
+    const pending = first.session.startDesktop()
+    first.scope.stop()
+    await flushPromises()
+    expect(api.stopDesktop).toHaveBeenCalledTimes(1)
+    const second = surface(id)
+    await second.session.startDesktop()
+    expect(api.startDesktop).toHaveBeenLastCalledWith(id, {
+      viewer_client_id: desktopViewerClientId,
+      intent_revision: 2,
+    })
+    finish({ task_id: 'old' })
+    await pending
+    expect(desktopViewerSession(id).revision).toBe(2)
+    expect(desktopViewerSession(id).wanted).toBe(true)
+  })
 
-    const firstStop = session.stopDesktopIfActive('ws-1')
-    const secondStop = session.stopDesktopIfActive('ws-1')
-    await Promise.resolve()
-    expect(stopDesktopApi).toHaveBeenCalledTimes(1)
-    resolveStop({ task_id: 'task-stop' })
-    await Promise.all([firstStop, secondStop])
+  it('never inherits membership from global active broadcasts or observer state', async () => {
+    const id = `viewer-${++count}`
+    vi.mocked(api.getDesktopStatus).mockResolvedValue({
+      ...status(id),
+      viewer_lease_state: 'unknown',
+      revision: 0,
+    })
+    const { session } = surface(id, true)
+    session.setupSocketListeners()
+    await session.startDesktop()
+    handlers.get('desktop:started')?.({ workspace_id: id })
+    await flushPromises()
+    const store = useDesktopStore()
+    expect(store.isConnected).toBe(true)
+    expect(store.mcpActive).toBe(true)
+    expect(store.holderCount).toBe(2)
+    expect(store.viewerOwned).toBe(false)
+    expect(store.intentRevision).toBeNull()
+    await vi.advanceTimersByTimeAsync(90_000)
+    await session.stopDesktop()
+    expect(api.startDesktop).not.toHaveBeenCalled()
+    expect(api.stopDesktop).not.toHaveBeenCalled()
+    expect(api.renewDesktop).not.toHaveBeenCalled()
+  })
 
-    expect(stopDesktopApi).toHaveBeenCalledTimes(1)
+  it('reacquires higher revision after expiry and epoch change rather than renewing ended lease', async () => {
+    const id = `viewer-${++count}`
+    const { session } = surface(id)
+    await session.startDesktop()
+    vi.mocked(api.getDesktopStatus).mockImplementationOnce(async () => status(id, 'expired'))
+    await refreshDesktopViewer(id)
+    expect(desktopViewerSession(id).revision).toBe(2)
+    vi.mocked(api.getDesktopStatus).mockImplementation(async () => status(id, 'held', 'epoch-2'))
+    await refreshDesktopViewer(id)
+    expect(desktopViewerSession(id).revision).toBe(3)
+    expect(api.renewDesktop).not.toHaveBeenCalled()
+  })
+
+  it('does not renew reserved or globally held leases, retries observation on outage', async () => {
+    const id = `viewer-${++count}`
+    vi.mocked(api.getDesktopStatus).mockImplementation(async () => status(id, 'reserved'))
+    const { session } = surface(id)
+    await session.startDesktop()
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(api.renewDesktop).not.toHaveBeenCalled()
+    vi.mocked(api.getDesktopStatus).mockRejectedValueOnce(new Error('offline'))
+    await refreshDesktopViewer(id)
+    expect(api.startDesktop).toHaveBeenCalledTimes(1)
+    expect(desktopViewerSession(id).error).toBe('offline')
+  })
+
+  it('does not release an active desktop merely inherited from Pinia', async () => {
+    const id = `viewer-${++count}`
+    useDesktopStore().setConnected(id, `/ws/desktop/${id}/`)
+    const { scope } = surface(id)
+    scope.stop()
+    await flushPromises()
+    expect(api.stopDesktop).not.toHaveBeenCalled()
+  })
+
+  it('ignores an old own-status response after a newer acquire', async () => {
+    const id = `viewer-${++count}`
+    let resolveStatus!: (value: ReturnType<typeof status>) => void
+    vi.mocked(api.getDesktopStatus).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStatus = resolve
+      }),
+    )
+    const { session } = surface(id)
+    const first = session.startDesktop()
+    await flushPromises()
+    await session.stopDesktop()
+    await session.startDesktop()
+    resolveStatus({ ...status(id), revision: 1, viewer_lease_state: 'expired' })
+    await first
+    expect(desktopViewerSession(id).revision).toBe(2)
+    expect(useDesktopStore().viewerOwned).toBe(true)
+    expect(api.startDesktop).toHaveBeenCalledTimes(2)
+  })
+
+  it('retries a failed final tombstone with the same revision', async () => {
+    const id = `viewer-${++count}`
+    const { session } = surface(id)
+    await session.startDesktop()
+    vi.mocked(api.stopDesktop).mockRejectedValueOnce(new Error('offline'))
+    expect(await session.stopDesktop()).toBe(false)
+    await vi.advanceTimersByTimeAsync(45_000)
+    expect(api.stopDesktop).toHaveBeenCalledTimes(2)
+    expect(api.stopDesktop).toHaveBeenLastCalledWith(id, {
+      viewer_client_id: desktopViewerClientId,
+      intent_revision: 1,
+    })
+    expect(api.startDesktop).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends release after failed start and reports stop failure without claiming ownership', async () => {
+    const id = `viewer-${++count}`
+    vi.mocked(api.startDesktop).mockRejectedValueOnce(new Error('permission denied'))
+    const { session } = surface(id)
+    await session.startDesktop()
+    expect(session.error.value).toBe('permission denied')
+    vi.mocked(api.stopDesktop).mockRejectedValueOnce(new Error('offline'))
+    expect(await session.stopDesktop()).toBe(false)
+    expect(useDesktopStore().viewerOwned).toBe(false)
+    expect(api.stopDesktop).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('viewer observation fencing and bounded startup', () => {
+  it('retries reopen only after older closing intent is conclusively ended', async () => {
+    const id = `viewer-${++count}`
+    const { session } = surface(id)
+    await session.startDesktop()
+    await session.stopDesktop()
+    vi.mocked(api.getDesktopStatus).mockResolvedValueOnce({
+      ...status(id, 'closing'),
+      revision: 1,
+    })
+    await session.startDesktop()
+    expect(api.startDesktop).toHaveBeenCalledTimes(2)
+    expect(desktopViewerSession(id).revision).toBe(2)
+    vi.mocked(api.getDesktopStatus).mockResolvedValueOnce({
+      ...status(id, 'released'),
+      revision: 1,
+    })
+    await refreshDesktopViewer(id)
+    expect(api.startDesktop).toHaveBeenCalledTimes(3)
+    expect(desktopViewerSession(id).revision).toBe(3)
+    expect(desktopViewerSession(id).leaseState).toBe('held')
+    expect(desktopViewerSession(id).connecting).toBe(false)
+  })
+
+  it('bounds asynchronous rejected start retries and unknown startup polling', async () => {
+    const id = `viewer-${++count}`
+    const { session } = surface(id)
+    vi.mocked(api.getDesktopStatus).mockResolvedValue({
+      ...status(id, 'released'),
+      revision: 0,
+    })
+    await session.startDesktop()
+    expect(api.startDesktop).toHaveBeenCalledTimes(3)
+    expect(desktopViewerSession(id).connecting).toBe(false)
+    expect(desktopViewerSession(id).error).toContain('could not be confirmed')
+    const other = `viewer-${++count}`
+    vi.mocked(api.getDesktopStatus).mockResolvedValue({
+      ...status(other, 'unknown'),
+      revision: 0,
+    })
+    await surface(other).session.startDesktop()
+    await vi.advanceTimersByTimeAsync(31_000)
+    expect(desktopViewerSession(other).connecting).toBe(false)
+    expect(desktopViewerSession(other).timer).toBeNull()
+    expect(desktopViewerSession(other).error).toContain('could not be confirmed')
+  })
+
+  it('ignores earlier same-revision state and epoch observations', async () => {
+    const id = `viewer-${++count}`
+    await surface(id).session.startDesktop()
+    let resolveOld!: (value: ReturnType<typeof status>) => void
+    vi.mocked(api.getDesktopStatus).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveOld = resolve
+      }),
+    )
+    const old = refreshDesktopViewer(id)
+    await refreshDesktopViewer(id)
+    resolveOld(status(id, 'expired', 'stale-epoch'))
+    await old
+    expect(desktopViewerSession(id).leaseState).toBe('held')
+    expect(desktopViewerSession(id).epoch).toBe('epoch-1')
+    expect(desktopViewerSession(id).revision).toBe(1)
+    expect(api.startDesktop).toHaveBeenCalledTimes(1)
   })
 })

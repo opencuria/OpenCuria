@@ -8,8 +8,33 @@
 
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
+import { desktopViewerClientId } from '@/composables/useDesktopSessionCoordinator'
 
 export const useDesktopStore = defineStore('desktop', () => {
+  const viewerClientId = desktopViewerClientId
+  const intentRevision = ref<number | null>(null)
+  const viewerLeaseState = ref('unknown')
+  const epoch = ref<string | null>(null)
+  const mcpActive = ref(false)
+  const holderCount = ref(0)
+  const viewerOwned = computed(
+    () => intentRevision.value !== null && viewerLeaseState.value === 'held',
+  )
+
+  function setViewerIntent(
+    revision: number | null,
+    state: string,
+    runnerEpoch: string | null,
+  ): void {
+    intentRevision.value = revision
+    viewerLeaseState.value = state
+    epoch.value = runnerEpoch
+  }
+  function setGlobalHolders(mcp: boolean, count: number): void {
+    mcpActive.value = mcp
+    holderCount.value = count
+  }
+
   const isOpen = ref(false)
   const isConnecting = ref(false)
   const isConnected = ref(false)
@@ -85,6 +110,8 @@ export const useDesktopStore = defineStore('desktop', () => {
   }
 
   function reset(): void {
+    setViewerIntent(null, 'unknown', null)
+    setGlobalHolders(false, 0)
     isOpen.value = false
     isConnected.value = false
     isConnecting.value = false
@@ -95,6 +122,15 @@ export const useDesktopStore = defineStore('desktop', () => {
   }
 
   return {
+    viewerClientId,
+    intentRevision,
+    viewerLeaseState,
+    epoch,
+    viewerOwned,
+    mcpActive,
+    holderCount,
+    setViewerIntent,
+    setGlobalHolders,
     isOpen,
     isConnecting,
     isConnected,

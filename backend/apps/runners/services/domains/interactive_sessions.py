@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
 from asgiref.sync import sync_to_async
 
@@ -30,6 +31,9 @@ from ...exceptions import (
     WorkspaceStateError,
 )
 
+if TYPE_CHECKING:
+    from ...models import Task
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,7 +45,7 @@ class InteractiveSessionsMixin:
         workspace_id: uuid.UUID,
         cols: int = 80,
         rows: int = 24,
-    ) -> "Task":
+    ) -> Task:
         """Dispatch a start_terminal task to the runner.
 
         Returns the Task record.
@@ -288,26 +292,151 @@ class InteractiveSessionsMixin:
             },
         )
 
+    @staticmethod
+    def viewer_identity(
+        workspace_id: uuid.UUID, user_id: uuid.UUID, viewer_client_id: uuid.UUID
+    ) -> dict:
+        """Derive a viewer identity; caller-provided owner IDs are never accepted."""
+        client = uuid.UUID(str(viewer_client_id))
+        return {
+            "lease_id": str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"opencuria:viewer:{workspace_id}:{user_id}:{client}",
+                )
+            ),
+            "owner_id": str(user_id),
+            "kind": "viewer",
+        }
+
+    async def _viewer_workspace(
+        self, workspace_id: uuid.UUID, *, user, organization_id: uuid.UUID
+    ):
+        """Apply shared REST, MCP and proxy workspace authorization."""
+        from apps.organizations.services import OrganizationService
+
+        orgs = OrganizationService()
+        await sync_to_async(orgs.require_membership)(user, organization_id)
+        role = await sync_to_async(orgs.get_user_role)(user, organization_id)
+        workspace = await sync_to_async(self.get_workspace)(workspace_id)
+        if workspace.runner.organization_id != organization_id or (
+            role != "admin" and workspace.created_by_id != user.id
+        ):
+            raise WorkspaceNotFoundError(str(workspace_id))
+        self._ensure_workspace_available(workspace)
+        if not workspace.runner.is_online:
+            raise RunnerOfflineError(str(workspace.runner.id))
+        return workspace
+
+    async def _viewer_rpc(
+        self, workspace_id: uuid.UUID, action: str, args: dict
+    ) -> dict:
+        """Use the existing correlated desktop_action transport."""
+        from apps.harness.access.runner_accessor import (
+            RunnerAccessorError,
+            create_harness_accessor,
+        )
+
+        accessor = await create_harness_accessor(self, str(workspace_id))
+        try:
+            return await accessor.desktop_action(action, args)
+        except (RunnerAccessorError, TimeoutError) as exc:
+            raise ConflictError(
+                "Viewer desktop operation could not be confirmed"
+            ) from exc
+
+    async def viewer_desktop_status(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        user,
+        organization_id: uuid.UUID,
+        viewer_client_id: uuid.UUID | None = None,
+    ) -> dict:
+        """Return global summaries and only the authenticated client's intent."""
+        await self._viewer_workspace(
+            workspace_id, user=user, organization_id=organization_id
+        )
+        info = self.get_desktop_info(str(workspace_id)) or {}
+        result = {
+            "active": bool(info),
+            "proxy_url": f"/ws/desktop/{workspace_id}/" if info else None,
+            "viewer_held": bool(info.get("viewer")),
+            "computer_use_active": bool(info.get("computer_use")),
+            "mcp_active": bool(info.get("mcp")),
+            "holder_count": int(info.get("holder_count", 0)),
+            "viewer_lease_state": "unknown",
+            "revision": None,
+            "epoch": None,
+        }
+        if viewer_client_id is not None:
+            identity = self.viewer_identity(workspace_id, user.id, viewer_client_id)
+            own = await self._viewer_rpc(
+                workspace_id, "lease_status", {"lease_id": identity["lease_id"]}
+            )
+            result.update(
+                viewer_lease_state=own.get("lease_state", "unknown"),
+                revision=own.get("revision"),
+                epoch=own.get("epoch"),
+            )
+        return result
+
+    async def renew_desktop(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        user,
+        organization_id: uuid.UUID,
+        viewer_client_id: uuid.UUID,
+        intent_revision: int,
+    ) -> dict:
+        """Extend an existing intent, never reserve or restart a desktop."""
+        await self._viewer_workspace(
+            workspace_id, user=user, organization_id=organization_id
+        )
+        identity = self.viewer_identity(workspace_id, user.id, viewer_client_id)
+        own = await self._viewer_rpc(
+            workspace_id, "lease_status", {"lease_id": identity["lease_id"]}
+        )
+        if own.get("lease_state") != "held" or own.get("revision") != intent_revision:
+            raise ConflictError("Viewer lease is not held at this revision")
+        response = await self._viewer_rpc(
+            workspace_id,
+            "renew",
+            {
+                "lease_id": identity["lease_id"],
+                "epoch": own["epoch"],
+                "revision": intent_revision,
+            },
+        )
+        return {
+            "viewer_lease_state": response.get("lease_state", "unknown"),
+            "revision": response.get("revision", intent_revision),
+            "epoch": response.get("epoch"),
+        }
+
     async def start_desktop(
         self,
         workspace_id: uuid.UUID,
-    ) -> "Task":
+        *,
+        user,
+        organization_id: uuid.UUID,
+        viewer_client_id: uuid.UUID,
+        intent_revision: int,
+    ) -> Task:
         """Dispatch a start_desktop task to the runner."""
-        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
-        if workspace is None:
-            raise WorkspaceNotFoundError(str(workspace_id))
-
-        self._ensure_workspace_available(workspace)
+        workspace = await self._viewer_workspace(
+            workspace_id, user=user, organization_id=organization_id
+        )
+        runner = workspace.runner
+        if intent_revision < 1:
+            raise ValueError("intent_revision must be positive")
+        identity = self.viewer_identity(workspace_id, user.id, viewer_client_id)
+        binding = await self._viewer_rpc(workspace_id, "binding", {})
+        ownership = {**identity, "revision": intent_revision, "epoch": binding["epoch"]}
 
         if workspace.status != WorkspaceStatus.RUNNING:
-            raise WorkspaceStateError(
-                f"Workspace '{workspace_id}' is '{workspace.status}', "
-                f"must be '{WorkspaceStatus.RUNNING}' to start a desktop"
-            )
-
-        runner = workspace.runner
-        if not runner.is_online:
-            raise RunnerOfflineError(str(runner.id))
+            raise WorkspaceStateError("Workspace must be running")
 
         from common.utils import generate_uuid
 
@@ -325,6 +454,7 @@ class InteractiveSessionsMixin:
             {
                 "task_id": str(task_id),
                 "workspace_id": str(workspace_id),
+                **ownership,
                 "desktop_width": workspace.desktop_width,
                 "desktop_height": workspace.desktop_height,
             },
@@ -343,16 +473,22 @@ class InteractiveSessionsMixin:
     async def stop_desktop(
         self,
         workspace_id: uuid.UUID,
-    ) -> "Task":
+        *,
+        user,
+        organization_id: uuid.UUID,
+        viewer_client_id: uuid.UUID,
+        intent_revision: int,
+    ) -> Task:
         """Dispatch a stop_desktop task to the runner."""
-        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
-        if workspace is None:
-            raise WorkspaceNotFoundError(str(workspace_id))
-
-        self._ensure_workspace_available(workspace)
+        workspace = await self._viewer_workspace(
+            workspace_id, user=user, organization_id=organization_id
+        )
         runner = workspace.runner
-        if not runner.is_online:
-            raise RunnerOfflineError(str(runner.id))
+        if intent_revision < 1:
+            raise ValueError("intent_revision must be positive")
+        identity = self.viewer_identity(workspace_id, user.id, viewer_client_id)
+        binding = await self._viewer_rpc(workspace_id, "binding", {})
+        ownership = {**identity, "revision": intent_revision, "epoch": binding["epoch"]}
 
         from common.utils import generate_uuid
 
@@ -370,6 +506,7 @@ class InteractiveSessionsMixin:
             {
                 "task_id": str(task_id),
                 "workspace_id": str(workspace_id),
+                **ownership,
             },
         )
 
@@ -461,6 +598,10 @@ class InteractiveSessionsMixin:
         *,
         viewer: bool = True,
         computer_use: bool = False,
+        mcp: bool | None = None,
+        holder_count: int | None = None,
+        generation: int | None = None,
+        epoch: str | None = None,
     ) -> None:
         """Handle desktop:started after a viewer lease is acquired."""
         from ...sio_server import emit_to_frontend
@@ -474,6 +615,17 @@ class InteractiveSessionsMixin:
         self._record_active_desktop(
             workspace_id,
             {
+                **(self.get_desktop_info(workspace_id) or {}),
+                **{
+                    key: value
+                    for key, value in {
+                        "mcp": mcp,
+                        "holder_count": holder_count,
+                        "generation": generation,
+                        "epoch": epoch,
+                    }.items()
+                    if value is not None
+                },
                 "port": port,
                 "container_ip": container_ip,
                 "network_name": network_name,
@@ -503,6 +655,7 @@ class InteractiveSessionsMixin:
                 "task_id": task_id,
                 "proxy_url": f"/ws/desktop/{workspace_id}/",
                 "computer_use_active": computer_use,
+                **self._desktop_public_summary(workspace_id),
             },
             workspace_id,
         )
@@ -517,6 +670,10 @@ class InteractiveSessionsMixin:
         *,
         viewer: bool = False,
         computer_use: bool = False,
+        mcp: bool | None = None,
+        holder_count: int | None = None,
+        generation: int | None = None,
+        epoch: str | None = None,
     ) -> None:
         """Record live desktop process routing without a viewer acquire.
 
@@ -535,6 +692,17 @@ class InteractiveSessionsMixin:
         self._record_active_desktop(
             workspace_id,
             {
+                **(self.get_desktop_info(workspace_id) or {}),
+                **{
+                    key: value
+                    for key, value in {
+                        "mcp": mcp,
+                        "holder_count": holder_count,
+                        "generation": generation,
+                        "epoch": epoch,
+                    }.items()
+                    if value is not None
+                },
                 "port": port,
                 "container_ip": container_ip,
                 "network_name": network_name,
@@ -555,6 +723,7 @@ class InteractiveSessionsMixin:
                 "workspace_id": workspace_id,
                 "proxy_url": f"/ws/desktop/{workspace_id}/",
                 "computer_use_active": computer_use,
+                **self._desktop_public_summary(workspace_id),
             },
             workspace_id,
         )
@@ -566,6 +735,11 @@ class InteractiveSessionsMixin:
         runner_id: str | None = None,
         *,
         computer_use_active: bool = False,
+        viewer_held: bool | None = None,
+        mcp: bool | None = None,
+        holder_count: int | None = None,
+        generation: int | None = None,
+        epoch: str | None = None,
     ) -> None:
         """Handle viewer lease release while the desktop process stays up.
 
@@ -587,7 +761,22 @@ class InteractiveSessionsMixin:
         current = self._active_desktops.get(workspace_id)
         if current is not None:
             updated = dict(current)
-            updated["viewer"] = False
+            if viewer_held is not None:
+                updated["viewer"] = viewer_held
+            elif holder_count is None:
+                updated["viewer"] = False
+            updated.update(
+                {
+                    key: value
+                    for key, value in {
+                        "mcp": mcp,
+                        "holder_count": holder_count,
+                        "generation": generation,
+                        "epoch": epoch,
+                    }.items()
+                    if value is not None
+                }
+            )
             updated["computer_use"] = computer_use_active
             self._record_active_desktop(
                 workspace_id,
@@ -606,6 +795,7 @@ class InteractiveSessionsMixin:
                 "workspace_id": workspace_id,
                 "task_id": task_id,
                 "computer_use_active": computer_use_active,
+                **self._desktop_public_summary(workspace_id),
             },
             workspace_id,
         )
@@ -645,7 +835,7 @@ class InteractiveSessionsMixin:
                     return
                 await sync_to_async(self.tasks.complete)(task)
 
-        desktop_info = self._active_desktops.pop(workspace_id, None)
+        self._active_desktops.pop(workspace_id, None)
         self._desktop_workspace_runner.pop(workspace_id, None)
 
         logger.info("Desktop stopped: workspace=%s", workspace_id)

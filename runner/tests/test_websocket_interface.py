@@ -224,6 +224,11 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             {
                 "supported_runtimes": [],
                 "status": "ready",
+                "inventory_epoch": interface._inventory_epoch,
+                "desktop_leases": {
+                    "protocol_version": 1,
+                    "epoch": interface._inventory_epoch,
+                },
             },
         )
         await interface.stop()

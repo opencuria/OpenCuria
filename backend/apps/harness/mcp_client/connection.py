@@ -29,6 +29,7 @@ import structlog
 from mcp.client.session import ClientSession
 from pydantic import BaseModel, ConfigDict
 
+from ..desktop_leases import DesktopLease
 from ..tools.base import Tool, ToolContext, ToolError, ToolResult
 from .naming import TOOL_NAME_RE, mcp_tool_name
 from .stdio import workspace_stdio_client
@@ -445,6 +446,9 @@ class McpServerConnection:
     healthy: bool = True
     harness_tools: list[Any] = field(default_factory=list)
 
+    desktop_lease: DesktopLease | None = field(default=None, repr=False)
+    desktop_activation: str = "server_start"
+
     _stack: AsyncExitStack | None = None
     _session: ClientSession | None = None
     _lock: Any = None
@@ -482,12 +486,21 @@ class McpServerConnection:
             transport=(self.transport or "").strip().lower(),
             timeout_s=timeout,
         )
+        startup_ok = False
         scope = stack.enter_context(anyio.fail_after(timeout))
         try:
             try:
+                if self.desktop_lease is not None:
+                    binding = await self.desktop_lease.reserve()
+                    self.env.update(
+                        DISPLAY=binding["display"], XAUTHORITY=binding["xauthority"]
+                    )
+                    if self.desktop_activation == "server_start":
+                        await self.desktop_lease.hold()
                 await self._open_transport(stack, accessor)
                 await self._open_session(stack)
                 await self._discover()
+                startup_ok = True
             except BaseException as exc:
                 # Pass the active exception through the nested scopes in LIFO
                 # order. fail_after must see its own cancellation to turn it
@@ -534,6 +547,12 @@ class McpServerConnection:
                 stderr_excerpt=_safe_stderr_excerpt(accessor),
             )
             raise
+        finally:
+            if not startup_ok and self.desktop_lease is not None:
+                try:
+                    await self.desktop_lease.aclose()
+                except BaseException:
+                    log.warning("mcp_desktop_compensation_failed", server=self.desc)
         # Startup succeeded: disarm the timeout for the connection's
         # lifetime. The scope is still exited by the stack (last, after
         # the session/transport) exactly once in ``aclose``.
@@ -561,6 +580,11 @@ class McpServerConnection:
                 env=dict(self.env),
                 server_desc=self.desc,
                 timeout=float(self.startup_timeout_seconds or 30.0),
+                **(
+                    {"owner": self.desktop_lease.owner}
+                    if self.desktop_lease is not None
+                    else {}
+                ),
             )
             read, write = await stack.enter_async_context(ctx)
             self._read, self._write = read, write
@@ -730,10 +754,15 @@ class McpServerConnection:
             raise ToolError(f"MCP server {self.desc} is not connected", tool=self.desc)
         lock = self._lock or anyio.Lock()
         async with lock:
+            if self._closed or self._session is None or not self.healthy:
+                raise ToolError("MCP connection is closed", tool=self.desc)
             timeout = float(self.request_timeout_seconds or 60.0)
             try:
                 try:
                     with anyio.fail_after(timeout):
+                        if self.desktop_lease is not None:
+                            self.desktop_lease.check_health()
+                            await self.desktop_lease.hold()
                         result = await self._session.call_tool(
                             original_name,
                             dict(args or {}),
@@ -769,12 +798,26 @@ class McpServerConnection:
     async def aclose(self) -> None:
         """Close the session + transport (idempotent, never raises)."""
         if self._closed:
+            await self._close_desktop_lease()
             return
         self._closed = True
         stack, self._stack = self._stack, None
         self._session = None
+        if stack is None:
+            await self._close_desktop_lease()
+            return
         if stack is not None:
             try:
                 await stack.aclose()
             except Exception:  # pragma: no cover - best effort
                 log.warning("mcp_server_close_failed", server=self.desc)
+            finally:
+                await self._close_desktop_lease()
+
+    async def _close_desktop_lease(self) -> None:
+        """Best-effort authoritative RPC closure without masking owner errors."""
+        if self.desktop_lease is not None:
+            try:
+                await self.desktop_lease.aclose()
+            except Exception:
+                log.warning("mcp_desktop_release_failed", server=self.desc)

@@ -891,6 +891,35 @@ _TOOLS: list[Tool] = [
             "required": ["session_id"],
         },
     ),
+    *[
+        Tool(
+            name=name,
+            description=description,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace_id": {"type": "string", "format": "uuid"},
+                    "viewer_client_id": {"type": "string", "format": "uuid"},
+                    "intent_revision": {"type": "integer", "minimum": 1},
+                },
+                "required": (["workspace_id"] if name == "desktop_status" else
+                             ["workspace_id", "viewer_client_id", "intent_revision"]),
+                "additionalProperties": False,
+            },
+        )
+        for name, description in [
+            ("start_desktop", "Acquire this client's revision-fenced viewer intent."),
+            (
+                "stop_desktop",
+                "Release this client's viewer intent, preserving other owners.",
+            ),
+            (
+                "renew_desktop",
+                "Renew an existing held viewer intent; never create one.",
+            ),
+            ("desktop_status", "Get desktop summaries and optional own viewer intent."),
+        ]
+    ],
     Tool(
         name="take_desktop_control",
         description=(
@@ -1451,6 +1480,8 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "edit_harness_message": APIKeyPermission.HARNESS_RUN,
     "abort_harness_session": APIKeyPermission.HARNESS_RUN,
     "take_desktop_control": APIKeyPermission.HARNESS_RUN,
+    **{name: APIKeyPermission.TERMINAL_ACCESS for name in
+       ("start_desktop", "stop_desktop", "renew_desktop", "desktop_status")},
     "list_harness_parts": APIKeyPermission.HARNESS_READ,
     "get_harness_timeline": APIKeyPermission.HARNESS_READ,
     "get_harness_part": APIKeyPermission.HARNESS_READ,
@@ -3883,6 +3914,39 @@ def _call_abort_harness_session(api_key, org_id, args: dict) -> list[TextContent
     return _text(_session_dict_with_unread(service, updated))
 
 
+def _call_viewer_desktop(api_key, org_id, args: dict, action: str) -> list[TextContent]:
+    """REST/MCP parity through the same authenticated viewer service methods."""
+    import uuid as _uuid
+
+    from asgiref.sync import async_to_sync
+    from pydantic import ValidationError
+
+    from apps.accounts.models import APIKeyPermission
+    from apps.runners.schemas import DesktopViewerIntentIn
+    from common.exceptions import ConflictError, NotFoundError
+
+    if not api_key.has_permission(APIKeyPermission.TERMINAL_ACCESS):
+        return _error("Permission denied: terminal:access required")
+    try:
+        workspace_id = _uuid.UUID(args["workspace_id"])
+        kwargs = {"user": api_key.user, "organization_id": org_id}
+        service = _runner_service()
+        if action == "status":
+            client = args.get("viewer_client_id")
+            return _text(async_to_sync(service.viewer_desktop_status)(
+                workspace_id, **kwargs,
+                viewer_client_id=_uuid.UUID(client) if client else None))
+        intent = DesktopViewerIntentIn(
+            viewer_client_id=args.get("viewer_client_id"),
+            intent_revision=args.get("intent_revision"))
+        result = async_to_sync(getattr(service, f"{action}_desktop"))(
+            workspace_id, **kwargs, viewer_client_id=intent.viewer_client_id,
+            intent_revision=intent.intent_revision)
+        return _text(result if action == "renew" else {"task_id": str(result.id)})
+    except (KeyError, ValueError, ValidationError, ConflictError, NotFoundError) as exc:
+        return _error(str(exc))
+
+
 def _call_take_desktop_control(api_key, org_id, args: dict) -> list[TextContent]:
     """Abort busy computer-use sessions so a human can drive the desktop."""
     import asyncio
@@ -5177,6 +5241,10 @@ _TOOL_HANDLERS = {
     "edit_harness_message": _call_edit_harness_message,
     "abort_harness_session": _call_abort_harness_session,
     "take_desktop_control": _call_take_desktop_control,
+    **{name: (lambda api_key, org_id, args, action=action:
+              _call_viewer_desktop(api_key, org_id, args, action))
+       for name, action in (("start_desktop", "start"), ("stop_desktop", "stop"),
+                            ("renew_desktop", "renew"), ("desktop_status", "status"))},
     "list_harness_parts": _call_list_harness_parts,
     "get_harness_timeline": _call_get_harness_timeline,
     "get_harness_part": _call_get_harness_part,
