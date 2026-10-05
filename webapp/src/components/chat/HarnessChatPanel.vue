@@ -724,6 +724,17 @@ async function handleForkMessage(messageId: string): Promise<void> {
         />
       </div>
     </div>
+    <div
+      v-else-if="inputStoppable"
+      class="relative z-10 flex min-w-0 shrink-0 justify-end overflow-x-hidden"
+    >
+      <HarnessChatInput
+        :stop-only="true"
+        :stoppable="inputStoppable"
+        :disabled="true"
+        @stop="handleStop"
+      />
+    </div>
   </div>
 </template>
 

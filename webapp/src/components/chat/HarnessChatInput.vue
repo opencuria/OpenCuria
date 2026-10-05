@@ -107,6 +107,8 @@ const props = defineProps<{
   uploadDrag?: ChatUploadDragState
   /** Scheduled-task editor uses the shared composer without chat-only state. */
   variant?: 'chat' | 'scheduled-task'
+  /** Subagent transcript: render only the stop control, with no composer. */
+  stopOnly?: boolean
   prompt?: string
   skillIds?: string[]
   filesAvailable?: boolean
@@ -406,6 +408,7 @@ async function loadProviderModels(): Promise<void> {
 }
 
 onMounted(() => {
+  if (props.stopOnly) return
   if (!isScheduledTask.value) {
     const cached = loadFromCache()
     if (cached) prompt.value = cached
@@ -420,7 +423,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   uploadDisposed = true
   invalidateUploads()
-  if (!isScheduledTask.value) saveToCache(prompt.value)
+  if (!isScheduledTask.value && !props.stopOnly) saveToCache(prompt.value)
   if (mentionFindTimer) {
     clearTimeout(mentionFindTimer)
     mentionFindTimer = null
@@ -1123,7 +1126,25 @@ function onComposerKeydown(e: KeyboardEvent): void {
 </script>
 
 <template>
+  <div v-if="stopOnly" class="flex justify-end px-3 pb-2 sm:px-4">
+    <Button
+      :disabled="!canStop"
+      size="icon"
+      class="h-8 w-8 shrink-0 rounded-full transition-all"
+      :class="
+        canStop
+          ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+          : 'bg-muted text-muted-foreground'
+      "
+      title="Stop current run"
+      data-testid="composer-stop"
+      @click="emit('stop')"
+    >
+      <Square :size="14" />
+    </Button>
+  </div>
   <div
+    v-else
     class="relative min-w-0 w-full bg-transparent"
     :class="isScheduledTask ? 'p-0' : ['px-3 pb-2 sm:px-4', attached ? 'pt-0' : 'pt-3 sm:pt-4']"
     @keydown="onComposerKeydown"

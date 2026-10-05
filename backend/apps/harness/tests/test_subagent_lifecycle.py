@@ -428,6 +428,54 @@ async def test_cancellation_after_admission_preserves_or_cancels_child_by_owner(
     assert_settled(service, [parent, child])
 
 
+async def test_user_stop_in_child_spawn_window_cancels_the_run(
+    harness_workspace,
+    monkeypatch,
+) -> None:
+    """Stop after the child task exists and before its start_run returns."""
+    provider = RoutingProvider()
+    service, _, events = _service(provider=provider)
+    parent = await _db_create_session(harness_workspace)
+    window = asyncio.Event()
+    original = service._emit_frontend
+
+    async def emit(event, data, workspace_id):
+        if (
+            event == "harness.session_status"
+            and data.get("status") == "busy"
+            and data.get("session_id") != str(parent.id)
+        ):
+            window.set()
+            await asyncio.Event().wait()
+        await original(event, data, workspace_id)
+
+    monkeypatch.setattr(service, "_emit_frontend", emit)
+    assistant, parent_task = await start(service, parent)
+    await checkpoint(window)
+    await checkpoint(provider.entered["child"])
+    child = children(parent)[0]
+    child_task = service._tasks[str(child.id)]
+    assert not child_task.done()
+    await asyncio.wait_for(service.abort_run(parent.id), TIMEOUT)
+    assert child_task.done()
+    assert parent_task.done()
+    assert not provider.release["child"].is_set()
+    child_message = assistant_for(child)
+    assert (child_message.finish, child_message.error) == (
+        "aborted",
+        "aborted by user",
+    )
+    assistant.refresh_from_db()
+    assert (assistant.finish, assistant.error) == ("aborted", "aborted by user")
+    finished = [e for e in events if e["event"] == "harness.subtask_finished"]
+    assert finished
+    assert {e["status"] for e in finished} == {"aborted"}
+    assert not service._tasks
+    assert str(parent.id) not in service._run_parents
+    assert str(child.id) not in service._run_parents
+    assert_settled(service, [parent, child])
+
+
 async def test_direct_root_abort_during_history_admission(
     harness_workspace,
     monkeypatch,

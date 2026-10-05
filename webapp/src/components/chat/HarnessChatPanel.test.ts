@@ -53,7 +53,7 @@ vi.mock('@/stores/skills', () => ({
 const HarnessChatInputStub = {
   name: 'HarnessChatInput',
   template: '<div data-testid="harness-chat-input"><div data-testid="composer-card" /></div>',
-  props: ['disabled', 'workspaceId', 'sessionId', 'uploadDrag'],
+  props: ['disabled', 'workspaceId', 'sessionId', 'uploadDrag', 'stoppable', 'stopOnly'],
   emits: ['prefill', 'send', 'stop'],
   methods: {
     setPrompt(prompt: string) {
@@ -244,6 +244,53 @@ describe('HarnessChatPanel', () => {
     await wrapper.vm.$nextTick()
 
     expect(wrapper.findComponent(HarnessChatInputStub).exists()).toBe(false)
+  })
+
+  it('shows stop for a busy subagent and aborts that session', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: {
+        workspaceId: 'ws-1',
+        canPrompt: true,
+      },
+      global: {
+        plugins: [router],
+        stubs,
+      },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [
+      makeSession({ status: 'busy' }),
+      makeSession({
+        id: 'session-child',
+        parent_id: 'session-root',
+        title: 'subtask',
+        agent_name: 'explore',
+        status: 'busy',
+      }),
+    ]
+    store.setActiveSession('session-child')
+    await wrapper.vm.$nextTick()
+
+    const input = wrapper.findComponent(HarnessChatInputStub)
+    expect(input.exists()).toBe(true)
+    expect(input.props('stopOnly')).toBe(true)
+    expect(input.props('stoppable')).toBe(true)
+    expect(input.props('disabled')).toBe(true)
+    const stop = vi.spyOn(store, 'abortSession').mockResolvedValue(undefined)
+    input.vm.$emit('stop')
+    await flushPromises()
+    expect(stop).toHaveBeenCalledWith('session-child')
+
+    store.setActiveSession('session-root')
+    await wrapper.vm.$nextTick()
+    const rootInput = wrapper.findComponent(HarnessChatInputStub)
+    expect(rootInput.props('stopOnly')).toBeFalsy()
+    expect(rootInput.props('stoppable')).toBe(true)
+    rootInput.vm.$emit('stop')
+    await flushPromises()
+    expect(stop).toHaveBeenCalledWith('session-root')
   })
 
   it('keeps the input when viewing a root session', async () => {

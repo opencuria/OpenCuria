@@ -810,6 +810,18 @@ describe('HarnessChatInput', () => {
     expect(card.classes()).not.toContain('border-t-0')
   })
 
+  it('renders only the stop control when stopOnly is set', async () => {
+    const wrapper = mountInput({ stopOnly: true, stoppable: true })
+    expect(wrapper.find('[data-testid="composer-card"]').exists()).toBe(false)
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    const stop = wrapper.find('[data-testid="composer-stop"]')
+    expect(stop.exists()).toBe(true)
+    expect(stop.classes()).toContain('bg-primary')
+    await stop.trigger('click')
+    expect(wrapper.emitted('stop')).toHaveLength(1)
+    expect(listProviderModelsMock).not.toHaveBeenCalled()
+  })
+
   it('styles the stop button with primary accent colors when stoppable', () => {
     const wrapper = mountInput({ stoppable: true })
     const stop = wrapper.find('[data-testid="composer-stop"]')

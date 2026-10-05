@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -12,6 +13,7 @@ from apps.harness.providers.base import Delta, ProviderError
 from apps.harness.tests.test_harness_service import FakeProvider, _tool_step
 from apps.harness.tests.test_subagent_depth import _service, _session
 from apps.harness.tests.test_subagent_lifecycle import (
+    TIMEOUT,
     assert_settled,
     assistant_for,
     checkpoint,
@@ -65,6 +67,48 @@ class NestedProvider(FakeProvider):
             call_id=f"call-{target}",
         ):
             yield delta
+
+
+class ParallelTreeProvider(FakeProvider):
+    """Root delegates to a child and a sibling; the child delegates once more."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.entered = {
+            name: asyncio.Event() for name in ("child", "sibling", "grandchild")
+        }
+        self.release = asyncio.Event()
+
+    async def chat_stream(self, model, messages, tools, opts=None):
+        prompt = next(m.content for m in reversed(messages) if m.role == "user")
+        if prompt in ("sibling", "grandchild"):
+            self.entered[prompt].set()
+            await self.release.wait()
+            yield Delta(text=f"{prompt} finished")
+            return
+        if prompt == "child":
+            self.entered["child"].set()
+        if any(m.role == "tool" for m in messages):
+            yield Delta(text=f"{prompt} continued")
+            return
+        targets = ("child", "sibling") if prompt == "parent" else ("grandchild",)
+        yield Delta(
+            tool_calls=tuple(
+                {
+                    "index": index,
+                    "id": f"call-{name}",
+                    "name": "task",
+                    "arguments": json.dumps(
+                        {
+                            "description": name,
+                            "prompt": name,
+                            "subagent_type": "general",
+                        }
+                    ),
+                }
+                for index, name in enumerate(targets)
+            )
+        )
 
 
 def tree(root):
@@ -247,3 +291,39 @@ async def test_root_abort_covers_grandchild_admitted_after_descendant_snapshot(
     assistant.refresh_from_db()
     assert (assistant.finish, assistant.error) == ("aborted", "aborted by user")
     assert_user_abort(service, sessions)
+
+
+async def test_root_stop_ends_parallel_children_and_grandchild(
+    harness_workspace,
+) -> None:
+    """One root stop ends every live descendant, including a nested leaf."""
+    provider = ParallelTreeProvider()
+    service, _, _ = _service(provider)
+    events: list[dict[str, Any]] = []
+    original_emit = service._emit
+
+    async def emit(event: str, data: dict[str, Any]) -> None:
+        events.append({"event": event, **data})
+        await original_emit(event, data)
+
+    service._emit = emit
+    root = await _session(harness_workspace)
+    assistant, root_task = await start(service, root)
+    for name in ("child", "sibling", "grandchild"):
+        await checkpoint(provider.entered[name])
+    rows = children(root)
+    child = next(row for row in rows if row.title == "child")
+    sibling = next(row for row in rows if row.title == "sibling")
+    grandchild = children(child)[0]
+    sessions = [root, child, sibling, grandchild]
+    await asyncio.wait_for(service.abort_run(root.id), TIMEOUT)
+    assert root_task.done()
+    assert not provider.release.is_set()
+    assert not service._tasks
+    assistant.refresh_from_db()
+    assert (assistant.finish, assistant.error) == ("aborted", "aborted by user")
+    assert_user_abort(service, sessions)
+    finished = [e for e in events if e["event"] == "harness.subtask_finished"]
+    assert len(finished) == 3
+    assert {e["status"] for e in finished} == {"aborted"}
+    assert all(str(row.id) not in service._run_parents for row in sessions)

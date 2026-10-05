@@ -153,6 +153,9 @@ class HarnessService:
         self._accessor_factory = accessor_factory
         self._tasks: dict[str, asyncio.Task] = {}
         self._admissions: dict[str, asyncio.Task] = {}
+        # session id -> parent session id for live runs. Abort walks this
+        # instead of waiting for a descendant to notice a shielded cancel.
+        self._run_parents: dict[str, str | None] = {}
         # Cancellation is not proof of user intent (e.g. an MCP deadline).
         self._abort_requested: set[str] = set()
         self._pending_permissions: dict[str, asyncio.Future[str]] = {}
@@ -928,6 +931,11 @@ class HarnessService:
         """
         if not prompt or not prompt.strip():
             raise ValueError("prompt must not be empty")
+        self._remember_run(session)
+        # Parent stop already covers this session: do not spawn another run.
+        if self._user_abort_requested(session):
+            self._forget_run(str(session.id))
+            raise asyncio.CancelledError()
         await sync_to_async(self.sessions.ensure_interactions_available)(
             session.workspace_id
         )
@@ -1046,6 +1054,8 @@ class HarnessService:
                 "skill_bodies": skill_bodies,
             }
             self._runs[key] = run_context
+            if self._user_abort_requested(session):
+                raise asyncio.CancelledError()
             run_coro = self._execute_run(
                 session=session,
                 prompt=prompt.strip(),
@@ -1076,6 +1086,18 @@ class HarnessService:
                 self._on_run_task_done(task, key)
 
             spawned_task.add_done_callback(run_done)
+            if self._user_abort_requested(session):
+                # Stop arrived while this run was being admitted. Cancel a
+                # still-running owner. A task already cancelled before its
+                # callback was installed must keep settling and return.
+                already_stopping = spawned_task.done() or bool(
+                    spawned_task.cancelling()
+                )
+                self._cancel_owned_task(key)
+                if not already_stopping and (
+                    spawned_task.cancelling() or spawned_task.done()
+                ):
+                    raise asyncio.CancelledError()
             if session.parent_id is None and prior_user_messages == 0:
                 self._spawn_background(
                     self._generate_title(
@@ -1103,100 +1125,252 @@ class HarnessService:
             return assistant
         except BaseException as exc:
             if spawned_task is not None:
-                # Once the background turn is spawned the durable chat is live;
-                # a caller's cancellation or emission error must not erase it.
-                log.exception("harness_run_admitted_with_caller_error")
+                # A dropped HTTP caller must not erase a live background turn.
+                # User stop cancels that owner instead of leaving it running.
                 if isinstance(exc, asyncio.CancelledError):
+                    if self._user_abort_requested(session):
+                        self._cancel_owned_task(key)
+                    else:
+                        log.exception("harness_run_admitted_with_caller_error")
                     raise
+                log.exception("harness_run_admitted_with_caller_error")
                 return assistant
             user_abort = self._user_abort_requested(session)
+            # sync_to_async re-raises CancelledError after a shielded write
+            # when this task is already stopping. Retry until the shell is
+            # durable, then propagate the original cancellation.
             with anyio.CancelScope(shield=True):
-                await sync_to_async(self.sessions.mark_status)(
-                    session, HarnessSessionStatus.IDLE
-                )
-                session.status = HarnessSessionStatus.IDLE
-                if assistant is not None:
-                    await sync_to_async(self.messages.complete)(
-                        assistant,
-                        finish="aborted" if user_abort else "error",
-                        error=(
-                            "aborted by user"
-                            if user_abort
-                            else "Run admission failed before the harness started: "
-                            + (str(exc) or type(exc).__name__)
-                        ),
-                    )
+                for _ in range(4):
+                    try:
+                        await sync_to_async(self.sessions.mark_status)(
+                            session, HarnessSessionStatus.IDLE
+                        )
+                        session.status = HarnessSessionStatus.IDLE
+                        if assistant is not None:
+                            await sync_to_async(self.messages.complete)(
+                                assistant,
+                                finish="aborted" if user_abort else "error",
+                                error=(
+                                    "aborted by user"
+                                    if user_abort
+                                    else "Run admission failed before the "
+                                    "harness started: "
+                                    + (str(exc) or type(exc).__name__)
+                                ),
+                            )
+                        break
+                    except asyncio.CancelledError:
+                        continue
+            self._forget_run(key)
             raise
         finally:
             if self._admissions.get(key) is owner:
                 self._admissions.pop(key, None)
 
     async def abort_run(self, session_id: uuid.UUID) -> HarnessSession:
-        """Cancel the active run task, reject pending user gates, and mark aborted."""
+        """Cancel the active run tree, reject pending user gates, and mark aborted."""
         session = await sync_to_async(self.get_session)(session_id)
         await sync_to_async(self.sessions.ensure_interactions_available)(
             session.workspace_id
         )
         return await self._abort_run_tree(session)
 
-    async def _abort_run_tree(self, session: HarnessSession) -> HarnessSession:
-        """Join an authorized stop tree, even if capture begins during cleanup."""
-        session_id = session.id
+    def _remember_run(self, session: HarnessSession) -> None:
+        """Index a live session under its parent before the next await."""
         key = str(session.id)
-        task = self._tasks.get(key) or self._admissions.get(key)
+        parent = str(session.parent_id) if session.parent_id else None
+        self._run_parents[key] = parent
+
+    def _forget_run(self, key: str) -> None:
+        """Drop a finished session once nothing still points at it."""
+        parent = self._run_parents.get(key)
+        if any(owner == key for owner in self._run_parents.values()):
+            return
+        self._run_parents.pop(key, None)
+        if (
+            parent
+            and parent not in self._tasks
+            and parent not in self._runs
+            and parent not in self._admissions
+        ):
+            self._forget_run(parent)
+
+    def _descendant_keys(self, root: str) -> set[str]:
+        """Return *root* and in-memory descendant session ids."""
+        keys = {root}
+        changed = True
+        while changed:
+            changed = False
+            for key, parent in self._run_parents.items():
+                if parent in keys and key not in keys:
+                    keys.add(key)
+                    changed = True
+        return keys
+
+    def _owned_run_task(self, key: str) -> asyncio.Task | None:
+        """Return the run owner for *key*.
+
+        Child admissions are the parent tool task (``harness-tool-*``).
+        Cancelling those would abort the parent, so only a dedicated run
+        task or a non-tool admission (root startup) is owned here.
+        """
+        task = self._tasks.get(key)
+        if task is not None:
+            return task
+        admission = self._admissions.get(key)
+        if admission is None or admission.done():
+            return None
+        if admission.get_name().startswith("harness-tool-"):
+            return None
+        return admission
+
+    def _startup_admission(self, key: str) -> asyncio.Task | None:
+        """Return an in-flight ``start_run`` when no background owner exists yet."""
+        task = self._tasks.get(key)
+        if task is not None and not task.done():
+            return None
+        admission = self._admissions.get(key)
+        if admission is None or admission.done() or admission is asyncio.current_task():
+            return None
+        return admission
+
+    def _cancel_owned_task(self, key: str) -> None:
+        """Cancel *key*'s run unless it is already stopping or finalizing."""
+        task = self._owned_run_task(key)
         if task is None or task.done():
-            # Still ensure idle status (e.g. task already finished).
-            if session.status != HarnessSessionStatus.IDLE:
-                await sync_to_async(self.sessions.mark_status)(
-                    session, HarnessSessionStatus.IDLE
+            task = None
+        elif not task.cancelling() and not self._runs.get(key, {}).get("finalizing"):
+            task.cancel()
+        # A start_run blocked before its background task exists is the
+        # admission (often the parent tool task). Cancel that waiter too
+        # when this session has no live owner yet.
+        admission = self._startup_admission(key)
+        if (
+            admission is None
+            or admission is task
+            or admission.cancelling()
+            or self._runs.get(key, {}).get("finalizing")
+        ):
+            return
+        admission.cancel()
+
+    def _arm_abort_keys(self, keys: set[str]) -> None:
+        """Mark user-stop intent and cancel every owned run in *keys*."""
+        for key in keys:
+            self._abort_requested.add(key)
+            self._cancel_owned_task(key)
+
+    async def _join_owned_task(self, key: str, task: asyncio.Task) -> None:
+        """Wait for *task* without abandoning it if this stop is cancelled."""
+        if task.done() or task is asyncio.current_task():
+            return
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not task.done():
+                raise
+        except Exception:  # pragma: no cover - abort must not raise
+            log.exception("harness_abort_run_error", session_id=key)
+        # The done callback may have replaced a pre-entry task. Join that
+        # owner too, without cancelling it: it is already settling.
+        finalizer = self._tasks.get(key)
+        if finalizer is not None and finalizer is not task and not finalizer.done():
+            await self._join_owned_task(key, finalizer)
+
+    async def _join_abort_tree(self, root: str, closure: set[str]) -> None:
+        """Cancel and join every live owner in *closure* until it is stable."""
+        while True:
+            closure.update(self._descendant_keys(root))
+            self._arm_abort_keys(closure)
+            pending: list[tuple[str, asyncio.Task]] = []
+            seen: set[int] = set()
+            for key in closure:
+                candidates = (
+                    self._owned_run_task(key),
+                    self._startup_admission(key),
                 )
-                session.status = HarnessSessionStatus.IDLE
-        elif self._runs.get(key, {}).get("finalizing"):
-            # Cleanup owns its terminal outcome; repeated stop must not cancel it.
+                for task in candidates:
+                    if task is None or task.done() or task is asyncio.current_task():
+                        continue
+                    if id(task) in seen:
+                        continue
+                    seen.add(id(task))
+                    pending.append((key, task))
+            if not pending:
+                return
+            key, task = pending[0]
+            await self._join_owned_task(key, task)
+
+    async def _reject_tree_gates(self, keys: set[str]) -> None:
+        """Reject permission and question gates for every session in *keys*."""
+        ids: list[uuid.UUID] = []
+        for key in keys:
             try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                if not task.done():
-                    raise
-            session = await sync_to_async(self.get_session)(session.id)
-        else:
-            # Mark the entire live tree before cancellation can propagate through
-            # awaited child tasks. Only this explicit abort path implies user intent.
-            descendant_ids = await sync_to_async(self.sessions.list_descendant_ids)(
-                session.id
-            )
-            self._abort_requested.update(str(child_id) for child_id in descendant_ids)
-            # Another stop may have raced the repository await above. Never
-            # inject a second cancellation into terminal persistence/cleanup.
-            if not task.cancelling() and not self._runs.get(key, {}).get("finalizing"):
-                task.cancel()
+                ids.append(uuid.UUID(key))
+            except ValueError:
+                continue
+        if not ids:
+            return
+        rows = await sync_to_async(self.sessions.list_by_ids)(ids)
+        for row in rows:
+            await self._reject_pending_user_gates(row)
+
+    async def _settle_abort_tree(
+        self, session: HarnessSession, closure: set[str]
+    ) -> HarnessSession:
+        """Mark leftover busy rows idle and drop stop intent for *closure*."""
+        ids: list[uuid.UUID] = []
+        for key in closure:
             try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                pass
-            except Exception:  # pragma: no cover - abort must not raise
-                log.exception("harness_abort_run_error", session_id=key)
-            # A pre-entry cancellation may have installed its fallback finalizer.
-            finalizer = self._tasks.get(key)
-            if finalizer is not None and finalizer is not task:
-                await finalizer
-            # Belt-and-braces: _execute_run's finally already marked idle;
-            # ensure state even if cancellation raced.
-            fresh = await sync_to_async(self.sessions.get_by_id)(session.id)
-            if fresh is not None:
-                session = fresh
-            if session.status != HarnessSessionStatus.IDLE:
+                ids.append(uuid.UUID(key))
+            except ValueError:
+                continue
+        rows = await sync_to_async(self.sessions.list_by_ids)(ids)
+        fresh = session
+        for row in rows:
+            key = str(row.id)
+            task = self._owned_run_task(key)
+            if task is not None and not task.done():
+                continue
+            if row.status != HarnessSessionStatus.IDLE:
                 await sync_to_async(self.sessions.mark_status)(
-                    session, HarnessSessionStatus.IDLE
+                    row, HarnessSessionStatus.IDLE
                 )
-                session.status = HarnessSessionStatus.IDLE
-        await self._reject_pending_user_gates(session)
-        # Admissions may have added children after the initial stop traversal.
-        children = await sync_to_async(self.sessions.list_children)(session_id)
-        for child in children:
-            await self._abort_run_tree(child)
-        self._abort_requested.discard(key)
-        return session
+                row.status = HarnessSessionStatus.IDLE
+            self._abort_requested.discard(key)
+            if row.id == session.id:
+                fresh = row
+        return fresh
+
+    async def _abort_run_tree(self, session: HarnessSession) -> HarnessSession:
+        """Cancel and join an authorized stop tree, including descendants.
+
+        Intent is published and every registered run is cancelled before
+        any join. ``asyncio.shield`` around a child therefore cannot keep
+        that child alive until the root happens to unwind.
+        """
+        root = str(session.id)
+        # Read descendants before publishing intent. A leaf admitted during
+        # this query is then in the memory index and is armed with the rest,
+        # instead of being cancelled before it can be registered.
+        descendant_ids = await sync_to_async(self.sessions.list_descendant_ids)(
+            session.id
+        )
+        closure = {str(child_id) for child_id in descendant_ids}
+        closure.update(self._descendant_keys(root))
+        # Cancel and join before any further database work. Cleanup writes
+        # the terminal message; overlapping reads deadlock SQLite.
+        self._arm_abort_keys(closure)
+        await self._join_abort_tree(root, closure)
+        descendant_ids = await sync_to_async(self.sessions.list_descendant_ids)(
+            session.id
+        )
+        closure.update(str(child_id) for child_id in descendant_ids)
+        closure.update(self._descendant_keys(root))
+        self._arm_abort_keys(closure)
+        await self._join_abort_tree(root, closure)
+        await self._reject_tree_gates(closure)
+        return await self._settle_abort_tree(session, closure)
 
     async def abort_busy_computeruse_for_workspace(
         self, workspace_id: uuid.UUID
@@ -1858,7 +2032,9 @@ class HarnessService:
                 await sync_to_async(self.messages.complete)(
                     assistant, finish="error", error=str(exc)
                 )
-                await self._fail_open_parts(assistant, state="error", output=str(exc))
+                await self._fail_open_parts(
+                    assistant, state="error", output=str(exc), session=session
+                )
             log.exception("harness_run_failed", session_id=key)
         finally:
             self._runs.get(key, {})["finalizing"] = True
@@ -1886,11 +2062,26 @@ class HarnessService:
                 await self._finalize_run(session, assistant)
 
     def _user_abort_requested(self, session: HarnessSession) -> bool:
-        """Inherit explicit stop intent for children admitted during tree traversal."""
+        """Inherit explicit stop intent from any ancestor still in the tree."""
         key = str(session.id)
-        if session.parent_id and str(session.parent_id) in self._abort_requested:
-            self._abort_requested.add(key)
+        cursor = str(session.parent_id) if session.parent_id else None
+        chain = [key]
+        seen = {key}
+        while cursor and cursor not in seen:
+            chain.append(cursor)
+            seen.add(cursor)
+            if cursor in self._abort_requested:
+                self._abort_requested.update(chain)
+                return True
+            cursor = self._run_parents.get(cursor)
         return key in self._abort_requested
+
+    def _parent_stop_in_progress(self, session: HarnessSession) -> bool:
+        """True when user stop must end *session* instead of returning a tool error."""
+        if self._user_abort_requested(session):
+            return True
+        parent_task = self._tasks.get(str(session.id))
+        return parent_task is not None and bool(parent_task.cancelling())
 
     async def _record_run_interruption(
         self, session: HarnessSession, assistant: HarnessMessage, *, phase: str
@@ -1903,7 +2094,9 @@ class HarnessService:
             await sync_to_async(self.messages.complete)(
                 assistant, finish="aborted" if user_abort else "error", error=error
             )
-            await self._fail_open_parts(assistant, state="error", output=error)
+            await self._fail_open_parts(
+                assistant, state="error", output=error, session=session
+            )
         if not user_abort:
             log.warning(
                 "harness_run_interrupted",
@@ -1965,6 +2158,7 @@ class HarnessService:
             # Keep task ownership until all persistence/emission awaits have finished.
             if self._tasks.get(key) is asyncio.current_task():
                 self._tasks.pop(key, None)
+            self._forget_run(key)
 
     async def _cleanup_session_processes(
         self,
@@ -2125,14 +2319,21 @@ class HarnessService:
             await sync_to_async(self.parts.mark_state)(part, "completed")
 
     async def _fail_open_parts(
-        self, assistant: HarnessMessage, *, state: str, output: str
+        self,
+        assistant: HarnessMessage,
+        *,
+        state: str,
+        output: str,
+        session: HarnessSession | None = None,
     ) -> None:
         """Mark pending/running parts of *assistant* as failed/aborted.
 
         Text and reasoning keep their streamed content and are marked
         completed — aborting a run does not abort a thought that already
         happened. Tool/subtask parts become *state* and keep any partial
-        output already written.
+        output already written. When *session* is set, open tool and
+        subtask parts are also published so the timeline leaves ``running``
+        without waiting for a later refetch.
         """
         open_parts = await sync_to_async(
             lambda: list(
@@ -2146,9 +2347,58 @@ class HarnessService:
             if part.type in ("text", "reasoning"):
                 await sync_to_async(self.parts.mark_state)(part, "completed")
                 continue
-            await sync_to_async(self.parts.mark_state)(
-                part, state, output=part.output or output
+            stored = part.output or output
+            await sync_to_async(self.parts.mark_state)(part, state, output=stored)
+            if session is not None and part.type in ("tool", "subtask"):
+                await self._emit_failed_open_part(
+                    session, assistant, part, output=stored
+                )
+
+    async def _emit_failed_open_part(
+        self,
+        session: HarnessSession,
+        assistant: HarnessMessage,
+        part: HarnessPart,
+        *,
+        output: str,
+    ) -> None:
+        """Publish a terminal tool or subtask part after a user abort."""
+        workspace_id = str(session.workspace_id)
+        session_id = str(session.id)
+        message_id = str(assistant.id)
+        if part.type == "subtask":
+            meta = part.meta or {}
+            await self._emit_frontend(
+                FRONTEND_EVENT_SUBTASK_FINISHED,
+                {
+                    "workspace_id": workspace_id,
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "subtask_id": str(meta.get("subtask_id", "")),
+                    "child_session_id": str(meta.get("child_session_id", "")),
+                    "agent": str(meta.get("agent", "")),
+                    "status": "aborted",
+                    "summary": _socket_text(output, limit=240),
+                },
+                workspace_id,
             )
+            return
+        await self._emit_frontend(
+            FRONTEND_EVENT_PART,
+            {
+                "workspace_id": workspace_id,
+                "session_id": session_id,
+                "message_id": message_id,
+                "delta": {
+                    "tool_error": _socket_text(output, limit=240) or "Tool failed",
+                    "title": _socket_text(part.title or "", limit=240),
+                    "call_id": _socket_text(part.call_id or "", limit=255),
+                    "state": "error",
+                },
+                "part_id": str(part.id),
+            },
+            workspace_id,
+        )
 
     async def _append_tail_text_part(
         self, session: HarnessSession, assistant: HarnessMessage, remainder: str
@@ -3481,6 +3731,10 @@ class HarnessService:
             if child_task is not None:
                 # Cancel execution explicitly below, not an already-settling owner.
                 await asyncio.shield(child_task)
+            # A stopped parent must not treat the child outcome as a tool
+            # error the model can recover from by launching another subagent.
+            if self._parent_stop_in_progress(parent):
+                raise asyncio.CancelledError()
             assistant = await sync_to_async(self.messages.model.objects.get)(
                 id=assistant.id
             )
