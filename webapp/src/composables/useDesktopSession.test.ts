@@ -8,6 +8,7 @@ import {
   desktopViewerClientId,
   desktopViewerSession,
   refreshDesktopViewer,
+  RELEASE_GRACE_MS,
 } from './useDesktopSessionCoordinator'
 import { useDesktopStore } from '@/stores/desktop'
 import * as api from '@/services/workspaces.api'
@@ -118,13 +119,46 @@ describe('per-tab desktop viewer intents', () => {
     expect(api.stopDesktop).not.toHaveBeenCalled()
     second.scope.stop()
     await flushPromises()
+    expect(api.stopDesktop).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(RELEASE_GRACE_MS)
     expect(api.stopDesktop).toHaveBeenCalledExactlyOnceWith(id, {
       viewer_client_id: desktopViewerClientId,
       intent_revision: 1,
     })
   })
 
-  it('tombstones immediately before a delayed start finishes and ignores late completion', async () => {
+  it('hands the intent to a surface remounted within the grace period', async () => {
+    const id = `viewer-${++count}`
+    const first = surface(id)
+    await first.session.startDesktop()
+    first.scope.stop()
+    await flushPromises()
+    const second = surface(id)
+    await second.session.startDesktop()
+    await vi.advanceTimersByTimeAsync(RELEASE_GRACE_MS * 2)
+    expect(api.stopDesktop).not.toHaveBeenCalled()
+    expect(api.startDesktop).toHaveBeenCalledTimes(1)
+    expect(desktopViewerSession(id).revision).toBe(1)
+    expect(desktopViewerSession(id).wanted).toBe(true)
+  })
+
+  it('stops immediately on explicit stop even while a release is deferred', async () => {
+    const id = `viewer-${++count}`
+    const first = surface(id)
+    await first.session.startDesktop()
+    first.scope.stop()
+    await flushPromises()
+    expect(api.stopDesktop).not.toHaveBeenCalled()
+    await first.session.stopDesktop()
+    expect(api.stopDesktop).toHaveBeenCalledExactlyOnceWith(id, {
+      viewer_client_id: desktopViewerClientId,
+      intent_revision: 1,
+    })
+    await vi.advanceTimersByTimeAsync(RELEASE_GRACE_MS * 2)
+    expect(api.stopDesktop).toHaveBeenCalledTimes(1)
+  })
+
+  it('tombstones after the grace period before a delayed start finishes and ignores late completion', async () => {
     const id = `viewer-${++count}`
     let finish!: (value: { task_id: string }) => void
     vi.mocked(api.startDesktop).mockReturnValueOnce(
@@ -135,7 +169,7 @@ describe('per-tab desktop viewer intents', () => {
     const first = surface(id)
     const pending = first.session.startDesktop()
     first.scope.stop()
-    await flushPromises()
+    await vi.advanceTimersByTimeAsync(RELEASE_GRACE_MS)
     expect(api.stopDesktop).toHaveBeenCalledTimes(1)
     const second = surface(id)
     await second.session.startDesktop()

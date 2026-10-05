@@ -592,3 +592,79 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
             )
         rows = await self.store.recordings()
         self.assertIsNone(rows[0]["guest_token"])
+
+    def guest_manager(self, *, stop_kills_xvnc: bool = True):
+        """Manager with the real stop path against a pre-a001a88 guest.
+
+        The guest's stop script kills every process whose argv matches
+        ``Xvnc.*:1`` (including its own wrapper shell) as old images did.
+        """
+        import re
+
+        stop_script = "/usr/local/bin/opencuria-desktop-stop"
+        guest = {"xvnc": True, "kills": stop_kills_xvnc}
+        commands: list[list[str]] = []
+
+        async def exec_command_wait(instance_id, command, workdir=None, env=None):
+            commands.append(list(command))
+            argv = " ".join(command)
+            if command == [stop_script]:
+                if guest["kills"]:
+                    guest["xvnc"] = False
+                return 0, ""
+            if stop_script in argv and re.search(r"Xvnc.*:1", argv):
+                guest["xvnc"] = False
+                return -1, ""
+            if "pgrep" in argv:
+                return (1, "") if guest["xvnc"] else (0, "")
+            return 0, ""
+
+        runtime = SimpleNamespace(
+            exec_command_wait=exec_command_wait,
+            get_workspace_status=AsyncMock(
+                return_value=SimpleNamespace(instance_id="guest", status="running")
+            ),
+        )
+        manager = self.manager()
+        del manager._stop_desktop_process
+        manager._get_runtime = lambda _: runtime
+        return manager, guest, commands
+
+    def viewer(self, revision: int) -> dict:
+        return {
+            "lease_id": "viewer-tab",
+            "kind": "viewer",
+            "owner_id": "user",
+            "epoch": "epoch",
+            "revision": revision,
+        }
+
+    async def test_viewer_release_confirms_stop_on_old_guest_and_restarts(self):
+        manager, guest, commands = self.guest_manager()
+        await manager.desktop_action(self.ws, "hold", self.viewer(1))
+        result = await manager.desktop_action(self.ws, "release", self.viewer(1))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["lease_state"], "released")
+        self.assertFalse(guest["xvnc"])
+        self.assertEqual(len(commands), 2)
+        for argv in commands:
+            joined = " ".join(argv)
+            self.assertNotIn("Xvnc", joined)
+            self.assertNotIn("Xtigervnc", joined)
+        self.assertNotIn(self.ws, manager._desktop_sessions)
+        held = await manager.desktop_action(self.ws, "hold", self.viewer(2))
+        self.assertEqual((held["lease_state"], held["revision"]), ("held", 2))
+
+    async def test_unconfirmed_stop_keeps_lease_closing_until_xvnc_exits(self):
+        manager, guest, _commands = self.guest_manager(stop_kills_xvnc=False)
+        await manager.desktop_action(self.ws, "hold", self.viewer(1))
+        result = await manager.desktop_action(self.ws, "release", self.viewer(1))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["lease_state"], "closing")
+        with self.assertRaisesRegex(ValueError, "cannot advance revision"):
+            await manager.desktop_action(self.ws, "hold", self.viewer(2))
+        guest["kills"] = True
+        await manager.reap_expired()
+        self.assertEqual((await self.store.get("viewer-tab"))["state"], "expired")
+        held = await manager.desktop_action(self.ws, "hold", self.viewer(2))
+        self.assertEqual(held["lease_state"], "held")

@@ -481,3 +481,59 @@ async def test_harness_service_mcp_partial_discovery_failure(harness_workspace):
     assert assistant.finish == "stop"
     names = [s.name for s in surviving.seen_schemas[0]]
     assert names.count("mcp_demo_good_echo") == 1
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_harness_run_survives_failing_http_mcp_startup(harness_workspace):
+    """A failing HTTP server is skipped; the run is not reported interrupted."""
+    import apps.harness.mcp_client.runtime as mcp_runtime_module
+    from apps.harness.tests.test_mcp_startup_lifecycle import (
+        FailingRelayAccessor,
+        prepared_with_http,
+    )
+
+    real_mcp_runtime = mcp_runtime_module.McpRuntime
+
+    class FailingHttpRuntime(real_mcp_runtime):  # type: ignore[misc,valid-type]
+        async def setup(self, **kwargs):  # type: ignore[no-untyped-def]
+            prepared = prepared_with_http()
+            result = await super().setup(
+                workspace=None,
+                organization_id=prepared.snapshot.organization_id,
+                accessor=FailingRelayAccessor({}),
+                snapshot=prepared,
+            )
+            assert [item["server"] for item in self.skipped] == ["web"]
+            return result
+
+    class TextProvider(FakeProvider):
+        async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            yield Delta(text="done", usage=Usage(1, 1, 2))
+
+    async def _emit(event: str, data: dict) -> None:
+        return None
+
+    provider = TextProvider()
+    service = HarnessService(
+        permissions=PermissionService(),
+        emit=_emit,
+        provider_factory=lambda _org: provider,
+        accessor_factory=_async_fake_accessor,
+    )
+    session = _create_harness_session(harness_workspace)
+    mcp_runtime_module.McpRuntime = FailingHttpRuntime  # type: ignore[assignment]
+    try:
+        assistant = await service.start_run(
+            session,
+            "hello",
+            organization_id=harness_workspace.runner.organization_id,
+            workspace_id=str(harness_workspace.id),
+        )
+        await service._tasks[str(session.id)]
+    finally:
+        mcp_runtime_module.McpRuntime = real_mcp_runtime
+    assistant.refresh_from_db()
+    assert assistant.finish == "stop"
+    assert not assistant.error
+    assert provider.calls == 1

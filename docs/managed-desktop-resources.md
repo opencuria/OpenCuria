@@ -164,7 +164,9 @@ Each browser tab has its own non-persisted `viewer_client_id`; surfaces within a
 tab share/refcount its intent. A monotonically increasing `intent_revision`
 fences delayed starts, renewals, and releases. A globally active desktop does not
 prove that this tab owns a lease. Closing the last retained surface releases only
-that tab's viewer intent, not other viewers or agent owners.
+that tab's viewer intent, not other viewers or agent owners. That release waits a
+1.5-second grace period so a surface remounted by navigation keeps the intent; an
+explicit stop releases immediately.
 
 The current REST interfaces under `/api/v1/workspaces/{workspace_id}` are:
 

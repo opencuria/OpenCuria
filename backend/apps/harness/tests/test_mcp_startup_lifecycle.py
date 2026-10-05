@@ -338,3 +338,111 @@ async def test_http_startup_stall_closes_checkpointing_stream(
     assert all(s.eof_sent and s.closed for s in accessor.streams)
     assert conn._stack is None
     await assert_no_residual_cancellation()
+
+
+class FailingRelayAccessor(ScriptedAccessor):
+    """Stdio peers work; every workspace TCP relay open fails.
+
+    The failure surfaces inside the SDK's per-request task, which cancels
+    the host task through the SDK task group, as for a production POST.
+    """
+
+    def __init__(self, stalls: dict[str, str | None], *, hold: bool = False):
+        super().__init__(stalls)
+        self.hold = hold
+        self.tcp_reached = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def open_tcp(self, host, port, tls=False, server_hostname=None, timeout=None):
+        self.tcp_reached.set()
+        if self.hold:
+            await self.release.wait()
+        raise OSError("workspace relay refused")
+
+
+def http_connection(name: str = "web") -> McpServerConnection:
+    conn = connection(name, 5)
+    conn.transport = "streamable_http"
+    conn.url = "http://localhost:8123/mcp"
+    return conn
+
+
+def prepared_with_http(*stdio: str, http: str = "web") -> PreparedPluginRuntime:
+    prepared = prepared_servers(*stdio)
+    plugin = prepared.snapshot.plugins[0]
+    server = PluginMcpServerSnapshot(
+        id=uuid.uuid4(),
+        name=http,
+        slug=http,
+        transport="streamable_http",
+        command="",
+        url="http://localhost:8123/mcp",
+        startup_timeout_seconds=5,
+        request_timeout_seconds=10,
+    )
+    plugin = EffectivePluginSnapshot(
+        id=plugin.id,
+        name=plugin.name,
+        slug=plugin.slug,
+        description="",
+        organization_id=None,
+        is_global=True,
+        mcp_servers=(server, *plugin.mcp_servers),
+    )
+    return PreparedPluginRuntime(
+        snapshot=WorkspacePluginSnapshot(
+            workspace_id=prepared.snapshot.workspace_id,
+            organization_id=prepared.snapshot.organization_id,
+            plugins=(plugin,),
+        ),
+        workspace=None,
+        plaintexts={plugin.id: {}},
+    )
+
+
+async def test_sdk_child_failure_is_health_error_not_cancellation() -> None:
+    accessor = FailingRelayAccessor({})
+    conn = http_connection()
+    with pytest.raises(McpServerHealthError, match="startup failed") as error:
+        await conn.open(accessor)
+    assert isinstance(error.value.__cause__, OSError)
+    assert "workspace relay refused" in str(error.value.__cause__)
+    assert conn._stack is None
+    await assert_no_residual_cancellation()
+
+
+async def test_runtime_skips_failing_http_server_and_keeps_others() -> None:
+    accessor = FailingRelayAccessor({"first": None})
+    runtime = McpRuntime()
+    prepared = prepared_with_http("first")
+    try:
+        await runtime.setup(
+            workspace=None,
+            organization_id=prepared.snapshot.organization_id,
+            accessor=accessor,
+            snapshot=prepared,
+        )
+        assert [conn.server_slug for conn in runtime.connections] == ["first"]
+        assert [item["server"] for item in runtime.skipped] == ["web"]
+        assert "startup failed" in runtime.skipped[0]["error"]
+        await assert_no_residual_cancellation(live_pumps=1)
+        page = await runtime.connections[0]._session.list_tools()
+        assert [tool.name for tool in page.tools] == ["echo"]
+    finally:
+        await runtime.aclose()
+    assert accessor.closed == ["first"]
+    await assert_no_residual_cancellation()
+
+
+async def test_external_cancel_wins_over_concurrent_sdk_child_failure() -> None:
+    accessor = FailingRelayAccessor({}, hold=True)
+    conn = http_connection()
+    task = asyncio.create_task(conn.open(accessor))
+    await asyncio.wait_for(accessor.tcp_reached.wait(), timeout=2)
+    accessor.release.set()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
+    assert conn._stack is None
+    await assert_no_residual_cancellation()
