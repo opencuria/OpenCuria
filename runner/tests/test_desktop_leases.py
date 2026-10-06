@@ -417,6 +417,26 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(manager._recording_waiters)
         runtime.process_detach.assert_awaited_once()
 
+    async def test_same_id_remove_allows_a_new_desktop_lease(self):
+        manager, runtime, lifecycle, registry, streams = await self.lifecycle_manager()
+        await lifecycle.remove_workspace(self.ws)
+        self.assertEqual(await self.store.list_unfinished(str(self.ws)), [])
+        from src.models import WorkspaceInfo
+
+        registry._cache[self.ws] = WorkspaceInfo(
+            self.ws, "guest-2", "running", runtime_type="qemu"
+        )
+        result = await manager.desktop_action(
+            self.ws,
+            "hold",
+            {**self.intent(), "lease_id": "after-recreate", "kind": "viewer"},
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["lease_state"], "held")
+        self.assertEqual(
+            (await self.store.get("after-recreate"))["instance_id"], "guest-2"
+        )
+
     async def test_stop_failed_preclose_final_proof_finishes_owners(self):
         manager, runtime, lifecycle, registry, streams = await self.lifecycle_manager()
         await lifecycle.stop_workspace(self.ws)

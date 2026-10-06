@@ -180,10 +180,10 @@ class FrontendBusMixin:
         self, workspace_id: str, active_operation: str | None
     ) -> dict:
         """Read the committed operation and lifecycle projection synchronously."""
-        from ...capture_repository import CaptureRepository
+        from ...operation_projection import project_workspace_operation
 
         workspace = self.workspaces.get_by_id(workspace_id)
-        operation = CaptureRepository.operation(workspace_id, active_operation)
+        operation = project_workspace_operation(workspace_id, active_operation)
         payload = {"workspace_id": workspace_id, "active_operation": operation}
         if workspace is not None:
             payload.update(

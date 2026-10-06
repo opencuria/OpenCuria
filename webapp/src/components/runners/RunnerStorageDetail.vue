@@ -29,6 +29,7 @@ import {
 import {
   currentRunnerDefault,
   generationLabel,
+  storageVersionTitle,
   runnerStateClass,
   runnerStateLabel,
 } from '@/lib/runnerPresentation'
@@ -201,6 +202,16 @@ const activeActivities = computed(
       (c) => !['completed', 'cancelled', 'failed'].includes(c.phase),
     ).length ?? 0),
 )
+/** Versions of one image stay together, newest first. */
+function byVersionLine(images: StorageGeneration[]): StorageGeneration[] {
+  const line = (i: StorageGeneration) => i.captured_image_id || i.build_job_id || i.id
+  return [...images].sort(
+    (a, b) =>
+      (a.line_name || a.name).localeCompare(b.line_name || b.name) ||
+      line(a).localeCompare(line(b)) ||
+      (b.generation ?? 0) - (a.generation ?? 0),
+  )
+}
 const inventoryGroups = computed(() => {
   const term = inventoryQuery.value.trim().toLowerCase()
   const matches = (image: StorageGeneration) =>
@@ -212,12 +223,16 @@ const inventoryGroups = computed(() => {
     {
       name: 'Base / build images',
       icon: Layers,
-      images: stored.value.filter((i) => i.origin_type !== 'workspace_capture' && matches(i)),
+      images: byVersionLine(
+        stored.value.filter((i) => i.origin_type !== 'workspace_capture' && matches(i)),
+      ),
     },
     {
       name: 'Captured images',
       icon: Camera,
-      images: stored.value.filter((i) => i.origin_type === 'workspace_capture' && matches(i)),
+      images: byVersionLine(
+        stored.value.filter((i) => i.origin_type === 'workspace_capture' && matches(i)),
+      ),
     },
     ...(showDeleted.value
       ? [{ name: 'Deleted history', icon: Clock, images: deleted.value.filter(matches) }]
@@ -577,17 +592,19 @@ async function rebuild(definition: string) {
                 class="size-4 shrink-0 text-muted-foreground"
               />
               <span class="min-w-0 flex-1"
-                ><span class="block truncate text-sm font-medium">{{ image.name }}</span
+                ><span class="block truncate text-sm font-medium">{{
+                  storageVersionTitle(image)
+                }}</span
                 ><span class="mt-1 block text-xs text-muted-foreground"
                   >{{ image.runtime_type?.toUpperCase() }} ·
                   {{
                     image.origin_type === 'workspace_capture'
                       ? image.owner_label || 'Capture'
                       : image.definition_name || 'Legacy definition'
-                  }}<template v-if="image.origin_type !== 'workspace_capture'">
-                    · {{ image.generation == null ? 'Legacy' : `g${image.generation}` }}</template
-                  ></span
-                ></span
+                  }}<template v-if="image.generation == null"> · Legacy</template></span
+                ><span v-if="image.message" class="mt-0.5 block truncate text-xs text-muted-foreground">{{
+                  image.message
+                }}</span></span
               >
               <span class="hidden shrink-0 text-right text-xs text-muted-foreground sm:block"
                 ><span class="block tabular-nums">{{ storageBytes(image.size_bytes) }}</span

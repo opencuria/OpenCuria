@@ -14,7 +14,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
+import CaptureTargetFields from '@/components/images/CaptureTargetFields.vue'
+import { NEW_IMAGE } from '@/lib/imageVersions'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import type { Workspace } from '@/types'
 
@@ -30,12 +31,15 @@ const emit = defineEmits<{
 const workspaceStore = useWorkspaceStore()
 
 const error = ref('')
+const target = ref(NEW_IMAGE)
 const name = ref('')
+const message = ref('')
 const submitting = ref(false)
+const fields = ref<InstanceType<typeof CaptureTargetFields> | null>(null)
 
 const isValid = computed(
   () =>
-    name.value.trim().length > 0 &&
+    !!fields.value?.isValid &&
     props.workspace.runtime_type === 'qemu' &&
     !props.workspace.intervention_required &&
     !workspaceStore.isWorkspaceTransitioning(props.workspace.id) &&
@@ -43,11 +47,9 @@ const isValid = computed(
 )
 
 async function handleSubmit(): Promise<void> {
-  if (!isValid.value) return
+  if (!isValid.value || !fields.value) return
   submitting.value = true
-  const ok = await workspaceStore.createImageArtifact(props.workspace.id, {
-    name: name.value.trim(),
-  })
+  const ok = await workspaceStore.createImageArtifact(props.workspace.id, fields.value.payload())
   submitting.value = false
   if (ok) handleClose()
   else
@@ -59,6 +61,7 @@ function handleClose(): void {
   emit('update:open', false)
   setTimeout(() => {
     name.value = ''
+    message.value = ''
     error.value = ''
   }, 200)
 }
@@ -70,25 +73,25 @@ function handleClose(): void {
       <DialogHeader>
         <DialogTitle>Capture Image</DialogTitle>
         <DialogDescription>
-          Capture a point-in-time image. A running workspace automatically stops and restarts; a
-          stopped workspace stays stopped. Live interactions are unavailable during capture.
+          The workspace briefly stops and continues on the captured version. Files, chats and
+          settings are kept; running processes stop.
         </DialogDescription>
       </DialogHeader>
 
       <DialogBody>
         <p v-if="error" role="alert" class="text-destructive">{{ error }}</p>
-        <form id="capture-image-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
-          <div>
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Image name</label>
-            <Input
-              :disabled="submitting || workspaceStore.isWorkspaceTransitioning(workspace.id)"
-              v-model="name"
-              placeholder="e.g. before-refactor"
-            />
-            <p class="text-xs text-muted-foreground mt-1">
-              Workspace: <span class="font-mono">{{ workspace.name }}</span>
-            </p>
-          </div>
+        <form id="capture-image-form" @submit.prevent="handleSubmit">
+          <CaptureTargetFields
+            ref="fields"
+            v-model:target="target"
+            v-model:name="name"
+            v-model:message="message"
+            :workspace="workspace"
+            :disabled="submitting || workspaceStore.isWorkspaceTransitioning(workspace.id)"
+          />
+          <p class="text-xs text-muted-foreground mt-2">
+            Workspace: <span class="font-mono">{{ workspace.name }}</span>
+          </p>
         </form>
       </DialogBody>
 

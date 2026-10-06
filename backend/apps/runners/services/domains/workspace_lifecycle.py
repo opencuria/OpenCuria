@@ -52,6 +52,7 @@ from ...exceptions import (
     WorkspaceNotFoundError,
     WorkspaceStateError,
 )
+from ...provisioning import disk_size_for, provisioning_command, uses_artifact_clone
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
     from apps.credentials.services import ResolvedCredentials
@@ -322,6 +323,20 @@ class WorkspaceLifecycleMixin:
         task_id = generate_uuid()
         from ..workspace_configuration import WorkspaceConfigurationService
 
+        if runtime_type == RuntimeType.QEMU:
+            resolved_qemu_disk_size_gb = disk_size_for(
+                resolved_qemu_disk_size_gb, selected_image
+            )
+        command = provisioning_command(
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            image=selected_image,
+            runtime_type=runtime_type,
+            repos=[] if uses_artifact_clone(selected_image) else repos,
+            qemu_vcpus=resolved_qemu_vcpus,
+            qemu_memory_mb=resolved_qemu_memory_mb,
+            qemu_disk_size_gb=resolved_qemu_disk_size_gb,
+        )
         workspace_fields = {
             "workspace_id": workspace_id,
             "runner": runner,
@@ -333,6 +348,7 @@ class WorkspaceLifecycleMixin:
             "desktop_width": resolved_desktop_width,
             "desktop_height": resolved_desktop_height,
             "base_image_instance": selected_image,
+            "repos": command.payload.get("repos", []),
             "created_by": user,
         }
         workspace, task = await sync_to_async(
@@ -345,42 +361,21 @@ class WorkspaceLifecycleMixin:
             credentials=list(credentials or []),
             plugin_ids=list(plugin_ids or []),
             task_id=task_id,
-            operation_payload={
-                "workspace_id": str(workspace_id),
-                "repos": repos,
-                "workspace_name": workspace_name,
-                "runtime_type": runtime_type,
-                "qemu_vcpus": resolved_qemu_vcpus,
-                "qemu_memory_mb": resolved_qemu_memory_mb,
-                "qemu_disk_size_gb": resolved_qemu_disk_size_gb,
-                "configure_commands": [],
-                "image_artifact_id": str(image_artifact_id),
-                "image_tag": selected_image.runner_ref
-                if runtime_type == RuntimeType.DOCKER
-                else "",
-                "base_image_path": selected_image.runner_ref
-                if runtime_type == RuntimeType.QEMU
-                else "",
-            },
+            operation_payload=command.payload,
             credentials_present=bool(env_vars or files or ssh_keys),
+            task_type=command.task_type,
         )
         # Dispatch to runner — include workspace_id so the runner
         # uses the same UUID the backend assigned.
         await self._dispatch_workspace_task(
             runner=runner,
-            event="task:create_workspace",
+            event=command.event,
             task=task,
             workspace=workspace,
-            operation=self._task_workspace_operation(TaskType.CREATE_WORKSPACE),
+            operation=self._task_workspace_operation(command.task_type),
             payload={
                 "task_id": str(task_id),
-                "workspace_id": str(workspace_id),
-                "repos": repos,
-                "runtime_type": runtime_type,
-                "qemu_vcpus": resolved_qemu_vcpus,
-                "qemu_memory_mb": resolved_qemu_memory_mb,
-                "qemu_disk_size_gb": resolved_qemu_disk_size_gb,
-                "configure_commands": [],
+                **command.payload,
                 "env_vars": env_vars or {},
                 "files": [
                     {
@@ -391,13 +386,6 @@ class WorkspaceLifecycleMixin:
                     for file in (files or [])
                 ],
                 "ssh_keys": ssh_keys or [],
-                "image_artifact_id": str(image_artifact_id),
-                "image_tag": selected_image.runner_ref
-                if runtime_type == RuntimeType.DOCKER
-                else "",
-                "base_image_path": selected_image.runner_ref
-                if runtime_type == RuntimeType.QEMU
-                else "",
             },
         )
         logger.info(
@@ -757,6 +745,83 @@ class WorkspaceLifecycleMixin:
         )
         return task
 
+    async def recreate_workspace(
+        self,
+        workspace_id: uuid.UUID,
+        image_id: uuid.UUID,
+        *,
+        user=None,
+        organization_id: uuid.UUID | None = None,
+    ) -> tuple[Workspace, Task]:
+        """Reset (same version) or update (latest version) a workspace in place.
+
+        Every precondition is checked before the runtime is destroyed. The
+        workspace keeps its id, chats, credentials, plugins and schedules;
+        all data stored only inside the workspace is permanently lost.
+        """
+        from ...recreate_repository import RecreateRepository
+
+        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
+        if workspace is None or (
+            organization_id and workspace.runner.organization_id != organization_id
+        ):
+            raise WorkspaceNotFoundError(str(workspace_id))
+        runner = workspace.runner
+        if not runner.is_online:
+            raise RunnerOfflineError(str(runner.id))
+        target = await sync_to_async(self.image_instances.get_by_id)(image_id)
+        if target is None or target.runner_id != runner.id:
+            raise NotFoundError("Image version", str(image_id))
+
+        disk_size_gb = workspace.qemu_disk_size_gb
+        if workspace.runtime_type == RuntimeType.QEMU:
+            disk_size_gb = disk_size_for(workspace.qemu_disk_size_gb, target)
+            vcpus, memory_mb, disk_size_gb = self._resolve_qemu_resources(
+                runner=runner,
+                qemu_vcpus=workspace.qemu_vcpus,
+                qemu_memory_mb=workspace.qemu_memory_mb,
+                qemu_disk_size_gb=disk_size_gb,
+            )
+            if workspace.status != WorkspaceStatus.RUNNING:
+                await self._ensure_qemu_active_capacity(
+                    runner=runner,
+                    requested_vcpus=vcpus,
+                    requested_memory_mb=memory_mb,
+                    requested_disk_size_gb=disk_size_gb,
+                    exclude_workspace_id=workspace.id,
+                )
+
+        from apps.credentials.services import CredentialSvc
+
+        try:
+            await sync_to_async(CredentialSvc().resolve_workspace_credentials)(
+                workspace
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced as a clear conflict
+            raise ConflictError(
+                "Workspace credentials cannot be resolved. Fix or detach them "
+                "before resetting."
+            ) from exc
+
+        workspace, task, _ = await sync_to_async(
+            RecreateRepository.allocate, thread_sensitive=True
+        )(
+            workspace_id,
+            image_id,
+            requested_by=user,
+            qemu_disk_size_gb=disk_size_gb,
+        )
+        await sync_to_async(self._forward_workspace_operation)(
+            str(workspace_id), workspace.active_operation
+        )
+        logger.info(
+            "Recreate requested (workspace=%s, image=%s, task=%s)",
+            workspace_id,
+            image_id,
+            task.id,
+        )
+        return workspace, task
+
     async def remove_workspace(self, workspace_id: uuid.UUID) -> Task:
         """Remove a workspace and its container.
 
@@ -1040,12 +1105,15 @@ class WorkspaceLifecycleMixin:
             self._pending_credential_inject.discard(
                 (str(workspace.runner_id), str(workspace.id))
             )
+        from ...recreate_repository import RecreateRepository
+
+        recreating = RecreateRepository.owns(task)
         if workspace and task.type in {
             TaskType.CREATE_WORKSPACE,
             TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT,
         }:
             self.workspaces.update_status(workspace, WorkspaceStatus.FAILED)
-        elif workspace and task.type == TaskType.REMOVE_WORKSPACE:
+        elif workspace and task.type == TaskType.REMOVE_WORKSPACE and not recreating:
             self.workspaces.mark_delete_failed(workspace.id, error=error)
 
         if workspace and task.type in {
@@ -1067,7 +1135,7 @@ class WorkspaceLifecycleMixin:
         if workspace_id:
             if workspace and observed_status is not None:
                 self._forward_workspace_status(workspace, task_id=task_id)
-            if workspace and task.type == TaskType.REMOVE_WORKSPACE:
+            if workspace and task.type == TaskType.REMOVE_WORKSPACE and not recreating:
                 self._forward_to_frontend(
                     "workspace:status_changed",
                     {
@@ -1113,10 +1181,13 @@ class WorkspaceLifecycleMixin:
         if not self._validate_task_runner(task, runner_id):
             return
 
+        from ...recreate_repository import RecreateRepository
+
+        recreating = RecreateRepository.owns(task)
         delete_result = result or ("already_absent" if already_absent else "deleted")
         if delete_result not in {"deleted", "already_absent"}:
             error = f"Workspace delete was not confirmed: {delete_result}"
-            if task.workspace:
+            if task.workspace and not recreating:
                 self.workspaces.mark_delete_failed(task.workspace.id, error=error)
             self.tasks.fail(task, error)
             logger.warning(
@@ -1128,17 +1199,34 @@ class WorkspaceLifecycleMixin:
 
         workspace = task.workspace
         if workspace:
-            self.workspaces.mark_deleted(workspace.id)
+            if recreating:
+                RecreateRepository.removed(workspace)
+            else:
+                self.workspaces.mark_deleted(workspace.id)
             self.mark_processes_killed(str(workspace.id), reason="workspace_removed")
         self._cleanup_desktop_state(workspace_id)
 
         self.tasks.complete(task)
         logger.info(
-            "Workspace removed: %s (result=%s already_absent=%s)",
+            "Workspace removed: %s (result=%s already_absent=%s recreating=%s)",
             workspace_id,
             delete_result,
             already_absent,
+            recreating,
         )
+
+        if recreating:
+            self._forward_to_frontend(
+                "workspace:status_changed",
+                {
+                    "workspace_id": workspace_id,
+                    "status": WorkspaceStatus.CREATING,
+                    "task_id": task_id,
+                },
+                workspace_id,
+            )
+            self._forward_workspace_operation(workspace_id, None)
+            return
 
         self._forward_to_frontend(
             "workspace:status_changed",
@@ -1252,7 +1340,9 @@ class WorkspaceLifecycleMixin:
         source_workspace = image.origin_workspace
         qemu_vcpus = getattr(source_workspace, "qemu_vcpus", None)
         qemu_memory_mb = getattr(source_workspace, "qemu_memory_mb", None)
-        qemu_disk_size_gb = getattr(source_workspace, "qemu_disk_size_gb", None)
+        qemu_disk_size_gb = disk_size_for(
+            getattr(source_workspace, "qemu_disk_size_gb", None), image
+        )
         desktop_width = (
             source_workspace.desktop_width
             if source_workspace is not None

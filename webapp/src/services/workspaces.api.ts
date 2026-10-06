@@ -18,6 +18,8 @@ import type {
   ImageArtifactCloneOut,
   ImageDefinition,
   RunnerImageBuild,
+  CapturedImage,
+  WorkspaceRecreateOut,
 } from '@/types'
 import { get, post, del, patch } from './api'
 
@@ -51,6 +53,11 @@ export function stopWorkspace(id: string): Promise<Task> {
 
 export function resumeWorkspace(id: string): Promise<Task> {
   return post<Task>(`/workspaces/${id}/resume/`)
+}
+
+/** Reset (own version) or update (latest version); workspace data is lost. */
+export function recreateWorkspace(id: string, imageId: string): Promise<WorkspaceRecreateOut> {
+  return post<WorkspaceRecreateOut>(`/workspaces/${id}/recreate/`, { image_id: imageId })
 }
 
 // --- Terminal API ---
@@ -243,6 +250,24 @@ export function createWorkspaceFromUserImageArtifact(
   return post<ImageArtifactCloneOut>(`/image-artifacts/${imageArtifactId}/workspaces/`, data)
 }
 
+// --- Captured image (versioned) API ---
+
+export function listCapturedImages(): Promise<CapturedImage[]> {
+  return get<CapturedImage[]>('/captured-images/')
+}
+
+export function renameCapturedImage(id: string, name: string): Promise<CapturedImage> {
+  return patch<CapturedImage>(`/captured-images/${id}/`, { name })
+}
+
+/** New workspaces always use the latest version of a captured image. */
+export function createWorkspaceFromCapturedImage(
+  id: string,
+  data: ImageArtifactCloneIn,
+): Promise<ImageArtifactCloneOut> {
+  return post<ImageArtifactCloneOut>(`/captured-images/${id}/workspaces/`, data)
+}
+
 // --- Image definition APIs ---
 
 export function listImageDefinitions(): Promise<ImageDefinition[]> {
@@ -282,7 +307,7 @@ export function listRunnerImageBuilds(definitionId: string): Promise<RunnerImage
 
 export function createRunnerImageBuild(
   definitionId: string,
-  data: { runner_id: string; activate?: boolean },
+  data: { runner_id: string; activate?: boolean; message?: string },
 ): Promise<RunnerImageBuild> {
   return post<RunnerImageBuild>(`/image-definitions/${definitionId}/runner-builds/`, data)
 }
@@ -290,7 +315,7 @@ export function createRunnerImageBuild(
 export function updateRunnerImageBuild(
   definitionId: string,
   runnerId: string,
-  data: { action: 'activate' | 'deactivate' | 'rebuild' },
+  data: { action: 'activate' | 'deactivate' | 'rebuild'; message?: string },
 ): Promise<RunnerImageBuild> {
   return patch<RunnerImageBuild>(
     `/image-definitions/${definitionId}/runner-builds/${runnerId}/`,

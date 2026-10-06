@@ -6,6 +6,8 @@ export interface StorageWorkspace {
   status: string
   observed_state?: string
   base_image_instance_id?: string | null
+  pending_base_image_instance_id?: string | null
+  allocated_bytes?: number | null
   last_activity_at: string | null
 }
 export interface StorageResource {
@@ -56,6 +58,11 @@ export interface StorageGeneration {
   definition_name: string | null
   build_job_id: string | null
   generation: number | null
+  captured_image_id?: string | null
+  line_name?: string | null
+  message?: string
+  is_latest?: boolean
+  retention?: 'latest' | 'kept' | 'expires_when_unused' | null
   status: string
   assignment_status: string | null
   runner_ref: string
@@ -94,7 +101,7 @@ export interface RunnerStorage {
   }[]
 }
 export type DeletionTarget = {
-  target_type: 'image' | 'assignment' | 'definition'
+  target_type: 'image' | 'assignment' | 'definition' | 'captured_image'
   target_id: string
 }
 export interface DeletionGraph {

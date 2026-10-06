@@ -48,6 +48,15 @@ class OrganizationRepository:
         return organization
 
     @staticmethod
+    def update_image_versions_to_keep(
+        organization: Organization, keep: int
+    ) -> Organization:
+        """Persist how many newest image versions are always retained."""
+        organization.image_versions_to_keep = keep
+        organization.save(update_fields=["image_versions_to_keep", "updated_at"])
+        return organization
+
+    @staticmethod
     def list_for_user(user) -> QuerySet[Organization]:
         """Return all organizations a user is a member of."""
         return Organization.objects.filter(

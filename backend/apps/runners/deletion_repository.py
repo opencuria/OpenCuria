@@ -15,8 +15,10 @@ from django.utils import timezone
 
 from common.exceptions import ConflictError, NotFoundError
 
+from .image_lines import ImageLineRepository
 from .inventory_repository import InventoryRepository
 from .models import (
+    CapturedImage,
     ImageBuildJob,
     ImageDefinition,
     ImageDeletionRequest,
@@ -66,6 +68,19 @@ class DeletionRepository:
                 image_definition_id=target_id, runner__organization_id=org_id
             )
             images = ImageInstance.objects.filter(build_job__in=jobs)
+        elif kind == "captured_image":
+            target = CapturedImage.objects.filter(
+                pk=target_id, organization_id=org_id
+            ).first()
+            # Versions already owned by another live request (e.g. retention)
+            # stay with that request instead of conflicting with the line.
+            reserved = ImageLineRepository.reserved_image_ids(
+                exclude_target=(kind, target_id)
+            )
+            images = ImageInstance.objects.filter(captured_image_id=target_id).exclude(
+                pk__in=reserved
+            )
+            jobs = ImageBuildJob.objects.none()
         else:
             raise ConflictError("Unknown deletion target type")
         if target is None:
@@ -87,7 +102,7 @@ class DeletionRepository:
             "snapshots": [],
         }
         runners = {i.runner_id for i in roots} | {j.runner_id for j in jobs}
-        if kind in ["image", "assignment"]:
+        if kind in ["image", "assignment", "captured_image"]:
             runners.add(target.runner_id)
         selected_images = {str(i.id): i for i in roots}
         selected_ws = {}
@@ -165,11 +180,7 @@ class DeletionRepository:
                     image_ids = {
                         by_id[x].image_id for x in chosen if by_id[x].image_id
                     } | root_ids
-                    pinned = list(
-                        Workspace.objects.filter(
-                            base_image_instance_id__in=image_ids
-                        ).exclude(status__in=TERMINAL)
-                    )
+                    pinned = list(ImageLineRepository.pinning_workspaces(image_ids))
                     ws_ids = {w.id for w in pinned} | {
                         by_id[x].workspace_id for x in chosen if by_id[x].workspace_id
                     }
@@ -179,7 +190,12 @@ class DeletionRepository:
                     chosen |= extra
                 for w in pinned:
                     selected_ws[str(w.id)] = w
-                    result["pins"].append([str(w.id), str(w.base_image_instance_id)])
+                    pin = (
+                        w.base_image_instance_id
+                        if w.base_image_instance_id in image_ids
+                        else w.pending_base_image_instance_id
+                    )
+                    result["pins"].append([str(w.id), str(pin)])
                     if not any(r.workspace_id == w.id for r in resources):
                         result["blockers"].append("missing_workspace:" + str(w.id))
                 for resource_id in chosen:
@@ -321,7 +337,7 @@ class DeletionRepository:
     def _lock_runners(org_id, kind, target_id):
         target, images, jobs = DeletionRepository.target(org_id, kind, target_id)
         ids = {i.runner_id for i in images} | {j.runner_id for j in jobs}
-        if kind in ["image", "assignment"]:
+        if kind in ["image", "assignment", "captured_image"]:
             ids.add(target.runner_id)
         from .locking import lock_runner
 
@@ -424,6 +440,10 @@ class DeletionRepository:
             ImageDefinition.objects.filter(pk=definition.id).update(
                 status="pending_deletion"
             )
+        if plan.target_type == "captured_image":
+            line = CapturedImage.objects.get(pk=plan.target_id)
+            previous.setdefault("captured_image:" + str(line.id), line.status)
+            CapturedImage.objects.filter(pk=line.id).update(status="pending_deletion")
         plan.previous = previous
         plan.save(update_fields=["previous"])
 
@@ -475,6 +495,7 @@ class DeletionRepository:
                         "image": ImageInstance,
                         "assignment": ImageBuildJob,
                         "definition": ImageDefinition,
+                        "captured_image": CapturedImage,
                     }[kind]
                     # Never overwrite a later user/worker state or resurrect bytes.
                     if kind == "image" and state in ["building", "capturing"]:
@@ -717,6 +738,8 @@ class DeletionRepository:
                     ImageDefinition.objects.filter(pk=plan.target_id).update(
                         status="deleted"
                     )
+                if plan.target_type == "captured_image":
+                    ImageLineRepository.finalize_captured(plan.target_id)
                 wait("completed", "")
                 return
             # Allocate one leaf, then demand a subsequent complete scan before

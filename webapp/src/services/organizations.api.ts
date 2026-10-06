@@ -19,7 +19,10 @@ export function getOrganization(id: string): Promise<Organization> {
 
 export function updateOrganizationWorkspacePolicy(
   id: string,
-  data: { workspace_auto_stop_timeout_minutes: number | null },
+  data: {
+    workspace_auto_stop_timeout_minutes?: number | null
+    image_versions_to_keep?: number
+  },
 ): Promise<Organization> {
   return patch<Organization>(`/organizations/${id}/workspace-policy/`, data)
 }

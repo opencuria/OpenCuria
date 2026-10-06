@@ -197,6 +197,13 @@ class HeartbeatReconcilerMixin:
 
             if ws.status in (WorkspaceStatus.FAILED, WorkspaceStatus.REMOVED):
                 continue
+            if getattr(ws, "pending_base_image_instance_id", None) and (
+                ws.active_operation or ws.current_task_id
+            ):
+                # The runtime is being removed and recreated under the same id;
+                # the recreate request, not the heartbeat, owns the status.
+                self._pending_unknown_workspace_cleanup.discard(cleanup_key)
+                continue
 
             if ws.status in (
                 WorkspaceStatus.PENDING_DELETION,

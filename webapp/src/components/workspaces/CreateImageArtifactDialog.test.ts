@@ -7,9 +7,14 @@ import { useRunnerStore } from '@/stores/runners'
 import { useImageArtifactStore } from '@/stores/imageArtifacts'
 import { WorkspaceOperation, WorkspaceStatus, RuntimeType, type Workspace } from '@/types'
 
+vi.mock('@/services/workspaces.api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/workspaces.api')>()),
+  listCapturedImages: vi.fn(async () => []),
+}))
+
 beforeEach(() => setActivePinia(createPinia()))
 it.each([WorkspaceStatus.RUNNING, WorkspaceStatus.STOPPED])(
-  'captures %s without approval and sends only name and workspace',
+  'captures %s without approval as a new image of the workspace',
   async (status) => {
     const workspaces = useWorkspaceStore()
     workspaces.workspaces = [
@@ -66,7 +71,7 @@ it.each([WorkspaceStatus.RUNNING, WorkspaceStatus.STOPPED])(
     await wrapper.get('form').trigger('submit')
     await flushPromises()
     expect(wrapper.find('[role="checkbox"]').exists()).toBe(false)
-    expect(create).toHaveBeenCalledWith({ name: 'Snapshot', workspace_id: 'w' })
+    expect(create).toHaveBeenCalledWith({ name: 'Snapshot', message: '', workspace_id: 'w' })
     wrapper.unmount()
   },
 )
@@ -102,6 +107,6 @@ it('selects a workspace with the real Reka select', async () => {
   expect(submit.disabled).toBe(false)
   document.body.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
   await flushPromises()
-  expect(create).toHaveBeenCalledWith({ name: 'Snapshot', workspace_id: 'w' })
+  expect(create).toHaveBeenCalledWith({ name: 'Snapshot', message: '', workspace_id: 'w' })
   wrapper.unmount()
 })

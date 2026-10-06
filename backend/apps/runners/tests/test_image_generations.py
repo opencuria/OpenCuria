@@ -7,6 +7,7 @@ from django.db import IntegrityError, transaction
 
 from apps.runners.models import ImageDefinition, ImageInstance, Task, Workspace
 from apps.runners.repositories import ImageGenerationRepository as Generations
+from apps.runners.tests.conftest import capture_version_fields
 
 
 @pytest.fixture
@@ -160,6 +161,7 @@ def test_capture_no_fallback_wrong_workspace_and_no_revival(runner, user):
         name="capture",
         status="capturing",
         creating_task=task,
+        **capture_version_fields(runner, user),
     )
     assert not Generations.capture_result(**{**kwargs, "workspace_id": uuid.uuid4()})
     image.status = "deleting"
@@ -183,6 +185,7 @@ def test_deletion_callback_exact_attempt_target(runner, user):
         status="deleting",
         deleting_task=task,
         runner_ref="/delete.qcow2",
+        **capture_version_fields(runner, user),
     )
     assert Generations.delete_result(task_id=uuid.uuid4(), runner_id=runner.id) is None
     assert (

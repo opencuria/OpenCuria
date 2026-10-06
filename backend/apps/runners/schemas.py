@@ -101,6 +101,21 @@ class RunnerUpdateIn(Schema):
 # ---------------------------------------------------------------------------
 
 
+class ImageVersionRefOut(Schema):
+    """The image version a workspace is (or is being) based on."""
+
+    id: uuid.UUID
+    line_kind: str | None = None
+    line_id: uuid.UUID | None = None
+    name: str
+    version: int | None = None
+    message: str = ""
+    status: str
+    latest_id: uuid.UUID | None = None
+    latest_version: int | None = None
+    update_available: bool = False
+
+
 class WorkspaceOut(Schema):
     """Response schema for a workspace."""
 
@@ -134,6 +149,23 @@ class WorkspaceOut(Schema):
     plugin_ids: list[uuid.UUID] = []
     credentials_present: bool = False
     base_image_name: str | None = None
+    base_image: ImageVersionRefOut | None = None
+    pending_base_image: ImageVersionRefOut | None = None
+    repos: list[str] = []
+
+
+class WorkspaceRecreateIn(Schema):
+    """Recreate a workspace on its own version (reset) or the latest (update)."""
+
+    image_id: uuid.UUID
+
+
+class WorkspaceRecreateOut(Schema):
+    """Response after a recreate was accepted."""
+
+    workspace_id: uuid.UUID
+    task_id: uuid.UUID
+    active_operation: str | None = None
 
 
 class WorkspaceCreateIn(Schema):
@@ -380,8 +412,16 @@ class ErrorOut(Schema):
 # ---------------------------------------------------------------------------
 
 
+class ImageVersionWorkspaceOut(Schema):
+    """A workspace that is based on an image version."""
+
+    id: uuid.UUID
+    name: str
+    created_by_id: int | None = None
+
+
 class ImageArtifactOut(Schema):
-    """Response schema for a concrete image artifact."""
+    """Response schema for a concrete image artifact (one image version)."""
 
     id: uuid.UUID
     source_workspace_id: uuid.UUID | None = None
@@ -405,6 +445,13 @@ class ImageArtifactOut(Schema):
     delete_last_error: str = ""
     created_at: datetime
     created_by_id: int | None = None
+    captured_image_id: uuid.UUID | None = None
+    version: int | None = None
+    message: str = ""
+    is_latest: bool = False
+    retention: str | None = None
+    workspace_count: int = 0
+    workspaces: list[ImageVersionWorkspaceOut] = []
 
 
 class ImageArtifactUpdateIn(Schema):
@@ -414,10 +461,35 @@ class ImageArtifactUpdateIn(Schema):
 
 
 class ImageArtifactCreateIn(Schema):
-    """Request schema for creating an image artifact."""
+    """Capture a workspace as a new image or as the next version of one."""
+
+    name: str = ""
+    workspace_id: uuid.UUID | None = None
+    captured_image_id: uuid.UUID | None = None
+    message: str = Field(default="", max_length=500)
+
+
+class CapturedImageOut(Schema):
+    """A versioned captured image (line) with all of its versions."""
+
+    id: uuid.UUID
+    name: str
+    status: str
+    runner_id: uuid.UUID
+    runner_online: bool = False
+    created_by_id: int | None = None
+    created_at: datetime
+    latest_id: uuid.UUID | None = None
+    latest_version: int | None = None
+    total_size_bytes: int = 0
+    workspace_count: int = 0
+    versions: list[ImageArtifactOut] = []
+
+
+class CapturedImageUpdateIn(Schema):
+    """Rename a captured image."""
 
     name: str
-    workspace_id: uuid.UUID | None = None
 
 
 class ImageArtifactCreateOut(Schema):
@@ -505,6 +577,7 @@ class ImageBuildJobListOut(Schema):
     delete_last_error: str = ""
     created_at: datetime
     updated_at: datetime
+    versions: list[ImageArtifactOut] = []
 
 
 class ImageBuildJobCreateIn(Schema):
@@ -512,12 +585,14 @@ class ImageBuildJobCreateIn(Schema):
 
     runner_id: uuid.UUID
     activate: bool = True
+    message: str = Field(default="", max_length=500)
 
 
 class ImageBuildJobUpdateIn(Schema):
     """Update runner build lifecycle state via actions."""
 
     action: str  # deactivate | activate | rebuild
+    message: str = Field(default="", max_length=500)
 
 
 class ImageDefinitionOut(Schema):

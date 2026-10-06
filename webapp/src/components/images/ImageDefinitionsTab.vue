@@ -12,12 +12,20 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { Textarea } from '@/components/ui/textarea'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import ImageVersionList from './ImageVersionList.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import SettingsSection from '@/components/settings/SettingsSection.vue'
 import SettingsRow from '@/components/settings/SettingsRow.vue'
 import { Plus, Pencil, Trash2, ChevronDown, Loader2, Copy, RotateCcw, Layers } from '@lucide/vue'
-import { RunnerStatus, type ImageDefinition, type Runner, type RunnerImageBuild } from '@/types'
+import {
+  RunnerStatus,
+  type ImageArtifact,
+  type ImageDefinition,
+  type Runner,
+  type RunnerImageBuild,
+} from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 import { ApiRequestError, get } from '@/services/api'
 import { filterRunnersByRuntime } from '@/lib/runtimeSupport'
@@ -56,12 +64,13 @@ const confirmDialog = ref<{
   kind: RunnerBuildConfirmKind | 'delete_definition'
 } | null>(null)
 const pendingConfirm = ref<(() => Promise<void>) | null>(null)
+const buildMessage = ref('')
 
 let refreshTimer: number | null = null
 
 const REBUILD_CONFIRM = {
   title: 'Rebuild this runner image?',
-  body: 'The image on this runner will be rebuilt. Existing workspaces keep the filesystem they were created with and are not deleted or updated. New workspaces will use the rebuilt image after the build succeeds.',
+  body: 'Builds a new version on this runner. New workspaces use it once the build succeeds. Existing workspaces keep their version until they are updated.',
   confirmLabel: 'Rebuild',
   destructive: false,
   kind: 'rebuild' as const,
@@ -163,6 +172,7 @@ function askConfirm(
 ): void {
   confirmDialog.value = spec
   pendingConfirm.value = action
+  buildMessage.value = ''
 }
 
 async function runConfirmed(): Promise<void> {
@@ -256,10 +266,27 @@ async function patchRunner(
   definitionId: string,
   runnerId: string,
   action: 'activate' | 'deactivate' | 'rebuild',
+  message = '',
 ): Promise<void> {
   await runRunnerAction(definitionId, runnerId, action, async () => {
-    await workspacesApi.updateRunnerImageBuild(definitionId, runnerId, { action })
+    await workspacesApi.updateRunnerImageBuild(definitionId, runnerId, {
+      action,
+      ...(message.trim() ? { message: message.trim() } : {}),
+    })
   })
+}
+
+function buildVersions(definitionId: string, runnerId: string): ImageArtifact[] {
+  return getBuild(definitionId, runnerId)?.versions ?? []
+}
+
+function latestVersion(definitionId: string, runnerId: string): number | null {
+  const build = getBuild(definitionId, runnerId)
+  return build?.versions?.find((v) => v.id === build.current_generation_id)?.version ?? null
+}
+
+function requestDeleteVersion(version: ImageArtifact): void {
+  deletionTarget.value = { target_type: 'image', target_id: version.id }
 }
 
 async function viewLog(definitionId: string, runnerId: string): Promise<void> {
@@ -291,7 +318,7 @@ function handleAction(
       case 'deactivate':
         return patchRunner(definitionId, runnerId, 'deactivate')
       case 'rebuild':
-        return patchRunner(definitionId, runnerId, 'rebuild')
+        return patchRunner(definitionId, runnerId, 'rebuild', buildMessage.value)
       case 'remove':
       case 'retry_remove': {
         const assignment = getBuild(definitionId, runnerId)
@@ -547,21 +574,13 @@ onUnmounted(() => {
                           <Button variant="outline" size="sm" @click="windowOpenRunner(runner.id)"
                             >Storage & generation history</Button
                           >
-                          <span
-                            v-if="getBuild(definition.id, runner.id)?.current_generation_id"
-                            class="text-xs"
-                            >Current available ·
-                            {{
-                              getBuild(definition.id, runner.id)?.current_generation_id?.slice(0, 8)
-                            }}</span
+                          <span v-if="latestVersion(definition.id, runner.id)" class="text-xs"
+                            >Latest v{{ latestVersion(definition.id, runner.id) }}</span
                           >
                           <span
                             v-if="getBuild(definition.id, runner.id)?.pending_generation_id"
                             class="text-xs"
-                            >Pending attempt ·
-                            {{
-                              getBuild(definition.id, runner.id)?.pending_generation_id?.slice(0, 8)
-                            }}</span
+                            >New version building</span
                           >
                           <Button
                             v-if="
@@ -618,6 +637,23 @@ onUnmounted(() => {
                         </div>
                       </td>
                     </tr>
+                    <tr
+                      v-for="runner in compatibleRunners(definition).filter(
+                        (r) => buildVersions(definition.id, r.id).length,
+                      )"
+                      :key="`${runner.id}-versions`"
+                    >
+                      <td colspan="3" class="pb-2">
+                        <p class="pt-2 text-xs font-medium text-muted-foreground">
+                          Versions on {{ runner.name || runner.id.slice(0, 8) }}
+                        </p>
+                        <ImageVersionList
+                          :versions="buildVersions(definition.id, runner.id)"
+                          can-delete
+                          @delete="requestDeleteVersion"
+                        />
+                      </td>
+                    </tr>
                   </tbody>
                 </table>
               </div>
@@ -659,6 +695,15 @@ onUnmounted(() => {
           <DialogTitle>{{ confirmDialog?.title }}</DialogTitle>
           <DialogDescription>{{ confirmDialog?.body }}</DialogDescription>
         </DialogHeader>
+        <DialogBody v-if="confirmDialog?.kind === 'rebuild'">
+          <label class="text-sm font-medium text-foreground mb-1.5 block">What changed?</label>
+          <Textarea
+            v-model="buildMessage"
+            maxlength="500"
+            placeholder="Optional, e.g. Added Playwright"
+            data-testid="rebuild-message-input"
+          />
+        </DialogBody>
         <DialogFooter>
           <Button variant="outline" type="button" @click="cancelConfirm">Cancel</Button>
           <Button

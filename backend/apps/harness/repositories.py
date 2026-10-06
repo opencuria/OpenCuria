@@ -348,6 +348,8 @@ class HarnessSessionRepository:
         workspace = Workspace.objects.get(id=workspace_id)
         if workspace.active_operation == "capturing_image":
             raise ConflictError("Workspace is currently capturing image")
+        if workspace.active_operation in {"resetting", "updating"}:
+            raise ConflictError(f"Workspace is currently {workspace.active_operation}")
         if workspace.current_task_id and not workspace.active_operation:
             raise ConflictError(
                 "Workspace lifecycle outcome unresolved; intervention required"

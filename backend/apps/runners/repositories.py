@@ -26,6 +26,7 @@ from .enums import (
 )
 from .locking import lock_runner
 from .models import (
+    CapturedImage,
     ImageBuildJob,
     ImageDefinition,
     ImageInstance,
@@ -299,6 +300,7 @@ class WorkspaceRepository:
         desktop_width: int | None = None,
         desktop_height: int | None = None,
         base_image_instance=None,
+        repos: list[str] | None = None,
         created_by=None,
     ) -> Workspace:
         """Create a new workspace record."""
@@ -319,6 +321,7 @@ class WorkspaceRepository:
                 DEFAULT_DESKTOP_HEIGHT if desktop_height is None else desktop_height
             ),
             base_image_instance=base_image_instance,
+            repos=list(repos or []),
             status=WorkspaceStatus.CREATING,
             active_operation=WorkspaceOperation.CREATING,
             created_by=created_by,
@@ -486,9 +489,9 @@ class WorkspaceRepository:
         active_operation: WorkspaceOperation | None,
     ) -> Workspace:
         """Update the currently active blocking operation for a workspace."""
-        from .capture_repository import CaptureRepository
+        from .operation_projection import project_workspace_operation
 
-        workspace.active_operation = CaptureRepository.operation(
+        workspace.active_operation = project_workspace_operation(
             workspace.id, active_operation
         )
         workspace.save(update_fields=["active_operation", "updated_at"])
@@ -1013,6 +1016,7 @@ class TaskRepository:
         workspace: Workspace | None = None,
         operation_payload: dict | None = None,
         capture_request_id: uuid.UUID | None = None,
+        recreate_request_id: uuid.UUID | None = None,
     ) -> Task:
         """Create a new task record."""
         from .operations import OperationRepository
@@ -1021,14 +1025,19 @@ class TaskRepository:
             lock_runner(runner.id)
             if workspace is not None:
                 workspace = Workspace.objects.select_for_update().get(pk=workspace.id)
+                from common.exceptions import ConflictError
+
                 from .capture_repository import CaptureRepository
+                from .recreate_repository import RecreateRepository
 
                 if capture_request_id is None and CaptureRepository.active(
                     workspace.id
                 ):
-                    from common.exceptions import ConflictError
-
                     raise ConflictError("Workspace is capturing image")
+                if recreate_request_id is None and RecreateRepository.active(
+                    workspace.id
+                ):
+                    raise ConflictError("Workspace is being reset")
             task = Task.objects.create(
                 id=task_id,
                 runner=runner,
@@ -1036,7 +1045,11 @@ class TaskRepository:
                 type=task_type,
                 status=TaskStatus.PENDING,
             )
-            OperationRepository.allocate(task, capture_request_id=capture_request_id)
+            OperationRepository.allocate(
+                task,
+                capture_request_id=capture_request_id,
+                recreate_request_id=recreate_request_id,
+            )
             if operation_payload is not None or task_type in {
                 TaskType.STOP_WORKSPACE,
                 TaskType.RESUME_WORKSPACE,
@@ -1070,11 +1083,11 @@ class TaskRepository:
 
     @staticmethod
     def release_workspace(task: Task) -> None:
-        """Release a child identity, never its enclosing capture reservation."""
-        from .capture_repository import CaptureRepository
+        """Release a child identity, never its enclosing capture/recreate request."""
+        from .operation_projection import project_workspace_operation
 
         operation = (
-            CaptureRepository.operation(task.workspace_id, None)
+            project_workspace_operation(task.workspace_id, None)
             if task.workspace_id
             else None
         )
@@ -1351,11 +1364,9 @@ class ImageInstanceRepository:
 
         with transaction.atomic():
             ImageInstance.objects.select_for_update().get(id=image_id)
-            if (
-                Workspace.objects.filter(base_image_instance_id=image_id)
-                .exclude(status__in=["removed", "deleted"])
-                .exists()
-            ):
+            from .image_lines import ImageLineRepository
+
+            if ImageLineRepository.pinning_workspaces([image_id]).exists():
                 raise ConflictError("Image is still used by a workspace")
             ImageInstance.objects.filter(id=image_id).update(
                 status=ImageInstance.Status.DELETING,
@@ -1374,11 +1385,9 @@ class ImageInstanceRepository:
 
         with transaction.atomic():
             ImageInstance.objects.select_for_update().get(id=image_id)
-            if (
-                Workspace.objects.filter(base_image_instance_id=image_id)
-                .exclude(status__in=["removed", "deleted"])
-                .exists()
-            ):
+            from .image_lines import ImageLineRepository
+
+            if ImageLineRepository.pinning_workspaces([image_id]).exists():
                 raise ConflictError("Image is still used by a workspace")
             ImageInstance.objects.filter(id=image_id).update(
                 status=ImageInstance.Status.PENDING_DELETION,
@@ -1974,7 +1983,9 @@ class ImageGenerationRepository:
     )
 
     @staticmethod
-    def request(*, definition, runner, rendered_input: dict, created_by=None):
+    def request(
+        *, definition, runner, rendered_input: dict, created_by=None, message: str = ""
+    ):
         """Allocate a fresh generation without touching any previous image."""
         import hashlib
         import json
@@ -2048,6 +2059,7 @@ class ImageGenerationRepository:
                 created_by=created_by,
                 name=f"{definition.name} ({runner.name})",
                 runner_ref=runner_ref,
+                message=(message or "").strip()[:500],
                 status="building",
             )
             job.pending_generation = image
@@ -2209,6 +2221,15 @@ class ImageGenerationRepository:
                 or definition.status != "active"
             ):
                 raise ConflictError("Selected image is no longer current")
+        if image.captured_image_id:
+            from .image_lines import ImageLineRepository
+
+            CapturedImage.objects.select_for_update().get(id=image.captured_image_id)
+            latest = ImageLineRepository.latest_for(image)
+            if latest is None or latest.id != image.id:
+                raise ConflictError(
+                    "Only the latest image version can be used for new workspaces"
+                )
         return image
 
     @staticmethod

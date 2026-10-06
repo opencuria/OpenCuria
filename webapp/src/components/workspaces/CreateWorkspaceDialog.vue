@@ -158,6 +158,7 @@ const imageOptions = computed(() => {
       return (
         artifact.artifact_kind === 'captured' &&
         artifact.status === 'ready' &&
+        (!artifact.captured_image_id || artifact.is_latest) &&
         artifact.source_runner_online === true &&
         runnerSupportsRuntime(sourceRunner, artifact.runtime_type || RuntimeType.QEMU)
       )
@@ -165,7 +166,7 @@ const imageOptions = computed(() => {
     .map((artifact) => ({
       value: `captured:${artifact.id}`,
       kind: 'captured',
-      label: `○ ${artifact.name} [${(artifact.runtime_type || 'qemu').toString()}]`,
+      label: `○ ${artifact.name}${artifact.version ? ` · v${artifact.version}` : ''} [${(artifact.runtime_type || 'qemu').toString()}]`,
       runtimeType:
         artifact.runtime_type === RuntimeType.DOCKER ? RuntimeType.DOCKER : RuntimeType.QEMU,
       imageArtifact: artifact,
@@ -415,14 +416,18 @@ async function handleSubmit(): Promise<void> {
   let success: boolean
   let createdWorkspaceId: string | null = null
   if (isCapturedClone.value) {
-    const workspaceId = await imageStore.createWorkspaceFromImageArtifact(
-      selectedOption.imageArtifact?.id || '',
-      {
-        name: name.value.trim(),
-        credential_ids: selectedCredentialIds.value,
-        plugin_ids: selectedPluginIds.value,
-      },
-    )
+    const data = {
+      name: name.value.trim(),
+      credential_ids: selectedCredentialIds.value,
+      plugin_ids: selectedPluginIds.value,
+    }
+    const capturedImageId = selectedOption.imageArtifact?.captured_image_id
+    const workspaceId = capturedImageId
+      ? await imageStore.createWorkspaceFromCapturedImage(capturedImageId, data)
+      : await imageStore.createWorkspaceFromImageArtifact(
+          selectedOption.imageArtifact?.id || '',
+          data,
+        )
     success = !!workspaceId
     createdWorkspaceId = workspaceId
   } else {

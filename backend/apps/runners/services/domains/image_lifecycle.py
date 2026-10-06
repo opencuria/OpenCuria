@@ -339,7 +339,7 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         """Return an image definition by ID or None."""
         return self.image_definitions.get_by_id(definition_id)
 
-    async def activate_build_job(self, build, *, created_by=None):
+    async def activate_build_job(self, build, *, created_by=None, message: str = ""):
         """Make an existing runner image selectable, or build it if none exists."""
         from ...models import ImageInstance
 
@@ -360,6 +360,7 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
                 runner=build.runner,
                 activate=True,
                 created_by=created_by,
+                message=message,
             )
 
         build = await sync_to_async(self.build_jobs.activate)(build.id)
@@ -376,8 +377,12 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         runner,
         activate: bool = True,
         created_by=None,
+        message: str = "",
     ):
-        """Create/update runner build record and dispatch task:build_image."""
+        """Create/update runner build record and dispatch task:build_image.
+
+        Every build is a new standalone version; ``message`` describes it.
+        """
 
         self._ensure_runner_supports_runtime(
             runner=runner,
@@ -408,6 +413,7 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
             runner=runner,
             rendered_input=rendered,
             created_by=created_by,
+            message=message,
         )
         payload = {
             **rendered,
@@ -498,10 +504,16 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
     async def create_image_artifact(
         self,
         workspace_id: uuid.UUID,
-        name: str,
+        name: str = "",
         organization_id: uuid.UUID | None = None,
+        captured_image_id: uuid.UUID | None = None,
+        message: str = "",
     ) -> tuple["Workspace", "Task"]:
-        """Reserve an automatic QEMU capture; recovery owns child progression."""
+        """Reserve an automatic QEMU capture; recovery owns child progression.
+
+        Without ``captured_image_id`` a new image (v1) is created; otherwise the
+        capture becomes the next version of that image.
+        """
         from ...capture_repository import CaptureRepository
 
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
@@ -510,7 +522,10 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         ):
             raise WorkspaceNotFoundError(str(workspace_id))
         workspace, task = await sync_to_async(CaptureRepository.allocate)(
-            workspace_id, name
+            workspace_id,
+            name,
+            captured_image_id=captured_image_id,
+            message=message,
         )
         await sync_to_async(self._forward_workspace_operation)(
             str(workspace_id), "capturing_image"

@@ -174,6 +174,23 @@ class Workspace(models.Model):
             "Legacy workspaces created before image-instance tracking may be null."
         ),
     )
+    pending_base_image_instance = models.ForeignKey(
+        "runners.ImageInstance",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="pending_workspaces",
+        help_text=(
+            "Target image version of an in-flight or failed recreate. It pins "
+            "the version until the workspace has been provisioned from it."
+        ),
+    )
+    repos = models.JSONField(
+        default=list,
+        db_default=models.Value([], output_field=models.JSONField()),
+        blank=True,
+        help_text="Repositories cloned on top of the base image when provisioning.",
+    )
     credentials = models.ManyToManyField(
         "credentials.Credential",
         blank=True,
@@ -654,6 +671,49 @@ class ImageBuildJob(models.Model):
         )
 
 
+class CapturedImage(models.Model):
+    """A versioned line of workspace captures owned by one user on one runner."""
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        PENDING_DELETION = "pending_deletion", "Pending Deletion"
+        DELETED = "deleted", "Deleted"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="captured_images",
+    )
+    runner = models.ForeignKey(
+        Runner,
+        on_delete=models.CASCADE,
+        related_name="captured_images",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="captured_images",
+    )
+    name = models.CharField(max_length=255)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "runners_captured_image"
+        ordering = ["name", "-created_at"]
+
+    def __str__(self) -> str:
+        return f"CapturedImage({self.name}, status={self.status})"
+
+
 class ImageInstance(models.Model):
     """Concrete runnable image instance tracked independently from definitions."""
 
@@ -724,7 +784,29 @@ class ImageInstance(models.Model):
         blank=True,
         related_name="generations",
     )
-    generation = models.PositiveIntegerField(null=True, blank=True)
+    captured_image = models.ForeignKey(
+        CapturedImage,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="versions",
+    )
+    generation = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Version number within the image line (build job or capture).",
+    )
+    message = models.TextField(
+        blank=True,
+        default="",
+        db_default="",
+        help_text="Short description of what changed in this version.",
+    )
+    min_disk_size_gb = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Smallest workspace disk (GiB) that can hold this captured version.",
+    )
     is_legacy = models.BooleanField(default=False)
     legacy_task_references = models.JSONField(default=dict, blank=True)
 
@@ -809,6 +891,10 @@ class ImageInstance(models.Model):
             models.UniqueConstraint(
                 fields=["build_job", "generation"], name="unique_image_generation"
             ),
+            models.UniqueConstraint(
+                fields=["captured_image", "generation"],
+                name="unique_captured_image_version",
+            ),
             models.CheckConstraint(
                 condition=models.Q(is_legacy=True)
                 | (
@@ -820,6 +906,7 @@ class ImageInstance(models.Model):
                         generation__gte=1,
                         generation__isnull=False,
                         origin_workspace__isnull=True,
+                        captured_image__isnull=True,
                     )
                 )
                 | (
@@ -828,7 +915,9 @@ class ImageInstance(models.Model):
                         origin_definition__isnull=True,
                         build_job__isnull=True,
                         revision__isnull=True,
-                        generation__isnull=True,
+                        captured_image__isnull=False,
+                        generation__gte=1,
+                        generation__isnull=False,
                         runtime_type="qemu",
                     )
                 ),
@@ -845,6 +934,7 @@ class ImageInstance(models.Model):
                 "origin_type",
                 "origin_definition_id",
                 "build_job_id",
+                "captured_image_id",
                 "revision_id",
                 "generation",
                 "is_legacy",
@@ -1003,6 +1093,39 @@ class CaptureRequest(models.Model):
     child = models.ForeignKey(Task, null=True, on_delete=models.PROTECT)
     diagnostic = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class WorkspaceRecreateRequest(models.Model):
+    """Durable remove/create/stop orchestration that keeps the workspace identity.
+
+    Used for reset (same version), update (latest version) and the automatic
+    replacement after a capture. The target version lives on
+    ``Workspace.pending_base_image_instance`` until the old runtime is removed.
+    """
+
+    class Reason(models.TextChoices):
+        RESET = "reset", "Reset"
+        UPDATE = "update", "Update"
+        CAPTURE = "capture", "Capture"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        Workspace, on_delete=models.PROTECT, related_name="recreate_requests"
+    )
+    reason = models.CharField(max_length=16, choices=Reason.choices)
+    phase = models.CharField(max_length=16, default="remove")
+    final_running = models.BooleanField(default=True)
+    child = models.ForeignKey(Task, null=True, on_delete=models.PROTECT)
+    diagnostic = models.TextField(blank=True)
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "runners_workspace_recreate_request"
+        ordering = ["-created_at"]
 
 
 class ImageDeletionRequest(models.Model):

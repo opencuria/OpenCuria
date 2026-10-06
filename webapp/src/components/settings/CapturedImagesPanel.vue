@@ -1,5 +1,5 @@
 <!--
-  CapturedImagesPanel — captured workspace images list.
+  CapturedImagesPanel — versioned captured images (one row per image).
   Polls (3s while capturing, otherwise 15s).
 -->
 <script setup lang="ts">
@@ -11,75 +11,76 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import ImageDeletionDialog from '@/components/images/ImageDeletionDialog.vue'
+import ImageVersionList from '@/components/images/ImageVersionList.vue'
 import SettingsSection from './SettingsSection.vue'
 import SettingsRow from './SettingsRow.vue'
 import CreateImageArtifactDialog from '@/components/workspaces/CreateImageArtifactDialog.vue'
 import CreateWorkspaceFromImageArtifactDialog from '@/components/workspaces/CreateWorkspaceFromImageArtifactDialog.vue'
 import {
   Camera,
+  ChevronDown,
   Copy,
   Trash2,
   HardDrive,
-  Calendar,
   Pencil,
   Check,
   X,
-  AlertTriangle,
   Loader2,
   WifiOff,
 } from '@lucide/vue'
-import { cn, formatDate } from '@/lib/utils'
-import type { ImageArtifact } from '@/types'
+import { cn } from '@/lib/utils'
+import { storageBytes } from '@/composables/useRunnerStorage'
+import type { CapturedImage, ImageArtifact } from '@/types'
+import type { DeletionTarget } from '@/types/runnerStorage'
 
 const imageStore = useImageStore()
 
-const pendingDelete = ref<ImageArtifact | null>(null)
+const pendingDelete = ref<{ target: DeletionTarget; name: string } | null>(null)
 const editingId = ref<string | null>(null)
 const editName = ref('')
 
-const capturedImages = computed(() =>
-  imageStore.images.filter((entry) => entry.artifact_kind === 'captured'),
-)
+const images = computed(() => imageStore.capturedImages)
 
-function isCaptureInProgress(imageArtifact: ImageArtifact): boolean {
-  return imageArtifact.status === 'creating' || imageArtifact.status === 'capturing'
+function latestOf(image: CapturedImage): ImageArtifact | undefined {
+  return image.versions.find((version) => version.id === image.latest_id)
 }
 
-const hasCreating = computed(() => capturedImages.value.some((image) => isCaptureInProgress(image)))
+function isCapturing(image: CapturedImage): boolean {
+  return image.versions.some((version) => version.status === 'capturing')
+}
+
+const hasCapturing = computed(() => images.value.some(isCapturing))
 
 const { start } = usePolling(
   async () => {
-    await imageStore.fetchImages()
+    await imageStore.fetchCapturedImages()
   },
-  computed(() => (hasCreating.value ? 3000 : 15000)),
+  computed(() => (hasCapturing.value ? 3000 : 15000)),
 )
 
 onMounted(() => {
   start()
 })
 
-function formatBytes(bytes: number | null): string {
-  if (bytes == null) return 'Unknown'
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+function deleteImage(image: CapturedImage): void {
+  pendingDelete.value = {
+    target: { target_type: 'captured_image', target_id: image.id },
+    name: image.name,
+  }
 }
 
-function iconClassFor(imageArtifact: ImageArtifact): string {
-  if (isCaptureInProgress(imageArtifact)) return 'bg-warning-muted text-warning'
-  if (imageArtifact.status === 'failed') return 'bg-destructive/10 text-destructive'
-  return ''
+function deleteVersion(image: CapturedImage, version: ImageArtifact): void {
+  pendingDelete.value = {
+    target: { target_type: 'image', target_id: version.id },
+    name: `${image.name} · v${version.version}`,
+  }
 }
 
-function requestDelete(imageArtifact: ImageArtifact): void {
-  pendingDelete.value = imageArtifact
-}
-
-function startRename(imageArtifact: ImageArtifact): void {
-  editingId.value = imageArtifact.id
-  editName.value = imageArtifact.name
+function startRename(image: CapturedImage): void {
+  editingId.value = image.id
+  editName.value = image.name
 }
 
 function cancelRename(): void {
@@ -87,25 +88,27 @@ function cancelRename(): void {
   editName.value = ''
 }
 
-async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
+async function confirmRename(image: CapturedImage): Promise<void> {
   const trimmed = editName.value.trim()
-  if (!trimmed || trimmed === imageArtifact.name) {
+  if (!trimmed || trimmed === image.name) {
     cancelRename()
     return
   }
-  await imageStore.renameImageArtifact(imageArtifact.id, trimmed)
+  await imageStore.renameCapturedImage(image.id, trimmed)
   editingId.value = null
 }
 </script>
 
 <template>
   <div class="space-y-6">
-    <SettingsSection description="Reusable workspace images captured from your workspaces.">
+    <SettingsSection
+      description="Versioned images captured from your workspaces. New workspaces always use the latest version."
+    >
       <template #actions>
         <CreateImageArtifactDialog />
       </template>
 
-      <div v-if="imageStore.loading && !imageStore.images.length" class="flex justify-center py-12">
+      <div v-if="imageStore.loading && !images.length" class="flex justify-center py-12">
         <LoadingSpinner :size="24" />
       </div>
 
@@ -116,10 +119,7 @@ async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
         {{ imageStore.error }}
       </div>
 
-      <div
-        v-else-if="!capturedImages.length"
-        class="overflow-hidden rounded-lg border border-border bg-card"
-      >
+      <div v-else-if="!images.length" class="overflow-hidden rounded-lg border border-border bg-card">
         <EmptyState
           :icon="Camera"
           title="No captured images yet"
@@ -127,161 +127,126 @@ async function confirmRename(imageArtifact: ImageArtifact): Promise<void> {
         />
       </div>
 
-      <div
-        v-else
-        class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
-      >
-        <SettingsRow
-          v-for="imageArtifact in capturedImages"
-          :key="imageArtifact.id"
-          :icon-class="iconClassFor(imageArtifact)"
-          :class="
-            cn(
-              imageArtifact.status === 'failed' ||
-                imageArtifact.is_deactivated ||
-                imageArtifact.source_runner_online === false
-                ? 'opacity-80'
-                : undefined,
-            )
-          "
-        >
-          <template #icon>
-            <Loader2 v-if="isCaptureInProgress(imageArtifact)" :size="16" class="animate-spin" />
-            <AlertTriangle v-else-if="imageArtifact.status === 'failed'" :size="16" />
-            <Camera v-else :size="16" />
-          </template>
+      <div v-else class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
+        <Collapsible v-for="image in images" :key="image.id" data-testid="captured-image-row">
+          <SettingsRow
+            :class="cn(image.status !== 'active' || !image.runner_online ? 'opacity-80' : undefined)"
+          >
+            <template #icon>
+              <Loader2 v-if="isCapturing(image)" :size="16" class="animate-spin" />
+              <Camera v-else :size="16" />
+            </template>
 
-          <div class="min-w-0 space-y-1.5">
-            <div v-if="editingId === imageArtifact.id" class="flex items-center gap-1.5">
-              <Input
-                v-model="editName"
-                class="h-8 max-w-xs"
-                @keydown.enter="confirmRename(imageArtifact)"
-                @keydown.escape="cancelRename"
-              />
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                class="text-success hover:text-success"
-                @click="confirmRename(imageArtifact)"
-              >
-                <Check />
-              </Button>
-              <Button variant="ghost" size="icon-sm" @click="cancelRename">
-                <X />
-              </Button>
-            </div>
-            <div v-else class="flex items-center gap-2">
-              <span class="min-w-0 text-sm font-medium break-words text-foreground">{{
-                imageArtifact.name
-              }}</span>
-              <Button
-                v-if="!isCaptureInProgress(imageArtifact)"
-                variant="ghost"
-                size="icon-sm"
-                :disabled="['pending_deletion', 'deleting'].includes(imageArtifact.status)"
-                title="Rename image"
-                @click="startRename(imageArtifact)"
-              >
-                <Pencil />
-              </Button>
-            </div>
+            <div class="min-w-0 space-y-1.5">
+              <div v-if="editingId === image.id" class="flex items-center gap-1.5">
+                <Input
+                  v-model="editName"
+                  class="h-8 max-w-xs"
+                  @keydown.enter="confirmRename(image)"
+                  @keydown.escape="cancelRename"
+                />
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  class="text-success hover:text-success"
+                  @click="confirmRename(image)"
+                >
+                  <Check />
+                </Button>
+                <Button variant="ghost" size="icon-sm" @click="cancelRename">
+                  <X />
+                </Button>
+              </div>
+              <div v-else class="flex items-center gap-2">
+                <span class="min-w-0 text-sm font-medium break-words text-foreground">
+                  {{ image.name }}
+                </span>
+                <Button
+                  v-if="image.status === 'active'"
+                  variant="ghost"
+                  size="icon-sm"
+                  title="Rename image"
+                  @click="startRename(image)"
+                >
+                  <Pencil />
+                </Button>
+              </div>
 
-            <div class="flex flex-wrap items-center gap-1.5">
-              <Badge v-if="imageArtifact.runtime_type" variant="secondary">{{
-                imageArtifact.runtime_type === 'qemu' ? 'QEMU' : imageArtifact.runtime_type
-              }}</Badge>
-              <Badge v-if="isCaptureInProgress(imageArtifact)" variant="outline">Creating…</Badge>
-              <Badge v-else-if="imageArtifact.status === 'failed'" variant="destructive"
-                >Failed</Badge
-              >
-              <Badge v-else-if="imageArtifact.status === 'pending_deletion'" variant="destructive"
-                >Pending deletion</Badge
-              >
-              <Badge
-                v-else-if="imageArtifact.status === 'deleting'"
-                variant="destructive"
-                class="inline-flex items-center gap-1"
-              >
-                <Loader2 :size="11" class="animate-spin" />
-                Deleting
-              </Badge>
-              <Badge v-else-if="imageArtifact.status === 'delete_failed'" variant="destructive">
-                Delete failed
-              </Badge>
-              <Badge v-if="imageArtifact.is_deactivated" variant="secondary">Deactivated</Badge>
-              <Badge
-                v-if="imageArtifact.source_runner_online === false"
-                variant="outline"
-                class="inline-flex items-center gap-1"
-              >
-                <WifiOff :size="11" />
-                Runner offline
-              </Badge>
-            </div>
+              <div class="flex flex-wrap items-center gap-1.5">
+                <Badge v-if="image.latest_version" variant="secondary">
+                  v{{ image.latest_version }}
+                </Badge>
+                <Badge v-else variant="destructive">No ready version</Badge>
+                <Badge v-if="isCapturing(image)" variant="outline">Capturing…</Badge>
+                <Badge v-if="image.status === 'pending_deletion'" variant="destructive">
+                  Deleting when unused
+                </Badge>
+                <Badge
+                  v-if="!image.runner_online"
+                  variant="outline"
+                  class="inline-flex items-center gap-1"
+                >
+                  <WifiOff :size="11" />
+                  Runner offline
+                </Badge>
+              </div>
 
-            <p v-if="imageArtifact.source_definition_name" class="text-xs text-muted-foreground">
-              Built from: {{ imageArtifact.source_definition_name }}
-            </p>
-            <p
-              v-if="imageArtifact.source_workspace_id"
-              class="font-mono text-xs text-muted-foreground"
-            >
-              {{ imageArtifact.source_workspace_id.slice(0, 8) }}…
-            </p>
-            <div class="flex flex-wrap items-center gap-3">
-              <span class="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <CollapsibleTrigger
+                class="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground [&[data-state=open]>svg]:rotate-180"
+                data-testid="captured-image-versions-toggle"
+              >
                 <HardDrive :size="12" />
-                {{ formatBytes(imageArtifact.size_bytes) }}
-              </span>
-              <span class="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                <Calendar :size="12" />
-                {{ formatDate(imageArtifact.created_at) }}
-              </span>
+                {{ image.versions.length }}
+                {{ image.versions.length === 1 ? 'version' : 'versions' }} ·
+                {{ storageBytes(image.total_size_bytes) }}
+                <template v-if="image.workspace_count">
+                  · used by {{ image.workspace_count }}
+                  {{ image.workspace_count === 1 ? 'workspace' : 'workspaces' }}
+                </template>
+                <ChevronDown :size="12" class="transition-transform" />
+              </CollapsibleTrigger>
             </div>
-          </div>
 
-          <template #actions>
-            <CreateWorkspaceFromImageArtifactDialog
-              v-if="imageArtifact.status === 'ready'"
-              :image-artifact="imageArtifact"
-              :disabled="imageArtifact.source_runner_online === false"
-            >
-              <Button
-                variant="outline"
-                size="sm"
-                :disabled="imageArtifact.source_runner_online === false"
+            <template #actions>
+              <CreateWorkspaceFromImageArtifactDialog
+                v-if="latestOf(image)"
+                :image-artifact="latestOf(image)!"
+                :captured-image-id="image.id"
+                :disabled="!image.runner_online"
               >
-                <Copy />
-                {{
-                  imageArtifact.source_runner_online === false
-                    ? 'Clone unavailable'
-                    : 'Clone Workspace'
-                }}
+                <Button variant="outline" size="sm" :disabled="!image.runner_online">
+                  <Copy />
+                  New workspace
+                </Button>
+              </CreateWorkspaceFromImageArtifactDialog>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                title="Delete image"
+                aria-label="Delete image or inspect pending request"
+                class="text-destructive hover:text-destructive"
+                @click="deleteImage(image)"
+              >
+                <Trash2 />
               </Button>
-            </CreateWorkspaceFromImageArtifactDialog>
-
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              title="Delete image"
-              aria-label="Delete image or inspect pending request"
-              class="text-destructive hover:text-destructive"
-              :disabled="imageArtifact.status === 'deleting'"
-              @click="requestDelete(imageArtifact)"
-            >
-              <Trash2 />
-            </Button>
-          </template>
-        </SettingsRow>
+            </template>
+          </SettingsRow>
+          <CollapsibleContent class="px-4 pb-3">
+            <ImageVersionList
+              :versions="image.versions"
+              :can-delete="image.status === 'active'"
+              @delete="(version) => deleteVersion(image, version)"
+            />
+          </CollapsibleContent>
+        </Collapsible>
       </div>
     </SettingsSection>
 
     <ImageDeletionDialog
-      :target="pendingDelete ? { target_type: 'image', target_id: pendingDelete.id } : null"
+      :target="pendingDelete?.target ?? null"
       :name="pendingDelete?.name"
       @close="pendingDelete = null"
-      @requested="imageStore.fetchImages"
+      @requested="imageStore.fetchCapturedImages"
     />
   </div>
 </template>

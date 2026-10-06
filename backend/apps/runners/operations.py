@@ -38,7 +38,12 @@ class OperationRepository:
     """Lock allocation, sanitized outbox, leases and terminal reconciliation."""
 
     @staticmethod
-    def allocate(task: Task, *, capture_request_id: uuid.UUID | None = None) -> None:
+    def allocate(
+        task: Task,
+        *,
+        capture_request_id: uuid.UUID | None = None,
+        recreate_request_id: uuid.UUID | None = None,
+    ) -> None:
         """Allocate inside the task creation transaction."""
         if task.type not in LIFECYCLE_TYPES:
             return
@@ -47,6 +52,7 @@ class OperationRepository:
             if ws.current_task_id and ws.current_task_id != task.id:
                 raise ConflictError("Workspace has an unresolved lifecycle operation")
             from .models import CaptureRequest
+            from .recreate_repository import OPERATION_BY_REASON, RecreateRepository
 
             capture = (
                 CaptureRequest.objects.filter(workspace=ws)
@@ -55,10 +61,16 @@ class OperationRepository:
             )
             if capture and capture.id != capture_request_id:
                 raise ConflictError("Workspace is capturing image")
+            recreate = RecreateRepository.live(ws.id)
+            if recreate and recreate.id != recreate_request_id:
+                raise ConflictError("Workspace is being reset")
             ws.current_task_id = task.id
-            ws.active_operation = (
-                "capturing_image" if capture else OPERATIONS.get(task.type)
-            )
+            if capture:
+                ws.active_operation = "capturing_image"
+            elif recreate:
+                ws.active_operation = OPERATION_BY_REASON[recreate.reason]
+            else:
+                ws.active_operation = OPERATIONS.get(task.type)
             ws.save(update_fields=["current_task", "active_operation"])
         LifecycleCommand.objects.get_or_create(
             task=task,

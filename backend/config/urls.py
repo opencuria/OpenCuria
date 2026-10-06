@@ -23,6 +23,7 @@ from apps.harness.api import harness_router
 from apps.organizations.api import org_router
 from apps.plugins.api import plugin_router, workspace_plugin_router
 from apps.runners.api import (
+    captured_image_router,
     git_router,
     image_artifact_router,
     image_definition_router,
@@ -59,6 +60,7 @@ api.add_router("/workspaces/", workspace_router)
 api.add_router("/workspaces/", workspace_image_artifact_router)
 api.add_router("/workspaces/", git_router)
 api.add_router("/image-artifacts/", image_artifact_router)
+api.add_router("/captured-images/", captured_image_router)
 api.add_router("/credential-services/", credential_service_router)
 api.add_router("/credential-services/", service_oauth_router)
 api.add_router("/credentials/", credential_router)

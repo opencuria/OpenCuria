@@ -1,10 +1,15 @@
-"""Durable explicit stop/capture/resume child progression."""
+"""Durable explicit stop/capture/replace (or resume) child progression."""
 
 import pytest
 
 from apps.runners.capture_repository import CaptureRepository
-from apps.runners.models import CaptureRequest, LifecycleCommand
+from apps.runners.models import (
+    CaptureRequest,
+    LifecycleCommand,
+    WorkspaceRecreateRequest,
+)
 from apps.runners.operations import OperationRepository, apply_result
+from apps.runners.tests.conftest import capture_version_fields
 from apps.runners.tests.test_services import service as service
 from apps.runners.tests.test_services import sio_mock as sio_mock
 from common.exceptions import ConflictError
@@ -44,13 +49,15 @@ def test_automatic_stop_capture_resume(service, runner, workspace):
     )
     CaptureRepository.tick()
     req.refresh_from_db()
-    assert req.phase == "resume"
-    assert result(service, runner, req.child, "workspace:error", error="start failed")
-    CaptureRepository.tick()
-    req.refresh_from_db()
     assert req.phase == "completed"
     assert req.image.status == "ready"
-    assert "restart failed" in req.diagnostic
+    recreate = WorkspaceRecreateRequest.objects.get(workspace=workspace)
+    workspace.refresh_from_db()
+    assert recreate.reason == "capture" and recreate.phase == "remove"
+    assert recreate.final_running is True
+    assert recreate.child.type == "remove_workspace"
+    assert workspace.pending_base_image_instance_id == req.image_id
+    assert workspace.active_operation == "capturing_image"
 
 
 def test_unknown_capture_fences_and_suppressed_resume(
@@ -110,7 +117,11 @@ def test_retirement_after_clean_stop_preserves_restart_approval(
     from apps.runners.models import ImageInstance
 
     base = ImageInstance.objects.create(
-        runner=runner, runtime_type="qemu", name="base", status="ready"
+        runner=runner,
+        runtime_type="qemu",
+        name="base",
+        status="ready",
+        **capture_version_fields(runner, workspace.created_by, "base"),
     )
     workspace.runtime_type = "qemu"
     workspace.base_image_instance = base
@@ -151,7 +162,15 @@ def test_unknown_handler_failure_and_delayed_unknown_result_hold_fence(
     assert CaptureRequest.objects.get(workspace=workspace).phase == "stop"
 
 
-def test_capture_resume_child_retains_exact_qemu_resources(service, runner, workspace):
+def test_capture_resume_child_retains_exact_qemu_resources(
+    service, runner, workspace, monkeypatch
+):
+    from apps.credentials.services import CredentialSvc
+
+    def unresolvable(self, ws):
+        raise RuntimeError("credential revoked")
+
+    monkeypatch.setattr(CredentialSvc, "resolve_workspace_credentials", unresolvable)
     workspace.runtime_type = "qemu"
     workspace.qemu_vcpus = 1
     workspace.qemu_memory_mb = 1024
@@ -185,8 +204,10 @@ def test_capture_resume_child_retains_exact_qemu_resources(service, runner, work
     CaptureRepository.tick()
     req.refresh_from_db()
     workspace.refresh_from_db()
-    assert req.phase == "completed" and not req.diagnostic
+    assert req.phase == "completed"
+    assert "stays on its previous version" in req.diagnostic
     assert workspace.current_task_id is None and workspace.status == "running"
+    assert not WorkspaceRecreateRequest.objects.filter(workspace=workspace).exists()
 
 
 def test_full_success_holds_parent_until_recovery(
@@ -229,8 +250,16 @@ def test_full_success_holds_parent_until_recovery(
             },
             "stopped",
         ),
-        ("resume", "workspace:resumed", {"credentials_present": False}, "running"),
+        ("remove", "workspace:removed", {"result": "deleted"}, "creating"),
+        (
+            "create",
+            "workspace:created",
+            {"status": "running", "credentials_present": False},
+            "running",
+        ),
     ]:
+        if phase in {"remove", "create"}:
+            request = WorkspaceRecreateRequest.objects.get(workspace=workspace)
         request.refresh_from_db()
         assert request.phase == phase
         workspace.refresh_from_db()
@@ -295,7 +324,7 @@ def test_full_success_holds_parent_until_recovery(
             LifecycleCommand.objects.count(),
         )
         request.refresh_from_db()
-        assert not request.resume_suppressed
+        assert not getattr(request, "resume_suppressed", False)
         operations = [
             c.args[1]["active_operation"]
             for c in frontend.call_args_list
@@ -306,17 +335,20 @@ def test_full_success_holds_parent_until_recovery(
             async_to_sync(RecoveryService().tick)(sio_mock)
     request.refresh_from_db()
     workspace.refresh_from_db()
+    capture = CaptureRequest.objects.get(workspace=workspace)
     assert request.phase == "completed" and not request.diagnostic
-    assert request.image.status == "ready"
+    assert capture.phase == "completed" and capture.image.status == "ready"
     assert workspace.status == "running" and workspace.current_task_id is None
     assert workspace.active_operation is None
+    assert workspace.base_image_instance_id == capture.image_id
+    assert workspace.pending_base_image_instance_id is None
     operations = [
         c.args[1]["active_operation"]
         for c in frontend.call_args_list
         if c.args[0] == "workspace:operation_changed"
     ]
     assert operations[-1] is None and operations.count(None) == 1
-    assert Task.objects.filter(workspace=workspace).count() == 3
+    assert Task.objects.filter(workspace=workspace).count() == 4
 
 
 def test_stopped_capture_final_clear_without_resume(service, runner, stopped_workspace):
@@ -339,20 +371,20 @@ def test_stopped_capture_final_clear_without_resume(service, runner, stopped_wor
     )
     ws.refresh_from_db()
     assert ws.current_task_id is None and ws.active_operation == "capturing_image"
-    assert CaptureRepository.tick() == [
-        {"workspace_id": str(ws.id), "phase": "completed", "diagnostic": ""}
-    ]
     assert CaptureRepository.tick() == []
+    request.refresh_from_db()
+    assert request.phase == "completed"
+    recreate = WorkspaceRecreateRequest.objects.get(workspace=ws)
+    assert recreate.final_running is False and recreate.phase == "remove"
     ws.refresh_from_db()
-    assert ws.status == "stopped" and ws.active_operation is None
-    assert Task.objects.filter(workspace=ws).count() == 1
+    assert ws.active_operation == "capturing_image"
+    assert Task.objects.filter(workspace=ws).count() == 2
 
 
 @pytest.mark.parametrize(
     "capture_failed,restart_failed",
     [
         (True, False),
-        (False, True),
         (True, True),
     ],
 )

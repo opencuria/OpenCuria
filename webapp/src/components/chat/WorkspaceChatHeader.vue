@@ -18,6 +18,7 @@ import type { WorkspaceDetail } from '@/types'
 import { WorkspaceStatus } from '@/types'
 import type { HarnessSession } from '@/types/harness'
 import { formatSubagentType } from '@/lib/harnessSubtaskActivity'
+import { versionLabel } from '@/lib/imageVersions'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -40,6 +41,7 @@ import {
   Pencil,
   Play,
   Plus,
+  RotateCcw,
   Square,
   Trash2,
   X,
@@ -70,6 +72,7 @@ const emit = defineEmits<{
   'toggle-side-panel': []
   'toggle-processes': []
   'capture-image': []
+  'recreate-workspace': []
   'delete-workspace': []
   'open-session': [sessionId: string]
 }>()
@@ -136,6 +139,7 @@ const statusDotClass = computed(() => {
   return 'bg-green-500'
 })
 
+const baseVersionLabel = computed(() => versionLabel(props.workspace.base_image))
 const statusText = computed(() => {
   if (props.transitionLabel) return props.transitionLabel
   if (props.runnerOffline) return 'Runner offline'
@@ -342,6 +346,14 @@ watch(
           >
             {{ workspace.name }}
           </button>
+          <span
+            v-if="baseVersionLabel"
+            class="hidden shrink-0 truncate sm:inline"
+            :title="`Based on ${baseVersionLabel}`"
+            data-testid="workspace-chat-header-version"
+          >
+            · {{ baseVersionLabel }}
+          </span>
           <button
             v-if="!transitionLabel"
             type="button"
@@ -431,6 +443,16 @@ watch(
           >
             <Camera :size="14" />
             Capture image
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            v-if="workspace.base_image || workspace.pending_base_image"
+            class="text-xs"
+            data-testid="workspace-chat-header-recreate"
+            :disabled="isTransitioning || runnerOffline"
+            @select="emit('recreate-workspace')"
+          >
+            <RotateCcw :size="14" />
+            {{ workspace.base_image?.update_available ? 'Reset or update…' : 'Reset workspace…' }}
           </DropdownMenuItem>
           <DropdownMenuItem
             class="text-xs"

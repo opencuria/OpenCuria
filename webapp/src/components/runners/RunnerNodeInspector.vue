@@ -157,7 +157,7 @@ function openWorkspace() {
             <dd class="mt-1">{{ image.definition_name || 'Unknown' }}</dd>
           </div>
           <div>
-            <dt class="text-muted-foreground">Generation</dt>
+            <dt class="text-muted-foreground">Version</dt>
             <dd class="mt-1">{{ image.generation ?? 'Legacy' }}</dd>
           </div>
           <div>
@@ -184,6 +184,12 @@ function openWorkspace() {
               <p class="font-medium">{{ ws.name }}</p>
               <p class="text-muted-foreground">
                 {{ ws.owner_label }} · {{ ws.last_activity_at || 'Activity unknown' }}
+                <template v-if="ws.allocated_bytes != null">
+                  · {{ storageBytes(ws.allocated_bytes) }} own disk</template
+                >
+                <template v-if="ws.pending_base_image_instance_id === image.id">
+                  · switching to this version</template
+                >
               </p>
             </div>
             <div class="flex flex-wrap gap-1">

@@ -17,6 +17,12 @@ import type { DeletionTarget, DeletionGraph, DeletionRequest } from '@/types/run
 const props = defineProps<{ target: DeletionTarget | null; name?: string }>()
 const emit = defineEmits<{ close: []; requested: [request: DeletionRequest] }>()
 const isAdmin = () => useAuthStore().isAdmin
+const KIND_LABELS: Record<DeletionTarget['target_type'], string> = {
+  image: 'image version',
+  captured_image: 'image with all versions',
+  assignment: 'runner build',
+  definition: 'image definition',
+}
 const graph = ref<DeletionGraph | null>(null),
   result = ref<DeletionRequest | null>(null)
 const error = ref(''),
@@ -114,8 +120,9 @@ async function cancel() {
           force ? 'Force deletion — permanent data loss' : 'Request deletion'
         }}</DialogTitle>
         <DialogDescription
-          >{{ name }} · {{ target?.target_type }}. Ordinary deletion stores intent now and waits for
-          dependencies. It does not delete dependent workspaces.</DialogDescription
+          >{{ name }} · {{ target ? KIND_LABELS[target.target_type] : '' }}. Ordinary deletion
+          stores intent now and waits until no workspace uses it. It does not delete dependent
+          workspaces.</DialogDescription
         ></DialogHeader
       >
       <DialogBody class="space-y-4">

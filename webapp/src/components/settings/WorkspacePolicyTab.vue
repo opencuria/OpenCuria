@@ -1,5 +1,5 @@
 <!--
-  WorkspacePolicyTab — General settings: automatic workspace stop policy.
+  WorkspacePolicyTab — General settings: automatic workspace stop and image version retention.
 -->
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
@@ -23,6 +23,8 @@ const organizationSettings = ref<Organization | null>(null)
 const policySaving = ref(false)
 const autoStopEnabled = ref(false)
 const autoStopTimeoutMinutes = ref<number>(240)
+const imageVersionsToKeep = ref<number>(2)
+const MAX_IMAGE_VERSIONS_TO_KEEP = 20
 
 const workspacePolicyPresetOptions = [
   { value: 30, label: '30 min' },
@@ -56,6 +58,7 @@ async function loadData(): Promise<void> {
     autoStopEnabled.value = organizationSettings.value.workspace_auto_stop_timeout_minutes != null
     autoStopTimeoutMinutes.value =
       organizationSettings.value.workspace_auto_stop_timeout_minutes ?? 240
+    imageVersionsToKeep.value = organizationSettings.value.image_versions_to_keep ?? 2
   } catch (e: unknown) {
     error.value = (e as Error).message || 'Failed to load settings'
   } finally {
@@ -88,11 +91,13 @@ async function saveWorkspacePolicy(): Promise<void> {
       workspace_auto_stop_timeout_minutes: autoStopEnabled.value
         ? Math.round(autoStopTimeoutMinutes.value)
         : null,
+      image_versions_to_keep: imageVersionsToKeep.value,
     })
     organizationSettings.value = updated
     autoStopEnabled.value = updated.workspace_auto_stop_timeout_minutes != null
     autoStopTimeoutMinutes.value =
       updated.workspace_auto_stop_timeout_minutes ?? autoStopTimeoutMinutes.value
+    imageVersionsToKeep.value = updated.image_versions_to_keep
   } catch (e) {
     error.value = (e as Error).message || 'Failed to update workspace policy'
   } finally {
@@ -116,11 +121,11 @@ async function saveWorkspacePolicy(): Promise<void> {
 
     <SettingsSection
       v-else
-      title="Automatic Workspace Stop"
+      title="Workspace Policy"
       :description="
         organizationSettings
-          ? `Running workspaces in ${organizationSettings.name} stop automatically after a period without prompts, terminal input, or file interactions.`
-          : 'Running workspaces stop automatically after a period without prompts, terminal input, or file interactions.'
+          ? `Applies to all workspaces and images in ${organizationSettings.name}. Inactivity means no prompts, terminal input, or file interactions.`
+          : 'Applies to all workspaces and images. Inactivity means no prompts, terminal input, or file interactions.'
       "
     >
       <div class="overflow-hidden rounded-lg border border-border bg-card">
@@ -161,6 +166,31 @@ async function saveWorkspacePolicy(): Promise<void> {
           <p class="text-sm text-muted-foreground">
             Active prompt sessions prevent auto-stop until they finish.
           </p>
+        </div>
+
+        <div class="flex items-center justify-between gap-4 border-t border-border px-4 py-4">
+          <label for="image-versions-to-keep" class="min-w-0 flex-1 space-y-1">
+            <div class="text-sm font-medium text-foreground">Image versions to keep</div>
+            <p class="text-sm text-muted-foreground">
+              Older versions are deleted automatically once no workspace uses them.
+            </p>
+          </label>
+          <Input
+            id="image-versions-to-keep"
+            class="w-20"
+            data-testid="image-versions-to-keep"
+            :model-value="String(imageVersionsToKeep)"
+            type="number"
+            min="1"
+            :max="MAX_IMAGE_VERSIONS_TO_KEEP"
+            step="1"
+            @update:model-value="
+              imageVersionsToKeep = Math.min(
+                MAX_IMAGE_VERSIONS_TO_KEEP,
+                Math.max(1, Math.round(Number($event)) || 1),
+              )
+            "
+          />
         </div>
       </div>
 

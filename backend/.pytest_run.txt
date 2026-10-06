@@ -1,0 +1,283 @@
+........................................................................ [  3%]
+........................................................................ [  6%]
+........................................................................ [ 10%]
+........................................................................ [ 13%]
+........................................................................ [ 17%]
+........................................................................ [ 20%]
+........................................................................ [ 24%]
+.........................................................F.......sssssss [ 27%]
+sssssssssss....................s........................................ [ 31%]
+........................................................................ [ 34%]
+........................................................................ [ 38%]
+........................................................................ [ 41%]
+........................................................................ [ 44%]
+........................................................................ [ 48%]
+........................................................................ [ 51%]
+........................................................................ [ 55%]
+........................................................................ [ 58%]
+........................................................................ [ 62%]
+........................................................................ [ 65%]
+.................................................................sssss.. [ 69%]
+........................................................................ [ 72%]
+........................................................................ [ 76%]
+........................................................................ [ 79%]
+........................................................................ [ 83%]
+........................................................................ [ 86%]
+........................................................................ [ 89%]
+........................................................................ [ 93%]
+........................................................................ [ 96%]
+.................................................................        [100%]
+=================================== FAILURES ===================================
+______________ test_force_real_qcow_overlay_domain_and_cloud_init ______________
+
+runner = <Runner: Runner(test-runner, online)>
+user = <User: runner-tests-c9163b9f@example.com>
+tmp_path = PosixPath('/private/var/folders/fj/t0q6566d1h3_lffxyhyd_4c40000gn/T/pytest-of-timokamphaus/pytest-14/test_force_real_qcow_overlay_d0')
+
+    def test_force_real_qcow_overlay_domain_and_cloud_init(runner, user, tmp_path):
+        """Feed actual runner discovery to policy, not a hand-written blank VM graph."""
+        import json
+        import subprocess
+        from pathlib import Path
+    
+        root = Path(__file__).resolve().parents[4]
+        runner_dir = root / "runner"
+        if not (runner_dir / ".venv/bin/python").exists():
+            pytest.skip("Requires runner environment and qemu-img")
+        base = image(runner, user, "published")
+        ws = Workspace.objects.create(
+            runner=runner,
+            created_by=user,
+            name="full VM",
+            runtime_type="qemu",
+            status="stopped",
+            base_image_instance=base,
+        )
+        output = tmp_path / "scan.json"
+        # Only libvirt is mocked: qemu-img creates/inspects the base and overlay.
+        code = """
+    import asyncio, json, sys
+    from pathlib import Path
+    from dataclasses import asdict
+    sys.path.insert(0, 'tests')
+    from test_storage_inventory import runtime, qcow, cloud_init_domain
+    async def run():
+        r = runtime(Path(sys.argv[1]))
+        base = r._snapshot_dir / 'published.qcow2'
+        source = r._disk_dir / 'source.qcow2'
+        qcow(source)
+        await r._publish_image(source, base, {'artifact_id': sys.argv[2]})
+        source.unlink()
+        disk = r._disk_path(sys.argv[3])
+        qcow(disk, base)
+        cloud_init_domain(r, sys.argv[3], disk)
+        scan = await r.inventory()
+        assert scan.complete, scan.errors
+        Path(sys.argv[4]).write_text(json.dumps(asdict(scan)))
+    asyncio.run(run())
+    """
+>       subprocess.run(
+            [
+                str(runner_dir / ".venv/bin/python"),
+                "-c",
+                code,
+                str(tmp_path),
+                str(base.id),
+                str(ws.id),
+                str(output),
+            ],
+            cwd=runner_dir,
+            check=True,
+            capture_output=True,
+        )
+
+apps/runners/tests/test_image_deletion_coordinator.py:835: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+input = None, capture_output = True, timeout = None, check = True
+popenargs = (['/Users/timokamphaus/Git/opencuria/runner/.venv/bin/python', '-c', "\nimport asyncio, json, sys\nfrom pathlib import...est_force_real_qcow_overlay_d0', '374d71a2-b68e-41a8-9f40-9a5c6752f55b', '78ee4a46-ad83-481a-ba7d-5adfe0670ac1', ...],)
+kwargs = {'cwd': PosixPath('/Users/timokamphaus/Git/opencuria/runner'), 'stderr': -1, 'stdout': -1}
+process = <Popen: returncode: 1 args: ['/Users/timokamphaus/Git/opencuria/runner/.venv...>
+stdout = b''
+stderr = b'Traceback (most recent call last):\n  File "<string>", line 6, in <module>\n    from test_storage_inventory import r...runtime/qemu_runtime.py", line 28, in <module>\n    import libvirt\nModuleNotFoundError: No module named \'libvirt\'\n'
+retcode = 1
+
+    def run(*popenargs,
+            input=None, capture_output=False, timeout=None, check=False, **kwargs):
+        """Run command with arguments and return a CompletedProcess instance.
+    
+        The returned instance will have attributes args, returncode, stdout and
+        stderr. By default, stdout and stderr are not captured, and those attributes
+        will be None. Pass stdout=PIPE and/or stderr=PIPE in order to capture them,
+        or pass capture_output=True to capture both.
+    
+        If check is True and the exit code was non-zero, it raises a
+        CalledProcessError. The CalledProcessError object will have the return code
+        in the returncode attribute, and output & stderr attributes if those streams
+        were captured.
+    
+        If timeout (seconds) is given and the process takes too long,
+         a TimeoutExpired exception will be raised.
+    
+        There is an optional argument "input", allowing you to
+        pass bytes or a string to the subprocess's stdin.  If you use this argument
+        you may not also use the Popen constructor's "stdin" argument, as
+        it will be used internally.
+    
+        By default, all communication is in bytes, and therefore any "input" should
+        be bytes, and the stdout and stderr will be bytes. If in text mode, any
+        "input" should be a string, and stdout and stderr will be strings decoded
+        according to locale encoding, or by "encoding" if set. Text mode is
+        triggered by setting any of text, encoding, errors or universal_newlines.
+    
+        The other arguments are the same as for the Popen constructor.
+        """
+        if input is not None:
+            if kwargs.get('stdin') is not None:
+                raise ValueError('stdin and input arguments may not both be used.')
+            kwargs['stdin'] = PIPE
+    
+        if capture_output:
+            if kwargs.get('stdout') is not None or kwargs.get('stderr') is not None:
+                raise ValueError('stdout and stderr arguments may not be used '
+                                 'with capture_output.')
+            kwargs['stdout'] = PIPE
+            kwargs['stderr'] = PIPE
+    
+        with Popen(*popenargs, **kwargs) as process:
+            try:
+                stdout, stderr = process.communicate(input, timeout=timeout)
+            except TimeoutExpired as exc:
+                process.kill()
+                if _mswindows:
+                    # Windows accumulates the output in a single blocking
+                    # read() call run on child threads, with the timeout
+                    # being done in a join() on those threads.  communicate()
+                    # _after_ kill() is required to collect that and add it
+                    # to the exception.
+                    exc.stdout, exc.stderr = process.communicate()
+                else:
+                    # POSIX _communicate already populated the output so
+                    # far into the TimeoutExpired exception.
+                    process.wait()
+                raise
+            except:  # Including KeyboardInterrupt, communicate handled that.
+                process.kill()
+                # We don't call process.wait() as .__exit__ does that for us.
+                raise
+            retcode = process.poll()
+            if check and retcode:
+>               raise CalledProcessError(retcode, process.args,
+                                         output=stdout, stderr=stderr)
+E               subprocess.CalledProcessError: Command '['/Users/timokamphaus/Git/opencuria/runner/.venv/bin/python', '-c', "\nimport asyncio, json, sys\nfrom pathlib import Path\nfrom dataclasses import asdict\nsys.path.insert(0, 'tests')\nfrom test_storage_inventory import runtime, qcow, cloud_init_domain\nasync def run():\n    r = runtime(Path(sys.argv[1]))\n    base = r._snapshot_dir / 'published.qcow2'\n    source = r._disk_dir / 'source.qcow2'\n    qcow(source)\n    await r._publish_image(source, base, {'artifact_id': sys.argv[2]})\n    source.unlink()\n    disk = r._disk_path(sys.argv[3])\n    qcow(disk, base)\n    cloud_init_domain(r, sys.argv[3], disk)\n    scan = await r.inventory()\n    assert scan.complete, scan.errors\n    Path(sys.argv[4]).write_text(json.dumps(asdict(scan)))\nasyncio.run(run())\n", '/private/var/folders/fj/t0q6566d1h3_lffxyhyd_4c40000gn/T/pytest-of-timokamphaus/pytest-14/test_force_real_qcow_overlay_d0', '374d71a2-b68e-41a8-9f40-9a5c6752f55b', '78ee4a46-ad83-481a-ba7d-5adfe0670ac1', '/private/var/folders/fj/t0q6566d1h3_lffxyhyd_4c40000gn/T/pytest-of-timokamphaus/pytest-14/test_force_real_qcow_overlay_d0/scan.json']' returned non-zero exit status 1.
+
+/opt/homebrew/Cellar/python@3.14/3.14.0_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py:577: CalledProcessError
+=============================== warnings summary ===============================
+apps/credentials/models.py:191
+  /Users/timokamphaus/Git/opencuria/backend/apps/credentials/models.py:191: RemovedInDjango60Warning: CheckConstraint.check is deprecated in favor of `.condition`.
+    models.CheckConstraint(
+
+apps/skills/models.py:59
+  /Users/timokamphaus/Git/opencuria/backend/apps/skills/models.py:59: RemovedInDjango60Warning: CheckConstraint.check is deprecated in favor of `.condition`.
+    models.CheckConstraint(
+
+apps/runners/tests/test_api.py: 10 warnings
+apps/runners/tests/test_api_permissions.py: 2 warnings
+apps/runners/tests/test_capture_api.py: 14 warnings
+apps/runners/tests/test_desktop_geometry.py: 8 warnings
+apps/runners/tests/test_git_api.py: 49 warnings
+apps/runners/tests/test_image_definitions_api.py: 28 warnings
+apps/runners/tests/test_processes_api.py: 15 warnings
+apps/runners/tests/test_workspace_access_controls.py: 26 warnings
+apps/organizations/tests/test_organization_api_permissions.py: 3 warnings
+apps/harness/tests/test_harness_conversations.py: 19 warnings
+apps/harness/tests/test_subagent_config.py: 12 warnings
+apps/runners/tests/test_image_deletion_coordinator.py: 1 warning
+apps/runners/tests/test_operator_disposition.py: 1 warning
+apps/harness/tests/test_agent_s_config.py: 4 warnings
+apps/harness/tests/test_harness_api.py: 31 warnings
+apps/harness/tests/test_harness_fork_edit_api.py: 19 warnings
+apps/harness/tests/test_paket3_features.py: 8 warnings
+apps/harness/tests/test_provider_config_api.py: 32 warnings
+apps/harness/tests/test_providers_openai_compatible.py: 3 warnings
+apps/harness/tests/test_recent_models_api.py: 8 warnings
+  /Users/timokamphaus/Git/opencuria/backend/.venv/lib/python3.14/site-packages/django/core/handlers/base.py:61: UserWarning: No directory at: /Users/timokamphaus/Git/opencuria/backend/staticfiles/
+    mw_instance = middleware(adapted_handler)
+
+apps/runners/tests/test_api.py: 6 warnings
+apps/runners/tests/test_image_definitions_api.py: 9 warnings
+apps/runners/tests/test_workspace_access_controls.py: 5 warnings
+apps/organizations/tests/test_organization_api_permissions.py: 3 warnings
+apps/harness/tests/test_harness_conversations.py: 32 warnings
+apps/harness/tests/test_subagent_config.py: 18 warnings
+apps/runners/tests/test_image_deletion_coordinator.py: 1 warning
+apps/harness/tests/test_agent_s_config.py: 14 warnings
+apps/harness/tests/test_harness_api.py: 25 warnings
+apps/harness/tests/test_harness_fork_edit_api.py: 2 warnings
+apps/harness/tests/test_paket3_features.py: 1 warning
+apps/harness/tests/test_provider_config_api.py: 49 warnings
+apps/harness/tests/test_providers_openai_compatible.py: 19 warnings
+apps/harness/tests/test_recent_models_api.py: 17 warnings
+  /Users/timokamphaus/Git/opencuria/backend/.venv/lib/python3.14/site-packages/ninja/operation.py:219: DeprecationWarning: Returning tuple (status_code, response) is deprecated. Use Status(status_code, response) instead.
+    return self._result_to_response(request, result, temporal_response)
+
+apps/runners/tests/test_capture_api.py: 16 warnings
+apps/runners/tests/test_desktop_geometry.py: 4 warnings
+apps/runners/tests/test_git_api.py: 34 warnings
+apps/runners/tests/test_image_definitions_api.py: 16 warnings
+apps/runners/tests/test_processes_api.py: 20 warnings
+apps/runners/tests/test_workspace_access_controls.py: 21 warnings
+apps/runners/tests/test_operator_disposition.py: 1 warning
+apps/harness/tests/test_harness_api.py: 29 warnings
+apps/harness/tests/test_harness_fork_edit_api.py: 20 warnings
+apps/harness/tests/test_paket3_features.py: 9 warnings
+apps/harness/tests/test_provider_config_api.py: 7 warnings
+  /Users/timokamphaus/Git/opencuria/backend/.venv/lib/python3.14/site-packages/ninja/operation.py:494: DeprecationWarning: Returning tuple (status_code, response) is deprecated. Use Status(status_code, response) instead.
+    return self._result_to_response(request, result, temporal_response)
+
+apps/runners/tests/test_capture_notifications.py: 22 warnings
+  /Users/timokamphaus/Git/opencuria/backend/apps/runners/services/infra/frontend_bus.py:115: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead
+    if asyncio.iscoroutinefunction(target):
+
+apps/runners/tests/test_desktop_proxy.py::test_proxy_returns_not_found_for_member_without_workspace_access
+  /Users/timokamphaus/Git/opencuria/backend/.venv/lib/python3.14/site-packages/jwt/api_jwt.py:147: InsecureKeyLengthWarning: The HMAC key is 30 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    return self._jws.encode(
+
+apps/runners/tests/test_desktop_proxy.py::test_proxy_returns_not_found_for_member_without_workspace_access
+  /Users/timokamphaus/Git/opencuria/backend/.venv/lib/python3.14/site-packages/jwt/api_jwt.py:365: InsecureKeyLengthWarning: The HMAC key is 30 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.
+    decoded = self.decode_complete(
+
+apps/mcp_app/tests/test_image_definitions.py::test_mcp_delete_image_definition_uses_orchestrated_delete
+  /Users/timokamphaus/Git/opencuria/backend/.venv/lib/python3.14/site-packages/django/db/models/sql/compiler.py:1780: RuntimeWarning: coroutine 'test_mcp_edit_busy_reports_conflict.<locals>._never' was never awaited
+    sql_and_param_pair_rows = (zip(*row) for row in rows_of_fields_as_sql)
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+apps/harness/tests/test_harness_api.py::test_permission_resolve_via_api
+  /opt/homebrew/Cellar/python@3.14/3.14.0_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/inspect.py:3101: RuntimeWarning: coroutine 'test_double_message_is_409_while_busy.<locals>._never' was never awaited
+    break
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+apps/harness/tests/test_harness_api.py::test_mode_switch_while_busy_is_409
+  /Users/timokamphaus/Git/opencuria/backend/.venv/lib/python3.14/site-packages/_pytest/runner.py:147: RuntimeWarning: coroutine 'test_mode_switch_while_busy_is_409.<locals>._never' was never awaited
+    item.funcargs = None  # type: ignore[attr-defined]
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+apps/harness/tests/test_harness_fork_edit_api.py::test_fork_child_session_is_400
+  /opt/homebrew/Cellar/python@3.14/3.14.0_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/inspect.py:3101: RuntimeWarning: coroutine 'test_fork_works_while_busy.<locals>._never' was never awaited
+    break
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+apps/harness/tests/test_harness_fork_edit_api.py::test_edit_assistant_message_is_400
+  /Users/timokamphaus/Git/opencuria/backend/.venv/lib/python3.14/site-packages/django/utils/deconstruct.py:15: RuntimeWarning: coroutine 'test_edit_while_busy_is_409.<locals>._never' was never awaited
+    def __new__(cls, *args, **kwargs):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED apps/runners/tests/test_image_deletion_coordinator.py::test_force_real_qcow_overlay_domain_and_cloud_init
+1 failed, 2056 passed, 24 skipped, 702 warnings in 209.38s (0:03:29)

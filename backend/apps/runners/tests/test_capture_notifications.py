@@ -1,14 +1,19 @@
 """Capture notifications use the real bus and committed lifecycle projection."""
 
 import asyncio
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from asgiref.sync import async_to_sync
 from django.db import transaction
 
+from apps.credentials.services import CredentialSvc
 from apps.runners.capture_repository import CaptureRepository
-from apps.runners.models import CaptureRequest, LifecycleCommand
+from apps.runners.models import (
+    CaptureRequest,
+    LifecycleCommand,
+    WorkspaceRecreateRequest,
+)
 from apps.runners.operations import OperationRepository
 from apps.runners.services.recovery import RecoveryService
 from apps.runners.tests.test_capture_pipeline import result
@@ -98,7 +103,13 @@ def test_child_result_rollback_discards_changes_and_events(
             name="capture",
             size_bytes=123,
         )
-        assert CaptureRepository.tick() == []
+        # A blocked replacement resumes the unchanged source workspace.
+        with patch.object(
+            CredentialSvc,
+            "resolve_workspace_credentials",
+            side_effect=RuntimeError("credential revoked"),
+        ):
+            assert CaptureRepository.tick() == []
         request.refresh_from_db()
     child = request.child
     workspace.refresh_from_db()
@@ -202,19 +213,32 @@ def test_completed_duplicate_ticks_notify_exactly_once(
         name="capture",
         size_bytes=123,
     )
-    frontend.reset_mock()
     monkeypatch.setattr(
         "apps.runners.services.RunnerService", lambda transport: service
     )
     async_to_sync(RecoveryService().tick)(sio_mock)
     assert CaptureRequest.objects.get(workspace=workspace).phase == "completed"
-    frontend.assert_called_once_with(
-        "workspace:operation_changed", operation_payload(workspace), str(workspace.id)
-    )
-    assert CaptureRepository.tick() == []
+    recreate = WorkspaceRecreateRequest.objects.get(workspace=workspace)
+    for event, extra in [
+        ("workspace:removed", {"result": "deleted"}),
+        ("workspace:created", {"status": "running", "credentials_present": False}),
+        ("workspace:stopped", {"credentials_present": False}),
+    ]:
+        recreate.refresh_from_db()
+        assert result(service, runner, recreate.child, event, **extra)
+        frontend.reset_mock()
+        async_to_sync(RecoveryService().tick)(sio_mock)
+    recreate.refresh_from_db()
+    workspace.refresh_from_db()
+    assert recreate.phase == "completed" and workspace.status == "stopped"
+    operations = [
+        c for c in frontend.call_args_list if c.args[0] == "workspace:operation_changed"
+    ]
+    assert [c.args[1] for c in operations] == [operation_payload(workspace)]
+    frontend.reset_mock()
     assert CaptureRepository.tick() == []
     async_to_sync(RecoveryService().tick)(sio_mock)
-    assert frontend.call_count == 1
+    frontend.assert_not_called()
 
 
 @pytest.mark.asyncio

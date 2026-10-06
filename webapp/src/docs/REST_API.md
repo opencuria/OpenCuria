@@ -279,6 +279,24 @@ Get a single organization by UUID.
 
 ---
 
+#### `PATCH /organizations/{org_id}/workspace-policy/` [org]
+
+Partial update of workspace policy. Admins only.
+
+**Request:**
+```json
+{
+  "image_versions_to_keep": 2
+}
+```
+
+`image_versions_to_keep` is 1–20 (default 2). Latest plus this many newest
+ready versions are retained; unused older versions are deleted automatically.
+
+**Response 200:** Organization object including `image_versions_to_keep`.
+
+---
+
 ### Runners
 
 #### `GET /runners/` [org]
@@ -363,6 +381,18 @@ Get a single workspace without chat session history.
   "name": "My workspace",
   "runtime_type": "docker",
   "repos": ["https://github.com/org/repo"],
+  "base_image": {
+    "id": "uuid",
+    "line_kind": "captured",
+    "line_id": "uuid",
+    "name": "My image",
+    "version": 1,
+    "latest_id": "uuid",
+    "latest_version": 2,
+    "status": "ready",
+    "update_available": true
+  },
+  "pending_base_image": null,
   "created_by_id": 1,
   "created_at": "2026-01-01T00:00:00Z",
   "updated_at": "2026-01-01T00:00:00Z",
@@ -385,6 +415,23 @@ Stop a running workspace. Asynchronous.
 Resume a stopped workspace. Asynchronous.
 
 **Response 202:** Task object.
+
+---
+
+#### `POST /workspaces/{workspace_id}/recreate/` [org]
+
+Reset the workspace to a confirmed version, or update it to Latest, under the
+same workspace id. Disk and runtime are removed and provisioned again. Chats,
+credentials, plugins and schedules stay. Requires `workspaces:delete`.
+
+**Request:**
+```json
+{
+  "image_id": "uuid"
+}
+```
+
+**Response 202:** Workspace object with `active_operation` `resetting` or `updating`.
 
 ---
 
@@ -515,6 +562,41 @@ Delete an image artifact.
 #### `POST /workspaces/{workspace_id}/image-artifacts/{image_artifact_id}/workspaces/` [org]
 
 Create a workspace from an image artifact.
+
+**Response 202:** Task object with new workspace info.
+
+---
+
+### Captured images
+
+Captured images are versioned lines. New workspaces always use Latest.
+
+#### `GET /captured-images/` [org]
+
+List the current user's captured images with versions, size and retention.
+
+**Response 200:** Array of captured-image objects (`id`, `name`, `versions`,
+`latest_version`, `total_size_bytes`, `workspace_count`).
+
+---
+
+#### `GET /captured-images/{captured_image_id}/` [org]
+
+Get one captured image and all of its versions.
+
+---
+
+#### `PATCH /captured-images/{captured_image_id}/` [org]
+
+Rename a captured image.
+
+**Request:** `{"name": "Renamed"}`
+
+---
+
+#### `POST /captured-images/{captured_image_id}/workspaces/` [org]
+
+Create a workspace from the line's Latest version.
 
 **Response 202:** Task object with new workspace info.
 

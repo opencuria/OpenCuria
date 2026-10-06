@@ -436,10 +436,33 @@ class InventoryRepository:
                 if resource["kind"] == "workspace" and resource["workspace"]:
                     key = (runtime["runtime_type"], resource["workspace"]["id"])
                     workspace_states.setdefault(key, resource["state"])
+        # Allocated bytes of each workspace's own storage (disks, ISOs, volumes).
+        workspace_bytes: dict[str, int] = {}
+        for runtime in result["runtimes"]:
+            for resource in runtime["resources"]:
+                if resource["workspace"] and resource["kind"] != "workspace":
+                    ws_key = resource["workspace"]["id"]
+                    workspace_bytes[ws_key] = workspace_bytes.get(ws_key, 0) + (
+                        resource["allocated_bytes"] or 0
+                    )
+        from .image_lines import ImageLineRepository
+        from .retention_repository import RetentionRepository
+
+        keep = RetentionRepository.keep_for(runner.organization_id)
+        version_facts: dict[str, dict] = {}
         result["generations"] = []
         for image in ImageInstance.objects.filter(runner=runner).select_related(
-            "created_by", "build_job", "origin_definition"
+            "created_by", "build_job__image_definition", "origin_definition",
+            "captured_image",
         ):
+            line = ImageLineRepository.line_of(image)
+            if line is not None and str(line) not in version_facts:
+                latest_version = ImageLineRepository.latest(line)
+                version_facts[str(line)] = {
+                    "latest": latest_version.id if latest_version else None,
+                    "labels": ImageLineRepository.retention_labels(line, keep),
+                }
+            facts = version_facts.get(str(line), {}) if line else {}
             image_resources = [
                 resource
                 for runtime in result["runtimes"]
@@ -477,6 +500,7 @@ class InventoryRepository:
                 for w in workspaces
                 if (
                     str(w.base_image_instance_id) in dependent_images
+                    or str(w.pending_base_image_instance_id) in dependent_images
                     or str(w.id) in physical_ws
                 )
                 and w.status not in {"deleted", "removed"}
@@ -508,6 +532,15 @@ class InventoryRepository:
                     if image.origin_definition
                     else None,
                     "generation": image.generation,
+                    "captured_image_id": str(image.captured_image_id)
+                    if image.captured_image_id
+                    else None,
+                    "line_name": line.name if line else image.name,
+                    "message": image.message,
+                    "is_latest": bool(facts and facts["latest"] == image.id),
+                    "retention": facts.get("labels", {}).get(image.id)
+                    if facts
+                    else None,
                     "status": image.status,
                     "runner_ref": image.runner_ref,
                     "size_bytes": image.size_bytes,
@@ -559,6 +592,12 @@ class InventoryRepository:
                             "base_image_instance_id": str(w.base_image_instance_id)
                             if w.base_image_instance_id
                             else None,
+                            "pending_base_image_instance_id": str(
+                                w.pending_base_image_instance_id
+                            )
+                            if w.pending_base_image_instance_id
+                            else None,
+                            "allocated_bytes": workspace_bytes.get(str(w.id)),
                             "name": w.name,
                             "owner_id": str(w.created_by_id),
                             "owner_label": InventoryRepository.owner_label(

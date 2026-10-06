@@ -49,6 +49,7 @@ def list_organizations(request: HttpRequest):
             workspace_auto_stop_timeout_minutes=o.get(
                 "workspace_auto_stop_timeout_minutes"
             ),
+            image_versions_to_keep=o.get("image_versions_to_keep", 2),
             created_at=o["created_at"],
         )
         for o in org_list
@@ -79,6 +80,7 @@ def create_organization(request: HttpRequest, payload: OrganizationCreateIn):
         slug=org.slug,
         role="admin",
         workspace_auto_stop_timeout_minutes=org.workspace_auto_stop_timeout_minutes,
+        image_versions_to_keep=org.image_versions_to_keep,
         created_at=org.created_at,
     )
 
@@ -105,6 +107,7 @@ def get_organization(request: HttpRequest, org_id: uuid.UUID):
         slug=org.slug,
         role=role,
         workspace_auto_stop_timeout_minutes=org.workspace_auto_stop_timeout_minutes,
+        image_versions_to_keep=org.image_versions_to_keep,
         created_at=org.created_at,
     )
 
@@ -128,10 +131,13 @@ def update_workspace_policy(
 
     service = _get_service()
     try:
+        changes = payload.dict(exclude_unset=True)
+        if changes.get("image_versions_to_keep", 0) is None:
+            changes.pop("image_versions_to_keep")
         org = service.update_workspace_policy(
             org_id=org_id,
             user=request.user,
-            workspace_auto_stop_timeout_minutes=payload.workspace_auto_stop_timeout_minutes,
+            **changes,
         )
         role = service.get_user_role(request.user, org_id) or "member"
     except NotFoundError as e:
@@ -147,5 +153,6 @@ def update_workspace_policy(
         slug=org.slug,
         role=role,
         workspace_auto_stop_timeout_minutes=org.workspace_auto_stop_timeout_minutes,
+        image_versions_to_keep=org.image_versions_to_keep,
         created_at=org.created_at,
     )

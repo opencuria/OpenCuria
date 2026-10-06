@@ -47,9 +47,14 @@ preserve runner bytes/journal before deploying both components together.
   durable scrub evidence bound to unchanged domain/disk incarnation. Capture is
   standalone QCOW2, not an overlay. Stopped observation alone is not scrub proof.
   Only injected credentials are scrubbed; arbitrary user secrets are not sanitized.
-  Failed capture may resume only its previously running guest; unknown outcomes
-  retain fences. A successful capture survives a failed restart. Docker capture
-  remains unsupported (legacy captures remain readable).
+  A successful capture is a new version on a captured-image line and hands off
+  to recreate under the same workspace id; resume of the prior guest is only the
+  fallback when replacement is blocked or the version was deleted. Failed
+  capture may resume only its previously running guest; unknown outcomes retain
+  fences. Docker capture remains unsupported (legacy captures remain readable).
+  Reset and update reuse the same recreate path. Retention keeps Latest plus
+  `Organization.image_versions_to_keep` newest ready versions; pinned unused
+  versions stay until the last workspace is gone.
 - Ordinary QEMU removal checks the reverse graph before destroying its domain
   and before unlinking its disk. Docker canonical workspace data volumes are
   explicitly labelled at creation. Removal checks all stopped/running consumers

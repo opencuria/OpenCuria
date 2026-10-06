@@ -17,8 +17,14 @@ Tools and their required permissions
 - resume_workspace       → workspaces:resume
 - remove_workspace       → workspaces:delete
 - list_runners           → runners:read
+- recreate_workspace     → workspaces:delete (reset/update; workspace data lost)
 - list_image_artifacts   → images:read
 - create_image_artifact  → images:create
+- list_captured_images   → images:read
+- update_captured_image  → images:create
+- create_workspace_from_captured_image → images:clone
+- get_workspace_policy   → organizations:read
+- update_workspace_policy → organizations:write (admin)
 - list_image_definitions → image_definitions:read
 - create_image_definition → image_definitions:write
 - update_image_definition → image_definitions:write
@@ -258,6 +264,29 @@ _TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="recreate_workspace",
+        description=(
+            "Reset a workspace onto its own image version, or update it to the "
+            "latest version of its image. The workspace keeps its id, chats, "
+            "credentials, plugins and schedules; all data stored only inside "
+            "the workspace is permanently deleted."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "description": "Workspace UUID."},
+                "image_id": {
+                    "type": "string",
+                    "description": (
+                        "Target version: base_image.id (reset) or "
+                        "base_image.latest_id (update) from get_workspace."
+                    ),
+                },
+            },
+            "required": ["workspace_id", "image_id"],
+        },
+    ),
+    Tool(
         name="preview_image_deletion",
         description="Read-only exact physical cascade preview (org admin).",
         inputSchema={
@@ -265,7 +294,7 @@ _TOOLS: list[Tool] = [
             "properties": {
                 "target_type": {
                     "type": "string",
-                    "enum": ["image", "assignment", "definition"],
+                    "enum": ["image", "assignment", "definition", "captured_image"],
                 },
                 "target_id": {"type": "string"},
             },
@@ -364,16 +393,83 @@ _TOOLS: list[Tool] = [
     Tool(
         name="create_image_artifact",
         description=(
-            "Create an image artifact of a workspace. Running sources are stopped "
-            "and restarted automatically; stopped sources remain stopped."
+            "Capture a workspace as a new image (name) or as the next version of "
+            "an existing captured image (captured_image_id). The workspace is "
+            "stopped, captured and then recreated on the new version under the "
+            "same id; it ends in its previous run state with its files intact."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "workspace_id": {"type": "string", "description": "Workspace UUID."},
-                "name": {"type": "string", "description": "Image artifact name."},
+                "name": {"type": "string", "description": "Name of a new image."},
+                "captured_image_id": {
+                    "type": "string",
+                    "description": "Captured image UUID to add a version to.",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Short description of what changed (optional).",
+                },
             },
-            "required": ["workspace_id", "name"],
+            "required": ["workspace_id"],
+        },
+    ),
+    Tool(
+        name="list_captured_images",
+        description=(
+            "List the current user's captured images with all versions, the "
+            "latest version, retention state and the workspaces using each."
+        ),
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="update_captured_image",
+        description="Rename a captured image.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "captured_image_id": {"type": "string"},
+                "name": {"type": "string"},
+            },
+            "required": ["captured_image_id", "name"],
+        },
+    ),
+    Tool(
+        name="create_workspace_from_captured_image",
+        description="Create a workspace from the latest version of a captured image.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "captured_image_id": {"type": "string"},
+                "name": {"type": "string"},
+                "credential_ids": {"type": "array", "items": {"type": "string"}},
+                "plugin_ids": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["captured_image_id"],
+        },
+    ),
+    Tool(
+        name="get_workspace_policy",
+        description="Get the organization's workspace policy (auto-stop, versions kept).",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="update_workspace_policy",
+        description=(
+            "Update the organization's workspace policy (admin). Omitted fields "
+            "stay unchanged. image_versions_to_keep: newest versions retained "
+            "per image; older ones are deleted once no workspace uses them."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_auto_stop_timeout_minutes": {
+                    "type": ["integer", "null"],
+                    "description": "Idle minutes before auto-stop; null disables.",
+                },
+                "image_versions_to_keep": {"type": "integer", "minimum": 1},
+            },
         },
     ),
     Tool(
@@ -459,6 +555,10 @@ _TOOLS: list[Tool] = [
                 "definition_id": {"type": "string"},
                 "runner_id": {"type": "string"},
                 "activate": {"type": "boolean"},
+                "message": {
+                    "type": "string",
+                    "description": "What changed in this version (optional).",
+                },
             },
             "required": ["definition_id", "runner_id"],
         },
@@ -474,6 +574,10 @@ _TOOLS: list[Tool] = [
                 "action": {
                     "type": "string",
                     "enum": ["deactivate", "activate", "rebuild"],
+                },
+                "message": {
+                    "type": "string",
+                    "description": "What changed in the rebuilt version (optional).",
                 },
             },
             "required": ["definition_id", "runner_id", "action"],
@@ -1431,6 +1535,12 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "refresh_runner_storage": APIKeyPermission.RUNNERS_READ,
     "list_image_artifacts": APIKeyPermission.IMAGES_READ,
     "create_image_artifact": APIKeyPermission.IMAGES_CREATE,
+    "recreate_workspace": APIKeyPermission.WORKSPACES_DELETE,
+    "list_captured_images": APIKeyPermission.IMAGES_READ,
+    "update_captured_image": APIKeyPermission.IMAGES_CREATE,
+    "create_workspace_from_captured_image": APIKeyPermission.IMAGES_CLONE,
+    "get_workspace_policy": APIKeyPermission.ORGANIZATIONS_READ,
+    "update_workspace_policy": APIKeyPermission.ORGANIZATIONS_WRITE,
     "list_image_definitions": APIKeyPermission.IMAGE_DEFINITIONS_READ,
     "create_image_definition": APIKeyPermission.IMAGE_DEFINITIONS_WRITE,
     "duplicate_image_definition": APIKeyPermission.IMAGE_DEFINITIONS_WRITE,
@@ -1628,6 +1738,9 @@ def _call_get_workspace(api_key, org_id, args: dict) -> list[TextContent]:
     if error is not None:
         return error
 
+    from apps.runners.services.image_versions import ImageVersionService
+
+    versions = ImageVersionService()
     result = {
         "id": str(workspace.id),
         "name": workspace.name,
@@ -1642,6 +1755,10 @@ def _call_get_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         "plugin_ids": [
             str(item.plugin_id) for item in workspace.plugin_activations.all()
         ],
+        "base_image": versions.version_ref(workspace.base_image_instance),
+        "pending_base_image": versions.version_ref(
+            workspace.pending_base_image_instance
+        ),
         "created_at": workspace.created_at.isoformat(),
     }
     return _text(result)
@@ -2119,10 +2236,181 @@ def _call_list_image_artifacts(api_key, org_id, args: dict) -> list[TextContent]
             "status": str(s.status),
             "size_bytes": s.size_bytes,
             "created_at": s.created_at.isoformat(),
+            "captured_image_id": (
+                str(s.captured_image_id) if s.captured_image_id else None
+            ),
+            "version": s.generation,
+            "message": s.message,
         }
         for s in artifacts
     ]
     return _text(result)
+
+
+def _call_recreate_workspace(api_key, org_id, args: dict) -> list[TextContent]:
+    from common.exceptions import ConflictError, NotFoundError
+
+    try:
+        workspace_id = uuid.UUID(args.get("workspace_id") or "")
+        image_id = uuid.UUID(args.get("image_id") or "")
+    except ValueError:
+        return _error("workspace_id and image_id must be UUIDs")
+    try:
+        _workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+        if error is not None:
+            return error
+        svc = _runner_service()
+        loop = asyncio.new_event_loop()
+        try:
+            workspace, task = loop.run_until_complete(
+                svc.recreate_workspace(
+                    workspace_id,
+                    image_id,
+                    user=api_key.user,
+                    organization_id=org_id,
+                )
+            )
+        finally:
+            loop.close()
+        return _text(
+            {
+                "workspace_id": str(workspace.id),
+                "task_id": str(task.id),
+                "active_operation": workspace.active_operation,
+            }
+        )
+    except (NotFoundError, ConflictError) as e:
+        return _error(str(e))
+
+
+def _captured_image_payload(view: dict) -> dict:
+    from apps.runners.api import _captured_image_to_out
+
+    return _captured_image_to_out(view).model_dump(mode="json")
+
+
+def _call_list_captured_images(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.organizations.services import OrganizationService
+    from apps.runners.services.image_versions import ImageVersionService
+
+    OrganizationService().require_membership(api_key.user, org_id)
+    views = ImageVersionService().list_captured_images(api_key.user, org_id)
+    return _text([_captured_image_payload(view) for view in views])
+
+
+def _call_update_captured_image(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.organizations.services import OrganizationService
+    from apps.runners.services.image_versions import ImageVersionService
+    from common.exceptions import ConflictError, NotFoundError
+
+    OrganizationService().require_membership(api_key.user, org_id)
+    try:
+        view = ImageVersionService().rename_captured_image(
+            api_key.user,
+            org_id,
+            uuid.UUID(args.get("captured_image_id") or ""),
+            args.get("name") or "",
+        )
+    except ValueError:
+        return _error("Invalid captured_image_id UUID")
+    except (NotFoundError, ConflictError) as e:
+        return _error(str(e))
+    return _text(_captured_image_payload(view))
+
+
+def _call_create_workspace_from_captured_image(
+    api_key, org_id, args: dict
+) -> list[TextContent]:
+    from apps.credentials.services import CredentialSvc
+    from apps.organizations.services import OrganizationService
+    from apps.runners.services.image_versions import ImageVersionService
+    from common.exceptions import ConflictError, NotFoundError
+
+    OrganizationService().require_membership(api_key.user, org_id)
+    plugin_ids = [uuid.UUID(p) for p in args.get("plugin_ids") or []]
+    credential_ids = [uuid.UUID(c) for c in args.get("credential_ids") or []]
+    if plugin_ids and not api_key.has_permission(APIKeyPermission.PLUGINS_WRITE):
+        return _error("API key lacks permission: plugins:write")
+    if credential_ids and not api_key.has_permission(
+        APIKeyPermission.CREDENTIALS_READ
+    ):
+        return _error("API key lacks permission: credentials:read")
+    try:
+        latest = ImageVersionService().latest_captured_version(
+            api_key.user, org_id, uuid.UUID(args.get("captured_image_id") or "")
+        )
+        resolved = CredentialSvc().resolve_credentials(
+            credential_ids, org_id=org_id, user=api_key.user
+        )
+        svc = _runner_service()
+        loop = asyncio.new_event_loop()
+        try:
+            workspace, task = loop.run_until_complete(
+                svc.create_workspace_from_image_artifact(
+                    image_artifact_id=latest.id,
+                    name=args.get("name") or "",
+                    env_vars=resolved.env_vars,
+                    files=resolved.files,
+                    ssh_keys=resolved.ssh_keys,
+                    credentials=resolved.credentials,
+                    resolved_credentials=resolved,
+                    user=api_key.user,
+                    organization_id=org_id,
+                    plugin_ids=plugin_ids,
+                )
+            )
+        finally:
+            loop.close()
+    except ValueError:
+        return _error("Invalid captured_image_id UUID")
+    except (NotFoundError, ConflictError) as e:
+        return _error(str(e))
+    return _text(
+        {
+            "workspace_id": str(workspace.id),
+            "task_id": str(task.id),
+            "image_id": str(latest.id),
+            "version": latest.generation,
+        }
+    )
+
+
+def _workspace_policy_payload(org) -> dict:
+    return {
+        "workspace_auto_stop_timeout_minutes": org.workspace_auto_stop_timeout_minutes,
+        "image_versions_to_keep": org.image_versions_to_keep,
+    }
+
+
+def _call_get_workspace_policy(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.organizations.services import OrganizationService
+    from common.exceptions import NotFoundError
+
+    try:
+        org = OrganizationService().get_organization(org_id, api_key.user)
+    except NotFoundError as e:
+        return _error(str(e))
+    return _text(_workspace_policy_payload(org))
+
+
+def _call_update_workspace_policy(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.organizations.services import OrganizationService
+    from common.exceptions import AuthenticationError, NotFoundError
+
+    changes = {
+        key: args[key]
+        for key in ("workspace_auto_stop_timeout_minutes", "image_versions_to_keep")
+        if key in args
+    }
+    try:
+        org = OrganizationService().update_workspace_policy(
+            org_id=org_id, user=api_key.user, **changes
+        )
+    except (NotFoundError, AuthenticationError) as e:
+        return _error(str(e))
+    except ValueError as e:
+        return _error(str(e))
+    return _text(_workspace_policy_payload(org))
 
 
 def _call_create_image_artifact(api_key, org_id, args: dict) -> list[TextContent]:
@@ -2132,13 +2420,16 @@ def _call_create_image_artifact(api_key, org_id, args: dict) -> list[TextContent
     from common.exceptions import ConflictError, NotFoundError
 
     workspace_id_str = args.get("workspace_id")
-    name = args.get("name")
-    if not workspace_id_str or not name:
-        return _error("workspace_id and name are required")
+    name = args.get("name") or ""
+    captured_image_id = None
+    if not workspace_id_str or not (name or args.get("captured_image_id")):
+        return _error("workspace_id and either name or captured_image_id are required")
     try:
         workspace_id = _uuid.UUID(workspace_id_str)
+        if args.get("captured_image_id"):
+            captured_image_id = _uuid.UUID(args["captured_image_id"])
     except ValueError:
-        return _error("Invalid workspace_id UUID")
+        return _error("Invalid workspace_id or captured_image_id UUID")
 
     try:
         workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
@@ -2154,6 +2445,8 @@ def _call_create_image_artifact(api_key, org_id, args: dict) -> list[TextContent
                 workspace_id=workspace_id,
                 name=name,
                 organization_id=org_id,
+                captured_image_id=captured_image_id,
+                message=(args.get("message") or "")[:500],
             )
 
         loop = asyncio.new_event_loop()
@@ -2505,6 +2798,7 @@ def _call_create_build_job(api_key, org_id, args: dict) -> list[TextContent]:
             runner=runner,
             activate=bool(args.get("activate", True)),
             created_by=api_key.user,
+            message=(args.get("message") or "")[:500],
         )
 
     loop = asyncio.new_event_loop()
@@ -2560,16 +2854,19 @@ def _call_update_build_job(api_key, org_id, args: dict) -> list[TextContent]:
     svc = get_runner_service()
 
     async def _update():
+        message = (args.get("message") or "")[:500]
         if action == "activate":
             return await svc.activate_build_job(
                 build,
                 created_by=api_key.user,
+                message=message,
             )
         return await svc.trigger_build_job(
             image_definition=build.image_definition,
             runner=build.runner,
             activate=True,
             created_by=api_key.user,
+            message=message,
         )
 
     loop = asyncio.new_event_loop()
@@ -5192,6 +5489,12 @@ _TOOL_HANDLERS = {
     "refresh_runner_storage": _call_refresh_runner_storage,
     "list_image_artifacts": _call_list_image_artifacts,
     "create_image_artifact": _call_create_image_artifact,
+    "recreate_workspace": _call_recreate_workspace,
+    "list_captured_images": _call_list_captured_images,
+    "update_captured_image": _call_update_captured_image,
+    "create_workspace_from_captured_image": _call_create_workspace_from_captured_image,
+    "get_workspace_policy": _call_get_workspace_policy,
+    "update_workspace_policy": _call_update_workspace_policy,
     "list_image_definitions": _call_list_image_definitions,
     "create_image_definition": _call_create_image_definition,
     "duplicate_image_definition": _call_duplicate_image_definition,

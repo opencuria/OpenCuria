@@ -39,7 +39,11 @@ def test_capture_reports_outcome_and_always_closes_loop(monkeypatch, error_type)
     )
     assert loop.is_closed()
     capture.assert_awaited_once_with(
-        workspace_id=workspace.id, name="Snapshot", organization_id=org_id
+        workspace_id=workspace.id,
+        name="Snapshot",
+        organization_id=org_id,
+        captured_image_id=None,
+        message="",
     )
     if error_type:
         assert "Capture diagnostic" in result[0].text

@@ -443,10 +443,14 @@ def test_legacy_migration_preserves_queued_without_physical_dispatch(runner, use
             is_legacy=True,
         )
         executor = MigrationExecutor(connection)
-        executor.migrate([("runners", "0023_preserve_delete_intents")])
+        preserved = [("runners", "0023_preserve_delete_intents")]
+        executor.migrate(preserved)
+        Image = executor.loader.project_state(preserved).apps.get_model(
+            "runners", "ImageInstance"
+        )
         row = ImageDeletionRequest.objects.get(target_id=queued.id)
         assert row.phase == "waiting_inventory" and row.children == {}
-        assert ImageInstance.objects.get(pk=queued.id).runner_ref == "/legacy"
+        assert Image.objects.get(pk=queued.id).runner_ref == "/legacy"
         assert not Task.objects.exists()
     finally:
         executor = MigrationExecutor(connection)

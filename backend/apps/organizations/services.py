@@ -16,6 +16,10 @@ from .repositories import MembershipRepository, OrganizationRepository
 
 logger = logging.getLogger(__name__)
 
+UNSET = object()
+MIN_IMAGE_VERSIONS_TO_KEEP = 1
+MAX_IMAGE_VERSIONS_TO_KEEP = 20
+
 
 class OrganizationService:
     """Business logic for organizations and memberships."""
@@ -84,6 +88,7 @@ class OrganizationService:
                 "slug": m.organization.slug,
                 "role": m.role,
                 "workspace_auto_stop_timeout_minutes": m.organization.workspace_auto_stop_timeout_minutes,
+                "image_versions_to_keep": m.organization.image_versions_to_keep,
                 "created_at": m.organization.created_at,
             }
             for m in memberships
@@ -110,25 +115,40 @@ class OrganizationService:
         *,
         org_id,
         user,
-        workspace_auto_stop_timeout_minutes: int | None,
+        workspace_auto_stop_timeout_minutes: int | None | object = UNSET,
+        image_versions_to_keep: int | object = UNSET,
     ) -> Organization:
-        """Update org-wide workspace inactivity settings."""
+        """Update org-wide workspace settings; omitted fields stay unchanged."""
         org = self.require_admin(user, org_id)
 
-        if workspace_auto_stop_timeout_minutes is not None:
-            if workspace_auto_stop_timeout_minutes < 1:
+        if workspace_auto_stop_timeout_minutes is not UNSET:
+            if workspace_auto_stop_timeout_minutes is not None:
+                if workspace_auto_stop_timeout_minutes < 1:
+                    raise ValueError(
+                        "workspace_auto_stop_timeout_minutes must be at least 1"
+                    )
+                if workspace_auto_stop_timeout_minutes > 10080:
+                    raise ValueError(
+                        "workspace_auto_stop_timeout_minutes must be at most 10080"
+                    )
+            org = self.organizations.update_workspace_auto_stop_timeout(
+                org,
+                workspace_auto_stop_timeout_minutes,
+            )
+        if image_versions_to_keep is not UNSET:
+            if not (
+                MIN_IMAGE_VERSIONS_TO_KEEP
+                <= int(image_versions_to_keep)
+                <= MAX_IMAGE_VERSIONS_TO_KEEP
+            ):
                 raise ValueError(
-                    "workspace_auto_stop_timeout_minutes must be at least 1"
+                    "image_versions_to_keep must be between "
+                    f"{MIN_IMAGE_VERSIONS_TO_KEEP} and {MAX_IMAGE_VERSIONS_TO_KEEP}"
                 )
-            if workspace_auto_stop_timeout_minutes > 10080:
-                raise ValueError(
-                    "workspace_auto_stop_timeout_minutes must be at most 10080"
-                )
-
-        return self.organizations.update_workspace_auto_stop_timeout(
-            org,
-            workspace_auto_stop_timeout_minutes,
-        )
+            org = self.organizations.update_image_versions_to_keep(
+                org, int(image_versions_to_keep)
+            )
+        return org
 
     def get_user_role(self, user, org_id) -> str | None:
         """Get the user's role in the given organization, or None."""

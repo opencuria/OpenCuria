@@ -5,6 +5,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type {
+  CapturedImage,
   ImageArtifact,
   ImageArtifactCreateIn,
   ImageArtifactCloneIn,
@@ -19,6 +20,7 @@ export const useImageStore = defineStore('images', () => {
   const notifications = useNotificationStore()
 
   const images = ref<ImageArtifact[]>([])
+  const capturedImages = ref<CapturedImage[]>([])
   const imageDefinitions = ref<ImageDefinition[]>([])
   const runnerBuildsByDefinition = ref<Record<string, RunnerImageBuild[]>>({})
   const loading = ref(false)
@@ -33,6 +35,44 @@ export const useImageStore = defineStore('images', () => {
       error.value = e instanceof Error ? e.message : 'Failed to load images'
     } finally {
       loading.value = false
+    }
+  }
+
+  async function fetchCapturedImages(): Promise<void> {
+    try {
+      capturedImages.value = await workspacesApi.listCapturedImages()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Failed to load images'
+    }
+  }
+
+  async function renameCapturedImage(id: string, name: string): Promise<boolean> {
+    try {
+      const updated = await workspacesApi.renameCapturedImage(id, name)
+      const idx = capturedImages.value.findIndex((image) => image.id === id)
+      if (idx !== -1) capturedImages.value[idx] = updated
+      notifications.success('Image renamed', `Image renamed to "${name}".`)
+      return true
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to rename image'
+      notifications.error('Rename failed', msg)
+      return false
+    }
+  }
+
+  /** New workspaces always start from the latest version of an image. */
+  async function createWorkspaceFromCapturedImage(
+    capturedImageId: string,
+    data: ImageArtifactCloneIn,
+  ): Promise<string | null> {
+    try {
+      const result = await workspacesApi.createWorkspaceFromCapturedImage(capturedImageId, data)
+      notifications.success('Creating workspace', 'New workspace is being created from image.')
+      return result.workspace_id
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to create workspace'
+      notifications.error('Create failed', msg)
+      return null
     }
   }
 
@@ -64,7 +104,7 @@ export const useImageStore = defineStore('images', () => {
         ))
       )
         return false
-      await fetchImages()
+      await Promise.all([fetchImages(), fetchCapturedImages()])
       notifications.success(
         'Image creating',
         'Image is being created. It will appear here when ready.',
@@ -130,11 +170,15 @@ export const useImageStore = defineStore('images', () => {
 
   return {
     images,
+    capturedImages,
     imageDefinitions,
     runnerBuildsByDefinition,
     loading,
     error,
     fetchImages,
+    fetchCapturedImages,
+    renameCapturedImage,
+    createWorkspaceFromCapturedImage,
     fetchImageDefinitionsWithBuilds,
     createImageArtifact,
     renameImageArtifact,

@@ -51,6 +51,8 @@ from .schemas import (
     GitHistoryQuery,
     GitOperationIn,
     GitRepoQuery,
+    CapturedImageOut,
+    CapturedImageUpdateIn,
     ImageArtifactCreateIn,
     ImageArtifactCreateOut,
     ImageArtifactOut,
@@ -79,6 +81,8 @@ from .schemas import (
     WorkspaceFromImageArtifactIn,
     WorkspaceFromImageArtifactOut,
     WorkspaceOut,
+    WorkspaceRecreateIn,
+    WorkspaceRecreateOut,
     WorkspaceUpdateIn,
     WorkspaceUpdateOut,
     validate_commit_hash,
@@ -118,6 +122,9 @@ def _workspace_base_image_name(workspace) -> str | None:
 
 def _workspace_to_out(workspace) -> WorkspaceOut:
     """Map a Workspace ORM instance to WorkspaceOut."""
+    from .services.image_versions import ImageVersionService
+
+    versions = ImageVersionService()
     # Determine runner online status — prefer cached attribute injected by the
     # queryset annotation, fall back to FK traversal.
     runner_online: bool = False
@@ -182,6 +189,11 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
         ),
         credentials_present=bool(getattr(workspace, "credentials_present", False)),
         base_image_name=_workspace_base_image_name(workspace),
+        base_image=versions.version_ref(getattr(workspace, "base_image_instance", None)),
+        pending_base_image=versions.version_ref(
+            getattr(workspace, "pending_base_image_instance", None)
+        ),
+        repos=list(getattr(workspace, "repos", None) or []),
     )
 
 
@@ -611,46 +623,7 @@ def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     org_service.require_membership(request.user, org_id)
     try:
         workspace = _get_owned_workspace(request, org_id, workspace_id)
-        from .enums import RunnerStatus
-
-        return 200, WorkspaceOut(
-            id=workspace.id,
-            runner_id=workspace.runner_id,
-            status=workspace.status,
-            active_operation=workspace.active_operation,
-            intervention_required=workspace.intervention_required,
-            lifecycle_diagnostic=workspace.lifecycle_diagnostic,
-            name=workspace.name,
-            runtime_type=workspace.runtime_type,
-            qemu_vcpus=workspace.qemu_vcpus,
-            qemu_memory_mb=workspace.qemu_memory_mb,
-            qemu_disk_size_gb=workspace.qemu_disk_size_gb,
-            created_by_id=workspace.created_by_id,
-            last_activity_at=workspace.last_activity_at,
-            auto_stop_timeout_minutes=workspace.runner.organization.workspace_auto_stop_timeout_minutes,
-            auto_stop_at=(
-                workspace.last_activity_at
-                + timedelta(
-                    minutes=workspace.runner.organization.workspace_auto_stop_timeout_minutes
-                )
-                if (
-                    workspace.status == WorkspaceStatus.RUNNING
-                    and workspace.last_activity_at is not None
-                    and workspace.runner.organization.workspace_auto_stop_timeout_minutes
-                )
-                else None
-            ),
-            created_at=workspace.created_at,
-            updated_at=workspace.updated_at,
-            has_active_session=False,
-            runner_online=workspace.runner.status == RunnerStatus.ONLINE,
-            credential_ids=_workspace_credential_ids(workspace),
-            plugin_ids=list(
-                workspace.plugin_activations.values_list("plugin_id", flat=True)
-            ),
-            credentials_present=bool(workspace.credentials_present),
-            base_image_name=_workspace_base_image_name(workspace),
-        )
+        return 200, _workspace_to_out(workspace)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
 
@@ -1064,6 +1037,46 @@ async def remove_workspace(request: HttpRequest, workspace_id: uuid.UUID):
         return 202, task
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
+    except ConflictError as e:
+        return 409, ErrorOut(detail=e.message, code=e.code)
+
+
+@workspace_router.post(
+    "/{workspace_id}/recreate/",
+    response={202: WorkspaceRecreateOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    summary="Reset or update a workspace (all workspace-only data is lost)",
+)
+async def recreate_workspace(
+    request: HttpRequest, workspace_id: uuid.UUID, payload: WorkspaceRecreateIn
+):
+    """Recreate the workspace on its own version (reset) or the latest (update).
+
+    The workspace keeps its id, chats, credentials, plugins and schedules.
+    Requires the delete permission because workspace data is destroyed.
+    """
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_DELETE):
+        return _perm_denied(APIKeyPermission.WORKSPACES_DELETE)
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    service = _get_service()
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        workspace, task = await service.recreate_workspace(
+            workspace_id,
+            payload.image_id,
+            user=request.user,
+            organization_id=org_id,
+        )
+        return 202, WorkspaceRecreateOut(
+            workspace_id=workspace.id,
+            task_id=task.id,
+            active_operation=workspace.active_operation,
+        )
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code=e.code)
+    except RunnerOfflineError as e:
+        return 409, ErrorOut(detail=str(e), code="runner_offline")
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
 
@@ -1713,12 +1726,18 @@ workspace_image_artifact_router = Router(tags=["image-artifacts"])
 image_artifact_router = Router(tags=["image-artifacts"])
 
 
-def _image_artifact_to_out(artifact) -> ImageArtifactOut:
+def _image_artifact_to_out(artifact, extras: dict | None = None) -> ImageArtifactOut:
     """Map an ImageInstance to ImageArtifactOut.
 
     Runner and runtime come from the image itself. ``origin_workspace``
     is provenance only and may be unset after the source is deleted.
+    ``extras`` carries version facts (latest, retention, usage) computed
+    per line by :class:`ImageVersionService`.
     """
+    if extras is None:
+        from .services.image_versions import ImageVersionService
+
+        extras = ImageVersionService().version_extras([artifact])[artifact.id]
     runner_build = getattr(artifact, "build_job", None)
     image_runner = getattr(artifact, "runner", None)
     runtime_type = getattr(artifact, "runtime_type", None)
@@ -1770,6 +1789,44 @@ def _image_artifact_to_out(artifact) -> ImageArtifactOut:
         delete_last_error=getattr(artifact, "delete_last_error", "") or "",
         created_at=artifact.created_at,
         created_by_id=artifact.created_by_id,
+        captured_image_id=extras["captured_image_id"],
+        version=extras["version"],
+        message=extras["message"],
+        is_latest=extras["is_latest"],
+        retention=extras["retention"],
+        workspace_count=extras["workspace_count"],
+        workspaces=extras["workspaces"],
+    )
+
+
+def _image_artifacts_to_out(artifacts) -> list[ImageArtifactOut]:
+    """Map many versions, computing version facts once per line."""
+    from .services.image_versions import ImageVersionService
+
+    artifacts = list(artifacts)
+    extras = ImageVersionService().version_extras(artifacts)
+    return [_image_artifact_to_out(a, extras[a.id]) for a in artifacts]
+
+
+def _captured_image_to_out(view: dict) -> CapturedImageOut:
+    """Map an ImageVersionService captured-image view."""
+    line = view["line"]
+    latest = view["latest"]
+    return CapturedImageOut(
+        id=line.id,
+        name=line.name,
+        status=line.status,
+        runner_id=line.runner_id,
+        runner_online=line.runner.status == RS.ONLINE,
+        created_by_id=line.created_by_id,
+        created_at=line.created_at,
+        latest_id=latest.id if latest else None,
+        latest_version=latest.generation if latest else None,
+        total_size_bytes=view["total_size_bytes"],
+        workspace_count=view["workspace_count"],
+        versions=[
+            _image_artifact_to_out(v, view["extras"][v.id]) for v in view["versions"]
+        ],
     )
 
 
@@ -1862,7 +1919,7 @@ def list_image_artifacts(request: HttpRequest):
 
     service = _get_service()
     artifacts = service.list_image_artifacts_for_user(user=request.user)
-    return [_image_artifact_to_out(artifact) for artifact in artifacts]
+    return _image_artifacts_to_out(artifacts)
 
 
 @image_artifact_router.post(
@@ -1889,11 +1946,15 @@ async def create_image_artifact_global(
             workspace_id=payload.workspace_id,
             name=payload.name,
             organization_id=org_id,
+            captured_image_id=payload.captured_image_id,
+            message=payload.message,
         )
         return 202, ImageArtifactCreateOut(task_id=task.id, workspace_id=workspace.id)
     except ConflictError as e:
-        return 409, ErrorOut(detail=str(e), code="conflict")
-    except (NotFoundError, ValueError) as e:
+        return 409, ErrorOut(detail=e.message, code="conflict")
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code="not_found")
+    except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
 
 
@@ -2036,6 +2097,135 @@ async def create_workspace_from_image_artifact_global(
         return 404, ErrorOut(detail=str(e), code="not_found")
 
 
+captured_image_router = Router(tags=["captured-images"])
+
+
+def _captured_image_errors(exc: Exception):
+    if isinstance(exc, NotFoundError):
+        return 404, ErrorOut(detail=exc.message, code=exc.code)
+    if isinstance(exc, RunnerOfflineError):
+        return 409, ErrorOut(detail=str(exc), code="runner_offline")
+    if isinstance(exc, ConflictError):
+        return 409, ErrorOut(
+            detail=exc.message, code=exc.code, gaps=getattr(exc, "gaps", None)
+        )
+    raise exc
+
+
+@captured_image_router.get(
+    "/",
+    response={200: list[CapturedImageOut], 403: ErrorOut},
+    summary="List the current user's captured images with versions",
+)
+def list_captured_images(request: HttpRequest):
+    if not check_api_key_permission(request, APIKeyPermission.IMAGES_READ):
+        return _perm_denied(APIKeyPermission.IMAGES_READ)
+    org_id = _get_org_id(request)
+    _get_org_service().require_membership(request.user, org_id)
+    from .services.image_versions import ImageVersionService
+
+    views = ImageVersionService().list_captured_images(request.user, org_id)
+    return 200, [_captured_image_to_out(view) for view in views]
+
+
+@captured_image_router.get(
+    "/{captured_image_id}/",
+    response={200: CapturedImageOut, 403: ErrorOut, 404: ErrorOut},
+    summary="Get a captured image with all versions",
+)
+def get_captured_image(request: HttpRequest, captured_image_id: uuid.UUID):
+    if not check_api_key_permission(request, APIKeyPermission.IMAGES_READ):
+        return _perm_denied(APIKeyPermission.IMAGES_READ)
+    org_id = _get_org_id(request)
+    _get_org_service().require_membership(request.user, org_id)
+    from .services.image_versions import ImageVersionService
+
+    versions = ImageVersionService()
+    try:
+        line = versions.owned_captured_image(request.user, org_id, captured_image_id)
+        return 200, _captured_image_to_out(versions.captured_image(line))
+    except NotFoundError as exc:
+        return _captured_image_errors(exc)
+
+
+@captured_image_router.patch(
+    "/{captured_image_id}/",
+    response={200: CapturedImageOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
+    summary="Rename a captured image",
+)
+def rename_captured_image(
+    request: HttpRequest, captured_image_id: uuid.UUID, payload: CapturedImageUpdateIn
+):
+    if not check_api_key_permission(request, APIKeyPermission.IMAGES_CREATE):
+        return _perm_denied(APIKeyPermission.IMAGES_CREATE)
+    org_id = _get_org_id(request)
+    _get_org_service().require_membership(request.user, org_id)
+    from .services.image_versions import ImageVersionService
+
+    try:
+        view = ImageVersionService().rename_captured_image(
+            request.user, org_id, captured_image_id, payload.name
+        )
+        return 200, _captured_image_to_out(view)
+    except (NotFoundError, ConflictError) as exc:
+        return _captured_image_errors(exc)
+
+
+@captured_image_router.post(
+    "/{captured_image_id}/workspaces/",
+    response={
+        202: WorkspaceFromImageArtifactOut,
+        403: ErrorOut,
+        404: ErrorOut,
+        409: ErrorOut,
+    },
+    summary="Create a workspace from the latest version of a captured image",
+)
+async def create_workspace_from_captured_image(
+    request: HttpRequest,
+    captured_image_id: uuid.UUID,
+    payload: WorkspaceFromImageArtifactIn,
+):
+    if not check_api_key_permission(request, APIKeyPermission.IMAGES_CLONE):
+        return _perm_denied(APIKeyPermission.IMAGES_CLONE)
+    if payload.plugin_ids and not check_api_key_permission(
+        request, APIKeyPermission.PLUGINS_WRITE
+    ):
+        return _perm_denied(APIKeyPermission.PLUGINS_WRITE)
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+    from .services.image_versions import ImageVersionService
+
+    service = _get_service()
+    try:
+        latest = await sync_to_async(ImageVersionService().latest_captured_version)(
+            request.user, org_id, captured_image_id
+        )
+        resolved = await sync_to_async(CredentialSvc().resolve_credentials)(
+            payload.credential_ids, org_id=org_id, user=request.user
+        )
+        workspace, task = await service.create_workspace_from_image_artifact(
+            image_artifact_id=latest.id,
+            name=payload.name,
+            env_vars=resolved.env_vars,
+            files=resolved.files,
+            ssh_keys=resolved.ssh_keys,
+            credentials=resolved.credentials,
+            resolved_credentials=resolved,
+            user=request.user,
+            organization_id=org_id,
+            plugin_ids=payload.plugin_ids,
+        )
+        return 202, WorkspaceFromImageArtifactOut(
+            workspace_id=workspace.id,
+            task_id=task.id,
+            status=workspace.status,
+            plugin_ids=await sync_to_async(_workspace_plugin_ids)(workspace),
+        )
+    except (NotFoundError, ConflictError) as exc:
+        return _captured_image_errors(exc)
+
+
 @workspace_image_artifact_router.get(
     "/{workspace_id}/image-artifacts/",
     response={200: list[ImageArtifactOut], 404: ErrorOut},
@@ -2053,7 +2243,7 @@ def list_workspace_image_artifacts(request: HttpRequest, workspace_id: uuid.UUID
         _get_owned_workspace(request, org_id, workspace_id)
         service = _get_service()
         artifacts = service.list_image_artifacts_for_workspace(workspace_id)
-        return [_image_artifact_to_out(artifact) for artifact in artifacts]
+        return _image_artifacts_to_out(artifacts)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
 
@@ -2079,11 +2269,15 @@ async def create_workspace_image_artifact(
             workspace_id=workspace_id,
             name=payload.name,
             organization_id=org_id,
+            captured_image_id=payload.captured_image_id,
+            message=payload.message,
         )
         return 202, ImageArtifactCreateOut(task_id=task.id, workspace_id=workspace.id)
     except ConflictError as e:
-        return 409, ErrorOut(detail=str(e), code="conflict")
-    except (NotFoundError, ValueError) as e:
+        return 409, ErrorOut(detail=e.message, code="conflict")
+    except NotFoundError as e:
+        return 404, ErrorOut(detail=e.message, code="not_found")
+    except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
 
 
@@ -2253,6 +2447,8 @@ def _build_job_to_out(build) -> ImageBuildJobOut:
 
 def _build_job_to_list_out(build) -> ImageBuildJobListOut:
     """Convert a (build_log-deferred) build row to the polling-safe schema."""
+    from .services.image_versions import ImageVersionService
+
     artifact = None
     try:
         artifact = getattr(build, "image_instance", None)
@@ -2276,6 +2472,9 @@ def _build_job_to_list_out(build) -> ImageBuildJobListOut:
         delete_last_error=getattr(build, "delete_last_error", "") or "",
         created_at=build.created_at,
         updated_at=build.updated_at,
+        versions=_image_artifacts_to_out(
+            ImageVersionService().definition_versions(build)
+        ),
     )
 
 
@@ -2565,6 +2764,7 @@ async def create_image_definition_runner_build(
             runner=runner,
             activate=payload.activate,
             created_by=request.user,
+            message=payload.message,
         )
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
@@ -2622,6 +2822,7 @@ async def update_image_definition_runner_build(
             updated = await service.activate_build_job(
                 build,
                 created_by=request.user,
+                message=payload.message,
             )
         else:
             updated = await service.trigger_build_job(
@@ -2629,6 +2830,7 @@ async def update_image_definition_runner_build(
                 runner=runner,
                 activate=True,
                 created_by=request.user,
+                message=payload.message,
             )
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)

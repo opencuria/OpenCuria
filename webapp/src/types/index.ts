@@ -28,6 +28,8 @@ export enum WorkspaceOperation {
   RESTARTING = 'restarting',
   REMOVING = 'removing',
   CAPTURING_IMAGE = 'capturing_image',
+  RESETTING = 'resetting',
+  UPDATING = 'updating',
 }
 
 export enum TaskStatus {
@@ -121,6 +123,7 @@ export interface Organization {
   slug: string
   role: string
   workspace_auto_stop_timeout_minutes: number | null
+  image_versions_to_keep: number
   created_at: string
 }
 
@@ -231,6 +234,29 @@ export interface Workspace {
   plugin_ids: string[]
   credentials_present: boolean
   base_image_name?: string | null
+  base_image?: ImageVersionRef | null
+  pending_base_image?: ImageVersionRef | null
+  repos?: string[]
+}
+
+/** The image version a workspace is (or is being) based on. */
+export interface ImageVersionRef {
+  id: string
+  line_kind: 'captured' | 'definition' | null
+  line_id: string | null
+  name: string
+  version: number | null
+  message: string
+  status: ImageArtifact['status']
+  latest_id: string | null
+  latest_version: number | null
+  update_available: boolean
+}
+
+export interface WorkspaceRecreateOut {
+  workspace_id: string
+  task_id: string
+  active_operation: WorkspaceOperation | null
 }
 
 export type WorkspaceDetail = Workspace
@@ -691,11 +717,46 @@ export interface ImageArtifact {
   delete_last_error?: string
   created_at: string
   created_by_id: number | null
+  captured_image_id?: string | null
+  version?: number | null
+  message?: string
+  is_latest?: boolean
+  retention?: ImageVersionRetention | null
+  workspace_count?: number
+  workspaces?: ImageVersionWorkspace[]
+}
+
+/** latest: used for new workspaces; kept: retained by policy; expires_when_unused:
+ * deleted automatically once no workspace is based on it. */
+export type ImageVersionRetention = 'latest' | 'kept' | 'expires_when_unused'
+
+export interface ImageVersionWorkspace {
+  id: string
+  name: string
+  created_by_id: number | null
+}
+
+/** A versioned captured image with all of its versions (newest first). */
+export interface CapturedImage {
+  id: string
+  name: string
+  status: 'active' | 'pending_deletion' | 'deleted'
+  runner_id: string
+  runner_online: boolean
+  created_by_id: number | null
+  created_at: string
+  latest_id: string | null
+  latest_version: number | null
+  total_size_bytes: number
+  workspace_count: number
+  versions: ImageArtifact[]
 }
 
 export interface ImageArtifactCreateIn {
-  name: string
+  name?: string
   workspace_id?: string
+  captured_image_id?: string | null
+  message?: string
 }
 
 export interface ImageArtifactCreateOut {
@@ -748,6 +809,7 @@ export interface RunnerImageBuild {
   delete_last_error?: string
   created_at: string
   updated_at: string
+  versions?: ImageArtifact[]
 }
 
 export interface ImageDefinitionBuildSummary {

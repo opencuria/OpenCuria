@@ -185,7 +185,11 @@ class DispositionRepository:
             task.completed_at = timezone.now()
             task.save(update_fields=["status", "error", "completed_at"])
             if action == "acknowledge_interrupted":
-                from .models import CaptureRequest, ImageInstance
+                from .models import (
+                    CaptureRequest,
+                    ImageInstance,
+                    WorkspaceRecreateRequest,
+                )
 
                 CaptureRequest.objects.filter(child=task).update(
                     phase="failed",
@@ -193,6 +197,15 @@ class DispositionRepository:
                     diagnostic=(
                         "Interrupted child acknowledged; resources preserved, "
                         "no automatic restart"
+                    ),
+                )
+                WorkspaceRecreateRequest.objects.filter(child=task).exclude(
+                    phase__in=["completed", "failed"]
+                ).update(
+                    phase="failed",
+                    diagnostic=(
+                        "Interrupted reset acknowledged; retry the reset or "
+                        "delete the workspace"
                     ),
                 )
                 ImageInstance.objects.filter(creating_task=task).exclude(
@@ -209,7 +222,13 @@ class DispositionRepository:
                 }:
                     ws.status = "failed"
                 elif task.type == "remove_workspace":
-                    ws.status = "delete_failed"
+                    from .models import WorkspaceRecreateRequest
+
+                    ws.status = (
+                        "failed"
+                        if WorkspaceRecreateRequest.objects.filter(child=task).exists()
+                        else "delete_failed"
+                    )
                 ws.save(update_fields=["current_task", "active_operation", "status"])
             if action == "retry":
                 new = TaskRepository.create(

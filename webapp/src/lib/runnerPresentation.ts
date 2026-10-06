@@ -12,7 +12,16 @@ export function generationLabel(image: StorageGeneration): string {
   if (image.status === 'deleted') return 'Deleted'
   if (currentRunnerDefault(image)) return 'Current default'
   if (image.is_pending) return 'Pending attempt'
+  if (image.is_latest) return 'Latest'
+  if (image.retention === 'kept') return 'Kept'
+  if (image.retention === 'expires_when_unused') return 'Removed when unused'
   return image.origin_type === 'workspace_capture' ? 'Capture' : 'History'
+}
+
+/** "line · v3" for any image version shown in storage views. */
+export function storageVersionTitle(image: StorageGeneration): string {
+  const name = image.line_name || image.name
+  return image.generation == null ? name : `${name} · v${image.generation}`
 }
 
 export function runnerStateClass(state: string | null | undefined): string {

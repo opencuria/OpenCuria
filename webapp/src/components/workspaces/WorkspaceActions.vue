@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { WorkspaceStatus, RuntimeType } from '@/types'
 import type { Workspace } from '@/types'
 import { Button } from '@/components/ui/button'
-import { Square, Play, Trash2, Camera, Loader2 } from '@lucide/vue'
+import { Square, Play, Trash2, Camera, Loader2, RotateCcw } from '@lucide/vue'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import EditWorkspaceDialog from './EditWorkspaceDialog.vue'
 
@@ -15,6 +15,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   captureImage: []
+  recreate: []
 }>()
 
 function inspectRunner() {
@@ -57,6 +58,14 @@ const canCaptureImage = computed(
     (props.workspace.status === WorkspaceStatus.RUNNING ||
       props.workspace.status === WorkspaceStatus.STOPPED),
 )
+const canRecreate = computed(
+  () =>
+    !isRunnerOfflineState.value &&
+    !!(props.workspace.base_image || props.workspace.pending_base_image) &&
+    [WorkspaceStatus.RUNNING, WorkspaceStatus.STOPPED, WorkspaceStatus.FAILED].includes(
+      props.workspace.status,
+    ),
+)
 const captureBlockedByCredentials = computed(
   () =>
     canCaptureImage.value &&
@@ -96,6 +105,11 @@ function handleCaptureImage(e: Event): void {
   e.stopPropagation()
   emit('captureImage')
 }
+
+function handleRecreate(e: Event): void {
+  e.stopPropagation()
+  emit('recreate')
+}
 </script>
 
 <template>
@@ -129,6 +143,17 @@ function handleCaptureImage(e: Event): void {
       @click="handleCaptureImage"
     >
       <Camera :size="14" />
+    </Button>
+    <Button
+      v-if="canRecreate && !hideDestructive"
+      variant="ghost"
+      :size="btnSize"
+      title="Reset workspace"
+      data-testid="workspace-actions-recreate"
+      :disabled="areActionsDisabled"
+      @click="handleRecreate"
+    >
+      <RotateCcw :size="14" />
     </Button>
     <Button
       v-if="canStop && !hideDestructive"

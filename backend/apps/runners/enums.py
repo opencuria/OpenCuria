@@ -47,6 +47,8 @@ class WorkspaceOperation(models.TextChoices):
     RESTARTING = "restarting", "Restarting"
     REMOVING = "removing", "Removing"
     CAPTURING_IMAGE = "capturing_image", "Capturing Image"
+    RESETTING = "resetting", "Resetting"
+    UPDATING = "updating", "Updating"
 
 
 class TaskType(models.TextChoices):

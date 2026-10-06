@@ -1128,7 +1128,7 @@ def test_activate_runner_build_uses_activate_action(client: Client, monkeypatch)
         triggered["rebuild"] = True
         return build
 
-    async def _activate_build_job(job, *, created_by=None):
+    async def _activate_build_job(job, *, created_by=None, message=""):
         triggered["activate"] = True
         job.status = ImageBuildJob.Status.ACTIVE
         return job
@@ -1195,7 +1195,7 @@ def test_rebuild_runner_build_uses_rebuild_action(client: Client, monkeypatch):
         triggered["rebuild"] = True
         return build
 
-    async def _activate_build_job(job, *, created_by=None):
+    async def _activate_build_job(job, *, created_by=None, message=""):
         triggered["activate"] = True
         return job
 

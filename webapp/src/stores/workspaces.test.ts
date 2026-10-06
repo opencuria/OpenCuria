@@ -22,6 +22,7 @@ vi.mock('@/services/workspaces.api', async (importOriginal) => {
     updateWorkspace: vi.fn(),
     getWorkspace: vi.fn(),
     listWorkspaces: vi.fn(),
+    recreateWorkspace: vi.fn(),
   }
 })
 
@@ -509,4 +510,43 @@ it('preserves legacy noncapture error cleanup', () => {
   store.handleWorkspaceError('workspace-1', 'Start failed')
   expect(store.workspaces[0]?.active_operation).toBeNull()
   expect(store.pendingWorkspaceOperations['workspace-1']).toBeUndefined()
+})
+
+describe('recreateWorkspace', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  it('requests the explicit version and shows the update label while running', async () => {
+    const store = useWorkspaceStore()
+    store.workspaces = [makeWorkspace()]
+    vi.mocked(workspacesApi.listWorkspaces).mockResolvedValue([
+      makeWorkspace({ active_operation: WorkspaceOperation.UPDATING }),
+    ])
+    vi.mocked(workspacesApi.recreateWorkspace).mockResolvedValue({
+      workspace_id: 'workspace-1',
+      task_id: 'task-1',
+      active_operation: WorkspaceOperation.UPDATING,
+    })
+    expect(await store.recreateWorkspace('workspace-1', 'v2')).toBe(true)
+    expect(workspacesApi.recreateWorkspace).toHaveBeenCalledWith('workspace-1', 'v2')
+    expect(toast.info).toHaveBeenCalled()
+    expect(store.getWorkspaceTransitionLabel('workspace-1')).toBe('Updating…')
+    expect(store.isWorkspaceTransitioning('workspace-1')).toBe(true)
+  })
+
+  it('reports conflicts and does nothing while another action runs', async () => {
+    const store = useWorkspaceStore()
+    store.workspaces = [makeWorkspace({ active_operation: WorkspaceOperation.STOPPING })]
+    expect(await store.recreateWorkspace('workspace-1', 'v1')).toBe(false)
+    expect(workspacesApi.recreateWorkspace).not.toHaveBeenCalled()
+
+    store.workspaces = [makeWorkspace()]
+    vi.mocked(workspacesApi.recreateWorkspace).mockRejectedValue(
+      new Error('A newer image version is available'),
+    )
+    expect(await store.recreateWorkspace('workspace-1', 'v1')).toBe(false)
+    expect(toast.error).toHaveBeenCalled()
+  })
 })

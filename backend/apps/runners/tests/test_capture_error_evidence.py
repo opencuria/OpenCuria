@@ -1,8 +1,11 @@
 """Authenticated resume failures persist evidence without losing captured images."""
 
 import uuid
+from unittest.mock import patch
 
 import pytest
+
+from apps.credentials.services import CredentialSvc
 
 from apps.runners.capture_repository import CaptureRepository
 from apps.runners.enums import TaskStatus, WorkspaceStatus
@@ -30,7 +33,13 @@ def resume_child(service, runner, workspace):
         name="capture",
         size_bytes=123,
     )
-    CaptureRepository.tick()
+    # A blocked replacement keeps the source on its version and resumes it.
+    with patch.object(
+        CredentialSvc,
+        "resolve_workspace_credentials",
+        side_effect=RuntimeError("credential revoked"),
+    ):
+        CaptureRepository.tick()
     request.refresh_from_db()
     assert request.phase == "resume"
     return request

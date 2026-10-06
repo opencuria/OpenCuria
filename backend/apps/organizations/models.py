@@ -29,6 +29,14 @@ class Organization(models.Model):
             "inactivity. Null disables the policy."
         ),
     )
+    image_versions_to_keep = models.PositiveSmallIntegerField(
+        default=2,
+        db_default=2,
+        help_text=(
+            "Number of newest ready versions kept per image. Older versions are "
+            "deleted automatically once no workspace is based on them."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

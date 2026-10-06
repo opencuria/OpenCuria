@@ -15,6 +15,8 @@ class StorageWorkspaceOut(Schema):
     last_activity_at: datetime | None
     observed_state: str | None = None
     base_image_instance_id: str | None = None
+    pending_base_image_instance_id: str | None = None
+    allocated_bytes: int | None = None
 
 
 class StorageResourceOut(Schema):
@@ -59,6 +61,11 @@ class StorageGenerationOut(Schema):
     definition_id: str | None
     definition_name: str | None
     generation: int | None
+    captured_image_id: str | None = None
+    line_name: str | None = None
+    message: str = ""
+    is_latest: bool = False
+    retention: str | None = None
     status: str
     runner_ref: str
     size_bytes: int | None

@@ -1,6 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { get, post } from './api'
-import { getDesktopStatus, renewDesktop, startDesktop, stopDesktop } from './workspaces.api'
+import { get, patch, post } from './api'
+import {
+  createWorkspaceFromCapturedImage,
+  getDesktopStatus,
+  listCapturedImages,
+  recreateWorkspace,
+  renameCapturedImage,
+  renewDesktop,
+  startDesktop,
+  stopDesktop,
+} from './workspaces.api'
 
 vi.mock('./api', () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() }))
 
@@ -23,5 +32,20 @@ describe('desktop viewer transport', () => {
       '/workspaces/ws/desktop/status/?viewer_client_id=client-id',
     )
     expect(get).toHaveBeenNthCalledWith(2, '/workspaces/ws/desktop/status/')
+  })
+})
+
+describe('versioned images transport', () => {
+  it('recreates a workspace on an explicit version', () => {
+    recreateWorkspace('ws', 'v3')
+    expect(post).toHaveBeenCalledWith('/workspaces/ws/recreate/', { image_id: 'v3' })
+  })
+  it('lists, renames and creates workspaces from captured images', () => {
+    listCapturedImages()
+    renameCapturedImage('line', 'Renamed')
+    createWorkspaceFromCapturedImage('line', { name: 'feature-x' })
+    expect(get).toHaveBeenCalledWith('/captured-images/')
+    expect(patch).toHaveBeenCalledWith('/captured-images/line/', { name: 'Renamed' })
+    expect(post).toHaveBeenCalledWith('/captured-images/line/workspaces/', { name: 'feature-x' })
   })
 })

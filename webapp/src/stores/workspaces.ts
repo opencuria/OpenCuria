@@ -237,6 +237,10 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
         return 'Restarting…'
       case WorkspaceOperation.REMOVING:
         return 'Removing…'
+      case WorkspaceOperation.RESETTING:
+        return 'Resetting…'
+      case WorkspaceOperation.UPDATING:
+        return 'Updating…'
     }
 
     const pending = pendingWorkspaceOperations.value[workspaceId]
@@ -654,6 +658,31 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     }
   }
 
+  /** Reset to the workspace's own version or update to the latest one. */
+  async function recreateWorkspace(id: string, imageId: string): Promise<boolean> {
+    const notifications = useNotificationStore()
+    if (isWorkspaceTransitioning(id)) {
+      notifications.info(
+        'Action already running',
+        'Please wait until the current workspace action finishes.',
+      )
+      return false
+    }
+    try {
+      const result = await workspacesApi.recreateWorkspace(id, imageId)
+      const updating = result.active_operation === WorkspaceOperation.UPDATING
+      notifications.info(
+        updating ? 'Updating workspace' : 'Resetting workspace',
+        `${getWorkspaceName(id)} is being recreated from its image…`,
+      )
+      await fetchWorkspaces()
+      return true
+    } catch (e: unknown) {
+      notifications.error('Reset failed', e instanceof Error ? e.message : 'Unknown error')
+      return false
+    }
+  }
+
   // --- Image capture actions ---
 
   async function fetchImageArtifacts(workspaceId: string): Promise<void> {
@@ -677,7 +706,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
         ))
       )
         return false
-      await imageStore.fetchImages()
+      await Promise.all([imageStore.fetchImages(), imageStore.fetchCapturedImages()])
       notifications.success('Image capturing', 'Image is being captured.')
       return true
     } catch (e: unknown) {
@@ -849,6 +878,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     stopWorkspace,
     resumeWorkspace,
     removeWorkspace,
+    recreateWorkspace,
     // Image artifact actions
     fetchImageArtifacts,
     createImageArtifact,

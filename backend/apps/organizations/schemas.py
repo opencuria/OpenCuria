@@ -24,10 +24,12 @@ class OrganizationOut(Schema):
     slug: str
     role: str
     workspace_auto_stop_timeout_minutes: int | None = None
+    image_versions_to_keep: int = 2
     created_at: datetime
 
 
 class OrganizationWorkspacePolicyUpdateIn(Schema):
-    """Request schema for updating org workspace auto-stop policy."""
+    """Partial update of org workspace policy; omitted fields stay unchanged."""
 
     workspace_auto_stop_timeout_minutes: int | None = None
+    image_versions_to_keep: int | None = None

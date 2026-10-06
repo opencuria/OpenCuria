@@ -21,7 +21,12 @@ import { readWorkspaceDraft, removeWorkspaceDraft, saveWorkspaceDraft } from '@/
 import type { WorkspaceDraftFields } from '@/lib/workspaceDraft'
 import type { ImageArtifact } from '@/types'
 
-const props = defineProps<{ imageArtifact: ImageArtifact; disabled?: boolean }>()
+const props = defineProps<{
+  imageArtifact: ImageArtifact
+  /** Create from the captured image so the backend always picks its latest version. */
+  capturedImageId?: string
+  disabled?: boolean
+}>()
 const route = useRoute()
 const router = useRouter()
 const imageArtifactStore = useImageArtifactStore()
@@ -84,14 +89,14 @@ async function handleSubmit(): Promise<void> {
   if (props.disabled || !isValid.value) return
   submitting.value = true
   const previousDraftId = restoringDraftId.value
-  const workspaceId = await imageArtifactStore.createWorkspaceFromImageArtifact(
-    props.imageArtifact.id,
-    {
-      name: name.value.trim(),
-      credential_ids: selectedCredentialIds.value,
-      plugin_ids: selectedPluginIds.value,
-    },
-  )
+  const data = {
+    name: name.value.trim(),
+    credential_ids: selectedCredentialIds.value,
+    plugin_ids: selectedPluginIds.value,
+  }
+  const workspaceId = props.capturedImageId
+    ? await imageArtifactStore.createWorkspaceFromCapturedImage(props.capturedImageId, data)
+    : await imageArtifactStore.createWorkspaceFromImageArtifact(props.imageArtifact.id, data)
   submitting.value = false
   if (workspaceId) {
     if (previousDraftId) removeWorkspaceDraft(previousDraftId)
@@ -175,7 +180,12 @@ async function navigateToCredentials(serviceId?: string, reconnectId?: string): 
       <DialogBody>
         <form id="clone-from-image-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
           <div class="rounded-md border border-border bg-muted/50 p-3 text-sm">
-            <div class="mb-1 font-medium text-foreground">{{ props.imageArtifact.name }}</div>
+            <div class="mb-1 font-medium text-foreground">
+              {{ props.imageArtifact.name }}
+              <span v-if="props.imageArtifact.version" class="text-muted-foreground"
+                >· v{{ props.imageArtifact.version }} (latest)</span
+              >
+            </div>
             <div class="text-xs text-muted-foreground">
               Only credentials and plugins selected below will be attached.
             </div>

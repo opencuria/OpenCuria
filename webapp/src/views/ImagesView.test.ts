@@ -2,17 +2,16 @@ import { mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ImagesView from './ImagesView.vue'
-import type { ImageArtifact } from '@/types'
+import type { CapturedImage, ImageArtifact } from '@/types'
 
 const startPolling = vi.fn()
 
 const imageStore = {
-  images: [] as ImageArtifact[],
+  capturedImages: [] as CapturedImage[],
   loading: false,
   error: null,
-  fetchImages: vi.fn(),
-  deleteImageArtifact: vi.fn(),
-  renameImageArtifact: vi.fn(),
+  fetchCapturedImages: vi.fn(),
+  renameCapturedImage: vi.fn(),
 }
 
 vi.mock('@/stores/images', () => ({
@@ -28,32 +27,42 @@ vi.mock('@/composables/usePolling', () => ({
 describe('ImagesView', () => {
   beforeEach(() => {
     startPolling.mockReset()
-    imageStore.fetchImages.mockReset()
-    imageStore.deleteImageArtifact.mockReset()
-    imageStore.renameImageArtifact.mockReset()
+    imageStore.fetchCapturedImages.mockReset()
+    imageStore.renameCapturedImage.mockReset()
     imageStore.loading = false
     imageStore.error = null
-    imageStore.images = []
+    imageStore.capturedImages = []
   })
 
   it('shows captured images with backend capturing status as in progress', () => {
-    imageStore.images = [
+    const capturing: ImageArtifact = {
+      id: 'captured-image-1',
+      source_workspace_id: 'workspace-1',
+      runner_artifact_id: '',
+      name: 'Snapshot',
+      size_bytes: null,
+      status: 'capturing',
+      artifact_kind: 'captured',
+      runtime_type: 'qemu',
+      created_at: '2026-05-06T12:00:00.000Z',
+      created_by_id: 1,
+      captured_image_id: 'line-1',
+      version: 1,
+    }
+    imageStore.capturedImages = [
       {
-        id: 'captured-image-1',
-        source_workspace_id: 'workspace-1',
-        runner_artifact_id: '',
+        id: 'line-1',
         name: 'Snapshot',
-        size_bytes: 1024,
-        status: 'capturing',
-        artifact_kind: 'captured',
-        runtime_type: 'qemu',
-        is_deactivated: false,
-        source_runner_online: true,
-        delete_requested_at: null,
-        delete_confirmed_at: null,
-        delete_last_error: '',
-        created_at: '2026-05-06T12:00:00.000Z',
+        status: 'active',
+        runner_id: 'r',
+        runner_online: true,
         created_by_id: 1,
+        created_at: '2026-05-06T12:00:00.000Z',
+        latest_id: null,
+        latest_version: null,
+        total_size_bytes: 0,
+        workspace_count: 0,
+        versions: [capturing],
       },
     ]
 
@@ -71,7 +80,8 @@ describe('ImagesView', () => {
       },
     })
 
-    expect(wrapper.text()).toContain('Creating…')
-    expect(wrapper.text()).not.toContain('Clone Workspace')
+    expect(wrapper.text()).toContain('Capturing…')
+    expect(wrapper.text()).toContain('No ready version')
+    expect(wrapper.findAll('button').some((b) => b.text().includes('New workspace'))).toBe(false)
   })
 })

@@ -15,7 +15,6 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
 import {
   Select,
   SelectContent,
@@ -23,10 +22,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import CaptureTargetFields from '@/components/images/CaptureTargetFields.vue'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
 import { useImageArtifactStore } from '@/stores/imageArtifacts'
 import { WorkspaceStatus, RuntimeType } from '@/types'
+import { NEW_IMAGE } from '@/lib/imageVersions'
 import { runnerSupportsRuntime } from '@/lib/runtimeSupport'
 
 const workspaceStore = useWorkspaceStore()
@@ -34,9 +35,12 @@ const runnerStore = useRunnerStore()
 const imageArtifactStore = useImageArtifactStore()
 
 const open = ref(false)
+const target = ref(NEW_IMAGE)
 const name = ref('')
+const message = ref('')
 const selectedWorkspaceId = ref('')
 const submitting = ref(false)
+const fields = ref<InstanceType<typeof CaptureTargetFields> | null>(null)
 
 const snappableWorkspaces = computed(() =>
   workspaceStore.workspaces.filter((w) => {
@@ -79,7 +83,7 @@ const selected = computed(() =>
 )
 const isValid = computed(
   () =>
-    name.value.trim().length > 0 &&
+    !!fields.value?.isValid &&
     !!selected.value &&
     !workspaceStore.isWorkspaceTransitioning(selected.value.id),
 )
@@ -94,10 +98,10 @@ onMounted(async () => {
 })
 
 async function handleSubmit(): Promise<void> {
-  if (!isValid.value) return
+  if (!isValid.value || !fields.value) return
   submitting.value = true
   const ok = await imageArtifactStore.createImageArtifact({
-    name: name.value.trim(),
+    ...fields.value.payload(),
     workspace_id: selectedWorkspaceId.value,
   })
   submitting.value = false
@@ -110,6 +114,7 @@ function handleClose(): void {
   open.value = false
   setTimeout(() => {
     name.value = ''
+    message.value = ''
     selectedWorkspaceId.value = ''
   }, 200)
 }
@@ -125,8 +130,8 @@ function handleClose(): void {
       <DialogHeader>
         <DialogTitle>Capture Image</DialogTitle>
         <DialogDescription>
-          Capture a point-in-time image. A running workspace automatically stops and restarts; a
-          stopped workspace stays stopped. Live interactions are unavailable during capture.
+          The workspace briefly stops and continues on the captured version. Files, chats and
+          settings are kept; running processes stop.
         </DialogDescription>
       </DialogHeader>
 
@@ -139,11 +144,6 @@ function handleClose(): void {
           class="flex flex-col gap-4"
           @submit.prevent="handleSubmit"
         >
-          <div>
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Image name</label>
-            <Input :disabled="captureBlocked" v-model="name" placeholder="e.g. before-refactor" />
-          </div>
-
           <div>
             <label class="text-sm font-medium text-foreground mb-1.5 block">Source workspace</label>
             <Select v-model="selectedWorkspaceId" :disabled="captureBlocked">
@@ -158,17 +158,24 @@ function handleClose(): void {
             </Select>
             <p v-if="snappableWorkspaces.length === 0" class="text-xs text-muted-foreground mt-1">
               No capturable QEMU workspaces found. Capture requires a QEMU workspace with no
-              intervention fence. Running workspaces automatically stop and restart.
+              intervention fence.
             </p>
             <p v-else class="text-xs text-muted-foreground mt-1">
-              Stopped workspaces require controlled credential scrub proof. Running workspaces
-              automatically stop and restart.
+              Stopped workspaces require controlled credential scrub proof.
             </p>
             <p v-if="blockedByCredentials" class="text-xs text-muted-foreground mt-1">
               Stopped workspace credentials require controlled resume/stop scrub proof. Unknown
               proof is rejected by the runner, never assumed clean.
             </p>
           </div>
+          <CaptureTargetFields
+            ref="fields"
+            v-model:target="target"
+            v-model:name="name"
+            v-model:message="message"
+            :workspace="selected ?? null"
+            :disabled="captureBlocked"
+          />
         </form>
       </DialogBody>
 

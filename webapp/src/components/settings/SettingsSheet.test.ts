@@ -253,7 +253,7 @@ describe('SettingsSheet', () => {
     await flushPromises()
 
     // Default: General (workspace policy)
-    expect(wrapper.text()).toContain('Automatic Workspace Stop')
+    expect(wrapper.text()).toContain('Workspace Policy')
 
     await wrapper.find('[data-testid="settings-nav-provider"]').trigger('click')
     await flushPromises()

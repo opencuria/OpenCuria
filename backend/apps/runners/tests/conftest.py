@@ -83,6 +83,16 @@ def workspace(runner: Runner, user) -> Workspace:
     )
 
 
+def capture_version_fields(runner: Runner, user, name: str = "capture") -> dict:
+    """Fields that attach a new captured version (v1) to a fresh image line."""
+    from apps.runners.models import CapturedImage
+
+    line = CapturedImage.objects.create(
+        organization=runner.organization, runner=runner, created_by=user, name=name
+    )
+    return {"captured_image": line, "generation": 1}
+
+
 @pytest.fixture
 def stopped_workspace(runner: Runner, user) -> Workspace:
     """A stopped workspace in the database."""

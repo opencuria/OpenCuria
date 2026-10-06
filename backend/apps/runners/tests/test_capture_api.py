@@ -116,9 +116,10 @@ def test_capture_hides_another_members_workspace(capture_setup, global_endpoint)
 
 
 def test_capture_rest_and_mcp_schemas_have_no_restart_flag():
-    assert set(ImageArtifactCreateIn.model_fields) == {"name", "workspace_id"}
+    fields = {"name", "workspace_id", "captured_image_id", "message"}
+    assert set(ImageArtifactCreateIn.model_fields) == fields
     tool = next(tool for tool in _TOOLS if tool.name == "create_image_artifact")
-    assert set(tool.inputSchema["properties"]) == {"name", "workspace_id"}
+    assert set(tool.inputSchema["properties"]) == fields
 
 
 def test_mcp_capture_calls_service_without_restart_flag(capture_setup, monkeypatch):
@@ -126,8 +127,10 @@ def test_mcp_capture_calls_service_without_restart_flag(capture_setup, monkeypat
     calls = []
     task = SimpleNamespace(id=workspace.id)
 
-    async def create(*, workspace_id, name, organization_id):
-        calls.append((workspace_id, name, organization_id))
+    async def create(
+        *, workspace_id, name, organization_id, captured_image_id, message
+    ):
+        calls.append((workspace_id, name, organization_id, captured_image_id))
         return workspace, task
 
     monkeypatch.setattr(get_runner_service(), "create_image_artifact", create)
@@ -137,7 +140,7 @@ def test_mcp_capture_calls_service_without_restart_flag(capture_setup, monkeypat
         {"workspace_id": str(workspace.id), "name": "Capture"},
     )
     assert json.loads(result[0].text)["task_id"] == str(task.id)
-    assert calls == [(workspace.id, "Capture", org.id)]
+    assert calls == [(workspace.id, "Capture", org.id, None)]
 
 
 @pytest.mark.parametrize("action", ["status", "take-control"])

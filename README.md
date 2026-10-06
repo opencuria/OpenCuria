@@ -268,6 +268,27 @@ runner on the same machine, use the same QEMU runner flow above, but point
 `RUNNER_BACKEND_URL` at your local backend and run the runner in the foreground
 with `python -m src` while iterating.
 
+## Image versions
+
+Captured images and image-definition builds share the same version model.
+Each capture or build is a standalone version (`v1`, `v2`, …) with an optional
+message. New workspaces always use **Latest**. Reset rebuilds the same workspace
+id on its current version; Update moves it to Latest. Capture replaces the
+source workspace with the new version. Name, URL, chats, credentials, plugins
+and schedules stay; only the runner disk and runtime are recreated.
+
+**Settings → Workspace policy → Image versions to keep** (default **2**, range
+1–20) retains Latest plus the newest ready versions. Unused older versions are
+deleted automatically; versions still used by a workspace stay until that
+workspace is gone. Raising the setting does not restore already deleted
+versions.
+
+REST: `GET/PATCH /api/v1/captured-images/`, `POST /api/v1/workspaces/{id}/recreate/`,
+`PATCH /api/v1/organizations/{id}/workspace-policy/`. Matching MCP tools:
+`list_captured_images`, `update_captured_image`,
+`create_workspace_from_captured_image`, `recreate_workspace`,
+`get_workspace_policy`, `update_workspace_policy`.
+
 ## Subagent nesting
 
 **Settings → Agents → Subagents → Maximum nesting depth** sets the organization-wide

@@ -39,6 +39,7 @@ def test_guest_resume_always_supplies_explicit_resources() -> None:
 @pytest.mark.asyncio
 async def test_guest_credential_checks_use_installed_paths(monkeypatch) -> None:
     """Presence sources the installed env; absence checks both files and env block."""
+    pytest.importorskip("libvirt")
     monkeypatch.syspath_prepend(str(SCRIPT.parent))
     spec = importlib.util.spec_from_file_location("integration_guest_smoke", SCRIPT)
     module = importlib.util.module_from_spec(spec)

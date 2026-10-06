@@ -4,26 +4,38 @@ import uuid
 
 from django.db import transaction
 
-from common.exceptions import ConflictError
+from common.exceptions import ConflictError, NotFoundError
 
+from .image_lines import ImageLineRepository
 from .locking import lock_runner
 from .models import (
+    CapturedImage,
     CaptureRequest,
     ImageInstance,
     LifecycleCommand,
     Task,
     Workspace,
+    WorkspaceRecreateRequest,
 )
 from .operations import OperationRepository
+from .phase_children import fence_unknown_child
 from .repositories import TaskRepository
+
+MAX_MESSAGE_LENGTH = 500
 
 
 class CaptureRepository:
     """Own the complete capture reservation without inferring scrub safety."""
 
     @staticmethod
-    def allocate(workspace_id: uuid.UUID, name: str) -> tuple[Workspace, Task]:
-        """Atomically reserve an automatic stop/capture/resume operation."""
+    def allocate(
+        workspace_id: uuid.UUID,
+        name: str = "",
+        *,
+        captured_image_id: uuid.UUID | None = None,
+        message: str = "",
+    ) -> tuple[Workspace, Task]:
+        """Atomically reserve an automatic stop/capture/replace operation."""
         with transaction.atomic():
             runner_id = Workspace.objects.values_list("runner_id", flat=True).get(
                 pk=workspace_id
@@ -85,6 +97,7 @@ class CaptureRepository:
                 .exists()
             ):
                 raise ConflictError("Source image is retired or unavailable")
+            line = CaptureRepository._reserve_line(ws, name, captured_image_id)
             phase = "stop" if ws.status == "running" else "capture"
             # The image and first prepared command commit together, closing the old
             # allocation/transport preparation crash window for capture.
@@ -94,7 +107,11 @@ class CaptureRepository:
                 origin_type="workspace_capture",
                 origin_workspace=ws,
                 created_by=ws.created_by,
-                name=name,
+                name=line.name,
+                captured_image=line,
+                generation=ImageLineRepository.next_captured_version(line.id),
+                message=(message or "").strip()[:MAX_MESSAGE_LENGTH],
+                min_disk_size_gb=ws.qemu_disk_size_gb,
                 status="capturing",
             )
             request = CaptureRequest.objects.create(
@@ -106,6 +123,40 @@ class CaptureRepository:
             task = CaptureRepository._child(request, ws, phase)
             ws.refresh_from_db()
             return ws, task
+
+    @staticmethod
+    def _reserve_line(
+        ws: Workspace, name: str, captured_image_id: uuid.UUID | None
+    ) -> CapturedImage:
+        """Create a new image line or lock an existing one for the next version."""
+        if captured_image_id is None:
+            name = (name or "").strip()
+            if not name:
+                raise ConflictError("A name is required for a new image")
+            return CapturedImage.objects.create(
+                organization_id=ws.runner.organization_id,
+                runner=ws.runner,
+                created_by=ws.created_by,
+                name=name[:255],
+            )
+        line = (
+            CapturedImage.objects.select_for_update()
+            .filter(pk=captured_image_id, organization_id=ws.runner.organization_id)
+            .first()
+        )
+        if line is None or line.created_by_id != ws.created_by_id:
+            raise NotFoundError("Captured image", str(captured_image_id))
+        if line.status != CapturedImage.Status.ACTIVE:
+            raise ConflictError("Image is being deleted; capture a new image instead")
+        if line.runner_id != ws.runner_id:
+            raise ConflictError(
+                "New versions must be captured on the runner that stores the image"
+            )
+        if ImageInstance.objects.filter(
+            captured_image=line, status="capturing"
+        ).exists():
+            raise ConflictError("Another version of this image is being captured")
+        return line
 
     @staticmethod
     def _child(request: CaptureRequest, ws: Workspace, phase: str) -> Task:
@@ -204,28 +255,9 @@ class CaptureRepository:
             command = LifecycleCommand.objects.get(task=child)
             if child.status not in ["completed", "failed"]:
                 return
-            if (
-                command.phase == "intervention"
-                or ws.current_task_id
-                or (child.status == "failed" and "intervention" in child.error.lower())
-            ):
-                diagnostic = (
-                    "Unknown child outcome; exact journal reconciliation required"
-                )
-                changed = request.diagnostic != diagnostic
-                OperationRepository.intervene(child, diagnostic)
-                ws.current_task = child
-                ws.active_operation = None
-                ws.save(update_fields=["current_task", "active_operation"])
-                request.diagnostic = diagnostic
-                request.save(update_fields=["diagnostic"])
-                if changed:
-                    return {
-                        "workspace_id": str(ws.id),
-                        "phase": "intervention",
-                        "diagnostic": diagnostic,
-                    }
-                return
+            fenced, notification = fence_unknown_child(request, ws, child, command)
+            if fenced:
+                return notification
             if request.phase == "stop":
                 if child.status != "completed" or ws.credentials_present:
                     request.phase = "failed"
@@ -262,6 +294,13 @@ class CaptureRepository:
                 if child.status == "failed":
                     request.diagnostic = "Image capture failed: " + child.error
                     request.save(update_fields=["diagnostic"])
+                else:
+                    blocker = CaptureRepository._replacement_blocker(request, ws)
+                    if blocker is None:
+                        CaptureRepository._hand_off(request, ws)
+                        return None
+                    request.diagnostic = blocker
+                    request.save(update_fields=["diagnostic"])
                 if (
                     request.prior_running
                     and not request.resume_suppressed
@@ -289,6 +328,55 @@ class CaptureRepository:
                 "phase": request.phase,
                 "diagnostic": request.diagnostic,
             }
+
+    @staticmethod
+    def _replacement_blocker(request: CaptureRequest, ws: Workspace) -> str | None:
+        """Why the source cannot switch to the new version; None when it can.
+
+        Nothing has been removed yet, so every blocker safely keeps the
+        workspace on its previous version.
+        """
+        image = ImageInstance.objects.select_for_update().get(pk=request.image_id)
+        if image.status != "ready" or not image.runner_ref:
+            return "Image version was deleted during capture; workspace kept as is"
+        if ws.status != "stopped":
+            return "Workspace changed during capture; it stays on its previous version"
+        try:
+            from apps.credentials.services import CredentialSvc
+
+            CredentialSvc().resolve_workspace_credentials(ws)
+        except Exception:  # noqa: BLE001 - any failure keeps the workspace
+            return (
+                f"Image saved as v{image.generation}, but workspace credentials "
+                "cannot be resolved; the workspace stays on its previous version"
+            )
+        runner = ws.runner
+        if (
+            image.min_disk_size_gb
+            and image.min_disk_size_gb > runner.qemu_max_disk_size_gb
+        ):
+            return (
+                f"Image saved as v{image.generation}, but it exceeds the runner disk "
+                "limit; the workspace stays on its previous version"
+            )
+        return None
+
+    @staticmethod
+    def _hand_off(request: CaptureRequest, ws: Workspace) -> None:
+        """Atomically finish the capture and recreate the source on the new version."""
+        from .recreate_repository import RecreateRepository
+
+        request.phase = "completed"
+        request.save(update_fields=["phase", "diagnostic"])
+        # Cloned repositories are part of the captured image from now on.
+        ws.repos = []
+        ws.save(update_fields=["repos", "updated_at"])
+        RecreateRepository.begin(
+            ws,
+            ImageInstance.objects.get(pk=request.image_id),
+            reason=WorkspaceRecreateRequest.Reason.CAPTURE,
+            final_running=request.prior_running and not request.resume_suppressed,
+        )
 
     @staticmethod
     def suppress_resume(workspace_id) -> None:

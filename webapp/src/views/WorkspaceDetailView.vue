@@ -12,6 +12,7 @@ import { isComposerTransitionPending } from '@/lib/composerTransition'
 import HarnessChatPanel from '@/components/chat/HarnessChatPanel.vue'
 import WorkspaceChatHeader from '@/components/chat/WorkspaceChatHeader.vue'
 import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImageArtifactDialog.vue'
+import WorkspaceRecreateDialog from '@/components/workspaces/WorkspaceRecreateDialog.vue'
 import WorkspaceToolsSplit from '@/components/workspaces/WorkspaceToolsSplit.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { Button } from '@/components/ui/button'
@@ -29,6 +30,7 @@ const workspaceImageStore = useWorkspaceImageStore()
 const renamingWorkspace = ref(false)
 const processesOpen = ref(false)
 const imageArtifactDialogOpen = ref(false)
+const recreateDialogOpen = ref(false)
 /** Header entrance animation only when arriving from the home composer send. */
 const animateEntrance = ref(isComposerTransitionPending())
 
@@ -263,6 +265,7 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
           @toggle-side-panel="canPrompt && sidePanelStore.toggle()"
           @toggle-processes="toggleProcessesPanel"
           @capture-image="imageArtifactDialogOpen = true"
+          @recreate-workspace="recreateDialogOpen = true"
           @delete-workspace="handleDeleteWorkspace"
         />
       </template>
@@ -295,5 +298,11 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
     :workspace="workspace"
     :open="imageArtifactDialogOpen"
     @update:open="imageArtifactDialogOpen = $event"
+  />
+  <WorkspaceRecreateDialog
+    v-if="workspace && recreateDialogOpen"
+    :workspace="workspace"
+    :open="recreateDialogOpen"
+    @update:open="recreateDialogOpen = $event"
   />
 </template>

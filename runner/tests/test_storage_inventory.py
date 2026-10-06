@@ -2,6 +2,8 @@
 
 import asyncio
 import subprocess
+import sys
+import types
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +11,24 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from src.runtime.docker_runtime import DockerRuntime
+
+try:
+    import libvirt  # noqa: F401
+except ImportError:
+    libvirt = types.ModuleType("libvirt")
+    libvirt.VIR_DOMAIN_SHUTOFF = 5
+    libvirt.VIR_DOMAIN_RUNNING = 1
+    libvirt.VIR_DOMAIN_UNDEFINE_NVRAM = 4
+    libvirt.VIR_DOMAIN_UNDEFINE_MANAGED_SAVE = 2
+    libvirt.VIR_ERR_NO_DOMAIN = 42
+
+    class LibvirtError(Exception):
+        def get_error_code(self):
+            return None
+
+    libvirt.libvirtError = LibvirtError
+    sys.modules["libvirt"] = libvirt
+
 from src.runtime.qemu_runtime import QemuRuntime, libvirt
 from src.runtime.storage import storage_mutation
 

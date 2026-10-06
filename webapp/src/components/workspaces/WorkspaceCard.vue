@@ -4,11 +4,13 @@ import { WorkspaceStatus } from '@/types'
 import type { Workspace } from '@/types'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { AlertTriangle, Container, Loader2, Layers, WifiOff } from '@lucide/vue'
+import { AlertTriangle, Container, Loader2, WifiOff } from '@lucide/vue'
 import { formatRelativeTime } from '@/lib/utils'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import WorkspaceActions from './WorkspaceActions.vue'
 import WorkspaceImageArtifactDialog from './WorkspaceImageArtifactDialog.vue'
+import WorkspaceRecreateDialog from './WorkspaceRecreateDialog.vue'
+import ImageVersionBadge from '@/components/images/ImageVersionBadge.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -25,6 +27,13 @@ defineEmits<{
 }>()
 
 const imageArtifactDialogOpen = ref(false)
+const recreateDialogOpen = ref(false)
+const recreatePreferLatest = ref(false)
+
+function openRecreate(preferLatest: boolean): void {
+  recreatePreferLatest.value = preferLatest
+  recreateDialogOpen.value = true
+}
 const workspaceStore = useWorkspaceStore()
 
 function handleCaptureImage(): void {
@@ -126,15 +135,7 @@ function formatStorage(bytes?: number | null): string {
             <h3 class="font-medium text-foreground text-sm truncate">
               {{ workspace.name }}
             </h3>
-            <div
-              v-if="workspace.base_image_name"
-              class="mt-1 inline-flex max-w-full items-center gap-1 rounded-[var(--radius-sm)] bg-muted/60 px-1.5 py-0.5 text-[11px] text-muted-foreground"
-              :title="`Based on image: ${workspace.base_image_name}`"
-            >
-              <Layers :size="11" class="shrink-0" />
-              <span class="truncate">{{ workspace.base_image_name }}</span>
-            </div>
-            <div v-else class="mt-1 text-xs text-muted-foreground">—</div>
+            <ImageVersionBadge :workspace="workspace" @update="openRecreate(true)" />
           </div>
         </div>
 
@@ -171,7 +172,12 @@ function formatStorage(bytes?: number | null): string {
             {{ imminentAutoStopLabel }}
           </div>
         </div>
-        <WorkspaceActions :workspace="workspace" size="sm" @capture-image="handleCaptureImage" />
+        <WorkspaceActions
+          :workspace="workspace"
+          size="sm"
+          @capture-image="handleCaptureImage"
+          @recreate="openRecreate(false)"
+        />
       </div>
     </CardContent>
   </Card>
@@ -181,5 +187,12 @@ function formatStorage(bytes?: number | null): string {
     :workspace="workspace"
     :open="imageArtifactDialogOpen"
     @update:open="imageArtifactDialogOpen = $event"
+  />
+  <WorkspaceRecreateDialog
+    v-if="recreateDialogOpen"
+    :workspace="workspace"
+    :open="recreateDialogOpen"
+    :prefer-latest="recreatePreferLatest"
+    @update:open="recreateDialogOpen = $event"
   />
 </template>

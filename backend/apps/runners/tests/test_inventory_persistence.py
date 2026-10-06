@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from apps.runners.inventory_repository import InventoryRepository
 from apps.runners.models import InventoryEdge, InventorySnapshot
+from apps.runners.tests.conftest import capture_version_fields
 
 pytestmark = pytest.mark.django_db
 
@@ -560,6 +561,7 @@ def test_qemu_uuid_manifest_requires_artifact_and_operation(runner, operation_ma
         runtime_type="qemu",
         runner_ref="/base.qcow2",
         creating_task=task,
+        **capture_version_fields(runner, None, "New"),
     )
     payload = scan(
         resources=[
@@ -624,6 +626,7 @@ def test_unpublished_capture_without_reference_is_not_missing(runner):
         runtime_type="qemu",
         status="failed",
         runner_ref="",
+        **capture_version_fields(runner, None, "Failed capture"),
     )
     assert InventoryRepository.record(str(runner.id), runner.sid, scan())
     assert (
@@ -700,6 +703,7 @@ def test_exact_base_pin_serialized_without_physical_base(runner, workspace):
         name="Orphan base",
         runtime_type="qemu",
         runner_ref="",
+        **capture_version_fields(runner, None, "Orphan base"),
     )
     workspace.base_image_instance = image
     workspace.save(update_fields=["base_image_instance"])

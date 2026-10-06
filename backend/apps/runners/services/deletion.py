@@ -1,9 +1,10 @@
 """Shared authorization boundary for REST and MCP deletion commands."""
 
 from apps.organizations.services import OrganizationService
-from common.exceptions import AuthenticationError, NotFoundError
+from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from ..deletion_repository import DeletionRepository
+from ..image_lines import ImageLineRepository
 
 
 class DeletionService:
@@ -15,10 +16,11 @@ class DeletionService:
         orgs.require_membership(user, org_id)
         target, _, _ = DeletionRepository.target(org_id, kind, target_id)
         admin = orgs.get_user_role(user, org_id) in ["owner", "admin"]
-        if force or kind != "image":
+        if force or kind not in {"image", "captured_image"}:
             orgs.require_admin(user, org_id)
         elif not admin and (
-            target.created_by_id != user.id or target.origin_type != "workspace_capture"
+            target.created_by_id != user.id
+            or (kind == "image" and target.origin_type != "workspace_capture")
         ):
             raise AuthenticationError(
                 "Only the capture owner or organization admin may delete this image"
@@ -30,7 +32,13 @@ class DeletionService:
         return DeletionRepository.preview(org_id, kind, target_id)
 
     def request(self, user, org_id, kind, target_id, mode="deferred", fingerprint=""):
-        self.authorize(user, org_id, kind, target_id, force=mode == "force")
+        target = self.authorize(user, org_id, kind, target_id, force=mode == "force")
+        if kind == "image" and target.captured_image_id:
+            latest = ImageLineRepository.latest_for(target)
+            if latest is not None and latest.id == target.id:
+                raise ConflictError(
+                    "The latest version can only be removed by deleting the image"
+                )
         return DeletionRepository.request(
             org_id, user, kind, target_id, mode, fingerprint
         )
