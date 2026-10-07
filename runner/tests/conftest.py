@@ -5,6 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from src.config import RunnerSettings
+
+
+@pytest.fixture(autouse=True)
+def isolated_runner_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep unit tests independent of the deployment's private dotenv file."""
+    monkeypatch.setitem(RunnerSettings.model_config, "env_file", None)
 
 
 def _qemu_runtime_deps_available() -> bool:
@@ -19,8 +26,7 @@ def _qemu_runtime_deps_available() -> bool:
 
 HAS_QEMU_RUNTIME_DEPS = _qemu_runtime_deps_available()
 QEMU_SKIP_REASON = (
-    "QEMU runtime dependencies not installed "
-    "(pip install -r requirements-qemu.txt)"
+    "QEMU runtime dependencies not installed (pip install -r requirements-qemu.txt)"
 )
 
 

@@ -39,7 +39,7 @@ from .base import (
     ImageArtifactInfo,
     WorkspaceConfig,
 )
-from .storage import storage_mutation
+from .storage import sha256_digest, storage_mutation
 from .inventory import RuntimeInventory, StorageResource
 from .managed_process import managed_argv
 from .stream_wrapper import shell_quote_argv, stream_wrapper_argv
@@ -1908,7 +1908,6 @@ class QemuRuntime(RuntimeBackend):
         and after reading. ctime prevents same-size/mtime replacement reuse.
         No cache is used for active workspace disks or mutable image info.
         """
-        import hashlib
         import os
         import stat
         import threading
@@ -1942,7 +1941,7 @@ class QemuRuntime(RuntimeBackend):
                 digest = (
                     cached[1]
                     if cached and cached[0] == signature
-                    else hashlib.file_digest(stream, "sha256").hexdigest()
+                    else sha256_digest(stream)
                 )
                 if (
                     identity(os.fstat(stream.fileno())) != signature
@@ -2299,15 +2298,9 @@ class QemuRuntime(RuntimeBackend):
             os.fsync(stream.fileno())
         os.link(temp, target)  # exclusive, never replaces a published inode
         temp.unlink()
-        import hashlib
-
-        def digest():
-            with target.open("rb") as stream:
-                return hashlib.file_digest(stream, "sha256").hexdigest()
-
         manifest = {
             **manifest,
-            "sha256": await asyncio.to_thread(digest),
+            "sha256": await asyncio.to_thread(self._publication_digest, target),
             "version": 1,
             "image_path": str(target),
             "size_bytes": target.stat().st_size,

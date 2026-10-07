@@ -92,7 +92,8 @@ a stopped observation, interrupted stop or lost reply is not scrub proof.
 Run migrations, ASGI and `python manage.py recover_lifecycle` with the same DB,
 credential encryption key, application version and REDIS_URL. Redis channel
 `opencuria-runner` delivers messages, not durable truth (DB rows are truth).
-Systemd template: `backend/systemd/opencuria-recovery.service`; compose services
+Systemd template: `backend/systemd/opencuria-recovery.service`, rendered and enabled
+with `sudo ./backend/systemd/install-recovery-service.sh`; compose services
 include recovery and Redis. Runner journal is private FULL-sync SQLite/WAL under
 RUNNER_STATE_DIR (default ~/.local/share/opencuria/runner); runner compose/systemd
 persist it. Never delete that volume or run two processes against one journal.
@@ -102,6 +103,14 @@ but not hard deadlines. Offline runner observation does not rewrite runtime stat
 Timeout/intervention retains current-task fences. Operation results ACK only after
 backend terminal transaction commit; unacknowledged outcomes replay on reconnect.
 The latest authenticated Socket.IO SID supersedes old callbacks/disconnects.
+The systemd worker uses readiness notifications and a 90-second progress watchdog.
+Only a successful recovery tick renews the watchdog; persistent failures or a hung
+tick cause a restart. The installer adds the worker to the backend's start
+dependencies and propagates backend restarts to the worker. SQLite atomic blocks
+use `IMMEDIATE` with a 20-second busy timeout; idle delivery polls avoid write locks.
+Migration `0026` closes previously disposed, unstarted capture reservations without
+changing finished images or touching workspace disks. Acknowledging a capture
+child now also closes its reserved image before the capture task exists.
 
 ## Inventory contract
 

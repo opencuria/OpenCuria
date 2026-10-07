@@ -12,7 +12,8 @@ from apps.runners.sio_server import _frontend_user_can_access_workspace
 from common.utils import hash_token
 
 
-@pytest.mark.django_db
+# Async ORM calls use separate connections and need committed fixture data.
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_frontend_workspace_access_is_owner_scoped():
     user_model = get_user_model()
@@ -45,5 +46,9 @@ async def test_frontend_workspace_access_is_owner_scoped():
         created_by=owner,
     )
 
-    assert await _frontend_user_can_access_workspace(owner.id, str(workspace.id)) is True
-    assert await _frontend_user_can_access_workspace(admin.id, str(workspace.id)) is False
+    assert (
+        await _frontend_user_can_access_workspace(owner.id, str(workspace.id)) is True
+    )
+    assert (
+        await _frontend_user_can_access_workspace(admin.id, str(workspace.id)) is False
+    )

@@ -615,21 +615,22 @@ async def test_docker_build_checkpoints_verified_final_and_refuses_overwrite(tmp
 
 
 def test_publication_hash_cache_invalidates_same_size_and_mtime(tmp_path, monkeypatch):
-    import hashlib
     import os
+
+    from src.runtime import qemu_runtime
 
     r = runtime(tmp_path)
     disk = r._snapshot_dir / "publication.qcow2"
     disk.write_bytes(b"original")
     original_stat = disk.stat()
-    digest = hashlib.file_digest
+    digest = qemu_runtime.sha256_digest
     calls = []
 
-    def counted(stream, algorithm):
+    def counted(stream):
         calls.append(True)
-        return digest(stream, algorithm)
+        return digest(stream)
 
-    monkeypatch.setattr(hashlib, "file_digest", counted)
+    monkeypatch.setattr(qemu_runtime, "sha256_digest", counted)
     expected = r._publication_digest(disk)
     assert r._publication_digest(disk) == expected
     assert len(calls) == 1

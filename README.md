@@ -325,6 +325,32 @@ between runners or delete it to resolve a failed task. Run migrations and the
 independent `python manage.py recover_lifecycle` worker alongside ASGI (Compose
 and the backend systemd worker unit provide this process).
 
+For a systemd source checkout, install the worker and its backend dependency:
+
+```bash
+sudo ./backend/systemd/install-recovery-service.sh
+```
+
+The installer uses the backend virtualenv and environment file, applies migrations,
+enables `opencuria-recover-lifecycle.service` at boot, and starts the backend and
+worker together. It briefly stops both services to apply migrations. Override
+`--env-file` or the service names when the deployment differs. To inspect the
+rendered files first, use `--no-activate --output-dir /tmp/opencuria-systemd`.
+When updating a local runner as well, add `--restart-runner opencuria-runner.service`.
+The worker reports readiness after its first successful tick and Redis connectivity
+check, and renews systemd's 90-second watchdog only after both succeed. Failures
+remain visible in
+`systemctl status opencuria-recover-lifecycle` and
+`journalctl -u opencuria-recover-lifecycle`.
+
+SQLite development deployments use `IMMEDIATE` transactions and a 20-second
+busy timeout so concurrent atomic writes wait before reading, instead of failing
+during a read-to-write lock upgrade. Idle delivery polling does not reserve the
+writer lock. Keep transactions short; PostgreSQL remains the production backend.
+See [Django's SQLite transaction guidance](https://docs.djangoproject.com/en/5.2/ref/databases/#transactions-behavior).
+Backend tests use a separate temporary SQLite file, so concurrency checks exercise
+the same lock waiting as the application rather than shared-cache memory locks.
+
 For an unresolved operation, use `GET /api/v1/runners/operations/` then
 `GET /api/v1/runners/operations/{id}/`. Offline inspection returns unknown;
 it never clears a fence. `POST .../{id}/reconcile/` applies proven journal

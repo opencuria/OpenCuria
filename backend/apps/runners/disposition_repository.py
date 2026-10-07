@@ -4,6 +4,7 @@ import uuid
 from typing import Any
 
 from django.db import transaction
+from django.db.models import Q
 
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
@@ -191,7 +192,9 @@ class DispositionRepository:
                     WorkspaceRecreateRequest,
                 )
 
-                CaptureRequest.objects.filter(child=task).update(
+                captures = CaptureRequest.objects.filter(child=task)
+                capture_image_ids = list(captures.values_list("image_id", flat=True))
+                captures.update(
                     phase="failed",
                     resume_suppressed=True,
                     diagnostic=(
@@ -208,9 +211,14 @@ class DispositionRepository:
                         "delete the workspace"
                     ),
                 )
-                ImageInstance.objects.filter(creating_task=task).exclude(
+                # The reservation precedes the capture task: an interrupted stop
+                # still owns an unfinished image with no creating_task yet.
+                ImageInstance.objects.filter(
+                    Q(creating_task=task)
+                    | Q(pk__in=capture_image_ids, status="capturing")
+                ).exclude(
                     status__in=["ready", "deleted", "pending_deletion"]
-                ).update(status="failed")
+                ).update(status="failed", updated_at=timezone.now())
             row.phase = "disposed"
             row.save(update_fields=["phase"])
             if ws:

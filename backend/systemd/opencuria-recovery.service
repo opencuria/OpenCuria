@@ -2,13 +2,18 @@
 Description=OpenCuria lifecycle recovery worker
 After=network-online.target
 Wants=network-online.target
+PartOf=__BACKEND_SERVICE__
+StartLimitIntervalSec=0
 
 [Service]
-Type=simple
-WorkingDirectory=/opt/opencuria/backend
-EnvironmentFile=/opt/opencuria/backend/.env
-ExecStart=/opt/opencuria/backend/.venv/bin/python manage.py recover_lifecycle
-Restart=always
+Type=notify
+NotifyAccess=main
+WorkingDirectory=__WORKING_DIR__
+EnvironmentFile=__ENV_FILE__
+ExecStart="__BACKEND_DIR__/.venv/bin/python" manage.py recover_lifecycle
+WatchdogSec=90
+TimeoutStartSec=90
+Restart=on-failure
 RestartSec=5
 
 [Install]

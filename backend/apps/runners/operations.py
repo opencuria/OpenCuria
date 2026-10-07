@@ -163,18 +163,26 @@ class OperationRepository:
     def candidates() -> list:
         """Claim due commands with bounded delivery; expired leases may be reclaimed."""
         now = timezone.now()
+        stale_runners = Runner.objects.filter(status="online").filter(
+            Q(last_heartbeat_at__lt=now - timedelta(seconds=90))
+            | Q(
+                last_heartbeat_at__isnull=True,
+                connected_at__lt=now - timedelta(seconds=90),
+            )
+        )
+        due = LifecycleCommand.objects.filter(
+            task__status__in=["pending", "in_progress"],
+            next_delivery_at__lte=now,
+            lease_until__lte=now,
+        )
+        # Idle polling must not acquire SQLite's single writer reservation.
+        # Repeat both predicates under the runner locks when there is work.
+        if not due.exists() and not stale_runners.exists():
+            return []
         with transaction.atomic():
-            from django.db.models import Q
-
             for runner_id in Runner.objects.order_by("id").values_list("id", flat=True):
                 lock_runner(runner_id)
-            Runner.objects.filter(status="online").filter(
-                Q(last_heartbeat_at__lt=now - timedelta(seconds=90))
-                | Q(
-                    last_heartbeat_at__isnull=True,
-                    connected_at__lt=now - timedelta(seconds=90),
-                )
-            ).update(status="offline")
+            stale_runners.update(status="offline")
             # Match allocation/results: runner -> workspace -> image -> task.
             # Graph approval and inventory writes serialize at runner boundary.
             due_ids = LifecycleCommand.objects.filter(
