@@ -74,10 +74,15 @@ async def test_open_process_passes_control_timeout() -> None:
 
 
 async def test_cancelled_open_cleans_up_remote_and_routing() -> None:
+    started = asyncio.Event()
+
     class HangingCall(FakeCallTransport):
-        async def call(self, event, payload, timeout=None):
+        async def call(
+            self, event: str, payload: dict, timeout: float | None = None
+        ) -> dict:
             self.calls.append((event, payload))
             if event == "workspace:stream_start":
+                started.set()
                 await asyncio.Event().wait()
             return {"ok": True}
 
@@ -89,7 +94,7 @@ async def test_cancelled_open_cleans_up_remote_and_routing() -> None:
 
     accessor = RunnerWorkspaceAccessor("ws-1", emit=emit, call=transport.call)
     task = asyncio.create_task(accessor.open_process(["slow-mcp"], timeout=120))
-    await asyncio.sleep(0)
+    await asyncio.wait_for(started.wait(), timeout=1)
     conn = transport.calls[0][1]["connection_id"]
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

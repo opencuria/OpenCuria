@@ -2202,6 +2202,18 @@ class QemuRuntime(RuntimeBackend):
                 elif path.with_suffix(".meta").exists():
                     resource.state = "legacy"
                     resource.kind = "image"
+                    legacy = await asyncio.to_thread(
+                        self._read_legacy_image_metadata, path.with_suffix(".meta")
+                    )
+                    snapshot_id = legacy.get("snapshot_id", "")
+                    # Legacy captures use a snapshot ID distinct from the DB image ID.
+                    # Only its exact managed filename proves that reference alias.
+                    if (
+                        path.parent == self._snapshot_dir.absolute()
+                        and snapshot_id == path.stem
+                        and re.fullmatch(r"[A-Za-z0-9_-]+", snapshot_id)
+                    ):
+                        resource.aliases.append(snapshot_id)
                 elif path.suffix == ".iso":
                     # Directory placement or an arbitrary managed-domain reference
                     # is not ownership. Only the exact workspace's seed path is.
@@ -2390,6 +2402,18 @@ class QemuRuntime(RuntimeBackend):
         ):
             raise RuntimeError("Image deletion incomplete")
 
+    @staticmethod
+    def _read_legacy_image_metadata(path: Path) -> dict[str, str]:
+        """Read a legacy capture marker without following a marker symlink."""
+        if path.is_symlink():
+            raise ValueError("Symlink image marker refused")
+        metadata: dict[str, str] = {}
+        for line in path.read_text().splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key.strip():
+                metadata[key.strip()] = value.strip()
+        return metadata
+
     async def list_image_artifacts(self, instance_id: str) -> list[ImageArtifactInfo]:
         """List all image artifacts for a given workspace instance."""
         snapshots: list[ImageArtifactInfo] = []
@@ -2409,10 +2433,7 @@ class QemuRuntime(RuntimeBackend):
                     )
                 )
         for meta_path in self._snapshot_dir.glob("*.meta"):
-            meta = {}
-            for line in meta_path.read_text().strip().splitlines():
-                k, _, v = line.partition("=")
-                meta[k.strip()] = v.strip()
+            meta = await asyncio.to_thread(self._read_legacy_image_metadata, meta_path)
             if meta.get("instance_id") == instance_id:
                 snapshots.append(
                     ImageArtifactInfo(

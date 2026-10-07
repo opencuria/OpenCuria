@@ -699,8 +699,46 @@ async def test_legacy_base_and_old_meta_keep_physical_backing_identity(tmp_path)
     assert str(base) in resources[str(base)].aliases
     assert resources[str(child)].kind == "image"
     assert resources[str(child)].state == "legacy"
+    assert resources[str(child)].aliases == [str(child), "old-capture"]
     assert resources[str(child)].dependencies == [str(base)]
     assert not resources[str(base)].metadata.get("artifact_id")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marker", ["matching", "mismatched", "missing", "symlink"])
+async def test_legacy_snapshot_alias_requires_exact_managed_marker(
+    tmp_path: Path, marker: str
+) -> None:
+    r = runtime(tmp_path)
+    snapshot_id = str(uuid.uuid4())
+    image = r._snapshot_dir / f"{snapshot_id}.qcow2"
+    qcow(image)
+    meta_path = image.with_suffix(".meta")
+    if marker == "symlink":
+        foreign_marker = tmp_path / "foreign.meta"
+        foreign_marker.write_text(f"snapshot_id={snapshot_id}\n")
+        meta_path.symlink_to(foreign_marker)
+    elif marker != "missing":
+        recorded_id = snapshot_id if marker == "matching" else str(uuid.uuid4())
+        meta_path.write_text(f"snapshot_id={recorded_id}\nname=Legacy capture\n")
+
+    # A copied marker in another storage directory cannot claim the snapshot ID.
+    copy = tmp_path / "images" / image.name
+    qcow(copy)
+    copy.with_suffix(".meta").write_text(f"snapshot_id={snapshot_id}\n")
+    disk = r._disk_dir / "workspace.qcow2"
+    qcow(disk, image)
+
+    scan = await r.inventory()
+    resources = {item.resource_id: item for item in scan.resources}
+    assert scan.complete is (marker != "symlink")
+    assert (snapshot_id in resources[str(image)].aliases) is (marker == "matching")
+    assert snapshot_id not in resources[str(copy)].aliases
+    assert "artifact_id" not in resources[str(image)].metadata
+    assert resources[str(disk)].dependencies == [str(image)]
+    with pytest.raises(RuntimeError, match="Incomplete|dependents"):
+        await r.delete_image_artifact(snapshot_id)
+    assert image.exists()
 
 
 def cloud_init_domain(r, workspace_id, disk):

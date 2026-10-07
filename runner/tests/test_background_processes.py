@@ -180,7 +180,9 @@ class BackgroundServiceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             log_path = str(Path(tmp) / "proc-exit3.log")
             exit_path = str(Path(tmp) / "proc-exit3.exit")
-            with unittest.mock.patch("src.service.BACKGROUND_PROCESS_DIR", tmp):
+            with unittest.mock.patch(
+                "src.services.sessions.background.BACKGROUND_PROCESS_DIR", tmp
+            ):
                 shell = WorkspaceService._build_background_start_shell(
                     "exit 3", log_path, exit_path
                 )
