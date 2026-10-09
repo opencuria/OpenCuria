@@ -262,6 +262,7 @@ class ScheduledTaskRepository:
             "mode": task.mode,
             "model": task.model,
             "reasoning_effort": task.reasoning_effort,
+            "harness_id": task.harness_id,
             "skill_ids": list(task.skill_ids or []),
             "recurrence": task.recurrence,
             "weekdays": list(task.weekdays or []),

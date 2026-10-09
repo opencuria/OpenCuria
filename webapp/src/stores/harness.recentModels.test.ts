@@ -88,6 +88,38 @@ describe('harness store recent-models save-on-send', () => {
     expect(saveMock).toHaveBeenCalledWith('acme/other', 'low')
   })
 
+  it('persists Claude selection and does not write its alias into native model recents', async () => {
+    createMock.mockResolvedValue(makeSession({ harness_id: 'claude', model: 'sonnet' }))
+    const store = useHarnessStore()
+    const session = await store.createSession(
+      'ws-1',
+      'hello',
+      'build',
+      'sonnet',
+      [],
+      'high',
+      'claude',
+    )
+    expect(session?.harness_id).toBe('claude')
+    expect(createMock).toHaveBeenCalledWith('ws-1', {
+      prompt: 'hello',
+      mode: 'build',
+      model: 'sonnet',
+      agent_name: 'build',
+      skill_ids: [],
+      reasoning_effort: 'high',
+      harness_id: 'claude',
+    })
+    expect(saveMock).not.toHaveBeenCalled()
+  })
+
+  it('does not write Claude model ids into native recents on follow-up sends', async () => {
+    sendMock.mockResolvedValue(makeSession({ harness_id: 'claude', model: 'sonnet' }))
+    const store = useHarnessStore()
+    await store.sendMessage('session-1', 'follow up', { model: 'sonnet' })
+    expect(saveMock).not.toHaveBeenCalled()
+  })
+
   it('records nothing when createSession fails', async () => {
     createMock.mockRejectedValue(new Error('down'))
     const store = useHarnessStore()

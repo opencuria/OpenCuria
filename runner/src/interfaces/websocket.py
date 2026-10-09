@@ -30,6 +30,7 @@ import structlog
 
 from ..config import RunnerSettings
 from ..git import GIT_OPERATIONS, git_timeout_for
+from ..runtime.artifacts import ArtifactRequestError
 from ..service import WorkspaceService
 from ..services.capture_fence import CaptureFence, live_interaction
 from .base import Interface
@@ -1643,6 +1644,68 @@ class WebSocketInterface(Interface):
 
         async def _harness_result(event: str, data: dict) -> None:
             await sio.emit(event, data)
+
+        @sio.on("workspace:artifact_ensure")
+        async def on_workspace_artifact_ensure(data: dict) -> dict:
+            """Ensure the one approved native artifact and emit its correlated reply."""
+            raw = data if isinstance(data, dict) else {}
+            workspace_echo = raw.get("workspace_id", "")
+            request_id = raw.get("request_id", "")
+            result: dict = {
+                "workspace_id": (
+                    workspace_echo if isinstance(workspace_echo, str) else ""
+                ),
+                "request_id": request_id if isinstance(request_id, str) else "",
+                "ok": False,
+            }
+            try:
+                workspace_id = uuid.UUID(result["workspace_id"])
+                if (
+                    not result["request_id"]
+                    or len(result["request_id"]) > 128
+                    or not result["request_id"].strip()
+                ):
+                    raise ValueError("request_id is required")
+                task_key = f"harness:{result['request_id']}"
+                active = self._running_tasks.get(task_key)
+                if active is not None and not active.done():
+                    raise ValueError("request_id is already active")
+                artifact_id = raw.get("artifact_id")
+                version = raw.get("version")
+                if not isinstance(artifact_id, str) or not isinstance(version, str):
+                    raise TypeError("Invalid artifact identity")
+                current = asyncio.current_task()
+                assert current is not None
+                self._running_tasks[task_key] = current
+                try:
+                    ensured = await self._service.ensure_runtime_artifact(
+                        workspace_id, artifact_id, version
+                    )
+                finally:
+                    if self._running_tasks.get(task_key) is current:
+                        self._running_tasks.pop(task_key, None)
+                result.update(ensured)
+                result.update(
+                    workspace_id=str(workspace_id),
+                    request_id=raw["request_id"],
+                    ok=True,
+                )
+            except asyncio.CancelledError:
+                raise
+            except (ArtifactRequestError, ValueError) as exc:
+                result["error"] = str(exc)
+            except Exception:
+                result["error"] = "Runtime artifact provisioning failed"
+                logger.warning(
+                    "runtime_artifact_ensure_failed",
+                    workspace_id=result["workspace_id"],
+                    request_id=result["request_id"],
+                    artifact_id=raw.get("artifact_id")
+                    if isinstance(raw.get("artifact_id"), str)
+                    else "",
+                )
+            await _harness_result("workspace:artifact_ensure_result", result)
+            return result
 
         async def _emit_stream_output(
             *,

@@ -1,7 +1,7 @@
 import tempfile
 import unittest
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.runtime.qemu_runtime import QemuRuntime
@@ -27,12 +27,11 @@ class QemuRuntimeHostDirectoryTests(unittest.TestCase):
             Path,
             "mkdir",
             side_effect=PermissionError("permission denied"),
-        ):
-            with self.assertRaises(RuntimeError) as ctx:
-                self.runtime._ensure_host_directory(
-                    target,
-                    writable_hint="sudo install -d -o $USER -g $USER -m 755 '/var/lib/opencuria/base-images'",
-                )
+        ), self.assertRaises(RuntimeError) as ctx:
+            self.runtime._ensure_host_directory(
+                target,
+                writable_hint="sudo install -d -o $USER -g $USER -m 755 '/var/lib/opencuria/base-images'",
+            )
 
         self.assertIn(str(target), str(ctx.exception))
         self.assertIn("sudo install -d -o $USER -g $USER -m 755", str(ctx.exception))
@@ -57,16 +56,15 @@ class QemuRuntimeBuildBaseImageTests(unittest.TestCase):
                     self.runtime,
                     "_ensure_ubuntu_cloud_image",
                     side_effect=AssertionError("should not download 22.04"),
-                ):
-                    with patch.object(
-                        real_path, "exists", autospec=True
-                    ) as exists_mock:
-                        exists_mock.side_effect = lambda path_obj: (
-                            str(path_obj) == str(legacy)
-                        )
-                        resolved = self.runtime._resolve_build_base_image(
-                            "ubuntu:22.04"
-                        )
+                ), patch.object(
+                    real_path, "exists", autospec=True
+                ) as exists_mock:
+                    exists_mock.side_effect = lambda path_obj: (
+                        str(path_obj) == str(legacy)
+                    )
+                    resolved = self.runtime._resolve_build_base_image(
+                        "ubuntu:22.04"
+                    )
 
             self.assertEqual(resolved, legacy)
 
@@ -108,20 +106,19 @@ class QemuRuntimeBuildBaseImageTests(unittest.TestCase):
             response.__enter__.return_value = response
             response.__exit__.return_value = False
 
-            with patch.object(
+            with (
+                patch.object(
                 self.runtime, "_ensure_host_directory"
-            ) as ensure_dir_mock:
-                with (
-                    patch(
-                        "src.runtime.qemu_runtime.urllib.request.urlopen",
-                        return_value=response,
-                    ) as urlopen_mock,
-                    patch(
-                        "src.runtime.qemu_runtime.subprocess.run",
-                        return_value=SimpleNamespace(stdout=b'{"format": "qcow2"}'),
-                    ),
-                ):
-                    target = self.runtime._ensure_ubuntu_cloud_image("24.04")
+            ) as ensure_dir_mock, patch(
+                    "src.runtime.qemu_runtime.urllib.request.urlopen",
+                    return_value=response,
+                ) as urlopen_mock,
+                patch(
+                    "src.runtime.qemu_runtime.subprocess.run",
+                    return_value=SimpleNamespace(stdout=b'{"format": "qcow2"}'),
+                ),
+            ):
+                target = self.runtime._ensure_ubuntu_cloud_image("24.04")
 
             self.assertEqual(
                 target, images_dir / "ubuntu-24.04-server-cloudimg-amd64.img"
@@ -202,21 +199,19 @@ class QemuRuntimeBuildImageTests(unittest.IsolatedAsyncioTestCase):
 
             with patch(
                 "src.runtime.qemu_runtime._domain_xml", return_value="<domain/>"
+            ), patch(
+                "src.runtime.qemu_runtime.asyncio.to_thread", new=AsyncMock()
+            ), patch(
+                "src.runtime.qemu_runtime.asyncio.create_subprocess_exec",
+                new=AsyncMock(side_effect=_create_subprocess_exec),
             ):
-                with patch(
-                    "src.runtime.qemu_runtime.asyncio.to_thread", new=AsyncMock()
-                ):
-                    with patch(
-                        "src.runtime.qemu_runtime.asyncio.create_subprocess_exec",
-                        new=AsyncMock(side_effect=_create_subprocess_exec),
-                    ):
-                        result = await runtime.build_image(
-                            base_distro="ubuntu:24.04",
-                            init_script="#!/bin/bash\napt-get update\n",
-                            image_path=str(target_path),
-                            operation_id="op",
-                            image_instance_id="image",
-                        )
+                result = await runtime.build_image(
+                    base_distro="ubuntu:24.04",
+                    init_script="#!/bin/bash\napt-get update\n",
+                    image_path=str(target_path),
+                    operation_id="op",
+                    image_instance_id="image",
+                )
 
         runtime._stream_ssh_process.assert_awaited_once_with(
             unittest.mock.ANY,
@@ -224,6 +219,45 @@ class QemuRuntimeBuildImageTests(unittest.IsolatedAsyncioTestCase):
             None,
         )
         self.assertEqual(result["image_path"], str(target_path))
+
+
+class QemuRuntimeAgentStdinTests(unittest.IsolatedAsyncioTestCase):
+    async def test_agent_bootstrap_frame_keeps_stdin_open_for_sdk_messages(self) -> None:
+        from src.runtime.managed_process import isolated_agent_env_preamble
+
+        runtime = object.__new__(QemuRuntime)
+        stdin = MagicMock()
+        stdin.drain = AsyncMock()
+        process = SimpleNamespace(stdin=stdin, close=MagicMock())
+        ssh = SimpleNamespace(create_process=AsyncMock(return_value=process))
+        runtime._get_ssh = AsyncMock(return_value=ssh)
+        runtime._stream_pidfile = MagicMock(return_value="/tmp/stream.pid")
+        env = {
+            "ANTHROPIC_API_KEY": "test-secret",
+            "CLAUDE_CONFIG_DIR": "/workspace/.opencuria/harness/claude/12345678-1234-1234-1234-123456789abc/config",
+            "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
+            "CLAUDE_AGENT_SDK_VERSION": "0.2.164",
+            "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
+            "DISABLE_UPDATES": "1",
+            "DISABLE_TELEMETRY": "1",
+            "DISABLE_ERROR_REPORTING": "1",
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+        }
+
+        await runtime.spawn_process(
+            "instance",
+            ["/usr/bin/claude", "--input-format", "stream-json"],
+            workdir="/workspace",
+            env=env,
+            control_path="/var/lib/opencuria/streams/test",
+            expected_token={"boot_id": "boot", "init_starttime": "1"},
+            isolated_env=True,
+            isolated_home="/tmp/opencuria-agent-home-0123456789abcdef0123456789abcdef",
+        )
+
+        stdin.write.assert_called_once_with(isolated_agent_env_preamble(env))
+        stdin.drain.assert_awaited_once()
+        stdin.write_eof.assert_not_called()
 
 
 class QemuRuntimeDesktopProxyTests(unittest.TestCase):

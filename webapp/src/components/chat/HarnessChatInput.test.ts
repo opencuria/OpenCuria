@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 import HarnessChatInput from './HarnessChatInput.vue'
 import ComposerRichEditor from './ComposerRichEditor.vue'
+import HarnessMentionSheet from './HarnessMentionSheet.vue'
 import type { VueWrapper } from '@vue/test-utils'
 import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 import * as harnessApi from '@/services/harness.api'
@@ -40,6 +41,8 @@ vi.mock('@/services/harness.api', async () => {
   return {
     ...actual,
     listProviderModels: vi.fn(),
+    listClaudeModels: vi.fn(),
+    listHarnessEngines: vi.fn(),
     listAgentConfigs: vi.fn(),
     listRecentModels: vi.fn().mockResolvedValue([]),
     saveRecentModel: vi.fn(),
@@ -47,6 +50,8 @@ vi.mock('@/services/harness.api', async () => {
 })
 
 const listProviderModelsMock = vi.mocked(harnessApi.listProviderModels)
+const listClaudeModelsMock = vi.mocked(harnessApi.listClaudeModels)
+const listHarnessEnginesMock = vi.mocked(harnessApi.listHarnessEngines)
 const listAgentConfigsMock = vi.mocked(harnessApi.listAgentConfigs)
 
 const catalog: ProviderModel[] = [
@@ -76,11 +81,12 @@ const dropdownStubs = {
   DropdownMenu: { template: '<div><slot /></div>' },
   DropdownMenuTrigger: { template: '<div><slot /></div>' },
   DropdownMenuContent: { template: '<div><slot /></div>' },
+  DropdownMenuLabel: { template: '<div><slot /></div>' },
+  DropdownMenuSeparator: { template: '<hr />' },
   DropdownMenuItem: { template: '<button type="button"><slot /></button>' },
   DropdownMenuSub: { template: '<div><slot /></div>' },
   DropdownMenuSubTrigger: { template: '<div><slot /></div>' },
   DropdownMenuSubContent: { template: '<div><slot /></div>' },
-  DropdownMenuSeparator: { template: '<hr />' },
 }
 
 function mountInput(props: Record<string, unknown> = {}, attachTo?: Element) {
@@ -171,6 +177,22 @@ describe('HarnessChatInput', () => {
       },
     ])
     listProviderModelsMock.mockResolvedValue(catalog)
+    listHarnessEnginesMock.mockResolvedValue([
+      { id: 'native', name: 'OpenCuria', modes: ['build', 'plan'], connected: true },
+      { id: 'claude', name: 'Claude Agent', modes: ['build', 'plan'], connected: true },
+    ])
+    listClaudeModelsMock.mockResolvedValue([
+      {
+        id: 'sonnet',
+        name: 'Claude Sonnet',
+        provider: 'claude',
+        reasoning_efforts: ['high'],
+        default_effort: 'high',
+        supports_tools: true,
+        context_length: 200_000,
+        max_output_tokens: 16_000,
+      },
+    ])
   })
 
   it('loads the provider catalog into the model picker', async () => {
@@ -182,6 +204,100 @@ describe('HarnessChatInput', () => {
     expect(listProviderModelsMock).toHaveBeenCalled()
     expect(wrapper.text()).not.toContain('Skills')
     expect(wrapper.text()).not.toContain('Fast')
+  })
+
+  it('offers the four combined harness/mode choices and uses the Claude catalog separately', async () => {
+    const wrapper = mountInput()
+    await vi.waitFor(() => expect(listHarnessEnginesMock).toHaveBeenCalled())
+    await flushPromises()
+    expect(wrapper.find('[data-testid="composer-mode-native-build"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-mode-native-plan"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-mode-claude-build"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-mode-claude-plan"]').exists()).toBe(true)
+
+    await wrapper.find('[data-testid="composer-mode-claude-build"]').trigger('click')
+    await vi.waitFor(() => expect(listClaudeModelsMock).toHaveBeenCalled())
+    expect(wrapper.emitted('update:harnessId')?.slice(-1)[0]).toEqual(['claude'])
+    expect(wrapper.find('[data-testid="composer-mode-trigger"]').text()).toContain(
+      'Claude Agent Build',
+    )
+    expect(wrapper.find('[data-testid="composer-model-trigger"]').text()).toContain('Claude Sonnet')
+
+    await setEditorText(wrapper, 'Use Claude')
+    await wrapper.find('[data-testid="composer-send"]').trigger('click')
+    expect(wrapper.emitted('send')?.slice(-1)[0]).toEqual([
+      'Use Claude',
+      'build',
+      'sonnet',
+      [],
+      'high',
+      'claude',
+    ])
+  })
+
+  it('locks the selected engine in an existing Claude session while keeping its modes available', async () => {
+    const wrapper = mountInput({ harnessId: 'claude', engineLocked: true, model: 'sonnet' })
+    await vi.waitFor(() => expect(listHarnessEnginesMock).toHaveBeenCalled())
+    await flushPromises()
+    expect(
+      wrapper.find('[data-testid="composer-mode-native-build"]').attributes('disabled'),
+    ).toBeDefined()
+    expect(
+      wrapper.find('[data-testid="composer-mode-claude-build"]').attributes('disabled'),
+    ).toBeUndefined()
+    await wrapper.find('[data-testid="composer-mode-claude-plan"]').trigger('click')
+    expect(wrapper.emitted('update:mode')?.[0]).toEqual(['plan'])
+    expect(wrapper.emitted('update:harnessId')).toBeUndefined()
+  })
+
+  it('keeps Claude modes selectable in an existing session after its connection is removed', async () => {
+    listHarnessEnginesMock.mockResolvedValue([
+      { id: 'native', name: 'OpenCuria', modes: ['build', 'plan'], connected: true },
+      { id: 'claude', name: 'Claude Agent', modes: ['build', 'plan'], connected: false },
+    ])
+    const wrapper = mountInput({ harnessId: 'claude', engineLocked: true, model: 'sonnet' })
+    await vi.waitFor(() => expect(listHarnessEnginesMock).toHaveBeenCalled())
+    await flushPromises()
+    expect(
+      wrapper.find('[data-testid="composer-mode-claude-plan"]').attributes('disabled'),
+    ).toBeUndefined()
+  })
+
+  it('disables Claude choices when the engine connection is unavailable', async () => {
+    listHarnessEnginesMock.mockResolvedValue([
+      { id: 'native', name: 'OpenCuria', modes: ['build', 'plan'], connected: true },
+      { id: 'claude', name: 'Claude Agent', modes: ['build', 'plan'], connected: false },
+    ])
+    const wrapper = mountInput()
+    await vi.waitFor(() => expect(listHarnessEnginesMock).toHaveBeenCalled())
+    await flushPromises()
+    expect(
+      wrapper.find('[data-testid="composer-mode-claude-build"]').attributes('disabled'),
+    ).toBeDefined()
+    expect(wrapper.find('[data-testid="claude-provider-settings"]').exists()).toBe(true)
+  })
+
+  it('refreshes Claude availability when a personal connection changes', async () => {
+    const wrapper = mountInput()
+    await vi.waitFor(() => expect(listHarnessEnginesMock).toHaveBeenCalledTimes(1))
+    await flushPromises()
+    expect(
+      wrapper.find('[data-testid="composer-mode-claude-build"]').attributes('disabled'),
+    ).toBeUndefined()
+
+    listHarnessEnginesMock.mockResolvedValue([
+      { id: 'native', name: 'OpenCuria', modes: ['build', 'plan'], connected: true },
+      { id: 'claude', name: 'Claude Agent', modes: ['build', 'plan'], connected: false },
+    ])
+    window.dispatchEvent(new Event(harnessApi.HARNESS_ENGINE_CONNECTION_CHANGED_EVENT))
+    await vi.waitFor(() =>
+      expect(
+        wrapper.find('[data-testid="composer-mode-claude-build"]').attributes('disabled'),
+      ).toBeDefined(),
+    )
+    expect(
+      wrapper.find('[data-testid="composer-mode-claude-build"]').attributes('disabled'),
+    ).toBeDefined()
   })
 
   it('renders mode pill, context ring, paperclip, and send arrow', async () => {
@@ -319,8 +435,8 @@ describe('HarnessChatInput', () => {
   it('loads models and agent defaults without fetching provider settings', async () => {
     const wrapper = mountInput()
     await vi.waitFor(() => expect(listProviderModelsMock).toHaveBeenCalled())
+    await vi.waitFor(() => expect(listAgentConfigsMock).toHaveBeenCalled())
     expect(listProviderModelsMock).toHaveBeenCalled()
-    expect(listAgentConfigsMock).toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -457,11 +573,17 @@ describe('HarnessChatInput', () => {
     await vi.waitFor(() =>
       expect(document.querySelector('[data-testid="composer-skill-option"]')).not.toBeNull(),
     )
-    await document.body
-      .querySelector('[data-testid="composer-skill-option"]')!
-      .dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    const skillSheet = wrapper.findComponent(HarnessMentionSheet)
+    expect(skillSheet.exists()).toBe(true)
+    await skillSheet.get('[data-testid="composer-skill-option"]').trigger('mousedown')
     expect(wrapper.emitted('update:skillIds')?.slice(-1)[0]).toEqual([['skill-1']])
     expect(wrapper.find('[data-testid="composer-skill-remove-skill-1"]').exists()).toBe(true)
+
+    await wrapper.find('[data-testid="composer-mode-claude-plan"]').trigger('click')
+    expect(wrapper.emitted('update:harnessId')?.slice(-1)[0]).toEqual(['claude'])
+    expect(wrapper.emitted('update:skillIds')?.slice(-1)[0]).toEqual([['skill-1']])
+    expect(wrapper.find('[data-testid="composer-skill-remove-skill-1"]').exists()).toBe(true)
+
     await wrapper.get('[data-testid="composer-skill-remove-skill-1"]').trigger('click')
     expect(wrapper.emitted('update:skillIds')?.slice(-1)[0]).toEqual([[]])
 

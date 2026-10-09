@@ -67,6 +67,83 @@ class ScheduledTaskService:
             raise NotFoundError("ScheduledTask", str(task_id))
         return task
 
+    @staticmethod
+    def _normalize_harness_id(value: Any) -> str:
+        from apps.harness.engines.catalog import ENGINE_IDS
+
+        if not isinstance(value, str):
+            raise ValueError("harness_id must be native or claude")
+        harness_id = value.strip().lower()
+        if harness_id not in ENGINE_IDS:
+            raise ValueError("harness_id must be native or claude")
+        return harness_id
+
+    def _validate_engine_config(
+        self,
+        *,
+        organization_id: uuid.UUID,
+        owner_id: int,
+        workspace_id: uuid.UUID,
+        mode: str,
+        harness_id: Any,
+        model: Any,
+        reasoning_effort: Any,
+        skill_ids: Any,
+    ) -> tuple[str, str, str, list[str]]:
+        """Normalize engine-specific schedule fields and check run readiness."""
+        harness_id = self._normalize_harness_id(harness_id)
+        if not isinstance(model, str) or not isinstance(reasoning_effort, str):
+            raise ValueError("model and reasoning_effort must be strings")
+        raw_model = model.strip()
+        raw_effort = reasoning_effort.strip()
+        skills = self._validate_skill_ids(skill_ids)
+        if skills:
+            from apps.harness.harness_service import resolve_skill_bodies
+
+            # The same ownership and organization-visibility rules apply to
+            # both engines; only the engine consuming the skill bodies differs.
+            resolve_skill_bodies(
+                skills, user_id=owner_id, organization_id=organization_id
+            )
+
+        if harness_id == "native":
+            from apps.harness.providers.models_catalog import normalize_reasoning_effort
+            from apps.harness.harness_service import HarnessSession
+
+            effort = normalize_reasoning_effort(raw_effort)
+            validation_session = HarnessSession(
+                workspace_id=workspace_id,
+                organization_id=organization_id,
+                mode=mode,
+                agent_name=mode,
+                model=raw_model,
+                reasoning_effort=effort,
+                skill_ids=skills,
+            )
+            self._harness().validate_provider_for_run(
+                organization_id, validation_session
+            )
+            return harness_id, raw_model, effort, skills
+
+        from apps.harness.engines.catalog import (
+            normalize_claude_effort,
+            normalize_claude_model,
+        )
+        from apps.harness.engines.connections import EngineConnectionService
+
+        normalized_model = normalize_claude_model(raw_model or None)
+        effort = normalize_claude_effort(raw_effort or None)
+        # Resolve only to verify the owner's personal authorization. The token
+        # is never copied into a task or occurrence snapshot; the engine resolves
+        # the connection again for each actual run.
+        try:
+            EngineConnectionService().resolve(organization_id, owner_id)
+        except NotFoundError as exc:
+            raise ValueError(
+                "Connect your personal Claude authorization before scheduling Claude tasks"
+            ) from exc
+        return harness_id, normalized_model, effort, skills
+
     def create(
         self,
         *,
@@ -102,33 +179,16 @@ class ScheduledTaskService:
             recurrence=recurrence,
             weekdays=weekdays,
         )
-        from apps.harness.providers.models_catalog import normalize_reasoning_effort
-
-        raw_effort = values.get("reasoning_effort", "")
-        raw_model = values.get("model", "")
-        if not isinstance(raw_effort, str) or not isinstance(raw_model, str):
-            raise ValueError("model and reasoning_effort must be strings")
-        effort = normalize_reasoning_effort(raw_effort)
-        model = raw_model.strip()
-        skills = self._validate_skill_ids(values.get("skill_ids"))
-        from apps.harness.harness_service import HarnessSession, resolve_skill_bodies
-
-        if skills:
-            resolve_skill_bodies(
-                skills, user_id=owner_id, organization_id=organization_id
-            )
-        # Validate current model/provider availability without creating a throwaway
-        # persisted chat; empty model/effort remains an agent-default reference.
-        validation_session = HarnessSession(
-            workspace_id=workspace.id,
+        harness_id, model, effort, skills = self._validate_engine_config(
             organization_id=organization_id,
+            owner_id=owner_id,
+            workspace_id=workspace.id,
             mode=mode,
-            agent_name=mode,
-            model=model,
-            reasoning_effort=effort,
-            skill_ids=skills,
+            harness_id=values.get("harness_id", "native"),
+            model=values.get("model", ""),
+            reasoning_effort=values.get("reasoning_effort", ""),
+            skill_ids=values.get("skill_ids"),
         )
-        self._harness().validate_provider_for_run(organization_id, validation_session)
         return self.repository.create(
             organization_id=organization_id,
             owner_id=owner_id,
@@ -138,6 +198,7 @@ class ScheduledTaskService:
             mode=mode,
             model=model,
             reasoning_effort=effort,
+            harness_id=harness_id,
             skill_ids=skills,
             recurrence=recurrence,
             weekdays=weekdays,
@@ -154,6 +215,7 @@ class ScheduledTaskService:
             "mode",
             "model",
             "reasoning_effort",
+            "harness_id",
             "skill_ids",
             "recurrence",
             "weekdays",
@@ -162,7 +224,10 @@ class ScheduledTaskService:
             "enabled",
         }
         changes = {key: value for key, value in values.items() if key in allowed}
-        combined = {key: getattr(task, key) for key in allowed}
+        combined = {
+            key: getattr(task, key, "native" if key == "harness_id" else None)
+            for key in allowed
+        }
         combined.update(changes)
         if "name" in changes:
             if not isinstance(changes["name"], str):
@@ -192,41 +257,30 @@ class ScheduledTaskService:
             combined["mode"] = changes["mode"]
         if "mode" in changes and changes["mode"] not in {"plan", "build"}:
             raise ValueError("mode must be plan or build")
-        if "model" in changes and not isinstance(changes["model"], str):
-            raise ValueError("model must be a string")
         if "model" in changes:
+            if not isinstance(changes["model"], str):
+                raise ValueError("model must be a string")
             changes["model"] = changes["model"].strip()
             combined["model"] = changes["model"]
-        if "reasoning_effort" in changes and not isinstance(
-            changes["reasoning_effort"], str
-        ):
-            raise ValueError("reasoning_effort must be a string")
         if "reasoning_effort" in changes:
-            from apps.harness.providers.models_catalog import normalize_reasoning_effort
-
-            changes["reasoning_effort"] = normalize_reasoning_effort(
-                changes["reasoning_effort"]
-            )
+            if not isinstance(changes["reasoning_effort"], str):
+                raise ValueError("reasoning_effort must be a string")
+            changes["reasoning_effort"] = changes["reasoning_effort"].strip()
             combined["reasoning_effort"] = changes["reasoning_effort"]
-        if {"mode", "model", "reasoning_effort"} & changes.keys():
-            from apps.harness.harness_service import HarnessSession
-
-            validation_session = HarnessSession(
-                workspace_id=task.workspace_id,
-                organization_id=task.organization_id,
-                mode=combined.get("mode", task.mode),
-                agent_name=combined.get("mode", task.mode),
-                model=combined.get("model", task.model) or "",
-                reasoning_effort=combined.get("reasoning_effort", task.reasoning_effort)
-                or "",
-                skill_ids=combined.get("skill_ids", task.skill_ids) or [],
-            )
-            self._harness().validate_provider_for_run(
-                task.organization_id, validation_session
-            )
+        if "harness_id" in changes:
+            changes["harness_id"] = self._normalize_harness_id(changes["harness_id"])
+            combined["harness_id"] = changes["harness_id"]
+            if changes["harness_id"] != getattr(task, "harness_id", "native"):
+                # Model IDs and effort enums are engine-specific. Do not carry
+                # one engine's explicit settings into the other by accident.
+                if "model" not in changes:
+                    combined["model"] = ""
+                if "reasoning_effort" not in changes:
+                    combined["reasoning_effort"] = ""
         if "skill_ids" in changes:
             changes["skill_ids"] = self._validate_skill_ids(changes["skill_ids"])
-            if changes["skill_ids"]:
+            combined["skill_ids"] = changes["skill_ids"]
+            if combined["harness_id"] == "native" and changes["skill_ids"]:
                 from apps.harness.harness_service import resolve_skill_bodies
 
                 resolve_skill_bodies(
@@ -234,6 +288,29 @@ class ScheduledTaskService:
                     user_id=task.owner_id,
                     organization_id=task.organization_id,
                 )
+        validate_engine = bool(
+            {"mode", "model", "reasoning_effort", "harness_id"} & changes.keys()
+        ) or ("skill_ids" in changes and combined["harness_id"] == "claude")
+        if validate_engine:
+            harness_id, model, effort, skills = self._validate_engine_config(
+                organization_id=task.organization_id,
+                owner_id=task.owner_id,
+                workspace_id=task.workspace_id,
+                mode=combined.get("mode", task.mode),
+                harness_id=combined.get("harness_id", getattr(task, "harness_id", "native")),
+                model=combined.get("model", task.model) or "",
+                reasoning_effort=(
+                    combined.get("reasoning_effort", task.reasoning_effort) or ""
+                ),
+                skill_ids=combined.get("skill_ids", task.skill_ids) or [],
+            )
+            changes.update(
+                harness_id=harness_id,
+                model=model,
+                reasoning_effort=effort,
+                skill_ids=skills,
+            )
+            combined.update(changes)
         if "enabled" in changes:
             if not isinstance(changes["enabled"], bool):
                 raise ValueError("enabled must be a boolean")
@@ -635,6 +712,7 @@ class ScheduledTaskService:
             "reasoning_effort": snapshot.get(
                 "reasoning_effort", task.reasoning_effort
             ),
+            "harness_id": snapshot.get("harness_id", getattr(task, "harness_id", "native")),
             "skill_ids": snapshot.get("skill_ids", list(task.skill_ids or [])),
         }
         return SimpleNamespace(**values)
@@ -643,16 +721,22 @@ class ScheduledTaskService:
         self, task: ScheduledTask, run: ScheduledTaskRun, service: HarnessService
     ) -> ScheduledTaskRun:
         """Create, persist, and admit a chat before exposing cancellation."""
-        session = await sync_to_async(service.create_session)(
-            workspace_id=task.workspace_id,
-            organization_id=task.organization_id,
-            prompt=task.prompt,
-            mode=task.mode,
-            model=task.model or "",
-            reasoning_effort=task.reasoning_effort or "",
-            skill_ids=list(task.skill_ids or []),
-            user_id=task.owner_id,
-        )
+        harness_id = getattr(task, "harness_id", "native")
+        session_values = {
+            "workspace_id": task.workspace_id,
+            "organization_id": task.organization_id,
+            "prompt": task.prompt,
+            "mode": task.mode,
+            "model": task.model or "",
+            "reasoning_effort": task.reasoning_effort or "",
+            "skill_ids": list(task.skill_ids or []),
+            "user_id": task.owner_id,
+        }
+        # Native remains the backwards-compatible create_session default; the
+        # non-default selector is forwarded explicitly to engines supporting it.
+        if harness_id != "native":
+            session_values["harness_id"] = harness_id
+        session = await sync_to_async(service.create_session)(**session_values)
         run = await sync_to_async(self.repository.update_run)(run, session=session)
         try:
             assistant = await service.start_run(

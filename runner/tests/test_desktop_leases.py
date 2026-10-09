@@ -45,6 +45,55 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.store.renew("one", "epoch", 1, 180)
 
+    async def test_agent_lease_can_reserve_renew_release_without_desktop_stop(self):
+        manager = self.manager()
+        intent = {
+            "lease_id": "agent-owner",
+            "kind": "agent",
+            "owner_id": "agent-run-1",
+            "epoch": "epoch",
+            "revision": 1,
+        }
+        reserved = await manager.desktop_action(self.ws, "reserve", intent)
+        self.assertEqual(reserved["lease_state"], "reserved")
+        renewed = await manager.desktop_action(self.ws, "renew", intent)
+        self.assertEqual(renewed["lease_state"], "reserved")
+        with self.assertRaisesRegex(ValueError, "process ownership only"):
+            await manager.desktop_action(self.ws, "hold", intent)
+        with self.assertRaisesRegex(ValueError, "cannot be activated"):
+            await self.store.activate("agent-owner", "epoch", 1)
+
+        result = await manager.desktop_action(self.ws, "release", intent)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["lease_state"], "released")
+        self.assertFalse(result["stopped"])
+        manager._stop_desktop_process.assert_not_awaited()
+        manager._ensure_desktop_process_locked.assert_not_awaited()
+
+    async def test_agent_release_does_not_require_live_workspace_lookup(self):
+        manager = self.manager()
+        intent = {
+            "lease_id": "agent-gone",
+            "kind": "agent",
+            "owner_id": "agent-run",
+            "epoch": "epoch",
+            "revision": 1,
+        }
+        await manager.desktop_action(self.ws, "reserve", intent)
+        manager._get_cached = lambda _: self.fail("Agent release looked up workspace")
+        result = await manager.desktop_action(self.ws, "release", intent)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["lease_state"], "released")
+        manager._stop_desktop_process.assert_not_awaited()
+
+    async def test_mcp_release_preserves_last_desktop_stop(self):
+        manager = self.manager()
+        intent = {**self.intent(), "lease_id": "mcp-owner"}
+        await manager.desktop_action(self.ws, "hold", intent)
+        result = await manager.desktop_action(self.ws, "release", intent)
+        self.assertTrue(result["ok"])
+        manager._stop_desktop_process.assert_awaited_once()
+
     async def test_epoch_and_identity_fences(self):
         await self.reserve()
         for kwargs in (

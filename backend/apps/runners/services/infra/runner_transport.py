@@ -149,6 +149,7 @@ class RunnerTransportMixin:
             "harness:list_result",
             "harness:stat_result",
             "harness:desktop_action_result",
+            "workspace:artifact_ensure_result",
         }
         if event not in harness_events:
             return None

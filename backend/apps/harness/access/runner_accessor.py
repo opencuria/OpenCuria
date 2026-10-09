@@ -1843,6 +1843,29 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         _ = state
         return RunnerByteStream(self, self.workspace_id, connection_id)
 
+    async def ensure_runtime_artifact(
+        self, artifact_id: str, version: str
+    ) -> dict[str, Any]:
+        """Provision an allowlisted runner artifact, with correlated ownership."""
+        if not artifact_id or not version or len(artifact_id) > 64 or len(version) > 64:
+            raise ValueError("Invalid runtime artifact identity")
+        request_id = uuid.uuid4().hex
+        result = await self._await_result(
+            request_id,
+            "workspace:artifact_ensure",
+            {
+                "workspace_id": self.workspace_id,
+                "request_id": request_id,
+                "artifact_id": artifact_id,
+                "version": version,
+            },
+            600.0,
+        )
+        self._raise_for_error(result, "workspace:artifact_ensure")
+        if result.get("ok") is not True or result.get("version") != version:
+            raise RunnerAccessorError("Runtime artifact provisioning was not confirmed")
+        return result
+
     async def open_process(
         self,
         command: list[str],

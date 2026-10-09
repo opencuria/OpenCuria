@@ -688,7 +688,8 @@ class DesktopManager:
                 )
             row = await self.lease_store.mark_closing(lease_id)
             if (
-                row["activated"]
+                row["kind"] != "agent"
+                and row["activated"]
                 and not self._legacy_mode
                 and workspace_id not in self._desktop_sessions
                 and row["instance_id"] == self._get_cached(workspace_id).instance_id
@@ -699,11 +700,15 @@ class DesktopManager:
                 self._desktop_sessions[workspace_id] = DesktopSession(
                     workspace_id, row["instance_id"]
                 )
+        # Agent leases own only their process streams; do not inspect runtime
+        # status or infer authority over the workspace desktop during release.
         # Stream shutdown can acquire runtime/workspace locks: never await it
         # while holding the desktop lock. Closing forbids holds/renew/spawn.
-        proven_stopped = await self._instance_proven_stopped(
-            workspace_id, row["instance_id"]
-        )
+        proven_stopped = False
+        if row["kind"] != "agent":
+            proven_stopped = await self._instance_proven_stopped(
+                workspace_id, row["instance_id"]
+            )
         closed = row["state"] in {"released", "expired"}
         if not closed:
             try:
@@ -732,14 +737,25 @@ class DesktopManager:
             if proven_stopped and session and session.instance_id == row["instance_id"]:
                 self._desktop_sessions.pop(workspace_id, None)
                 session = None
-            current_instance = self._get_cached(workspace_id).instance_id
-            if row["instance_id"] != current_instance and not proven_stopped:
+            current_instance = (
+                self._get_cached(workspace_id).instance_id
+                if row["kind"] != "agent"
+                else row["instance_id"]
+            )
+            if (
+                row["kind"] != "agent"
+                and row["instance_id"] != current_instance
+                and not proven_stopped
+            ):
                 closed = False
             if session and session.instance_id != row["instance_id"]:
                 session = None  # Never stop a replacement guest's display.
-            own_membership = int(bool(row["activated"]))
+            own_membership = (
+                int(bool(row["activated"])) if row["kind"] != "agent" else 0
+            )
             if (
-                closed
+                row["kind"] != "agent"
+                and closed
                 and summary["holder_count"] == own_membership
                 and session is not None
             ):
@@ -1651,6 +1667,13 @@ class DesktopManager:
         payload = args or {}
         log = logger.bind(workspace_id=str(workspace_id), desktop_action=action)
 
+        if action == "activate":
+            if payload.get("kind") == "agent":
+                raise ValueError("Agent desktop leases are process ownership only")
+            raise ValueError("Desktop lease activation is only supported through hold")
+        if action == "hold" and payload.get("kind") == "agent":
+            raise ValueError("Agent desktop leases are process ownership only")
+
         if action in {"binding", "reserve", "renew", "lease_status"} or (
             action in {"hold", "release"} and payload.get("lease_id")
         ):
@@ -2256,7 +2279,6 @@ class DesktopManager:
 
 
 __all__ = [
-    "DesktopManager",
     "COMPUTER_USE_RECORD_DIR",
     "DEFAULT_DESKTOP_HEIGHT",
     "DEFAULT_DESKTOP_WIDTH",
@@ -2274,4 +2296,5 @@ __all__ = [
     "_CLICK_BUTTONS",
     "_RUN_ID_RE",
     "_SCROLL_BUTTONS",
+    "DesktopManager",
 ]

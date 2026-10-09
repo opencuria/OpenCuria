@@ -347,6 +347,14 @@ class WorkspaceAccessor(abc.ABC):
         Returns ``{"process_id": ..., "deleted": True}``.
         """
 
+    async def ensure_runtime_artifact(
+        self, artifact_id: str, version: str
+    ) -> dict[str, Any]:
+        """Provision a trusted, pinned executable inside this workspace."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support runtime artifacts"
+        )
+
     async def open_process(
         self,
         command: list[str],

@@ -156,7 +156,7 @@ class DesktopLeaseStore:
         ttl: float,
     ) -> dict:
         """Reserve without activation; enforce identity/revision tombstones."""
-        if kind not in {"viewer", "computeruse", "mcp"}:
+        if kind not in {"viewer", "computeruse", "mcp", "agent"}:
             raise ValueError("Invalid desktop lease kind")
         if not lease_id or not owner_id or not epoch:
             raise ValueError("Desktop lease identity is required")
@@ -266,6 +266,8 @@ class DesktopLeaseStore:
                 or row["expires_at"] <= time.time()
             ):
                 raise ValueError("Desktop lease ended or stale")
+            if row["kind"] == "agent":
+                raise ValueError("Agent desktop leases cannot be activated")
             db.execute(
                 "UPDATE desktop_leases SET activated=1,state='held' WHERE lease_id=?",
                 (lease_id,),

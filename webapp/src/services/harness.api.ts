@@ -20,6 +20,7 @@ import type {
   HarnessSessionCreateIn,
   HarnessSessionMode,
   HarnessSessionPatchIn,
+  HarnessId,
   HarnessTodo,
 } from '@/types/harness'
 import type { ProviderId, ProviderModel } from '@/lib/harnessModels'
@@ -64,6 +65,33 @@ export interface HarnessProviderConfigIn {
   default_effort?: string
   small_effort?: string
   computer_use_effort?: string
+}
+
+export const HARNESS_ENGINE_CONNECTION_CHANGED_EVENT = 'harness:engine-connection-changed'
+
+export interface HarnessEngine {
+  id: HarnessId
+  name: 'OpenCuria' | 'Claude Agent'
+  modes: HarnessSessionMode[]
+  connected: boolean
+}
+
+export type HarnessEngineOut = HarnessEngine
+
+/** Safe personal Claude Agent connection metadata; never contains a token. */
+export interface ClaudeConnection {
+  id: string
+  auth_type: 'api_token' | 'subscription_token'
+  label: string
+  connected: boolean
+  created_at?: string
+  updated_at?: string
+}
+
+export interface ClaudeConnectionUpsertIn {
+  auth_type: 'api_token' | 'subscription_token'
+  token: string
+  label?: string
 }
 
 export interface ProviderConnection {
@@ -139,7 +167,7 @@ export interface ChatGptOAuthStatus {
   account_id?: string
 }
 
-export interface HarnessSessionOut extends HarnessSession {}
+export type HarnessSessionOut = HarnessSession
 
 export interface HarnessPartsResponse {
   session: HarnessSession
@@ -154,6 +182,26 @@ export interface HarnessPermissionOut {
   remember: string
 }
 
+export function listHarnessEngines(): Promise<HarnessEngine[]> {
+  return get<HarnessEngine[]>('/harness/engines/')
+}
+
+export function getClaudeConnection(): Promise<ClaudeConnection | null> {
+  return get<ClaudeConnection | null>('/harness/engines/claude/connection/')
+}
+
+export function saveClaudeConnection(data: ClaudeConnectionUpsertIn): Promise<ClaudeConnection> {
+  return put<ClaudeConnection>('/harness/engines/claude/connection/', data)
+}
+
+export function deleteClaudeConnection(): Promise<void> {
+  return del<void>('/harness/engines/claude/connection/')
+}
+
+export function listClaudeModels(): Promise<ProviderModel[]> {
+  return get<ProviderModel[]>('/harness/engines/claude/models/')
+}
+
 export function listHarnessSessions(workspaceId: string): Promise<HarnessSession[]> {
   return get<HarnessSession[]>(`/workspaces/${workspaceId}/harness/sessions/`)
 }
@@ -162,14 +210,16 @@ export function createHarnessSession(
   workspaceId: string,
   data: HarnessSessionCreateIn,
 ): Promise<HarnessSession> {
-  return post<HarnessSession>(`/workspaces/${workspaceId}/harness/sessions/`, {
+  const payload: HarnessSessionCreateIn = {
     prompt: data.prompt,
     agent_name: data.agent_name ?? 'build',
     mode: data.mode ?? 'build',
     model: data.model ?? '',
     reasoning_effort: data.reasoning_effort ?? '',
     skill_ids: data.skill_ids ?? [],
-  })
+    harness_id: data.harness_id ?? 'native',
+  }
+  return post<HarnessSession>(`/workspaces/${workspaceId}/harness/sessions/`, payload)
 }
 
 export function sendHarnessMessage(

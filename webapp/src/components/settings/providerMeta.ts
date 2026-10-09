@@ -7,8 +7,11 @@ import { Bot, Cloud, Globe, Plug } from '@lucide/vue'
 import type { ProviderId } from '@/lib/harnessModels'
 import type { ProviderConnection } from '@/services/harness.api'
 
+/** Settings-only Claude connection row, not a native catalog ProviderId. */
+export type SettingsProviderId = ProviderId | 'claude-agent'
+
 export interface ProviderMeta {
-  id: ProviderId
+  id: SettingsProviderId
   name: string
   /** Shown on the provider row while not connected. */
   description: string
@@ -56,10 +59,20 @@ export const PROVIDER_META: ProviderMeta[] = [
       'Disconnect this endpoint? The harness will stop using this base URL and its models.',
     icon: Plug,
   },
+  {
+    id: 'claude-agent',
+    name: 'Claude Agent',
+    description: 'Run the separate Claude Agent harness with your personal Anthropic connection.',
+    dialogDescription:
+      'Use your own Anthropic API token or subscription token. Usage is billed or governed by Anthropic.',
+    disconnectConfirm:
+      'Disconnect Claude Agent? Its personal Anthropic connection will be removed.',
+    icon: Bot,
+  },
 ]
 
 /** Look up presentation metadata for a provider id. */
-export function providerMeta(id: ProviderId | null): ProviderMeta | undefined {
+export function providerMeta(id: SettingsProviderId | null): ProviderMeta | undefined {
   return PROVIDER_META.find((meta) => meta.id === id)
 }
 

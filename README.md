@@ -307,6 +307,10 @@ membership. Run backend migrations before using this setting.
 
 OAuth-capable HTTP MCP plugins (including the seeded Notion plugin) can connect named personal or organization accounts from **Settings → Credentials**. Configure the fixed HTTPS callback and frontend return URLs on the backend before enabling this in production. See [MCP OAuth setup and operations](./docs/mcp-oauth.md) for required environment configuration, workspace attachment, security notes, and provider requirements.
 
+## Claude Agent
+
+OpenCuria can run the pinned Claude Code CLI as a separate harness inside a workspace, using your own Anthropic API or authorized subscription token. See the [Claude Agent guide](./docs/claude-agent.md) for setup, runtime details, data handling, and test coverage.
+
 ## Managed desktop resources
 
 See [Managed desktop resources](./docs/managed-desktop-resources.md) for plugin policy and rollout, and the [backend](./backend/README.md) and [runner](./runner/README.md) component guides.

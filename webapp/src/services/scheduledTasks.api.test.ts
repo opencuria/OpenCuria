@@ -10,9 +10,19 @@ import {
 } from './scheduledTasks.api'
 
 const taskInput = {
-  name: 'Weekday review', workspace_id: 'ws-1', prompt: 'Review open issues', mode: 'plan' as const,
-  model: '', reasoning_effort: '', skill_ids: [], recurrence: 'weekly' as const,
-  weekdays: [0, 1, 2, 3, 4], local_time: '09:30', timezone_name: 'Europe/Berlin', enabled: true,
+  name: 'Weekday review',
+  workspace_id: 'ws-1',
+  prompt: 'Review open issues',
+  mode: 'plan' as const,
+  harness_id: 'native' as const,
+  model: '',
+  reasoning_effort: '',
+  skill_ids: [],
+  recurrence: 'weekly' as const,
+  weekdays: [0, 1, 2, 3, 4],
+  local_time: '09:30',
+  timezone_name: 'Europe/Berlin',
+  enabled: true,
 }
 
 afterEach(() => vi.restoreAllMocks())
@@ -32,7 +42,9 @@ describe('scheduled tasks API', () => {
 
   it('supports patch, manual run, history and delete actions', async () => {
     const patch = vi.spyOn(api, 'patch').mockResolvedValue({ id: 'task-1' })
-    await expect(updateScheduledTask('task-1', { enabled: false })).resolves.toEqual({ id: 'task-1' })
+    await expect(updateScheduledTask('task-1', { enabled: false })).resolves.toEqual({
+      id: 'task-1',
+    })
     expect(patch).toHaveBeenCalledWith('/scheduled-tasks/task-1/', { enabled: false })
     patch.mockRestore()
 

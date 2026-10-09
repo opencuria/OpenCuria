@@ -53,8 +53,20 @@ vi.mock('@/stores/skills', () => ({
 const HarnessChatInputStub = {
   name: 'HarnessChatInput',
   template: '<div data-testid="harness-chat-input"><div data-testid="composer-card" /></div>',
-  props: ['disabled', 'workspaceId', 'sessionId', 'uploadDrag', 'stoppable', 'stopOnly'],
-  emits: ['prefill', 'send', 'stop'],
+  props: [
+    'disabled',
+    'workspaceId',
+    'sessionId',
+    'uploadDrag',
+    'stoppable',
+    'stopOnly',
+    'harnessId',
+    'engineLocked',
+    'mode',
+    'model',
+    'effort',
+  ],
+  emits: ['prefill', 'send', 'stop', 'update:harnessId', 'update:mode'],
   methods: {
     setPrompt(prompt: string) {
       ;(this as unknown as { $emit: (event: string, ...args: unknown[]) => void }).$emit(
@@ -215,6 +227,127 @@ describe('HarnessChatPanel', () => {
     expect(titles).not.toContain('Open file explorer')
     expect(titles).not.toContain('Open terminal')
     expect(titles).not.toContain('Open desktop')
+  })
+
+  it('forwards a selected engine and its skill ids when creating a session', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: { workspaceId: 'ws-1', canPrompt: true },
+      global: { plugins: [router], stubs },
+    })
+    await flushPromises()
+    const store = useHarnessStore()
+    const create = vi
+      .spyOn(store, 'createSession')
+      .mockResolvedValue(makeSession({ harness_id: 'claude' }))
+    const input = wrapper.findComponent(HarnessChatInputStub)
+    input.vm.$emit('update:harnessId', 'claude')
+    input.vm.$emit('send', 'prompt', 'plan', 'opus', ['skill-1'], 'low', 'claude')
+    await flushPromises()
+
+    expect(create).toHaveBeenCalledWith(
+      'ws-1',
+      'prompt',
+      'plan',
+      'opus',
+      ['skill-1'],
+      'low',
+      'claude',
+    )
+  })
+
+  it('hydrates a Claude session fetched on load before native composer defaults can replace it', async () => {
+    const listSessions = vi.mocked(listHarnessSessions)
+    listSessions.mockResolvedValueOnce([
+      makeSession({
+        harness_id: 'claude',
+        mode: 'plan',
+        model: 'opus',
+        reasoning_effort: 'low',
+      }),
+    ])
+    await router.push('/workspaces/ws-1?session=session-root')
+    const wrapper = mount(HarnessChatPanel, {
+      props: { workspaceId: 'ws-1', canPrompt: true },
+      global: { plugins: [router], stubs },
+    })
+    await flushPromises()
+    const input = wrapper.findComponent(HarnessChatInputStub)
+    expect(input.props()).toMatchObject({
+      harnessId: 'claude',
+      engineLocked: true,
+      mode: 'plan',
+      model: 'opus',
+      effort: 'low',
+    })
+    expect(listSessions).toHaveBeenCalledTimes(1)
+
+    const session = useHarnessStore().activeSession!
+    session.status = 'busy'
+    await wrapper.vm.$nextTick()
+    expect(listSessions).toHaveBeenCalledTimes(1)
+    expect(useHarnessStore().modelInput).toBe('opus')
+  })
+
+  it('keeps follow-up messages on their loaded session engine', async () => {
+    vi.mocked(listHarnessSessions).mockResolvedValueOnce([makeSession({ harness_id: 'claude' })])
+    await router.push('/workspaces/ws-1?session=session-root')
+    const wrapper = mount(HarnessChatPanel, {
+      props: { workspaceId: 'ws-1', canPrompt: true },
+      global: { plugins: [router], stubs },
+    })
+    await flushPromises()
+    const store = useHarnessStore()
+    const send = vi.spyOn(store, 'sendMessage').mockResolvedValue(undefined)
+    const create = vi.spyOn(store, 'createSession')
+    wrapper
+      .findComponent(HarnessChatInputStub)
+      .vm.$emit('send', 'follow up', 'plan', 'sonnet', ['skill-1'], 'high', 'native')
+    await flushPromises()
+
+    expect(send).toHaveBeenCalledWith('session-root', 'follow up', {
+      mode: 'plan',
+      model: 'sonnet',
+      skillIds: ['skill-1'],
+      reasoningEffort: 'high',
+    })
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('clears Claude model state when starting a new native conversation', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: { workspaceId: 'ws-1', canPrompt: true },
+      global: { plugins: [router], stubs },
+    })
+    await flushPromises()
+    const store = useHarnessStore()
+    store.sessions = [
+      makeSession({ harness_id: 'claude', model: 'sonnet', reasoning_effort: 'high' }),
+    ]
+    store.setActiveSession('session-root')
+    await wrapper.vm.$nextTick()
+    expect(store.modelInput).toBe('sonnet')
+
+    store.setActiveSession(null)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findComponent(HarnessChatInputStub).props('harnessId')).toBe('native')
+    expect(store.modelInput).toBe('')
+    expect(store.effortInput).toBe('')
+  })
+
+  it('restores a Claude session engine and prevents changing its fixed engine', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: { workspaceId: 'ws-1', canPrompt: true },
+      global: { plugins: [router], stubs },
+    })
+    await flushPromises()
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ harness_id: 'claude', model: 'sonnet' })]
+    store.setActiveSession('session-root')
+    await wrapper.vm.$nextTick()
+
+    const input = wrapper.findComponent(HarnessChatInputStub)
+    expect(input.props('harnessId')).toBe('claude')
+    expect(input.props('engineLocked')).toBe(true)
   })
 
   it('hides the input when viewing a subagent session', async () => {

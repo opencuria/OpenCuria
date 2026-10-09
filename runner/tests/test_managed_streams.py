@@ -9,8 +9,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
 from src.runtime.base import ProcessHandle
-from src.runtime.managed_process import managed_argv, managed_close_argv
+from src.runtime.managed_process import (
+    ISOLATED_AGENT_CONFIG_ROOT,
+    _isolated_agent_env,
+    isolated_agent_env_preamble,
+    managed_argv,
+    managed_close_argv,
+)
 from src.services.sessions.streams import StreamManager
 
 
@@ -40,6 +47,8 @@ class LocalRuntime:
     def __init__(self):
         self.fail_close = False
         self.gate = None
+        self.last_argv = None
+        self.config_root = ISOLATED_AGENT_CONFIG_ROOT
 
     async def probe_managed_token(self, instance_id):
         return current_token()
@@ -53,21 +62,35 @@ class LocalRuntime:
         *,
         control_path=None,
         expected_token=None,
+        isolated_env=False,
+        isolated_home=None,
     ):
         if self.gate:
             await self.gate.wait()
+        argv = managed_argv(
+            control_path,
+            workdir,
+            env,
+            command,
+            expected_token=expected_token or current_token(),
+            isolated_env=isolated_env,
+            isolated_home=isolated_home,
+            config_root=self.config_root,
+        )
+        self.last_argv = argv
         process = await asyncio.create_subprocess_exec(
-            *managed_argv(
-                control_path,
-                workdir,
-                env,
-                command,
-                expected_token=expected_token or current_token(),
-            ),
+            *argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        if isolated_env:
+            from src.runtime.managed_process import isolated_agent_env_preamble
+
+            process.stdin.write(
+                isolated_agent_env_preamble(env, config_root=self.config_root)
+            )
+            await process.stdin.drain()
         return ProcessHandle(instance_id, process, {"control_path": control_path})
 
     async def close_managed_process(self, instance_id, control_path):
@@ -506,9 +529,9 @@ async def test_supervisor_drops_stdin_while_descendant_lives(tmp_path):
             [
                 sys.executable,
                 "-c",
-                "import subprocess,sys; subprocess.Popen([sys.executable,'-c',"
+                ("import subprocess,sys; subprocess.Popen([sys.executable,'-c',"
                 "'import time; time.sleep(90)'],stdin=subprocess.DEVNULL); "
-                "print('ready',flush=True)",
+                "print('ready',flush=True)"),
             ],
             expected_token=current_token(),
         ),
@@ -549,6 +572,7 @@ async def test_qemu_paused_and_shutting_down_not_dead():
     from unittest.mock import Mock
 
     import libvirt
+
     from src.runtime.qemu_runtime import QemuRuntime
 
     runtime = object.__new__(QemuRuntime)
@@ -758,3 +782,173 @@ async def test_probe_completion_rechecks_ended_lease(tmp_path):
     with pytest.raises(ValueError, match="during guest probe"):
         await m.stream_start_process(workspace, "ended-probe", ["true"], owner=owner)
     assert await m.stream_record("ended-probe") is None
+
+
+@pytest.mark.asyncio
+async def test_agent_stream_private_environment_ignores_workspace_credentials(
+    tmp_path, monkeypatch
+):
+    """Agent child accepts SDK env, excludes ambient auth and keeps stdin open."""
+    workspace = uuid.uuid4()
+    lease_id = str(uuid.uuid4())
+    epoch = str(uuid.uuid4())
+    runtime = LocalRuntime()
+    runtime.config_root = str(tmp_path / "claude-config")
+    (Path(runtime.config_root) / str(workspace) / "config").mkdir(parents=True)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "workspace-api-key")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "workspace-oauth")
+    info = SimpleNamespace(instance_id="instance")
+
+    class AgentLeases:
+        async def get(self, _lease_id):
+            return {
+                "kind": "agent",
+                "epoch": epoch,
+                "expires_at": time.time() + 180,
+                "state": "reserved",
+                "workspace_id": str(workspace),
+                "instance_id": "instance",
+            }
+
+    manager = StreamManager(
+        get_cached=lambda _: info,
+        get_runtime=lambda _: runtime,
+        state_dir=tmp_path,
+        lease_store=AgentLeases(),
+        epoch=epoch,
+    )
+    session = await manager.stream_start_process(
+        workspace,
+        "agent-private-env",
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json,os,sys; "
+                "first=sys.stdin.readline().strip(); "
+                "second=sys.stdin.readline().strip(); "
+                "print(json.dumps({'first':first,'second':second,"
+                "'env':{k:v for k,v in os.environ.items() "
+                "if k.startswith('ANTHROPIC_') or k.startswith('CLAUDE_') "
+                "or k.startswith('DISABLE_') or k.startswith('ENABLE_') "
+                "or k.startswith('MAX_')}}))"
+            ),
+        ],
+        workdir="/workspace",
+        env={
+            "ANTHROPIC_API_KEY": "subscription-key",
+            "CLAUDE_CONFIG_DIR": f"{runtime.config_root}/{workspace}/config",
+            "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
+            "CLAUDE_AGENT_SDK_VERSION": "0.2.164",
+            "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
+            "DISABLE_UPDATES": "1",
+            "DISABLE_TELEMETRY": "1",
+            "DISABLE_ERROR_REPORTING": "1",
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+            "DISABLE_AUTOUPDATER": "1",
+            "CLAUDE_CODE_DISABLE_NON_ESSENTIAL_MODEL_CALLS": "0",
+            "CLAUDE_CODE_DISABLE_NON_ESSENTIAL_TRAFFIC": "1",
+            "ENABLE_CLAUDEAI_MCP_SERVERS": "0",
+            "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING": "1",
+            "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "4",
+            "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "8",
+            "MAX_CONCURRENT_SUBAGENTS": "8",
+        },
+        owner={"lease_id": lease_id, "epoch": epoch},
+    )
+    handle = session.handle.handle
+    config = runtime.last_argv[runtime.last_argv.index("start") + 1]
+    assert "subscription-key" not in config
+    assert "workspace-api-key" not in config
+    handle.stdin.write(b'{"type":"sdk-initialize"}\n')
+    await handle.stdin.drain()
+    handle.stdin.write(b'{"type":"sdk-next-turn"}\n')
+    await handle.stdin.drain()
+    output = await asyncio.wait_for(handle.stdout.readline(), 10)
+    values = json.loads(output)
+    assert values["env"]["ANTHROPIC_API_KEY"] == "subscription-key"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in values["env"]
+    assert values["env"]["CLAUDE_CODE_ENTRYPOINT"] == "sdk-py"
+    assert values["env"]["CLAUDE_AGENT_SDK_VERSION"] == "0.2.164"
+    assert values["env"]["CLAUDE_CONFIG_DIR"] == (
+        f"{runtime.config_root}/{workspace}/config"
+    )
+    assert values["env"]["DISABLE_AUTOUPDATER"] == "1"
+    assert values["env"]["CLAUDE_CODE_DISABLE_NON_ESSENTIAL_MODEL_CALLS"] == "0"
+    assert values["env"]["CLAUDE_CODE_DISABLE_NON_ESSENTIAL_TRAFFIC"] == "1"
+    assert values["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"] == "0"
+    assert values["env"]["CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING"] == "1"
+    assert values["env"]["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"] == "4"
+    assert values["env"]["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"] == "8"
+    assert values["env"]["MAX_CONCURRENT_SUBAGENTS"] == "8"
+    assert values["first"] == '{"type":"sdk-initialize"}'
+    assert values["second"] == '{"type":"sdk-next-turn"}'
+    await manager.stream_close("agent-private-env")
+
+
+@pytest.mark.parametrize("key", ["HOME", "PATH"])
+def test_isolated_agent_env_rejects_runner_owned_environment(key):
+    env = {
+        "ANTHROPIC_API_KEY": "private-key",
+        "CLAUDE_CONFIG_DIR": f"{ISOLATED_AGENT_CONFIG_ROOT}/{uuid.uuid4()}/config",
+        "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
+        "CLAUDE_AGENT_SDK_VERSION": "0.2.164",
+        "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
+        "DISABLE_UPDATES": "1",
+        "DISABLE_TELEMETRY": "1",
+        "DISABLE_ERROR_REPORTING": "1",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+        key: "/attacker/controlled",
+    }
+    with pytest.raises(ValueError, match="Unsupported environment variable"):
+        _isolated_agent_env(env)
+
+
+def test_isolated_agent_env_rejects_unmanaged_config_dir():
+    env = {
+        "ANTHROPIC_API_KEY": "private-key",
+        "CLAUDE_CONFIG_DIR": "/tmp/claude-config",
+        "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
+        "CLAUDE_AGENT_SDK_VERSION": "0.2.164",
+        "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
+        "DISABLE_UPDATES": "1",
+        "DISABLE_TELEMETRY": "1",
+        "DISABLE_ERROR_REPORTING": "1",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    }
+    with pytest.raises(ValueError, match="Claude config directory"):
+        _isolated_agent_env(env)
+
+
+def test_isolated_agent_env_requires_exactly_one_authentication_value():
+    env = {
+        "ANTHROPIC_API_KEY": "key",
+        "CLAUDE_CODE_OAUTH_TOKEN": "oauth",
+        "CLAUDE_CONFIG_DIR": f"{ISOLATED_AGENT_CONFIG_ROOT}/{uuid.uuid4()}/config",
+        "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
+        "CLAUDE_AGENT_SDK_VERSION": "0.2.164",
+        "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
+        "DISABLE_UPDATES": "1",
+        "DISABLE_TELEMETRY": "1",
+        "DISABLE_ERROR_REPORTING": "1",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    }
+    with pytest.raises(ValueError, match="Exactly one Claude authentication"):
+        _isolated_agent_env(env)
+
+
+def test_isolated_agent_config_root_is_testable_without_internal_workspace_state():
+    temp_root = "/tmp/opencuria-test-state/claude"
+    env = {
+        "ANTHROPIC_API_KEY": "private-key",
+        "CLAUDE_CONFIG_DIR": f"{temp_root}/{uuid.uuid4()}/config",
+        "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
+        "CLAUDE_AGENT_SDK_VERSION": "0.2.164",
+        "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
+        "DISABLE_UPDATES": "1",
+        "DISABLE_TELEMETRY": "1",
+        "DISABLE_ERROR_REPORTING": "1",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    }
+    assert _isolated_agent_env(env, config_root=temp_root) == env
+    assert len(isolated_agent_env_preamble(env, config_root=temp_root)) > 4

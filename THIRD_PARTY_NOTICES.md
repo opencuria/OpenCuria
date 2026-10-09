@@ -87,6 +87,48 @@ and the Agent-S contributors published the upstream work — is available at
 `http://www.apache.org/licenses/LICENSE-2.0`. A copy may also be found in
 the upstream repository (https://github.com/simular-ai/Agent-S).
 
+## Claude Agent SDK for Python
+
+The backend depends on the unmodified `claude-agent-sdk` Python distribution,
+pinned to **0.2.164** in `backend/requirements.txt`. The SDK is authored and
+copyrighted by Anthropic, PBC and is distributed under the **MIT License**.
+Its installed distribution contains `claude_agent_sdk-0.2.164.dist-info/licenses/LICENSE`;
+the upstream source and license are available at
+[anthropics/claude-agent-sdk-python](https://github.com/anthropics/claude-agent-sdk-python).
+The SDK package bundles the separate Claude Code CLI binary; that binary is
+Anthropic software, is not licensed by the SDK's MIT license, and is governed by
+Anthropic's applicable terms. The pinned CLI artifact and runtime details are
+documented in the [Claude Agent guide](./docs/claude-agent.md).
+
+The OpenCuria Claude transport and harness integration are independently written
+project code. No SDK source files are vendored into this repository.
+
+### Upstream SDK license text (MIT)
+
+```text
+MIT License
+
+Copyright (c) 2025 Anthropic, PBC
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## material-icon-theme (VS Code file/folder icons)
 
 The webapp bundles a small curated subset of colored file/folder SVGs

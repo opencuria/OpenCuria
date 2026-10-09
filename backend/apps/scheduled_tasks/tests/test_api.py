@@ -163,6 +163,82 @@ def test_local_time_stays_hhmm_across_task_endpoints(schedule_api_setup, monkeyp
     assert [item["id"] for item in history.json()] == [str(run.id)]
 
 
+def test_claude_harness_id_round_trips_through_api(schedule_api_setup, monkeypatch):
+    from apps.harness.engines.connections import EngineConnectionService
+    from apps.harness.harness_service import HarnessService
+    from apps.skills.models import Skill
+
+    monkeypatch.setattr(
+        HarnessService,
+        "validate_provider_for_run",
+        lambda self, organization_id, session, provider=None: "openrouter/test",
+    )
+    monkeypatch.setattr(
+        EngineConnectionService,
+        "resolve",
+        lambda self, organization_id, user_id, connection_id=None: object(),
+    )
+    org, owner, stranger, workspace = schedule_api_setup
+    skill = Skill.objects.create(
+        name="Scheduled Claude skill",
+        body="Use owner-specific context",
+        user=owner,
+        created_by=owner,
+    )
+    client = schedule_client(
+        owner,
+        org,
+        [APIKeyPermission.HARNESS_READ.value, APIKeyPermission.HARNESS_RUN.value],
+    )
+    response = client.post(
+        "/api/v1/scheduled-tasks/",
+        data={
+            "name": "Claude review",
+            "workspace_id": str(workspace.id),
+            "prompt": "Review changes",
+            "harness_id": "claude",
+            "recurrence": "daily",
+            "local_time": "09:00",
+            "timezone_name": "UTC",
+        },
+        content_type="application/json",
+    )
+    assert response.status_code == 201, response.content
+    assert response.json()["harness_id"] == "claude"
+    assert response.json()["model"] == "sonnet"
+    assert response.json()["reasoning_effort"] == "high"
+
+    with_skill = client.patch(
+        f"/api/v1/scheduled-tasks/{response.json()['id']}/",
+        data={"skill_ids": [str(skill.id)]},
+        content_type="application/json",
+    )
+    assert with_skill.status_code == 200, with_skill.content
+    assert with_skill.json()["skill_ids"] == [str(skill.id)]
+    foreign = Skill.objects.create(
+        name="Another user's skill",
+        body="Private context",
+        user=stranger,
+        created_by=stranger,
+    )
+    rejected = client.patch(
+        f"/api/v1/scheduled-tasks/{response.json()['id']}/",
+        data={"skill_ids": [str(foreign.id)]},
+        content_type="application/json",
+    )
+    assert rejected.status_code == 400
+    assert "not found or not accessible" in rejected.json()["detail"]
+
+    task_id = response.json()["id"]
+    updated = client.patch(
+        f"/api/v1/scheduled-tasks/{task_id}/",
+        data={"harness_id": "native"},
+        content_type="application/json",
+    )
+    assert updated.status_code == 200, updated.content
+    assert updated.json()["harness_id"] == "native"
+
+
 def test_create_requires_harness_run_permission(schedule_api_setup):
     org, owner, _, workspace = schedule_api_setup
     client = schedule_client(owner, org, [APIKeyPermission.HARNESS_READ.value])

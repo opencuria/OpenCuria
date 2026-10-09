@@ -367,6 +367,11 @@ class HarnessSessionRepository:
         reasoning_effort: str = "",
         parent_id: uuid.UUID | None = None,
         skill_ids: list[str] | None = None,
+        harness_id: str = "native",
+        connection_id: uuid.UUID | str | None = None,
+        created_by_id: int | None = None,
+        external_session_id: str = "",
+        engine_state: dict | None = None,
     ) -> HarnessSession:
         """Create a harness session bound to a workspace."""
         return HarnessSession.objects.create(
@@ -379,6 +384,11 @@ class HarnessSessionRepository:
             reasoning_effort=reasoning_effort or "",
             parent_id=parent_id,
             skill_ids=list(skill_ids or []),
+            harness_id=(harness_id or "native").strip(),
+            connection_id=connection_id,
+            created_by_id=created_by_id,
+            external_session_id=(external_session_id or "").strip(),
+            engine_state=dict(engine_state or {}),
             last_message_at=timezone.now(),
         )
 
@@ -393,6 +403,11 @@ class HarnessSessionRepository:
         model: str = "",
         reasoning_effort: str = "",
         skill_ids: list[str] | None = None,
+        harness_id: str = "native",
+        connection_id: uuid.UUID | str | None = None,
+        created_by_id: int | None = None,
+        external_session_id: str = "",
+        engine_state: dict | None = None,
     ) -> HarnessSession:
         """Create a root fork session (parent always None, fresh usage)."""
         return HarnessSession.objects.create(
@@ -405,6 +420,11 @@ class HarnessSessionRepository:
             reasoning_effort=reasoning_effort or "",
             parent_id=None,
             skill_ids=list(skill_ids or []),
+            harness_id=(harness_id or "native").strip(),
+            connection_id=connection_id,
+            created_by_id=created_by_id,
+            external_session_id=(external_session_id or "").strip(),
+            engine_state=dict(engine_state or {}),
             cost=0.0,
             tokens={},
             last_read_at=None,
@@ -641,6 +661,119 @@ class HarnessSessionRepository:
         return session
 
     @staticmethod
+    def finalize_owned_turn(
+        run_id: uuid.UUID,
+        owner_token: uuid.UUID,
+        *,
+        status: str,
+        finish: str,
+        error: str = "",
+        assistant_content: str | None = None,
+        engine_meta: dict | None = None,
+        session_usage: dict | None = None,
+        session_cost: float = 0.0,
+        tail_remainder: str = "",
+        now=None,
+    ) -> bool:
+        """Atomically settle the attempt, assistant shell and busy session.
+
+        Finalizers retain the owner's token after entering ``closing``. A
+        recovery worker rotates that token before takeover, so stale workers
+        cannot publish completion even when their CLI has returned late.
+        """
+        if status not in {
+            HarnessRunStatus.COMPLETED,
+            HarnessRunStatus.INTERRUPTED,
+            HarnessRunStatus.ERROR,
+        }:
+            raise ValueError("status must be terminal")
+        moment = now or timezone.now()
+        with transaction.atomic():
+            attempt = (
+                HarnessRun.objects.select_for_update()
+                .filter(
+                    id=run_id,
+                    owner_token=owner_token,
+                    status__in=(
+                        HarnessRunStatus.STARTING,
+                        HarnessRunStatus.RUNNING,
+                        HarnessRunStatus.CLOSING,
+                    ),
+                )
+                .first()
+            )
+            if attempt is None:
+                return False
+            changed = HarnessRun.objects.filter(
+                id=attempt.id,
+                owner_token=owner_token,
+                status__in=(
+                    HarnessRunStatus.STARTING,
+                    HarnessRunStatus.RUNNING,
+                    HarnessRunStatus.CLOSING,
+                ),
+            ).update(
+                status=status,
+                error="Engine run failed." if error else "",
+                heartbeat_at=moment,
+                completed_at=moment,
+            )
+            if not changed:
+                return False
+            message_updates = {
+                "finish": finish,
+                "error": error,
+                "completed_at": moment,
+            }
+            if assistant_content is not None:
+                message_updates["content"] = assistant_content
+            if engine_meta is not None:
+                message_updates["engine_meta"] = dict(engine_meta)
+            HarnessMessage.objects.filter(id=attempt.assistant_message_id).update(
+                **message_updates
+            )
+            session_updates = {
+                "status": HarnessSessionStatus.IDLE,
+                "last_message_at": moment,
+                "updated_at": moment,
+            }
+            if session_usage is not None:
+                session = attempt.session
+                prior_usage = dict(session.tokens or {})
+                prior_usage["prompt"] = int(prior_usage.get("prompt", 0)) + int(
+                    session_usage.get("prompt", 0)
+                )
+                prior_usage["completion"] = int(
+                    prior_usage.get("completion", 0)
+                ) + int(session_usage.get("completion", 0))
+                prior_usage["total"] = int(prior_usage.get("total", 0)) + int(
+                    session_usage.get("total", 0)
+                )
+                session_updates["tokens"] = prior_usage
+                session_updates["cost"] = float(session.cost or 0.0) + float(
+                    session_cost or 0.0
+                )
+            HarnessSession.objects.filter(id=attempt.session_id).update(
+                **session_updates
+            )
+            if tail_remainder:
+                HarnessPartRepository.create(
+                    message_id=attempt.assistant_message_id,
+                    type="text",
+                    state="completed",
+                    output=tail_remainder,
+                    meta={"step": None, "tail": True},
+                )
+            HarnessPart.objects.filter(
+                message_id=attempt.assistant_message_id,
+                state__in=("pending", "running"),
+            ).update(
+                state="completed" if status == HarnessRunStatus.COMPLETED else "error",
+                updated_at=moment,
+            )
+            return True
+
+    @staticmethod
     def delete(session: HarnessSession) -> None:
         """Delete a harness session and its related rows."""
         session.delete()
@@ -723,6 +856,8 @@ class HarnessMessageRepository:
         reasoning_effort: str = "",
         provider: str = "",
         skill_ids: list[str] | None = None,
+        harness_id: str = "native",
+        engine_meta: dict | None = None,
     ) -> HarnessMessage:
         """Create a user or assistant message shell.
 
@@ -746,6 +881,8 @@ class HarnessMessageRepository:
                         reasoning_effort=reasoning_effort or "",
                         provider=provider or "",
                         skill_ids=list(skill_ids or []),
+                        harness_id=(harness_id or "native").strip(),
+                        engine_meta=dict(engine_meta or {}),
                         position=position,
                     )
                 break
@@ -806,6 +943,8 @@ class HarnessMessageRepository:
                 "finish",
                 "error",
                 "skill_ids",
+                "harness_id",
+                "engine_meta",
                 "notice_dismissed_at",
                 "position",
                 "created_at",
@@ -896,8 +1035,12 @@ class HarnessMessageRepository:
                 reasoning_effort=src.reasoning_effort or "",
                 provider=src.provider or "",
                 skill_ids=list(getattr(src, "skill_ids", None) or []),
+                harness_id=getattr(src, "harness_id", "native") or "native",
+                engine_meta=dict(getattr(src, "engine_meta", None) or {}),
             )
             HarnessMessage.objects.filter(id=dst.id).update(
+                harness_id=getattr(src, "harness_id", "native") or "native",
+                engine_meta=dict(getattr(src, "engine_meta", None) or {}),
                 cost=float(src.cost or 0.0),
                 tokens=dict(src.tokens or {}),
                 finish=src.finish or "",

@@ -29,14 +29,17 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { writeClipboardText } from '@/lib/clipboard'
-import { connectionDetail, providerMeta } from './providerMeta'
-import type { ProviderId } from '@/lib/harnessModels'
+import { connectionDetail, providerMeta, type SettingsProviderId } from './providerMeta'
 import {
   cancelChatGptOAuth,
   deleteProviderConnection,
   getChatGptOAuthStatus,
   saveProviderConnection,
   startChatGptOAuth,
+  saveClaudeConnection,
+  deleteClaudeConnection,
+  HARNESS_ENGINE_CONNECTION_CHANGED_EVENT,
+  type ClaudeConnection,
   type ProviderConnection,
 } from '@/services/harness.api'
 
@@ -44,8 +47,9 @@ const DEFAULT_OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 const DEFAULT_BEDROCK_REGION = 'us-east-1'
 
 const props = defineProps<{
-  provider: ProviderId | null
+  provider: SettingsProviderId | null
   connection?: ProviderConnection
+  claudeConnection?: ClaudeConnection | null
 }>()
 
 const open = defineModel<boolean>('open', { default: false })
@@ -74,6 +78,9 @@ const bedrockAccessKeyId = ref('')
 const bedrockSecretAccessKey = ref('')
 const bedrockSessionToken = ref('')
 const bedrockBearerToken = ref('')
+const claudeAuthType = ref<'api_token' | 'subscription_token'>('api_token')
+const claudeToken = ref('')
+const claudeLabel = ref('')
 
 type ChatGptOAuthPhase = 'idle' | 'pending' | 'connected' | 'expired' | 'denied' | 'error'
 
@@ -85,15 +92,21 @@ const chatGptOAuthError = ref<string | null>(null)
 let chatGptPollTimer: ReturnType<typeof setTimeout> | null = null
 let chatGptPollIntervalSec = 5
 
-const isConnected = computed(() =>
-  props.provider === 'chatgpt'
-    ? Boolean(props.connection?.connected) || chatGptOAuthPhase.value === 'connected'
-    : Boolean(props.connection?.connected),
-)
+const isConnected = computed(() => {
+  if (props.provider === 'chatgpt')
+    return Boolean(props.connection?.connected) || chatGptOAuthPhase.value === 'connected'
+  if (props.provider === 'claude-agent') return Boolean(props.claudeConnection?.connected)
+  return Boolean(props.connection?.connected)
+})
 
 const statusDetail = computed(() => {
   if (props.provider === 'chatgpt' && chatGptAccountId.value) {
     return `Account ${chatGptAccountId.value}`
+  }
+  if (props.provider === 'claude-agent' && props.claudeConnection?.connected) {
+    const auth =
+      props.claudeConnection.auth_type === 'api_token' ? 'API token' : 'Subscription token'
+    return [props.claudeConnection.label, auth].filter(Boolean).join(' · ')
   }
   return props.connection ? connectionDetail(props.connection) : ''
 })
@@ -137,6 +150,9 @@ function resetForms(): void {
   bedrockSecretAccessKey.value = ''
   bedrockSessionToken.value = ''
   bedrockBearerToken.value = ''
+  claudeAuthType.value = props.claudeConnection?.auth_type ?? 'api_token'
+  claudeToken.value = ''
+  claudeLabel.value = props.claudeConnection?.label ?? ''
   chatGptOAuthError.value = null
   if (props.connection?.connected) {
     chatGptOAuthPhase.value = 'connected'
@@ -283,12 +299,41 @@ async function saveBedrock(): Promise<void> {
   }
 }
 
+async function saveClaude(): Promise<void> {
+  const existing = props.claudeConnection
+  const token = claudeToken.value.trim()
+  if (existing?.connected && existing.auth_type === claudeAuthType.value && !token) {
+    // Blank is an intentional preserve operation for the currently stored auth type.
+  } else if (!token) {
+    dialogError.value = 'Enter a token to connect or change the authentication type.'
+    return
+  }
+  saving.value = true
+  dialogError.value = null
+  try {
+    await saveClaudeConnection({
+      auth_type: claudeAuthType.value,
+      token,
+      ...(claudeLabel.value.trim() ? { label: claudeLabel.value.trim() } : {}),
+    })
+    window.dispatchEvent(new Event(HARNESS_ENGINE_CONNECTION_CHANGED_EVENT))
+    emit('changed')
+  } catch (e: unknown) {
+    dialogError.value = e instanceof Error ? e.message : 'Failed to save Claude Agent connection'
+  } finally {
+    saving.value = false
+  }
+}
+
 async function disconnectProvider(): Promise<void> {
   if (!props.provider) return
   saving.value = true
   dialogError.value = null
   try {
-    await deleteProviderConnection(props.provider)
+    if (props.provider === 'claude-agent') {
+      await deleteClaudeConnection()
+      window.dispatchEvent(new Event(HARNESS_ENGINE_CONNECTION_CHANGED_EVENT))
+    } else await deleteProviderConnection(props.provider)
     emit('changed')
   } catch (e: unknown) {
     dialogError.value = e instanceof Error ? e.message : 'Failed to disconnect provider'
@@ -473,6 +518,60 @@ onBeforeUnmount(() => {
           </div>
         </template>
 
+        <template v-else-if="provider === 'claude-agent'">
+          <div class="space-y-2">
+            <Label for="claude-auth-type">Anthropic authentication</Label>
+            <Tabs v-model="claudeAuthType" class="w-full">
+              <TabsList class="grid w-full grid-cols-2">
+                <TabsTrigger value="api_token" data-testid="claude-tab-api-token">
+                  API token
+                </TabsTrigger>
+                <TabsTrigger value="subscription_token" data-testid="claude-tab-subscription-token">
+                  Subscription token
+                </TabsTrigger>
+              </TabsList>
+            </Tabs>
+            <p class="text-xs text-muted-foreground">
+              Paste a token Anthropic issued or authorized for your own account. There is no OAuth
+              or browser authorization flow.
+            </p>
+          </div>
+          <div class="space-y-2">
+            <Label for="claude-token">
+              {{
+                claudeAuthType === 'api_token'
+                  ? 'Anthropic API token'
+                  : 'Anthropic subscription token'
+              }}
+            </Label>
+            <Input
+              id="claude-token"
+              v-model="claudeToken"
+              type="password"
+              autocomplete="off"
+              :placeholder="
+                claudeConnection?.connected && claudeConnection.auth_type === claudeAuthType
+                  ? 'Leave blank to keep existing token'
+                  : 'Paste your Anthropic token'
+              "
+              data-testid="claude-token"
+            />
+            <p class="text-xs text-muted-foreground">
+              Runs in this workspace; use only workspaces you trust. API usage or subscription
+              access is personal and follows Anthropic's terms.
+            </p>
+          </div>
+          <div class="space-y-2">
+            <Label for="claude-label">Label (optional)</Label>
+            <Input
+              id="claude-label"
+              v-model="claudeLabel"
+              autocomplete="off"
+              placeholder="Personal Anthropic account"
+            />
+          </div>
+        </template>
+
         <template v-else-if="provider === 'amazon-bedrock'">
           <Tabs v-model="bedrockAuthMethod" class="w-full">
             <TabsList class="grid w-full grid-cols-2">
@@ -586,6 +685,16 @@ onBeforeUnmount(() => {
             :disabled="saving"
             data-testid="save-compatible"
             @click="saveCompat"
+          >
+            <LoadingSpinner v-if="saving" :size="12" />
+            <span v-else>Save</span>
+          </Button>
+          <Button
+            v-else-if="provider === 'claude-agent'"
+            type="button"
+            :disabled="saving"
+            data-testid="save-claude-agent"
+            @click="saveClaude"
           >
             <LoadingSpinner v-if="saving" :size="12" />
             <span v-else>Save</span>

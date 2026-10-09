@@ -22,6 +22,11 @@ vi.mock('@/services/harness.api', async () => {
     getProviderConfig: vi.fn(),
     saveProviderConfig: vi.fn(),
     listProviderConnections: vi.fn(),
+    getClaudeConnection: vi.fn(),
+    listClaudeModels: vi.fn(),
+    listHarnessEngines: vi.fn(),
+    saveClaudeConnection: vi.fn(),
+    deleteClaudeConnection: vi.fn(),
     saveProviderConnection: vi.fn(),
     deleteProviderConnection: vi.fn(),
     startChatGptOAuth: vi.fn(),
@@ -33,6 +38,7 @@ vi.mock('@/services/harness.api', async () => {
 const getProviderConfigMock = vi.mocked(harnessApi.getProviderConfig)
 const saveProviderConfigMock = vi.mocked(harnessApi.saveProviderConfig)
 const listProviderConnectionsMock = vi.mocked(harnessApi.listProviderConnections)
+const getClaudeConnectionMock = vi.mocked(harnessApi.getClaudeConnection)
 
 const catalog: ProviderModel[] = [
   {
@@ -70,7 +76,7 @@ const catalog: ProviderModel[] = [
 const stubs = {
   ProviderConnectionDialog: {
     name: 'ProviderConnectionDialog',
-    props: ['open', 'provider', 'connection'],
+    props: ['open', 'provider', 'connection', 'claudeConnection'],
     emits: ['update:open', 'changed', 'connected'],
     template: '<div data-testid="provider-connection-dialog" />',
   },
@@ -97,6 +103,19 @@ describe('ProviderConfigTab', () => {
     vi.restoreAllMocks()
     vi.clearAllMocks()
     vi.spyOn(providerCatalog, 'loadProviderModelsCached').mockResolvedValue(catalog)
+    vi.mocked(harnessApi.listClaudeModels).mockResolvedValue([
+      {
+        id: 'sonnet',
+        name: 'Claude Sonnet',
+        provider: 'claude',
+        reasoning_efforts: ['high'],
+        default_effort: 'high',
+        supports_tools: true,
+        context_length: 200_000,
+        max_output_tokens: 16_000,
+      },
+    ])
+    getClaudeConnectionMock.mockResolvedValue(null)
     getProviderConfigMock.mockResolvedValue({
       base_url: 'https://openrouter.ai/api/v1',
       default_model: 'openrouter/model-big',
@@ -147,6 +166,13 @@ describe('ProviderConfigTab', () => {
     expect(wrapper.find('[data-testid="provider-row-chatgpt"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="provider-row-amazon-bedrock"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="provider-row-openai-compatible"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="provider-row-claude-agent"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="provider-detail-claude-agent"]').text()).toContain(
+      'personal Anthropic connection',
+    )
+    expect(wrapper.find('[data-testid="provider-model-count-claude-agent"]').text()).toBe(
+      '1 models',
+    )
     const pickers = wrapper.findAllComponents(ModelPicker)
     expect(pickers).toHaveLength(1)
     expect(pickers[0]?.props()).toMatchObject({
@@ -252,6 +278,15 @@ describe('ProviderConfigTab', () => {
     const dialog = wrapper.findComponent(ProviderConnectionDialog)
     expect(dialog.props('open')).toBe(true)
     expect(dialog.props('provider')).toBe('chatgpt')
+  })
+
+  it('opens the settings-only Claude Agent connection dialog', async () => {
+    const wrapper = mountTab()
+    await flushPromises()
+    await wrapper.find('[data-testid="provider-manage-claude-agent"]').trigger('click')
+    const dialog = wrapper.findComponent(ProviderConnectionDialog)
+    expect(dialog.props('provider')).toBe('claude-agent')
+    expect(dialog.props('claudeConnection')).toBeNull()
   })
 
   it('refreshes state and closes the dialog on changed', async () => {

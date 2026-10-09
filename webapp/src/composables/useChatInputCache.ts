@@ -1,13 +1,17 @@
 import { computed, toValue, type MaybeRefOrGetter } from 'vue'
+import type { HarnessId } from '@/types/harness'
 
 export function useChatInputCache(
   workspaceId: MaybeRefOrGetter<string>,
   chatId?: MaybeRefOrGetter<string | null | undefined>,
+  harnessId?: MaybeRefOrGetter<HarnessId | null | undefined>,
 ) {
   const cacheKey = computed(() => {
     const resolvedWorkspaceId = toValue(workspaceId)
     const resolvedChatId = toValue(chatId) || 'default'
-    return `chat-input-${resolvedWorkspaceId}-${resolvedChatId}`
+    const resolvedHarnessId = toValue(harnessId) || 'native'
+    const suffix = resolvedHarnessId === 'native' ? '' : `-${resolvedHarnessId}`
+    return `chat-input-${resolvedWorkspaceId}-${resolvedChatId}${suffix}`
   })
 
   const loadFromCache = (): string => {

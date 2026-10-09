@@ -28,9 +28,13 @@ from .permissions.models import PermissionAllowlist, PermissionRequest
 __all__ = [
     "AgentConfig",
     "AgentSConfig",
+    "HarnessConnection",
     "HarnessMessage",
     "HarnessPart",
+    "HarnessRun",
+    "HarnessRunStatus",
     "HarnessSession",
+    "HarnessTranscriptBatch",
     "PermissionAllowlist",
     "PermissionRequest",
     "ProviderConfig",
@@ -365,6 +369,33 @@ class HarnessSession(models.Model):
         blank=True,
         help_text="Selected skill UUIDs persisted for subsequent runs.",
     )
+    harness_id = models.CharField(
+        max_length=16,
+        default="native",
+        help_text="Execution engine that owns this session.",
+    )
+    connection = models.ForeignKey(
+        "HarnessConnection",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="sessions",
+        help_text="Personal engine connection selected when this session was created.",
+    )
+    created_by = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="harness_sessions",
+        help_text="User who owns this session and its engine authorization.",
+    )
+    external_session_id = models.CharField(max_length=64, blank=True, default="")
+    engine_state = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Engine-specific resumable session state (no credentials).",
+    )
     last_read_at = models.DateTimeField(
         null=True,
         blank=True,
@@ -400,6 +431,17 @@ class HarnessMessageRole(models.TextChoices):
 
     USER = "user", "User"
     ASSISTANT = "assistant", "Assistant"
+
+
+class HarnessRunStatus(models.TextChoices):
+    """Durable lifecycle states of one external-engine attempt."""
+
+    STARTING = "starting", "Starting"
+    RUNNING = "running", "Running"
+    CLOSING = "closing", "Closing"
+    COMPLETED = "completed", "Completed"
+    INTERRUPTED = "interrupted", "Interrupted"
+    ERROR = "error", "Error"
 
 
 class HarnessMessage(models.Model):
@@ -439,6 +481,16 @@ class HarnessMessage(models.Model):
         blank=True,
         help_text="Skill UUIDs active for this user turn.",
     )
+    harness_id = models.CharField(
+        max_length=16,
+        default="native",
+        help_text="Execution engine that produced this message.",
+    )
+    engine_meta = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Secret-free engine-specific message metadata.",
+    )
     notice_dismissed_at = models.DateTimeField(
         null=True,
         blank=True,
@@ -465,6 +517,78 @@ class HarnessMessage(models.Model):
     def __str__(self) -> str:
         """Return a short representation of the message."""
         return f"HarnessMessage({self.role}, session={str(self.session_id)[:8]})"
+
+
+class HarnessRun(models.Model):
+    """Durable attempt ownership for an engine-backed assistant turn.
+
+    The owner token fences writes from a worker after its lease has been
+    superseded. Lease identity is metadata only; credentials and prompt data
+    must never be stored here.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session = models.ForeignKey(
+        HarnessSession,
+        on_delete=models.CASCADE,
+        related_name="runs",
+    )
+    assistant_message = models.OneToOneField(
+        HarnessMessage,
+        on_delete=models.CASCADE,
+        related_name="run_attempt",
+    )
+    organization_id = models.UUIDField(
+        help_text="Organization snapshot for durable attempt scoping."
+    )
+    initiated_by = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="harness_runs",
+    )
+    harness_id = models.CharField(max_length=16, default="claude")
+    status = models.CharField(
+        max_length=16,
+        choices=HarnessRunStatus.choices,
+        default=HarnessRunStatus.STARTING,
+        db_index=True,
+    )
+    owner_token = models.UUIDField(default=uuid.uuid4, editable=False)
+    heartbeat_at = models.DateTimeField(default=timezone.now, db_index=True)
+    lease_id = models.UUIDField(null=True, blank=True)
+    lease_epoch = models.CharField(max_length=128, blank=True, default="")
+    external_session_id = models.CharField(max_length=64, blank=True, default="")
+    error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "harness_run"
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(
+                fields=["session", "status"], name="harness_run_session_status_idx"
+            ),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session"],
+                condition=models.Q(
+                    status__in=[
+                        HarnessRunStatus.STARTING,
+                        HarnessRunStatus.RUNNING,
+                        HarnessRunStatus.CLOSING,
+                    ]
+                ),
+                name="harness_run_one_live_per_session",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        """Return an operationally useful but secret-free description."""
+        return f"HarnessRun({str(self.id)[:8]}, {self.status})"
 
 
 class HarnessPartType(models.TextChoices):
@@ -517,7 +641,10 @@ class HarnessPart(models.Model):
     display = models.JSONField(
         default=dict,
         blank=True,
-        help_text="Bounded timeline display projection; full details stay in input/output/meta.",
+        help_text=(
+            "Bounded timeline display projection; full details stay in "
+            "input/output/meta."
+        ),
     )
     position = models.PositiveIntegerField(
         default=0,
@@ -679,3 +806,83 @@ class RecentModel(models.Model):
     def __str__(self) -> str:
         """Return a short representation of the recent-model row."""
         return f"RecentModel(org={self.organization_id}, {self.model})"
+
+
+class HarnessConnection(models.Model):
+    """Personal Claude authorization associated with one organization context."""
+
+    class AuthType(models.TextChoices):
+        API_TOKEN = "api_token", "API token"
+        SUBSCRIPTION_TOKEN = "subscription_token", "Subscription token"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        "organizations.Organization",
+        on_delete=models.CASCADE,
+        related_name="harness_connections",
+    )
+    user = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.CASCADE,
+        related_name="harness_connections",
+    )
+    credential = models.ForeignKey(
+        "credentials.Credential",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="harness_connections",
+    )
+    auth_type = models.CharField(max_length=32, choices=AuthType.choices)
+    label = models.CharField(max_length=255, blank=True, default="Claude")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "harness_connection"
+        ordering = ["-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "user"],
+                name="harness_connection_org_user_uniq",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        """Return a secret-free description of the connection."""
+        return f"HarnessConnection(org={self.organization_id}, user={self.user_id})"
+
+
+class HarnessTranscriptBatch(models.Model):
+    """One encrypted, deduplicated engine transcript entry."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session = models.ForeignKey(
+        HarnessSession,
+        on_delete=models.CASCADE,
+        related_name="transcript_batches",
+    )
+    external_session_id = models.CharField(max_length=64)
+    subpath = models.CharField(max_length=255, blank=True, default="")
+    digest = models.CharField(max_length=64)
+    payload_encrypted = models.TextField()
+    position = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "harness_transcript_batch"
+        ordering = ["position", "created_at", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session", "external_session_id", "subpath", "digest"],
+                name="harness_transcript_digest_uniq",
+            ),
+            models.UniqueConstraint(
+                fields=["session", "external_session_id", "subpath", "position"],
+                name="harness_transcript_position_uniq",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        """Return a secret-free transcript record description."""
+        return f"HarnessTranscriptBatch(session={self.session_id}, pos={self.position})"

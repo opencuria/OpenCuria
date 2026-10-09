@@ -60,6 +60,7 @@ class ScheduledTaskIn(Schema):
     mode: str = "build"
     model: str = ""
     reasoning_effort: str = ""
+    harness_id: str = "native"
     skill_ids: list[str] = []
     recurrence: str = "daily"
     weekdays: list[int] = []
@@ -74,6 +75,7 @@ class ScheduledTaskPatchIn(Schema):
     mode: str | None = None
     model: str | None = None
     reasoning_effort: str | None = None
+    harness_id: str | None = None
     skill_ids: list[str] | None = None
     recurrence: str | None = None
     weekdays: list[int] | None = None
@@ -90,6 +92,7 @@ class ScheduledTaskOut(Schema):
     mode: str
     model: str
     reasoning_effort: str
+    harness_id: str
     skill_ids: list[str]
     recurrence: str
     weekdays: list[int]
@@ -125,6 +128,7 @@ def _task_out(task: ScheduledTask) -> ScheduledTaskOut:
         mode=task.mode,
         model=task.model,
         reasoning_effort=task.reasoning_effort,
+        harness_id=task.harness_id,
         skill_ids=list(task.skill_ids or []),
         recurrence=task.recurrence,
         weekdays=list(task.weekdays or []),

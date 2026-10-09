@@ -20,6 +20,7 @@ const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   chatgpt: 'ChatGPT',
   'amazon-bedrock': 'Amazon Bedrock',
   'openai-compatible': 'OpenAI Compatible',
+  claude: 'Claude',
 }
 
 /** Human-readable provider label for catalog rows and tooltips. */

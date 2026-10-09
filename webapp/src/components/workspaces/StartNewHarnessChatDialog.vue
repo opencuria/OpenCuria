@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ArrowLeft } from '@lucide/vue'
-import type { HarnessSessionMode } from '@/types/harness'
+import type { HarnessId, HarnessSessionMode } from '@/types/harness'
 import type { Workspace } from '@/types'
 import { WorkspaceStatus } from '@/types'
 import { useWorkspaceStore } from '@/stores/workspaces'
@@ -29,6 +29,7 @@ const open = ref(false)
 const step = ref<'workspace' | 'prompt'>('workspace')
 const selectedWorkspace = ref<Workspace | null>(null)
 const composerMode = ref<HarnessSessionMode>('build')
+const composerHarnessId = ref<HarnessId>('native')
 const creating = ref(false)
 
 const runningWorkspaces = computed(() =>
@@ -46,6 +47,7 @@ function resetDialog(): void {
   step.value = 'workspace'
   selectedWorkspace.value = null
   composerMode.value = 'build'
+  composerHarnessId.value = 'native'
   creating.value = false
 }
 
@@ -66,6 +68,7 @@ async function handleCreateSession(
   model: string,
   skillIds: string[],
   effort: string,
+  harnessId: HarnessId = 'native',
 ): Promise<void> {
   const workspace = selectedWorkspace.value
   if (!workspace || creating.value || !workspaceStore.canUseWorkspace(workspace.id)) return
@@ -78,6 +81,7 @@ async function handleCreateSession(
       model,
       skillIds,
       effort,
+      harnessId,
     )
     if (session) {
       open.value = false
@@ -142,6 +146,7 @@ async function handleCreateSession(
           <HarnessChatInput
             :workspace-id="selectedWorkspace.id"
             :mode="composerMode"
+            :harness-id="composerHarnessId"
             :model="harnessStore.modelInput"
             :effort="harnessStore.effortInput"
             :skill-options="skillStore.skills"
@@ -151,6 +156,7 @@ async function handleCreateSession(
               !workspaceStore.canUseWorkspace(selectedWorkspace.id)
             "
             @update:mode="composerMode = $event"
+            @update:harness-id="composerHarnessId = $event"
             @update:model="harnessStore.setComposerModel($event)"
             @update:effort="harnessStore.setComposerEffort($event)"
             @send="handleCreateSession"

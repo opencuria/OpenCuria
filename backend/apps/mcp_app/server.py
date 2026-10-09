@@ -50,6 +50,9 @@ Tools and their required permissions
 - update_workspace plugin_ids → plugins:write; credential_ids → credentials:read
 - get_provider_config → harness:read
 - list_provider_models → harness:read
+- list_harness_engines / list_claude_engine_models → harness:read
+- get_claude_connection / save_claude_connection /
+  delete_claude_connection → harness:providers
 - save_provider_config → harness:run
 - delete_provider_config → harness:run
 - list_provider_connections → harness:providers
@@ -667,6 +670,45 @@ _TOOLS: list[Tool] = [
         inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
+        name="list_harness_engines",
+        description="List native and Claude harness engines and connection status.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="get_claude_connection",
+        description="Get the current user's personal Claude connection status.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="save_claude_connection",
+        description=(
+            "Save the current user's personal Claude API or subscription token."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "auth_type": {
+                    "type": "string",
+                    "enum": ["api_token", "subscription_token"],
+                },
+                "token": {"type": "string"},
+                "label": {"type": "string"},
+            },
+            "required": ["auth_type"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="delete_claude_connection",
+        description="Delete the current user's personal Claude connection.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="list_claude_engine_models",
+        description="List Claude models for the Claude harness engine.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
         name="save_provider_config",
         description="Save (upsert) the org-wide harness provider config.",
         inputSchema={
@@ -824,6 +866,7 @@ _TOOLS: list[Tool] = [
                 "workspace_id": {"type": "string"},
                 "name": {"type": "string"},
                 "prompt": {"type": "string"},
+                "harness_id": {"type": "string", "enum": ["native", "claude"]},
                 "mode": {"type": "string"},
                 "model": {"type": "string"},
                 "reasoning_effort": {"type": "string"},
@@ -852,6 +895,7 @@ _TOOLS: list[Tool] = [
                 "task_id": {"type": "string"},
                 "name": {"type": "string"},
                 "prompt": {"type": "string"},
+                "harness_id": {"type": "string", "enum": ["native", "claude"]},
                 "mode": {"type": "string"},
                 "model": {"type": "string"},
                 "reasoning_effort": {"type": "string"},
@@ -921,6 +965,8 @@ _TOOLS: list[Tool] = [
                 "workspace_id": {"type": "string"},
                 "prompt": {"type": "string"},
                 "agent_name": {"type": "string"},
+                "harness_id": {"type": "string", "enum": ["native", "claude"]},
+                "connection_id": {"type": "string", "format": "uuid"},
                 "mode": {"type": "string"},
                 "model": {"type": "string"},
                 "reasoning_effort": {"type": "string"},
@@ -1006,8 +1052,11 @@ _TOOLS: list[Tool] = [
                     "viewer_client_id": {"type": "string", "format": "uuid"},
                     "intent_revision": {"type": "integer", "minimum": 1},
                 },
-                "required": (["workspace_id"] if name == "desktop_status" else
-                             ["workspace_id", "viewer_client_id", "intent_revision"]),
+                "required": (
+                    ["workspace_id"]
+                    if name == "desktop_status"
+                    else ["workspace_id", "viewer_client_id", "intent_revision"]
+                ),
                 "additionalProperties": False,
             },
         )
@@ -1564,6 +1613,11 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "list_workspace_plugins": APIKeyPermission.PLUGINS_READ,
     "get_provider_config": APIKeyPermission.HARNESS_READ,
     "list_provider_models": APIKeyPermission.HARNESS_READ,
+    "list_harness_engines": APIKeyPermission.HARNESS_READ,
+    "get_claude_connection": APIKeyPermission.HARNESS_PROVIDERS,
+    "save_claude_connection": APIKeyPermission.HARNESS_PROVIDERS,
+    "delete_claude_connection": APIKeyPermission.HARNESS_PROVIDERS,
+    "list_claude_engine_models": APIKeyPermission.HARNESS_READ,
     "save_provider_config": APIKeyPermission.HARNESS_RUN,
     "delete_provider_config": APIKeyPermission.HARNESS_RUN,
     "list_provider_connections": APIKeyPermission.HARNESS_PROVIDERS,
@@ -1590,8 +1644,10 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "edit_harness_message": APIKeyPermission.HARNESS_RUN,
     "abort_harness_session": APIKeyPermission.HARNESS_RUN,
     "take_desktop_control": APIKeyPermission.HARNESS_RUN,
-    **{name: APIKeyPermission.TERMINAL_ACCESS for name in
-       ("start_desktop", "stop_desktop", "renew_desktop", "desktop_status")},
+    **{
+        name: APIKeyPermission.TERMINAL_ACCESS
+        for name in ("start_desktop", "stop_desktop", "renew_desktop", "desktop_status")
+    },
     "list_harness_parts": APIKeyPermission.HARNESS_READ,
     "get_harness_timeline": APIKeyPermission.HARNESS_READ,
     "get_harness_part": APIKeyPermission.HARNESS_READ,
@@ -2331,9 +2387,7 @@ def _call_create_workspace_from_captured_image(
     credential_ids = [uuid.UUID(c) for c in args.get("credential_ids") or []]
     if plugin_ids and not api_key.has_permission(APIKeyPermission.PLUGINS_WRITE):
         return _error("API key lacks permission: plugins:write")
-    if credential_ids and not api_key.has_permission(
-        APIKeyPermission.CREDENTIALS_READ
-    ):
+    if credential_ids and not api_key.has_permission(APIKeyPermission.CREDENTIALS_READ):
         return _error("API key lacks permission: credentials:read")
     try:
         latest = ImageVersionService().latest_captured_version(
@@ -3378,6 +3432,13 @@ def _get_harness_service():
     return get_harness_service()
 
 
+def _is_claude_session_owner(session, user_id: object) -> bool:
+    """Allow personal-engine actions only to the session's credential owner."""
+    return getattr(session, "harness_id", "native") != "claude" or str(
+        getattr(session, "created_by_id", "")
+    ) == str(user_id)
+
+
 def _session_dict(session, *, unread: bool = False) -> dict:
     """Serialize a HarnessSession ORM row for MCP responses."""
     return {
@@ -3386,6 +3447,7 @@ def _session_dict(session, *, unread: bool = False) -> dict:
         "title": session.title or "",
         "mode": session.mode,
         "agent_name": session.agent_name,
+        "harness_id": getattr(session, "harness_id", "native") or "native",
         "model": session.model or "",
         "reasoning_effort": getattr(session, "reasoning_effort", "") or "",
         "status": session.status,
@@ -3433,6 +3495,114 @@ def _owned_harness_session_or_error(api_key, org_id, session_id):
     if error is not None:
         return None, error
     return session, None
+
+
+def _call_list_harness_engines(api_key, org_id, args: dict) -> list[TextContent]:
+    """List available harness engines and only the caller's Claude status."""
+    from apps.harness.engines.api import _connection_view
+    from apps.harness.engines.catalog import ENGINE_IDS
+    from apps.organizations.services import OrganizationService
+    from common.exceptions import NotFoundError
+
+    try:
+        OrganizationService().require_membership(api_key.user, org_id)
+    except NotFoundError as exc:
+        return _error(exc.message)
+    connection = _connection_view(org_id, api_key.user.id)
+    rows = [
+        {
+            "id": "native",
+            "name": "OpenCuria",
+            "modes": ["build", "plan"],
+            "connected": True,
+        },
+        {
+            "id": "claude",
+            "name": "Claude Agent",
+            "modes": ["build", "plan"],
+            "connected": bool(connection and connection["connected"]),
+        },
+    ]
+    return _text([row for row in rows if row["id"] in ENGINE_IDS])
+
+
+def _call_get_claude_connection(api_key, org_id, args: dict) -> list[TextContent]:
+    """Get safe status for the caller's personal Claude authorization."""
+    from apps.harness.engines.api import _connection_view
+    from apps.organizations.services import OrganizationService
+    from common.exceptions import NotFoundError
+
+    try:
+        OrganizationService().require_membership(api_key.user, org_id)
+    except NotFoundError as exc:
+        return _error(exc.message)
+    return _text(_connection_view(org_id, api_key.user.id))
+
+
+def _call_save_claude_connection(api_key, org_id, args: dict) -> list[TextContent]:
+    """Upsert a user's Claude token using shared encrypted credentials."""
+    from apps.harness.engines.connections import EngineConnectionService
+    from apps.organizations.services import OrganizationService
+    from common.exceptions import NotFoundError
+
+    try:
+        OrganizationService().require_membership(api_key.user, org_id)
+    except NotFoundError as exc:
+        return _error(exc.message)
+    auth_type = args.get("auth_type")
+    if not isinstance(auth_type, str):
+        return _error("auth_type is required")
+    try:
+        connection = EngineConnectionService().save_connection(
+            organization_id=org_id,
+            user=api_key.user,
+            auth_type=auth_type,
+            token=args.get("token", ""),
+            label=args.get("label", "Claude"),
+        )
+    except (ValueError, TypeError) as exc:
+        return _error(str(exc))
+    return _text(
+        {
+            "id": str(connection.id),
+            "auth_type": connection.auth_type,
+            "label": connection.label,
+            "connected": connection.credential_id is not None,
+        }
+    )
+
+
+def _call_delete_claude_connection(api_key, org_id, args: dict) -> list[TextContent]:
+    """Disconnect only the caller's Claude credentials."""
+    from apps.harness.engines.connections import EngineConnectionService
+    from apps.organizations.services import OrganizationService
+    from common.exceptions import NotFoundError
+
+    try:
+        OrganizationService().require_membership(api_key.user, org_id)
+        EngineConnectionService().delete_connection(org_id, api_key.user.id)
+    except NotFoundError as exc:
+        return _error(exc.message)
+    return _text({"deleted": True})
+
+
+def _call_list_claude_engine_models(api_key, org_id, args: dict) -> list[TextContent]:
+    """List Claude-only model catalog, separate from provider adapters."""
+    from apps.harness.engines.api import _model_payload
+    from apps.harness.engines.catalog import list_claude_models
+    from apps.organizations.services import OrganizationService
+    from common.exceptions import NotFoundError
+
+    try:
+        OrganizationService().require_membership(api_key.user, org_id)
+    except NotFoundError as exc:
+        return _error(exc.message)
+    return _text(
+        [
+            _model_payload(model).model_dump(mode="json")
+            for model in list_claude_models()
+        ]
+    )
 
 
 def _call_get_provider_config(api_key, org_id, args: dict) -> list[TextContent]:
@@ -3769,6 +3939,7 @@ def _scheduled_task_dict(task) -> dict:
         "workspace_id": str(task.workspace_id),
         "prompt": task.prompt,
         "mode": task.mode,
+        "harness_id": getattr(task, "harness_id", "native"),
         "model": task.model,
         "reasoning_effort": task.reasoning_effort,
         "skill_ids": list(task.skill_ids or []),
@@ -3986,7 +4157,7 @@ async def _call_create_harness_session(
 
     from asgiref.sync import sync_to_async
 
-    from common.exceptions import ConflictError, NotFoundError
+    from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
     workspace_id_str = args.get("workspace_id")
     prompt = (args.get("prompt") or "").strip()
@@ -4010,6 +4181,8 @@ async def _call_create_harness_session(
             workspace_id=workspace.id,
             organization_id=org_id,
             prompt=prompt,
+            harness_id=args.get("harness_id", "native"),
+            connection_id=args.get("connection_id"),
             agent_name=args.get("agent_name") or "build",
             mode=args.get("mode") or "build",
             model=args.get("model") or "",
@@ -4028,6 +4201,8 @@ async def _call_create_harness_session(
         fresh = await sync_to_async(service.get_session)(session.id)
         payload = await sync_to_async(_session_dict_with_unread)(service, fresh)
         return _text(payload)
+    except AuthenticationError as exc:
+        return _error(exc.message)
     except (NotFoundError, ConflictError, ValueError, KeyError) as exc:
         return _error(str(exc))
 
@@ -4038,7 +4213,7 @@ async def _call_send_harness_message(api_key, org_id, args: dict) -> list[TextCo
 
     from asgiref.sync import sync_to_async
 
-    from common.exceptions import ConflictError, NotFoundError
+    from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
     session_id_str = args.get("session_id")
     prompt = (args.get("prompt") or "").strip()
@@ -4059,6 +4234,12 @@ async def _call_send_harness_message(api_key, org_id, args: dict) -> list[TextCo
 
     try:
         current = await sync_to_async(service.get_session)(session.id)
+        if getattr(current, "harness_id", "native") == "claude" and str(
+            getattr(current, "created_by_id", "")
+        ) != str(api_key.user.id):
+            raise AuthenticationError(
+                "Only the session owner may use its Claude connection"
+            )
         await sync_to_async(service.ensure_user_promptable)(current)
         if not service.is_running(current.id):
             if args.get("mode"):
@@ -4084,6 +4265,8 @@ async def _call_send_harness_message(api_key, org_id, args: dict) -> list[TextCo
         fresh = await sync_to_async(service.get_session)(current.id)
         payload = await sync_to_async(_session_dict_with_unread)(service, fresh)
         return _text(payload)
+    except AuthenticationError as exc:
+        return _error(exc.message)
     except (NotFoundError, ConflictError, ValueError, KeyError) as exc:
         return _error(str(exc))
 
@@ -4135,7 +4318,7 @@ async def _call_edit_harness_message(api_key, org_id, args) -> list:  # type: ig
 
     from asgiref.sync import sync_to_async
 
-    from common.exceptions import ConflictError, NotFoundError
+    from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
     session_id_str = args.get("session_id")
     message_id_str = args.get("message_id")
@@ -4164,6 +4347,12 @@ async def _call_edit_harness_message(api_key, org_id, args) -> list:  # type: ig
 
     try:
         current = await sync_to_async(service.get_session)(session.id)
+        if getattr(current, "harness_id", "native") == "claude" and str(
+            getattr(current, "created_by_id", "")
+        ) != str(api_key.user.id):
+            raise AuthenticationError(
+                "Only the session owner may use its Claude connection"
+            )
         await sync_to_async(service.ensure_user_promptable)(current)
         await service.edit_user_message(
             current.id,
@@ -4180,6 +4369,8 @@ async def _call_edit_harness_message(api_key, org_id, args) -> list:  # type: ig
         fresh = await sync_to_async(service.get_session)(current.id)
         payload = await sync_to_async(_session_dict_with_unread)(service, fresh)
         return _text(payload)
+    except AuthenticationError as exc:
+        return _error(exc.message)
     except (NotFoundError, ConflictError, ValueError, KeyError) as exc:
         return _error(str(exc))
 
@@ -4230,15 +4421,23 @@ def _call_viewer_desktop(api_key, org_id, args: dict, action: str) -> list[TextC
         service = _runner_service()
         if action == "status":
             client = args.get("viewer_client_id")
-            return _text(async_to_sync(service.viewer_desktop_status)(
-                workspace_id, **kwargs,
-                viewer_client_id=_uuid.UUID(client) if client else None))
+            return _text(
+                async_to_sync(service.viewer_desktop_status)(
+                    workspace_id,
+                    **kwargs,
+                    viewer_client_id=_uuid.UUID(client) if client else None,
+                )
+            )
         intent = DesktopViewerIntentIn(
             viewer_client_id=args.get("viewer_client_id"),
-            intent_revision=args.get("intent_revision"))
+            intent_revision=args.get("intent_revision"),
+        )
         result = async_to_sync(getattr(service, f"{action}_desktop"))(
-            workspace_id, **kwargs, viewer_client_id=intent.viewer_client_id,
-            intent_revision=intent.intent_revision)
+            workspace_id,
+            **kwargs,
+            viewer_client_id=intent.viewer_client_id,
+            intent_revision=intent.intent_revision,
+        )
         return _text(result if action == "renew" else {"task_id": str(result.id)})
     except (KeyError, ValueError, ValidationError, ConflictError, NotFoundError) as exc:
         return _error(str(exc))
@@ -4322,6 +4521,7 @@ def _call_list_harness_parts(api_key, org_id, args: dict) -> list[TextContent]:
             "messages": [
                 {
                     "id": str(message.id),
+                    "harness_id": getattr(session, "harness_id", "native") or "native",
                     "role": message.role,
                     "content": message.content or "",
                     "model": message.model or "",
@@ -4353,7 +4553,14 @@ def _call_list_harness_parts(api_key, org_id, args: dict) -> list[TextContent]:
 def _call_get_harness_timeline(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.mcp_app.timeline_handlers import get_harness_timeline
 
-    return get_harness_timeline(api_key, org_id, args)
+    response = get_harness_timeline(api_key, org_id, args)
+    if not response or response[0].text.startswith("Error:"):
+        return response
+    payload = json.loads(response[0].text)
+    harness_id = str(payload.get("session", {}).get("harness_id") or "native")
+    for message in payload.get("messages", []):
+        message["harness_id"] = harness_id
+    return _text(payload)
 
 
 def _call_get_harness_part(api_key, org_id, args: dict) -> list[TextContent]:
@@ -4401,6 +4608,8 @@ def _call_resolve_harness_permission(api_key, org_id, args: dict) -> list[TextCo
     session, error = _owned_harness_session_or_error(api_key, org_id, session_id)
     if error is not None:
         return error
+    if not _is_claude_session_owner(session, api_key.user.id):
+        return _error("Only the session owner may use its Claude connection")
 
     service = _get_harness_service()
 
@@ -4516,11 +4725,24 @@ def _call_list_harness_conversations(api_key, org_id, args: dict) -> list[TextCo
         user=api_key.user,
     )
     service = _get_harness_service()
+    workspace_ids = [workspace.id for workspace in workspaces]
+    conversations = service.list_conversations(
+        organization_id=org_id,
+        workspace_ids=workspace_ids,
+    )
+    harness_ids = {
+        str(session.id): getattr(session, "harness_id", "native") or "native"
+        for workspace_id in workspace_ids
+        for session in service.list_sessions(workspace_id)
+    }
     return _text(
-        service.list_conversations(
-            organization_id=org_id,
-            workspace_ids=[workspace.id for workspace in workspaces],
-        )
+        [
+            {
+                **conversation,
+                "harness_id": harness_ids.get(conversation["session_id"], "native"),
+            }
+            for conversation in conversations
+        ]
     )
 
 
@@ -5069,6 +5291,8 @@ def _call_resolve_harness_question(api_key, org_id, args: dict) -> list[TextCont
     session, error = _owned_harness_session_or_error(api_key, org_id, session_id)
     if error is not None:
         return error
+    if not _is_claude_session_owner(session, api_key.user.id):
+        return _error("Only the session owner may use its Claude connection")
 
     answers = args.get("answers") or []
     reject = bool(args.get("reject", False))
@@ -5518,6 +5742,11 @@ _TOOL_HANDLERS = {
     "list_workspace_plugins": _call_list_workspace_plugins,
     "get_provider_config": _call_get_provider_config,
     "list_provider_models": _call_list_provider_models,
+    "list_harness_engines": _call_list_harness_engines,
+    "get_claude_connection": _call_get_claude_connection,
+    "save_claude_connection": _call_save_claude_connection,
+    "delete_claude_connection": _call_delete_claude_connection,
+    "list_claude_engine_models": _call_list_claude_engine_models,
     "save_provider_config": _call_save_provider_config,
     "delete_provider_config": _call_delete_provider_config,
     "list_provider_connections": _call_list_provider_connections,
@@ -5544,10 +5773,19 @@ _TOOL_HANDLERS = {
     "edit_harness_message": _call_edit_harness_message,
     "abort_harness_session": _call_abort_harness_session,
     "take_desktop_control": _call_take_desktop_control,
-    **{name: (lambda api_key, org_id, args, action=action:
-              _call_viewer_desktop(api_key, org_id, args, action))
-       for name, action in (("start_desktop", "start"), ("stop_desktop", "stop"),
-                            ("renew_desktop", "renew"), ("desktop_status", "status"))},
+    **{
+        name: (
+            lambda api_key, org_id, args, action=action: _call_viewer_desktop(
+                api_key, org_id, args, action
+            )
+        )
+        for name, action in (
+            ("start_desktop", "start"),
+            ("stop_desktop", "stop"),
+            ("renew_desktop", "renew"),
+            ("desktop_status", "status"),
+        )
+    },
     "list_harness_parts": _call_list_harness_parts,
     "get_harness_timeline": _call_get_harness_timeline,
     "get_harness_part": _call_get_harness_part,

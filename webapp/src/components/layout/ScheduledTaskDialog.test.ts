@@ -50,6 +50,7 @@ const task: ScheduledTask = {
   workspace_id: 'ws-1',
   prompt: 'Review open issues',
   mode: 'plan',
+  harness_id: 'native',
   model: '',
   reasoning_effort: '',
   skill_ids: [],
@@ -98,17 +99,6 @@ const passthrough = defineComponent({
     return () => h('div', slots.default?.())
   },
 })
-const dropdownItemStub = defineComponent({
-  emits: ['select'],
-  setup(_, { slots, attrs, emit }) {
-    return () =>
-      h(
-        'button',
-        { type: 'button', ...attrs, onClick: (event: MouseEvent) => emit('select', event) },
-        slots.default?.(),
-      )
-  },
-})
 const selectUpdateKey = Symbol('select-update')
 const tabsModelKey = Symbol('tabs-model')
 
@@ -147,18 +137,24 @@ async function mountDialog(mode: 'edit' | 'new' = 'edit', selectedTask = task) {
         ComposerRichEditor: editorStub,
         ModelPicker: true,
         HarnessChatInput: defineComponent({
+          name: 'HarnessChatInput',
           props: {
             prompt: { type: String, default: '' },
+            harnessId: { type: String, default: 'native' },
+            mode: { type: String, default: 'build' },
+            model: { type: String, default: '' },
+            effort: { type: String, default: '' },
             promptError: { type: String, default: '' },
             skillIds: { type: Array, default: () => [] },
             disabled: Boolean,
           },
           emits: [
             'update:prompt',
-            'update:skill-ids',
+            'update:skillIds',
             'update:model',
             'update:effort',
             'update:mode',
+            'update:harnessId',
           ],
           setup(props, { emit }) {
             return () =>
@@ -361,7 +357,44 @@ describe('ScheduledTaskDialog', () => {
     await wrapper.get('[data-testid="save-task"]').trigger('click')
     await flushPromises()
     expect(api.createScheduledTask).toHaveBeenCalledWith(
-      expect.objectContaining({ recurrence: 'daily', weekdays: [] }),
+      expect.objectContaining({
+        recurrence: 'daily',
+        weekdays: [],
+        harness_id: 'native',
+        skill_ids: [],
+      }),
+    )
+  })
+
+  it('restores Claude task mode and selected skills when editing', async () => {
+    const claudeTask: ScheduledTask = {
+      ...task,
+      harness_id: 'claude',
+      model: 'opus',
+      reasoning_effort: 'low',
+      skill_ids: ['skill-1'],
+    }
+    const { wrapper } = await mountDialog('edit', claudeTask)
+    const composer = wrapper.findComponent({ name: 'HarnessChatInput' })
+    expect(composer.props()).toMatchObject({
+      harnessId: 'claude',
+      mode: 'plan',
+      model: 'opus',
+      effort: 'low',
+      skillIds: ['skill-1'],
+    })
+
+    await wrapper.get('[data-testid="task-name"]').setValue('Claude review')
+    await wrapper.get('[data-testid="save-task"]').trigger('click')
+    await flushPromises()
+    expect(api.updateScheduledTask).toHaveBeenCalledWith(
+      claudeTask.id,
+      expect.objectContaining({
+        harness_id: 'claude',
+        model: 'opus',
+        reasoning_effort: 'low',
+        skill_ids: ['skill-1'],
+      }),
     )
   })
 
@@ -437,6 +470,7 @@ describe('ScheduledTaskDialog', () => {
         prompt: 'Check build health',
         skill_ids: [],
         mode: 'build',
+        harness_id: 'native',
         model: '',
         reasoning_effort: '',
         recurrence: 'weekly',

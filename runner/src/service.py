@@ -537,10 +537,19 @@ class WorkspaceService:
         from .services.capture_fence import CaptureFence
 
         self.capture_fence: CaptureFence = CaptureFence(self._registry)
+        # Pinned tools are lifecycle-scoped runner artifacts, not agent logic.
+        from .runtime.artifacts import RuntimeArtifactManager
+
+        self._runtime_artifacts = RuntimeArtifactManager(
+            runtimes,
+            self._get_cached,
+            self._get_runtime,
+            settings.state_dir,
+        )
         for manager in (
             self._images, self._terminals_manager, self._streams_manager,
             self._background, self._files_manager, self._harness,
-            self._git, self._desktop, self._lifecycle,
+            self._git, self._desktop, self._lifecycle, self._runtime_artifacts,
         ):
             manager.capture_fence = self.capture_fence
 
@@ -613,6 +622,7 @@ class WorkspaceService:
             "_background",
             "_files_manager",
             "_harness",
+            "_runtime_artifacts",
             "_git",
             "_desktop",
         ):
@@ -819,6 +829,22 @@ class WorkspaceService:
     def harness(self) -> HarnessExecService:
         """Return the harness command execution manager."""
         return self._harness
+
+    @property
+    def runtime_artifacts(self) -> RuntimeArtifactManager:
+        """Return the pinned runtime artifact manager."""
+        return self._runtime_artifacts
+
+    async def ensure_runtime_artifact(
+        self,
+        workspace_id: uuid.UUID,
+        artifact_id: str,
+        version: str,
+    ) -> dict[str, Any]:
+        """Ensure one approved native runtime tool in a workspace."""
+        return await self._runtime_artifacts.ensure_runtime_artifact(
+            workspace_id, artifact_id, version
+        )
 
     @property
     def credentials(self) -> CredentialManager:

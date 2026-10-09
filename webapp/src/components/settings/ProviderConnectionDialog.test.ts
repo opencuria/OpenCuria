@@ -13,6 +13,8 @@ vi.mock('@/services/harness.api', async () => {
     ...actual,
     saveProviderConnection: vi.fn(),
     deleteProviderConnection: vi.fn(),
+    saveClaudeConnection: vi.fn(),
+    deleteClaudeConnection: vi.fn(),
     startChatGptOAuth: vi.fn(),
     getChatGptOAuthStatus: vi.fn(),
     cancelChatGptOAuth: vi.fn(),
@@ -21,6 +23,8 @@ vi.mock('@/services/harness.api', async () => {
 
 const saveProviderConnectionMock = vi.mocked(harnessApi.saveProviderConnection)
 const deleteProviderConnectionMock = vi.mocked(harnessApi.deleteProviderConnection)
+const saveClaudeConnectionMock = vi.mocked(harnessApi.saveClaudeConnection)
+const deleteClaudeConnectionMock = vi.mocked(harnessApi.deleteClaudeConnection)
 const startChatGptOAuthMock = vi.mocked(harnessApi.startChatGptOAuth)
 const getChatGptOAuthStatusMock = vi.mocked(harnessApi.getChatGptOAuthStatus)
 const cancelChatGptOAuthMock = vi.mocked(harnessApi.cancelChatGptOAuth)
@@ -38,9 +42,13 @@ const dialogStubs = {
   DialogFooter: { template: '<div><slot /></div>' },
 }
 
-function mountDialog(provider: ProviderId, connection?: ProviderConnection) {
+function mountDialog(
+  provider: ProviderId | 'claude-agent',
+  connection?: ProviderConnection,
+  claudeConnection?: import('@/services/harness.api').ClaudeConnection | null,
+) {
   return mount(ProviderConnectionDialog, {
-    props: { open: true, provider, connection },
+    props: { open: true, provider, connection, claudeConnection },
     global: { stubs: dialogStubs },
   })
 }
@@ -55,6 +63,15 @@ describe('ProviderConnectionDialog', () => {
       api_key_hint: '••••wxyz',
     })
     deleteProviderConnectionMock.mockResolvedValue(undefined)
+    saveClaudeConnectionMock.mockResolvedValue({
+      id: 'personal-1',
+      auth_type: 'api_token',
+      label: 'Personal',
+      connected: true,
+      created_at: '2026-10-08T00:00:00Z',
+      updated_at: '2026-10-08T00:00:00Z',
+    })
+    deleteClaudeConnectionMock.mockResolvedValue(undefined)
     startChatGptOAuthMock.mockResolvedValue({
       user_code: 'ABCD-1234',
       verification_url: 'https://auth.openai.com/codex/device',
@@ -98,6 +115,65 @@ describe('ProviderConnectionDialog', () => {
       base_url: 'https://openrouter.ai/api/v1',
     })
     expect(wrapper.emitted('changed')).toHaveLength(1)
+  })
+
+  it('saves a personal Claude API token without echoing it back', async () => {
+    const wrapper = mountDialog('claude-agent')
+    await wrapper.find('#claude-token').setValue('anthropic-secret')
+    await wrapper.find('#claude-label').setValue('Work account')
+    await wrapper.find('[data-testid="save-claude-agent"]').trigger('click')
+    await flushPromises()
+
+    expect(saveClaudeConnectionMock).toHaveBeenCalledWith({
+      auth_type: 'api_token',
+      token: 'anthropic-secret',
+      label: 'Work account',
+    })
+    expect(wrapper.emitted('changed')).toHaveLength(1)
+    expect(wrapper.find('#claude-token').element.getAttribute('type')).toBe('password')
+    expect(wrapper.text()).toContain('no OAuth or browser authorization flow')
+    expect(wrapper.text()).toContain('only workspaces you trust')
+    expect(wrapper.text()).toContain('personal')
+  })
+
+  it('keeps a blank token for the same authentication type and requires a token to switch type', async () => {
+    const connection = {
+      id: 'personal-1',
+      auth_type: 'api_token' as const,
+      label: 'Personal',
+      connected: true,
+      created_at: '2026-10-08T00:00:00Z',
+      updated_at: '2026-10-08T00:00:00Z',
+    }
+    const wrapper = mountDialog('claude-agent', undefined, connection)
+    await wrapper.find('[data-testid="save-claude-agent"]').trigger('click')
+    await flushPromises()
+    expect(saveClaudeConnectionMock).toHaveBeenCalledWith({
+      auth_type: 'api_token',
+      token: '',
+      label: 'Personal',
+    })
+
+    wrapper.findComponent({ name: 'Tabs' }).vm.$emit('update:modelValue', 'subscription_token')
+    await wrapper.find('[data-testid="save-claude-agent"]').trigger('click')
+    expect(saveClaudeConnectionMock).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).toContain('Enter a token to connect or change the authentication type.')
+  })
+
+  it('disconnects Claude using its personal connection endpoint', async () => {
+    const connection = {
+      id: 'personal-1',
+      auth_type: 'subscription_token' as const,
+      label: 'Personal',
+      connected: true,
+      created_at: '2026-10-08T00:00:00Z',
+      updated_at: '2026-10-08T00:00:00Z',
+    }
+    const wrapper = mountDialog('claude-agent', undefined, connection)
+    await wrapper.find('[data-testid="disconnect-claude-agent"]').trigger('click')
+    await wrapper.find('[data-testid="confirm-disconnect-claude-agent"]').trigger('click')
+    await flushPromises()
+    expect(deleteClaudeConnectionMock).toHaveBeenCalledOnce()
   })
 
   it('runs ChatGPT OAuth polling until connected', async () => {

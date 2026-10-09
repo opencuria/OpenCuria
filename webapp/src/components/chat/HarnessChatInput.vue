@@ -6,6 +6,8 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import ComposerRichEditor from '@/components/chat/ComposerRichEditor.vue'
@@ -24,12 +26,22 @@ import {
   Square,
   X,
 } from '@lucide/vue'
-import type { HarnessSessionMode } from '@/types/harness'
+import type { HarnessId, HarnessSessionMode } from '@/types/harness'
 import type { FileNode, Skill } from '@/types'
 import { sendFilesUpload, subscribeToWorkspace } from '@/services/socket'
 import { resolveCatalogModel, snapEffort, type ProviderModel } from '@/lib/harnessModels'
 import { loadProviderModelsCached } from '@/lib/providerCatalog'
-import { loadRecentModels, recentCatalogModels, useRecentModels } from '@/lib/recentModels'
+import {
+  HARNESS_ENGINE_CONNECTION_CHANGED_EVENT,
+  listClaudeModels,
+  listHarnessEngines,
+} from '@/services/harness.api'
+import {
+  loadRecentModels,
+  recentCatalogModels,
+  recentEffortFor,
+  useRecentModels,
+} from '@/lib/recentModels'
 import { useChatInputCache } from '@/composables/useChatInputCache'
 import ModelPicker from '@/components/common/ModelPicker.vue'
 import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
@@ -89,6 +101,8 @@ const props = defineProps<{
   model?: string
   effort?: string
   mode?: HarnessSessionMode
+  harnessId?: HarnessId
+  engineLocked?: boolean
   skillOptions?: Skill[]
   /**
    * External mention navigation state mirrored from the parent sheet stack.
@@ -123,11 +137,13 @@ const emit = defineEmits<{
     model: string,
     skillIds: string[],
     effort: string,
+    harnessId: HarnessId,
   ]
   stop: []
   'update:model': [value: string]
   'update:effort': [value: string]
   'update:mode': [value: HarnessSessionMode]
+  'update:harnessId': [value: HarnessId]
   'update:prompt': [value: string]
   'update:skillIds': [value: string[]]
   uploading: [value: boolean]
@@ -152,13 +168,18 @@ function removeImageToken(start: number, end: number): void {
   })
 }
 const localMode = ref<HarnessSessionMode>(props.mode ?? 'build')
+const localHarnessId = ref<HarnessId>(props.harnessId ?? 'native')
 const localModel = ref(props.model ?? '')
 const localEffort = ref(props.effort ?? '')
 const catalog = ref<ProviderModel[]>([])
 const { entries: recentEntries } = useRecentModels()
-const recentModels = computed(() => recentCatalogModels(catalog.value))
+const recentModels = computed(() =>
+  localHarnessId.value === 'native' ? recentCatalogModels(catalog.value) : [],
+)
 const modelLoading = ref(true)
 const providerMissing = ref(false)
+const claudeConnected = ref(false)
+const claudeEngineAvailable = ref(false)
 const selectedSkillIds = ref<string[]>([...(props.skillIds ?? [])])
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const isUploading = ref(false)
@@ -176,11 +197,13 @@ function uploadReservationKey(workspaceId: string, path: string): string {
 const harness = useHarnessStore()
 const authStore = useAuthStore()
 let applyingDefaults = false
+let applyEngineDefaultsAfterCatalog = false
 let modelRequestGeneration = 0
 
 const { loadFromCache, saveToCache, clearCache } = useChatInputCache(
   () => props.workspaceId || '',
   () => props.sessionId,
+  () => localHarnessId.value,
 )
 
 const selectedSkills = computed(() =>
@@ -309,7 +332,7 @@ const contextRingCircumference = 2 * Math.PI * CONTEXT_RING_RADIUS
 
 const contextLimit = computed(() => {
   const catalogModel = resolveCatalogModel(catalog.value, localModel.value)
-  return catalogModel?.context_length ?? 0
+  return catalogModel?.context_length ?? (localHarnessId.value === 'claude' ? 200_000 : 0)
 })
 
 const contextUsed = computed(() => Math.max(0, props.contextUsed ?? 0))
@@ -342,6 +365,10 @@ watch(
 
 const modeIcon = computed(() => (localMode.value === 'plan' ? ListTodo : Hammer))
 const modeLabel = computed(() => (localMode.value === 'plan' ? 'Plan' : 'Build'))
+const harnessLabel = computed(() =>
+  localHarnessId.value === 'claude' ? 'Claude Agent' : 'OpenCuria',
+)
+const modeMenuLabel = computed(() => `${harnessLabel.value} ${modeLabel.value}`)
 
 /**
  * Öffnet das Provider-Tab direkt per Window-Event — bewusst OHNE Router-Navigation:
@@ -355,7 +382,12 @@ function openProviderSettings(): void {
 
 function applyModeDefaults(mode: HarnessSessionMode, opts: { resetDirty?: boolean } = {}): void {
   const defaults = harness.agentDefault(mode)
-  if (isScheduledTask.value || (!defaults.model && !defaults.effort)) return
+  if (
+    isScheduledTask.value ||
+    localHarnessId.value === 'claude' ||
+    (!defaults.model && !defaults.effort)
+  )
+    return
   applyingDefaults = true
   try {
     localModel.value = defaults.model
@@ -375,10 +407,9 @@ async function loadProviderModels(): Promise<void> {
   const requestGeneration = ++modelRequestGeneration
   const organizationId = authStore.activeOrganizationId
   try {
-    const [models] = await Promise.all([
-      loadProviderModelsCached(),
-      ...(isScheduledTask.value ? [] : [harness.loadAgentConfigs()]),
-      loadRecentModels(),
+    const [models, engines] = await Promise.all([
+      localHarnessId.value === 'claude' ? listClaudeModels() : loadProviderModelsCached(),
+      listHarnessEngines().catch(() => []),
     ])
     if (
       requestGeneration !== modelRequestGeneration ||
@@ -386,7 +417,14 @@ async function loadProviderModels(): Promise<void> {
     )
       return
     catalog.value = models
-    if (catalog.value.length === 0) providerMissing.value = true
+    claudeEngineAvailable.value = engines.some((engine) => engine.id === 'claude')
+    claudeConnected.value = Boolean(engines.find((engine) => engine.id === 'claude')?.connected)
+    if (localHarnessId.value === 'claude' && !claudeConnected.value) providerMissing.value = true
+    else if (catalog.value.length === 0) providerMissing.value = true
+    if (localHarnessId.value === 'native') {
+      if (!isScheduledTask.value) await harness.loadAgentConfigs()
+      await loadRecentModels()
+    }
   } catch {
     if (
       requestGeneration !== modelRequestGeneration ||
@@ -402,7 +440,17 @@ async function loadProviderModels(): Promise<void> {
     )
       modelLoading.value = false
   }
-  if (!isScheduledTask.value && !harness.composerDirty && !props.model && !props.effort) {
+  if (applyEngineDefaultsAfterCatalog && localHarnessId.value === 'native') {
+    applyModeDefaults(localMode.value, { resetDirty: true })
+    applyEngineDefaultsAfterCatalog = false
+  }
+  if (
+    localHarnessId.value === 'native' &&
+    !isScheduledTask.value &&
+    !harness.composerDirty &&
+    !props.model &&
+    !props.effort
+  ) {
     applyModeDefaults(localMode.value, { resetDirty: true })
   }
 }
@@ -413,6 +461,7 @@ onMounted(() => {
     const cached = loadFromCache()
     if (cached) prompt.value = cached
   }
+  window.addEventListener(HARNESS_ENGINE_CONNECTION_CHANGED_EVENT, loadProviderModels)
   void loadProviderModels()
   void nextTick(() => {
     resizeTextarea()
@@ -421,6 +470,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener(HARNESS_ENGINE_CONNECTION_CHANGED_EVENT, loadProviderModels)
   uploadDisposed = true
   invalidateUploads()
   if (!isScheduledTask.value && !props.stopOnly) saveToCache(prompt.value)
@@ -485,6 +535,24 @@ watch(
   },
 )
 
+watch(
+  () => props.harnessId,
+  (next) => {
+    if (next && next !== localHarnessId.value) {
+      localHarnessId.value = next
+      if (!isScheduledTask.value) prompt.value = loadFromCache()
+      if (!props.engineLocked) {
+        localModel.value = next === 'claude' ? 'sonnet' : ''
+        localEffort.value = next === 'claude' ? 'high' : recentEffortFor(localModel.value)
+        emit('update:model', localModel.value)
+        emit('update:effort', localEffort.value)
+        applyEngineDefaultsAfterCatalog = next === 'native'
+      }
+      void loadProviderModels()
+    }
+  },
+)
+
 watch(prompt, (value) => {
   if (isScheduledTask.value) emit('update:prompt', value)
   else saveToCache(value)
@@ -508,6 +576,7 @@ watch(
     releaseMentionSubscription?.()
     releaseMentionSubscription = null
     localMode.value = props.mode ?? 'build'
+    localHarnessId.value = props.harnessId ?? 'native'
     localModel.value = props.model ?? ''
     localEffort.value = props.effort ?? ''
     selectedSkillIds.value = [...(props.skillIds ?? [])]
@@ -537,11 +606,38 @@ function handleSend(): void {
     localModel.value.trim(),
     [...selectedSkillIds.value],
     localEffort.value.trim(),
+    localHarnessId.value,
   )
   prompt.value = ''
   selectedSkillIds.value = []
   clearCache()
   closeComposerQuery()
+}
+
+function setHarnessMode(harnessId: HarnessId, mode: HarnessSessionMode): void {
+  if (props.engineLocked && harnessId !== localHarnessId.value) return
+  if (
+    harnessId === 'claude' &&
+    harnessId !== localHarnessId.value &&
+    (!claudeEngineAvailable.value || !claudeConnected.value)
+  ) {
+    openProviderSettings()
+    return
+  }
+  const harnessChanged = harnessId !== localHarnessId.value
+  localHarnessId.value = harnessId
+  if (harnessChanged) {
+    emit('update:harnessId', harnessId)
+
+    localModel.value = harnessId === 'claude' ? 'sonnet' : ''
+    localEffort.value = harnessId === 'claude' ? 'high' : ''
+    emit('update:model', localModel.value)
+    emit('update:effort', localEffort.value)
+    harness.composerDirty = false
+    applyEngineDefaultsAfterCatalog = harnessId === 'native'
+    void loadProviderModels()
+  }
+  setMode(mode)
 }
 
 function setMode(mode: HarnessSessionMode): void {
@@ -1207,7 +1303,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
               :placeholder="
                 isScheduledTask
                   ? 'Describe the recurring work… Use / for skills and @ for context'
-                  : 'Plan, Build, / for skills, @ for context'
+                  : 'Plan or Build, / for skills, @ for context'
               "
               :aria-label="isScheduledTask ? 'Scheduled task prompt' : 'Chat prompt'"
               :aria-invalid="isScheduledTask ? Boolean(promptError) : undefined"
@@ -1295,29 +1391,93 @@ function onComposerKeydown(e: KeyboardEvent): void {
                     :disabled="disabled"
                   >
                     <component :is="modeIcon" :size="14" class="shrink-0" />
-                    <span class="min-w-0 truncate">{{ modeLabel }}</span>
+                    <span class="min-w-0 truncate">{{ modeMenuLabel }}</span>
                     <ChevronDown :size="12" class="shrink-0 opacity-70" />
                   </Button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent side="top" align="start" class="min-w-36">
+                <DropdownMenuContent side="top" align="start" class="min-w-48">
+                  <DropdownMenuLabel class="px-2 pb-1 pt-2">OpenCuria Build/Plan</DropdownMenuLabel>
                   <DropdownMenuItem
                     class="text-xs"
-                    data-testid="composer-mode-build"
-                    @click="setMode('build')"
+                    data-testid="composer-mode-native-build"
+                    :disabled="engineLocked && localHarnessId !== 'native'"
+                    @click="setHarnessMode('native', 'build')"
                   >
                     <Hammer :size="14" />
-                    Build
-                    <Check v-if="localMode === 'build'" class="ml-auto size-3.5" />
+                    OpenCuria Build
+                    <Check
+                      v-if="localHarnessId === 'native' && localMode === 'build'"
+                      class="ml-auto size-3.5"
+                    />
                   </DropdownMenuItem>
                   <DropdownMenuItem
                     class="text-xs"
-                    data-testid="composer-mode-plan"
-                    @click="setMode('plan')"
+                    data-testid="composer-mode-native-plan"
+                    :disabled="engineLocked && localHarnessId !== 'native'"
+                    @click="setHarnessMode('native', 'plan')"
                   >
                     <ListTodo :size="14" />
-                    Plan
-                    <Check v-if="localMode === 'plan'" class="ml-auto size-3.5" />
+                    OpenCuria Plan
+                    <Check
+                      v-if="localHarnessId === 'native' && localMode === 'plan'"
+                      class="ml-auto size-3.5"
+                    />
                   </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel class="px-2 pb-1 pt-2"
+                    >Claude Agent Build/Plan</DropdownMenuLabel
+                  >
+                  <DropdownMenuItem
+                    class="text-xs"
+                    data-testid="composer-mode-claude-build"
+                    :disabled="
+                      (engineLocked && localHarnessId === 'native') ||
+                      (localHarnessId !== 'claude' && (!claudeEngineAvailable || !claudeConnected))
+                    "
+                    :title="
+                      localHarnessId !== 'claude' && (!claudeEngineAvailable || !claudeConnected)
+                        ? 'Connect Claude Agent in Provider settings first.'
+                        : undefined
+                    "
+                    @click="setHarnessMode('claude', 'build')"
+                  >
+                    <Hammer :size="14" />
+                    Claude Agent Build
+                    <Check
+                      v-if="localHarnessId === 'claude' && localMode === 'build'"
+                      class="ml-auto size-3.5"
+                    />
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    class="text-xs"
+                    data-testid="composer-mode-claude-plan"
+                    :disabled="
+                      (engineLocked && localHarnessId === 'native') ||
+                      (localHarnessId !== 'claude' && (!claudeEngineAvailable || !claudeConnected))
+                    "
+                    :title="
+                      localHarnessId !== 'claude' && (!claudeEngineAvailable || !claudeConnected)
+                        ? 'Connect Claude Agent in Provider settings first.'
+                        : undefined
+                    "
+                    @click="setHarnessMode('claude', 'plan')"
+                  >
+                    <ListTodo :size="14" />
+                    Claude Agent Plan
+                    <Check
+                      v-if="localHarnessId === 'claude' && localMode === 'plan'"
+                      class="ml-auto size-3.5"
+                    />
+                  </DropdownMenuItem>
+                  <button
+                    v-if="!claudeConnected"
+                    type="button"
+                    class="w-full px-3 py-2 text-left text-xs text-muted-foreground hover:text-foreground"
+                    data-testid="claude-provider-settings"
+                    @click.stop="openProviderSettings"
+                  >
+                    Connect Claude Agent in Provider settings
+                  </button>
                 </DropdownMenuContent>
               </DropdownMenu>
 
@@ -1326,7 +1486,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
                 :effort="localEffort"
                 :models="catalog"
                 :recent-models="recentModels"
-                :recent-efforts="recentEntries"
+                :recent-efforts="localHarnessId === 'native' ? recentEntries : []"
                 :loading="modelLoading"
                 :disabled="disabled"
                 :default-model-label="isScheduledTask ? 'Agent default' : 'Select model…'"

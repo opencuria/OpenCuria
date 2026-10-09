@@ -65,7 +65,11 @@ def test_claim_snapshots_locked_task_configuration_not_stale_due_object():
     due = task.next_run_at
     stale_task = ScheduledTask.objects.get(id=task.id)
     ScheduledTask.objects.filter(id=task.id).update(
-        prompt="Edited prompt", mode="plan", model="", reasoning_effort=""
+        prompt="Edited prompt",
+        mode="plan",
+        model="",
+        reasoning_effort="",
+        harness_id="claude",
     )
 
     run = ScheduledTaskRepository.claim(
@@ -77,6 +81,7 @@ def test_claim_snapshots_locked_task_configuration_not_stale_due_object():
     assert run.configuration_snapshot["mode"] == "plan"
     assert run.configuration_snapshot["model"] == ""
     assert run.configuration_snapshot["reasoning_effort"] == ""
+    assert run.configuration_snapshot["harness_id"] == "claude"
     assert run.configuration_snapshot["workspace_id"] == str(task.workspace_id)
     assert "owner_id" not in run.configuration_snapshot
     assert run.trigger == "scheduled"

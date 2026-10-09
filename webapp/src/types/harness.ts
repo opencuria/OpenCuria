@@ -86,6 +86,7 @@ export interface HarnessPartDisplay {
 export interface HarnessMessage {
   id: string
   session_id: string
+  harness_id?: HarnessId
   role: 'user' | 'assistant'
   content: string
   model?: string
@@ -107,6 +108,9 @@ export interface HarnessMessage {
   completed_at?: string | null
 }
 
+/** Harness engine selected for a conversation. */
+export type HarnessId = 'native' | 'claude'
+
 /** Execution mode of a harness session. */
 export type HarnessSessionMode = 'plan' | 'build'
 
@@ -121,6 +125,9 @@ export interface HarnessSession {
   id: string
   workspace_id: string
   parent_id?: string | null
+  /** Fixed execution engine for the session; legacy sessions default to native. */
+  harness_id?: HarnessId
+  connection_id?: string | null
   title: string
   mode: HarnessSessionMode
   agent_name: string
@@ -198,6 +205,7 @@ export interface HarnessSessionCreateIn {
   model?: string
   reasoning_effort?: string
   skill_ids?: string[]
+  harness_id?: HarnessId
 }
 
 export interface HarnessSessionPatchIn {
@@ -234,6 +242,7 @@ export interface HarnessPartsOut {
 /** Org-wide harness conversation row for the dashboard feed. */
 export interface HarnessConversation {
   session_id: string
+  harness_id?: HarnessId
   workspace_id: string
   workspace_name: string
   title: string

@@ -170,8 +170,17 @@ async function mountHome() {
       stubs: {
         CreateWorkspaceDialog: { template: '<div />' },
         HarnessChatInput: {
-          template:
-            '<div data-testid="chat-home-composer"><textarea data-testid="composer-textarea" /></div>',
+          props: ['harnessId'],
+          template: `
+            <div data-testid="chat-home-composer">
+              <textarea data-testid="composer-textarea" />
+              <button data-testid="select-claude" @click="$emit('update:harnessId', 'claude')" />
+              <button
+                data-testid="send-composer-prompt"
+                @click="$emit('send', 'hello', 'build', '', [], '', harnessId)"
+              />
+            </div>
+          `,
           methods: {
             chooseMention() {},
           },
@@ -205,6 +214,7 @@ describe('ChatHomeView', () => {
   beforeEach(() => {
     localStorage.clear()
     setActivePinia(createPinia())
+    vi.unstubAllGlobals()
     vi.clearAllMocks()
     clearComposerTransition()
     workspaceStore.workspaces = [makeWorkspace()]
@@ -259,7 +269,8 @@ describe('ChatHomeView', () => {
     expect(wrapper.get('[data-testid="workspace-picker-trigger"]').text()).toContain('Beta')
   })
 
-  it('creates a session and navigates to workspace-detail on send', async () => {
+  it('passes the selected Claude harness to the new session and navigates to workspace-detail', async () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })))
     const { wrapper, router } = await mountHome()
     const pushSpy = vi.spyOn(router, 'push')
     harnessStore.createSession.mockResolvedValue({ id: 'session-1' })
@@ -271,12 +282,23 @@ describe('ChatHomeView', () => {
         model: string,
         skillIds: string[],
         effort: string,
+        harnessId?: 'native' | 'claude',
       ) => Promise<void>
     }
-    await vm.handleSend('hello', 'build', '', [], '')
+    expect(vm.handleSend).toBeTypeOf('function')
+    await wrapper.get('[data-testid="select-claude"]').trigger('click')
+    await wrapper.get('[data-testid="send-composer-prompt"]').trigger('click')
     await flushPromises()
 
-    expect(harnessStore.createSession).toHaveBeenCalledWith('ws-1', 'hello', 'build', '', [], '')
+    expect(harnessStore.createSession).toHaveBeenCalledWith(
+      'ws-1',
+      'hello',
+      'build',
+      '',
+      [],
+      '',
+      'claude',
+    )
     expect(pushSpy).toHaveBeenCalledWith({
       name: 'workspace-detail',
       params: { id: 'ws-1' },
@@ -302,6 +324,7 @@ describe('ChatHomeView', () => {
         model: string,
         skillIds: string[],
         effort: string,
+        harnessId?: 'native' | 'claude',
       ) => Promise<void>
     }
     const sendPromise = vm.handleSend('hello', 'build', '', [], '')
@@ -315,6 +338,15 @@ describe('ChatHomeView', () => {
     await sendPromise
     await flushPromises()
 
+    expect(harnessStore.createSession).toHaveBeenCalledWith(
+      'ws-1',
+      'hello',
+      'build',
+      '',
+      [],
+      '',
+      'native',
+    )
     expect(isComposerTransitionPending()).toBe(true)
     expect(workspaceStore.activeWorkspace?.id).toBe('ws-1')
     expect(pushSpy).toHaveBeenCalledWith({
@@ -336,6 +368,7 @@ describe('ChatHomeView', () => {
         model: string,
         skillIds: string[],
         effort: string,
+        harnessId?: 'native' | 'claude',
       ) => Promise<void>
     }
     await vm.handleSend('hello', 'build', '', [], '')

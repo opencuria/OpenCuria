@@ -14,7 +14,12 @@ import ProviderConnectionDialog from './ProviderConnectionDialog.vue'
 import ModelPicker from '@/components/common/ModelPicker.vue'
 import SettingsRow from './SettingsRow.vue'
 import SettingsSection from './SettingsSection.vue'
-import { PROVIDER_META, connectionDetail, type ProviderMeta } from './providerMeta'
+import {
+  PROVIDER_META,
+  connectionDetail,
+  type ProviderMeta,
+  type SettingsProviderId,
+} from './providerMeta'
 import type { ProviderId, ProviderModel } from '@/lib/harnessModels'
 import { invalidateProviderCatalog, loadProviderModelsCached } from '@/lib/providerCatalog'
 import { ApiRequestError } from '@/services/api'
@@ -22,7 +27,10 @@ import { useNotificationStore } from '@/stores/notifications'
 import {
   getProviderConfig,
   listProviderConnections,
+  getClaudeConnection,
   saveProviderConfig,
+  type ClaudeConnection,
+  listClaudeModels,
   type HarnessProviderConfig,
   type ProviderConnection,
 } from '@/services/harness.api'
@@ -34,12 +42,14 @@ const savingDefaults = ref(false)
 const error = ref<string | null>(null)
 const config = ref<HarnessProviderConfig | null>(null)
 const connections = ref<ProviderConnection[]>([])
+const claudeConnection = ref<ClaudeConnection | null>(null)
 const catalog = ref<ProviderModel[]>([])
+const claudeCatalog = ref<ProviderModel[]>([])
 
 const smallModel = ref('')
 const smallEffort = ref('')
 
-const activeProvider = ref<ProviderId | null>(null)
+const activeProvider = ref<SettingsProviderId | null>(null)
 
 const connectionByProvider = computed(() => {
   const map = new Map<ProviderId, ProviderConnection>()
@@ -50,7 +60,13 @@ const connectionByProvider = computed(() => {
 })
 
 const activeConnection = computed(() =>
-  activeProvider.value ? connectionByProvider.value.get(activeProvider.value) : undefined,
+  activeProvider.value && activeProvider.value !== 'claude-agent'
+    ? connectionByProvider.value.get(activeProvider.value)
+    : undefined,
+)
+
+const activeClaudeConnection = computed(() =>
+  activeProvider.value === 'claude-agent' ? claudeConnection.value : null,
 )
 
 const anyConnected = computed(() => connections.value.some((row) => row.connected))
@@ -58,7 +74,7 @@ const anyConnected = computed(() => connections.value.some((row) => row.connecte
 /** Number of catalog models per provider, once the catalog is loaded. */
 const modelCountByProvider = computed(() => {
   const counts = new Map<string, number>()
-  for (const model of catalog.value) {
+  for (const model of [...catalog.value, ...claudeCatalog.value]) {
     if (!model.provider) continue
     counts.set(model.provider, (counts.get(model.provider) ?? 0) + 1)
   }
@@ -87,17 +103,21 @@ function isNotFoundError(error: unknown): boolean {
 
 async function refreshAll(): Promise<void> {
   invalidateProviderCatalog()
-  const [configRes, connectionRes, modelsRes] = await Promise.all([
+  const [configRes, connectionRes, modelsRes, claudeRes, claudeModels] = await Promise.all([
     getProviderConfig().catch((error: unknown) => {
       if (isNotFoundError(error)) return null
       throw error
     }),
     listProviderConnections(),
     loadProviderModelsCached().catch(() => [] as ProviderModel[]),
+    getClaudeConnection().catch(() => null),
+    listClaudeModels().catch(() => [] as ProviderModel[]),
   ])
   applyConfig(configRes)
   connections.value = connectionRes
   catalog.value = modelsRes
+  claudeCatalog.value = claudeModels
+  claudeConnection.value = claudeRes
 }
 
 async function loadState(): Promise<void> {
@@ -108,7 +128,9 @@ async function loadState(): Promise<void> {
   } catch (e: unknown) {
     config.value = null
     connections.value = []
+    claudeConnection.value = null
     catalog.value = []
+    claudeCatalog.value = []
     smallModel.value = ''
     smallEffort.value = ''
     const message = e instanceof Error ? e.message : 'Failed to load provider settings'
@@ -120,12 +142,18 @@ async function loadState(): Promise<void> {
   }
 }
 
-function openProviderDialog(provider: ProviderId): void {
+function openProviderDialog(provider: SettingsProviderId): void {
   activeProvider.value = provider
 }
 
 /** Row subtitle: connection summary when connected, otherwise the pitch. */
 function rowDetail(meta: ProviderMeta): string {
+  if (meta.id === 'claude-agent') {
+    const connection = claudeConnection.value
+    if (!connection?.connected) return meta.description
+    const auth = connection.auth_type === 'api_token' ? 'API token' : 'Subscription token'
+    return [connection.label, auth].filter(Boolean).join(' · ')
+  }
   const connection = connectionByProvider.value.get(meta.id)
   if (!connection?.connected) return meta.description
   return connectionDetail(connection)
@@ -189,7 +217,7 @@ onMounted(() => {
     <template v-else>
       <SettingsSection
         title="Providers"
-        description="Connect one or more model providers for your organization. Credentials are encrypted at rest."
+        description="Connect organization-wide model providers. Claude Agent uses your personal Anthropic token and follows Anthropic billing; provider secrets are encrypted at rest."
       >
         <div class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
           <SettingsRow
@@ -197,7 +225,11 @@ onMounted(() => {
             :key="meta.id"
             class="cursor-pointer transition-colors hover:bg-muted/40"
             :icon-class="
-              connectionByProvider.get(meta.id)?.connected
+              (
+                meta.id === 'claude-agent'
+                  ? claudeConnection?.connected
+                  : connectionByProvider.get(meta.id)?.connected
+              )
                 ? 'bg-success/10 text-success'
                 : undefined
             "
@@ -211,7 +243,11 @@ onMounted(() => {
               <div class="flex flex-wrap items-center gap-2">
                 <span class="text-sm font-medium text-foreground">{{ meta.name }}</span>
                 <span
-                  v-if="connectionByProvider.get(meta.id)?.connected"
+                  v-if="
+                    meta.id === 'claude-agent'
+                      ? claudeConnection?.connected
+                      : connectionByProvider.get(meta.id)?.connected
+                  "
                   class="text-xs font-medium text-success"
                   :data-testid="`provider-status-${meta.id}`"
                 >
@@ -224,21 +260,38 @@ onMounted(() => {
             </div>
             <template #badges>
               <span
-                v-if="modelCountByProvider.get(meta.id)"
+                v-if="modelCountByProvider.get(meta.id === 'claude-agent' ? 'claude' : meta.id)"
                 class="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground"
                 :data-testid="`provider-model-count-${meta.id}`"
               >
-                {{ modelCountByProvider.get(meta.id) }} models
+                {{ modelCountByProvider.get(meta.id === 'claude-agent' ? 'claude' : meta.id) }}
+                models
               </span>
             </template>
             <template #actions>
               <Button
                 size="sm"
-                :variant="connectionByProvider.get(meta.id)?.connected ? 'outline' : 'default'"
+                :variant="
+                  (
+                    meta.id === 'claude-agent'
+                      ? claudeConnection?.connected
+                      : connectionByProvider.get(meta.id)?.connected
+                  )
+                    ? 'outline'
+                    : 'default'
+                "
                 :data-testid="`provider-manage-${meta.id}`"
                 @click.stop="openProviderDialog(meta.id)"
               >
-                {{ connectionByProvider.get(meta.id)?.connected ? 'Manage' : 'Connect' }}
+                {{
+                  (
+                    meta.id === 'claude-agent'
+                      ? claudeConnection?.connected
+                      : connectionByProvider.get(meta.id)?.connected
+                  )
+                    ? 'Manage'
+                    : 'Connect'
+                }}
               </Button>
             </template>
           </SettingsRow>
@@ -311,6 +364,7 @@ onMounted(() => {
       :open="activeProvider !== null"
       :provider="activeProvider"
       :connection="activeConnection"
+      :claude-connection="activeClaudeConnection"
       @update:open="handleDialogClosed"
       @changed="handleConnectionChanged"
       @connected="handleConnectionConnected"

@@ -28,6 +28,7 @@ class ScheduledTask(models.Model):
     )
     model = models.CharField(max_length=255, blank=True, default="")
     reasoning_effort = models.CharField(max_length=50, blank=True, default="")
+    harness_id = models.CharField(max_length=16, default="native")
     skill_ids = models.JSONField(default=list, blank=True)
     recurrence = models.CharField(max_length=16, choices=Recurrence.choices)
     weekdays = models.JSONField(default=list, blank=True)

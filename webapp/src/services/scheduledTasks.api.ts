@@ -1,5 +1,6 @@
 /** Personal scheduled-task REST API. */
 import { del, get, patch, post } from './api'
+import type { HarnessId } from '@/types/harness'
 
 export interface ScheduledTask {
   id: string
@@ -7,6 +8,7 @@ export interface ScheduledTask {
   workspace_id: string
   prompt: string
   mode: 'plan' | 'build'
+  harness_id?: HarnessId
   model: string
   reasoning_effort: string
   skill_ids: string[]
@@ -25,6 +27,7 @@ export interface ScheduledTaskInput {
   workspace_id: string
   prompt: string
   mode: 'plan' | 'build'
+  harness_id: HarnessId
   model: string
   reasoning_effort: string
   skill_ids: string[]

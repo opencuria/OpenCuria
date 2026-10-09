@@ -36,8 +36,12 @@ from .docker_frames import (
     DockerFrameParser,
 )
 from .inventory import RuntimeInventory, StorageResource
+from .managed_process import (
+    isolated_agent_env_preamble,
+    managed_argv,
+    managed_isolated_argv,
+)
 from .storage import storage_mutation
-from .managed_process import managed_argv
 from .stream_wrapper import stream_wrapper_argv
 
 logger = structlog.get_logger(__name__)
@@ -654,6 +658,8 @@ class DockerRuntime(RuntimeBackend):
         *,
         control_path: str | None = None,
         expected_token: dict[str, str] | None = None,
+        isolated_env: bool = False,
+        isolated_home: str | None = None,
     ) -> ProcessHandle:
         """Spawn a non-TTY bidirectional process (stdin/stdout/stderr)."""
         if not command or not all(isinstance(part, str) for part in command):
@@ -663,15 +669,32 @@ class DockerRuntime(RuntimeBackend):
         if control_path and expected_token is None:
             expected_token = await self.probe_managed_token(instance_id)
         pidfile = self._stream_pidfile()
-        argv = (
-            managed_argv(control_path, workdir, env, list(command), expected_token=expected_token)
-            if control_path else
-            stream_wrapper_argv(pidfile, workdir, env, list(command))
-        )
+        if isolated_env:
+            if not control_path or expected_token is None or isolated_home is None:
+                raise ValueError("Isolated agent streams require managed identity")
+            argv = managed_isolated_argv(
+                control_path,
+                workdir,
+                list(command),
+                expected_token=expected_token,
+                isolated_home=isolated_home,
+            )
+        elif control_path:
+            argv = managed_argv(
+                control_path,
+                workdir,
+                env,
+                list(command),
+                expected_token=expected_token,
+            )
+        else:
+            argv = stream_wrapper_argv(pidfile, workdir, env, list(command))
 
         def _spawn() -> tuple[object, str]:
             api = self._get_client().api
             environment = {"TERM": "xterm-256color"}
+            if isolated_env:
+                environment["OPENCURIA_ISOLATED_AGENT"] = "1"
             exec_id = api.exec_create(
                 instance_id,
                 cmd=argv,
@@ -683,6 +706,15 @@ class DockerRuntime(RuntimeBackend):
                 environment=environment,
             )["Id"]
             sock = api.exec_start(exec_id, socket=True, tty=False)
+            if isolated_env:
+                raw_sock = getattr(sock, "_sock", sock)
+                payload = isolated_agent_env_preamble(env)
+                try:
+                    raw_sock.sendall(payload)
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        raw_sock.close()
+                    raise
             return sock, exec_id
 
         sock, exec_id = await asyncio.to_thread(_spawn)

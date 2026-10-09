@@ -39,6 +39,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useSkillStore } from '@/stores/skills'
 import { useScheduledTaskStore } from '@/stores/scheduledTasks'
 import { WorkspaceStatus } from '@/types'
+import type { HarnessId } from '@/types/harness'
 import {
   isValidTimeZone,
   nextLocalOccurrence,
@@ -76,6 +77,7 @@ interface FormState {
   workspace_id: string
   prompt: string
   mode: 'plan' | 'build'
+  harness_id: HarnessId
   model: string
   reasoning_effort: string
   skill_ids: string[]
@@ -90,6 +92,7 @@ function blankForm(): FormState {
     workspace_id: '',
     prompt: '',
     mode: 'build',
+    harness_id: 'native',
     model: '',
     reasoning_effort: '',
     skill_ids: [],
@@ -191,6 +194,7 @@ function applyTask(task: ScheduledTask): void {
     workspace_id: task.workspace_id,
     prompt: task.prompt,
     mode: task.mode,
+    harness_id: task.harness_id ?? 'native',
     model: task.model,
     reasoning_effort: task.reasoning_effort,
     skill_ids: [...task.skill_ids],
@@ -707,11 +711,13 @@ onMounted(async () => {
                 <HarnessChatInput
                   :prompt="form.prompt"
                   :mode="form.mode"
+                  :harness-id="form.harness_id"
                   :model="form.model"
                   :effort="form.reasoning_effort"
                   :skill-ids="form.skill_ids"
                   @update:prompt="updateForm('prompt', $event)"
                   @update:mode="updateForm('mode', $event)"
+                  @update:harness-id="updateForm('harness_id', $event)"
                   @update:model="updateForm('model', $event)"
                   @update:effort="updateForm('reasoning_effort', $event)"
                   @update:skill-ids="updateForm('skill_ids', $event)"

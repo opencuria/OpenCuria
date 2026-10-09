@@ -372,6 +372,8 @@ class StreamManager:
             raise RuntimeError("Workspace has no instance assigned")
         control_path = None
         expected_token = None
+        isolated_env = False
+        isolated_home: str | None = None
         if owner is not None:
             if (
                 not isinstance(owner, dict)
@@ -389,7 +391,7 @@ class StreamManager:
             lease = await self.lease_store.get(owner["lease_id"])
             if (
                 not lease
-                or lease["kind"] != "mcp"
+                or lease["kind"] not in {"mcp", "agent"}
                 or lease["epoch"] != owner["epoch"]
                 or (self.epoch is not None and owner["epoch"] != self.epoch)
                 or not isinstance(lease.get("expires_at"), (int, float))
@@ -415,15 +417,26 @@ class StreamManager:
                 + "/"
                 + hashlib.sha256(identity.encode()).hexdigest()
             )
+            isolated_env = lease["kind"] == "agent"
+            if isolated_env:
+                isolated_home = (
+                    "/tmp/opencuria-agent-home-"
+                    + hashlib.sha256(
+                        f"{workspace_id}:{owner['lease_id']}:{owner['epoch']}:{conn_id}".encode()
+                    ).hexdigest()[:32]
+                )
         if owner is not None:
             expected_token = await runtime.probe_managed_token(info.instance_id)
             # Probe may have queued through a restart/release. Revalidate after it.
             lease = await self.lease_store.get(owner["lease_id"])
             if (
                 not lease
+                or lease["kind"] not in {"mcp", "agent"}
                 or lease["state"] not in {"reserved", "held"}
                 or lease["epoch"] != owner["epoch"]
                 or lease["expires_at"] <= time.time()
+                or str(lease["workspace_id"]) != str(workspace_id)
+                or lease["instance_id"] != info.instance_id
             ):
                 raise ValueError("Stream lease ended during guest probe")
         async with self._streams_guard:
@@ -463,13 +476,17 @@ class StreamManager:
                 if owner
                 else {}
             )
-            return await runtime.spawn_process(
+            if isolated_env:
+                kwargs["isolated_env"] = True
+                kwargs["isolated_home"] = isolated_home
+            handle = await runtime.spawn_process(
                 info.instance_id,
                 command=argv,
                 workdir=safe_workdir,
                 env=clean_env,
                 **kwargs,
             )
+            return handle
 
         task = asyncio.create_task(spawn())
         try:

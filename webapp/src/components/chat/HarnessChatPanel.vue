@@ -7,7 +7,7 @@ import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useHarnessStore } from '@/stores/harness'
 import { useSkillStore } from '@/stores/skills'
 import { onEvent, onReconnect, subscribeToWorkspace } from '@/services/socket'
-import type { HarnessSessionMode } from '@/types/harness'
+import type { HarnessId, HarnessSessionMode } from '@/types/harness'
 import type { MentionCandidate } from '@/lib/harnessMentions'
 import {
   buildComposerSheets,
@@ -50,6 +50,7 @@ const sending = ref(false)
 const resolving = ref(false)
 const answeringQuestion = ref(false)
 const composerMode = ref<HarnessSessionMode>('build')
+const composerHarnessId = ref<HarnessId>('native')
 
 const activeSession = computed(() => harness.activeSession)
 /**
@@ -475,7 +476,9 @@ onMounted(() => {
   setupSocketListeners()
   void harness.fetchSessions(props.workspaceId).then(() => {
     applySessionQuery()
-    harness.setViewingSession(harness.activeSessionId)
+    const sessionId = harness.activeSessionId
+    if (sessionId) syncSessionComposer(sessionId)
+    harness.setViewingSession(sessionId)
   })
   void skillStore.fetchSkills()
 })
@@ -493,7 +496,9 @@ watch(
     setupSocketListeners()
     void harness.fetchSessions(next).then(() => {
       applySessionQuery()
-      harness.setViewingSession(harness.activeSessionId)
+      const sessionId = harness.activeSessionId
+      if (sessionId) syncSessionComposer(sessionId)
+      harness.setViewingSession(sessionId)
     })
   },
 )
@@ -529,25 +534,59 @@ watch(
   { immediate: true },
 )
 
+function syncSessionComposer(sessionId: string): void {
+  const session = harness.sessions.find((item) => item.id === sessionId)
+  if (!session) return
+  composerMode.value = session.mode
+  const harnessId = session.harness_id ?? 'native'
+  composerHarnessId.value = harnessId
+  const defaultClaudeModel = harnessId === 'claude' ? 'sonnet' : ''
+  const defaultClaudeEffort = harnessId === 'claude' ? 'high' : ''
+  harness.loadSessionIntoComposer(
+    session.model || defaultClaudeModel,
+    session.reasoning_effort || defaultClaudeEffort,
+  )
+}
+
+function handleActiveSessionChanged(sessionId: string | null): void {
+  harness.setViewingSession(sessionId)
+  syncSessionQuery(sessionId)
+  if (!sessionId) {
+    composerMode.value = 'build'
+    composerHarnessId.value = 'native'
+    harness.loadSessionIntoComposer('', '')
+    return
+  }
+  void harness.fetchParts(sessionId)
+  void harness.fetchTodos(sessionId)
+  syncSessionComposer(sessionId)
+}
+
+watch(() => harness.activeSessionId, handleActiveSessionChanged, { immediate: true })
+
 watch(
-  () => harness.activeSessionId,
-  (sessionId) => {
-    harness.setViewingSession(sessionId)
-    syncSessionQuery(sessionId)
-    if (!sessionId) {
-      composerMode.value = 'build'
-      harness.resetComposerDirty()
-      return
-    }
-    void harness.fetchParts(sessionId)
-    void harness.fetchTodos(sessionId)
-    const session = harness.sessions.find((item) => item.id === sessionId)
-    if (session) {
-      composerMode.value = session.mode
-      harness.loadSessionIntoComposer(session.model ?? '', session.reasoning_effort ?? '')
-    }
+  () => {
+    const session = harness.sessions.find((item) => item.id === harness.activeSessionId)
+    return session
+      ? [
+          session.id,
+          session.harness_id ?? 'native',
+          session.mode,
+          session.model,
+          session.reasoning_effort,
+        ]
+      : [harness.activeSessionId, '', '', '', '']
   },
-  { immediate: true },
+  ([sessionId]) => {
+    if (sessionId) syncSessionComposer(sessionId)
+  },
+)
+
+watch(
+  () => harness.activeSession?.status,
+  (status) => {
+    if (status && harness.activeSessionId) syncSessionComposer(harness.activeSessionId)
+  },
 )
 
 watch(composerMode, async (mode, prev) => {
@@ -563,12 +602,21 @@ async function handleSend(
   model: string,
   skillIds: string[],
   effort: string,
+  harnessId: HarnessId = composerHarnessId.value,
 ): Promise<void> {
   if (!props.canPrompt || isSubagentSession.value) return
   sending.value = true
   try {
     if (!harness.activeSessionId) {
-      await harness.createSession(props.workspaceId, prompt, mode, model, skillIds, effort)
+      await harness.createSession(
+        props.workspaceId,
+        prompt,
+        mode,
+        model,
+        skillIds,
+        effort,
+        harnessId,
+      )
     } else {
       await harness.sendMessage(harness.activeSessionId, prompt, {
         mode,
@@ -699,6 +747,8 @@ async function handleForkMessage(messageId: string): Promise<void> {
           :stoppable="inputStoppable"
           :busy-message="busyMessage"
           :mode="composerMode"
+          :harness-id="composerHarnessId"
+          :engine-locked="Boolean(harness.activeSessionId)"
           :model="harness.modelInput"
           :effort="harness.effortInput"
           :workspace-id="props.workspaceId"
@@ -711,6 +761,7 @@ async function handleForkMessage(messageId: string): Promise<void> {
           mention-controlled
           :mention-active-index="mentionActiveIndex"
           @update:mode="composerMode = $event"
+          @update:harness-id="composerHarnessId = $event"
           @update:model="harness.setComposerModel($event)"
           @update:effort="harness.setComposerEffort($event)"
           @send="handleSend"

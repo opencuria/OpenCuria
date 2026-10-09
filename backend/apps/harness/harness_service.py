@@ -33,7 +33,7 @@ import anyio
 import structlog
 from asgiref.sync import ThreadSensitiveContext, async_to_sync, sync_to_async
 
-from common.exceptions import ConflictError, NotFoundError
+from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .agents.definitions import get_agent
 from .compaction import CHECKPOINT_PREFIX
@@ -45,6 +45,7 @@ from .images import (
 from .models import (
     HarnessMessage,
     HarnessPart,
+    HarnessRunStatus,
     HarnessSession,
     HarnessSessionStatus,
 )
@@ -134,6 +135,9 @@ class HarnessService:
         provider_factory: Callable[[uuid.UUID], ProviderAdapter] | None = None,
         accessor_factory: Callable[[str], Any] | None = None,
         process_cleanup: Callable[..., Any] | None = None,
+        engine_registry: Any | None = None,
+        engine_connections: Any | None = None,
+        run_service: Any | None = None,
     ) -> None:
         """Create the service with injectable seams (tests fake them).
 
@@ -164,6 +168,43 @@ class HarnessService:
         # run context kept in memory: session_id -> dict
         self._runs: dict[str, dict[str, Any]] = {}
         self._process_cleanup = process_cleanup
+        self._engine_registry = engine_registry
+        self._engine_connections = engine_connections
+        self._run_service = run_service
+        self._claude_child_contexts: dict[str, dict[str, Any]] = {}
+
+    def _engine_registry_for_run(self) -> Any:
+        """Return the configured factory or the default native/Claude adapter."""
+        if self._engine_registry is None:
+            from .engines.service_runtime import default_engine_registry
+
+            self._engine_registry = default_engine_registry()
+        return self._engine_registry
+
+    def _engine_connection_service(self) -> Any:
+        if self._engine_connections is None:
+            from .engines.connections import EngineConnectionService
+
+            self._engine_connections = EngineConnectionService()
+        return self._engine_connections
+
+    def _run_service_for_engine(self) -> Any:
+        if self._run_service is None:
+            from .engines.runs import HarnessRunService
+
+            self._run_service = HarnessRunService()
+        return self._run_service
+
+    def _resolve_engine_auth(
+        self,
+        organization_id: uuid.UUID,
+        user_id: int,
+        connection_id: uuid.UUID | str | None,
+    ) -> Any:
+        """Resolve owned personal authorization without persisting credentials."""
+        return self._engine_connection_service().resolve(
+            organization_id, user_id, connection_id
+        )
 
     # -- session lifecycle ------------------------------------------------
 
@@ -181,13 +222,43 @@ class HarnessService:
         parent_id: uuid.UUID | None = None,
         skill_ids: list[str] | None = None,
         user_id: int | None = None,
+        harness_id: str = "native",
+        connection_id: uuid.UUID | str | None = None,
     ) -> HarnessSession:
         """Create a session row (prompt persisted on run start)."""
         self.sessions.ensure_interactions_available(workspace_id)
+        if parent_id is not None:
+            parent_session = self.get_session(parent_id)
+            harness_id = getattr(parent_session, "harness_id", "native") or "native"
+            if harness_id == "claude":
+                created_by_id = getattr(parent_session, "created_by_id", None)
+                if user_id is not None and str(user_id) != str(created_by_id):
+                    raise AuthenticationError(
+                        "Claude child sessions inherit their owner's scope"
+                    )
+                if created_by_id is None:
+                    raise AuthenticationError("Claude child sessions require an owner")
+                user_id = created_by_id
+                connection_id = getattr(parent_session, "connection_id", None)
+        from .engines.catalog import (
+            DEFAULT_CLAUDE_EFFORT,
+            DEFAULT_CLAUDE_MODEL,
+            ENGINE_IDS,
+            normalize_claude_effort,
+            normalize_claude_model,
+        )
+
+        engine_id = (harness_id or "native").strip().lower()
+        if engine_id not in ENGINE_IDS:
+            raise ValueError(f"Unknown harness engine {harness_id!r}")
         normalized_mode = (mode or "build").strip().lower()
         if normalized_mode not in ("plan", "build"):
             raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
         requested = (agent_name or "").strip().lower()
+        if engine_id == "claude" and requested == "computeruse":
+            raise ValueError("Claude engine does not support Agent-S computeruse")
+        if engine_id == "claude" and requested in {"title", "compaction"}:
+            raise ValueError("Claude engine cannot use hidden harness agents")
         # Root sessions: agent_name follows mode (plan|build). Child sessions
         # honor subagent agent_name while keeping parent plan|build mode.
         resolved_agent = normalized_mode
@@ -209,8 +280,17 @@ class HarnessService:
                 user_id=user_id,
                 organization_id=organization_id,
             )
-        normalized_effort = normalize_reasoning_effort(reasoning_effort)
-        if not normalized_effort:
+        normalized_effort = (
+            normalize_claude_effort(reasoning_effort or DEFAULT_CLAUDE_EFFORT)
+            if engine_id == "claude"
+            else normalize_reasoning_effort(reasoning_effort)
+        )
+        normalized_model = (
+            normalize_claude_model(model or DEFAULT_CLAUDE_MODEL)
+            if engine_id == "claude"
+            else (model or "").strip()
+        )
+        if engine_id == "native" and not normalized_effort:
             # Fall back to the AgentConfig fixed effort of the resolved agent
             # (inherit-mode leaves "" so the caller decides). Legacy
             # ProviderConfig.default_effort is only a deprecated fallback.
@@ -232,17 +312,29 @@ class HarnessService:
                     )
                 except NotFoundError:
                     normalized_effort = ""
-        session = self.sessions.create(
-            workspace_id=workspace_id,
-            organization_id=organization_id,
-            title=title or _title_from_prompt(prompt),
-            mode=normalized_mode,
-            agent_name=resolved_agent,
-            model=(model or "").strip(),
-            reasoning_effort=normalized_effort,
-            parent_id=parent_id,
-            skill_ids=normalized_skills,
-        )
+        session_kwargs: dict[str, Any] = {
+            "workspace_id": workspace_id,
+            "organization_id": organization_id,
+            "title": title or _title_from_prompt(prompt),
+            "mode": normalized_mode,
+            "agent_name": resolved_agent,
+            "model": normalized_model,
+            "reasoning_effort": normalized_effort,
+            "parent_id": parent_id,
+            "skill_ids": normalized_skills,
+        }
+        if engine_id != "native":
+            if user_id is None:
+                raise AuthenticationError("A personal Claude connection is required")
+            auth = self._resolve_engine_auth(organization_id, user_id, connection_id)
+            session_kwargs.update(
+                harness_id=engine_id,
+                connection_id=auth.connection_id,
+                created_by_id=user_id,
+                external_session_id="",
+                engine_state={},
+            )
+        session = self.sessions.create(**session_kwargs)
         log.info("harness_session_created", session_id=str(session.id))
         if session.parent_id is None:
             self._emit_conversations_changed_sync(session.workspace_id)
@@ -292,7 +384,12 @@ class HarnessService:
         """Persist a model override for subsequent runs."""
         session = self.get_session(session_id)
         self.sessions.ensure_interactions_available(session.workspace_id)
-        return self.sessions.set_model(session, (model or "").strip())
+        value = (model or "").strip()
+        if getattr(session, "harness_id", "native") == "claude":
+            from .engines.catalog import normalize_claude_model
+
+            value = normalize_claude_model(value)
+        return self.sessions.set_model(session, value)
 
     def set_reasoning_effort(
         self, session_id: uuid.UUID, reasoning_effort: str
@@ -300,9 +397,13 @@ class HarnessService:
         """Persist a reasoning-effort override for subsequent runs."""
         session = self.get_session(session_id)
         self.sessions.ensure_interactions_available(session.workspace_id)
-        return self.sessions.set_reasoning_effort(
-            session, normalize_reasoning_effort(reasoning_effort)
-        )
+        if getattr(session, "harness_id", "native") == "claude":
+            from .engines.catalog import normalize_claude_effort
+
+            effort = normalize_claude_effort(reasoning_effort)
+        else:
+            effort = normalize_reasoning_effort(reasoning_effort)
+        return self.sessions.set_reasoning_effort(session, effort)
 
     def update_title(self, session_id: uuid.UUID, title: str) -> HarnessSession:
         """Rename a session (title only)."""
@@ -337,16 +438,54 @@ class HarnessService:
         return self.sessions.set_skill_ids(session, normalized)
 
     async def delete_session(self, session_id: uuid.UUID) -> None:
-        """Delete a session, aborting any active run first."""
+        """Delete a session only after external process ownership is settled."""
         session = await sync_to_async(self.get_session)(session_id)
         await sync_to_async(self.sessions.ensure_interactions_available)(
             session.workspace_id
         )
+        if (
+            session.parent_id is not None
+            and getattr(session, "harness_id", "native") == "claude"
+        ):
+            parent = await sync_to_async(self.sessions.get_by_id)(session.parent_id)
+            if (
+                parent is not None
+                and getattr(parent, "harness_id", "native") == "claude"
+            ):
+                if self.is_running(parent.id):
+                    await self.abort_run(parent.id)
+                await self._ensure_external_attempt_reconciled(parent, force=True)
         if self.is_running(session.id):
             await self.abort_run(session.id)
+        # A closing attempt with unconfirmed runner cleanup must survive deletion.
+        await self._ensure_external_attempt_reconciled(session, force=True)
         await sync_to_async(self.sessions.delete)(session)
         if session.parent_id is None:
             await self._emit_conversations_changed(session.workspace_id)
+
+    async def _ensure_external_attempt_reconciled(
+        self, session: HarnessSession, *, force: bool = False
+    ) -> bool:
+        """Reject mutations that could erase a durable external process owner."""
+        if (getattr(session, "harness_id", "native") or "native") == "native":
+            return True
+        run_service = self._run_service_for_engine()
+        attempt = await sync_to_async(
+            run_service.repository.get_open_for_session, thread_sensitive=True
+        )(session.id)
+        if attempt is None:
+            return True
+        accessor = None
+        if attempt.lease_id is not None:
+            if self._accessor_factory is None:
+                raise ConflictError("Previous engine process cleanup is pending")
+            accessor = self._accessor_factory(str(session.workspace_id))
+            if asyncio.iscoroutine(accessor):
+                accessor = await accessor
+        if force or attempt.status == HarnessRunStatus.CLOSING:
+            await run_service.prepare_session(session.id, accessor)
+            return True
+        raise ConflictError("Harness session already has an active run")
 
     async def fork_session(
         self,
@@ -371,16 +510,25 @@ class HarnessService:
             if message_id not in ids:
                 raise ValueError(f"Message '{message_id}' not in session")
         title = _forked_title(session.title or "")
-        forked = await sync_to_async(self.sessions.create_fork)(
-            workspace_id=session.workspace_id,
-            organization_id=session.organization_id,
-            title=title,
-            mode=session.mode,
-            agent_name=session.agent_name,
-            model=session.model or "",
-            reasoning_effort=session.reasoning_effort or "",
-            skill_ids=list(session.skill_ids or []),
-        )
+        fork_kwargs: dict[str, Any] = {
+            "workspace_id": session.workspace_id,
+            "organization_id": session.organization_id,
+            "title": title,
+            "mode": session.mode,
+            "agent_name": session.agent_name,
+            "model": session.model or "",
+            "reasoning_effort": session.reasoning_effort or "",
+            "skill_ids": list(session.skill_ids or []),
+        }
+        if getattr(session, "harness_id", "native") != "native":
+            fork_kwargs.update(
+                harness_id=session.harness_id,
+                connection_id=getattr(session, "connection_id", None),
+                created_by_id=getattr(session, "created_by_id", None),
+                external_session_id="",
+                engine_state={},
+            )
+        forked = await sync_to_async(self.sessions.create_fork)(**fork_kwargs)
         await sync_to_async(self.messages.copy_prefix)(
             session.id, forked.id, message_id
         )
@@ -418,6 +566,49 @@ class HarnessService:
             raise ConflictError(
                 f"Harness session '{session.id}' already has an active run"
             )
+        if getattr(session, "harness_id", "native") == "claude":
+            owner_id = getattr(session, "created_by_id", None)
+            if user_id is None or owner_id is None or str(user_id) != str(owner_id):
+                raise AuthenticationError(
+                    "Only the session owner may edit a Claude conversation"
+                )
+        await self._ensure_external_attempt_reconciled(session, force=True)
+        normalized_mode = None
+        normalized_model = None
+        normalized_effort = None
+        if mode is not None and mode.strip():
+            normalized_mode = mode.strip().lower()
+            if normalized_mode not in ("plan", "build"):
+                raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
+        if model is not None and model.strip():
+            normalized_model = model.strip()
+            if getattr(session, "harness_id", "native") == "claude":
+                from .engines.catalog import normalize_claude_model
+
+                normalized_model = normalize_claude_model(normalized_model)
+        if reasoning_effort is not None and reasoning_effort.strip():
+            if getattr(session, "harness_id", "native") == "claude":
+                from .engines.catalog import normalize_claude_effort
+
+                normalized_effort = normalize_claude_effort(reasoning_effort)
+            else:
+                normalized_effort = normalize_reasoning_effort(reasoning_effort)
+        if getattr(session, "harness_id", "native") == "claude":
+            await sync_to_async(self._resolve_engine_auth)(
+                session.organization_id,
+                owner_id,
+                getattr(session, "connection_id", None),
+            )
+        if skill_ids is not None:
+            if user_id is None:
+                raise AuthenticationError(
+                    "A user is required to validate selected skills"
+                )
+            await sync_to_async(resolve_skill_bodies)(
+                _normalize_skill_ids(skill_ids),
+                user_id=user_id,
+                organization_id=organization_id or session.organization_id,
+            )
         stored = await sync_to_async(self.messages.list_for_session)(session.id)
         target = next((row for row in stored if row.id == message_id), None)
         if target is None:
@@ -432,28 +623,34 @@ class HarnessService:
         suffix_ids = [row.id for row in suffix]
         child_ids = await self._collect_suffix_child_ids(suffix_ids)
         for child_id in child_ids:
-            try:
-                aborted_child = await self.abort_run(child_id)
-            except Exception:
-                aborted_child = await sync_to_async(self.sessions.get_by_id)(child_id)
-                if aborted_child is None:
-                    continue
+            aborted_child = await self.abort_run(child_id)
+            await self._ensure_external_attempt_reconciled(aborted_child, force=True)
             await sync_to_async(self.sessions.delete)(aborted_child)
         await self._reject_suffix_user_gates(session, suffix_ids)
         original_title = session.title or ""
         await sync_to_async(self.messages.delete_from)(session.id, message_id)
-        # Empty/whitespace overrides are a no-op (API sends "" by default).
-        if mode is not None and mode.strip():
-            normalized = mode.strip().lower()
-            if normalized not in ("plan", "build"):
-                raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
-            session = await sync_to_async(self.sessions.set_mode)(session, normalized)
-        if model is not None and model.strip():
-            session = await sync_to_async(self.sessions.set_model)(
-                session, model.strip()
+        if getattr(session, "harness_id", "native") == "claude":
+            # The opaque SDK transcript contains the discarded suffix. Start a
+            # fresh CLI conversation and let the surviving OpenCuria prefix be
+            # supplied as ordinary history instead of resuming stale vendor state.
+            from .engines.repositories import HarnessEngineRepository
+
+            await sync_to_async(HarnessEngineRepository.clear_transcript)(session.id)
+            await sync_to_async(HarnessEngineRepository.set_session_engine_state)(
+                session.id, external_session_id="", engine_state={}
             )
-        if reasoning_effort is not None and reasoning_effort.strip():
-            normalized_effort = normalize_reasoning_effort(reasoning_effort)
+            session.external_session_id = ""
+            session.engine_state = {}
+        # Empty/whitespace overrides are a no-op (API sends "" by default).
+        if normalized_mode is not None:
+            session = await sync_to_async(self.sessions.set_mode)(
+                session, normalized_mode
+            )
+        if normalized_model is not None:
+            session = await sync_to_async(self.sessions.set_model)(
+                session, normalized_model
+            )
+        if normalized_effort is not None:
             session = await sync_to_async(self.sessions.set_reasoning_effort)(
                 session, normalized_effort
             )
@@ -745,6 +942,20 @@ class HarnessService:
             ValueError: When API key or model is missing.
         """
         session_model = (session.model or "").strip()
+        if getattr(session, "harness_id", "native") == "claude":
+            from .engines.catalog import (
+                DEFAULT_CLAUDE_MODEL,
+                normalize_claude_effort,
+                normalize_claude_model,
+            )
+
+            session.model = normalize_claude_model(
+                session_model or DEFAULT_CLAUDE_MODEL
+            )
+            session.reasoning_effort = normalize_claude_effort(
+                session.reasoning_effort or "high"
+            )
+            return session.model
         if provider is not None or self._provider_factory is not None:
             return session_model
         from .services import ProviderConfigService
@@ -931,6 +1142,25 @@ class HarnessService:
         """
         if not prompt or not prompt.strip():
             raise ValueError("prompt must not be empty")
+        engine_id = (getattr(session, "harness_id", "native") or "native").strip()
+        run_user_id = user_id
+        if engine_id == "claude":
+            owner_id = getattr(session, "created_by_id", None)
+            if (
+                run_user_id is None
+                or owner_id is None
+                or str(run_user_id) != str(owner_id)
+            ):
+                raise AuthenticationError(
+                    "Only the session owner may use its Claude connection"
+                )
+            # Fail closed before admission; the resolved secret is intentionally
+            # discarded here and resolved again only inside the run coroutine.
+            await sync_to_async(self._resolve_engine_auth)(
+                session.organization_id,
+                owner_id,
+                getattr(session, "connection_id", None),
+            )
         self._remember_run(session)
         # Parent stop already covers this session: do not spawn another run.
         if self._user_abort_requested(session):
@@ -944,6 +1174,26 @@ class HarnessService:
             raise ConflictError(
                 f"Harness session '{session.id}' already has an active run"
             )
+        engine_id = (getattr(session, "harness_id", "native") or "native").strip()
+        recovery_accessor = None
+        if engine_id != "native":
+            run_service = self._run_service_for_engine()
+            open_attempt = await sync_to_async(
+                run_service.repository.get_open_for_session, thread_sensitive=True
+            )(session.id)
+            if open_attempt is not None:
+                if open_attempt.lease_id is not None:
+                    if self._accessor_factory is None:
+                        await run_service.prepare_session(session.id, None)
+                    else:
+                        recovery_accessor = await self._accessor_factory(
+                            str(session.workspace_id)
+                        )
+                        await run_service.prepare_session(session.id, recovery_accessor)
+                else:
+                    # Let RunOwnership apply its persisted staleness window; do
+                    # not create runner connectivity for a healthy unresolved run.
+                    await run_service.prepare_session(session.id, None)
         if str(session.status) != HarnessSessionStatus.IDLE:
             # Self-heal a stale busy flag: no live task exists, so a
             # previous run died without reaching its finally block
@@ -967,7 +1217,11 @@ class HarnessService:
             max_depth = config["max_depth"]
         if depth > max_depth:
             raise ValueError(f"depth {depth} exceeds max_depth {max_depth}")
-        if skill_ids is not None and user_id is not None:
+        if skill_ids is not None:
+            if user_id is None:
+                raise AuthenticationError(
+                    "A user is required to validate selected skills"
+                )
             session = await sync_to_async(self.update_skill_ids)(
                 session.id,
                 skill_ids,
@@ -1010,6 +1264,7 @@ class HarnessService:
                 role="user",
                 content=prompt.strip(),
                 skill_ids=list(session.skill_ids or []),
+                harness_id=engine_id,
             )
             assistant = await sync_to_async(self.messages.create)(
                 session_id=session.id,
@@ -1017,7 +1272,8 @@ class HarnessService:
                 content="",
                 model=resolved_model,
                 reasoning_effort=session.reasoning_effort or "",
-                provider=resolved_provider,
+                provider=("claude" if engine_id == "claude" else resolved_provider),
+                harness_id=engine_id,
             )
             # A new send clears older stopped/failed notices of the session;
             # the fresh run gets its own notice only when it stops or fails.
@@ -1034,7 +1290,11 @@ class HarnessService:
                 exclude_user_message_id=user_message.id,
             )
             skill_bodies: list[str] = []
-            if session.skill_ids and user_id is not None:
+            if session.skill_ids:
+                if user_id is None:
+                    raise AuthenticationError(
+                        "A user is required to validate selected skills"
+                    )
                 skill_bodies = await sync_to_async(resolve_skill_bodies)(
                     list(session.skill_ids or []),
                     user_id=user_id,
@@ -1054,6 +1314,19 @@ class HarnessService:
                 "skill_bodies": skill_bodies,
             }
             self._runs[key] = run_context
+            if engine_id != "native":
+                run_context["initiated_by_id"] = run_user_id
+                run_context["engine_id"] = engine_id
+                run_context["cleanup_confirmed"] = True
+                run_context["ownership"] = await sync_to_async(
+                    self._run_service_for_engine().create_attempt,
+                    thread_sensitive=True,
+                )(
+                    session_id=session.id,
+                    assistant_message_id=assistant.id,
+                    user_id=run_user_id,
+                    harness_id=engine_id,
+                )
             if self._user_abort_requested(session):
                 raise asyncio.CancelledError()
             run_coro = self._execute_run(
@@ -1098,7 +1371,11 @@ class HarnessService:
                     spawned_task.cancelling() or spawned_task.done()
                 ):
                     raise asyncio.CancelledError()
-            if session.parent_id is None and prior_user_messages == 0:
+            if (
+                engine_id == "native"
+                and session.parent_id is None
+                and prior_user_messages == 0
+            ):
                 self._spawn_background(
                     self._generate_title(
                         session_id=session.id,
@@ -1161,6 +1438,23 @@ class HarnessService:
                         break
                     except asyncio.CancelledError:
                         continue
+            run_context = self._runs.get(key, {})
+            durable_owner = run_context.get("ownership")
+            if durable_owner is not None:
+                try:
+                    await durable_owner.stop_heartbeat()
+                    await durable_owner.begin_close()
+                    await durable_owner.finish(
+                        status=(
+                            HarnessRunStatus.INTERRUPTED
+                            if user_abort
+                            else HarnessRunStatus.ERROR
+                        ),
+                        error="Run admission failed",
+                        cleanup_confirmed=True,
+                    )
+                except Exception:
+                    log.warning("harness_run_attempt_finalize_failed", session_id=key)
             self._forget_run(key)
             raise
         finally:
@@ -1173,6 +1467,19 @@ class HarnessService:
         await sync_to_async(self.sessions.ensure_interactions_available)(
             session.workspace_id
         )
+        engine_id = getattr(session, "harness_id", "native") or "native"
+        if engine_id != "native" and not self.is_running(session.id):
+            await self._ensure_external_attempt_reconciled(session, force=True)
+            session = await sync_to_async(self.get_session)(session.id)
+        if session.parent_id is not None:
+            child_context = self._runs.get(str(session.id), {})
+            if child_context.get("claude_projection"):
+                # The SDK owns the child process internally and has no
+                # separately addressable OpenCuria task handle. Stop the
+                # enclosing root run rather than leaving the subagent alive.
+                parent = await sync_to_async(self.sessions.get_by_id)(session.parent_id)
+                if parent is not None:
+                    return await self._abort_run_tree(parent)
         return await self._abort_run_tree(session)
 
     def _remember_run(self, session: HarnessSession) -> None:
@@ -1194,6 +1501,14 @@ class HarnessService:
             and parent not in self._admissions
         ):
             self._forget_run(parent)
+
+    def _drop_run_tracking(self, key: str) -> None:
+        """Release local task bookkeeping without publishing a terminal status."""
+        self._runs.pop(key, None)
+        self._event_locks.pop(key, None)
+        if self._tasks.get(key) is asyncio.current_task():
+            self._tasks.pop(key, None)
+        self._forget_run(key)
 
     def _descendant_keys(self, root: str) -> set[str]:
         """Return *root* and in-memory descendant session ids."""
@@ -1327,10 +1642,19 @@ class HarnessService:
                 continue
         rows = await sync_to_async(self.sessions.list_by_ids)(ids)
         fresh = session
+        unresolved = (
+            await sync_to_async(
+                self._run_service_for_engine().repository.list_open_for_sessions,
+                thread_sensitive=True,
+            )(ids)
+            if ids
+            else []
+        )
+        unresolved_ids = {str(item.session_id) for item in unresolved}
         for row in rows:
             key = str(row.id)
             task = self._owned_run_task(key)
-            if task is not None and not task.done():
+            if key in unresolved_ids or (task is not None and not task.done()):
                 continue
             if row.status != HarnessSessionStatus.IDLE:
                 await sync_to_async(self.sessions.mark_status)(
@@ -1358,6 +1682,20 @@ class HarnessService:
         )
         closure = {str(child_id) for child_id in descendant_ids}
         closure.update(self._descendant_keys(root))
+        durable_attempts = await sync_to_async(
+            self._run_service_for_engine().repository.list_open_for_sessions,
+            thread_sensitive=True,
+        )(list(uuid.UUID(key) for key in closure))
+        for attempt in durable_attempts:
+            attempt_key = str(attempt.session_id)
+            if (
+                self._tasks.get(attempt_key) is None
+                and self._admissions.get(attempt_key) is None
+            ):
+                raise ConflictError(
+                    "An external engine run is active on another worker; "
+                    "wait for its ownership lease to expire before aborting"
+                )
         # Cancel and join before any further database work. Cleanup writes
         # the terminal message; overlapping reads deadlock SQLite.
         self._arm_abort_keys(closure)
@@ -1370,7 +1708,16 @@ class HarnessService:
         self._arm_abort_keys(closure)
         await self._join_abort_tree(root, closure)
         await self._reject_tree_gates(closure)
-        return await self._settle_abort_tree(session, closure)
+        settled = await self._settle_abort_tree(session, closure)
+        remaining = await sync_to_async(
+            self._run_service_for_engine().repository.list_open_for_sessions,
+            thread_sensitive=True,
+        )(list(uuid.UUID(key) for key in closure))
+        if remaining:
+            raise ConflictError(
+                "External engine cleanup is pending; the session remains busy"
+            )
+        return settled
 
     async def abort_busy_computeruse_for_workspace(
         self, workspace_id: uuid.UUID
@@ -1807,9 +2154,23 @@ class HarnessService:
         from .services import ProviderConfigService
 
         key = str(session.id)
-        self._runs.get(key, {})["execution_started"] = True
+        run_context = self._runs.get(key, {})
+        run_context["execution_started"] = True
+        engine_id = (getattr(session, "harness_id", "native") or "native").strip()
         mcp_runtime = None
         phase = "startup"
+        if engine_id != "native":
+            await self._execute_external_run(
+                engine_id=engine_id,
+                session=session,
+                prompt=prompt,
+                history=history,
+                assistant=assistant,
+                organization_id=organization_id,
+                depth=depth,
+                max_depth=max_depth,
+            )
+            return
         try:
             # Fail closed on missing plugin credentials before constructing provider
             # configuration or registering/calling any harness tools.
@@ -1948,7 +2309,9 @@ class HarnessService:
                 )
             else:
                 effort = (session.reasoning_effort or "").strip() or None
-                loop_runner = HarnessRunner(
+                loop_runner = self._engine_registry_for_run().create(
+                    "native",
+                    provider=provider,
                     model_resolver=model_resolver,
                     tools=tools,
                     accessor=accessor,
@@ -2003,7 +2366,7 @@ class HarnessService:
             # drifts when a rerun/continuation re-emits a prefix). When a
             # remainder exists it also gets its own text part so message
             # content and parts never drift apart.
-            await sync_to_async(assistant.refresh_from_db)()
+            await sync_to_async(assistant.refresh_from_db, thread_sensitive=True)()
             existing = assistant.content or ""
             tail = result.output or ""
             remainder = _tail_remainder(existing, tail)
@@ -2061,6 +2424,248 @@ class HarnessService:
             finally:
                 await self._finalize_run(session, assistant)
 
+    @staticmethod
+    def _redact_claude_error(error: object, auth: Any | None) -> str:
+        """Redact the resolved per-run secret before logging SDK failures."""
+        from .engines.claude.security import redact_text
+
+        value = str(error or "Claude run failed")
+        token = str(getattr(auth, "token", "") or "")
+        if token:
+            value = value.replace(token, "[redacted]")
+        return redact_text(value)[:1000]
+
+    async def _execute_external_run(
+        self,
+        *,
+        engine_id: str,
+        session: HarnessSession,
+        prompt: str,
+        history: list[LLMMessage],
+        assistant: HarnessMessage,
+        organization_id: uuid.UUID,
+        depth: int,
+        max_depth: int,
+    ) -> None:
+        """Delegate external engine lifecycle work to its execution module."""
+        from .engines.execution import execute_external_run
+
+        await execute_external_run(
+            self,
+            engine_id=engine_id,
+            session=session,
+            prompt=prompt,
+            history=history,
+            assistant=assistant,
+            organization_id=organization_id,
+            depth=depth,
+            max_depth=max_depth,
+        )
+
+    async def _finalize_owned_claude_error(
+        self, session: HarnessSession, assistant: HarnessMessage
+    ) -> None:
+        """Publish idle bookkeeping after atomic engine finalization."""
+        key = str(session.id)
+        try:
+            with anyio.CancelScope(shield=True):
+                from apps.scheduled_tasks.services import ScheduledTaskService
+
+                try:
+                    await sync_to_async(
+                        ScheduledTaskService().complete_assistant_run
+                    )(assistant.id)
+                except Exception:
+                    log.exception("scheduled_task_completion_failed", session_id=key)
+                await self._emit_frontend(
+                    FRONTEND_EVENT_STATUS,
+                    self._session_status_payload(
+                        session,
+                        "idle",
+                        model=assistant.model or "",
+                        assistant=assistant,
+                    ),
+                    str(session.workspace_id),
+                )
+                if session.parent_id is None:
+                    await self._emit_conversations_changed(session.workspace_id)
+        finally:
+            self._drop_run_tracking(key)
+
+    async def _on_claude_root_event(
+        self, session: HarnessSession, assistant: HarnessMessage, event: dict[str, Any]
+    ) -> None:
+        """Project SDK task notifications to persisted OpenCuria child sessions."""
+        if event.get("type") == "subtask_started":
+            raw_agent = str(event.get("agent") or "general").strip().lower()
+            agent = "explore" if raw_agent in {"explore", "explorer"} else "general"
+            child = await sync_to_async(self.sessions.create, thread_sensitive=True)(
+                workspace_id=session.workspace_id,
+                organization_id=session.organization_id,
+                title=str(event.get("description") or agent)[:255],
+                mode=session.mode,
+                agent_name=agent,
+                model=session.model or "sonnet",
+                reasoning_effort=session.reasoning_effort or "high",
+                parent_id=session.id,
+                skill_ids=list(session.skill_ids or []),
+                harness_id="claude",
+                connection_id=getattr(session, "connection_id", None),
+                created_by_id=getattr(session, "created_by_id", None),
+            )
+            child_user = await sync_to_async(
+                self.messages.create, thread_sensitive=True
+            )(
+                session_id=child.id,
+                role="user",
+                content=str(event.get("description") or ""),
+                skill_ids=list(session.skill_ids or []),
+                harness_id="claude",
+            )
+            child_assistant = await sync_to_async(
+                self.messages.create, thread_sensitive=True
+            )(
+                session_id=child.id,
+                role="assistant",
+                content="",
+                model=child.model,
+                reasoning_effort=child.reasoning_effort or "high",
+                provider="claude",
+                harness_id="claude",
+            )
+            child_key = str(child.id)
+            self._runs[child_key] = {
+                "session_id": child_key,
+                "message_id": str(child_assistant.id),
+                "user_message_id": str(child_user.id),
+                "text_part_id": None,
+                "reasoning_part_id": None,
+                "tool_parts": {},
+                "step_parts": {},
+                "subtask_parts": {},
+                "skill_bodies": [],
+                "claude_projection": True,
+            }
+            await sync_to_async(self.sessions.mark_status)(
+                child, HarnessSessionStatus.BUSY
+            )
+            root_context = self._runs.get(str(session.id), {})
+            root_context.setdefault("claude_children", {})[
+                str(event.get("subtask_id", ""))
+            ] = {
+                "parent_call_id": str(event.get("parent_tool_use_id", "")),
+                "session": child,
+                "assistant": child_assistant,
+                "agent": agent,
+                "subtask_id": str(event.get("subtask_id", "")),
+            }
+            event = {**event, "agent": agent, "child_session_id": child_key}
+        elif event.get("type") == "subtask_finished":
+            child_ctx = self._claude_child_for_event(session, event)
+            if child_ctx is not None:
+                await self._finish_claude_child(child_ctx, event)
+                event = {**event, "child_session_id": str(child_ctx["session"].id)}
+        await self._on_runner_event(session, assistant, event)
+
+    def _claude_child_for_event(
+        self, session: HarnessSession, event: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Find a projected child by task id or parent tool-use id."""
+        children = self._runs.get(str(session.id), {}).get("claude_children", {})
+        task_id = str(event.get("subtask_id", ""))
+        if task_id in children:
+            return children[task_id]
+        call_id = str(event.get("parent_tool_use_id", ""))
+        return next(
+            (
+                item
+                for item in children.values()
+                if item.get("parent_call_id") == call_id
+            ),
+            None,
+        )
+
+    async def _on_claude_child_event(
+        self, root_key: str, parent_call_id: str, event: dict[str, Any]
+    ) -> None:
+        """Persist SDK-forwarded child events into their own message timeline."""
+        root_context = self._runs.get(root_key, {})
+        children = root_context.get("claude_children", {})
+        child_ctx = next(
+            (
+                item
+                for item in children.values()
+                if item.get("parent_call_id") == parent_call_id
+            ),
+            None,
+        )
+        if child_ctx is None:
+            return
+        await self._on_runner_event(child_ctx["session"], child_ctx["assistant"], event)
+
+    async def _finish_claude_child(
+        self, child_ctx: dict[str, Any], event: dict[str, Any]
+    ) -> None:
+        """Settle a projected SDK subagent transcript without duplicating root text."""
+        session = child_ctx["session"]
+        assistant = child_ctx["assistant"]
+        status = str(event.get("status") or "completed")
+        await sync_to_async(assistant.refresh_from_db, thread_sensitive=True)()
+        if not assistant.content and event.get("summary"):
+            text = str(event["summary"])
+            await sync_to_async(self.messages.append_content)(assistant, text)
+            await self._append_tail_text_part(session, assistant, text)
+        await sync_to_async(self.messages.complete)(
+            assistant,
+            finish=(
+                "stop"
+                if status == "completed"
+                else "aborted"
+                if status == "aborted"
+                else "error"
+            ),
+            error=""
+            if status == "completed"
+            else str(event.get("summary") or "Subagent ended"),
+        )
+        if status != "completed":
+            await self._fail_open_parts(
+                assistant,
+                state="error",
+                output=str(event.get("summary") or "Subagent ended"),
+                session=session,
+            )
+        else:
+            await self._settle_open_stream_parts(assistant)
+        await sync_to_async(self.sessions.mark_status)(
+            session, HarnessSessionStatus.IDLE
+        )
+        child_ctx["finished"] = True
+
+    async def _finalize_claude_children(
+        self, session: HarnessSession, assistant: HarnessMessage
+    ) -> None:
+        """Close any child projections left open by a cancelled SDK stream."""
+        children = self._runs.get(str(session.id), {}).get("claude_children", {})
+        for child_ctx in children.values():
+            if child_ctx.get("finished"):
+                continue
+            try:
+                await self._finish_claude_child(
+                    child_ctx,
+                    {
+                        "status": "aborted"
+                        if self._user_abort_requested(session)
+                        else "error",
+                        "summary": "Parent Claude run ended",
+                    },
+                )
+            except Exception:
+                log.warning(
+                    "claude_child_projection_finalize_failed",
+                    child_session_id=str(child_ctx.get("session").id),
+                )
+
     def _user_abort_requested(self, session: HarnessSession) -> bool:
         """Inherit explicit stop intent from any ancestor still in the tree."""
         key = str(session.id)
@@ -2109,6 +2714,27 @@ class HarnessService:
         self, session: HarnessSession, assistant: HarnessMessage
     ) -> None:
         """Settle an admitted background task cancelled before execution entry."""
+        context = self._runs.get(str(session.id), {})
+        ownership = context.get("ownership")
+        if ownership is not None:
+            # Execution never entered, so no runner lease or CLI process could
+            # have been created. Fence the durable attempt and shell together.
+            user_abort = self._user_abort_requested(session)
+            finalized = await ownership.finalize_turn(
+                status=HarnessRunStatus.INTERRUPTED,
+                finish="aborted" if user_abort else "error",
+                error=(
+                    "aborted by user"
+                    if user_abort
+                    else "Run interrupted unexpectedly"
+                ),
+                assistant_content=assistant.content or "",
+            )
+            if finalized:
+                await self._finalize_run(session, assistant)
+            else:
+                self._drop_run_tracking(str(session.id))
+            return
         try:
             await self._record_run_interruption(session, assistant, phase="startup")
         finally:
@@ -3022,30 +3648,80 @@ class HarnessService:
     async def _persist_tool_queued(
         self, session: HarnessSession, assistant: HarnessMessage, event: dict[str, Any]
     ) -> HarnessPart:
-        """Create the tool part at observed ``tool_queued`` position (pending).
+        """Persist one tool card per non-empty call ID without regressing state.
 
-        Called for the runner's ``tool_queued`` event
-        ``{type, step, call_id, tool, title, arguments}``. The row is created
-        in observed order (``position`` allocation) with state ``pending`` so
-        the timeline shows the tool where the provider placed it even before
-        permission gates/actual execution.
+        Some engines announce a call once with a provisional empty payload and
+        again after arguments are available. The later event enriches the same
+        pending card; it never creates an orphan card or reopens a terminal one.
+        Calls with no ID retain the legacy create-per-event behavior.
         """
         await self._close_running_stream_parts(session)
+        call_id = str(event.get("call_id", "") or "")
+        run_ctx = self._runs.get(str(session.id), {})
+        tool_parts = run_ctx.setdefault("tool_parts", {})
+        part = None
+        if call_id:
+            part_id = tool_parts.get(call_id)
+            if part_id:
+                part = await sync_to_async(
+                    self.parts.model.objects.filter(
+                        id=part_id,
+                        message_id=assistant.id,
+                        type="tool",
+                        call_id=call_id,
+                    ).first
+                )()
+            if part is None:
+                part = await sync_to_async(
+                    self.parts.model.objects.filter(
+                        message_id=assistant.id,
+                        type="tool",
+                        call_id=call_id,
+                    ).first
+                )()
+
+        incoming_tool = str(event.get("tool", "") or "")
+        incoming_arguments = event.get("arguments", "")
+        if part is not None:
+            if call_id:
+                tool_parts[call_id] = str(part.id)
+            if part.state not in ("pending", "running"):
+                return part
+            current_input = dict(part.input or {})
+            merged_input = dict(current_input)
+            if incoming_tool:
+                merged_input["tool"] = incoming_tool
+            if incoming_arguments not in (None, "", {}, []):
+                merged_input["arguments"] = incoming_arguments
+            meta = dict(part.meta or {})
+            if event.get("step") is not None:
+                meta["step"] = event.get("step")
+            await sync_to_async(self.parts.set_input)(part, merged_input)
+            title = str(event.get("title", "") or part.title or "")
+            if title != part.title or meta != dict(part.meta or {}):
+                part = await sync_to_async(self.parts.mark_state)(
+                    part,
+                    part.state,
+                    title=title,
+                    meta=meta,
+                )
+            if call_id:
+                tool_parts[call_id] = str(part.id)
+            return part
+
         part = await sync_to_async(self.parts.create)(
             message_id=assistant.id,
             type="tool",
             state="pending",
-            call_id=str(event.get("call_id", "")),
-            title=str(event.get("title", "")),
+            call_id=call_id,
+            title=str(event.get("title", "") or ""),
             input={
-                "tool": event.get("tool", ""),
-                "arguments": event.get("arguments", ""),
+                "tool": incoming_tool,
+                "arguments": incoming_arguments or "",
             },
             meta={"step": event.get("step")},
         )
-        self._runs.get(str(session.id), {}).get("tool_parts", {})[
-            str(event.get("call_id", ""))
-        ] = str(part.id)
+        tool_parts[call_id] = str(part.id)
         return part
 
     async def _persist_tool_started(
@@ -3473,6 +4149,9 @@ class HarnessService:
     ) -> None:
         """Run the hidden title agent asynchronously (never raises)."""
         try:
+            session = await sync_to_async(self.sessions.get_by_id)(session_id)
+            if session is None or getattr(session, "harness_id", "native") != "native":
+                return
             from .providers.resolver import StaticModelResolver
             from .services import ProviderConfigService
 
@@ -3779,7 +4458,7 @@ class HarnessService:
                 raise
             error = "Subagent run aborted"
             if assistant is not None:
-                await sync_to_async(assistant.refresh_from_db)()
+                await sync_to_async(assistant.refresh_from_db, thread_sensitive=True)()
                 error = assistant.error or error
                 if assistant.content:
                     error += (

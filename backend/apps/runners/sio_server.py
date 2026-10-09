@@ -638,6 +638,18 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             "harness:desktop_action_result", data, runner_id=runner_id
         )
 
+    @sio.on("workspace:artifact_ensure_result")
+    async def on_workspace_artifact_ensure_result(sid: str, data: dict):
+        """Route trusted artifact replies through the workspace ownership guard."""
+        event = "workspace:artifact_ensure_result"
+        runner_id = await _require_runner_id(sio, sid, event)
+        if not runner_id:
+            return
+        service = get_runner_service()
+        await sync_to_async(service.handle_harness_reply)(
+            event, data, runner_id=runner_id
+        )
+
     # --- Background process replies from runner ---
 
     @sio.on("git:operation_result")

@@ -18,6 +18,7 @@ import type {
   HarnessQuestionRequest,
   HarnessSession,
   HarnessSessionMode,
+  HarnessId,
   HarnessTodo,
 } from '@/types/harness'
 import {
@@ -577,6 +578,7 @@ export const useHarnessStore = defineStore('harness', () => {
     model: string,
     skillIds: string[] = [],
     reasoningEffort = '',
+    harnessId: HarnessId = 'native',
   ): Promise<HarnessSession | null> {
     if (useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return null
     const notifications = useNotificationStore()
@@ -588,6 +590,7 @@ export const useHarnessStore = defineStore('harness', () => {
         agent_name: mode,
         skill_ids: skillIds,
         reasoning_effort: reasoningEffort,
+        harness_id: harnessId,
       })
       sessions.value.unshift(session)
       setActiveSession(session.id)
@@ -603,7 +606,7 @@ export const useHarnessStore = defineStore('harness', () => {
         },
       ]
       await fetchParts(session.id)
-      recordRecentModelUsage(model, reasoningEffort)
+      if (harnessId === 'native') recordRecentModelUsage(model, reasoningEffort)
       return session
     } catch (e: unknown) {
       notifications.error('Prompt failed', e instanceof Error ? e.message : 'Unknown error')
@@ -624,6 +627,7 @@ export const useHarnessStore = defineStore('harness', () => {
     if (sessionTransitioning(sessionId)) return
     const notifications = useNotificationStore()
     try {
+      const previousSession = sessions.value.find((item) => item.id === sessionId)
       const session = await sendHarnessMessage(sessionId, {
         prompt,
         mode: options.mode,
@@ -636,7 +640,8 @@ export const useHarnessStore = defineStore('harness', () => {
       // before returning. Fetch their authoritative ids/positions instead
       // of inventing a local user that can collide with an identical prompt.
       await fetchParts(sessionId)
-      recordRecentModelUsage(options.model ?? '', options.reasoningEffort ?? '')
+      if ((session.harness_id ?? previousSession?.harness_id) !== 'claude')
+        recordRecentModelUsage(options.model ?? '', options.reasoningEffort ?? '')
     } catch (e: unknown) {
       notifications.error('Prompt failed', e instanceof Error ? e.message : 'Unknown error')
     }
@@ -1080,7 +1085,7 @@ export const useHarnessStore = defineStore('harness', () => {
 
   // Load session values into the composer; resets dirty.
   function loadSessionIntoComposer(model: string, effort: string): void {
-    if (model) modelInput.value = model
+    modelInput.value = model
     effortInput.value = effort
     composerDirty.value = false
   }

@@ -23,7 +23,7 @@ import { HOME_EXIT_MS, armComposerTransition, prefersReducedMotion } from '@/lib
 import { buildComposerSheets } from '@/lib/composerSheets'
 import { getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
 import type { MentionCandidate } from '@/lib/harnessMentions'
-import type { HarnessSessionMode } from '@/types/harness'
+import type { HarnessId, HarnessSessionMode } from '@/types/harness'
 import { WorkspaceStatus } from '@/types'
 import { useAuthStore } from '@/stores/auth'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
@@ -46,6 +46,7 @@ const workspaceStore = useWorkspaceStore()
 const selectedWorkspaceId = ref<string | null>(null)
 const sending = ref(false)
 const composerMode = ref<HarnessSessionMode>('build')
+const composerHarnessId = ref<HarnessId>('native')
 const createOpen = ref(false)
 /** Drives the exit animation of the greeting block while sending. */
 const leaving = ref(false)
@@ -269,6 +270,7 @@ async function handleSend(
   model: string,
   skillIds: string[],
   effort: string,
+  harnessId: HarnessId = 'native',
 ): Promise<void> {
   const workspace = readyWorkspace.value
   if (!workspace || sending.value) return
@@ -284,6 +286,7 @@ async function handleSend(
       model,
       skillIds,
       effort,
+      harnessId,
     )
     const sessionId = session?.id ?? harnessStore.activeSessionId
     if (!sessionId) {
@@ -420,6 +423,7 @@ watch(
               :workspace-id="selectedWorkspaceId ?? undefined"
               :session-id="null"
               :mode="composerMode"
+              :harness-id="composerHarnessId"
               :model="harnessStore.modelInput"
               :effort="harnessStore.effortInput"
               :files="fileExplorer.tree"
@@ -434,6 +438,7 @@ watch(
               class="text-left"
               data-testid="chat-home-composer"
               @update:mode="composerMode = $event"
+              @update:harness-id="composerHarnessId = $event"
               @update:model="harnessStore.setComposerModel($event)"
               @update:effort="harnessStore.setComposerEffort($event)"
               @send="handleSend"
