@@ -31,7 +31,7 @@ const value = ref('')
 const submitting = ref(false)
 
 function credentialDescriptor(credential: Credential): string {
-  if (credential.credential_type === 'mcp_oauth') return 'Provider-managed OAuth connection'
+  if (credential.credential_type === 'mcp_oauth') return 'OAuth'
   if (credential.credential_type === 'file') return credential.target_path
   if (credential.credential_type === 'ssh_key') return 'SSH key pair'
   return credential.env_var_name
@@ -84,7 +84,7 @@ function handleClose(): void {
         <DialogTitle>Edit Credential</DialogTitle>
         <DialogDescription>{{
           credential?.credential_type === 'mcp_oauth'
-            ? 'Rename the provider-managed connection. OAuth tokens cannot be manually edited.'
+            ? 'Update the credential name.'
             : 'Update the credential name or replace its value.'
         }}</DialogDescription>
       </DialogHeader>
@@ -120,9 +120,6 @@ function handleClose(): void {
               Only fill this in if you want to replace the stored value.
             </p>
           </div>
-          <p v-else class="text-sm text-muted-foreground">
-            OAuth tokens are provider-managed and cannot be edited here.
-          </p>
         </form>
       </DialogBody>
 

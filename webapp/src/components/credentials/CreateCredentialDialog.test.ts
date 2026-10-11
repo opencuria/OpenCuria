@@ -74,14 +74,46 @@ describe('CreateCredentialDialog', () => {
   it('starts a service-specific OAuth connect with no password/token field', async () => {
     const wrapper = mountDialog('svc-oauth')
     await flushPromises()
-    expect(wrapper.text()).toContain('Connect Notion OAuth')
-    expect(wrapper.text()).toContain('never asks for or displays OAuth tokens')
+    expect(wrapper.text()).toContain('Add Credential')
+    expect(wrapper.text()).toContain('Authorize this account with the provider in this tab.')
+    expect(wrapper.text()).not.toContain('Tokens remain encrypted')
+    expect(wrapper.find('button[type="submit"]').text()).toBe('Connect')
     expect(wrapper.find('input[type="password"]').exists()).toBe(false)
     expect(wrapper.find('textarea').exists()).toBe(false)
     await wrapper.find('#create-credential-form').trigger('submit')
     await flushPromises()
     expect(credentialStore.connectOAuthService).toHaveBeenCalledWith('svc-oauth', undefined, false)
     expect(credentialStore.createCredential).not.toHaveBeenCalled()
+  })
+
+  it('uses the shared name and organization scope fields for OAuth accounts', async () => {
+    auth.isAdmin = true
+    const wrapper = mountDialog('svc-oauth')
+    await flushPromises()
+    await wrapper.find('#new-credential-name').setValue('Notion Team')
+    await wrapper.find('#create-org-credential').trigger('click')
+    await wrapper.find('#create-credential-form').trigger('submit')
+    await flushPromises()
+    expect(credentialStore.connectOAuthService).toHaveBeenCalledWith(
+      'svc-oauth',
+      'Notion Team',
+      true,
+    )
+    expect(credentialStore.createCredential).not.toHaveBeenCalled()
+  })
+
+  it('keeps the OAuth form available after a failed connection without exposing tokens', async () => {
+    credentialStore.connectOAuthService.mockResolvedValue(false)
+    const wrapper = mountDialog('svc-oauth')
+    await flushPromises()
+    await wrapper.find('#create-credential-form').trigger('submit')
+    await flushPromises()
+    expect(wrapper.find('[role="alert"]').text()).toContain(
+      'Unable to start the provider connection',
+    )
+    expect(wrapper.find('button[type="submit"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('input[type="password"]').exists()).toBe(false)
+    expect(wrapper.emitted('close')).toBeUndefined()
   })
 
   it('retains ordinary environment values for env credentials', async () => {
@@ -116,7 +148,7 @@ describe('CreateCredentialDialog', () => {
     expect(vm.name).toBe('')
     await wrapper.setProps({ preselectedServiceId: undefined })
     expect(vm.selectedServiceId).toBe('svc-oauth')
-    expect(wrapper.text()).toContain('Connect Notion OAuth')
+    expect(wrapper.text()).toContain('Add Credential')
     expect(wrapper.find('button[type="submit"]').attributes('disabled')).toBeUndefined()
   })
 

@@ -24,6 +24,7 @@ from apps.runners.models import (
     ImageBuildJob,
     ImageDefinition,
     ImageInstance,
+    ImageRevision,
     Runner,
     Workspace,
 )
@@ -53,8 +54,12 @@ McpOAuthAuthorizationState.objects.filter(
 McpOAuthClientRegistration.objects.filter(id=state.get("testRegistrationId")).delete()
 Workspace.objects.filter(id=state["workspaceId"]).delete()
 Workspace.objects.filter(id__in=state.get("createdWorkspaces", [])).delete()
+ImageBuildJob.objects.filter(id=state["imageBuildId"]).update(
+    current_generation=None, pending_generation=None
+)
 ImageInstance.objects.filter(id=state["imageArtifactId"]).delete()
 ImageBuildJob.objects.filter(id=state["imageBuildId"]).delete()
+ImageRevision.objects.filter(id=state.get("imageRevisionId")).delete()
 ImageDefinition.objects.filter(id=state["imageDefinitionId"]).delete()
 Runner.objects.filter(id=state["runnerId"], name__startswith=state["marker"]).delete()
 User = get_user_model()

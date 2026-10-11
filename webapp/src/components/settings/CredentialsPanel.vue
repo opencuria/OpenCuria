@@ -17,6 +17,7 @@ import SettingsSection from './SettingsSection.vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -177,9 +178,6 @@ function canManage(credential: Credential): boolean {
     ? authStore.user?.id === credential.created_by_id
     : authStore.isAdmin
 }
-function isOAuth(credential: Credential): boolean {
-  return credential.credential_type === 'mcp_oauth'
-}
 function onEdit(credential: Credential): void {
   editingCredential.value = credential
 }
@@ -248,9 +246,7 @@ async function backToWorkspace(): Promise<void> {
 
 <template>
   <div class="space-y-6">
-    <SettingsSection
-      description="Manage personal and organization credentials. OAuth grants are managed securely by the provider and never expose token values."
-    >
+    <SettingsSection description="Manage personal and organization credentials.">
       <template #actions>
         <div v-if="activeDraft" class="flex flex-wrap gap-2">
           <Button
@@ -317,84 +313,23 @@ async function backToWorkspace(): Promise<void> {
         v-else-if="visibleCredentials.length"
         class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
       >
-        <template v-for="credential in visibleCredentials" :key="credential.id">
-          <div
-            v-if="isOAuth(credential)"
-            class="flex flex-wrap items-center justify-between gap-3 p-4"
-            :data-testid="`oauth-credential-${credential.id}`"
-          >
-            <div class="min-w-0 space-y-1">
-              <div class="flex flex-wrap items-center gap-2">
-                <p class="text-sm font-medium">{{ credential.name }}</p>
-                <span class="rounded bg-muted px-1.5 py-0.5 text-xs">{{
-                  credential.scope === 'organization' ? 'Organization' : 'Personal'
-                }}</span
-                ><span class="rounded border px-1.5 py-0.5 text-xs">OAuth</span>
-              </div>
-              <p class="text-sm text-muted-foreground">
-                {{ credential.service_name }} ·
-                {{
-                  credential.oauth_connected
-                    ? 'Connected'
-                    : credential.oauth_reconnect_required
-                      ? 'Reconnect required'
-                      : 'Not connected'
-                }}
-              </p>
-              <p class="text-xs text-muted-foreground">
-                Provider-managed connection. Tokens are never shown or edited here.
-              </p>
-            </div>
-            <div v-if="canManage(credential)" class="flex flex-wrap gap-2">
-              <Button
-                v-if="credential.oauth_reconnect_required || !credential.oauth_connected"
-                size="sm"
-                variant="outline"
-                :disabled="reconnectingCredential === credential.id"
-                :data-testid="`oauth-reconnect-${credential.id}`"
-                @click="reconnect(credential.id)"
-                >{{
-                  reconnectingCredential === credential.id ? 'Connecting…' : 'Reconnect'
-                }}</Button
-              >
-              <Button
-                size="sm"
-                variant="outline"
-                :data-testid="`oauth-rename-${credential.id}`"
-                @click="onEdit(credential)"
-                >Rename</Button
-              >
-              <Button
-                v-if="credential.oauth_connected || credential.oauth_reconnect_required"
-                size="sm"
-                variant="outline"
-                :data-testid="`oauth-disconnect-${credential.id}`"
-                @click="disconnectingCredential = credential"
-                >Disconnect</Button
-              >
-              <Button
-                size="sm"
-                variant="destructive"
-                :data-testid="`oauth-delete-${credential.id}`"
-                @click="onDelete(credential)"
-                >Delete</Button
-              >
-            </div>
-          </div>
-          <CredentialCard
-            v-else
-            :credential="credential"
-            @edit="onEdit"
-            @delete="onDelete"
-            @view-public-key="onViewPublicKey"
-          />
-        </template>
+        <CredentialCard
+          v-for="credential in visibleCredentials"
+          :key="credential.id"
+          :credential="credential"
+          :reconnecting="reconnectingCredential === credential.id"
+          @edit="onEdit"
+          @delete="onDelete"
+          @view-public-key="onViewPublicKey"
+          @reconnect="reconnect($event.id)"
+          @disconnect="disconnectingCredential = $event"
+        />
       </div>
       <div v-else class="overflow-hidden rounded-lg border border-border bg-card">
         <EmptyState
           :icon="KeyRound"
           title="No credentials"
-          description="Add a credential for an active service, or connect an OAuth account."
+          description="Add a credential for an active service."
         />
       </div>
     </SettingsSection>
@@ -409,28 +344,41 @@ async function backToWorkspace(): Promise<void> {
       :open="!!disconnectingCredential"
       @update:open="(value) => !value && (disconnectingCredential = null)"
     >
-      <DialogContent
-        ><DialogHeader
-          ><DialogTitle>Disconnect OAuth account?</DialogTitle
-          ><DialogDescription
-            >This clears the provider grant for {{ disconnectingCredential?.name }}. Workspace
-            associations are preserved and can block deletion if still required.</DialogDescription
-          ></DialogHeader
-        ><DialogFooter
-          ><Button
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Disconnect Credential</DialogTitle>
+          <DialogDescription>Workspace associations are preserved.</DialogDescription>
+        </DialogHeader>
+        <DialogBody>
+          <div
+            class="p-4 rounded-[var(--radius-md)] bg-destructive/10 border border-destructive/30"
+          >
+            <p class="text-sm text-foreground">
+              Are you sure you want to disconnect
+              <strong>{{ disconnectingCredential?.name }}</strong
+              >?
+            </p>
+            <p class="text-xs text-muted-foreground mt-1">
+              This removes the provider connection. Reconnect to use it again.
+            </p>
+          </div>
+        </DialogBody>
+        <DialogFooter>
+          <Button
             variant="outline"
             :disabled="disconnecting"
             @click="disconnectingCredential = null"
             >Cancel</Button
-          ><Button
+          >
+          <Button
             variant="destructive"
             :disabled="disconnecting"
             data-testid="oauth-disconnect-confirm"
             @click="confirmDisconnect"
             >{{ disconnecting ? 'Disconnecting…' : 'Disconnect' }}</Button
-          ></DialogFooter
-        ></DialogContent
-      >
+          >
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   </div>
 </template>

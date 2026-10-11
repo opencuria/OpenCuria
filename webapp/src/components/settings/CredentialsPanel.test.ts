@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import CredentialsPanel from './CredentialsPanel.vue'
+import CredentialCard from '@/components/credentials/CredentialCard.vue'
 import type { Credential } from '@/types'
 import { saveWorkspaceDraft } from '@/lib/workspaceDraft'
 
@@ -62,14 +63,22 @@ const oauth = (values: Partial<Credential> = {}): Credential => ({
 const stubs = {
   SettingsSection: { template: '<div><slot name="actions"/><slot/></div>' },
   CreateCredentialDialog: { template: '<div />', props: ['open', 'preselectedServiceId'] },
-  CredentialCard: { template: '<div />' },
   EmptyState: { template: '<div><slot /></div>' },
   LoadingSpinner: { template: '<span />' },
-  EditCredentialDialog: { template: '<div />' },
-  DeleteCredentialDialog: { template: '<div />' },
+  EditCredentialDialog: {
+    name: 'EditCredentialDialog',
+    template: '<div />',
+    props: ['credential'],
+  },
+  DeleteCredentialDialog: {
+    name: 'DeleteCredentialDialog',
+    template: '<div />',
+    props: ['credential'],
+  },
   PublicKeyDialog: { template: '<div />' },
   Dialog: { template: '<div><slot /></div>' },
   DialogContent: { template: '<div><slot /></div>' },
+  DialogBody: { template: '<div><slot /></div>' },
   DialogHeader: { template: '<div><slot /></div>' },
   DialogTitle: { template: '<div><slot /></div>' },
   DialogDescription: { template: '<div><slot /></div>' },
@@ -108,7 +117,83 @@ describe('CredentialsPanel OAuth credential controls', () => {
     expect(wrapper.find('[data-testid="oauth-reconnect-oauth-1"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="oauth-rename-oauth-1"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="oauth-delete-oauth-1"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('Tokens are never shown')
+    expect(wrapper.text()).not.toContain('Tokens are never shown')
+    expect(wrapper.text()).toContain('Created')
+  })
+
+  it('renders OAuth and ordinary credentials through the same card and icon actions', async () => {
+    credentials.credentials = [
+      oauth(),
+      oauth({
+        id: 'env-1',
+        name: 'GitHub Work',
+        service_name: 'GitHub',
+        credential_type: 'env',
+        env_var_name: 'GITHUB_TOKEN',
+      }),
+    ]
+    const wrapper = mountPanel()
+    await flushPromises()
+    const cards = wrapper.findAllComponents(CredentialCard)
+    expect(cards).toHaveLength(2)
+    for (const card of cards) {
+      expect(card.findAll('[data-slot="badge"]')).toHaveLength(2)
+      expect(card.text()).toContain('Personal')
+      expect(card.text()).toContain('Created')
+      for (const action of ['Edit credential', 'Delete credential']) {
+        const button = card.find(`button[aria-label="${action}"]`)
+        expect(button.attributes('data-variant')).toBe('ghost')
+        expect(button.attributes('data-size')).toBe('icon-sm')
+        expect(button.text()).toBe('')
+        expect(button.find('svg').exists()).toBe(true)
+      }
+    }
+    expect(cards[0]!.text()).toContain('OAuth')
+    expect(cards[1]!.text()).toContain('ENV')
+    expect(wrapper.find('[data-testid="credential-env-1"]').text()).toContain('GITHUB_TOKEN')
+  })
+
+  it('does not expose personal account controls to another user, including admins', async () => {
+    credentials.credentials = [oauth({ created_by_id: 2 })]
+    auth.isAdmin = true
+    const wrapper = mountPanel({ initialCredentialId: 'oauth-1' })
+    await flushPromises()
+    const row = wrapper.find('[data-testid="oauth-credential-oauth-1"]')
+    expect(row.find('button').exists()).toBe(false)
+    expect(credentials.reconnectOAuthCredential).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="oauth-error"]').text()).toContain('permission')
+  })
+
+  it('forwards edit and delete actions to the existing credential dialogs', async () => {
+    const credential = credentials.credentials[0]
+    const wrapper = mountPanel()
+    await flushPromises()
+    await wrapper.find('[data-testid="oauth-rename-oauth-1"]').trigger('click')
+    expect(wrapper.findComponent({ name: 'EditCredentialDialog' }).props('credential')).toEqual(
+      credential,
+    )
+    await wrapper.find('[data-testid="oauth-delete-oauth-1"]').trigger('click')
+    expect(wrapper.findComponent({ name: 'DeleteCredentialDialog' }).props('credential')).toEqual(
+      credential,
+    )
+  })
+
+  it('keeps the disconnect confirmation open when the provider grant cannot be cleared', async () => {
+    credentials.disconnectOAuthCredential.mockResolvedValue(false)
+    const wrapper = mountPanel()
+    await flushPromises()
+    await wrapper.find('[data-testid="oauth-disconnect-oauth-1"]').trigger('click')
+    expect(wrapper.text()).toContain('Disconnect Credential')
+    expect(wrapper.text()).toContain('Workspace associations are preserved.')
+    await wrapper.find('[data-testid="oauth-disconnect-confirm"]').trigger('click')
+    await flushPromises()
+    expect(credentials.disconnectOAuthCredential).toHaveBeenCalledWith('oauth-1')
+    expect(wrapper.find('[data-testid="oauth-error"]').text()).toContain(
+      'could not be disconnected',
+    )
+    expect(
+      (wrapper.vm as unknown as { disconnectingCredential: Credential }).disconnectingCredential.id,
+    ).toBe('oauth-1')
   })
 
   it('keeps multiple account rows independent and enforces organization ownership for members', async () => {
@@ -188,6 +273,39 @@ describe('CredentialsPanel OAuth credential controls', () => {
     await flushPromises()
     expect(push).toHaveBeenCalledWith({ path: '/', query: { resume_workspace: draft.id } })
     expect(replace).toHaveBeenCalledWith({ path: '/', query: {} })
+  })
+
+  it('offers only reconnect, edit and delete for a disconnected OAuth credential', async () => {
+    credentials.credentials = [oauth({ oauth_connected: false, oauth_status: 'disconnected' })]
+    const wrapper = mountPanel()
+    await flushPromises()
+    const row = wrapper.find('[data-testid="oauth-credential-oauth-1"]')
+    expect(row.text()).toContain('Not connected')
+    expect(row.find('[data-testid="oauth-reconnect-oauth-1"]').exists()).toBe(true)
+    expect(row.find('[data-testid="oauth-disconnect-oauth-1"]').exists()).toBe(false)
+    expect(row.findAll('button')).toHaveLength(3)
+  })
+
+  it('disables the shared reconnect icon while starting provider authorization', async () => {
+    credentials.credentials = [oauth({ oauth_connected: false })]
+    let finish!: (success: boolean) => void
+    credentials.reconnectOAuthCredential.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finish = resolve
+        }),
+    )
+    const wrapper = mountPanel()
+    await flushPromises()
+    const button = wrapper.find('[data-testid="oauth-reconnect-oauth-1"]')
+    await button.trigger('click')
+    await flushPromises()
+    expect(button.attributes('disabled')).toBeDefined()
+    expect(button.find('svg').classes()).toContain('animate-spin')
+    expect(credentials.reconnectOAuthCredential).toHaveBeenCalledWith('oauth-1', 'Notion Work')
+    finish(true)
+    await flushPromises()
+    expect(button.attributes('disabled')).toBeUndefined()
   })
 
   it('reports failed reconnect safely without replacing provider-managed material', async () => {

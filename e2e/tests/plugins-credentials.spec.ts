@@ -123,7 +123,7 @@ async function browserOAuth(
       res.url().endsWith("/oauth/connect/") &&
       res.request().method() === "POST",
   );
-  await page.getByRole("button", { name: "Connect securely" }).click();
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
   expect((await connectPromise).status()).toBe(200);
   const authURL = new URL(await authorization);
   expect(authURL.hostname).toBe("issuer.focused-e2e.invalid");
@@ -159,7 +159,16 @@ test("plugin overview and detail show activation, human-readable services, and A
     .getByTestId(`plugin-add-credential-${fixture.notionServiceId}`)
     .click();
   const dialog = page.getByRole("dialog").last();
-  await expect(dialog).toContainText("Connect Notion OAuth");
+  await expect(
+    dialog.getByRole("heading", { name: "Add Credential" }),
+  ).toBeVisible();
+  await expect(dialog).toContainText(
+    "Authorize this account with the provider in this tab.",
+  );
+  await expect(
+    dialog.getByRole("button", { name: "Connect", exact: true }),
+  ).toBeVisible();
+  await expect(dialog).not.toContainText("Tokens remain encrypted");
   await expect(dialog.getByText("Value", { exact: true })).toHaveCount(0);
   await shot(page, "credential-oauth-prefill.png");
 });
@@ -600,4 +609,157 @@ test("mobile plugin detail stays within the viewport and has a usable back contr
   } finally {
     await session.client.dispose();
   }
+});
+
+test("OAuth and ENV credentials share rows and OAuth names remain editable", async ({
+  page,
+}) => {
+  const session = await apiSession();
+  let envCredentialId: string | undefined;
+  const envName = `${fixture.marker} unified ENV credential`;
+  try {
+    const services = await session.client
+      .get("/api/v1/credential-services/", { headers: session.headers })
+      .then((response) => response.json());
+    const github = services.find((service: any) => service.slug === "github");
+    expect(github?.is_active).toBe(true);
+
+    const created = await session.client.post("/api/v1/credentials/", {
+      headers: session.headers,
+      data: {
+        service_id: github.id,
+        name: envName,
+        value: "focused-unified-row-test-secret",
+      },
+    });
+    expect(created.status()).toBe(201);
+    envCredentialId = (await created.json()).id;
+    fixture.createdCredentials = [
+      ...(fixture.createdCredentials || []),
+      envCredentialId,
+    ];
+    await saveFixture();
+  } finally {
+    await session.client.dispose();
+  }
+
+  await loginUI(page);
+  await settings(page, "credentials");
+  await page.getByTestId("credentials-add-trigger").click();
+  const oauthDialog = page.getByRole("dialog").last();
+  await oauthDialog.getByRole("combobox").click();
+  await page.getByRole("option", { name: /Notion.*OAuth/ }).click();
+  const oauthName = `${fixture.marker} unified OAuth credential`;
+  await oauthDialog.getByLabel("Name").fill(oauthName);
+  const query = await browserOAuth(page, {
+    code: "focused-unified-oauth-code",
+  });
+  expect(query).toContain("oauth_result=connected");
+  const oauthId = new URLSearchParams(query).get("credential_id")!;
+  fixture.oauthCredentials.push(oauthId);
+  fixture.oauthNames.push(oauthName);
+  await saveFixture();
+
+  const oauthRow = page.getByTestId(`oauth-credential-${oauthId}`);
+  const envRow = page.getByTestId(`credential-${envCredentialId}`);
+  await expect(oauthRow).toBeVisible();
+  await expect(envRow).toBeVisible();
+
+  for (const { row, kind } of [
+    { row: oauthRow, kind: "OAuth" },
+    { row: envRow, kind: "ENV" },
+  ]) {
+    const badges = row.locator('[data-slot="badge"]');
+    await expect(badges).toHaveCount(2);
+    await expect(badges).toContainText(["Personal", kind]);
+    await expect(row.locator("svg.lucide-key-round")).toHaveCount(1);
+    await expect(
+      row.locator("p").filter({ hasText: /Created / }),
+    ).toBeVisible();
+
+    for (const action of ["Edit credential", "Delete credential"]) {
+      const button = row.getByRole("button", { name: action, exact: true });
+      await expect(button).toHaveAttribute("aria-label", action);
+      await expect(button).toHaveAttribute("title", action);
+      await expect(button).toHaveAttribute("data-variant", "ghost");
+      await expect(button).toHaveAttribute("data-size", "icon-sm");
+      await expect(button.locator("svg")).toHaveCount(1);
+    }
+  }
+  await shot(page, "credentials-unified.png");
+
+  await page.getByTestId(`oauth-rename-${oauthId}`).click();
+  const editDialog = page.getByRole("dialog", {
+    name: "Edit Credential",
+    exact: true,
+  });
+  await expect(
+    editDialog.getByRole("heading", { name: "Edit Credential" }),
+  ).toBeVisible();
+  await expect(editDialog).toContainText("Update the credential name.");
+  await expect(editDialog).not.toContainText(/token/i);
+  await expect(editDialog.locator("input")).toHaveCount(1);
+  await expect(editDialog.locator("textarea")).toHaveCount(0);
+  await shot(page, "credential-oauth-edit.png");
+
+  const renamed = `${oauthName} unified edit`;
+  await editDialog.getByPlaceholder("Credential name").fill(renamed);
+  const updatePromise = page.waitForResponse(
+    (response) =>
+      response.url().endsWith(`/credentials/${oauthId}/`) &&
+      response.request().method() === "PATCH",
+  );
+  await editDialog.getByRole("button", { name: "Save Changes" }).click();
+  const update = await updatePromise;
+  expect(update.status()).toBe(200);
+  expect(update.request().postDataJSON()).toEqual({ name: renamed });
+  await expect(oauthRow).toContainText(renamed);
+  await expect(editDialog).not.toBeVisible();
+
+  await oauthRow.getByRole("button", { name: "Disconnect credential" }).click();
+  const disconnectDialog = page.getByRole("dialog", {
+    name: "Disconnect Credential",
+    exact: true,
+  });
+  await expect(
+    disconnectDialog.getByRole("heading", { name: "Disconnect Credential" }),
+  ).toBeVisible();
+  await expect(
+    disconnectDialog.locator('[data-slot="dialog-body"]'),
+  ).toContainText(renamed);
+  await shot(page, "credential-oauth-disconnect.png");
+  const disconnectPromise = page.waitForResponse(
+    (response) =>
+      response.url().endsWith(`/credentials/${oauthId}/oauth/disconnect/`) &&
+      response.request().method() === "DELETE",
+  );
+  await disconnectDialog.getByTestId("oauth-disconnect-confirm").click();
+  expect((await disconnectPromise).status()).toBe(204);
+  await expect(disconnectDialog).not.toBeVisible();
+  await expect(oauthRow).toContainText("Not connected");
+  await expect(
+    oauthRow.getByRole("button", { name: "Reconnect credential" }),
+  ).toBeVisible();
+  await expect(
+    oauthRow.getByRole("button", { name: "Disconnect credential" }),
+  ).toHaveCount(0);
+
+  await oauthRow.getByRole("button", { name: "Delete credential" }).click();
+  const deleteDialog = page.getByRole("dialog", {
+    name: "Delete Credential",
+    exact: true,
+  });
+  await expect(
+    deleteDialog.getByRole("heading", { name: "Delete Credential" }),
+  ).toBeVisible();
+  const deletePromise = page.waitForResponse(
+    (response) =>
+      response.url().endsWith(`/credentials/${oauthId}/`) &&
+      response.request().method() === "DELETE",
+  );
+  await deleteDialog
+    .getByRole("button", { name: "Delete", exact: true })
+    .click();
+  expect((await deletePromise).status()).toBe(204);
+  await expect(oauthRow).toHaveCount(0);
 });

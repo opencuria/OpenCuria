@@ -72,7 +72,7 @@ function handleClose(): void {
             </p>
             <p class="text-xs text-muted-foreground mt-1">
               Deletion may be blocked while a workspace or required plugin depends on this
-              credential. OAuth disconnect does not remove those references.
+              credential.
             </p>
           </div>
         </div>

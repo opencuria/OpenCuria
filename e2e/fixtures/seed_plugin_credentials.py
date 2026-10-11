@@ -1,5 +1,6 @@
 """Create own-row fixtures in an isolated, migrated E2E SQLite database."""
 
+import hashlib
 import json
 import os
 import uuid
@@ -23,6 +24,7 @@ from apps.runners.models import (
     ImageBuildJob,
     ImageDefinition,
     ImageInstance,
+    ImageRevision,
     Runner,
     Workspace,
 )
@@ -147,17 +149,41 @@ build = ImageBuildJob.objects.create(
     runner=runner,
     status=ImageBuildJob.Status.ACTIVE,
 )
+recipe = {
+    "runtime_type": image_definition.runtime_type,
+    "base_distro": image_definition.base_distro,
+    "packages": image_definition.packages,
+    "env_vars": image_definition.env_vars,
+    "custom_dockerfile": image_definition.custom_dockerfile,
+    "custom_init_script": image_definition.custom_init_script,
+}
+rendered_input = {}
+revision_digest = hashlib.sha256(
+    json.dumps(
+        {"recipe": recipe, "rendered_input": rendered_input}, sort_keys=True
+    ).encode()
+).hexdigest()
+revision = ImageRevision.objects.create(
+    definition=image_definition,
+    digest=revision_digest,
+    recipe=recipe,
+    rendered_input=rendered_input,
+)
 image = ImageInstance.objects.create(
     runner=runner,
     build_job=build,
     runtime_type=RuntimeType.QEMU,
     origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
     origin_definition=image_definition,
+    revision=revision,
+    generation=1,
     name=f"{marker} Fixture Image",
     runner_ref="/test/fixture.qcow2",
     status=ImageInstance.Status.READY,
     created_by=admin,
 )
+build.current_generation = image
+build.save(update_fields=["current_generation"])
 workspace = Workspace.objects.create(
     runner=runner,
     runtime_type=RuntimeType.QEMU,
@@ -227,6 +253,7 @@ state = {
     "workspaceId": str(workspace.id),
     "imageArtifactId": str(image.id),
     "imageDefinitionId": str(image_definition.id),
+    "imageRevisionId": str(revision.id),
     "imageBuildId": str(build.id),
     "runnerId": str(runner.id),
     "workspaceName": workspace.name,

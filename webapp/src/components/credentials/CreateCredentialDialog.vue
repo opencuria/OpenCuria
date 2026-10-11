@@ -164,12 +164,10 @@ function handleClose(): void {
     >
     <DialogContent>
       <DialogHeader
-        ><DialogTitle>{{
-          isOAuth ? `Connect ${selectedService?.name || 'OAuth account'}` : 'Add Credential'
-        }}</DialogTitle
+        ><DialogTitle>Add Credential</DialogTitle
         ><DialogDescription>{{
           isOAuth
-            ? 'A secure provider authorization will open in this tab. OpenCuria never asks for or displays OAuth tokens.'
+            ? 'Authorize this account with the provider in this tab.'
             : 'Store a credential to be injected into workspaces.'
         }}</DialogDescription></DialogHeader
       >
@@ -187,9 +185,11 @@ function handleClose(): void {
               @update:model-value="(value) => selectService(String(value))"
               ><SelectTrigger><SelectValue placeholder="Select an active service" /></SelectTrigger
               ><SelectContent
-                ><SelectItem v-for="service in serviceOptions" :key="service.id" :value="service.id"
-                  >{{ service.name
-                  }}<span v-if="service.credential_type === 'mcp_oauth'"> · OAuth</span></SelectItem
+                ><SelectItem
+                  v-for="service in serviceOptions"
+                  :key="service.id"
+                  :value="service.id"
+                  >{{ service.name }}</SelectItem
                 ></SelectContent
               ></Select
             >
@@ -211,16 +211,7 @@ function handleClose(): void {
             <p class="text-xs text-muted-foreground">Optional. Defaults to “{{ defaultName }}”.</p>
           </div>
           <div
-            v-if="isOAuth"
-            class="flex items-start gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2.5 text-sm"
-          >
-            <Info :size="16" class="mt-0.5 shrink-0 text-primary" /><span
-              >Continue to the provider in this tab to authorize securely. Tokens remain encrypted
-              and are never shown or manually entered.</span
-            >
-          </div>
-          <div
-            v-else-if="isSSHKey"
+            v-if="isSSHKey"
             class="flex items-start gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2.5 text-sm"
           >
             <Info :size="16" class="mt-0.5 shrink-0 text-primary" /><span
@@ -274,7 +265,7 @@ function handleClose(): void {
                 ? 'Connecting…'
                 : 'Saving…'
               : isOAuth
-                ? 'Connect securely'
+                ? 'Connect'
                 : 'Save Credential'
           }}</Button
         ></DialogFooter
