@@ -4,6 +4,25 @@ import RunnerOperationsPanel from './RunnerOperationsPanel.vue'
 const api = vi.hoisted(() => ({ inspectOperation: vi.fn(), disposeOperation: vi.fn() }))
 vi.mock('@/services/runnerStorage.api', () => api)
 beforeEach(() => vi.clearAllMocks())
+it('identifies each workspace when a grouped workflow has multiple blocked children', async () => {
+  api.inspectOperation.mockResolvedValue({ evidence: {}, permitted_actions: [] })
+  const w = mount(RunnerOperationsPanel, {
+    props: {
+      operations: [
+        { ...operations[0]!, task_id: 'first', task__workspace__name: 'Atlas' },
+        { ...operations[0]!, task_id: 'second', task__workspace__name: 'Beacon' },
+      ],
+    },
+  })
+  await w
+    .findAll('button')
+    .find((button) => button.text() === 'Check Beacon')!
+    .trigger('click')
+  await flushPromises()
+  expect(api.inspectOperation).toHaveBeenCalledExactlyOnceWith('second')
+  expect(w.text()).not.toContain('second')
+  w.unmount()
+})
 it('only offers server-inspected actions, preserves diagnostics and explicitly warns before acknowledgment', async () => {
   api.inspectOperation.mockResolvedValue({
     operation_id: 'op',
@@ -37,15 +56,12 @@ it('only offers server-inspected actions, preserves diagnostics and explicitly w
       ),
     },
   })
-  const inspect = () =>
-    w
-      .findAll('button')
-      .find((b) => b.attributes('aria-label') === 'Inspect current runner evidence')!
+  const inspect = () => w.findAll('button').find((b) => b.text() === 'Check status')!
   await inspect().trigger('click')
   await flushPromises()
-  expect(w.text()).toContain('Disk retained')
-  expect(w.text()).toContain('No safe action')
-  expect(w.findAll('button').some((b) => b.text() === 'retry')).toBe(false)
+  expect(w.text()).not.toContain('Disk retained')
+  expect(w.text()).toContain('could not be verified')
+  expect(w.findAll('button').some((b) => b.text() === 'Try again')).toBe(false)
   api.inspectOperation.mockResolvedValue({
     operation_id: 'op',
     diagnostic: 'Interrupted',
@@ -56,13 +72,13 @@ it('only offers server-inspected actions, preserves diagnostics and explicitly w
   await flushPromises()
   await w
     .findAll('button')
-    .find((b) => b.text() === 'acknowledge interrupted')!
+    .find((b) => b.text() === 'Close interrupted operation')!
     .trigger('click')
   expect(api.disposeOperation).not.toHaveBeenCalled()
-  expect(w.text()).toContain('Resources are preserved')
+  expect(w.text()).toContain('keeps existing resources')
   await w
     .findAll('button')
-    .find((b) => b.text() === 'Acknowledge, preserving resources')!
+    .find((b) => b.text() === 'Close operation and keep resources')!
     .trigger('click')
   await flushPromises()
   expect(api.disposeOperation).toHaveBeenCalledWith('op', 'acknowledge_interrupted')
@@ -79,15 +95,15 @@ const operations = [
     deliveries: 1,
   },
 ]
-it('hides empty activity and resolves target names', () => {
+it('hides recovery controls when no unresolved operation is passed', () => {
   const empty = mount(RunnerOperationsPanel, { props: { operations: [] } })
-  expect(empty.find('#runner-operations').exists()).toBe(false)
+  expect(empty.find('button').exists()).toBe(false)
   empty.unmount()
   const w = mount(RunnerOperationsPanel, {
-    props: { operations, targets: { ws: 'Workspace name' } },
+    props: { operations },
   })
-  expect(w.text()).toContain('Workspace name')
-  expect(w.get('[aria-label="Inspect current runner evidence"]').text()).toBe('Inspect')
+  expect(w.text()).toContain('Check status')
+  expect(w.text()).not.toContain('intervention')
   w.unmount()
 })
 it.each(['Inspection failed', 'Unauthorized'])(
@@ -95,7 +111,10 @@ it.each(['Inspection failed', 'Unauthorized'])(
   async (message) => {
     api.inspectOperation.mockRejectedValue(new Error(message))
     const w = mount(RunnerOperationsPanel, { props: { operations } })
-    await w.get('[aria-label="Inspect current runner evidence"]').trigger('click')
+    await w
+      .findAll('button')
+      .find((b) => b.text() === 'Check status')!
+      .trigger('click')
     await flushPromises()
     expect(w.get('[role="alert"]').text()).toBe(message)
     expect(api.disposeOperation).not.toHaveBeenCalled()
@@ -111,22 +130,25 @@ it('collapses evidence and clears eligibility on server refusal', async () => {
   })
   api.disposeOperation.mockRejectedValue(new Error('Server refused fresh evidence'))
   const w = mount(RunnerOperationsPanel, { props: { operations } })
-  await w.get('[aria-label="Inspect current runner evidence"]').trigger('click')
+  await w
+    .findAll('button')
+    .find((b) => b.text() === 'Check status')!
+    .trigger('click')
   await flushPromises()
   expect(w.text()).not.toContain('evidence-only')
   await w
     .findAll('button')
-    .find((b) => b.text() === 'Execution evidence')!
+    .find((b) => b.text() === 'Details')!
     .trigger('click')
   await flushPromises()
   expect(w.text()).toContain('evidence-only')
   await w
     .findAll('button')
-    .find((b) => b.text() === 'retry')!
+    .find((b) => b.text() === 'Try again')!
     .trigger('click')
   await flushPromises()
   expect(w.get('[role="alert"]').text()).toContain('Server refused')
-  expect(w.findAll('button').some((b) => b.text() === 'retry')).toBe(false)
+  expect(w.findAll('button').some((b) => b.text() === 'Try again')).toBe(false)
   expect(w.emitted('changed')).toBeUndefined()
   w.unmount()
 })
@@ -139,7 +161,7 @@ it('prevents duplicate inspections while busy', async () => {
       }),
   )
   const w = mount(RunnerOperationsPanel, { props: { operations } })
-  const button = w.get('[aria-label="Inspect current runner evidence"]')
+  const button = w.findAll('button').find((b) => b.text() === 'Check status')!
   await button.trigger('click')
   await button.trigger('click')
   expect(api.inspectOperation).toHaveBeenCalledTimes(1)

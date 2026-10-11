@@ -17,8 +17,8 @@ const baseURL = process.env.E2E_BASE_URL || "http://127.0.0.1:5181";
 // Real Vite/Vue app, isolated backend fixtures. Never connects to the DB.
 export default defineConfig({
   testDir: "./tests",
-  testMatch: "runner-storage.spec.ts",
-  outputDir: resolve(root, "../.opencuria/playwright/runner-storage-results"),
+  testMatch: ["runner-storage.spec.ts", "runner-activity.spec.ts"],
+  outputDir: resolve(root, ".opencuria/playwright/runner-storage-results"),
   workers: 1,
   retries: 0,
   timeout: 120_000,

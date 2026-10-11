@@ -5,6 +5,7 @@ import type { Workspace } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Square, Play, Trash2, Camera, Loader2, RotateCcw } from '@lucide/vue'
 import { useWorkspaceStore } from '@/stores/workspaces'
+import { useAuthStore } from '@/stores/auth'
 import EditWorkspaceDialog from './EditWorkspaceDialog.vue'
 
 const props = defineProps<{
@@ -21,12 +22,13 @@ const emit = defineEmits<{
 function inspectRunner() {
   window.dispatchEvent(
     new CustomEvent('opencuria:open-settings', {
-      detail: { tab: 'runners', runnerId: props.workspace.runner_id },
+      detail: { tab: 'runners', runnerId: props.workspace.runner_id, runnerActivity: true },
     }),
   )
 }
 
 const workspaceStore = useWorkspaceStore()
+const auth = useAuthStore()
 const isTransitioning = computed(() => workspaceStore.isWorkspaceTransitioning(props.workspace.id))
 const transitionLabel = computed(() =>
   workspaceStore.getWorkspaceTransitionLabel(props.workspace.id),
@@ -115,14 +117,18 @@ function handleRecreate(e: Event): void {
 <template>
   <div class="flex flex-wrap items-center gap-1">
     <p v-if="workspace.intervention_required" role="alert" class="text-xs text-destructive">
-      {{ workspace.lifecycle_diagnostic || 'Intervention required. Unsafe actions disabled.' }}
+      {{
+        auth.isAdmin
+          ? 'A previous operation could not be confirmed. Review its status to continue.'
+          : 'A previous operation could not be confirmed. Ask an organization admin to review it.'
+      }}
     </p>
     <Button
-      v-if="workspace.intervention_required"
+      v-if="workspace.intervention_required && auth.isAdmin"
       variant="outline"
       size="sm"
       @click="inspectRunner"
-      >Inspect runner operations (admin)</Button
+      >Review workspace issue</Button
     >
     <EditWorkspaceDialog :workspace="workspace" :size="size" :disabled="areActionsDisabled" />
     <Button

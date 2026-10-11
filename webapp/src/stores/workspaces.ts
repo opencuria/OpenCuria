@@ -225,7 +225,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       workspace?.active_operation === WorkspaceOperation.CAPTURING_IMAGE
     )
       return 'Capturing'
-    if (workspace?.intervention_required) return 'Needs intervention'
+    if (workspace?.intervention_required) return 'Needs attention'
     switch (workspace?.active_operation) {
       case WorkspaceOperation.CREATING:
         return 'Creating…'

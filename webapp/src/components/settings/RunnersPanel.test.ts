@@ -17,7 +17,8 @@ const stubs = {
     template: '<button @click="$emit(\'select\', runners[0])">Select runner</button>',
   },
   RunnerStorageDetail: {
-    props: ['runner'],
+    name: 'RunnerStorageDetail',
+    props: ['runner', 'initialTab'],
     emits: ['back'],
     template:
       '<div>{{ runner.name }} {{ runner.status }}<button @click="$emit(\'back\')">Back</button></div>',
@@ -25,6 +26,17 @@ const stubs = {
 }
 beforeEach(() => {
   store.runners = [{ id: 'r', name: 'Selected runner', status: 'online' }]
+})
+it('opens the requested activity view without resetting it during polling', async () => {
+  const w = mount(RunnersPanel, {
+    props: { runnerId: 'r', runnerActivity: true, contextVersion: 1 },
+    global: { stubs },
+  })
+  expect(w.findComponent({ name: 'RunnerStorageDetail' }).props('initialTab')).toBe('activities')
+  store.runners = [...store.runners]
+  await w.vm.$nextTick()
+  expect(w.findComponent({ name: 'RunnerStorageDetail' }).props('initialTab')).toBe('activities')
+  w.unmount()
 })
 it('Back persists across polls; a fresh context can reopen the same runner', async () => {
   const w = mount(RunnersPanel, { props: { runnerId: 'r', contextVersion: 1 }, global: { stubs } })

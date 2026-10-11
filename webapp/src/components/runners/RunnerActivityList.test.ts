@@ -1,16 +1,40 @@
 import { mount, flushPromises } from '@vue/test-utils'
 import { expect, it } from 'vitest'
 import RunnerActivityList from './RunnerActivityList.vue'
-import type { DeletionRequest, RunnerStorage } from '@/types/runnerStorage'
-const data = (): RunnerStorage => ({
+import type { DeletionRequest, RunnerActivity, RunnerStorage } from '@/types/runnerStorage'
+
+const activity = (patch: Partial<RunnerActivity> = {}): RunnerActivity => ({
+  id: 'blender-stop',
+  kind: 'operation',
+  target_name: 'Blender',
+  title: 'Stop workspace',
+  state: 'attention',
+  outcome: 'blocked',
+  summary: 'Stop could not be confirmed.',
+  diagnostic: 'Unknown outcome; intervention required',
+  operation_ids: ['op'],
+  created_at: new Date().toISOString(),
+  ...patch,
+})
+const data = (activities: RunnerActivity[] = []): RunnerStorage => ({
   runner_id: 'r',
   runner_online: true,
   latest_snapshot_id: null,
   latest_complete: true,
   runtimes: [],
   generations: [],
-  operations: [],
+  operations: [
+    {
+      task_id: 'op',
+      target: 'ws',
+      task__status: 'failed',
+      task__error: 'Unknown outcome',
+      phase: 'intervention',
+      deliveries: 1,
+    },
+  ],
   capture_requests: [],
+  activities,
 })
 const deletion = (phase: string, can_cancel = false): DeletionRequest => ({
   id: phase,
@@ -36,168 +60,129 @@ const mountList = (storage = data(), deletions: DeletionRequest[] = [], busy = f
       stubs: {
         RunnerOperationsPanel: {
           name: 'RunnerOperationsPanel',
-          props: ['operations', 'targets'],
+          props: ['operations', 'diagnostic'],
           emits: ['changed'],
-          template: '<div />',
+          template: '<button @click="$emit(\'changed\')">Check status</button>',
         },
       },
     },
   })
-it('shows only empty activity when nothing is recorded', () => {
+
+it('shows empty activity without recovery controls', () => {
   const w = mountList()
   expect(w.text()).toBe('No recorded activity')
-  expect(w.find('section').exists()).toBe(false)
-  w.unmount()
-})
-it('gates cancellation on server permission and busy state and emits explicit graph review', async () => {
-  const w = mountList(
-    data(),
-    [deletion('waiting', true), deletion('reconfirmation_required'), deletion('completed')],
-    true,
-  )
-  const cancel = () => w.findAll('button').find((b) => b.text() === 'Cancel pending request')!
-  expect(w.findAll('button').filter((b) => b.text() === 'Cancel pending request')).toHaveLength(1)
-  await cancel().trigger('click')
-  expect(w.emitted('cancel')).toBeUndefined()
-  await w
-    .findAll('button')
-    .find((b) => b.text() === 'Review changed graph and confirm again')!
-    .trigger('click')
-  expect(w.emitted('review')).toBeUndefined()
-  await w.setProps({ busy: false })
-  await cancel().trigger('click')
-  expect(w.emitted('cancel')).toEqual([['waiting']])
-  await w
-    .findAll('button')
-    .find((b) => b.text() === 'Review changed graph and confirm again')!
-    .trigger('click')
-  expect(w.emitted('review')).toEqual([
-    [{ target_type: 'image', target_id: 'image' }, 'Saved image'],
-  ])
-  expect(w.findAll('[role="alert"]')).toHaveLength(3)
-  w.unmount()
-})
-it('keeps truthful deletion outcomes with active requests first', () => {
-  const w = mountList(data(), [
-    deletion('completed'),
-    deletion('cancelled'),
-    deletion('waiting', true),
-  ])
-  const text = w.get('section').text()
-  expect(text).toContain('Cancelled — resources retained')
-  expect(text).toContain('Completed')
-  expect(text.indexOf('waiting')).toBeLessThan(text.indexOf('Completed'))
-  w.unmount()
-})
-it('resolves workspace and image names, shows suppression, and collapses terminal capture history', async () => {
-  const storage = data()
-  storage.generations = [
-    { id: 'image', name: 'Saved image', dependencies: [{ id: 'ws', name: 'Source workspace' }] },
-  ] as RunnerStorage['generations']
-  storage.capture_requests = [
-    {
-      id: 'done',
-      workspace_id: 'ws',
-      image_id: 'image',
-      phase: 'completed',
-      diagnostic: 'Capture finished',
-      resume_suppressed: false,
-    },
-    {
-      id: 'active',
-      workspace_id: 'ws',
-      image_id: 'image',
-      phase: 'capturing',
-      diagnostic: 'Waiting for evidence',
-      resume_suppressed: true,
-    },
-    {
-      id: 'cancelled',
-      workspace_id: 'ws',
-      image_id: 'image',
-      phase: 'cancelled',
-      diagnostic: 'Capture cancelled',
-      resume_suppressed: true,
-    },
-  ]
-  storage.operations = [
-    {
-      task_id: 'op',
-      target: 'image',
-      task__status: 'pending',
-      task__error: '',
-      phase: 'waiting',
-      deliveries: 1,
-    },
-  ]
-  const w = mountList(storage)
-  expect(w.text()).toContain('Source workspace → Saved image')
-  expect(w.text()).toContain('Restart suppressed')
-  expect(w.text()).toContain('Completed history (1)')
-  expect(w.text()).not.toContain('Capture finished')
-  const operations = w.findComponent({ name: 'RunnerOperationsPanel' })
-  expect(operations.props('targets')).toEqual({ image: 'Saved image' })
-  operations.vm.$emit('changed')
-  expect(w.emitted('changed')).toEqual([[]])
-  await w
-    .findAll('button')
-    .find((b) => b.text() === 'Completed history (1)')!
-    .trigger('click')
-  await flushPromises()
-  expect(w.text()).toContain('Capture finished')
-  expect(w.text()).toContain('Cancelled — resources retained')
-  w.unmount()
-})
-it('truncates unknown targets but preserves complete IDs in technical details', async () => {
-  const storage = data()
-  const id = 'unknown-workspace-12345678901234567890'
-  storage.capture_requests = [
-    {
-      id: 'capture',
-      workspace_id: id,
-      image_id: 'image',
-      phase: 'waiting',
-      diagnostic: '',
-      resume_suppressed: false,
-    },
-  ]
-  const w = mountList(storage)
-  expect(w.text()).toContain('unknown-work…7890')
-  expect(w.text()).not.toContain(id)
-  await w
-    .findAll('button')
-    .find((b) => b.text() === 'Technical identifiers')!
-    .trigger('click')
-  await flushPromises()
-  expect(w.text()).toContain(id)
+  expect(w.find('button').exists()).toBe(false)
   w.unmount()
 })
 
-it('resolves resource workspace and generation identities without using provenance', () => {
+it('shows one unresolved workflow and hides handled failures in history', async () => {
+  const w = mountList(
+    data([
+      activity(),
+      activity({
+        id: 'capture',
+        kind: 'capture',
+        target_name: 'OpenCuria 3',
+        title: 'Save workspace as image',
+        state: 'history',
+        outcome: 'resolved',
+        summary: 'Interrupted operation closed. Existing resources were kept.',
+        operation_ids: [],
+      }),
+    ]),
+  )
+  expect(w.get('[aria-label="Needs attention"]').findAll('article')).toHaveLength(1)
+  expect(w.text()).toContain('Blender')
+  expect(w.text()).not.toContain('OpenCuria 3')
+  expect(w.text()).not.toContain('intervention')
+  const panel = w.findComponent({ name: 'RunnerOperationsPanel' })
+  expect(panel.props('operations')).toHaveLength(1)
+  await w
+    .findAll('button')
+    .find((button) => button.text() === 'History (1)')!
+    .trigger('click')
+  await flushPromises()
+  expect(w.get('[aria-label="History"]').text()).toContain('OpenCuria 3')
+  expect(w.get('[aria-label="History"]').text()).toContain('Handled')
+  expect(w.get('[aria-label="History"]').text()).not.toContain('Check status')
+  await w
+    .findAll('button')
+    .find((button) => button.text() === 'Check status')!
+    .trigger('click')
+  expect(w.emitted('changed')).toEqual([[]])
+  w.unmount()
+})
+
+it('renders a capture and its child as one card with one recovery action', () => {
+  const w = mountList(data([activity({ kind: 'capture', title: 'Save workspace as image' })]))
+  expect(w.findAll('article')).toHaveLength(1)
+  expect(w.findAll('button').filter((button) => button.text() === 'Check status')).toHaveLength(1)
+  expect(w.text()).not.toContain('Deliveries')
+  w.unmount()
+})
+
+it('gates cancellation on server permission and busy state and reviews changed deletion', async () => {
+  const w = mountList(
+    data([
+      activity({ id: 'waiting', kind: 'deletion', state: 'active', operation_ids: [] }),
+      activity({
+        id: 'reconfirmation_required',
+        kind: 'deletion',
+        target_name: 'Saved image',
+        operation_ids: [],
+      }),
+    ]),
+    [deletion('waiting', true), deletion('reconfirmation_required')],
+    true,
+  )
+  const button = (text: string) => w.findAll('button').find((button) => button.text() === text)!
+  await button('Cancel request').trigger('click')
+  await button('Review deletion').trigger('click')
+  expect(w.emitted('cancel')).toBeUndefined()
+  expect(w.emitted('review')).toBeUndefined()
+  await w.setProps({ busy: false })
+  await button('Cancel request').trigger('click')
+  await button('Review deletion').trigger('click')
+  expect(w.emitted('cancel')).toEqual([['waiting']])
+  expect(w.emitted('review')).toEqual([
+    [{ target_type: 'image', target_id: 'image' }, 'Saved image'],
+  ])
+  w.unmount()
+})
+
+it('keeps terminal failures and suppressed restarts in collapsed history', async () => {
+  const w = mountList(
+    data([
+      activity({
+        state: 'history',
+        outcome: 'failed',
+        operation_ids: [],
+        diagnostic: 'Restart was suppressed for this interrupted capture.',
+      }),
+    ]),
+  )
+  expect(w.find('[aria-label="Needs attention"]').exists()).toBe(false)
+  await w
+    .findAll('button')
+    .find((button) => button.text() === 'History (1)')!
+    .trigger('click')
+  await flushPromises()
+  expect(w.text()).toContain('Failed')
+  expect(w.text()).not.toContain('Restart was suppressed')
+  await w
+    .findAll('button')
+    .find((button) => button.text() === 'Details')!
+    .trigger('click')
+  await flushPromises()
+  expect(w.text()).toContain('Restart was suppressed')
+  expect(w.text()).not.toContain('Check status')
+  w.unmount()
+})
+
+it('reports unavailable activity when connected to an older backend', () => {
   const storage = data()
-  storage.runtimes = [
-    {
-      resources: [
-        { workspace: { id: 'ws', name: 'Running workspace' }, provenance: 'not-a-dependency' },
-      ],
-    },
-  ] as RunnerStorage['runtimes']
-  storage.generations = [
-    { id: 'image', name: 'Current image', dependencies: [] },
-  ] as unknown as RunnerStorage['generations']
-  storage.operations = ['ws', 'image', 'not-a-dependency'].map((target) => ({
-    task_id: target,
-    target,
-    task__status: 'pending',
-    task__error: '',
-    phase: 'waiting',
-    deliveries: 1,
-  }))
+  delete storage.activities
   const w = mountList(storage)
-  expect(w.findComponent({ name: 'RunnerOperationsPanel' }).props('targets')).toEqual({
-    ws: 'Running workspace',
-    image: 'Current image',
-    'not-a-dependency': 'not-a-dependency',
-  })
+  expect(w.text()).toContain('Activity status unavailable')
   w.unmount()
 })

@@ -8,6 +8,7 @@ import type {
   StorageGeneration,
   StorageResource,
   DeletionRequest,
+  RunnerActivity,
 } from '@/types/runnerStorage'
 import RunnerStorageDetail from './RunnerStorageDetail.vue'
 import RunnerDependencyMap from './RunnerDependencyMap.vue'
@@ -153,6 +154,21 @@ const runner: Runner = {
   created_at: '2026-10-01',
   updated_at: '2026-10-01',
 }
+function activity(patch: Partial<RunnerActivity> = {}): RunnerActivity {
+  return {
+    id: 'request',
+    kind: 'deletion',
+    title: 'Delete image',
+    target_name: 'Base v2',
+    state: 'active',
+    outcome: 'in_progress',
+    summary: 'Waiting for dependent resources.',
+    diagnostic: '',
+    operation_ids: [],
+    created_at: '2026-10-01',
+    ...patch,
+  }
+}
 let w: VueWrapper
 beforeEach(() => {
   vi.resetAllMocks()
@@ -208,6 +224,7 @@ beforeEach(() => {
     ],
     operations: [],
     capture_requests: [],
+    activities: [],
   }
 })
 afterEach(() => {
@@ -440,7 +457,7 @@ describe('runner cockpit progressive disclosure and safety', () => {
     await flushPromises()
     expect(button('Refresh inventory').attributes('disabled')).toBeUndefined()
   })
-  it('shows terminal deletion truth and capture restart suppression only on Activities', async () => {
+  it('shows unresolved capture separately from collapsed deletion history on Activities', async () => {
     deletions.value = [
       deletion({ id: 'cancelled', phase: 'cancelled', can_cancel: false }),
       deletion({ id: 'completed', phase: 'completed', can_cancel: false }),
@@ -455,29 +472,56 @@ describe('runner cockpit progressive disclosure and safety', () => {
         resume_suppressed: true,
       },
     ]
+    data.value!.activities = [
+      activity({
+        id: 'capture-request',
+        kind: 'capture',
+        state: 'attention',
+        outcome: 'blocked',
+        target_name: 'Pinned workspace',
+        title: 'Save workspace as image',
+        summary: 'Capture could not be confirmed.',
+        diagnostic: 'Capture evidence changed',
+      }),
+      activity({
+        id: 'cancelled',
+        state: 'history',
+        outcome: 'cancelled',
+        summary: 'Cancelled. Existing resources were kept.',
+      }),
+      activity({
+        id: 'completed',
+        state: 'history',
+        outcome: 'completed',
+        summary: 'Delete image completed.',
+      }),
+    ]
     await setup()
-    expect(w.text()).not.toContain('Cancelled — resources retained')
+    expect(w.text()).not.toContain('Cancelled. Existing resources were kept.')
     await tab('Activities')
-    for (const text of [
-      'Cancelled — resources retained',
-      'Completed',
-      'Restart suppressed',
-      'Capture evidence changed',
-    ])
-      expect(w.text()).toContain(text)
+    expect(w.text()).toContain('Capture could not be confirmed.')
+    expect(w.text()).not.toContain('Cancelled. Existing resources were kept.')
+    await button('History (2)').trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('Cancelled. Existing resources were kept.')
+    expect(w.text()).toContain('Completed')
+    await button('Details').trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('Capture evidence changed')
     expect(w.text()).not.toContain('Waiting for server evidence')
-    expect(button('Cancel pending request')).toBeUndefined()
+    expect(button('Cancel request')).toBeUndefined()
   })
   it('guards duplicate cancellation and preserves deferred failure truth', async () => {
     deletions.value = [deletion()]
+    data.value!.activities = [activity()]
     const request = deferred()
     state.cancel.mockReturnValue(request.promise)
     await setup()
     await tab('Activities')
-    await button('Cancel pending request').trigger('click')
-    await button('Cancel pending request').trigger('click')
+    await button('Cancel request').trigger('click')
+    await button('Cancel request').trigger('click')
     expect(state.cancel).toHaveBeenCalledExactlyOnceWith('request')
-    expect(button('Cancel pending request').attributes('disabled')).toBeDefined()
+    expect(button('Cancel request').attributes('disabled')).toBeDefined()
     request.reject(new Error('Cancellation refused'))
     await flushPromises()
     expect(w.get('[role="alert"]').text()).toContain('Cancellation refused')
@@ -502,8 +546,9 @@ describe('runner cockpit progressive disclosure and safety', () => {
     expect(w.get('[aria-label="Selected resource"]').text()).toContain('Observed: present')
     expect(w.get('[aria-label="Selected resource"]').text()).toContain('1.0 KiB')
     deletions.value = [deletion()]
+    data.value!.activities = [activity()]
     await tab('Activities')
-    await button('Cancel pending request').trigger('click')
+    await button('Cancel request').trigger('click')
     await flushPromises()
     expect(state.load).toHaveBeenCalledTimes(2)
   })
@@ -511,6 +556,43 @@ describe('runner cockpit progressive disclosure and safety', () => {
     state.auth.isAdmin = false
     await setup()
     expect(button('Edit runner resources')).toBeUndefined()
+  })
+  it('counts only unresolved workflows while handled failures stay in history', async () => {
+    data.value!.activities = [
+      activity({
+        id: 'blender',
+        kind: 'operation',
+        state: 'attention',
+        outcome: 'blocked',
+        target_name: 'Blender',
+      }),
+      activity({
+        id: 'capture',
+        kind: 'capture',
+        state: 'history',
+        outcome: 'resolved',
+        target_name: 'OpenCuria 3',
+      }),
+    ]
+    // Historical raw failures must not inflate the backend's workflow projection.
+    data.value!.operations = [
+      {
+        task_id: 'disposed',
+        target: 'ws',
+        task__status: 'failed',
+        task__error: 'Acknowledged',
+        phase: 'disposed',
+        deliveries: 1,
+      },
+    ]
+    await setup()
+    expect(button('1 activity needs attention')).toBeDefined()
+    expect(button('3 activities need attention')).toBeUndefined()
+    await button('1 activity needs attention').trigger('click')
+    await flushPromises()
+    expect(w.get('[aria-label="Needs attention"]').text()).toContain('Blender')
+    expect(w.text()).not.toContain('OpenCuria 3')
+    expect(w.text()).toContain('History (1)')
   })
 })
 

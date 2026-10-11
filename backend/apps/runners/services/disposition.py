@@ -32,6 +32,9 @@ class DispositionService:
             "diagnostic": "Runner offline or unavailable; actions disabled",
         }
         result["permitted_actions"] = []
+        result["review_message"] = (
+            "The runner is unavailable. Restore its connection, then check again."
+        )
         if not row.task.runner.is_online or not row.task.runner.sid:
             return result
         try:
@@ -51,9 +54,54 @@ class DispositionService:
             result["permitted_actions"] = await sync_to_async(
                 DispositionRepository.permitted_actions
             )(current, evidence, user, organization_id)
+            result["review_message"] = self.review_message(
+                evidence, result["permitted_actions"]
+            )
         except Exception:
             return result
         return result
+
+    @staticmethod
+    def review_message(evidence: dict, actions: list[str]) -> str:
+        """Describe the permitted next step while keeping proof details separate."""
+        if evidence.get("status") == "running":
+            return "This operation is still running. Wait, then check again."
+        terminal_result = evidence.get("result")
+        error = (
+            terminal_result.get("error", "")
+            if isinstance(terminal_result, dict)
+            else ""
+        )
+        error = error if isinstance(error, str) else ""
+        if "SSH" in error:
+            message = (
+                "The workspace is not reachable. Restore its connection before "
+                "trying again."
+            )
+            if "acknowledge_interrupted" in actions:
+                message += (
+                    " Closing the interrupted operation only releases the block "
+                    "and keeps existing resources."
+                )
+            return message
+        if not actions:
+            return (
+                "The runner could not verify that this operation can be closed. "
+                "Check its connection and see Details."
+            )
+        if "acknowledge_interrupted" in actions:
+            return (
+                "The operation has ended, but its result is uncertain. "
+                "You can close it and keep existing resources."
+            )
+        if "retry" in actions:
+            return (
+                "The runner confirmed that the operation failed. "
+                "Apply its result or try again."
+            )
+        return (
+            "The runner confirmed the result. Apply it to update the workspace status."
+        )
 
     async def act(
         self,

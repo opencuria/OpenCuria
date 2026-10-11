@@ -76,6 +76,19 @@ export interface StorageGeneration {
   observed_state: string
   dependencies: StorageWorkspace[]
 }
+export interface RunnerActivity {
+  id: string
+  kind: 'operation' | 'capture' | 'recreate' | 'deletion'
+  title: string
+  target_name: string
+  state: 'attention' | 'active' | 'history'
+  outcome: string
+  summary: string
+  diagnostic: string
+  operation_ids: string[]
+  created_at: string
+}
+
 export interface RunnerStorage {
   runner_id: string
   runner_online: boolean
@@ -83,10 +96,12 @@ export interface RunnerStorage {
   latest_complete: boolean
   runtimes: StorageRuntime[]
   generations: StorageGeneration[]
+  activities?: RunnerActivity[]
   operations: {
     task_id: string
     task__status: string
     task__error: string
+    task__workspace__name?: string | null
     phase: string
     target: string
     deliveries: number
@@ -137,6 +152,7 @@ export interface OperationInspection {
   operation_id: string
   status: string
   diagnostic: string
+  review_message?: string
   phase: string
   permitted_actions: DispositionAction[]
   evidence: Record<string, unknown>

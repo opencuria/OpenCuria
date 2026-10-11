@@ -11,7 +11,11 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import SettingsSection from './SettingsSection.vue'
 
 import RunnerStorageDetail from '@/components/runners/RunnerStorageDetail.vue'
-const props = defineProps<{ runnerId?: string; contextVersion?: number }>()
+const props = defineProps<{
+  runnerId?: string
+  contextVersion?: number
+  runnerActivity?: boolean
+}>()
 const emit = defineEmits<{ 'detail-change': [open: boolean] }>()
 const selectedId = ref<string | null>(null)
 const runnerStore = useRunnerStore()
@@ -43,8 +47,9 @@ onMounted(() => {
   <div class="min-w-0 space-y-6">
     <RunnerStorageDetail
       v-if="selected"
-      :key="selected.id"
+      :key="`${selected.id}:${contextVersion ?? 0}`"
       :runner="selected"
+      :initial-tab="runnerActivity ? 'activities' : 'overview'"
       @back="selectedId = null"
     />
     <SettingsSection v-else description="Manage runner instances that execute AI coding agents.">

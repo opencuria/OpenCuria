@@ -114,15 +114,20 @@ function clearCredentialsContext(kind: 'service' | 'credential' | 'finished'): v
 }
 
 const selectedRunnerId = ref<string | undefined>()
+const selectedRunnerActivity = ref(false)
 const runnerDetailOpen = ref(false)
 
 watch(activeTab, (tab, previous) => {
   runnerDetailOpen.value = false
-  if (previous === 'runners' && tab !== 'runners') selectedRunnerId.value = undefined
+  if (previous === 'runners' && tab !== 'runners') {
+    selectedRunnerId.value = undefined
+    selectedRunnerActivity.value = false
+  }
 })
 watch(open, (isOpen) => {
   if (!isOpen) {
     selectedRunnerId.value = undefined
+    selectedRunnerActivity.value = false
     runnerDetailOpen.value = false
     settingsContext.value = { version: settingsContext.value.version + 1 }
   }
@@ -136,6 +141,7 @@ function handleSettingsEvent(event: Event): void {
       serviceId?: string
       credentialId?: string
       runnerId?: string
+      runnerActivity?: boolean
       workspaceDraftId?: string
     }>
   ).detail
@@ -147,6 +153,7 @@ function handleSettingsEvent(event: Event): void {
     version: settingsContext.value.version + 1,
   }
   selectedRunnerId.value = detail?.runnerId
+  selectedRunnerActivity.value = detail?.runnerActivity === true
   openSheet(detail?.tab)
 }
 
@@ -292,6 +299,7 @@ watch(isAdmin, (admin) => {
             <RunnersPanel
               v-else-if="activeTab === 'runners' && isAdmin"
               :runner-id="selectedRunnerId"
+              :runner-activity="selectedRunnerActivity"
               :context-version="settingsContext.version"
               @detail-change="runnerDetailOpen = $event"
             />
