@@ -12,7 +12,23 @@ import {
 } from './useDesktopSessionCoordinator'
 import { useDesktopStore } from '@/stores/desktop'
 import * as api from '@/services/workspaces.api'
+import { copyToClipboard } from '@/lib/clipboard'
 
+const notificationMocks = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }))
+
+type ClipboardCopyContent = string | (() => Promise<string>)
+type ClipboardCopyOptions = { success?: 'toast' | 'silent'; signal?: AbortSignal }
+function clipboardCopyCalls(): [ClipboardCopyContent, string, ClipboardCopyOptions?][] {
+  return (
+    copyToClipboard as unknown as {
+      mock: { calls: [ClipboardCopyContent, string, ClipboardCopyOptions?][] }
+    }
+  ).mock.calls
+}
+
+vi.mock('@/lib/clipboard', () => ({
+  copyToClipboard: vi.fn(),
+}))
 vi.mock('@/services/workspaces.api', () => ({
   getDesktopStatus: vi.fn(),
   startDesktop: vi.fn(),
@@ -23,7 +39,7 @@ vi.mock('@/services/workspaces.api', () => ({
   readDesktopClipboard: vi.fn(),
 }))
 vi.mock('@/stores/notifications', () => ({
-  useNotificationStore: () => ({ success: vi.fn(), error: vi.fn() }),
+  useNotificationStore: () => notificationMocks,
 }))
 const handlers = new Map<string, (data: { workspace_id: string }) => void>()
 vi.mock('@/services/socket', () => ({
@@ -37,8 +53,9 @@ const scopes: ReturnType<typeof effectScope>[] = []
 function surface(id: string, observer = false) {
   const scope = effectScope()
   scopes.push(scope)
-  const session = scope.run(() => useDesktopSession(ref(id), { observer }))!
-  return { scope, session }
+  const workspaceId = ref(id)
+  const session = scope.run(() => useDesktopSession(workspaceId, { observer }))!
+  return { scope, session, workspaceId }
 }
 function status(id: string, state = 'held', epoch = 'epoch-1') {
   return {
@@ -56,12 +73,15 @@ function status(id: string, state = 'held', epoch = 'epoch-1') {
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
+  notificationMocks.success.mockReset()
+  notificationMocks.error.mockReset()
   handlers.clear()
   vi.useFakeTimers()
   vi.mocked(api.startDesktop).mockResolvedValue({ task_id: 'start' })
   vi.mocked(api.stopDesktop).mockResolvedValue({ task_id: 'stop' })
   vi.mocked(api.getDesktopStatus).mockImplementation(async (id) => status(id))
   vi.mocked(api.renewDesktop).mockImplementation(async (id) => status(id))
+  vi.mocked(copyToClipboard).mockImplementation(async () => true)
 })
 afterEach(async () => {
   scopes.splice(0).forEach((scope) => scope.stop())
@@ -288,6 +308,217 @@ describe('per-tab desktop viewer intents', () => {
     expect(await session.stopDesktop()).toBe(false)
     expect(useDesktopStore().viewerOwned).toBe(false)
     expect(api.stopDesktop).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('VM clipboard copying', () => {
+  it('starts the clipboard API with a lazy loader and fetches only when requested', async () => {
+    const id = `viewer-${++count}`
+    const store = useDesktopStore()
+    store.setConnected(id, `/ws/desktop/${id}/`)
+    const { session } = surface(id)
+    vi.mocked(api.readDesktopClipboard).mockResolvedValue({ text: 'from VM' })
+
+    const copy = session.copyFromVmClipboard()
+
+    expect(copyToClipboard).toHaveBeenCalledOnce()
+    expect(copyToClipboard).toHaveBeenCalledWith(
+      expect.any(Function),
+      'VM clipboard',
+      expect.objectContaining({ success: 'silent', signal: expect.any(AbortSignal) }),
+    )
+    expect(notificationMocks.success).not.toHaveBeenCalled()
+    expect(api.readDesktopClipboard).not.toHaveBeenCalled()
+    const content = clipboardCopyCalls()[0]?.[0]
+    expect(typeof content).toBe('function')
+    if (typeof content !== 'function') throw new Error('Expected lazy clipboard loader')
+    expect(await content()).toBe('from VM')
+    expect(api.readDesktopClipboard).toHaveBeenCalledWith(id)
+    expect(await copy).toBe(true)
+    expect(notificationMocks.success).toHaveBeenCalledWith('Copied from VM')
+  })
+
+  it('keeps iframe shortcut delay inside the lazy VM loader', async () => {
+    const id = `viewer-${++count}`
+    useDesktopStore().setConnected(id, `/ws/desktop/${id}/`)
+    const { session } = surface(id)
+    vi.mocked(api.readDesktopClipboard).mockResolvedValue({ text: 'after shortcut' })
+    const pending = session.copyFromVmClipboard({ delayMs: 120 })
+    const content = clipboardCopyCalls()[0]?.[0]
+    if (typeof content !== 'function') throw new Error('Expected lazy clipboard loader')
+
+    expect(api.readDesktopClipboard).not.toHaveBeenCalled()
+    const loading = content()
+    await vi.advanceTimersByTimeAsync(119)
+    expect(api.readDesktopClipboard).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(await loading).toBe('after shortcut')
+    expect(await pending).toBe(true)
+  })
+
+  it('does not load or copy while busy or computer-use controls the desktop', async () => {
+    const id = `viewer-${++count}`
+    const store = useDesktopStore()
+    store.setConnected(id, `/ws/desktop/${id}/`)
+    store.setComputerUseActive(true)
+    const { session } = surface(id)
+
+    expect(await session.copyFromVmClipboard()).toBe(false)
+    expect(copyToClipboard).not.toHaveBeenCalled()
+    expect(api.readDesktopClipboard).not.toHaveBeenCalled()
+
+    store.setComputerUseActive(false)
+    let resolveCopy!: (value: boolean) => void
+    vi.mocked(copyToClipboard).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveCopy = resolve
+      }),
+    )
+    const pending = session.copyFromVmClipboard()
+    expect(session.clipboardBusy.value).toBe(true)
+    expect(await session.copyFromVmClipboard()).toBe(false)
+    resolveCopy(true)
+    expect(await pending).toBe(true)
+    expect(session.clipboardBusy.value).toBe(false)
+  })
+
+  it('aborts the pending manual copy request on workspace switch and releases busy', async () => {
+    const id = `viewer-${++count}`
+    const store = useDesktopStore()
+    store.setConnected(id, `/ws/desktop/${id}/`)
+    const { session, workspaceId } = surface(id)
+    const requestCopy = vi.fn(
+      (_text: string | Promise<string>, _label: string, signal?: AbortSignal) =>
+        new Promise<boolean>((resolve) => {
+          signal?.addEventListener('abort', () => resolve(false), { once: true })
+        }),
+    )
+    vi.mocked(copyToClipboard).mockImplementation(async (source, _label, copyOptions) => {
+      if (typeof source === 'function') await source()
+      return requestCopy('VM text', 'VM clipboard', copyOptions?.signal)
+    })
+    vi.mocked(api.readDesktopClipboard).mockResolvedValue({ text: 'VM text' })
+
+    const pending = session.copyFromVmClipboard()
+    await flushPromises()
+    const signal = clipboardCopyCalls()[0]?.[2]?.signal
+    expect(signal).toBeDefined()
+    expect(signal?.aborted).toBe(false)
+    expect(session.clipboardBusy.value).toBe(true)
+
+    workspaceId.value = `${id}-next`
+    expect(signal?.aborted).toBe(true)
+    expect(await pending).toBe(false)
+    expect(session.clipboardBusy.value).toBe(false)
+    expect(requestCopy).toHaveBeenCalledOnce()
+    expect(notificationMocks.success).not.toHaveBeenCalled()
+  })
+
+  it('aborts only this surface operation on disposal without aborting another surface', async () => {
+    const firstId = `viewer-${++count}`
+    const store = useDesktopStore()
+    store.setConnected(firstId, `/ws/desktop/${firstId}/`)
+    const first = surface(firstId)
+    const second = surface(firstId)
+    const resolveRequests: Array<(value: boolean) => void> = []
+    vi.mocked(copyToClipboard).mockImplementation(async (source, _label, copyOptions) => {
+      if (typeof source === 'function') await source()
+      return new Promise<boolean>((resolve) => {
+        resolveRequests.push(resolve)
+        copyOptions?.signal?.addEventListener('abort', () => resolve(false), { once: true })
+      })
+    })
+
+    vi.mocked(api.readDesktopClipboard).mockResolvedValue({ text: 'manual fallback text' })
+    const firstPending = first.session.copyFromVmClipboard()
+    const firstSignal = clipboardCopyCalls()[0]?.[2]?.signal
+    const secondPending = second.session.copyFromVmClipboard()
+    const secondSignal = clipboardCopyCalls()[1]?.[2]?.signal
+    await flushPromises()
+    expect(firstSignal).toBeDefined()
+    expect(secondSignal).toBeDefined()
+    expect(firstSignal).not.toBe(secondSignal)
+
+    first.scope.stop()
+    expect(firstSignal?.aborted).toBe(true)
+    expect(secondSignal?.aborted).toBe(false)
+    expect(await firstPending).toBe(false)
+    expect(second.session.clipboardBusy.value).toBe(true)
+
+    resolveRequests[1]?.(true)
+    expect(await secondPending).toBe(true)
+    expect(notificationMocks.success).toHaveBeenCalledOnce()
+    expect(second.session.clipboardBusy.value).toBe(false)
+  })
+
+  it('rejects stale loads after workspace change or disposal', async () => {
+    const id = `viewer-${++count}`
+    useDesktopStore().setConnected(id, `/ws/desktop/${id}/`)
+    const { scope, session, workspaceId } = surface(id)
+    const pending = session.copyFromVmClipboard()
+    const content = clipboardCopyCalls()[0]?.[0]
+    if (typeof content !== 'function') throw new Error('Expected lazy clipboard loader')
+    workspaceId.value = `${id}-other`
+
+    await expect(content()).rejects.toThrow('no longer current')
+    scope.stop()
+    expect(api.readDesktopClipboard).not.toHaveBeenCalled()
+    expect(await pending).toBe(false)
+    expect(session.clipboardBusy.value).toBe(false)
+  })
+
+  it('rejects in-flight VM data if the workspace changes or the session is disposed', async () => {
+    const id = `viewer-${++count}`
+    const store = useDesktopStore()
+    store.setConnected(id, `/ws/desktop/${id}/`)
+    const first = surface(id)
+    let resolveFirst!: (value: { text: string }) => void
+    vi.mocked(api.readDesktopClipboard).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveFirst = resolve
+      }),
+    )
+    const firstPending = first.session.copyFromVmClipboard()
+    const firstContent = clipboardCopyCalls()[0]?.[0]
+    if (typeof firstContent !== 'function') throw new Error('Expected lazy clipboard loader')
+    const staleWorkspaceLoad = firstContent()
+    await flushPromises()
+    first.workspaceId.value = `${id}-next`
+    resolveFirst({ text: 'stale workspace data' })
+    await expect(staleWorkspaceLoad).rejects.toThrow('no longer current')
+    await firstPending
+
+    const otherId = `${id}-disposed`
+    store.setConnected(otherId, `/ws/desktop/${otherId}/`)
+    const second = surface(otherId)
+    let resolveSecond!: (value: { text: string }) => void
+    vi.mocked(api.readDesktopClipboard).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveSecond = resolve
+      }),
+    )
+    const secondPending = second.session.copyFromVmClipboard()
+    const secondContent = clipboardCopyCalls()[1]?.[0]
+    if (typeof secondContent !== 'function') throw new Error('Expected lazy clipboard loader')
+    const disposedLoad = secondContent()
+    await flushPromises()
+    second.scope.stop()
+    resolveSecond({ text: 'disposed session data' })
+    await expect(disposedLoad).rejects.toThrow('no longer current')
+    await secondPending
+  })
+
+  it('keeps fetch failures generic and lets the shared clipboard helper handle them', async () => {
+    const id = `viewer-${++count}`
+    useDesktopStore().setConnected(id, `/ws/desktop/${id}/`)
+    const { session } = surface(id)
+    vi.mocked(api.readDesktopClipboard).mockRejectedValue(new Error('secret network detail'))
+    const pending = session.copyFromVmClipboard()
+    const content = clipboardCopyCalls()[0]?.[0]
+    if (typeof content !== 'function') throw new Error('Expected lazy clipboard loader')
+
+    await expect(content()).rejects.toThrow('Unable to load VM clipboard')
+    expect(await pending).toBe(true)
   })
 })
 

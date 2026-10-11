@@ -3,7 +3,7 @@ import { computed, getCurrentScope, onScopeDispose, ref, watch, type Ref } from 
 import { useDesktopStore } from '@/stores/desktop'
 import { useNotificationStore } from '@/stores/notifications'
 import * as workspacesApi from '@/services/workspaces.api'
-import { writeClipboardText } from '@/lib/clipboard'
+import { copyToClipboard } from '@/lib/clipboard'
 import { onEvent } from '@/services/socket'
 import {
   acquireDesktopViewer,
@@ -34,6 +34,8 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
   const retained = new Set<string>()
   const cleanupFns: (() => void)[] = []
   let disposed = false
+  let workspaceGeneration = 0
+  const vmClipboardControllers = new Set<AbortController>()
 
   function retain(id: string): void {
     if (options?.observer || disposed || retained.has(id)) return
@@ -50,9 +52,11 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
       if (disposed) return
       const id = workspaceId.value
       if (
-        desktopStore.workspaceId && desktopStore.workspaceId !== id
-        && (desktopStore.isConnected || desktopStore.isConnecting)
-      ) return
+        desktopStore.workspaceId &&
+        desktopStore.workspaceId !== id &&
+        (desktopStore.isConnected || desktopStore.isConnecting)
+      )
+        return
       error.value = state.error
       if (state.status) {
         desktopStore.setComputerUseActive(Boolean(state.status.computer_use_active))
@@ -81,6 +85,9 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
   const stopWorkspaceWatch = watch(
     workspaceId,
     (id, previous) => {
+      workspaceGeneration += 1
+      for (const controller of vmClipboardControllers) controller.abort()
+      vmClipboardControllers.clear()
       void stopDesktopIfActive(previous)
       // Previous workspace connection flags must not suppress the new
       // sidebar's auto-start. This is routing state, not inherited ownership.
@@ -93,6 +100,8 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
   function cleanupSocketListeners(): void {
     if (disposed) return
     disposed = true
+    for (const controller of vmClipboardControllers) controller.abort()
+    vmClipboardControllers.clear()
     stopStateWatch()
     stopWorkspaceWatch()
     cleanupFns.splice(0).forEach((fn) => fn())
@@ -130,23 +139,68 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
     }
   }
 
-  async function copyFromVmClipboard(): Promise<boolean> {
-    if (!desktopStore.isConnected || clipboardBusy.value) return false
-    clipboardBusy.value = true
-    try {
-      const { text } = await workspacesApi.readDesktopClipboard(workspaceId.value)
-      const ok = await writeClipboardText(text || '')
-      if (!ok) {
-        notifications.error('Copy failed', 'Clipboard unavailable')
-        return false
-      }
-      notifications.success('Copied from VM', 'VM clipboard copied to local clipboard.')
-      return true
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err)
-      notifications.error('Copy failed', msg)
+  async function copyFromVmClipboard(options?: { delayMs?: number }): Promise<boolean> {
+    const requestedWorkspaceId = workspaceId.value
+    const requestedGeneration = workspaceGeneration
+    if (
+      !desktopStore.isConnected ||
+      desktopStore.workspaceId !== requestedWorkspaceId ||
+      desktopStore.computerUseActive ||
+      clipboardBusy.value ||
+      disposed
+    )
       return false
+
+    clipboardBusy.value = true
+    const controller = new AbortController()
+    vmClipboardControllers.add(controller)
+    const signal = controller.signal
+    const isCurrentOperation = (): boolean =>
+      !signal.aborted &&
+      !disposed &&
+      workspaceGeneration === requestedGeneration &&
+      workspaceId.value === requestedWorkspaceId &&
+      desktopStore.workspaceId === requestedWorkspaceId
+    const loadText = async (): Promise<string> => {
+      if (options?.delayMs && options.delayMs > 0)
+        await new Promise<void>((resolve) => window.setTimeout(resolve, options.delayMs))
+      if (!isCurrentOperation() || !desktopStore.isConnected || desktopStore.computerUseActive)
+        throw new Error('VM clipboard request is no longer current')
+
+      let text: string
+      try {
+        const response = await workspacesApi.readDesktopClipboard(requestedWorkspaceId)
+        text = response.text
+      } catch {
+        // Do not expose API/network details through the generic clipboard error.
+        throw new Error('Unable to load VM clipboard')
+      }
+      if (!isCurrentOperation() || !desktopStore.isConnected || desktopStore.computerUseActive)
+        throw new Error('VM clipboard request is no longer current')
+      return text || ''
+    }
+
+    let removeAbortListener: (() => void) | undefined
+    try {
+      const copyRequest = copyToClipboard(loadText, 'VM clipboard', {
+        success: 'silent',
+        signal,
+      })
+      const copied = await Promise.race([
+        copyRequest,
+        new Promise<boolean>((resolve) => {
+          const onAbort = (): void => resolve(false)
+          signal.addEventListener('abort', onAbort, { once: true })
+          removeAbortListener = () => signal.removeEventListener('abort', onAbort)
+          if (signal.aborted) onAbort()
+        }),
+      ])
+      if (!copied || !isCurrentOperation()) return false
+      notifications.success('Copied from VM')
+      return true
     } finally {
+      removeAbortListener?.()
+      vmClipboardControllers.delete(controller)
       clipboardBusy.value = false
     }
   }

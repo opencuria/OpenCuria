@@ -11,6 +11,20 @@ import {
 import { useDesktopStore } from '@/stores/desktop'
 import { sidebarDesktopHost, modalDesktopHost } from '@/lib/desktopSurfaceHost'
 import * as workspacesApi from '@/services/workspaces.api'
+import { copyToClipboard } from '@/lib/clipboard'
+
+type ClipboardCopyContent = string | (() => Promise<string>)
+function clipboardCopyCalls(): [ClipboardCopyContent, string][] {
+  return (
+    copyToClipboard as unknown as {
+      mock: { calls: [ClipboardCopyContent, string][] }
+    }
+  ).mock.calls
+}
+
+vi.mock('@/lib/clipboard', () => ({
+  copyToClipboard: vi.fn(async () => true),
+}))
 
 vi.mock('@/services/workspaces.api', () => ({
   getDesktopStatus: vi.fn(),
@@ -236,6 +250,34 @@ describe('DesktopSurface', () => {
     await nextTick()
     expect(iframe.classList.contains('opacity-0')).toBe(false)
     expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeNull()
+  })
+
+  it('starts VM clipboard copying from the iframe keyboard gesture with a lazy loader', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    vi.mocked(workspacesApi.readDesktopClipboard).mockResolvedValue({ text: 'vm text' })
+    mountSurface()
+    await nextTick()
+
+    const iframe = document.querySelector('iframe')!
+    connectionMessage(iframe.contentWindow, 'connected')
+    await nextTick()
+    const frameWindow = iframe.contentWindow!
+    // jsdom keyboard events target Window, unlike browser key events targeting an element.
+    Object.defineProperty(frameWindow, 'closest', { value: () => null, configurable: true })
+    frameWindow.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true }),
+    )
+
+    expect(copyToClipboard).toHaveBeenCalledOnce()
+    expect(workspacesApi.readDesktopClipboard).not.toHaveBeenCalled()
+    const [content, label] = clipboardCopyCalls()[0] ?? []
+    expect(typeof content).toBe('function')
+    expect(label).toBe('VM clipboard')
+
+    if (typeof content !== 'function') throw new Error('Expected lazy clipboard loader')
+    expect(await content()).toBe('vm text')
+    expect(workspacesApi.readDesktopClipboard).toHaveBeenCalledWith('ws-1')
   })
 
   it('ignores messages from the wrong origin or a different frame', async () => {

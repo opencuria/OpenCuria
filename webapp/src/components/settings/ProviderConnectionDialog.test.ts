@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
 
+import { useNotificationStore } from '@/stores/notifications'
 import ProviderConnectionDialog from './ProviderConnectionDialog.vue'
 import * as harnessApi from '@/services/harness.api'
 import type { ProviderId } from '@/lib/harnessModels'
@@ -55,6 +57,7 @@ function mountDialog(
 
 describe('ProviderConnectionDialog', () => {
   beforeEach(() => {
+    setActivePinia(createPinia())
     vi.clearAllMocks()
     saveProviderConnectionMock.mockResolvedValue({
       provider: 'openrouter',
@@ -80,6 +83,27 @@ describe('ProviderConnectionDialog', () => {
     })
     getChatGptOAuthStatusMock.mockResolvedValue({ status: 'pending' })
     cancelChatGptOAuthMock.mockResolvedValue(undefined)
+  })
+
+  it('copies the ChatGPT login code through the shared copy control', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    const notificationInfo = vi.spyOn(useNotificationStore(), 'info')
+    const wrapper = mountDialog('chatgpt', { provider: 'chatgpt', connected: false })
+    await flushPromises()
+
+    await wrapper.find('[data-testid="chatgpt-connect"]').trigger('click')
+    await flushPromises()
+    const copyCode = wrapper.find('[data-testid="chatgpt-copy-code"]')
+    expect(copyCode.attributes('title')).toBe('Copy login code')
+    await copyCode.trigger('click')
+    await flushPromises()
+
+    expect(writeText).toHaveBeenCalledWith('ABCD-1234')
+    expect(wrapper.find('[data-testid="chatgpt-copy-code"]').attributes('aria-label')).toBe('Copied')
+    expect(wrapper.find('[data-testid="chatgpt-copy-code"]').attributes('title')).toBe('Copied')
+    expect(wrapper.find('[data-testid="chatgpt-copy-code"]').text()).toBe('Copy code')
+    expect(notificationInfo).not.toHaveBeenCalled()
   })
 
   it('shows a unified status summary for a connected provider', async () => {

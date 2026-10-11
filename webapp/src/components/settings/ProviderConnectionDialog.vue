@@ -12,7 +12,7 @@
 -->
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { Copy, ExternalLink, Loader2 } from '@lucide/vue'
+import { ExternalLink, Loader2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -28,7 +28,7 @@ import { Label } from '@/components/ui/label'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
-import { writeClipboardText } from '@/lib/clipboard'
+import CopyButton from '@/components/common/CopyButton.vue'
 import { connectionDetail, providerMeta, type SettingsProviderId } from './providerMeta'
 import {
   cancelChatGptOAuth,
@@ -226,11 +226,6 @@ async function startChatGptConnect(): Promise<void> {
   } finally {
     saving.value = false
   }
-}
-
-async function copyChatGptUserCode(): Promise<void> {
-  if (!chatGptUserCode.value) return
-  await writeClipboardText(chatGptUserCode.value)
 }
 
 async function saveOpenRouter(): Promise<void> {
@@ -436,15 +431,15 @@ onBeforeUnmount(() => {
                 {{ chatGptUserCode }}
               </p>
               <div class="flex justify-center gap-2">
-                <Button
+                <CopyButton
+                  :text="chatGptUserCode"
+                  label="login code"
                   size="sm"
                   variant="outline"
                   data-testid="chatgpt-copy-code"
-                  @click="copyChatGptUserCode"
                 >
-                  <Copy class="size-4" />
                   Copy code
-                </Button>
+                </CopyButton>
                 <Button size="sm" variant="outline" as-child>
                   <a
                     :href="chatGptVerificationUrl"

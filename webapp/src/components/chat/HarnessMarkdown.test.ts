@@ -165,6 +165,28 @@ describe('HarnessMarkdown', () => {
     wrapper.unmount()
   })
 
+  it('loads linked workspace media while preserving the original link and avoiding lightbox controls', async () => {
+    const store = useWorkspaceImageStore()
+    const wrapper = mountMarkdown('[![Photo](/workspace/photo.png)](https://example.com/full)')
+
+    expect(sendFilesRead).toHaveBeenCalledWith('ws-1', expect.any(String), '/workspace/photo.png')
+    store.imageCache['/workspace/photo.png'] = 'data:image/png;base64,abc'
+    await wrapper.vm.$nextTick()
+
+    const link = wrapper.get('a')
+    const image = wrapper.get('img')
+    expect(link.attributes('href')).toBe('https://example.com/full')
+    expect(image.attributes('src')).toBe('data:image/png;base64,abc')
+    expect(image.attributes('role')).toBeUndefined()
+    expect(wrapper.find('button[aria-haspopup="dialog"]').exists()).toBe(false)
+
+    vi.mocked(sendFilesRead).mockClear()
+    await image.trigger('click')
+    expect(wrapper.findComponent(ImageLightbox).exists()).toBe(false)
+    expect(sendFilesRead).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('does not turn decorative mention icons into preview triggers', async () => {
     const wrapper = mountMarkdown('@file:/workspace/photo.png')
     await wrapper.setProps({ mentions: true })
@@ -181,7 +203,9 @@ describe('HarnessMarkdown', () => {
 
   it('does not offer a lightbox for unavailable or loading workspace images', async () => {
     const unavailable = mountMarkdown('![Missing](missing.png)', '')
-    expect(unavailable.get('[data-testid="harness-markdown-media-fallback"]').text()).toBe('Missing')
+    expect(unavailable.get('[data-testid="harness-markdown-media-fallback"]').text()).toBe(
+      'Missing',
+    )
     expect(unavailable.find('button').exists()).toBe(false)
     expect(unavailable.findComponent(ImageLightbox).exists()).toBe(false)
 

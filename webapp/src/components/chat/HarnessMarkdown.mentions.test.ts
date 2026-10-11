@@ -4,9 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { nextTick, ref } from 'vue'
 
 import HarnessMarkdown from './HarnessMarkdown.vue'
-import HarnessMentionImages, {
-  type MentionFileToken,
-} from './HarnessMentionImages.vue'
+import HarnessMentionImages, { type MentionFileToken } from './HarnessMentionImages.vue'
 import ImageLightbox from './ImageLightbox.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
@@ -162,7 +160,9 @@ describe('HarnessMarkdown mentions', () => {
     expect(code.findAll('[data-testid="mention-badge-agent"]')).toHaveLength(0)
     expect(code.find('code').text()).toContain('@file:/workspace/a.ts')
     expect(code.find('[data-testid="mention-images"]').exists()).toBe(false)
-    const imageCode = mountMarkdown('`@file:/workspace/secret.png`', 'ws-mentions', { mentions: true })
+    const imageCode = mountMarkdown('`@file:/workspace/secret.png`', 'ws-mentions', {
+      mentions: true,
+    })
     await flushBadges()
     expect(imageCode.find('[data-testid="mention-images"]').exists()).toBe(false)
     expect(imageCode.emitted('mention-images')?.slice(-1)[0]?.[0]).toEqual([])
@@ -177,14 +177,60 @@ describe('HarnessMarkdown mentions', () => {
   })
 
   it('preserves surrounding markdown formatting', async () => {
-    const wrapper = mountMarkdown('**Bold** @file:/workspace/a.ts with [docs](https://example.com)', 'ws-mentions', {
-      mentions: true,
-    })
+    const wrapper = mountMarkdown(
+      '**Bold** @file:/workspace/a.ts with [docs](https://example.com)',
+      'ws-mentions',
+      {
+        mentions: true,
+      },
+    )
     await flushBadges()
 
     expect(wrapper.find('strong').text()).toBe('Bold')
     expect(wrapper.find('a').attributes('href')).toBe('https://example.com')
     expect(wrapper.findAll('[data-testid="mention-badge-file"]')).toHaveLength(1)
+  })
+
+  it('clears mention badges when mention enhancement is disabled', async () => {
+    const wrapper = mountMarkdown('See @file:/workspace/photo.png', 'ws-mentions', {
+      mentions: true,
+    })
+    await flushBadges()
+    expect(wrapper.find('[data-testid="mention-badge-file"]').exists()).toBe(true)
+
+    await wrapper.setProps({ mentions: false })
+    await flushBadges()
+    expect(wrapper.find('[data-testid="mention-badge-file"]').exists()).toBe(false)
+    expect(wrapper.get('[data-md-html]').text()).toContain('@file:/workspace/photo.png')
+    expect(wrapper.emitted('mention-images')?.slice(-1)[0]?.[0]).toEqual([])
+    wrapper.unmount()
+  })
+
+  it('rebuilds mention-enhanced nodes on text updates and refreshes badge tones', async () => {
+    const wrapper = mountMarkdown('See @file:/workspace/old.png', 'ws-mentions', {
+      mentions: true,
+      onPrimary: true,
+    })
+    await flushBadges()
+    expect(wrapper.get('[data-testid="mention-badge-file"]').attributes('data-path')).toBe(
+      '/workspace/old.png',
+    )
+
+    await wrapper.setProps({ text: 'See @file:/workspace/new.png' })
+    await flushBadges()
+    expect(wrapper.findAll('[data-testid="mention-badge-file"]')).toHaveLength(1)
+    expect(wrapper.get('[data-testid="mention-badge-file"]').attributes('data-path')).toBe(
+      '/workspace/new.png',
+    )
+    expect(wrapper.emitted('mention-images')?.slice(-1)[0]?.[0]).toEqual([
+      expect.objectContaining({ path: '/workspace/new.png' }),
+    ])
+
+    await wrapper.setProps({ onPrimary: false })
+    await flushBadges()
+    expect(wrapper.get('[data-testid="mention-badge-file"]').classes()).toContain('bg-muted')
+    expect(wrapper.get('[data-testid="mention-badge-file"]').text()).toBe('new.png')
+    wrapper.unmount()
   })
 })
 
@@ -235,7 +281,9 @@ describe('HarnessMentionImages', () => {
     const buttons = wrapper.findAll('[data-testid="mention-image-button"]')
     expect(buttons[0]!.classes()).toContain('h-14')
     expect(buttons[0]!.classes()).toContain('w-full')
-    expect(wrapper.findAll('[data-testid="mention-image"]')[0]!.classes()).toContain('object-contain')
+    expect(wrapper.findAll('[data-testid="mention-image"]')[0]!.classes()).toContain(
+      'object-contain',
+    )
     await buttons[0]!.trigger('click')
     expect(wrapper.findComponent(ImageLightbox).props('src')).toBe('data:image/png;base64,abc')
   })
@@ -278,9 +326,13 @@ describe('HarnessMentionImages', () => {
     expect(history.find('[data-testid="mention-images"]').exists()).toBe(true)
     expect(history.find('[data-testid="mention-image-remove"]').exists()).toBe(false)
 
-    const composer = mountStrip([fileToken('/workspace/cat.png', { start: 5, end: 31 })], 'ws-strip', {
-      removable: true,
-    })
+    const composer = mountStrip(
+      [fileToken('/workspace/cat.png', { start: 5, end: 31 })],
+      'ws-strip',
+      {
+        removable: true,
+      },
+    )
     await composer.find('[data-testid="mention-image-remove"]').trigger('click')
     expect(composer.emitted('remove')).toEqual([[5, 31]])
   })
