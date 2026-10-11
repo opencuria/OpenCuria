@@ -419,7 +419,7 @@ it('releases Capturing on unknown completion but preserves intervention until ex
   )
   await store.captureImage('workspace-1', async () => {})
   store.updateWorkspaceOperation('workspace-1', null, true, 'Capture outcome unknown')
-  expect(store.getWorkspaceTransitionLabel('workspace-1')).toBe('Needs intervention')
+  expect(store.getWorkspaceTransitionLabel('workspace-1')).toBe('Needs attention')
   expect(store.pendingCaptures['workspace-1']).toBeUndefined()
   expect(store.canUseWorkspace('workspace-1')).toBe(false)
   expect(store.isWorkspaceTransitioning('workspace-1')).toBe(true)

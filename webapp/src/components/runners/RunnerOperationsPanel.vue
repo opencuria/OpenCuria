@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { onUnmounted, ref } from 'vue'
-import { Activity, ChevronDown, Search } from '@lucide/vue'
-import { Badge } from '@/components/ui/badge'
+import { computed, onUnmounted, ref } from 'vue'
+import { ChevronDown, Search } from '@lucide/vue'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Button } from '@/components/ui/button'
 import {
@@ -14,13 +13,23 @@ import {
 } from '@/components/ui/dialog'
 import * as api from '@/services/runnerStorage.api'
 import type { RunnerStorage, OperationInspection, DispositionAction } from '@/types/runnerStorage'
-defineProps<{ operations: RunnerStorage['operations']; targets?: Record<string, string> }>()
+defineProps<{ operations: RunnerStorage['operations']; diagnostic?: string }>()
 const emit = defineEmits<{ changed: [] }>()
 const inspection = ref<OperationInspection | null>(null),
   busy = ref(false),
   error = ref(''),
   acknowledge = ref(false)
 let version = 0
+const actionLabels: Record<DispositionAction, string> = {
+  reconcile: 'Apply confirmed result',
+  retry: 'Try again',
+  acknowledge_interrupted: 'Close interrupted operation',
+}
+const reviewMessage = computed(
+  () =>
+    inspection.value?.review_message ||
+    'Status could not be verified. Check the runner connection and see Details.',
+)
 onUnmounted(() => {
   version++
 })
@@ -59,59 +68,29 @@ async function act(action: DispositionAction) {
 }
 </script>
 <template>
-  <div
-    v-if="operations.length || error || inspection"
-    class="min-w-0 space-y-3"
-    id="runner-operations"
-  >
-    <h3 class="flex items-center gap-2 text-sm font-semibold">
-      <Activity :size="16" class="text-muted-foreground" /> Activity & intervention
-    </h3>
+  <div v-if="operations.length || error || inspection" class="min-w-0 space-y-3">
     <p v-if="error" role="alert" class="text-sm text-destructive">{{ error }}</p>
-    <div
-      v-for="op in operations"
-      :key="op.task_id"
-      class="flex min-w-0 items-start gap-3 rounded-md border px-3 py-2"
-    >
-      <div class="min-w-0 flex-1 space-y-1">
-        <div class="flex flex-wrap items-center gap-2">
-          <span class="break-all text-sm font-medium">{{
-            targets?.[op.target] || op.target || op.task_id
-          }}</span>
-          <Badge variant="secondary">{{ op.task__status }}</Badge>
-        </div>
-        <p class="break-words text-xs text-muted-foreground">
-          {{ op.phase }} · Deliveries: {{ op.deliveries }}
-        </p>
-        <p v-if="op.task__error" class="break-words text-xs text-destructive">
-          {{ op.task__error }}
-        </p>
-      </div>
+    <div class="flex flex-wrap gap-2">
       <Button
+        v-for="(op, index) in operations"
+        :key="op.task_id"
         size="sm"
         variant="outline"
-        aria-label="Inspect current runner evidence"
         :disabled="busy"
         @click="inspect(op.task_id)"
       >
-        <Search :size="14" /> Inspect
+        <Search :size="14" />
+        {{
+          busy
+            ? 'Checking…'
+            : operations.length > 1
+              ? `Check ${op.task__workspace__name || `operation ${index + 1}`}`
+              : 'Check status'
+        }}
       </Button>
     </div>
     <div v-if="inspection" class="min-w-0 rounded-md border p-3 space-y-3">
-      <p class="break-words text-sm">{{ inspection.diagnostic }}</p>
-      <Collapsible>
-        <CollapsibleTrigger as-child>
-          <Button size="sm" variant="ghost"><ChevronDown :size="14" /> Execution evidence</Button>
-        </CollapsibleTrigger>
-        <CollapsibleContent>
-          <pre class="max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs">{{
-            JSON.stringify(inspection.evidence, null, 2)
-          }}</pre>
-        </CollapsibleContent>
-      </Collapsible>
-      <p v-if="!inspection.permitted_actions?.length" class="text-sm text-muted-foreground">
-        No safe action permitted by current inspection.
-      </p>
+      <p class="break-words text-sm">{{ reviewMessage }}</p>
       <div class="flex flex-wrap gap-2">
         <Button
           v-for="action in inspection.permitted_actions"
@@ -121,23 +100,40 @@ async function act(action: DispositionAction) {
           :disabled="busy"
           @click="action === 'acknowledge_interrupted' ? (acknowledge = true) : act(action)"
         >
-          {{ action.split('_').join(' ') }}
+          {{ actionLabels[action] }}
         </Button>
       </div>
     </div>
+    <Collapsible v-if="diagnostic || inspection">
+      <CollapsibleTrigger as-child>
+        <Button size="sm" variant="ghost"><ChevronDown :size="14" /> Details</Button>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <p
+          v-if="diagnostic || inspection?.diagnostic"
+          class="break-words text-xs text-muted-foreground"
+        >
+          {{ diagnostic || inspection?.diagnostic }}
+        </p>
+        <pre
+          v-if="inspection"
+          class="max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs"
+          >{{ JSON.stringify(inspection.evidence, null, 2) }}</pre
+        >
+      </CollapsibleContent>
+    </Collapsible>
     <Dialog :open="acknowledge" @update:open="(v) => (acknowledge = v)"
       ><DialogContent
         ><DialogHeader
-          ><DialogTitle>Acknowledge interrupted execution?</DialogTitle
+          ><DialogTitle>Close interrupted operation?</DialogTitle
           ><DialogDescription
-            >Resources are preserved, not deleted or recreated. This releases the retained operation
-            fence only after the server revalidates fresh exclusive-process evidence. No automatic
-            restart or credential scrub is implied.</DialogDescription
+            >This releases the block on further changes and keeps existing resources. The workspace
+            will not be restarted or repaired.</DialogDescription
           ></DialogHeader
         ><DialogFooter
           ><Button variant="outline" @click="acknowledge = false">Cancel</Button
           ><Button :disabled="busy" @click="act('acknowledge_interrupted')"
-            >Acknowledge, preserving resources</Button
+            >Close operation and keep resources</Button
           ></DialogFooter
         ></DialogContent
       ></Dialog

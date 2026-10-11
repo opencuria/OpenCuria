@@ -34,6 +34,7 @@ import {
   runnerStateLabel,
 } from '@/lib/runnerPresentation'
 import { formatRelativeTime } from '@/lib/utils'
+import { runnerActivityGroups } from '@/lib/runnerActivity'
 import { runnerSupportsRuntime } from '@/lib/runtimeSupport'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -56,13 +57,13 @@ import RunnerStorageDonut from './RunnerStorageDonut.vue'
 import RunnerNodeInspector from './RunnerNodeInspector.vue'
 import RunnerActivityList from './RunnerActivityList.vue'
 
-const props = defineProps<{ runner: Runner }>()
+const props = defineProps<{ runner: Runner; initialTab?: 'overview' | 'activities' }>()
 const emit = defineEmits<{ back: [] }>()
 const auth = useAuthStore()
 const runnerId = computed(() => props.runner.id)
 const { data, deletions, error, loading, refreshPending, load, refresh } =
   useRunnerStorage(runnerId)
-const tab = ref('overview')
+const tab = ref<'overview' | 'inventory' | 'activities'>(props.initialTab ?? 'overview')
 const freshMetrics = ref<RunnerSystemMetrics | null>(null)
 const runtimeFilter = ref('all')
 const inventoryQuery = ref('')
@@ -176,32 +177,10 @@ const lastInventory = computed(
 const inventoryProblems = computed(
   () => data.value?.runtimes.reduce((sum, r) => sum + (r.diagnostics?.errors.length ?? 0), 0) ?? 0,
 )
-const activityProblems = computed(
-  () =>
-    (data.value?.operations.filter(
-      (o) =>
-        o.task__error ||
-        ['failed', 'intervention', 'intervention_required'].includes(o.task__status) ||
-        ['intervention', 'intervention_required'].includes(o.phase),
-    ).length ?? 0) +
-    deletions.value.filter((d) =>
-      ['reconfirmation_required', 'failed', 'intervention_required'].includes(d.phase),
-    ).length +
-    (data.value?.capture_requests.filter(
-      (c) =>
-        (!['completed', 'cancelled'].includes(c.phase) && c.diagnostic) ||
-        c.resume_suppressed ||
-        ['failed', 'intervention_required'].includes(c.phase),
-    ).length ?? 0),
-)
-const activeActivities = computed(
-  () =>
-    (data.value?.operations.length ?? 0) +
-    deletions.value.filter((d) => !['completed', 'cancelled'].includes(d.phase)).length +
-    (data.value?.capture_requests.filter(
-      (c) => !['completed', 'cancelled', 'failed'].includes(c.phase),
-    ).length ?? 0),
-)
+const activityGroups = computed(() => runnerActivityGroups(data.value?.activities))
+const activityProblems = computed(() => activityGroups.value.attention.length)
+const activityUnavailable = computed(() => !!data.value && !data.value.activities)
+const activeActivities = computed(() => activityProblems.value + activityGroups.value.active.length)
 /** Versions of one image stay together, newest first. */
 function byVersionLine(images: StorageGeneration[]): StorageGeneration[] {
   const line = (i: StorageGeneration) => i.captured_image_id || i.build_job_id || i.id
@@ -425,7 +404,7 @@ async function rebuild(definition: string) {
           @sample="freshMetrics = $event"
         />
         <div
-          v-if="inventoryProblems || activityProblems"
+          v-if="inventoryProblems || activityProblems || activityUnavailable"
           class="flex flex-wrap gap-2"
           aria-label="Runner attention"
         >
@@ -438,12 +417,16 @@ async function rebuild(definition: string) {
             ><TriangleAlert />Inventory diagnostics · {{ inventoryProblems }}</Button
           >
           <Button
-            v-if="activityProblems"
+            v-if="activityProblems || activityUnavailable"
             variant="outline"
             size="sm"
             class="border-warning/30 text-warning"
             @click="tab = 'activities'"
-            ><TriangleAlert />Activity needs review · {{ activityProblems }}</Button
+            ><TriangleAlert />{{
+              activityUnavailable
+                ? 'Activity status unavailable'
+                : `${activityProblems} ${activityProblems === 1 ? 'activity needs' : 'activities need'} attention`
+            }}</Button
           >
         </div>
         <RunnerStorageDonut
@@ -602,9 +585,11 @@ async function rebuild(definition: string) {
                       ? image.owner_label || 'Capture'
                       : image.definition_name || 'Legacy definition'
                   }}<template v-if="image.generation == null"> · Legacy</template></span
-                ><span v-if="image.message" class="mt-0.5 block truncate text-xs text-muted-foreground">{{
-                  image.message
-                }}</span></span
+                ><span
+                  v-if="image.message"
+                  class="mt-0.5 block truncate text-xs text-muted-foreground"
+                  >{{ image.message }}</span
+                ></span
               >
               <span class="hidden shrink-0 text-right text-xs text-muted-foreground sm:block"
                 ><span class="block tabular-nums">{{ storageBytes(image.size_bytes) }}</span

@@ -1,7 +1,7 @@
 """Sanitized runner-storage presentation contract; no raw manifests or recipes."""
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from ninja import Schema
 
@@ -81,6 +81,21 @@ class StorageGenerationOut(Schema):
     dependencies: list[StorageWorkspaceOut]
 
 
+class RunnerActivityOut(Schema):
+    """One user-visible workflow, with execution children grouped beneath it."""
+
+    id: str
+    kind: Literal["operation", "capture", "recreate", "deletion"]
+    title: str
+    target_name: str
+    state: Literal["attention", "active", "history"]
+    outcome: str
+    summary: str
+    diagnostic: str
+    operation_ids: list[str]
+    created_at: datetime
+
+
 class RunnerStorageOut(Schema):
     runner_id: str
     runner_online: bool
@@ -91,3 +106,4 @@ class RunnerStorageOut(Schema):
     capture_requests: list[dict[str, Any]]
     operations: list[dict[str, Any]]
     pin_diagnostics: list[dict[str, Any]]
+    activities: list[RunnerActivityOut] = []

@@ -8,7 +8,6 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from .models import (
-    CaptureRequest,
     ImageInstance,
     InventoryAlias,
     InventoryEdge,
@@ -16,7 +15,6 @@ from .models import (
     InventoryResource,
     InventoryRuntime,
     InventorySnapshot,
-    LifecycleCommand,
     Runner,
     Workspace,
 )
@@ -613,19 +611,6 @@ class InventoryRepository:
                     ],
                 }
             )
-        result["capture_requests"] = list(
-            CaptureRequest.objects.filter(workspace__runner=runner).values(
-                "id",
-                "workspace_id",
-                "image_id",
-                "phase",
-                "child_id",
-                "prior_running",
-                "resume_suppressed",
-                "diagnostic",
-                "created_at",
-            )
-        )
         result["pin_diagnostics"] = []
         if latest:
             for physical in InventoryResource.objects.filter(
@@ -644,18 +629,7 @@ class InventoryRepository:
                             ),
                         }
                     )
-        result["operations"] = list(
-            LifecycleCommand.objects.filter(task__runner=runner)
-            .exclude(task__status="completed")
-            .values(
-                "task_id",
-                "task__status",
-                "task__error",
-                "phase",
-                "target",
-                "heartbeat_at",
-                "deadline_at",
-                "deliveries",
-            )
-        )
+        from .activity_repository import ActivityRepository
+
+        result.update(ActivityRepository.records(runner))
         return result

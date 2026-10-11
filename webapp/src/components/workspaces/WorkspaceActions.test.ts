@@ -13,6 +13,8 @@ vi.mock('@/stores/workspaces', () => ({
     removeWorkspace: vi.fn(),
   }),
 }))
+const auth = vi.hoisted(() => ({ isAdmin: true }))
+vi.mock('@/stores/auth', () => ({ useAuthStore: () => auth }))
 
 vi.mock('./EditWorkspaceDialog.vue', () => ({
   default: {
@@ -55,6 +57,37 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
 }
 
 describe('WorkspaceActions capture gating', () => {
+  it('links admins directly to runner activity while keeping lifecycle actions blocked', async () => {
+    const event = vi.fn()
+    window.addEventListener('opencuria:open-settings', event)
+    const wrapper = shallowMount(WorkspaceActions, {
+      props: { workspace: makeWorkspace({ intervention_required: true }) },
+      global: { stubs: { Button: { name: 'Button', template: '<button><slot /></button>' } } },
+    })
+    const buttons = wrapper.findAllComponents({ name: 'Button' })
+    const review = buttons.find((button) => button.text() === 'Review workspace issue')!
+    expect(review).toBeTruthy()
+    await review.trigger('click')
+    expect(event.mock.calls[0]![0].detail).toEqual({
+      tab: 'runners',
+      runnerId: 'runner-1',
+      runnerActivity: true,
+    })
+    const capture = buttons.find((button) => button.attributes('title') === 'Capture image')!
+    expect(['true', '']).toContain(capture.attributes('disabled'))
+    window.removeEventListener('opencuria:open-settings', event)
+    wrapper.unmount()
+  })
+  it('explains the admin requirement to a member without offering an inaccessible link', () => {
+    auth.isAdmin = false
+    const wrapper = shallowMount(WorkspaceActions, {
+      props: { workspace: makeWorkspace({ intervention_required: true }) },
+    })
+    expect(wrapper.text()).toContain('Ask an organization admin')
+    expect(wrapper.text()).not.toContain('Review workspace issue')
+    wrapper.unmount()
+    auth.isAdmin = true
+  })
   it('enables capture for a stopped QEMU workspace without credentials on disk', () => {
     const wrapper = shallowMount(WorkspaceActions, {
       props: {
