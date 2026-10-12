@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
+import { toast } from 'vue-sonner'
 
 import GitCommitDetailsView from './GitCommitDetailsView.vue'
 import * as gitApi from '@/services/git.api'
@@ -37,6 +38,17 @@ const getRepo = vi.mocked(gitApi.getGitRepo)
 const getHistory = vi.mocked(gitApi.getGitHistory)
 const getDetails = vi.mocked(gitApi.getGitCommitDetails)
 
+const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+let writeText: ReturnType<typeof vi.fn>
+
+afterEach(() => {
+  if (originalClipboardDescriptor) {
+    Object.defineProperty(navigator, 'clipboard', originalClipboardDescriptor)
+  } else {
+    Reflect.deleteProperty(navigator, 'clipboard')
+  }
+})
+
 function stubPointerCapture(): void {
   HTMLElement.prototype.setPointerCapture = vi.fn()
   HTMLElement.prototype.releasePointerCapture = vi.fn()
@@ -57,6 +69,11 @@ describe('GitCommitDetailsView', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
     stubPointerCapture()
     localStorage.clear()
     setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot()])
@@ -89,6 +106,48 @@ describe('GitCommitDetailsView', () => {
     for (const file of store.expandedCommitDetails!.fileChanges) {
       expect(wrapper.find(`[data-testid="git-cdv-file-${file.newPath}"]`).exists()).toBe(true)
     }
+  })
+
+  it('copies the hash through the shared button without a success toast', async () => {
+    const store = await initStore()
+    const hash = store.currentRepo!.commits[0]!.hash
+    await store.toggleCommitDetails(hash)
+    await flushPromises()
+    const wrapper = mountDetails(hash)
+    await nextTick()
+
+    const copyButton = wrapper.get('[data-testid="git-cdv-copy-hash"]')
+    await copyButton.trigger('click')
+    await flushPromises()
+
+    expect(writeText).toHaveBeenCalledWith(hash)
+    expect(copyButton.attributes('data-copied')).toBe('true')
+    expect(toast.info).not.toHaveBeenCalled()
+  })
+
+  it('copies file paths in tree and list views without selecting the file', async () => {
+    const store = await initStore()
+    const hash = store.currentRepo!.commits[0]!.hash
+    await store.toggleCommitDetails(hash)
+    await flushPromises()
+    const wrapper = mountDetails(hash)
+    await nextTick()
+    const path = store.expandedCommitDetails!.fileChanges[0]!.newPath
+
+    for (const view of ['tree', 'list'] as const) {
+      if (view === 'list') {
+        await wrapper.get('[data-testid="git-cdv-view-list"]').trigger('click')
+        await nextTick()
+      }
+      const copyButton = wrapper.get(`[data-testid="git-cdv-copy-${path}"]`)
+      await copyButton.trigger('click')
+      await flushPromises()
+
+      expect(writeText).toHaveBeenLastCalledWith(path)
+      expect(copyButton.attributes('data-copied')).toBe('true')
+      expect(store.expandedFilePath).toBeNull()
+    }
+    expect(writeText).toHaveBeenCalledTimes(2)
   })
 
   it('falls back to the details subject when the snapshot row is paged out', async () => {

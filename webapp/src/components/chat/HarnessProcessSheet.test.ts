@@ -207,14 +207,21 @@ describe('HarnessProcessSheet', () => {
     expect(workspacesApi.stopProcess).toHaveBeenCalledWith('workspace-1', 'process-1')
   })
 
-  it('copies the log path', async () => {
+  it('copies the log path through the shared CopyButton', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { clipboard: { writeText } })
     const store = useProcessesStore()
     store.processesByWorkspace['workspace-1'] = [makeProcess()]
     const wrapper = mountSheet()
+    const copyButton = wrapper.findComponent({ name: 'CopyButton' })
+    expect(copyButton.exists()).toBe(true)
+    expect(copyButton.props('label')).toBe('log path')
+    expect(wrapper.find('[data-testid="composer-process-copy"]').attributes('title')).toBe('Copy log path')
+
     await wrapper.find('[data-testid="composer-process-copy"]').trigger('click')
     await flushPromises()
+
     expect(writeText).toHaveBeenCalledWith('.opencuria/processes/process-1.log')
+    expect(wrapper.find('[data-testid="composer-process-copy"]').attributes('aria-label')).toBe('Copied')
   })
 })

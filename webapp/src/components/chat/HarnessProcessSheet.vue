@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, inject, ref } from 'vue'
-import { Copy, Play, RefreshCw, RotateCcw, Square, Trash2, X } from '@lucide/vue'
+import { Play, RefreshCw, RotateCcw, Square, Trash2, X } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { writeClipboardText } from '@/lib/clipboard'
+import CopyButton from '@/components/common/CopyButton.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useProcessesStore } from '@/stores/processes'
 import { ProcessKind, ProcessStatus } from '@/types'
@@ -15,7 +15,6 @@ const emit = defineEmits<{
 
 const workspaceIdRef = inject(harnessWorkspaceIdKey, ref(''))
 const processesStore = useProcessesStore()
-const copiedPath = ref<string | null>(null)
 
 const workspaceId = computed(() => workspaceIdRef.value)
 const processes = computed((): WorkspaceProcess[] =>
@@ -86,15 +85,6 @@ async function handleDelete(process: WorkspaceProcess): Promise<void> {
   await processesStore.deleteProcess(workspaceId.value, process.id)
 }
 
-async function handleCopyLogPath(process: WorkspaceProcess): Promise<void> {
-  if (!process.log_path) return
-  const ok = await writeClipboardText(process.log_path)
-  if (!ok) return
-  copiedPath.value = process.id
-  setTimeout(() => {
-    if (copiedPath.value === process.id) copiedPath.value = null
-  }, 1500)
-}
 </script>
 
 <template>
@@ -246,16 +236,14 @@ async function handleCopyLogPath(process: WorkspaceProcess): Promise<void> {
             {{ process.log_path }}
           </span>
           <span v-else class="text-xs text-muted-foreground">—</span>
-          <button
+          <CopyButton
             v-if="process.log_path"
-            type="button"
-            class="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            :title="copiedPath === process.id ? 'Copied' : 'Copy log path'"
+            :text="process.log_path"
+            label="log path"
+            size="icon-xs"
             data-testid="composer-process-copy"
-            @click="handleCopyLogPath(process)"
-          >
-            <Copy :size="12" />
-          </button>
+            class="size-5 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground [&_svg]:size-3"
+          />
         </div>
       </li>
     </ul>

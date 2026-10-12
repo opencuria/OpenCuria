@@ -1,73 +1,73 @@
-/**
- * Copy text to the clipboard without ever producing an unhandled promise
- * rejection (e.g. missing Clipboard API in Safari / insecure HTTP, or
- * denied permissions in headless environments).
- *
- * `writeClipboardText` is toast-free. `copyToClipboard` reports success
- * and failure through the notification store. Both return true on success.
- */
-
+/** Shared plain-text clipboard operations. Never log or toast copied content. */
 import { useNotificationStore } from '@/stores/notifications'
+import { useClipboardStore } from '@/stores/clipboard'
+
+import { writeClipboardText } from './clipboardWrite'
+
+export type ClipboardText = string | (() => Promise<string>)
+export { writeClipboardText } from './clipboardWrite'
 
 /**
- * Write plain text to the clipboard. Tries the Clipboard API first, then
- * falls back to a hidden textarea + `document.execCommand('copy')`.
+ * Copy with common feedback and a selectable retry dialog when blocked.
+ * A deferred producer reserves Safari's user gesture by supplying a promise
+ * to ClipboardItem immediately, rather than awaiting the text before write().
  */
-export async function writeClipboardText(text: string): Promise<boolean> {
-  const writeText = navigator.clipboard?.writeText
-  if (typeof writeText === 'function') {
-    try {
-      await writeText.call(navigator.clipboard, text)
-      return true
-    } catch {
-      // Fall through to execCommand (Safari / insecure context / denied).
-    }
-  }
-  return copyWithExecCommand(text)
-}
-
-/**
- * Copy text and toast the result. Success uses the existing
- * `Copied ${label}` info toast; both write paths failing use
- * `Failed to copy ${label}`.
- */
-export async function copyToClipboard(text: string, label: string): Promise<boolean> {
+export async function copyToClipboard(
+  source: ClipboardText,
+  label: string,
+  options: { success?: 'toast' | 'silent'; signal?: AbortSignal } = {},
+): Promise<boolean> {
   const notifications = useNotificationStore()
-  const ok = await writeClipboardText(text)
-  if (ok) {
-    notifications.info(`Copied ${label}`, text)
-    return true
-  }
-  notifications.error(`Failed to copy ${label}`, 'Clipboard unavailable')
-  return false
-}
-
-function copyWithExecCommand(text: string): boolean {
-  const textarea = document.createElement('textarea')
-  textarea.value = text
-  textarea.setAttribute('readonly', '')
-  textarea.style.position = 'fixed'
-  textarea.style.top = '0'
-  textarea.style.left = '0'
-  textarea.style.width = '1px'
-  textarea.style.height = '1px'
-  textarea.style.padding = '0'
-  textarea.style.border = 'none'
-  textarea.style.outline = 'none'
-  textarea.style.boxShadow = 'none'
-  textarea.style.background = 'transparent'
-  textarea.style.opacity = '0'
-  document.body.appendChild(textarea)
-  textarea.focus()
-  textarea.select()
-  textarea.setSelectionRange(0, text.length)
+  if (options.signal?.aborted) return false
   let ok = false
   try {
-    ok = typeof document.execCommand === 'function' && document.execCommand('copy')
+    if (typeof source === 'string') {
+      ok = await writeClipboardText(source, options.signal)
+      if (!ok && !options.signal?.aborted) {
+        notifications.error(
+          `Failed to copy ${label}`,
+          'Use Copy now or select the text to copy manually.',
+        )
+        ok = await useClipboardStore().requestCopy(source, label, options.signal)
+      }
+    } else {
+      // Invoke once, synchronously. Both the modern write and retry share it.
+      const text = source().then((value) => {
+        if (options.signal?.aborted) throw new Error('Copy cancelled')
+        return value
+      })
+      // Handle a producer rejection even if ClipboardItem construction throws.
+      void text.catch(() => {})
+      if (
+        typeof navigator !== 'undefined' &&
+        typeof navigator.clipboard?.write === 'function' &&
+        typeof ClipboardItem !== 'undefined'
+      ) {
+        const blob = text.then((value) => {
+          if (options.signal?.aborted) throw new Error('Copy cancelled')
+          return new Blob([value], { type: 'text/plain' })
+        })
+        void blob.catch(() => {})
+        try {
+          await navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob })])
+          ok = true
+        } catch {
+          // Do not attempt execCommand after fetching: it needs a fresh click.
+        }
+      }
+      if (!ok && !options.signal?.aborted) {
+        ok = await useClipboardStore().requestCopy(text, label, options.signal)
+      }
+    }
   } catch {
-    ok = false
-  } finally {
-    textarea.remove()
+    if (options.signal?.aborted) return false
+    notifications.error(
+      `Failed to copy ${label}`,
+      'Clipboard content could not be loaded. Try again.',
+    )
+    return false
   }
+  if (options.signal?.aborted) return false
+  if (ok && options.success !== 'silent') notifications.info(`Copied ${label}`)
   return ok
 }

@@ -5,6 +5,7 @@ import { BookText, GitFork, Pencil } from '@lucide/vue'
 import type { HarnessMessage } from '@/types/harness'
 import type { ComposerFileToken } from '@/lib/composerTokens'
 import { buildMessageBlocks, type MessageRenderBlock, type RenderBlock } from '@/lib/harnessBlocks'
+import { getMessageCopyText } from '@/lib/harnessMessageCopy'
 import { hasRunningToolOrSubtask } from '@/lib/harnessSubtaskActivity'
 import { buildAgentStepViews, hasRunningAgentSequence } from '@/lib/harnessAgentSteps'
 import { formatMessageHoverLine } from '@/lib/harnessUsage'
@@ -13,6 +14,7 @@ import { formatHarnessModelEffort, type ProviderModel } from '@/lib/harnessModel
 import { elapsedMs, formatElapsed } from '@/lib/formatElapsed'
 import { useSkillStore } from '@/stores/skills'
 import { Button } from '@/components/ui/button'
+import CopyButton from '@/components/common/CopyButton.vue'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import HarnessMarkdown from './HarnessMarkdown.vue'
@@ -54,6 +56,7 @@ onUnmounted(() => pinMessage?.(props.message.id, false))
 const mentionImages = ref<ComposerFileToken[]>([])
 
 const finished = computed(() => props.streaming !== true)
+const copyText = computed(() => getMessageCopyText(props.message, props.streaming === true))
 
 const blocks = computed(() => buildMessageBlocks(props.message.parts, { finished: finished.value }))
 const blockPage = ref(props.streaming ? lastHarnessPage(blocks.value.length) : 0)
@@ -378,10 +381,16 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
         </span>
       </div>
       <div
-        v-if="isEditableMessage && !editing"
-        class="mt-1 flex items-center justify-end gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
+        v-if="!editing"
+        class="mt-1 flex items-center justify-end gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100"
       >
-        <TooltipProvider>
+        <CopyButton
+          :text="message.content"
+          label="message"
+          data-testid="message-copy"
+          class="h-7 w-7 text-muted-foreground hover:text-foreground"
+        />
+        <TooltipProvider v-if="isEditableMessage && !editing">
           <Tooltip>
             <TooltipTrigger as-child>
               <Button
@@ -450,6 +459,7 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
                 "
                 :child-session-ids="childSessionIds"
                 :models="models ?? catalog"
+                :streaming="streaming"
                 @open-subtask="emit('openSubtask', $event)"
               />
             </HarnessWorkedFor>
@@ -481,6 +491,7 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
             "
             :child-session-ids="childSessionIds"
             :models="models ?? catalog"
+            :streaming="streaming"
             @open-subtask="emit('openSubtask', $event)"
           />
         </template>
@@ -493,6 +504,17 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
       >
         {{ streamingModelLine }}
       </p>
+      <div
+        v-if="copyText"
+        class="mt-1 flex items-center justify-start gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100"
+      >
+        <CopyButton
+          :text="copyText"
+          label="answer"
+          data-testid="answer-copy"
+          class="h-7 w-7 text-muted-foreground hover:text-foreground"
+        />
+      </div>
       <p
         v-if="usageLine"
         data-testid="harness-message-usage"

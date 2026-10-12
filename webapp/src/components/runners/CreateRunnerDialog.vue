@@ -1,9 +1,8 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRunnerStore } from '@/stores/runners'
-import { Copy, Check } from '@lucide/vue'
-import { writeClipboardText } from '@/lib/clipboard'
 import { Button } from '@/components/ui/button'
+import CopyButton from '@/components/common/CopyButton.vue'
 import { Input } from '@/components/ui/input'
 import {
   Dialog,
@@ -21,7 +20,6 @@ const runnerStore = useRunnerStore()
 const open = ref(false)
 const name = ref('')
 const createdToken = ref<string | null>(null)
-const copied = ref(false)
 const submitting = ref(false)
 
 async function handleSubmit(): Promise<void> {
@@ -34,20 +32,11 @@ async function handleSubmit(): Promise<void> {
   }
 }
 
-async function handleCopyToken(): Promise<void> {
-  if (!createdToken.value) return
-  const ok = await writeClipboardText(createdToken.value)
-  if (!ok) return
-  copied.value = true
-  setTimeout(() => (copied.value = false), 2000)
-}
-
 function handleClose(): void {
   open.value = false
   setTimeout(() => {
     name.value = ''
     createdToken.value = null
-    copied.value = false
   }, 200)
 }
 </script>
@@ -92,9 +81,7 @@ function handleClose(): void {
             >
               {{ createdToken }}
             </code>
-            <Button variant="outline" size="icon-sm" @click="handleCopyToken">
-              <component :is="copied ? Check : Copy" :size="14" />
-            </Button>
+            <CopyButton :text="createdToken" label="runner token" variant="outline" />
           </div>
         </div>
 

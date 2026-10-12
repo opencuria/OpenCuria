@@ -9,19 +9,12 @@
 import { computed, ref } from 'vue'
 import type { GitCommitFile } from '@/types/git'
 import { useGitStore } from '@/stores/git'
-import { copyToClipboard } from '@/lib/clipboard'
 import { formatDate } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import {
-  ChevronDown,
-  ChevronRight,
-  Copy,
-  FolderTree,
-  List,
-  X,
-} from '@lucide/vue'
+import { ChevronDown, ChevronRight, FolderTree, List, X } from '@lucide/vue'
 import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
+import CopyButton from '@/components/common/CopyButton.vue'
 
 const props = defineProps<{
   hash: string
@@ -263,14 +256,6 @@ function openParent(hash: string): void {
   void store.toggleCommitDetails(hash)
 }
 
-function copyPath(path: string): void {
-  void copyToClipboard(path, 'file path')
-}
-
-function copyHash(): void {
-  void copyToClipboard(details.value?.hash ?? props.hash, 'commit hash')
-}
-
 // --- Height resize (persisted via the store) ---
 
 const isResizing = ref(false)
@@ -351,16 +336,13 @@ function onResizeUp(event: PointerEvent): void {
           >
             {{ details?.hash ?? hash }}
           </span>
-          <Button
-            variant="ghost"
+          <CopyButton
+            :text="details?.hash ?? hash"
+            label="commit hash"
             size="icon-sm"
             class="h-5 w-5 shrink-0"
-            title="Copy commit hash"
             data-testid="git-cdv-copy-hash"
-            @click="copyHash"
-          >
-            <Copy :size="11" />
-          </Button>
+          />
         </dd>
         <dt class="font-medium text-muted-foreground">Parents</dt>
         <dd class="min-w-0 truncate" data-testid="git-cdv-parents">
@@ -520,16 +502,13 @@ function onResizeUp(event: PointerEvent): void {
               <span v-if="row.file.deletions > 0" class="shrink-0 text-[10px] text-error">
                 −{{ row.file.deletions }}
               </span>
-              <Button
-                variant="ghost"
+              <CopyButton
+                :text="row.file.newPath"
+                label="file path"
                 size="icon-sm"
-                class="h-5 w-5 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
-                title="Copy file path"
+                class="h-5 w-5 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100 [@media(hover:none)]:opacity-100"
                 :data-testid="`git-cdv-copy-${row.file.newPath}`"
-                @click.stop="copyPath(row.file.newPath)"
-              >
-                <Copy :size="11" />
-              </Button>
+              />
               <span
                 class="w-3 shrink-0 text-center text-[10px] font-semibold"
                 :class="STATUS_COLORS[row.file.status]"
@@ -561,16 +540,13 @@ function onResizeUp(event: PointerEvent): void {
             <span v-if="file.deletions > 0" class="shrink-0 text-[10px] text-error">
               −{{ file.deletions }}
             </span>
-            <Button
-              variant="ghost"
+            <CopyButton
+              :text="file.newPath"
+              label="file path"
               size="icon-sm"
-              class="h-5 w-5 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
-              title="Copy file path"
+              class="h-5 w-5 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100 [@media(hover:none)]:opacity-100"
               :data-testid="`git-cdv-copy-${file.newPath}`"
-              @click.stop="copyPath(file.newPath)"
-            >
-              <Copy :size="11" />
-            </Button>
+            />
             <span
               class="w-3 shrink-0 text-center text-[10px] font-semibold"
               :class="STATUS_COLORS[file.status]"

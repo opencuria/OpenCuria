@@ -2,8 +2,8 @@
 import { ref, computed, onMounted } from 'vue'
 import { useApiKeyStore } from '@/stores/apiKeys'
 import type { APIKeyCreatedOut } from '@/types'
-import { Copy, CheckCheck, AlertTriangle, KeyRound, Shield } from '@lucide/vue'
-import { writeClipboardText } from '@/lib/clipboard'
+import { AlertTriangle, KeyRound, Shield } from '@lucide/vue'
+import CopyButton from '@/components/common/CopyButton.vue'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
@@ -29,7 +29,6 @@ const selectedPermissions = ref<string[]>([])
 const fullAccess = ref(true)
 const submitting = ref(false)
 const createdKey = ref<APIKeyCreatedOut | null>(null)
-const copied = ref(false)
 
 onMounted(() => {
   apiKeyStore.fetchAvailablePermissions()
@@ -79,14 +78,6 @@ async function handleSubmit(): Promise<void> {
   }
 }
 
-async function copyToken(): Promise<void> {
-  if (!createdKey.value) return
-  const ok = await writeClipboardText(createdKey.value.key)
-  if (!ok) return
-  copied.value = true
-  setTimeout(() => (copied.value = false), 2000)
-}
-
 function handleClose(): void {
   open.value = false
   setTimeout(() => {
@@ -95,7 +86,6 @@ function handleClose(): void {
     selectedPermissions.value = []
     fullAccess.value = true
     createdKey.value = null
-    copied.value = false
   }, 200)
 }
 </script>
@@ -209,14 +199,7 @@ function handleClose(): void {
             >
               {{ createdKey.key }}
             </div>
-            <Button
-              variant="outline"
-              size="icon"
-              :title="copied ? 'Copied!' : 'Copy to clipboard'"
-              @click="copyToken"
-            >
-              <component :is="copied ? CheckCheck : Copy" :class="copied ? 'text-success' : ''" />
-            </Button>
+            <CopyButton :text="createdKey.key" label="API key" variant="outline" size="icon" />
           </div>
         </div>
 

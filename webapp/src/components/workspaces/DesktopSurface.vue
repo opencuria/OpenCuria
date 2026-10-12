@@ -33,7 +33,6 @@ const props = defineProps<{ workspaceId: string }>()
 const desktopStore = useDesktopStore()
 const workspaceStore = useWorkspaceStore()
 const {
-  error,
   takeControlBusy,
   startDesktop,
   stopDesktopIfActive,
@@ -177,7 +176,7 @@ async function handleDesktopIframeKeydown(event: KeyboardEvent): Promise<void> {
   if (!shortcut) return
 
   if (shortcut === 'copy') {
-    window.setTimeout(() => void copyFromVmClipboard(), 120)
+    void copyFromVmClipboard({ delayMs: 120 })
     return
   }
 

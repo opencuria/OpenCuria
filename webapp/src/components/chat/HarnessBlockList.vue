@@ -17,6 +17,7 @@ import { HARNESS_PAGE_SIZE, lastHarnessPage, shouldResetHarnessPage } from '@/li
 const props = defineProps<{
   blocks: RenderBlock[]
   showStreamingCursor?: boolean
+  streaming?: boolean
   childSessionIds?: Record<string, string>
   models?: ProviderModel[]
 }>()
@@ -113,7 +114,7 @@ function blockKey(block: RenderBlock, index: number): string {
         :data-block-kind="'text'"
         :data-part-id="entry.block.part.id"
       >
-        <HarnessMarkdown :text="entry.block.part.output" />
+        <HarnessMarkdown :text="entry.block.part.output" :streaming="streaming" />
         <span
           v-if="showStreamingCursor && entry.index === blocks.length - 1"
           class="ml-0.5 inline-block h-4 w-2 animate-pulse bg-primary/60 align-middle"
