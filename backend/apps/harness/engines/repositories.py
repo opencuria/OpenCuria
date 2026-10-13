@@ -441,7 +441,12 @@ class HarnessEngineRepository:
             )
             digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()
             prepared.append(
-                (entry, canonical, digest, stable_uuid if stable_uuid is not None else None)
+                (
+                    entry,
+                    canonical,
+                    digest,
+                    stable_uuid if stable_uuid is not None else None,
+                )
             )
         if not prepared:
             return []
@@ -467,7 +472,9 @@ class HarnessEngineRepository:
                         )
                     if not session.external_session_id:
                         session.external_session_id = external_id
-                        session.save(update_fields=["external_session_id", "updated_at"])
+                        session.save(
+                            update_fields=["external_session_id", "updated_at"]
+                        )
                     top = HarnessTranscriptBatch.objects.filter(
                         session_id=session.id,
                         external_session_id=external_id,
@@ -529,6 +536,17 @@ class HarnessEngineRepository:
         if row is None:
             raise HarnessSession.DoesNotExist
         return row
+
+    @staticmethod
+    def get_transcript_mtime(
+        session_id: uuid.UUID, *, external_session_id: str
+    ) -> int | None:
+        """Return the latest real transcript batch write time in milliseconds."""
+        latest = HarnessTranscriptBatch.objects.filter(
+            session_id=session_id,
+            external_session_id=(external_session_id or "").strip(),
+        ).aggregate(latest=Max("created_at"))["latest"]
+        return int(latest.timestamp() * 1000) if latest is not None else None
 
     @staticmethod
     def list_transcript_entries(

@@ -20,9 +20,10 @@ _SESSION_ID_PATTERN = re.compile(
 class HarnessClaudeSessionStore:
     """Async SDK ``SessionStore`` adapter isolated to one harness session.
 
-    The adapter accepts the SDK's normalized project key but verifies it
-    against the fixed harness workspace key. Session IDs and subpaths are
-    never used as filesystem paths by this store.
+    The adapter binds the SDK's normalized project key for key consistency.
+    Transcript rows are partitioned by the owning harness session and external
+    session identifier; this repository does not claim project-key storage
+    isolation. Session IDs and subpaths are never filesystem paths here.
     """
 
     def __init__(
@@ -36,7 +37,23 @@ class HarnessClaudeSessionStore:
         self.session_id = uuid.UUID(str(session_id))
         self.external_session_id = (external_session_id or "").strip()
         self.project_key = (project_key or "").strip()
+        if self.project_key and not _PROJECT_KEY_PATTERN.fullmatch(self.project_key):
+            raise ValueError("Claude session store project_key is invalid")
         self.repository = repository or HarnessEngineRepository
+
+    def bind_project_key(self, project_key: str) -> str:
+        """Bind this one-session adapter to the first validated SDK project key."""
+        if not isinstance(project_key, str) or not _PROJECT_KEY_PATTERN.fullmatch(
+            project_key
+        ):
+            raise ValueError("Claude session store project_key is invalid")
+        if self.project_key and project_key != self.project_key:
+            raise ValueError(
+                "Claude session store project_key does not match workspace"
+            )
+        if not self.project_key:
+            self.project_key = project_key
+        return self.project_key
 
     def _validate_key(self, key: Mapping[str, Any]) -> tuple[str, str, str]:
         """Validate and normalize an SDK transcript store key."""
@@ -47,19 +64,19 @@ class HarnessClaudeSessionStore:
             project_key
         ):
             raise ValueError("Claude session store project_key is invalid")
-        if self.project_key and project_key != self.project_key:
-            raise ValueError(
-                "Claude session store project_key does not match workspace"
-            )
         if not isinstance(external_id, str) or not _SESSION_ID_PATTERN.fullmatch(
             external_id
         ):
             raise ValueError("Claude session store session_id must be a UUID")
-        if self.external_session_id and external_id != self.external_session_id:
+        normalized_id = external_id.lower()
+        if self.external_session_id and (
+            normalized_id != self.external_session_id.lower()
+        ):
             raise ValueError("Claude session store session_id does not match harness")
         if not isinstance(subpath, str) or subpath and not self._safe_subpath(subpath):
             raise ValueError("Claude session store subpath is invalid")
-        return project_key, external_id.lower(), subpath
+        self.bind_project_key(project_key)
+        return project_key, normalized_id, subpath
 
     @staticmethod
     def _safe_subpath(value: str) -> bool:
@@ -119,7 +136,9 @@ class HarnessClaudeSessionStore:
             project_key
         ):
             raise ValueError("Claude session store project_key is invalid")
-        if self.project_key and project_key != self.project_key:
+        try:
+            self.bind_project_key(project_key)
+        except ValueError:
             return []
         record = await sync_to_async(
             self.repository.get_session_engine_record, thread_sensitive=True
@@ -129,8 +148,12 @@ class HarnessClaudeSessionStore:
             return []
         if not _SESSION_ID_PATTERN.fullmatch(external_id):
             return []
-        mtime = int(record["updated_at"].timestamp() * 1000)
-        return [{"session_id": external_id, "mtime": mtime}]
+        transcript_mtime = await sync_to_async(
+            self.repository.get_transcript_mtime, thread_sensitive=True
+        )(self.session_id, external_session_id=external_id)
+        if transcript_mtime is None:
+            return []
+        return [{"session_id": external_id, "mtime": int(transcript_mtime)}]
 
     async def delete(self, key: Mapping[str, Any]) -> None:
         """Delete just this bound session transcript, cascading main entries."""

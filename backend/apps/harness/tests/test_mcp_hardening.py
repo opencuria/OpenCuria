@@ -350,6 +350,114 @@ async def test_runtime_collision_first_wins_collider_closed():
         McpServerConnection.aclose = real_close  # type: ignore[assignment]
 
 
+@pytest.mark.asyncio
+async def test_runtime_same_server_normalized_name_collision_skips_server(monkeypatch):
+    """A normalized alias collision skips only that server and closes it."""
+    from apps.plugins.runtime_snapshot import (
+        EffectivePluginSnapshot,
+        PluginMcpServerSnapshot,
+        PreparedPluginRuntime,
+        WorkspacePluginSnapshot,
+    )
+
+    plugin_id = uuid.uuid4()
+    snapshot = WorkspacePluginSnapshot(
+        workspace_id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        plugins=(
+            EffectivePluginSnapshot(
+                id=plugin_id,
+                name="Plug",
+                slug="plug",
+                description="",
+                organization_id=None,
+                is_global=True,
+                skills=(),
+                mcp_servers=(
+                    PluginMcpServerSnapshot(
+                        id=uuid.uuid4(),
+                        name="Colliding",
+                        slug="colliding",
+                        transport="stdio",
+                        command="fake",
+                    ),
+                    PluginMcpServerSnapshot(
+                        id=uuid.uuid4(),
+                        name="Healthy",
+                        slug="healthy",
+                        transport="stdio",
+                        command="fake",
+                    ),
+                ),
+                requirements=(),
+            ),
+        ),
+    )
+    runtime = McpRuntime()
+    opened: dict[str, McpServerConnection] = {}
+    closed: list[str] = []
+    real_close = McpServerConnection.aclose
+
+    async def _fake_open(self, accessor):
+        opened[self.server_slug] = self
+        if self.server_slug == "colliding":
+            # Both names normalize to mcp_plug_colliding_foo_bar.
+            self.tools = [
+                _discovered("foo.bar", _namespaced("plug", "colliding", "foo.bar")),
+                _discovered("foo_bar", _namespaced("plug", "colliding", "foo_bar")),
+                _discovered("otherwise_safe", _namespaced("plug", "colliding", "otherwise_safe")),
+            ]
+        else:
+            self.tools = [
+                _discovered("solo", _namespaced("plug", "healthy", "solo")),
+                _discovered("another", _namespaced("plug", "healthy", "another")),
+            ]
+        return list(self.tools)
+
+    async def _tracking_close(self):
+        closed.append(self.server_slug)
+        await real_close(self)
+
+    monkeypatch.setattr(McpServerConnection, "open", _fake_open)
+    monkeypatch.setattr(McpServerConnection, "aclose", _tracking_close)
+    prepared = PreparedPluginRuntime(
+        snapshot=snapshot, workspace=None, plaintexts={plugin_id: {}}
+    )
+
+    await runtime.setup(
+        workspace=None,
+        organization_id=snapshot.organization_id,
+        accessor=object(),
+        snapshot=prepared,
+    )
+
+    assert _namespaced("plug", "colliding", "foo.bar") == _namespaced(
+        "plug", "colliding", "foo_bar"
+    )
+    assert opened["colliding"].healthy is False
+    assert opened["healthy"].healthy is True
+    assert closed == ["colliding"]
+    assert [connection.server_slug for connection in runtime.connections] == ["healthy"]
+    assert len(runtime.skipped) == 1
+    assert runtime.skipped[0]["server"] == "colliding"
+    assert "skipped" in runtime.skipped[0]["error"]
+
+    from apps.harness.tools.base import ToolRegistry
+
+    registry = ToolRegistry()
+    registered = runtime.register_tools(registry)
+    assert sorted(registered) == sorted(
+        [
+            _namespaced("plug", "healthy", "solo"),
+            _namespaced("plug", "healthy", "another"),
+        ]
+    )
+    assert not any("colliding" in name for name in registry.names())
+
+    await runtime.aclose()
+    assert closed == ["colliding", "healthy"]
+
+
 # -- setup exception / cancellation close ------------------------------------
 
 

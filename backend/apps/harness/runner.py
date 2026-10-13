@@ -134,6 +134,7 @@ class RunOptions:
     auto_approve: bool = False
     on_permission: PermissionCallback | None = None
     on_question: QuestionCallback | None = None
+    authorize_file_read: Callable[[str], Awaitable[bool]] | None = None
     run_subagent: Any | None = None
     depth: int = 0
     max_depth: int = DEFAULT_MAX_DEPTH

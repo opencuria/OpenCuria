@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import uuid
 from typing import Any
 
@@ -16,6 +18,185 @@ MANAGED_STATE_PREFIX = f"{HARNESS_WORKSPACE_ROOT}/.opencuria/harness/claude/"
 AUTH_ENV_KEYS = frozenset({"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"})
 MAX_SKILL_COUNT = 128
 MAX_SKILL_BODY_BYTES = 64 * 1024
+MAX_MANAGED_FILE_BYTES = 10 * 1024 * 1024
+
+# Keep content off argv, environment variables, and runner logs. Paths and this
+# constant script are the only command arguments; file bytes travel on stdin.
+_SAFE_MKDIR_SCRIPT = """
+import os
+import sys
+
+root = os.path.abspath(sys.argv[1])
+path = os.path.abspath(sys.argv[2])
+if os.path.commonpath((root, path)) != root:
+    raise SystemExit(2)
+flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(os.sep, flags)
+try:
+    parts = root.lstrip(os.sep).split(os.sep)
+    for index, part in enumerate(parts):
+        try:
+            child = os.open(part, flags, dir_fd=fd)
+        except FileNotFoundError:
+            try:
+                os.mkdir(part, 0o700, dir_fd=fd)
+            except FileExistsError:
+                pass
+            child = os.open(part, flags, dir_fd=fd)
+        os.close(fd)
+        fd = child
+        if index == len(parts) - 1:
+            os.fchmod(fd, 0o700)
+    relative = os.path.relpath(path, root)
+    if relative != ".":
+        for part in relative.split(os.sep):
+            try:
+                child = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            os.fchmod(fd, 0o700)
+finally:
+    os.close(fd)
+"""
+
+_SAFE_WRITE_SCRIPT = """
+import os
+import sys
+import uuid
+
+root = os.path.abspath(sys.argv[1])
+target = os.path.abspath(sys.argv[2])
+mode = int(sys.argv[3], 8)
+if os.path.commonpath((root, target)) != root or target == root:
+    raise SystemExit(2)
+limit = 10 * 1024 * 1024
+parent = os.path.dirname(target)
+leaf = os.path.basename(target)
+flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(os.sep, flags)
+for part in parent.lstrip(os.sep).split(os.sep):
+    if not part:
+        continue
+    child = os.open(part, flags, dir_fd=fd)
+    os.close(fd)
+    fd = child
+if not leaf or leaf in (".", ".."):
+    raise SystemExit(2)
+tmp = ".opencuria-" + uuid.uuid4().hex + ".tmp"
+file_fd = os.open(
+    tmp,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+    0o600,
+    dir_fd=fd,
+)
+count = 0
+try:
+    while True:
+        block = sys.stdin.buffer.read(65536)
+        if not block:
+            break
+        count += len(block)
+        if count > limit:
+            raise SystemExit(4)
+        view = memoryview(block)
+        while view:
+            written = os.write(file_fd, view)
+            view = view[written:]
+    os.fchmod(file_fd, mode)
+    os.fsync(file_fd)
+    os.close(file_fd)
+    file_fd = -1
+    # replace affects a symlink leaf itself, never its target.
+    os.replace(tmp, leaf, src_dir_fd=fd, dst_dir_fd=fd)
+    os.fsync(fd)
+finally:
+    if file_fd >= 0:
+        os.close(file_fd)
+    try:
+        os.unlink(tmp, dir_fd=fd)
+    except FileNotFoundError:
+        pass
+    os.close(fd)
+"""
+
+_SAFE_REMOVE_TREE_SCRIPT = """
+import os
+import stat
+import sys
+
+root = os.path.abspath(sys.argv[1])
+target = os.path.abspath(sys.argv[2])
+if os.path.commonpath((root, target)) != root or target == root:
+    raise SystemExit(2)
+flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(os.sep, flags)
+parent = os.path.dirname(target)
+leaf = os.path.basename(target)
+for part in parent.lstrip(os.sep).split(os.sep):
+    if not part:
+        continue
+    child = os.open(part, flags, dir_fd=fd)
+    os.close(fd)
+    fd = child
+try:
+    info = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+except FileNotFoundError:
+    os.close(fd)
+    raise SystemExit(0)
+if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+    raise SystemExit(3)
+tree = os.open(leaf, flags, dir_fd=fd)
+def verify(directory):
+    for name in os.listdir(directory):
+        item = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if stat.S_ISLNK(item.st_mode):
+            raise SystemExit(3)
+        if stat.S_ISDIR(item.st_mode):
+            child = os.open(name, flags, dir_fd=directory)
+            verify(child)
+            os.close(child)
+def clear(directory):
+    for name in os.listdir(directory):
+        item = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if stat.S_ISLNK(item.st_mode):
+            raise SystemExit(3)
+        if stat.S_ISDIR(item.st_mode):
+            child = os.open(name, flags, dir_fd=directory)
+            clear(child)
+            os.close(child)
+            os.rmdir(name, dir_fd=directory)
+        else:
+            os.unlink(name, dir_fd=directory)
+verify(tree)
+clear(tree)
+os.close(tree)
+os.rmdir(leaf, dir_fd=fd)
+os.close(fd)
+"""
+
+
+def validate_claude_skills(skills: list[str]) -> list[str]:
+    """Validate all selected Claude skill bodies before managed writes begin."""
+    if not isinstance(skills, list):
+        raise ValueError("Claude skills must be a list")
+    if len(skills) > MAX_SKILL_COUNT:
+        raise ValueError("Claude skill count exceeds the managed limit")
+    for body in skills:
+        if not isinstance(body, str):
+            raise ValueError("Claude skill bodies must be text")
+        try:
+            body_bytes = body.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("Claude skill body is not valid UTF-8 text") from None
+        if len(body_bytes) > MAX_SKILL_BODY_BYTES:
+            raise ValueError("Claude skill body exceeds the managed size limit")
+    return list(skills)
 
 
 class ClaudeRuntimeState:
@@ -36,46 +217,72 @@ class ClaudeRuntimeState:
         self.root = root.rstrip("/")
         self.sdk_version = sdk_version
 
+    def _validate_managed_path(self, path: str, *, allow_root: bool = False) -> str:
+        """Require an absolute, normalized path below the managed state root."""
+        if not isinstance(path, str) or not path.startswith("/") or "\x00" in path:
+            raise ValueError("Claude engine path is invalid")
+        normalized = os.path.normpath(path)
+        try:
+            contained = os.path.commonpath((self.root, normalized)) == self.root
+        except ValueError:
+            contained = False
+        if (
+            not contained
+            or normalized != path
+            or normalized == self.root
+            and not allow_root
+        ):
+            raise ValueError("Claude engine path escaped its managed state root")
+        return normalized
+
+    async def _run_managed_script(
+        self, script: str, args: list[str], *, payload: bytes = b""
+    ) -> None:
+        """Run bounded, secret-free Python code and send content over stdin."""
+        command = ["python3", "-c", script, *args]
+        if len(command) > 8 or any(len(arg) > 4096 for arg in command):
+            raise ValueError("Claude managed operation exceeds the command limit")
+        stream = await self.accessor.open_process(
+            command, workdir=HARNESS_WORKSPACE_ROOT, timeout=30
+        )
+        try:
+            for offset in range(0, len(payload), 64 * 1024):
+                await stream.send(payload[offset : offset + 64 * 1024])
+            await stream.send_eof()
+            # The scripts are silent; drain anyway so a future small diagnostic
+            # cannot block child exit. Never include remote output in exceptions.
+            while await stream.receive():
+                pass
+            exit_code = await stream.wait_closed()
+            if exit_code != 0:
+                raise RuntimeError("Claude managed workspace operation failed")
+        finally:
+            with contextlib.suppress(Exception):
+                await stream.aclose()
+
     async def ensure_managed_dir(self, path: str) -> None:
-        """Create a managed directory and reject symlinked path components."""
-        if not path.startswith(f"{self.root}/"):
-            raise ValueError("Claude engine directory escaped its managed state root")
-        root = self.root
-        script = (
-            "import os,stat,sys\n"
-            "root=os.path.abspath(sys.argv[1]); path=os.path.abspath(sys.argv[2])\n"
-            "if os.path.commonpath((root,path))!=root: raise SystemExit(2)\n"
-            "current=os.sep\n"
-            "for part in os.path.relpath(root,os.sep).split(os.sep):\n"
-            " current=os.path.join(current,part)\n"
-            " try: os.mkdir(current,0o700)\n"
-            " except FileExistsError: pass\n"
-            " st=os.lstat(current)\n"
-            " if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):\n"
-            "  raise SystemExit(3)\n"
-            "current=root\n"
-            "for part in os.path.relpath(path,root).split(os.sep):\n"
-            " current=os.path.join(current,part)\n"
-            " try: os.mkdir(current,0o700)\n"
-            " except FileExistsError: pass\n"
-            " st=os.lstat(current)\n"
-            " if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):\n"
-            "  raise SystemExit(3)\n"
-            " os.chmod(current,0o700)\n"
-        )
-        result = await self.accessor.exec_wait(
-            ["python3", "-c", script, root, path],
-            workdir=HARNESS_WORKSPACE_ROOT,
-            timeout=15,
-        )
-        if result.exit_code != 0:
-            raise RuntimeError("Could not safely prepare Claude engine state directory")
+        """Create a managed directory while refusing symlinked path components."""
+        path = self._validate_managed_path(path)
+        await self._run_managed_script(_SAFE_MKDIR_SCRIPT, [self.root, path])
 
     async def write_managed_file(self, path: str, payload: bytes) -> None:
-        """Write an engine-generated config or prompt file with private mode."""
-        if not path.startswith(f"{self.root}/"):
-            raise ValueError("Claude engine file escaped its managed state root")
-        await self.accessor.write_file(path, payload, mode=0o600)
+        """Atomically write a private managed file without following symlinks."""
+        path = self._validate_managed_path(path)
+        if not isinstance(payload, (bytes, bytearray)):
+            raise ValueError("Claude managed file content must be bytes")
+        raw = bytes(payload)
+        if len(raw) > MAX_MANAGED_FILE_BYTES:
+            raise ValueError("Claude managed file exceeds the size limit")
+        await self._run_managed_script(
+            _SAFE_WRITE_SCRIPT,
+            [self.root, path, "600"],
+            payload=raw,
+        )
+
+    async def _remove_managed_tree(self, path: str) -> None:
+        """Remove one generated directory tree without crossing symlinks."""
+        path = self._validate_managed_path(path)
+        await self._run_managed_script(_SAFE_REMOVE_TREE_SCRIPT, [self.root, path])
 
     async def write_skills_plugin(self, path: str, skills: list[str]) -> dict[str, str]:
         """Write selected skill bodies as a private, session-scoped Claude plugin.
@@ -85,12 +292,15 @@ class ClaudeRuntimeState:
         shell commands. A generated manifest declares only the plugin metadata;
         each body remains the exact authored skill content.
         """
-        if not skills:
+        skills = validate_claude_skills(skills)
+        plugin_dir = self._validate_managed_path(f"{path}/opencuria-skills")
+        root = f"{plugin_dir}/.claude-plugin"
+        skills_root = f"{plugin_dir}/skills"
+        # This is an exclusively generated directory below this harness
+        # session's managed root; clear it even when the new skill set is empty.
+        await self._remove_managed_tree(plugin_dir)
+        if not any(body.strip() for body in skills):
             return {}
-        if len(skills) > MAX_SKILL_COUNT:
-            raise ValueError("Claude skill count exceeds the managed limit")
-        root = f"{path}/opencuria-skills/.claude-plugin"
-        skills_root = f"{path}/opencuria-skills/skills"
         await self.ensure_managed_dir(root)
         await self.ensure_managed_dir(skills_root)
         manifest = {
@@ -103,10 +313,8 @@ class ClaudeRuntimeState:
         )
         names: dict[str, str] = {}
         for index, body in enumerate(skills):
-            if not isinstance(body, str) or not body.strip():
+            if not body.strip():
                 continue
-            if len(body.encode("utf-8")) > MAX_SKILL_BODY_BYTES:
-                raise ValueError("Claude skill body exceeds the managed size limit")
             name = f"opencuria-skill-{index + 1:03d}"
             skill_dir = f"{skills_root}/{name}"
             await self.ensure_managed_dir(skill_dir)
@@ -162,15 +370,17 @@ class ClaudeRuntimeState:
         if mode == "plan":
             value += (
                 "\n\nOpenCuria plan mode cannot switch into build mode. "
-                "Do not modify source files without explicit user approval; "
-                "use the OpenCuria permission gate for every requested mutation."
+                "Research, tests, builds, and development servers may create "
+                "ordinary temporary artifacts. Use the OpenCuria permission "
+                "gate before deliberate source/configuration edits or other "
+                "unclassified mutations, including delegated work."
             )
         return value
 
     @staticmethod
     def sdk_system_prompt() -> dict[str, Any]:
         """Retain Claude Code's native preset while SDK applies its options."""
-        return {"type": "preset", "preset": "claude_code"}
+        return {"type": "preset", "preset": "claude_code", "snapshot": False}
 
     @staticmethod
     def settings(mode: str) -> dict[str, Any]:
@@ -257,4 +467,5 @@ __all__ = [
     "MAX_SKILL_COUNT",
     "MANAGED_STATE_PREFIX",
     "ClaudeRuntimeState",
+    "validate_claude_skills",
 ]

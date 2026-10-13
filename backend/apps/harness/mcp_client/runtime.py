@@ -23,6 +23,7 @@ from .connection import (
     McpServerConnection,
     McpServerHealthError,
     McpTool,
+    check_name_collisions,
 )
 
 log = structlog.get_logger(__name__)
@@ -111,9 +112,9 @@ class McpRuntime:
         nothing matched — it is not resolved again. Extra *kwargs* are
         ignored for forward compatibility with stub runtimes. Individual
         server failures are logged as health warnings and skipped —
-        including servers whose tools collide with already-kept names
-        (first server wins deterministically, the colliding server is
-        closed and skipped; the run itself never fails for a collision).
+        including servers with duplicate normalized names within their own
+        discovery result or collisions with already-kept names (first server
+        wins deterministically, the colliding server is closed and skipped).
         """
         already_prepared = isinstance(snapshot, PreparedPluginRuntime)
         if isinstance(snapshot, PreparedPluginRuntime):
@@ -265,11 +266,15 @@ class McpRuntime:
                     tools = self._tools_for_connection(connection)
                     names = [tool.name for tool in tools]
                     lowered = [name.strip().lower() for name in names]
-                    if any(name in core for name in lowered) or any(
-                        name in seen for name in lowered
-                    ):
-                        # Deterministic: keep the first server that claimed
-                        # a name; skip + close the colliding server.
+                    try:
+                        # Validate this server's names together before registering
+                        # any of them, as well as against core + kept servers.
+                        check_name_collisions(names, existing=[*core, *seen])
+                    except McpServerHealthError:
+                        # Deterministic: keep the first server that claimed a
+                        # name; skip + close the colliding server. This also
+                        # rejects aliases created by name normalization within
+                        # one server, without dropping any other connection.
                         connection.healthy = False
                         _record_skip(
                             self.skipped,

@@ -28,14 +28,18 @@ from ...tools.base import ToolContext, ToolRegistry, ToolResult
 from ...tools.todos import repository_for_session
 from ..catalog import normalize_claude_effort, resolve_claude_sdk_model
 from .context import build_user_content
+from .errors import ClaudeTranscriptError
 from .events import ClaudeEventNormalizer, StepState
-from .materializer import stage_pdf_attachments
 from .mcp_bridge import mcp_attachment_content, sanitize_mcp_attachments
 from .message_projection import FileSnapshot, NativeFileChangeTracker
 from .message_projector import ClaudeMessageProjector
 from .permissionbridge import PermissionBridge
 from .policy import NATIVE_TOOL_KEYS, native_tools_for_claude, tool_schemas_for_claude
-from .runtime_state import MANAGED_STATE_PREFIX, ClaudeRuntimeState
+from .runtime_state import (
+    MANAGED_STATE_PREFIX,
+    ClaudeRuntimeState,
+    validate_claude_skills,
+)
 from .security import StreamingRedactor, redact_text, redact_value
 from .transport import ClaudeWorkspaceTransport
 
@@ -44,6 +48,7 @@ CLI_VERSION = "2.1.292"
 SDK_VERSION = "0.2.164"
 MAX_RESTORED_TRANSCRIPT_BYTES = 10 * 1024 * 1024
 MAX_MANAGED_PROMPT_BYTES = 256 * 1024
+CANCEL_CLEANUP_TIMEOUT_S = 3.0
 EmitCallback = Callable[[dict[str, Any]], Awaitable[None]]
 BindingCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 ChildEventCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -167,9 +172,7 @@ class ClaudeEngine:
         if self.on_child_event is None:
             return
         try:
-            await self.on_child_event(
-                parent_tool_use_id, self._sanitize_event(event)
-            )
+            await self.on_child_event(parent_tool_use_id, self._sanitize_event(event))
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # pragma: no cover - observer isolation
@@ -243,9 +246,11 @@ class ClaudeEngine:
     async def _restore_transcript(
         self, *, external_id: str, cwd: str, config_dir: str
     ) -> None:
-        """Materialize the isolated SDK mirror before a custom-transport resume."""
-        if self.session_store is None or not external_id:
+        """Restore the authoritative mirror; never reuse missing local state."""
+        if not external_id:
             return
+        if self.session_store is None:
+            raise ClaudeTranscriptError("is missing")
         from claude_agent_sdk._internal.session_store_validation import (
             _store_implements,
         )
@@ -255,8 +260,8 @@ class ClaudeEngine:
             raise ValueError("Claude SDK produced an unsafe project key")
         key = {"project_key": project_key, "session_id": external_id}
         entries = await self.session_store.load(key)
-        if entries is None:
-            return
+        if entries is None or entries == []:
+            raise ClaudeTranscriptError("is missing")
         if not isinstance(entries, list):
             raise ValueError("Claude session store returned invalid transcript entries")
         transcript = self._jsonl_bytes(entries)
@@ -289,7 +294,7 @@ class ClaudeEngine:
             sub_transcript = self._jsonl_bytes(transcript_entries)
             total += len(sub_transcript)
             if total > MAX_RESTORED_TRANSCRIPT_BYTES:
-                raise ValueError("Claude transcript exceeds the restore limit")
+                raise ClaudeTranscriptError("exceeds the restore limit")
             relative_dir, basename = subpath.rsplit("/", 1)
             remote_dir = f"{session_dir}/{relative_dir}"
             await self._ensure_managed_dir(remote_dir)
@@ -306,7 +311,7 @@ class ClaudeEngine:
                 raw = json.dumps(clean, ensure_ascii=False).encode()
                 total += len(raw)
                 if total > MAX_RESTORED_TRANSCRIPT_BYTES:
-                    raise ValueError("Claude transcript exceeds the restore limit")
+                    raise ClaudeTranscriptError("exceeds the restore limit")
                 await self._write_managed_file(
                     f"{remote_dir}/{basename}.meta.json", raw
                 )
@@ -326,7 +331,7 @@ class ClaudeEngine:
             )
             total += len(row)
             if total > MAX_RESTORED_TRANSCRIPT_BYTES:
-                raise ValueError("Claude transcript exceeds the restore limit")
+                raise ClaudeTranscriptError("exceeds the restore limit")
             rows.append(row)
         return b"".join(rows)
 
@@ -373,8 +378,6 @@ class ClaudeEngine:
                 or name.startswith("process_")
                 or name.startswith("mcp_")
                 or permission_key.startswith("mcp_")
-                or name == "write"
-                and mode == "plan"
             ):
                 eligible.register(tool)
         schemas = tool_schemas_for_claude(
@@ -423,70 +426,15 @@ class ClaudeEngine:
         return ClaudeRuntimeState.claude_system_prompt(system, mode)
 
     def _prompt_tools(self, schemas: list[dict[str, Any]]) -> list[ToolSchema]:
-        """Render user-owned tools without claiming native Claude tool control."""
-        descriptions: list[ToolSchema] = []
-        native = native_tools_for_claude(
-            tools=self.tools,
-            agent=self._agent or get_agent("build"),
-            evaluator=self.evaluator,
-            mode=self._mode,
-            depth=self._options.depth if self._options else 0,
-            max_depth=self._options.max_depth if self._options else DEFAULT_MAX_DEPTH,
-            selected_skills=sorted(self._managed_skill_names),
-            plan_mode=self._mode == "plan",
-        )
-        native_keys = {
-            "Bash": "bash",
-            "Read": "read",
-            "Write": "write",
-            "Edit": "edit",
-            "NotebookEdit": "edit",
-            "Glob": "glob",
-            "Grep": "grep",
-            "WebFetch": "webfetch",
-        }
-        for name in native:
-            if name in {"TaskStop", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList"}:
-                descriptions.append(
-                    ToolSchema(
-                        name=name,
-                        description="Manage Claude Code subagent tasks.",
-                        parameters={"type": "object"},
-                    )
-                )
-                continue
-            if name == "WebSearch":
-                descriptions.append(
-                    ToolSchema(
-                        name=name,
-                        description="Search the web for current information.",
-                        parameters={"type": "object"},
-                    )
-                )
-                continue
-            key = native_keys.get(name)
-            if not key:
-                continue
-            try:
-                registered = self.tools.get(key)
-            except KeyError:
-                continue
-            descriptions.append(
-                ToolSchema(
-                    name=name,
-                    description=registered.description,
-                    parameters=registered.parameters_schema(),
-                )
-            )
-        descriptions.extend(
+        """Describe only OpenCuria MCP tools; native contracts belong to the CLI."""
+        return [
             ToolSchema(
-                name=str(item["name"]),
+                name=f"mcp__opencuria__{item['name']}",
                 description=str(item.get("description") or item["name"]),
                 parameters=dict(item.get("input_schema") or {}),
             )
             for item in schemas
-        )
-        return descriptions
+        ]
 
     def _sdk_tools(self, schemas: list[dict[str, Any]]) -> list[Any]:
         from claude_agent_sdk import tool as sdk_tool
@@ -597,42 +545,25 @@ class ClaudeEngine:
             # Tool calls from separate turns may have identical arguments;
             # SDK metadata is the primary correlation mechanism. The FIFO
             # fallback is safe only when the SDK omits that correlation key.
-            call_id = ""
             try:
                 metadata = request_ctx.get().meta
             except LookupError:
                 metadata = None
-            if metadata is not None:
-                extra = metadata.model_extra or {}
-                claude_meta = extra.get("claudecode") or extra.get("claudeCode") or {}
-                call_id = str(
-                    extra.get("claudecode/toolUseId")
-                    or claude_meta.get("toolUseId")
-                    or claude_meta.get("tool_use_id")
-                    or ""
-                )
-            state = self._tool_events.get(call_id) if call_id else None
-            if state is not None and self._tool_arguments.get(call_id) == arguments:
-                if not await bridge.claim_mcp_call(call_id, name, arguments):
-                    call_id = ""
-            else:
-                call_id = ""
-            if not call_id:
-                extra = metadata.model_extra or {} if metadata is not None else {}
-                preferred_id = str(
-                    extra.get("tool_use_id") or extra.get("claudecode/toolUseId") or ""
-                )
-                call_id = await bridge.take_mcp_call(
-                    name, arguments, preferred_call_id=preferred_id
-                )
-                if not call_id:
-                    registry_name = self._wire_to_registry.get(wire_name)
-                    if registry_name and registry_name != name:
-                        call_id = await bridge.take_mcp_call(
-                            registry_name,
-                            arguments,
-                            preferred_call_id=preferred_id,
-                        )
+            extra = metadata.model_extra or {} if metadata is not None else {}
+            nested = extra.get("claudecode") or extra.get("claudeCode") or {}
+            nested = nested if isinstance(nested, dict) else {}
+            preferred_id = str(
+                extra.get("tool_use_id")
+                or extra.get("claudecode/toolUseId")
+                or nested.get("toolUseId")
+                or nested.get("tool_use_id")
+                or ""
+            )
+            # A supplied identity is authoritative. An invalid, duplicated, or
+            # mismatched identity must never consume another call via FIFO.
+            call_id = await bridge.take_mcp_call(
+                name, arguments, preferred_call_id=preferred_id
+            )
             if not call_id:
                 return self._mcp_error("Tool call was not approved by OpenCuria")
             state = self._tool_events.get(call_id)
@@ -734,19 +665,53 @@ class ClaudeEngine:
             "is_error": True,
         }
 
-    def _agent_definitions(self) -> dict[str, Any]:
+    async def _agent_definitions(self) -> dict[str, Any]:
+        """Give SDK children their own scoped tools and the project/run context."""
         from claude_agent_sdk import AgentDefinition as SdkAgentDefinition
 
         from ...agents.definitions import list_agents
 
         definitions = {}
+        options = self._options or RunOptions()
         for child in list_agents(mode="subagent"):
             if child.name == "computeruse":
                 continue
+            depth = options.depth + 1
+            native = native_tools_for_claude(
+                tools=self.tools,
+                agent=child,
+                evaluator=self.evaluator,
+                mode=self._mode,
+                depth=depth,
+                max_depth=options.max_depth,
+                selected_skills=sorted(self._managed_skill_names),
+                plan_mode=self._mode == "plan",
+            )
+            schemas = self._bridge_schemas_for_sdk(
+                self._schemas(child, self._mode, depth, options.max_depth)
+            )
+            prompt = await compose_system_prompt(
+                agent=child,
+                mode=self._mode,
+                accessor=self.accessor,
+                cwd=self._cwd,
+                tools=self._prompt_tools(schemas),
+                native_tool_contracts=True,
+                skills=list(options.skills) if child.name != "explore" else [],
+                subagents={},
+            )
+            system = (
+                self._claude_system_prompt(prompt.system, self._mode)
+                if child.name != "explore"
+                else prompt.system
+            )
+            if len(system.encode()) > MAX_MANAGED_PROMPT_BYTES:
+                raise ValueError("Claude child prompt exceeds the managed size limit")
             definitions[child.name] = SdkAgentDefinition(
                 description=child.description,
-                prompt=child.system_prompt,
-                mcpServers=["opencuria"],
+                prompt=system,
+                tools=native + [item.name for item in self._prompt_tools(schemas)],
+                mcpServers=["opencuria"] if schemas else [],
                 permissionMode="default",
                 model="inherit",
             )
@@ -828,14 +793,11 @@ class ClaudeEngine:
         scope = parent_tool_use_id or ""
         state = self._step_states.setdefault(scope, StepState())
         if state.started:
-            if state.active_calls:
+            if state.active_calls or not state.awaiting_next_step:
                 return state.step
-            if state.awaiting_next_step:
-                await self._finish_step(scope, Usage())
-            elif scope == "":
+            if state.current_message_id:
                 return state.step
-            else:
-                state.started = False
+            await self._finish_step(scope)
         state.step += 1
         state.started = True
         state.awaiting_next_step = False
@@ -847,26 +809,70 @@ class ClaudeEngine:
         )
         return state.step
 
-    async def _finish_step(self, scope: str, usage: Usage) -> None:
+    async def _finish_step(
+        self,
+        scope: str,
+        usage: Usage | None = None,
+        *,
+        flush_redactors: bool = True,
+    ) -> None:
         state = self._step_states.get(scope)
         if state is None or not state.started:
             return
-        await self._flush_stream_redactors(parent=scope)
+        if flush_redactors:
+            await self._flush_stream_redactors(parent=scope)
+        if usage is None:
+            usage = state.usage_by_message.get(state.current_message_id, Usage())
+        finished_step = state.step
+        finished_usage = usage
+        # Commit locally before yielding to the observer: cancellation during an
+        # emit must not make cleanup publish a second finish for this scope.
+        state.started = False
+        state.awaiting_next_step = False
+        state.finished_usage = state.finished_usage.merge(finished_usage)
         await self._publish(
             {
                 "type": "step_finish",
-                "step": state.step,
+                "step": finished_step,
                 "tokens": {
-                    "prompt_tokens": usage.prompt_tokens,
-                    "completion_tokens": usage.completion_tokens,
-                    "total_tokens": usage.total_tokens,
+                    "prompt_tokens": finished_usage.prompt_tokens,
+                    "completion_tokens": finished_usage.completion_tokens,
+                    "total_tokens": finished_usage.total_tokens,
                 },
-                "cost": usage.cost,
+                "cost": finished_usage.cost,
             },
             parent_tool_use_id=scope or None,
         )
-        state.started = False
-        state.awaiting_next_step = False
+
+    def _record_message_usage(
+        self, state: StepState, message_id: str, raw: Any
+    ) -> None:
+        """Keep the latest complete snapshot for an API assistant message."""
+        snapshot = (
+            raw if isinstance(raw, Usage) else ClaudeEventNormalizer.message_usage(raw)
+        )
+        if snapshot is None or not message_id:
+            return
+        previous = state.usage_by_message.get(message_id, Usage())
+        prompt_tokens = max(previous.prompt_tokens, snapshot.prompt_tokens)
+        completion_tokens = max(previous.completion_tokens, snapshot.completion_tokens)
+        state.usage_by_message[message_id] = Usage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            cost=max(previous.cost, snapshot.cost),
+        )
+
+    async def _begin_message_turn(self, parent: str, message_id: str) -> StepState:
+        """Give each API message its own step within its root/child scope."""
+        state = self._step_states.setdefault(parent, StepState())
+        if message_id and state.current_message_id != message_id:
+            if state.current_message_id and state.started:
+                await self._finish_step(parent)
+            state.current_message_id = message_id
+        if not state.started:
+            await self._start_new_step(parent or None)
+        return state
 
     async def _start_tool(self, call_id: str, *, parent_id: str | None) -> None:
         state = self._tool_events.get(call_id)
@@ -940,7 +946,7 @@ class ClaudeEngine:
                         "tool": state.get("tool", ""),
                         "title": f"Patch {path}",
                         "path": path,
-                        "unified_diff": patch[:128 * 1024],
+                        "unified_diff": patch[: 128 * 1024],
                     },
                     parent_tool_use_id=state.get("parent_tool_use_id"),
                 )
@@ -951,7 +957,7 @@ class ClaudeEngine:
         state = self._tool_events.pop(call_id, None)
         self._early_queued_calls.discard(call_id)
         self._tool_arguments.pop(call_id, None)
-        tool_result = self._tool_results.pop(call_id, None)
+        self._tool_results.pop(call_id, None)
         if state is None:
             self._clear_native_snapshot(call_id)
             return
@@ -1005,7 +1011,34 @@ class ClaudeEngine:
             accessor=self.accessor,
             history=options.history if options is not None else None,
             include_history=not bool(self.external_session_id),
+            authorize_read=(
+                options.authorize_file_read
+                if options is not None and options.authorize_file_read is not None
+                else self._authorize_media_read
+            ),
         )
+
+    async def _authorize_media_read(self, path: str) -> bool:
+        """Apply the native Read policy to explicit user attachments as well."""
+        if self._bridge is None or self._options is None:
+            return False
+        decision, tool, action, title = self._bridge.decide(
+            "Read", {"file_path": path}, depth=self._options.depth
+        )
+        if decision == "deny":
+            return False
+        if decision == "allow":
+            return True
+        if self._options.on_permission is None:
+            return False
+        response = await self._options.on_permission(
+            tool=tool,
+            action=action,
+            title=title,
+            call_id=f"media-{uuid.uuid4()}",
+            key="permission_read",
+        )
+        return response in {"once", "always", "allow", "approved", "yes"}
 
     async def _send_todos(self, parent_tool_use_id: str | None = None) -> None:
         try:
@@ -1133,15 +1166,42 @@ class ClaudeEngine:
             api_message_id = ClaudeEventNormalizer.stream_message_id(message)
             if api_message_id and api_message_id != state.current_message_id:
                 await self._flush_stream_redactors(parent=parent)
-                state.current_message_id = api_message_id
+                state = await self._begin_message_turn(parent, api_message_id)
+            snapshot = ClaudeEventNormalizer.stream_usage(message)
+            if snapshot is not None:
+                self._record_message_usage(state, *snapshot)
             return
 
+        snapshot = ClaudeEventNormalizer.stream_usage(message)
+        if snapshot is not None:
+            message_id, message_usage = snapshot
+            if not message_id:
+                message_id = state.current_message_id
+            if message_id:
+                self._record_message_usage(
+                    state,
+                    message_id,
+                    {
+                        "input_tokens": message_usage.prompt_tokens,
+                        "output_tokens": message_usage.completion_tokens,
+                    },
+                )
+
         if event_type == "content_block_start":
+            message_id = (
+                state.current_message_id
+                or ClaudeEventNormalizer.stream_fallback_id(message)
+            )
+            if message_id and message_id != state.current_message_id:
+                state = await self._begin_message_turn(parent, message_id)
             block = ClaudeEventNormalizer.stream_block_start(message)
             if block is None:
                 return
             index, kind, tool_name, call_id = block
-            message_id = state.current_message_id or ClaudeEventNormalizer.stream_fallback_id(message)
+            message_id = (
+                state.current_message_id
+                or ClaudeEventNormalizer.stream_fallback_id(message)
+            )
             if message_id:
                 state.block_types[(message_id, index)] = kind
                 order = state.block_order.setdefault(message_id, [])
@@ -1157,7 +1217,10 @@ class ClaudeEngine:
             index = ClaudeEventNormalizer.stream_block_stop(message)
             if index is None:
                 return
-            message_id = state.current_message_id or ClaudeEventNormalizer.stream_fallback_id(message)
+            message_id = (
+                state.current_message_id
+                or ClaudeEventNormalizer.stream_fallback_id(message)
+            )
             kind = state.block_types.get((message_id, index), "")
             if kind in {"text", "thinking"}:
                 field_name = "text" if kind == "text" else "reasoning"
@@ -1219,23 +1282,26 @@ class ClaudeEngine:
         parent, blocks = ClaudeEventNormalizer.assistant_blocks(message)
         state = self._step_states.setdefault(parent, StepState())
         message_id = ClaudeEventNormalizer.assistant_message_id(message)
-        if not state.started:
-            await self._start_new_step(parent or None)
-        elif state.awaiting_next_step and not state.active_calls:
-            state.awaiting_next_step = False
-
         if message_id and message_id in state.completed_messages:
             return
+        if message_id:
+            state = await self._begin_message_turn(parent, message_id)
+        elif not state.started:
+            await self._start_new_step(parent or None)
+        state.current_message_id = message_id or state.current_message_id
+        raw_usage = getattr(message, "usage", None)
+        self._record_message_usage(state, message_id, raw_usage)
         stream_state = {
             (index, slot): value
             for (api_id, index, slot), value in state.streamed.items()
             if api_id == message_id
         }
         _, deltas = ClaudeEventNormalizer.assistant_deltas(message, stream_state)
-        delta_by_block = {(index, slot): (field_name, text) for index, slot, field_name, text in deltas}
-        blocks_by_index = {
-            index: block for index, block in enumerate(blocks)
+        delta_by_block = {
+            (index, slot): (field_name, text)
+            for index, slot, field_name, text in deltas
         }
+        blocks_by_index = {index: block for index, block in enumerate(blocks)}
         ordered_blocks = state.block_order.get(message_id, [])
         if ordered_blocks:
             seen_indices = {index for index, _kind in ordered_blocks}
@@ -1374,9 +1440,7 @@ class ClaudeEngine:
     async def _revise_subtask_terminal_status(
         self, task: str, tool: str, status: str
     ) -> None:
-        await self._message_projector.revise_subtask_terminal_status(
-            task, tool, status
-        )
+        await self._message_projector.revise_subtask_terminal_status(task, tool, status)
 
     async def _bind_external_session(self, external_id: str) -> None:
         await self._message_projector.bind_external_session(external_id)
@@ -1389,7 +1453,6 @@ class ClaudeEngine:
             {**lease.owner, "owner_id": lease.owner_id},
             phase,
         )
-
 
     async def run(
         self,
@@ -1405,6 +1468,7 @@ class ClaudeEngine:
         if not prompt or not prompt.strip():
             raise ValueError("prompt must not be empty")
         options = opts or RunOptions()
+        skills = validate_claude_skills(options.skills)
         options.once_approved = set()
         agent = get_agent(agent_name)
         if agent.name == "computeruse":
@@ -1427,6 +1491,9 @@ class ClaudeEngine:
         self._project_key = project_key_for_directory(self._cwd)
         if not re.fullmatch(r"[A-Za-z0-9-]{1,255}", self._project_key):
             raise ValueError("Claude SDK produced an unsafe project key")
+        bind_project_key = getattr(self.session_store, "bind_project_key", None)
+        if callable(bind_project_key):
+            bind_project_key(self._project_key)
         self._steps = 0
         self._step_states = {"": StepState()}
         self._tool_events.clear()
@@ -1469,14 +1536,12 @@ class ClaudeEngine:
         root = f"{MANAGED_STATE_PREFIX}{directory}"
         self._managed_root = root
         self._native_file_snapshots.clear()
-        self._managed_root = root
-        self._native_file_snapshots.clear()
         config = f"{root}/config"
         prompt_file = f"{root}/system-prompt.md"
         if self.external_session_id:
-            resume_key = hashlib.sha256(
-                self.external_session_id.encode()
-            ).hexdigest()[:16]
+            resume_key = hashlib.sha256(self.external_session_id.encode()).hexdigest()[
+                :16
+            ]
             config += f"/resume-{resume_key}"
         await self._ensure_managed_dir(config)
         await self._ensure_managed_dir(root)
@@ -1487,7 +1552,7 @@ class ClaudeEngine:
         )
         schemas = self._schemas(agent, mode, depth, max_depth)
         sdk_schemas = self._bridge_schemas_for_sdk(schemas)
-        skill_names = await self._write_skills_plugin(root, list(options.skills or []))
+        skill_names = await self._write_skills_plugin(root, skills)
         self._managed_skill_names = set(skill_names)
         if agent.name == "explore":
             self._managed_skill_names.clear()
@@ -1495,12 +1560,17 @@ class ClaudeEngine:
             agent=agent,
             mode=mode,
             tools=self._prompt_tools(sdk_schemas),
+            native_tool_contracts=True,
             subagents={},
             accessor=self.accessor,
             cwd=self._cwd,
-            skills=list(options.skills or []),
+            skills=skills,
         )
-        system = self._claude_system_prompt(composed.system, mode)
+        system = (
+            self._claude_system_prompt(composed.system, mode)
+            if agent.name != "explore"
+            else composed.system
+        )
         if len(system.encode()) > MAX_MANAGED_PROMPT_BYTES:
             raise ValueError(
                 "Composed Claude system prompt exceeds the managed size limit"
@@ -1551,6 +1621,7 @@ class ClaudeEngine:
             from claude_agent_sdk import (
                 ClaudeAgentOptions,
                 ClaudeSDKClient,
+                ResultError,
                 create_sdk_mcp_server,
             )
         except ImportError as exc:
@@ -1569,6 +1640,9 @@ class ClaudeEngine:
             plan_mode=mode == "plan",
         )
         mirror_env = self._cli_environment(config)
+        max_turns = options.max_steps or agent.steps
+        if max_turns is not None:
+            argv.extend(["--max-turns", str(max_turns)])
         sdk_options = ClaudeAgentOptions(
             cwd=self._cwd,
             env=mirror_env,
@@ -1588,10 +1662,11 @@ class ClaudeEngine:
             settings=settings_path,
             model=self._model,
             effort=effort,
+            max_turns=max_turns,
             permission_mode="plan" if mode == "plan" else "default",
             system_prompt=self._sdk_system_prompt(),
             tools=native_cli_tools,
-            agents=self._agent_definitions(),
+            agents=await self._agent_definitions(),
             skills=(
                 sorted(self._managed_skill_names) if self._managed_skill_names else None
             ),
@@ -1643,11 +1718,24 @@ class ClaudeEngine:
             terminal = None
             output = ""
             usage = Usage()
-            async for message in client.receive_messages():
-                outcome = await self._handle_message(message)
-                if outcome is not None:
-                    terminal, output, usage = outcome
-                    await self._bind_external_session(str(terminal.session_id or ""))
+            try:
+                async for message in client.receive_messages():
+                    outcome = await self._handle_message(message)
+                    if outcome is not None:
+                        terminal, output, usage = outcome
+                        await self._bind_external_session(
+                            str(terminal.session_id or "")
+                        )
+            except ResultError as exc:
+                # The CLI deliberately exits nonzero after error_max_turns;
+                # the SDK raises again after delivering its result message.
+                if not (
+                    terminal is not None
+                    and terminal.subtype == "error_max_turns"
+                    and isinstance(exc.data, dict)
+                    and exc.data.get("subtype") == "error_max_turns"
+                ):
+                    raise
             if terminal is None:
                 raise RuntimeError("Claude Code stream ended without a result message")
             await self._flush_stream_redactors()
@@ -1684,14 +1772,8 @@ class ClaudeEngine:
             for pending_call_id in list(self._native_file_snapshots):
                 self._clear_native_snapshot(pending_call_id)
             run_error = exc
-            if client is not None:
-                try:
-                    async with asyncio.timeout(2):
-                        await client.interrupt()
-                except BaseException:
-                    pass
-            await self._finalize_abandoned_tools("Claude run was cancelled")
-            await self._send({"type": "aborted", "reason": "cancelled"})
+
+            await self._shield_cancelled_cleanup(client)
             raise
         except Exception as exc:
             for pending_call_id in list(self._native_file_snapshots):
@@ -1702,7 +1784,7 @@ class ClaudeEngine:
             )
             for scope, state in list(self._step_states.items()):
                 if state.started:
-                    await self._finish_step(scope, Usage())
+                    await self._finish_step(scope)
             raise
         finally:
             try:
@@ -1779,6 +1861,77 @@ class ClaudeEngine:
             self._tool_arguments.clear()
             self._managed_skill_names.clear()
 
+    async def _shield_cancelled_cleanup(self, client: Any) -> None:
+        """Bound cleanup, tolerating repeated cancellation without blocking teardown."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + CANCEL_CLEANUP_TIMEOUT_S
+        cleanup_task: asyncio.Task[None] | None = None
+
+        async def cleanup() -> None:
+            async def bounded(
+                awaitable: Awaitable[Any], *, reserve: float = 0.0
+            ) -> None:
+                remaining = deadline - loop.time() - reserve
+                if remaining <= 0:
+                    if asyncio.iscoroutine(awaitable):
+                        awaitable.close()
+                    return
+                operation = asyncio.create_task(awaitable)
+                try:
+                    done, _pending = await asyncio.wait({operation}, timeout=remaining)
+                    if operation in done:
+                        operation.result()
+                        return
+                except (asyncio.CancelledError, Exception):
+                    pass
+                if not operation.done():
+                    operation.cancel()
+                    operation.add_done_callback(
+                        lambda task: task.exception() if not task.cancelled() else None
+                    )
+                    reap_time = min(0.02, max(0.0, deadline - loop.time()))
+                    if reap_time:
+                        await asyncio.wait({operation}, timeout=reap_time)
+
+            budget = CANCEL_CLEANUP_TIMEOUT_S
+            if client is not None:
+                await bounded(client.interrupt(), reserve=budget * 0.85)
+            await bounded(self._flush_stream_redactors(), reserve=budget * 0.6)
+            await bounded(
+                self._finalize_abandoned_tools("Claude run was cancelled"),
+                reserve=budget * 0.4,
+            )
+            # Preserve the cancellation signal even if a step-finish observer
+            # stalls; step closure remains a bounded best-effort terminal event.
+            await bounded(
+                self._send({"type": "aborted", "reason": "cancelled"}),
+                reserve=budget * 0.2,
+            )
+            for scope, state in list(self._step_states.items()):
+                if state.started:
+                    await bounded(self._finish_step(scope, flush_redactors=False))
+
+        cleanup_task = asyncio.create_task(cleanup())
+        while not cleanup_task.done() and loop.time() < deadline:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(cleanup_task),
+                    timeout=max(0.0, deadline - loop.time()),
+                )
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                continue
+        if not cleanup_task.done():
+            cleanup_task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(cleanup_task), timeout=0.01)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+            # Don't await cleanup indefinitely: the run's finally block must
+            # retain control so transport and lease release can proceed.
+            cleanup_task.add_done_callback(
+                lambda task: task.exception() if not task.cancelled() else None
+            )
+
     async def _disconnect_client(self, client: Any) -> None:
         """Disconnect in the same asyncio task that connected the SDK client."""
         import anyio
@@ -1798,17 +1951,51 @@ class ClaudeEngine:
                 reason,
                 parent_id=state.get("parent_tool_use_id"),
             )
-            if state.get("source_tool") in {"Task", "Agent", "TaskCreate"}:
+            self._pending_task_tool_ids.discard(call_id)
+            if state.get("source_tool") in {"Task", "Agent"}:
                 task_id = self._subtask_by_tool.get(call_id, "")
                 if task_id:
-                    await self._finish_sdk_subtask(
-                        task_id, call_id, "error", reason
-                    )
+                    await self._finish_sdk_subtask(task_id, call_id, "error", reason)
                 else:
                     await self._finish_subtask_from_tool(call_id, reason, "error")
 
+    def _reconcile_closed_root_usage(
+        self, root: StepState | None, usage: Usage
+    ) -> None:
+        """Track result-only overhead without reopening a completed UI step."""
+        if root is not None:
+            # Result usage is authoritative at session completion. Do not emit
+            # another step_finish for a step whose lifecycle is already closed.
+            root.finished_usage = root.finished_usage.merge(usage)
+
     async def _flush_open_steps(self, usage: Usage) -> None:
-        """Finish every root and subagent step left open by terminal events."""
+        """Finish open scopes and reconcile cumulative result usage once."""
         for scope, state in list(self._step_states.items()):
-            if state.started:
-                await self._finish_step(scope, usage if not scope else Usage())
+            if scope and state.started:
+                await self._finish_step(scope)
+        root = self._step_states.get("")
+        child_usage = Usage()
+        for scope, state in self._step_states.items():
+            if scope:
+                child_usage = child_usage.merge(state.finished_usage)
+        local_usage = (
+            root.usage_by_message.get(root.current_message_id, Usage())
+            if root is not None and root.started
+            else Usage()
+        )
+        prior = (
+            (root.finished_usage if root is not None else Usage())
+            .merge(child_usage)
+            .merge(local_usage)
+        )
+        residual = Usage(
+            prompt_tokens=max(0, usage.prompt_tokens - prior.prompt_tokens),
+            completion_tokens=max(0, usage.completion_tokens - prior.completion_tokens),
+            total_tokens=max(0, usage.total_tokens - prior.total_tokens),
+            cost=max(0.0, usage.cost - prior.cost),
+        )
+        if root is not None and root.started:
+            final_usage = local_usage.merge(residual)
+            await self._finish_step("", final_usage)
+        else:
+            self._reconcile_closed_root_usage(root, residual)

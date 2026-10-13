@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
+from ...access.base import HARNESS_WORKSPACE_ROOT
 from ...agents.definitions import AgentDefinition
 from ...permissions.evaluator import ASK, DENY, PermissionEvaluator
 from ...tools.base import ToolRegistry
@@ -43,10 +45,22 @@ def combine_decisions(*decisions: str) -> str:
     return "allow"
 
 
+def _canonical_path(path: Any, cwd: str | None = None) -> str:
+    """Canonicalize a workspace VM path before granular permission matching."""
+    value = str(path or "")
+    if not value:
+        return ""
+    if not os.path.isabs(value):
+        value = os.path.join(cwd or HARNESS_WORKSPACE_ROOT, value)
+    return os.path.normpath(value)
+
+
 def tool_identity(
     source_name: str,
     arguments: dict[str, Any],
     tools: ToolRegistry,
+    *,
+    cwd: str | None = None,
 ) -> tuple[str, str, str]:
     """Return (event tool, permission key, action) for Claude tool calls."""
     raw_name = str(source_name or "")
@@ -57,6 +71,17 @@ def tool_identity(
         try:
             registered = tools.get(wire_name)
         except KeyError:
+            registered = None
+        if registered is None and wire_name.strip().lower() not in tools:
+            candidates = [
+                tool
+                for tool in tools.list()
+                if str(getattr(tool, "original_name", "") or "").strip().lower()
+                == wire_name.strip().lower()
+            ]
+            if len(candidates) == 1:
+                registered = candidates[0]
+        if registered is None:
             return wire_name, "__unknown_mcp_tool__", ""
         return (
             registered.name,
@@ -64,12 +89,21 @@ def tool_identity(
             _action(registered.name, arguments, registered),
         )
 
+    if raw_name == "WebSearch":
+        return "WebSearch", "websearch", str(arguments.get("query", "") or "")
+
+    if raw_name == "WebFetch":
+        return "WebFetch", "webfetch", str(arguments.get("url", "") or "")
+
     if raw_name.startswith("mcp__"):
-        tool_name = raw_name.split("__", 2)[2]
+        parts = raw_name.split("__", 2)
+        tool_name = parts[2] if len(parts) == 3 else ""
         try:
-            registered = tools.get(tool_name)
+            registered = tools.get(tool_name) if tool_name else None
         except KeyError:
-            return tool_name, "__unknown_mcp_tool__", ""
+            registered = None
+        if registered is None:
+            return tool_name or raw_name, "__unknown_mcp_tool__", ""
         return (
             registered.name,
             registered.permission_key or registered.name,
@@ -84,8 +118,20 @@ def tool_identity(
             registered = None
         if registered is None:
             return raw_name, key, _action(key, arguments, None)
-        key = registered.permission_key or key
-        return registered.name, key, _action(key, arguments, registered)
+        # Normalize native edit paths while retaining the harness event and
+        # permission identity (notably Write -> write, Edit -> edit).
+        event_tool = registered.name
+        permission_key = registered.permission_key or key
+        action = _action(key, arguments, registered)
+        if permission_key.lower() in {"read", "edit", "write", "list", "glob", "grep"}:
+            path = (
+                arguments.get("file_path")
+                or arguments.get("path")
+                or arguments.get("notebook_path")
+                or ""
+            )
+            action = _canonical_path(path, cwd)
+        return event_tool, permission_key, action
 
     try:
         registered = tools.get(raw_name)
@@ -127,6 +173,21 @@ def _action(name: str, arguments: dict[str, Any], registered: Any | None) -> str
     return ""
 
 
+def _resolve_registered_tool(source_name: str, tools: ToolRegistry) -> Any | None:
+    """Resolve a registry name or unique original MCP wire name."""
+    try:
+        return tools.get(source_name)
+    except KeyError:
+        normalized = source_name.strip().lower()
+        candidates = [
+            tool
+            for tool in tools.list()
+            if str(getattr(tool, "original_name", "") or "").strip().lower()
+            == normalized
+        ]
+        return candidates[0] if len(candidates) == 1 else None
+
+
 def registry_tool_identity(
     source_name: str,
     arguments: dict[str, Any],
@@ -136,14 +197,18 @@ def registry_tool_identity(
     try:
         registered = tools.get(source_name)
     except KeyError:
+        registered = None
+    if registered is None and source_name.strip().lower() not in tools:
         candidates = [
             tool
             for tool in tools.list()
-            if getattr(tool, "original_name", "") == source_name
+            if str(getattr(tool, "original_name", "") or "").strip().lower()
+            == source_name.strip().lower()
         ]
-        if len(candidates) != 1:
-            return source_name, "__unknown_tool__", ""
-        registered = candidates[0]
+        if len(candidates) == 1:
+            registered = candidates[0]
+    if registered is None:
+        return source_name, "__unknown_tool__", ""
     permission_key = registered.permission_key or registered.name
     action = _action(registered.name, arguments, registered)
     return registered.name, permission_key, action
@@ -160,28 +225,44 @@ def decide_tool(
     depth: int,
     max_depth: int,
     selected_skills: list[str] | None = None,
+    cwd: str | None = None,
 ) -> tuple[str, str, str, str]:
     """Return decision, event tool, safe action and human-readable title."""
-    event_tool, key, action = (
-        registry_tool_identity(source_name, arguments, tools)
-        if source_name in tools
-        else tool_identity(source_name, arguments, tools)
-    )
-    raw = source_name
+    raw_source = str(source_name or "")
+    # Explicit hook routing prevents native names such as Write being treated
+    # as similarly named registry tools, and MCP wire identities stay exact.
+    if raw_source.startswith("mcp__opencuria__"):
+        event_tool, key, action = tool_identity(
+            source_name, arguments, tools, cwd=cwd
+        )
+    elif raw_source.startswith("mcp__"):
+        parts = raw_source.split("__", 2)
+        if len(parts) == 3:
+            return DENY, parts[-1], "", parts[-1]
+        event_tool, key, action = registry_tool_identity(
+            source_name, arguments, tools
+        )
+    elif raw_source not in NATIVE_TOOL_KEYS:
+        event_tool, key, action = registry_tool_identity(source_name, arguments, tools)
+        if key.startswith("__unknown_"):
+            return DENY, event_tool, action, event_tool
+    else:
+        event_tool, key, action = tool_identity(source_name, arguments, tools, cwd=cwd)
+    raw = str(source_name or "")
     is_sdk_mcp = raw.startswith("mcp__")
     if key.startswith("__unknown_"):
         return DENY, event_tool, action, event_tool
-    if is_sdk_mcp and not raw.startswith("mcp__opencuria__"):
-        return DENY, event_tool, action, event_tool
-    if not is_sdk_mcp and raw not in NATIVE_TOOL_KEYS and raw not in tools:
-        return DENY, event_tool, action, event_tool
-
-    if key == "task" and raw in {"Task", "Agent", "TaskCreate"} and depth >= max_depth:
+    if key == "task" and raw in {"Task", "Agent"} and depth >= max_depth:
         return DENY, event_tool, action, "Subagent depth limit reached"
     if key == "todowrite" and depth > 0:
         return DENY, event_tool, action, "TodoWrite is unavailable to subagents"
     if raw == "ExitPlanMode":
-        return DENY, event_tool, action, "ExitPlanMode requires an OpenCuria build-mode restart"
+        return (
+            DENY,
+            event_tool,
+            action,
+            "ExitPlanMode requires an OpenCuria build-mode restart",
+        )
     if raw == "AskUserQuestion":
         return DENY, event_tool, action, "Use the OpenCuria question tool instead"
 
@@ -189,10 +270,20 @@ def decide_tool(
     try:
         registered = tools.get(event_tool)
     except KeyError:
-        if raw not in ("WebSearch", "Skill"):
+        if raw not in ("WebSearch", "WebFetch", "Skill") and not (
+            raw.startswith("mcp__") and event_tool
+        ):
             return DENY, event_tool, action, event_tool
 
     agent_eval = PermissionEvaluator(agent_rules=dict(agent.permissions or {}))
+    if raw in {"WebFetch", "WebSearch"}:
+        title = f"{raw}: {action}"[:240]
+        decision = combine_decisions(
+            evaluator.evaluate(key, action, mode=mode),
+            agent_eval.evaluate(key, action, mode=mode),
+        )
+        return decision, event_tool, action, title
+
     if raw == "Skill":
         skill_name = str(arguments.get("skill", "") or "")
         if skill_name not in set(selected_skills or ()):
@@ -231,11 +322,14 @@ def decide_tool(
         evaluator.evaluate(key, action, mode=mode),
         agent_eval.evaluate(key, action, mode=mode),
     )
+    if mode == "plan" and key == "edit":
+        decision = combine_decisions(decision, ASK)
     if key in ("bash", "process") and action:
         from ...tools.shell import detect_external_directory
 
         if detect_external_directory(action):
             decision = combine_decisions(
+                decision,
                 evaluator.evaluate(key, action, mode=mode, external_directory=True),
                 agent_eval.evaluate(key, action, mode=mode, external_directory=True),
             )
@@ -261,12 +355,17 @@ def tool_schemas_for_claude(
         if name == "todowrite" and depth > 0:
             continue
         key = registered.permission_key or registered.name
-        if name.startswith("mcp_") and agent.name == "explore":
+        if agent.name == "explore" and (
+            name.startswith("mcp_") or key.startswith("mcp_")
+        ):
             continue
-        if combine_decisions(
-            evaluator.evaluate(key, "", mode=mode),
-            agent_eval.evaluate(key, "", mode=mode),
-        ) == DENY:
+        if (
+            combine_decisions(
+                evaluator.evaluate(key, "", mode=mode),
+                agent_eval.evaluate(key, "", mode=mode),
+            )
+            == DENY
+        ):
             continue
         schemas.append(
             {
@@ -312,7 +411,7 @@ def native_tools_for_claude(
             continue
         if cli_name == "Skill" and agent.name == "explore":
             continue
-        if cli_name == "WebSearch":
+        if cli_name in {"WebSearch", "WebFetch"}:
             permission_key = registry_name
         elif cli_name == "Skill":
             if not selected_skills:
@@ -330,9 +429,7 @@ def native_tools_for_claude(
         )
         if cli_name == "Bash" and plan_mode and decision == "allow":
             decision = ASK
-        if decision != DENY and (
-            cli_name != "WebSearch" or "mcp_web_search" in tools
-        ):
+        if decision != DENY:
             names.append(cli_name)
     return names
 

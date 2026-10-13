@@ -214,6 +214,10 @@ class FakeAccessor(WorkspaceAccessor):
             truncated=truncated,
         )
 
+    async def read_file_no_follow(self, path: str, max_size=None) -> FileContent:
+        """Media-read counterpart for the in-memory fake (no symlinks exist)."""
+        return await self.read_file(path, max_size)
+
     async def write_file(self, path: str, content: bytes, mode=0o644) -> None:
         """Write into the in-memory file map."""
         self._maybe_fail()
@@ -308,7 +312,8 @@ class FakeAccessor(WorkspaceAccessor):
                 "workdir": workdir,
                 "pid": 1234,
                 "log_path": (
-                    f"/workspace/.opencuria/processes/proc-{len(self.processes) + 1}.log"
+                    "/workspace/.opencuria/processes/"
+                    f"proc-{len(self.processes) + 1}.log"
                 ),
                 "status": "running",
                 "exit_code": None,

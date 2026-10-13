@@ -6,9 +6,15 @@ import uuid
 from dataclasses import dataclass
 
 import structlog
+from django.db.models import Q
 from django.utils import timezone
 
 from . import models as perm_models
+from .scopes import (
+    is_permission_scope,
+    permission_display_action,
+    permission_scope_matches,
+)
 from .evaluator import (
     ALLOW,
     ASK,
@@ -157,7 +163,11 @@ class AllowlistRepository:
             organization_id=organization_id, tool=tool
         )
         if workspace_id is not None:
-            query = query.filter(workspace_id__in=[workspace_id, None])
+            query = query.filter(
+                Q(workspace_id=workspace_id) | Q(workspace_id__isnull=True)
+            )
+        else:
+            query = query.filter(workspace_id__isnull=True)
         return list(query.values_list("pattern", flat=True))
 
 
@@ -189,12 +199,15 @@ class PermissionService:
         organization_id: uuid.UUID | None = None,
         workspace_id: uuid.UUID | None = None,
     ) -> Decision:
-        """Evaluate without side effects (allowlist counts as allow)."""
-        if organization_id is not None and self._allowlisted(
+        """Evaluate without side effects; explicit evaluator denies win."""
+        decision = self.evaluator.evaluate(tool, action, mode=mode)
+        if decision == DENY:
+            return DENY
+        if organization_id is not None and self.is_allowlisted(
             organization_id, tool, action, workspace_id
         ):
             return ALLOW
-        return self.evaluator.evaluate(tool, action, mode=mode)
+        return decision
 
     def check_or_request(
         self,
@@ -212,10 +225,12 @@ class PermissionService:
         Returns ``(decision, request)`` where request is None unless the
         decision is ``ask`` (a pending request was created).
         """
-        if self._allowlisted(organization_id, tool, pattern, workspace_id):
+        decision = self.evaluator.evaluate(tool, pattern, mode=mode)
+        if decision == DENY:
+            return DENY, None
+        if self.is_allowlisted(organization_id, tool, pattern, workspace_id):
             log.debug("permission_allowlisted", tool=tool, pattern=pattern)
             return ALLOW, None
-        decision = self.evaluator.evaluate(tool, pattern, mode=mode)
         if decision != ASK:
             return decision, None
         request = self.requests.create(
@@ -272,6 +287,16 @@ class PermissionService:
         )
         return ResolveResult(request_id, ALLOW, remember)
 
+    def is_allowlisted(
+        self,
+        organization_id: uuid.UUID,
+        tool: str,
+        action: str,
+        workspace_id: uuid.UUID | None = None,
+    ) -> bool:
+        """Return whether a persisted grant covers this scoped tool action."""
+        return self._allowlisted(organization_id, tool, action, workspace_id)
+
     def _allowlisted(
         self,
         organization_id: uuid.UUID,
@@ -292,10 +317,18 @@ class PermissionService:
             tool="*",
             workspace_id=workspace_id,
         )
+        if is_permission_scope(action):
+            # A fingerprint is an exact action capability. Never apply glob
+            # semantics to its public display or let a legacy redacted grant
+            # bridge multiple distinct secret-bearing actions.
+            return any(
+                is_permission_scope(pattern)
+                and permission_scope_matches(pattern, action)
+                for pattern in (*patterns, *global_patterns)
+            )
         for pattern in (*patterns, *global_patterns):
-            if fnmatch.fnmatchcase(action, pattern) or pattern in (
-                action,
-                "*",
-            ):
+            if is_permission_scope(pattern):
+                continue
+            if fnmatch.fnmatchcase(action, pattern) or pattern in (action, "*"):
                 return True
         return False

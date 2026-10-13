@@ -22,6 +22,13 @@ if TYPE_CHECKING:
 log = structlog.get_logger("apps.harness.harness_service")
 
 
+def _safe_transcript_recovery_message(error: object) -> str:
+    """Expose only the fixed actionable message from Claude transcript errors."""
+    from .claude.errors import ClaudeTranscriptError
+
+    return str(error) if isinstance(error, ClaudeTranscriptError) else ""
+
+
 async def execute_external_run(
     service: HarnessService,
     *,
@@ -49,6 +56,7 @@ async def execute_external_run(
     status = HarnessRunStatus.ERROR
     safe_error = ""
     public_error = ""
+    public_recovery_error = ""
     cleanup_confirmed = True
     result = None
     allowed_metadata: dict[str, Any] = {}
@@ -125,6 +133,9 @@ async def execute_external_run(
             ),
             on_permission=lambda **kw: service._on_permission(session, assistant, **kw),
             on_question=lambda **kw: service._on_question(session, assistant, **kw),
+        )
+        run_options.authorize_file_read = lambda path: service._authorize_file_read(
+            session, assistant, path
         )
         run_options.reasoning_effort = session.reasoning_effort or "high"
 
@@ -245,6 +256,9 @@ async def execute_external_run(
             safe_error = service._redact_claude_error(exc, auth)
         except Exception:
             safe_error = "Claude run failed"
+        public_recovery_error = _safe_transcript_recovery_message(exc)
+        if public_recovery_error:
+            public_error = public_recovery_error
         current_owner = (
             ownership is not None and await ownership.is_owner_for_finalization()
         )
@@ -253,7 +267,8 @@ async def execute_external_run(
         else:
             await sync_to_async(assistant.refresh_from_db, thread_sensitive=True)()
             context["pending_assistant_content"] = assistant.content or ""
-            public_error = "Claude run failed."
+            if public_recovery_error:
+                public_error = public_recovery_error
         log.warning(
             "claude_harness_run_failed",
             session_id=key,
@@ -313,7 +328,7 @@ async def execute_external_run(
                         if status == HarnessRunStatus.INTERRUPTED
                         else "error"
                         if status == HarnessRunStatus.ERROR
-                        else "stop"
+                        else str(getattr(result, "finish_reason", "stop") or "stop")
                     )
                     public_error = (
                         "aborted by user"
@@ -321,6 +336,8 @@ async def execute_external_run(
                         and service._user_abort_requested(session)
                         else "Run interrupted unexpectedly"
                         if status == HarnessRunStatus.INTERRUPTED
+                        else public_recovery_error
+                        if status == HarnessRunStatus.ERROR and public_recovery_error
                         else "Claude run failed."
                         if status == HarnessRunStatus.ERROR
                         else ""

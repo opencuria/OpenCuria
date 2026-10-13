@@ -22,7 +22,7 @@ from apps.harness.harness_service import (
 )
 from apps.harness.models import HarnessSession, QuestionRequest, Todo
 from apps.harness.permissions.evaluator import PermissionEvaluator
-from apps.harness.permissions.models import PermissionRequest
+from apps.harness.permissions.models import PermissionAllowlist, PermissionRequest
 from apps.harness.permissions.service import (
     PermissionRequestRepository,
     PermissionService,
@@ -128,6 +128,53 @@ def _session(harness_workspace) -> HarnessSession:  # type: ignore[no-untyped-de
         mode="build",
         model="fake-model",
     )
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_native_run_reuses_persisted_always_allowlist(
+    harness_workspace,
+) -> None:
+    """Native ask decisions consult the same persistent org/workspace grant."""
+    path = "/workspace/docs/guide.md"
+    permissions = PermissionService(
+        evaluator=PermissionEvaluator(global_rules={"read": "ask"})
+    )
+    from apps.harness.tests.conftest import FakeAccessor
+
+    async def _accessor(_workspace_id: str) -> FakeAccessor:
+        return FakeAccessor(files={path: b"guide"})
+
+    service = HarnessService(
+        permissions=permissions,
+        provider_factory=lambda _org: FakeProvider(
+            [_tool_step("read", {"path": path}), _text_step("done")]
+        ),
+        accessor_factory=_accessor,
+    )
+    session = await _db_create_session(harness_workspace)
+    await sync_to_async(PermissionAllowlist.objects.create)(
+        organization_id=session.organization_id,
+        workspace_id=session.workspace_id,
+        tool="read",
+        pattern=path,
+    )
+
+    await service.start_run(
+        session,
+        "read the guide",
+        organization_id=session.organization_id,
+        workspace_id=str(session.workspace_id),
+    )
+    await service._tasks[str(session.id)]
+
+    messages = await sync_to_async(HarnessMessageRepository.list_for_session)(
+        session.id
+    )
+    assistant = next(message for message in messages if message.role == "assistant")
+    assert assistant.finish == "stop"
+    assert not await sync_to_async(
+        PermissionRequest.objects.filter(session_id=session.id).exists
+    )()
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1007,7 +1054,6 @@ async def test_execute_run_passes_catalog_limits_and_last_step_tokens(
             accessor=accessor,
             emit=emit,
         )
-        original_run = runner.run
 
         async def _capturing_run(prompt, agent, model, mode, opts):  # type: ignore[no-untyped-def]
             captured.append(opts)
@@ -2331,10 +2377,10 @@ async def test_parallel_tool_events_persist_distinct_parts_by_call_id(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_always_allow_resolves_sibling_pending_asks(
+async def test_always_allow_resolves_only_matching_sibling_asks(
     harness_workspace, monkeypatch
 ) -> None:
-    """Always-allow auto-approves remaining pending asks for the same tool."""
+    """Always resolves identical asks but leaves other actions pending."""
     emitted: list[dict[str, Any]] = []
 
     async def _emit(event: str, data: dict[str, Any]) -> None:
@@ -2361,9 +2407,19 @@ async def test_always_allow_resolves_sibling_pending_asks(
             session,
             assistant,
             tool="bash",
+            action="git status",
+            title="$ git status",
+            call_id="c2",
+        )
+    )
+    third = asyncio.create_task(
+        service._on_permission(
+            session,
+            assistant,
+            tool="bash",
             action="git diff",
             title="$ git diff",
-            call_id="c2",
+            call_id="c3",
         )
     )
     request_ids: list[str] = []
@@ -2373,10 +2429,10 @@ async def test_always_allow_resolves_sibling_pending_asks(
             for item in emitted
             if item.get("event") == FRONTEND_EVENT_PERMISSION
         ]
-        if len(request_ids) >= 2:
+        if len(request_ids) >= 3:
             break
         await asyncio.sleep(0.02)
-    assert len(request_ids) >= 2
+    assert len(request_ids) >= 3
     monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
     try:
         await service.resolve_permission(
@@ -2390,13 +2446,37 @@ async def test_always_allow_resolves_sibling_pending_asks(
         os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
     decisions = await asyncio.wait_for(asyncio.gather(first, second), timeout=2)
     assert set(decisions) == {"once"}
+    rows = await sync_to_async(list)(
+        PermissionRequest.objects.filter(id__in=request_ids).values(
+            "id", "pattern", "status"
+        )
+    )
+    matching_rows = [row for row in rows if row["pattern"] == "git status"]
+    nonmatching_rows = [row for row in rows if row["pattern"] == "git diff"]
+    assert len(matching_rows) == 2
+    assert len(nonmatching_rows) == 1
+    assert all(row["status"] == "approved" for row in matching_rows)
+    assert nonmatching_rows[0]["status"] == "pending"
+    matching_ids = [str(row["id"]) for row in matching_rows]
+    nonmatching_id = str(nonmatching_rows[0]["id"])
+    assert not third.done()
+    third.cancel()
+    await asyncio.gather(third, return_exceptions=True)
     resolved_events = [
         item
         for item in emitted
         if item.get("event") == FRONTEND_EVENT_PERMISSION and item.get("decision")
     ]
     assert len(resolved_events) == 2
-    assert {item["request_id"] for item in resolved_events} == set(request_ids[:2])
+    assert {item["request_id"] for item in resolved_events} == set(matching_ids)
+    nonmatching_record = await sync_to_async(PermissionRequest.objects.get)(
+        id=nonmatching_id
+    )
+    await sync_to_async(PermissionRequestRepository.mark_resolved)(
+        nonmatching_record,
+        approved=False,
+        remember="once",
+    )
     assert all(
         item.get("root_session_id") == str(parent.id) for item in resolved_events
     )
@@ -2911,7 +2991,8 @@ def test_message_positions_sequential_with_tied_timestamps(harness_workspace) ->
     ordered = HarnessMessageRepository.list_for_session(session.id)
     assert [m.id for m in ordered] == [first.id, second.id, third.id]
     assert [m.position for m in ordered] == [0, 1, 2]
-    assert [str(v) for v in HarnessMessageRepository.list_ids_for_session(session.id)] == [
+    message_ids = HarnessMessageRepository.list_ids_for_session(session.id)
+    assert [str(v) for v in message_ids] == [
         str(first.id),
         str(second.id),
         str(third.id),
@@ -2963,7 +3044,8 @@ async def test_text_tool_text_observed_order_and_live_ids(harness_workspace) -> 
     service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
 
     await service._on_runner_event(
-        session, assistant, {"type": "part_updated", "delta": {"text": "before "}, "step": 1}
+        session, assistant,
+        {"type": "part_updated", "delta": {"text": "before "}, "step": 1}
     )
     await service._on_runner_event(
         session,
@@ -3001,7 +3083,8 @@ async def test_text_tool_text_observed_order_and_live_ids(harness_workspace) -> 
         },
     )
     await service._on_runner_event(
-        session, assistant, {"type": "part_updated", "delta": {"text": "after"}, "step": 1}
+        session, assistant,
+        {"type": "part_updated", "delta": {"text": "after"}, "step": 1}
     )
 
     parts = HarnessPartRepository.list_for_message(assistant.id)
@@ -3254,10 +3337,12 @@ async def test_status_busy_and_idle_carry_current_assistant_message_id(
     )
     await service._tasks[str(session.id)]
     busy_first = [
-        e for e in events if e.get("event") == FRONTEND_EVENT_STATUS and e.get("status") == "busy"
+        e for e in events
+        if e.get("event") == FRONTEND_EVENT_STATUS and e.get("status") == "busy"
     ]
     idle_first = [
-        e for e in events if e.get("event") == FRONTEND_EVENT_STATUS and e.get("status") == "idle"
+        e for e in events
+        if e.get("event") == FRONTEND_EVENT_STATUS and e.get("status") == "idle"
     ]
     assert busy_first and busy_first[-1]["message_id"] == str(first.id)
     assert idle_first and idle_first[-1]["message_id"] == str(first.id)
@@ -3272,10 +3357,12 @@ async def test_status_busy_and_idle_carry_current_assistant_message_id(
     await service._tasks[str(session.id)]
     assert str(second.id) != str(first.id)
     busy_second = [
-        e for e in events if e.get("event") == FRONTEND_EVENT_STATUS and e.get("status") == "busy"
+        e for e in events
+        if e.get("event") == FRONTEND_EVENT_STATUS and e.get("status") == "busy"
     ]
     idle_second = [
-        e for e in events if e.get("event") == FRONTEND_EVENT_STATUS and e.get("status") == "idle"
+        e for e in events
+        if e.get("event") == FRONTEND_EVENT_STATUS and e.get("status") == "idle"
     ]
     assert busy_second and busy_second[-1]["message_id"] == str(second.id)
     assert idle_second and idle_second[-1]["message_id"] == str(second.id)
@@ -3454,7 +3541,8 @@ async def test_parallel_same_tool_provisional_ids_rebind_by_queued_id(
         })
     result = HarnessPartRepository.list_for_message(assistant.id)
     assert [part.id for part in result] == [part.id for part in initial]
-    assert [(part.call_id, part.input["arguments"], part.output) for part in result] == [
+    observed = [(part.call_id, part.input["arguments"], part.output) for part in result]
+    assert observed == [
         ("real-a", '{"path": "a.txt"}', "a.txt"),
         ("real-b", '{"path": "b.txt"}', "b.txt"),
     ]

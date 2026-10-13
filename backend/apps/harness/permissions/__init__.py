@@ -12,6 +12,12 @@ from .evaluator import (
     PermissionEvaluator,
     compile_rules,
 )
+from .scopes import (
+    is_permission_scope,
+    permission_display_action,
+    permission_scope,
+    permission_scope_matches,
+)
 from .service import (
     AllowlistRepository,
     PermissionRequestRepository,
@@ -32,4 +38,12 @@ __all__ = [
     "PermissionService",
     "ResolveResult",
     "compile_rules",
+    "is_permission_scope",
+    "permission_display_action",
+    "permission_scope",
+    "permission_scope_matches",
+    "is_permission_scope",
+    "permission_display_action",
+    "permission_scope",
+    "permission_scope_matches",
 ]

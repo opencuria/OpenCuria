@@ -599,16 +599,28 @@ class HarnessService:
                 owner_id,
                 getattr(session, "connection_id", None),
             )
-        if skill_ids is not None:
-            if user_id is None:
+        effective_skill_ids = (
+            _normalize_skill_ids(skill_ids)
+            if skill_ids is not None
+            else _normalize_skill_ids(list(session.skill_ids or []))
+        )
+        claude_session = getattr(session, "harness_id", "native") == "claude"
+        if claude_session or skill_ids is not None:
+            if user_id is None and (effective_skill_ids or skill_ids is not None):
                 raise AuthenticationError(
                     "A user is required to validate selected skills"
                 )
-            await sync_to_async(resolve_skill_bodies)(
-                _normalize_skill_ids(skill_ids),
-                user_id=user_id,
-                organization_id=organization_id or session.organization_id,
-            )
+            effective_skill_bodies: list[str] = []
+            if user_id is not None:
+                effective_skill_bodies = await sync_to_async(resolve_skill_bodies)(
+                    effective_skill_ids,
+                    user_id=user_id,
+                    organization_id=organization_id or session.organization_id,
+                )
+            if getattr(session, "harness_id", "native") == "claude":
+                from .engines.claude.runtime_state import validate_claude_skills
+
+                validate_claude_skills(effective_skill_bodies)
         stored = await sync_to_async(self.messages.list_for_session)(session.id)
         target = next((row for row in stored if row.id == message_id), None)
         if target is None:
@@ -1065,13 +1077,15 @@ class HarnessService:
         names = {
             row.id: row.agent_name for row in self.sessions.list_by_ids(session_ids)
         }
+        from .permissions.scopes import permission_display_action
+
         return [
             {
                 "request_id": str(row.id),
                 "session_id": str(row.session_id),
                 "workspace_id": str(row.workspace_id) if row.workspace_id else "",
                 "tool": row.tool,
-                "pattern": row.pattern,
+                "pattern": permission_display_action(row.pattern),
                 "title": row.title or "",
                 "call_id": row.call_id or "",
                 "status": "pending",
@@ -1161,6 +1175,27 @@ class HarnessService:
                 owner_id,
                 getattr(session, "connection_id", None),
             )
+        org_id = organization_id or session.organization_id
+        effective_skill_ids = (
+            _normalize_skill_ids(skill_ids)
+            if skill_ids is not None
+            else _normalize_skill_ids(list(session.skill_ids or []))
+        )
+        skill_bodies: list[str] = []
+        if engine_id == "claude":
+            if effective_skill_ids and run_user_id is None:
+                raise AuthenticationError(
+                    "A user is required to validate selected skills"
+                )
+            if run_user_id is not None:
+                skill_bodies = await sync_to_async(resolve_skill_bodies)(
+                    effective_skill_ids,
+                    user_id=run_user_id,
+                    organization_id=org_id,
+                )
+            from .engines.claude.runtime_state import validate_claude_skills
+
+            skill_bodies = validate_claude_skills(skill_bodies)
         self._remember_run(session)
         # Parent stop already covers this session: do not spawn another run.
         if self._user_abort_requested(session):
@@ -1208,7 +1243,6 @@ class HarnessService:
                 session, HarnessSessionStatus.IDLE
             )
             session.status = HarnessSessionStatus.IDLE
-        org_id = organization_id or session.organization_id
         from .services import SubagentConfigService
 
         depth = await sync_to_async(self.sessions.get_depth)(session.id)
@@ -1217,17 +1251,45 @@ class HarnessService:
             max_depth = config["max_depth"]
         if depth > max_depth:
             raise ValueError(f"depth {depth} exceeds max_depth {max_depth}")
-        if skill_ids is not None:
-            if user_id is None:
+        effective_skill_ids = (
+            _normalize_skill_ids(skill_ids)
+            if skill_ids is not None
+            else _normalize_skill_ids(list(session.skill_ids or []))
+        )
+        skill_bodies: list[str] = []
+        if engine_id == "claude":
+            if effective_skill_ids and user_id is None:
                 raise AuthenticationError(
                     "A user is required to validate selected skills"
                 )
-            session = await sync_to_async(self.update_skill_ids)(
-                session.id,
-                skill_ids,
-                user_id=user_id,
-                organization_id=org_id,
+            skill_bodies = (
+                await sync_to_async(resolve_skill_bodies)(
+                    effective_skill_ids,
+                    user_id=user_id,
+                    organization_id=org_id,
+                )
+                if user_id is not None
+                else []
             )
+            from .engines.claude.runtime_state import validate_claude_skills
+
+            skill_bodies = validate_claude_skills(skill_bodies)
+        if skill_ids is not None:
+            if engine_id != "claude" and user_id is None:
+                raise AuthenticationError(
+                    "A user is required to validate selected skills"
+                )
+            if engine_id == "claude":
+                session = await sync_to_async(self.sessions.set_skill_ids)(
+                    session, effective_skill_ids
+                )
+            else:
+                session = await sync_to_async(self.update_skill_ids)(
+                    session.id,
+                    effective_skill_ids,
+                    user_id=user_id,
+                    organization_id=org_id,
+                )
         resolved_model = await sync_to_async(self.validate_provider_for_run)(
             org_id, session, provider=provider
         )
@@ -1289,14 +1351,13 @@ class HarnessService:
                 exclude_message_id=assistant.id,
                 exclude_user_message_id=user_message.id,
             )
-            skill_bodies: list[str] = []
-            if session.skill_ids:
+            if engine_id != "claude" and session.skill_ids:
                 if user_id is None:
                     raise AuthenticationError(
                         "A user is required to validate selected skills"
                     )
                 skill_bodies = await sync_to_async(resolve_skill_bodies)(
-                    list(session.skill_ids or []),
+                    list(session.skill_ids),
                     user_id=user_id,
                     organization_id=org_id,
                 )
@@ -3047,14 +3108,67 @@ class HarnessService:
             run_ctx["text_part_id"] = str(part.id)
         await sync_to_async(self.parts.append_output)(part, remainder)
 
+    async def _authorize_file_read(
+        self,
+        session: HarnessSession,
+        assistant: HarnessMessage,
+        path: str,
+    ) -> bool:
+        """Authorize a Claude user-media read through existing permission gates."""
+        from .permissions.evaluator import ASK, DENY, PermissionEvaluator
+
+        action = str(path)
+        agent = get_agent(session.agent_name or session.mode or "build")
+        agent_decision = PermissionEvaluator(
+            agent_rules=dict(agent.permissions or {})
+        ).evaluate("read", action, mode=session.mode or "")
+        decision = self.permissions.evaluator.evaluate(
+            "read", action, mode=session.mode or ""
+        )
+        # Explicit policy denials remain authoritative, including agent hard bans.
+        if DENY in (agent_decision, decision):
+            return False
+        if await sync_to_async(self.permissions.is_allowlisted)(
+            session.organization_id, "read", action, session.workspace_id
+        ):
+            return True
+        if ASK in (agent_decision, decision):
+            approved = await self._on_permission(
+                session,
+                assistant,
+                tool="read",
+                action=action,
+                title=f"Read {action}"[:240],
+                key="permission_read",
+            )
+            return approved in {"once", "always", "allow", "approved", "yes"}
+        return True
+
     async def _on_permission(
         self, session: HarnessSession, assistant: HarnessMessage, **kwargs: Any
     ) -> str:
-        """Persist an ask gate as PermissionRequest and wait for resolve."""
+        """Persist an effective ask unless its exact action is allowlisted."""
+        from .engines.claude.security import redact_action, redact_title
+        from .permissions.scopes import is_permission_scope, permission_scope
+
         tool = str(kwargs.get("tool", ""))
-        action = str(kwargs.get("action", ""))
-        title = str(kwargs.get("title", ""))
+        display_action = redact_action(str(kwargs.get("action", "")))
+        provided_action = str(kwargs.get("permission_action", ""))
+        if is_permission_scope(provided_action):
+            scope = provided_action
+        else:
+            raw_action = provided_action or str(kwargs.get("action", ""))
+            scope = permission_scope(raw_action, display_action)
+        title = redact_title(str(kwargs.get("title", "")))
         call_id = str(kwargs.get("call_id", ""))
+        allowlisted = await sync_to_async(self.permissions.is_allowlisted)(
+            session.organization_id,
+            tool,
+            scope,
+            session.workspace_id,
+        )
+        if allowlisted:
+            return "once"
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
         request = await sync_to_async(self.permissions.requests.create)(
@@ -3062,7 +3176,7 @@ class HarnessService:
             session_id=session.id,
             workspace_id=session.workspace_id,
             tool=tool,
-            pattern=action,
+            pattern=scope,
             title=title,
             message_id=assistant.id,
             call_id=call_id,
@@ -3074,7 +3188,7 @@ class HarnessService:
                 **(await self._gate_ids(session)),
                 "request_id": str(request.id),
                 "tool": tool,
-                "pattern": action,
+                "pattern": display_action,
                 "title": title,
                 "call_id": call_id,
                 "agent_name": session.agent_name or "",
@@ -4014,6 +4128,14 @@ class HarnessService:
         )(session.id, tool=tool)
         for sibling in pending:
             if sibling.id == skip_id:
+                continue
+            allowlisted = await sync_to_async(self.permissions.is_allowlisted)(
+                session.organization_id,
+                sibling.tool,
+                sibling.pattern,
+                session.workspace_id,
+            )
+            if not allowlisted:
                 continue
             await sync_to_async(self.permissions.requests.mark_resolved)(
                 sibling, approved=True, remember="always"

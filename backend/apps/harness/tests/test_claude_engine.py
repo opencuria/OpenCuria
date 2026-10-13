@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -123,6 +124,7 @@ class LocalSseWorkspaceAccessor:
         self._files: dict[str, bytes] = {}
         self.project_key = ""
         self._remote_files: dict[str, bytes] = {}
+        self.managed_processes: list[dict[str, Any]] = []
 
     def guest_path(self, path: str) -> Path:
         workspace_root = self.root / "workspace"
@@ -163,6 +165,15 @@ class LocalSseWorkspaceAccessor:
 
     def real_path(self, path: str) -> Path:
         return self.guest_path(path)
+
+    async def read_file_no_follow(
+        self, path: str, max_size: int | None = None
+    ) -> FileContent:
+        from apps.harness.access.safe_files import read_file_no_follow
+
+        return await read_file_no_follow(
+            self, path, max_size=max_size, root="/workspace"
+        )
 
     async def write_file(self, path: str, content: bytes, mode: int = 0o644) -> None:
         target = self.real_path(path)
@@ -234,6 +245,37 @@ class LocalSseWorkspaceAccessor:
         owner: dict[str, str] | None = None,
     ) -> FakeProcessStream:
         argv = list(command)
+        if argv[:2] == ["python3", "-c"] or argv[:3] == ["python3", "-u", "-c"]:
+            assert env in (None, {})
+            assert len(argv) >= 5
+            original = list(argv)
+            argv[0] = sys.executable
+            path_index = argv.index("-c") + 2
+            argv[path_index] = str(self.guest_path(argv[path_index]))
+            argv[path_index + 1] = str(self.guest_path(argv[path_index + 1]))
+            cwd = self.guest_path(workdir)
+            cwd.mkdir(parents=True, exist_ok=True)
+            self.managed_processes.append(
+                {
+                    "argv": original,
+                    "workdir": workdir,
+                    "env": dict(env or {}),
+                }
+            )
+            process = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=cwd,
+                env={},
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            return FakeProcessStream(
+                process,
+                guest_root=self.root,
+                remote_config_dir="",
+                local_config_dir="",
+            )
         assert argv[0] == "/opt/opencuria/runtimes/claude-agent/2.1.292/claude"
         argv[0] = str(BUNDLED_CLAUDE)
         argv = [
@@ -325,6 +367,50 @@ def engine() -> ClaudeEngine:
     return ClaudeEngine(tools=default_tool_registry(), accessor=object())
 
 
+@pytest.mark.asyncio
+async def test_missing_resume_transcript_fails_without_fresh_or_local_fallback() -> (
+    None
+):
+    from apps.harness.engines.claude.errors import ClaudeTranscriptError
+
+    external_id = str(uuid.uuid4())
+    store = FixtureSessionStore()
+    engine = ClaudeEngine(
+        tools=default_tool_registry(),
+        accessor=object(),
+        external_session_id=external_id,
+        session_store=store,
+    )
+    engine._project_key = "workspace"
+    with pytest.raises(ClaudeTranscriptError, match="Fork this conversation"):
+        await engine._restore_transcript(
+            external_id=external_id, cwd="/workspace", config_dir="/unused"
+        )
+    assert engine.external_session_id == external_id
+    assert store.load_calls == [("workspace", external_id, "")]
+
+
+@pytest.mark.asyncio
+async def test_resume_without_authoritative_store_fails() -> None:
+    from apps.harness.engines.claude.errors import ClaudeTranscriptError
+
+    engine = ClaudeEngine(tools=ToolRegistry(), accessor=object())
+    with pytest.raises(ClaudeTranscriptError, match="is missing"):
+        await engine._restore_transcript(
+            external_id=str(uuid.uuid4()), cwd="/workspace", config_dir="/unused"
+        )
+
+
+def test_oversized_transcript_retains_explicit_recovery_contract(monkeypatch) -> None:
+    from apps.harness.engines.claude.errors import ClaudeTranscriptError
+
+    monkeypatch.setattr(
+        "apps.harness.engines.claude.engine.MAX_RESTORED_TRANSCRIPT_BYTES", 16
+    )
+    with pytest.raises(ClaudeTranscriptError, match="Fork this conversation"):
+        ClaudeEngine._jsonl_bytes([{"text": "x" * 17}])
+
+
 def test_cli_argv_is_explicit_bounded_and_resume_is_uuid() -> None:
     engine = ClaudeEngine(tools=default_tool_registry(), accessor=object())
     sid = str(uuid.uuid4())
@@ -379,6 +465,34 @@ def test_cli_argv_fresh_run_mirrors_session_without_forcing_resume() -> None:
     assert argv[argv.index("--tools") + 1] == "Bash,Read,Skill"
     assert "--plugin-dir" in argv
     assert "Bash" not in argv[argv.index("--disallowedTools") + 1]
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_oversized_skills_before_managed_processes() -> None:
+    from apps.harness.engines.claude.runtime_state import MAX_SKILL_BODY_BYTES
+    from apps.harness.runner import RunOptions
+
+    class RecordingAccessor:
+        workspace_id = str(uuid.uuid4())
+
+        def __init__(self) -> None:
+            self.open_process_calls: list[list[str]] = []
+
+        async def open_process(self, command: list[str], **_kwargs: Any) -> None:
+            self.open_process_calls.append(command)
+
+    accessor = RecordingAccessor()
+    engine = ClaudeEngine(tools=default_tool_registry(), accessor=accessor)  # type: ignore[arg-type]
+    options = RunOptions(
+        session_id=str(uuid.uuid4()),
+        workspace_id=accessor.workspace_id,
+        skills=["x" * (MAX_SKILL_BODY_BYTES + 1)],
+    )
+
+    with pytest.raises(ValueError, match="skill body exceeds"):
+        await engine.run("prompt", "build", "sonnet", opts=options)
+
+    assert accessor.open_process_calls == []
 
 
 def test_environment_rejects_blocked_auth_names_and_never_has_home_path(
@@ -707,7 +821,14 @@ async def test_real_sdk_cli_mcp_hook_question_and_followup_sse(tmp_path: Path) -
     assert len(questions) == 1 and questions[0]
     finishes = [event for event in events if event["type"] == "step_finish"]
     assert finishes and isinstance(finishes[-1]["tokens"], dict)
-    assert finishes[-1]["tokens"]["total_tokens"] == result.usage.total_tokens
+    assert len(finishes) == len(
+        [event for event in events if event["type"] == "step_start"]
+    )
+    assert len(finishes) == 2
+    assert (
+        sum(event["tokens"]["total_tokens"] for event in finishes)
+        == result.usage.total_tokens
+    )
     assert [event["type"] for event in events].count("tool_queued") == 1
     assert [event["type"] for event in events].count("tool_started") == 1
     assert [event["type"] for event in events].count("tool_completed") == 1

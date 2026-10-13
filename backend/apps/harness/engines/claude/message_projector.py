@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from ...agents.definitions import canonical_subagent_type
 from ...providers.base import Usage
 from .events import ClaudeEventNormalizer, StepState
 from .security import redact_text
@@ -54,10 +55,39 @@ class ClaudeMessageProjector:
                 engine._pending_task_tool_ids.discard(tool)
                 engine._subtask_by_tool[tool] = task
                 if task:
-                    task_data = message.data if isinstance(message.data, dict) else {}
-                    task_type = str(task_data.get("task_type") or "general")
-                    engine._agent_kind[task] = engine._normalize_agent_type(task_type)
-                    engine._agent_type_raw[task] = task_type
+                    task_data = getattr(message, "data", None)
+                    task_type = str(
+                        getattr(message, "task_type", None)
+                        or (
+                            task_data.get("task_type", "")
+                            if isinstance(task_data, dict)
+                            else ""
+                        )
+                    )
+                    try:
+                        canonical_type = canonical_subagent_type(task_type)
+                    except ValueError:
+                        canonical_type = ""
+                    if canonical_type:
+                        engine._agent_kind[task] = canonical_type
+                        engine._agent_type_raw[task] = canonical_type
+                    elif task not in engine._agent_type_raw:
+                        parent_tool = engine._tool_events.get(tool, {})
+                        arguments = parent_tool.get("event_arguments", {})
+                        requested_type = (
+                            arguments.get("subagent_type")
+                            if isinstance(arguments, dict)
+                            else None
+                        )
+                        try:
+                            canonical_type = canonical_subagent_type(
+                                str(requested_type or "")
+                            )
+                        except ValueError:
+                            canonical_type = ""
+                        if canonical_type:
+                            engine._agent_kind[task] = canonical_type
+                            engine._agent_type_raw[task] = canonical_type
                     engine._agent_parent_tool[task] = tool
                     base_depth = engine._tool_events.get(tool, {}).get("depth", 0)
                     engine._agent_depth[task] = int(base_depth) + 1
@@ -100,13 +130,13 @@ class ClaudeMessageProjector:
         if isinstance(message, types.result):
             if message.session_id:
                 await engine._bind_external_session(str(message.session_id))
-            if message.is_error:
+            usage = ClaudeEventNormalizer.result_usage(message)
+            if message.is_error and message.subtype != "error_max_turns":
                 errors = list(message.errors or [])
                 detail = "; ".join(map(str, errors)) or str(
                     message.result or message.subtype or "Claude run failed"
                 )
                 raise RuntimeError(engine._safe_error_text(detail))
-            usage = ClaudeEventNormalizer.result_usage(message)
             return message, str(message.result or ""), usage
         return None
 

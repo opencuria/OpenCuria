@@ -17,7 +17,12 @@ In a new chat, choose **Claude Agent Build** or **Claude Agent Plan**. Chats kee
 their selected harness; start a new chat to choose another. Model and effort use
 the shared model picker, which offers `sonnet`, `opus`, and `haiku`. These are
 runtime-resolved aliases, not fixed model versions. Both modes use OpenCuria
-permission gates; Plan does not switch to Build automatically.
+permission gates; Plan does not switch to Build automatically. Plan allows
+research, tests, builds, and development servers, including ordinary temporary
+artifacts. Deliberate source/configuration changes and unclassified mutations
+require approval in the root agent, subagents, and background processes. Explore
+remains read-only even in Plan. Command classification is a convenience for
+trusted workspaces, not a shell sandbox.
 
 API tokens are passed as `ANTHROPIC_API_KEY`; subscription tokens as
 `CLAUDE_CODE_OAUTH_TOKEN`. Connections are personal to their owner within the
@@ -75,7 +80,17 @@ repository setting sources. OpenCuria tools, permissions, MCP integrations, and
 their credentials use OpenCuria's existing bridge. Selected skills are included
 eagerly in the composed prompt and made available through a generated Claude
 plugin in managed workspace state. Repository hooks are not automatically
-enabled; OpenCuria does not create or edit a repository `CLAUDE.md`.
+enabled; OpenCuria does not create or edit a repository `CLAUDE.md`. Native tool
+schemas and descriptions come solely from the pinned CLI; OpenCuria describes
+only its managed MCP tools. Native WebFetch/WebSearch use Claude's behavior,
+including for Explore, rather than OpenCuria Webfetch's URL protections.
+
+Each run, including resume, rebuilds the OpenCuria prompt from the current mode,
+project context, and selected skills. Native subagents receive their own scoped
+project/run context. Explicit user image/PDF references (`@file:/workspace/...`
+and Markdown images) become bounded media inputs after read authorization;
+workspace-media reads reject symlinks. Assistant/tool text never triggers these
+implicit file reads. Other file references remain text for an explicit Read call.
 
 Generated settings, prompts, selected skills, and restored CLI transcript files
 live under `/workspace/.opencuria/harness/claude/` with private file/directory
@@ -92,7 +107,15 @@ upstream UUID and stored transcript. Fork starts a fresh upstream transcript
 with the copied OpenCuria message prefix; editing clears the stale transcript
 and starts fresh. Neither action rolls back workspace files. Deleting a chat
 removes transcript records through the session cascade. OpenCuria does not
-transparently switch harnesses or replay Claude state in another harness.
+transparently switch harnesses or replay Claude state in another harness. Missing
+or oversized stored transcripts stop resume with a fork/new-session hint; they
+never reuse an old local transcript or silently reset the upstream conversation.
+Deselected skill files are removed from the generated plugin on the next run.
+
+Persistent "always" approvals apply to matching actions in their existing
+organization/workspace scope; explicit denies and Explore restrictions still
+win. Redacted or truncated actions use a keyed fingerprint rather than raw secret
+text or a shared `[redacted]` value as their persisted approval identity.
 
 External runs use durable ownership and heartbeats. A stale heartbeat becomes
 recoverable after a 240-second grace period; recovery fences the prior owner.
@@ -115,7 +138,10 @@ Run relevant component suites when changing or deploying them:
 Backend accessor and runner-handler tests cover the artifact RPC contract.
 Runner artifact tests cover provisioning and, when pinned CLI bytes are
 available locally, run the installer against them using a local shell and
-filesystem fake—not a Docker or QEMU guest.
+filesystem fake—not a Docker or QEMU guest. Backend local-SSE contract tests run
+the real pinned CLI against scripted responses and cover native schemas, prompt
+refresh on resume, child context/tool scopes, direct image/PDF input, permission
+hooks, MCP correlation, and turn-limit completion without real provider calls.
 
 The opt-in browser E2E runs the actual pinned SDK and CLI through tool-use and
 continuation turns against a local canned Messages fixture and synthetic

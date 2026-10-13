@@ -21,6 +21,7 @@ from apps.harness.engines.claude.engine import ClaudeEngine
 from apps.harness.engines.claude.permissionbridge import PermissionBridge
 from apps.harness.engines.claude.policy import native_tools_for_claude
 from apps.harness.permissions.evaluator import PermissionEvaluator
+from apps.harness.permissions.scopes import permission_scope_matches
 from apps.harness.runner import RunOptions
 from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
@@ -203,13 +204,11 @@ async def test_native_and_mcp_hook_gates_fail_closed_and_keep_question_on_mcp(
     assert "question" in {
         schema["name"] for schema in engine._schemas(get_agent("build"), "build", 0, 2)
     }
-    native_names = {
-        schema.name
-        for schema in engine._prompt_tools(
-            engine._schemas(get_agent("build"), "build", 0, 2)
-        )
+    schemas = engine._schemas(get_agent("build"), "build", 0, 2)
+    assert {"question", "todowrite"}.issubset({schema["name"] for schema in schemas})
+    assert not {"read", "edit", "bash", "glob", "grep"} & {
+        schema["name"] for schema in schemas
     }
-    assert "AskUserQuestion" not in native_names
 
     # A can_use_tool permission request without the matching hook state cannot
     # bypass the gate, even when the evaluator has a permissive catch-all.
@@ -249,6 +248,7 @@ async def test_plan_and_child_native_tool_policy_is_applied_at_hook_boundary(
     engine._agent_parent_tool["explore-child"] = "parent-task-call"
     engine._agent_type_raw["explore-child"] = "explore"
     engine._agent_depth["explore-child"] = 1
+    engine._tool_events["parent-task-call"] = {"tool": "task"}
     engine._agent_parent_tool["max-depth-child"] = "parent-task-call"
     engine._agent_type_raw["max-depth-child"] = "build"
     engine._agent_depth["max-depth-child"] = options.max_depth
@@ -353,16 +353,37 @@ async def test_plan_and_child_native_tool_policy_is_applied_at_hook_boundary(
     assert decision(bash_mutation) == "ask"
     assert decision(explore_write) == "deny"
     assert decision(explore_bash) == "deny"
+    assert get_agent("explore").permissions["mcp_*"] == "deny"
+    assert "WebFetch" not in get_agent("explore").system_prompt
+    assert "WebSearch" not in get_agent("explore").system_prompt
+    explore_webfetch = await pre_tool(
+        {
+            "tool_name": "WebFetch",
+            "tool_input": {"url": "https://example.test"},
+            "agent_id": "explore-child",
+        },
+        "explore-webfetch",
+        None,
+    )
+    explore_websearch = await pre_tool(
+        {
+            "tool_name": "WebSearch",
+            "tool_input": {"query": "OpenCuria policy"},
+            "agent_id": "explore-child",
+        },
+        "explore-websearch",
+        None,
+    )
+    assert decision(explore_webfetch) == "allow"
+    assert decision(explore_websearch) == "allow"
     assert decision(selected_skill) == "allow"
     assert decision(unselected_skill) == "deny"
     assert decision(max_depth_task) == "deny"
-    native_names = {
-        schema.name
-        for schema in engine._prompt_tools(
-            engine._schemas(get_agent("plan"), "plan", 0, options.max_depth)
-        )
+    schemas = engine._schemas(get_agent("plan"), "plan", 0, options.max_depth)
+    assert {"question", "todowrite"}.issubset({schema["name"] for schema in schemas})
+    assert not {"read", "edit", "bash", "glob", "grep"} & {
+        schema["name"] for schema in schemas
     }
-    assert {"Read", "Bash", "Write"}.issubset(native_names)
     root_native_names = native_tools_for_claude(
         tools=engine.tools,
         agent=get_agent("plan"),
@@ -396,6 +417,14 @@ async def test_plan_and_child_native_tool_policy_is_applied_at_hook_boundary(
         plan_mode=True,
     )
     assert "Task" not in explore_native_names
+    assert {"WebFetch", "WebSearch"}.issubset(explore_native_names)
+    assert "mcp_web_search" not in engine.tools
+    explore_engine_schemas = engine._schemas(
+        get_agent("explore"), "plan", 1, options.max_depth
+    )
+    assert all(
+        not schema["name"].startswith("mcp_") for schema in explore_engine_schemas
+    )
     assert options.max_depth == 2
 
 
@@ -505,6 +534,67 @@ async def test_mcp_ask_uses_registry_identity_raw_args_and_exact_concurrent_call
 
 
 @pytest.mark.asyncio
+async def test_redacted_native_once_scope_separates_secret_actions(
+    fake_accessor,
+) -> None:
+    secret_one = "fixture-secret-action-one"
+    secret_two = "fixture-secret-action-two"
+    approvals: list[dict[str, Any]] = []
+
+    async def approve(**kwargs: Any) -> str:
+        approvals.append(dict(kwargs))
+        return "once"
+
+    engine, bridge, options, events = _bridge_case(
+        fake_accessor,
+        evaluator=PermissionEvaluator(global_rules={"bash": "ask"}),
+        on_permission=approve,
+    )
+    engine.auth_env["BASH_SECRET_ONE"] = secret_one
+    engine.auth_env["BASH_SECRET_TWO"] = secret_two
+    pre_tool = _pre_hook(bridge, engine)
+
+    async def invoke(command: str, call_id: str) -> None:
+        hook_result = await pre_tool(
+            {"tool_name": "Bash", "tool_input": {"command": command}},
+            call_id,
+            None,
+        )
+        assert hook_result["hookSpecificOutput"]["permissionDecision"] == "ask"
+        result = await bridge.can_use_tool(
+            engine,
+            "Bash",
+            {"command": command},
+            ToolPermissionContext(tool_use_id=call_id),
+        )
+        assert isinstance(result, PermissionResultAllow)
+
+    command_one = f"echo {secret_one}"
+    command_two = f"echo {secret_two}"
+    await invoke(command_one, "secret-once-one")
+    assert len(approvals) == 1
+    assert approvals[0]["action"] == "echo [redacted]"
+    scope_one = approvals[0]["permission_action"]
+    assert permission_scope_matches(scope_one, scope_one)
+
+    # Same safe display, but a distinct raw secret action, must ask again.
+    await invoke(command_two, "secret-once-two")
+    assert len(approvals) == 2
+    assert approvals[1]["action"] == approvals[0]["action"]
+    scope_two = approvals[1]["permission_action"]
+    assert not permission_scope_matches(scope_one, scope_two)
+
+    # A repeated identical secret action consumes only its own once grant.
+    await invoke(command_two, "secret-once-two-repeat")
+    assert len(approvals) == 2
+    for secret in (secret_one, secret_two):
+        assert secret not in repr(approvals)
+        assert secret not in repr(options.once_approved)
+        assert secret not in repr(engine._tool_events)
+        assert secret not in repr(events)
+
+
+@pytest.mark.asyncio
 async def test_permission_wait_cancellation_does_not_approve_or_dispatch(
     fake_accessor,
 ) -> None:
@@ -563,6 +653,211 @@ async def test_permission_wait_cancellation_does_not_approve_or_dispatch(
 
 
 @pytest.mark.asyncio
+async def test_plan_process_start_respects_global_process_ask(
+    fake_accessor,
+) -> None:
+    engine, bridge, _options, _events = _bridge_case(
+        fake_accessor,
+        agent="plan",
+        mode="plan",
+        evaluator=PermissionEvaluator(global_rules={"process": "ask"}),
+    )
+    start = _pre_hook(bridge, engine)
+    test_result = await start(
+        {
+            "tool_name": "mcp__opencuria__process_start",
+            "tool_input": {"command": "pytest -q", "name": "tests"},
+        },
+        "test-process",
+        None,
+    )
+    research_result = await start(
+        {
+            "tool_name": "mcp__opencuria__process_start",
+            "tool_input": {"command": "cat README.md", "name": "research"},
+        },
+        "research-process",
+        None,
+    )
+    assert test_result["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert research_result["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+    async def approve(**_kwargs: Any) -> str:
+        return "once"
+
+    _engine, allowed_bridge, _options, _events = _bridge_case(
+        fake_accessor,
+        agent="plan",
+        mode="plan",
+        evaluator=PermissionEvaluator(global_rules={"process": "ask"}),
+        on_permission=approve,
+    )
+    allow_start = _pre_hook(allowed_bridge, _engine)
+    approved = await allow_start(
+        {
+            "tool_name": "mcp__opencuria__process_start",
+            "tool_input": {"command": "pytest -q", "name": "approved-tests"},
+        },
+        "approved-test-process",
+        None,
+    )
+    assert approved["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+@pytest.mark.asyncio
+async def test_plan_process_restart_keeps_wildcard_allow_at_ask_precedence(
+    fake_accessor,
+) -> None:
+    engine, bridge, _options, _events = _bridge_case(
+        fake_accessor,
+        agent="plan",
+        mode="plan",
+        evaluator=PermissionEvaluator(global_rules={"*": "allow"}),
+    )
+    running = await fake_accessor.process_start(
+        "npm run dev", name="dev-server", kind="persistent"
+    )
+    pre_tool = _pre_hook(bridge, engine)
+
+    allowed = await pre_tool(
+        {
+            "tool_name": "mcp__opencuria__process_restart",
+            "tool_input": {"process_id": running["process_id"]},
+        },
+        "restart-server",
+        None,
+    )
+    # Existing operational process tools retain policy decisions, while the
+    # stored command is checked before an approval-free restart.
+    assert allowed["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+    unknown = await pre_tool(
+        {
+            "tool_name": "mcp__opencuria__process_restart",
+            "tool_input": {"process_id": "missing-process"},
+        },
+        "restart-missing",
+        None,
+    )
+    assert unknown["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+@pytest.mark.asyncio
+async def test_plan_process_restart_checks_stored_command_with_explicit_allow(
+    fake_accessor,
+) -> None:
+    engine, bridge, _options, _events = _bridge_case(
+        fake_accessor,
+        agent="plan",
+        mode="plan",
+        evaluator=PermissionEvaluator(global_rules={"process": "allow"}),
+    )
+    safe = await fake_accessor.process_start(
+        "npm run dev", name="dev-server", kind="persistent"
+    )
+    unsafe = await fake_accessor.process_start(
+        "rm -rf /workspace/tmp", name="unsafe-job", kind="persistent"
+    )
+    pre_tool = _pre_hook(bridge, engine)
+
+    safe_result = await pre_tool(
+        {
+            "tool_name": "mcp__opencuria__process_restart",
+            "tool_input": {"process_id": safe["process_id"]},
+        },
+        "restart-safe-server",
+        None,
+    )
+    unsafe_result = await pre_tool(
+        {
+            "tool_name": "mcp__opencuria__process_restart",
+            "tool_input": {"process_id": unsafe["process_id"]},
+        },
+        "restart-unsafe-job",
+        None,
+    )
+    assert safe_result["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert unsafe_result["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+@pytest.mark.asyncio
+async def test_scope_allows_live_sdk_child_after_parent_tool_completion(
+    fake_accessor,
+) -> None:
+    _engine, bridge, _options, _events = _bridge_case(fake_accessor)
+    engine = bridge.engine
+    assert engine is not None
+    engine._agent_parent_tool["live-child"] = "completed-task-call"
+    engine._agent_type_raw["live-child"] = "explore"
+    engine._agent_depth["live-child"] = 1
+    engine._started_subtasks.add("live-child")
+    # A native Task call can finish while its background child is still alive.
+    assert "completed-task-call" not in engine._tool_events
+
+    parent, agent, depth = bridge.scope(engine, {"agent_id": "live-child"})
+
+    assert parent == "completed-task-call"
+    assert agent.name == "explore"
+    assert depth == 1
+
+
+@pytest.mark.asyncio
+async def test_scope_rejects_finished_child_when_parent_tool_is_gone(
+    fake_accessor,
+) -> None:
+    _engine, bridge, _options, _events = _bridge_case(fake_accessor)
+    engine = bridge.engine
+    assert engine is not None
+    engine._agent_parent_tool["finished-child"] = "completed-task-call"
+    engine._agent_type_raw["finished-child"] = "general"
+    engine._agent_depth["finished-child"] = 1
+    engine._started_subtasks.add("finished-child")
+    engine._finished_subtasks.add("finished-child")
+    engine._agent_parent_tool["unstarted-child"] = "missing-task-call"
+    engine._agent_type_raw["unstarted-child"] = "general"
+    engine._agent_depth["unstarted-child"] = 1
+
+    with pytest.raises(ValueError, match="Claude subagent parent call is unavailable"):
+        bridge.scope(engine, {"agent_id": "finished-child"})
+    with pytest.raises(ValueError, match="Claude subagent parent call is unavailable"):
+        bridge.scope(engine, {"agent_id": "unstarted-child"})
+    with pytest.raises(ValueError, match="Unknown Claude subagent identity"):
+        bridge.scope(engine, {"agent_id": "invented-child"})
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_subagent_parent_correlation_fails_closed(
+    fake_accessor,
+) -> None:
+    engine, bridge, _options, _events = _bridge_case(fake_accessor)
+    engine._pending_task_tool_ids.update({"task-one", "task-two"})
+    engine._tool_events.update(
+        {
+            "task-one": {
+                "tool": "task",
+                "step": 0,
+                "parent_tool_use_id": None,
+            },
+            "task-two": {
+                "tool": "task",
+                "step": 0,
+                "parent_tool_use_id": None,
+            },
+        }
+    )
+    start = bridge.hooks(engine)["SubagentStart"][0].hooks[0]
+
+    await start({"agent_id": "ambiguous-child", "agent_type": "general"}, None, None)
+
+    assert not engine._pending_task_tool_ids
+    assert "ambiguous-child" not in engine._agent_parent_tool
+    assert {event["call_id"] for event in _events if event["type"] == "tool_error"} == {
+        "task-one",
+        "task-two",
+    }
+
+
+@pytest.mark.asyncio
 async def test_subagent_stop_waits_for_terminal_task_notification(
     fake_accessor,
 ) -> None:
@@ -570,6 +865,8 @@ async def test_subagent_stop_waits_for_terminal_task_notification(
     engine._subtask_by_tool["parent-task-call"] = "child-task"
     engine._agent_kind["child-task"] = "explore"
     engine._agent_parent_tool["child-task"] = "parent-task-call"
+    engine._agent_type_raw["child-task"] = "explore"
+    engine._tool_events["parent-task-call"] = {"tool": "task"}
     stop_hook = bridge.hooks(engine)["SubagentStop"][0].hooks[0]
 
     await stop_hook({"agent_id": "child-task"}, None, None)
@@ -593,3 +890,33 @@ async def test_subagent_stop_waits_for_terminal_task_notification(
     assert finished[0]["status"] == "aborted"
     assert finished[0]["summary"] == "Completed the first file before cancellation."
     assert "child-task" not in engine._stopped_subagents
+
+
+@pytest.mark.asyncio
+async def test_plan_process_research_and_bookkeeping_are_free(fake_accessor) -> None:
+    engine, bridge, _options, _events = _bridge_case(
+        fake_accessor, agent="plan", mode="plan"
+    )
+    pre_tool = _pre_hook(bridge, engine)
+    for name, arguments in (
+        ("process_start", {"command": "npm run dev", "name": "server"}),
+        ("process_start", {"command": "git log -1", "name": "research"}),
+        ("process_get", {"process_id": "server"}),
+        ("process_list", {}),
+        ("process_stop", {"process_id": "server"}),
+    ):
+        result = await pre_tool(
+            {"tool_name": f"mcp__opencuria__{name}", "tool_input": arguments},
+            f"free-{name}-{len(engine._tool_events)}",
+            None,
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+    denied = await pre_tool(
+        {
+            "tool_name": "mcp__opencuria__process_start",
+            "tool_input": {"command": "rm source.py", "name": "mutation"},
+        },
+        "ask-start-mutation",
+        None,
+    )
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "ask"

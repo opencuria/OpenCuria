@@ -217,9 +217,9 @@ def check_name_collisions(
 ) -> None:
     """Fail closed on duplicate or core-overwriting namespaced names.
 
-    Kept for unit checks; the run-scoped :class:`McpRuntime` resolves
-    cross-server collisions per server (first wins, colliding server
-    skipped) instead of failing the whole run.
+    The run-scoped :class:`McpRuntime` supplies names already claimed by
+    core tools and earlier servers; a collision skips the current server
+    instead of failing the whole run.
     """
     seen: set[str] = set()
     core = {name.strip().lower() for name in (existing or [])}

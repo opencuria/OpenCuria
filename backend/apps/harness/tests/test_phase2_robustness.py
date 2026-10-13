@@ -422,8 +422,8 @@ async def test_composer_environment_has_platform_and_plan_reminder() -> None:
     assert "Platform: Linux (isolated OpenCuria workspace)" in plan.system
     assert "Workspace root:" in plan.system
     assert "not on the user's machine" in plan.system
-    assert "Plan mode: investigate read-only" in plan.system
-    assert "ask before edits" in plan.system
+    assert "ordinary temporary artifacts" in plan.system
+    assert "Ask before deliberate source/configuration edits" in plan.system
     assert "Chat media:" in plan.system
     build = await compose_system_prompt(agent=get_agent("build"), mode="build")
     assert "Platform: Linux (isolated OpenCuria workspace)" in build.system

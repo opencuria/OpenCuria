@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from apps.harness.engines.claude.errors import ClaudeTranscriptError
 from apps.harness.engines.connections import AuthConfiguration
 from apps.harness.engines.run_repository import HarnessRunRepository
 from apps.harness.engines.runs import HarnessRunService
@@ -22,6 +23,9 @@ from apps.harness.models import (
     HarnessPart,
     HarnessSession,
 )
+from apps.harness.permissions.evaluator import PermissionEvaluator
+from apps.harness.permissions.models import PermissionAllowlist, PermissionRequest
+from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import Usage
 from apps.harness.repositories import HarnessMessageRepository
 from apps.harness.tests.conftest import FakeAccessor
@@ -95,6 +99,236 @@ async def test_closing_run_blocks_mutations_until_runner_release(harness_workspa
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_claude_run_uses_persisted_always_allowlist(harness_workspace):
+    """Claude's shared ask callback skips an already allowlisted action."""
+    permissions = PermissionService(
+        evaluator=PermissionEvaluator(global_rules={"*": "ask"})
+    )
+    connection_id = uuid.uuid4()
+    service, _registry, _connections, _events = _service(
+        connection_id=connection_id,
+        behavior="ask_permission",
+        permissions=permissions,
+    )
+    session = await _new_session(service, harness_workspace)
+    await service.start_run(
+        session,
+        "approve this action always",
+        organization_id=session.organization_id,
+        user_id=harness_workspace.created_by_id,
+    )
+    request = None
+    for _ in range(50):
+        request = await asyncio.to_thread(
+            lambda: PermissionRequest.objects.filter(session_id=session.id).first()
+        )
+        if request is not None:
+            break
+        await asyncio.sleep(0.01)
+    assert request is not None
+    await service.resolve_permission(
+        session=session, request_id=request.id, response="always"
+    )
+    first_task = service._tasks.get(str(session.id))
+    if first_task is not None:
+        await first_task
+
+    assistant = await service.start_run(
+        session,
+        "reuse the persisted grant",
+        organization_id=session.organization_id,
+        user_id=harness_workspace.created_by_id,
+    )
+    await service._tasks[str(session.id)]
+
+    assert assistant.finish == "stop"
+    assert PermissionAllowlist.objects.filter(
+        organization_id=session.organization_id,
+        workspace_id=session.workspace_id,
+        tool="edit",
+        pattern="/workspace/src/file.py",
+    ).exists()
+    assert PermissionRequest.objects.filter(session_id=session.id).count() == 1
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_claude_run_still_requests_nonmatching_allowlist_action(
+    harness_workspace,
+):
+    """A persisted grant for one path does not authorize another path."""
+    permissions = PermissionService(
+        evaluator=PermissionEvaluator(global_rules={"*": "ask"})
+    )
+    service, _registry, _connections, _events = _service(
+        connection_id=uuid.uuid4(),
+        behavior="ask_permission_other",
+        permissions=permissions,
+    )
+    session = await _new_session(service, harness_workspace)
+    PermissionAllowlist.objects.create(
+        organization_id=session.organization_id,
+        workspace_id=session.workspace_id,
+        tool="edit",
+        pattern="/workspace/src/file.py",
+    )
+
+    await service.start_run(
+        session,
+        "ask for a different path",
+        organization_id=session.organization_id,
+        user_id=harness_workspace.created_by_id,
+    )
+    request = None
+    for _ in range(50):
+        request = await asyncio.to_thread(
+            lambda: PermissionRequest.objects.filter(session_id=session.id).first()
+        )
+        if request is not None:
+            break
+        await asyncio.sleep(0.01)
+    assert request is not None, "effective Claude ask did not create a request"
+    assert request.status == "pending"
+    assert request.pattern == "/workspace/src/other.py"
+
+    await service.resolve_permission(
+        session=session, request_id=request.id, response="once"
+    )
+    await service._tasks[str(session.id)]
+    assert PermissionRequest.objects.filter(session_id=session.id).count() == 1
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_claude_media_permission_callback_uses_shared_allowlist(harness_workspace):
+    """External engines receive the shared permission_read authorization hook."""
+    permissions = PermissionService(
+        evaluator=PermissionEvaluator(global_rules={"read": "ask"})
+    )
+    service, _registry, _connections, _events = _service(
+        connection_id=uuid.uuid4(), behavior="media_read", permissions=permissions
+    )
+    session = await _new_session(service, harness_workspace)
+    PermissionAllowlist.objects.create(
+        organization_id=session.organization_id,
+        workspace_id=session.workspace_id,
+        tool="read",
+        pattern="/workspace/images/*.png",
+    )
+
+    assistant = await service.start_run(
+        session,
+        "inspect the image",
+        organization_id=session.organization_id,
+        user_id=harness_workspace.created_by_id,
+    )
+    await service._tasks[str(session.id)]
+
+    assert assistant.finish == "stop"
+    assert not PermissionRequest.objects.filter(session_id=session.id).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_claude_max_steps_result_is_persisted_as_completed(harness_workspace):
+    """A normal Claude turn-limit result remains completed with its reason."""
+    service, _registry, _connections, _events = _service(
+        connection_id=uuid.uuid4(), behavior="max_steps"
+    )
+    session = await _new_session(service, harness_workspace)
+
+    assistant = await service.start_run(
+        session,
+        "reach the turn limit",
+        organization_id=session.organization_id,
+        user_id=harness_workspace.created_by_id,
+    )
+    await service._tasks[str(session.id)]
+
+    attempt = HarnessRunRepository.model.objects.get(assistant_message=assistant)
+    assert assistant.finish == "max_steps"
+    assert assistant.error == ""
+    assert attempt.status == "completed"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_claude_start_preflights_oversized_skill_before_messages(
+    harness_workspace,
+):
+    """Claude skill limits fail before a user or assistant shell is created."""
+    from apps.skills.models import Skill
+
+    service, _registry, _connections, _events = _service(
+        connection_id=uuid.uuid4()
+    )
+    session = await _new_session(service, harness_workspace)
+    skill = Skill.objects.create(
+        name="Oversized",
+        body="x" * (64 * 1024 + 1),
+        organization_id=session.organization_id,
+        created_by_id=harness_workspace.created_by_id,
+    )
+    session.skill_ids = [str(skill.id)]
+    session.save(update_fields=["skill_ids"])
+
+    with pytest.raises(ValueError, match="skill body exceeds the managed size limit"):
+        await service.start_run(
+            session,
+            "reject before admission",
+            organization_id=session.organization_id,
+            user_id=harness_workspace.created_by_id,
+        )
+
+    assert HarnessMessageRepository.list_for_session(session.id) == []
+    session.refresh_from_db()
+    assert session.status == "idle"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_claude_edit_preflights_inherited_skill_before_deleting_suffix(
+    harness_workspace,
+):
+    """An invalid inherited selection preserves Claude history and transcript ID."""
+    from apps.skills.models import Skill
+
+    service, _registry, _connections, _events = _service(
+        connection_id=uuid.uuid4()
+    )
+    session = await _new_session(service, harness_workspace)
+    for prompt in ("first turn", "second turn"):
+        await service.start_run(
+            session,
+            prompt,
+            organization_id=session.organization_id,
+            user_id=harness_workspace.created_by_id,
+        )
+        await service._tasks[str(session.id)]
+
+    messages_before = HarnessMessageRepository.list_for_session(session.id)
+    transcript_id_before = session.external_session_id
+    assert transcript_id_before
+    skill = Skill.objects.create(
+        name="Oversized inherited skill",
+        body="x" * (64 * 1024 + 1),
+        organization_id=session.organization_id,
+        created_by_id=harness_workspace.created_by_id,
+    )
+    session.skill_ids = [str(skill.id)]
+    session.save(update_fields=["skill_ids"])
+    target = next(message for message in messages_before if message.role == "user")
+
+    with pytest.raises(ValueError, match="skill body exceeds the managed size limit"):
+        await service.edit_user_message(
+            session.id,
+            message_id=target.id,
+            prompt="must not delete history",
+            organization_id=session.organization_id,
+            user_id=harness_workspace.created_by_id,
+        )
+
+    assert HarnessMessageRepository.list_for_session(session.id) == messages_before
+    session.refresh_from_db()
+    assert session.external_session_id == transcript_id_before
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_claude_async_run_works_without_async_unsafe_escape(
     harness_workspace, monkeypatch
 ):
@@ -142,8 +376,27 @@ class FakeClaudeEngine:
         self.kwargs = kwargs
 
     async def run(self, prompt, agent, model, mode, opts):  # type: ignore[no-untyped-def]
+        if self.behavior == "media_read":
+            allowed = await opts.authorize_file_read(
+                "/workspace/images/approved.png"
+            )
+            assert allowed is True
+        if self.behavior in {"ask_permission", "ask_permission_other"}:
+            action = (
+                "/workspace/src/file.py"
+                if self.behavior == "ask_permission"
+                else "/workspace/src/other.py"
+            )
+            response = await opts.on_permission(
+                tool="edit",
+                action=action,
+                title="Edit file",
+                call_id="permission-call-1",
+                key="permission",
+            )
+            assert response in {"once", "reject"}
         lease = {"lease_id": str(uuid.uuid4()), "epoch": "epoch-test"}
-        external_id = str(uuid.uuid4())
+        external_id = self.kwargs.get("external_session_id") or str(uuid.uuid4())
         try:
             await self.kwargs["on_owner"](lease, "reserved")
             await self.kwargs["on_binding"](
@@ -189,6 +442,10 @@ class FakeClaudeEngine:
                 )
             if self.behavior == "error":
                 raise RuntimeError("ANTHROPIC_API_KEY=do-not-persist-this-token")
+            if self.behavior == "transcript_missing":
+                raise ClaudeTranscriptError("is missing")
+            if self.behavior == "transcript_oversized":
+                raise ClaudeTranscriptError("exceeds the restore limit")
             if self.behavior == "cancel":
                 await asyncio.Event().wait()
             await self.kwargs["emit"](
@@ -201,7 +458,9 @@ class FakeClaudeEngine:
                 steps=1,
                 usage=Usage(3, 2, 5, 0.01),
                 cost=0.01,
-                finish_reason="stop",
+                finish_reason=(
+                    "max_steps" if self.behavior == "max_steps" else "stop"
+                ),
                 metadata={
                     "harness_id": "claude",
                     "external_session_id": external_id,
@@ -226,7 +485,12 @@ class FakeEngineRegistry:
         return FakeClaudeEngine(behavior=self.behavior, kwargs=kwargs)
 
 
-def _service(*, connection_id: uuid.UUID, behavior: str = "success"):
+def _service(
+    *,
+    connection_id: uuid.UUID,
+    behavior: str = "success",
+    permissions: PermissionService | None = None,
+):
     emitted: list[tuple[str, dict[str, Any]]] = []
 
     async def emit(name: str, data: dict[str, Any]) -> None:
@@ -236,6 +500,7 @@ def _service(*, connection_id: uuid.UUID, behavior: str = "success"):
     connections = FakeConnectionService(connection_id)
     service = HarnessService(
         emit=emit,
+        permissions=permissions,
         accessor_factory=lambda workspace_id: _fake_accessor(workspace_id),
         engine_registry=registry,
         engine_connections=connections,
@@ -462,6 +727,38 @@ async def test_claude_session_auth_is_owner_bound(harness_workspace):
             user_id=harness_workspace.created_by_id + 1000,
         )
     assert HarnessMessageRepository.list_for_session(session.id) == []
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("behavior", "reason"),
+    [
+        ("transcript_missing", "is missing"),
+        ("transcript_oversized", "exceeds the restore limit"),
+    ],
+)
+async def test_claude_transcript_error_surfaces_safe_recovery_action(
+    harness_workspace, behavior, reason
+):
+    """Only typed transcript errors expose their safe actionable message."""
+    service, _registry, _connections, _events = _service(
+        connection_id=uuid.uuid4(), behavior=behavior
+    )
+    session = await _new_session(service, harness_workspace)
+    assistant = await service.start_run(
+        session,
+        "resume stored conversation",
+        organization_id=session.organization_id,
+        user_id=harness_workspace.created_by_id,
+    )
+    await service._tasks[str(session.id)]
+
+    assistant.refresh_from_db()
+    assert assistant.finish == "error"
+    assert assistant.error == str(ClaudeTranscriptError(reason))
+    assert "Fork this conversation or start a new session" in assistant.error
+    attempt = HarnessRunRepository.model.objects.get(assistant_message=assistant)
+    assert attempt.status == "error"
 
 
 @pytest.mark.django_db(transaction=True)

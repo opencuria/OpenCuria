@@ -52,19 +52,30 @@ async def test_session_store_batches_idempotent_entries_and_lists_subkeys(
     assert len(sessions) == 1
     assert sessions[0]["session_id"] == external_id
     assert isinstance(sessions[0]["mtime"], int)
+    assert sessions[0]["mtime"] == HarnessEngineRepository.get_transcript_mtime(
+        session.id, external_session_id=external_id
+    )
+    first_mtime = sessions[0]["mtime"]
+    await store.append(
+        key, [{"type": "result", "uuid": "later", "message": "last"}]
+    )
+    updated_sessions = await store.list_sessions(project_key)
+    assert updated_sessions[0]["mtime"] >= first_mtime
     assert (
         len(
             HarnessEngineRepository.list_transcript_entries(
                 session.id, external_session_id=external_id
             )
         )
-        == 2
+        == 3
     )
     await store.delete(key)
     assert await store.load(key) is None
     assert await store.load({**key, "subpath": "subagents/agent-123"}) is None
+    assert await store.list_sessions(project_key) == []
     assert await store.delete_session() == 0
     assert await store.list_subkeys(key) == []
+    assert await store.list_sessions(project_key) == []
 
 
 @pytest.mark.django_db(transaction=True)
@@ -86,6 +97,7 @@ async def test_session_store_rejects_invalid_project_and_path(
         await store.load({"project_key": "../other", "session_id": external_id})
     with pytest.raises(ValueError, match="does not match workspace"):
         await store.load({"project_key": "other", "session_id": external_id})
+    assert await store.list_sessions("other") == []
     with pytest.raises(ValueError, match="session_id"):
         await store.load({"project_key": "workspace", "session_id": "../../etc"})
     with pytest.raises(ValueError, match="subpath"):

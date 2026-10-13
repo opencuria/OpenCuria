@@ -240,6 +240,24 @@ class WorkspaceAccessor(abc.ABC):
     ) -> FileContent:
         """Read a file from the sandboxed workspace."""
 
+    async def read_file_no_follow(
+        self,
+        path: str,
+        max_size: int | None = None,
+    ) -> FileContent:
+        """Read a regular workspace file without following any symlink.
+
+        This media-specific primitive uses the existing binary-safe process
+        stream and is intentionally separate from the general ``read_file``
+        contract. Paths must be lexically normalized and remain below
+        ``/workspace``; every path component is opened with no-follow flags.
+        """
+        from .safe_files import read_file_no_follow
+
+        return await read_file_no_follow(
+            self, path, max_size, root=HARNESS_WORKSPACE_ROOT
+        )
+
     @abc.abstractmethod
     async def write_file(
         self,

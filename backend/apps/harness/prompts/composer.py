@@ -24,6 +24,7 @@ logic lives here on purpose.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -151,6 +152,7 @@ async def compose_system_prompt(
     now: datetime | None = None,
     skills: list[str] | None = None,
     references: list[str] | None = None,
+    native_tool_contracts: bool = False,
 ) -> ComposedPrompt:
     """Compose the full system prompt for an agent run.
 
@@ -165,6 +167,7 @@ async def compose_system_prompt(
         now: Timestamp for the environment section (defaults to UTC).
         skills: Extension point (M5/M7): skill names/blobs to append.
         references: Extension point (M5/M7): ``@file``-style references.
+        native_tool_contracts: The CLI owns native tool names and descriptions.
 
     Returns:
         The composed prompt plus loaded sources and a truncated flag.
@@ -172,7 +175,26 @@ async def compose_system_prompt(
     if mode not in ("plan", "build"):
         raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
     moment = now or datetime.now(timezone.utc)
-    sections: list[str] = [agent.system_prompt.strip()]
+    agent_prompt = agent.system_prompt.strip()
+    if native_tool_contracts:
+        # Adapt names only; never replace the CLI's native tool contracts.
+        for local, native in (
+            ("read", "Read"),
+            ("glob", "Glob"),
+            ("grep", "Grep"),
+            ("bash", "Bash"),
+        ):
+            agent_prompt = re.sub(rf"\b{local}\b", native, agent_prompt)
+        agent_prompt = agent_prompt.replace(
+            "Read, Glob, Grep, list", "Read, Glob, Grep"
+        )
+        agent_prompt = agent_prompt.replace(
+            "read tools (Read, Glob, Grep, list)", "Read, Glob, and Grep"
+        )
+        agent_prompt = agent_prompt.replace(
+            "question tool", "mcp__opencuria__question tool"
+        )
+    sections: list[str] = [agent_prompt]
     sources: list[str] = []
     truncated = False
 
@@ -208,21 +230,32 @@ async def compose_system_prompt(
             "missing packages when your current permissions allow it."
         )
     if mode == "plan":
-        env_lines.append(
-            "Plan mode: investigate read-only; "
-            "ask before edits/mutating commands."
-        )
+        if agent.name == "explore":
+            env_lines.append(
+                "Plan mode does not relax Explore's read-only restrictions. "
+                "Do not edit files, run tests or mutating commands, or delegate."
+            )
+        else:
+            env_lines.append(
+                "Plan mode: research, tests, builds, and development servers may "
+                "create ordinary temporary artifacts. Ask before deliberate source/"
+                "configuration edits or other unclassified mutations, including "
+                "delegated work and background processes."
+            )
     sections.append("\n".join(env_lines))
 
     if tools:
-        tool_lines = ["# Available tools"]
+        tool_lines = [
+            "# OpenCuria tools" if native_tool_contracts else "# Available tools"
+        ]
         for schema in tools:
             tool_lines.append(f"- {schema.name}: {schema.description}")
-        tool_lines.append(
-            "Independent tool calls in one assistant message run in parallel. "
-            "Issue multiple tool calls in a single step for independent work; "
-            "wait for results before dependent follow-ups."
-        )
+        if not native_tool_contracts:
+            tool_lines.append(
+                "Independent tool calls in one assistant message run in parallel. "
+                "Issue multiple tool calls in a single step for independent work; "
+                "wait for results before dependent follow-ups."
+            )
         sections.append("\n".join(tool_lines))
 
     if subagents:
@@ -242,12 +275,11 @@ async def compose_system_prompt(
     if skills:
         sections.append("# Skills\n" + "\n".join(f"- {skill}" for skill in skills))
     if references:
-        sections.append(
-            "# References\n" + "\n".join(f"- {ref}" for ref in references)
-        )
+        sections.append("# References\n" + "\n".join(f"- {ref}" for ref in references))
 
-    return ComposedPrompt(system="\n\n".join(sections), sources=sources,
-                           truncated=truncated)
+    return ComposedPrompt(
+        system="\n\n".join(sections), sources=sources, truncated=truncated
+    )
 
 
 def describe_tools_for_prompt(tools: list[ToolSchema] | None) -> list[str]:

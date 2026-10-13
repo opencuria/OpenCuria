@@ -10,7 +10,7 @@ from ...providers.base import Usage
 
 @dataclass
 class StepState:
-    """Streaming state for one root turn or a delegated CLI subagent."""
+    """Streaming state for API-message steps in one root or delegated scope."""
 
     step: int = 0
     started: bool = False
@@ -22,6 +22,8 @@ class StepState:
     block_order: dict[str, list[tuple[int, str]]] = field(default_factory=dict)
     completed_blocks: set[tuple[str, int, str]] = field(default_factory=set)
     completed_messages: set[str] = field(default_factory=set)
+    usage_by_message: dict[str, Usage] = field(default_factory=dict)
+    finished_usage: Usage = field(default_factory=Usage)
     text: list[str] = field(default_factory=list)
     reasoning: list[str] = field(default_factory=list)
 
@@ -72,7 +74,11 @@ class ClaudeEventNormalizer:
     @staticmethod
     def stream_event(message: Any) -> dict[str, Any]:
         """Return a raw SDK stream event from a parsed message or fixture."""
-        raw = message.get("event") if isinstance(message, dict) else getattr(message, "event", None)
+        raw = (
+            message.get("event")
+            if isinstance(message, dict)
+            else getattr(message, "event", None)
+        )
         return raw if isinstance(raw, dict) else {}
 
     @staticmethod
@@ -91,6 +97,67 @@ class ClaudeEventNormalizer:
         raw = cls.stream_event(message)
         api_message = raw.get("message")
         return str(api_message.get("id") or "") if isinstance(api_message, dict) else ""
+
+    @classmethod
+    def stream_usage(cls, message: Any) -> tuple[str, Usage] | None:
+        """Read an API message usage snapshot from stream boundaries."""
+        raw = cls.stream_event(message)
+        if raw.get("type") == "message_start":
+            api_message = raw.get("message")
+            usage = api_message.get("usage") if isinstance(api_message, dict) else None
+            message_id = (
+                str(api_message.get("id") or "")
+                if isinstance(api_message, dict)
+                else ""
+            )
+        elif raw.get("type") == "message_delta":
+            usage = raw.get("usage")
+            message_id = ""
+        else:
+            return None
+        mapped = cls.message_usage(usage)
+        return (message_id, mapped) if mapped is not None else None
+
+    @staticmethod
+    def message_usage(raw: Any) -> Usage | None:
+        """Map one API message's token usage, including cache token fields."""
+        if not isinstance(raw, dict):
+            return None
+
+        def count(*keys: str) -> int:
+            for key in keys:
+                if key in raw:
+                    try:
+                        return int(raw.get(key) or 0)
+                    except (TypeError, ValueError):
+                        return 0
+            return 0
+
+        prompt = (
+            count("input_tokens", "inputTokens")
+            + count("cache_read_input_tokens", "cacheReadInputTokens")
+            + count("cache_creation_input_tokens", "cacheCreationInputTokens")
+        )
+        completion = count("output_tokens", "outputTokens")
+        if not any(
+            key in raw
+            for key in (
+                "input_tokens",
+                "inputTokens",
+                "cache_read_input_tokens",
+                "cacheReadInputTokens",
+                "cache_creation_input_tokens",
+                "cacheCreationInputTokens",
+                "output_tokens",
+                "outputTokens",
+            )
+        ):
+            return None
+        return Usage(
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            total_tokens=prompt + completion,
+        )
 
     @staticmethod
     def stream_fallback_id(message: Any) -> str:
@@ -137,12 +204,12 @@ class ClaudeEventNormalizer:
         """Read the Anthropic API message ID from an assistant completion."""
         if isinstance(message, dict):
             raw_message = message.get("message")
-            message_id = raw_message.get("id") if isinstance(raw_message, dict) else None
+            message_id = (
+                raw_message.get("id") if isinstance(raw_message, dict) else None
+            )
             return str(message_id or message.get("uuid") or "")
         return str(
-            getattr(message, "message_id", None)
-            or getattr(message, "uuid", None)
-            or ""
+            getattr(message, "message_id", None) or getattr(message, "uuid", None) or ""
         )
 
     @classmethod
@@ -158,7 +225,11 @@ class ClaudeEventNormalizer:
         if kind == "text_delta":
             text, slot, field_name = str(delta.get("text") or ""), "text", "text"
         elif kind == "thinking_delta":
-            text, slot, field_name = str(delta.get("thinking") or ""), "thinking", "reasoning"
+            text, slot, field_name = (
+                str(delta.get("thinking") or ""),
+                "thinking",
+                "reasoning",
+            )
         else:
             return None
         try:
@@ -182,7 +253,11 @@ class ClaudeEventNormalizer:
         if isinstance(message, dict):
             parent = message.get("parent_tool_use_id")
             raw_message = message.get("message")
-            blocks = raw_message.get("content", message.get("content")) if isinstance(raw_message, dict) else message.get("content")
+            blocks = (
+                raw_message.get("content", message.get("content"))
+                if isinstance(raw_message, dict)
+                else message.get("content")
+            )
         return str(parent or ""), blocks if isinstance(blocks, list) else []
 
     @staticmethod
@@ -191,7 +266,9 @@ class ClaudeEventNormalizer:
         content = getattr(message, "content", None)
         if isinstance(message, dict):
             raw = message.get("message")
-            content = raw.get("content") if isinstance(raw, dict) else message.get("content")
+            content = (
+                raw.get("content") if isinstance(raw, dict) else message.get("content")
+            )
         if not isinstance(content, list):
             return []
         results: list[tuple[str, Any, bool]] = []
@@ -199,7 +276,11 @@ class ClaudeEventNormalizer:
             if ClaudeEventNormalizer.block_type(block) != "tool_result":
                 continue
             if isinstance(block, dict):
-                call_id, value, error = block.get("tool_use_id"), block.get("content"), block.get("is_error")
+                call_id, value, error = (
+                    block.get("tool_use_id"),
+                    block.get("content"),
+                    block.get("is_error"),
+                )
             else:
                 call_id = getattr(block, "tool_use_id", None)
                 value = getattr(block, "content", None)
@@ -214,8 +295,10 @@ class ClaudeEventNormalizer:
         if isinstance(block, dict):
             return str(block.get("type") or "")
         return {
-            "TextBlock": "text", "ThinkingBlock": "thinking",
-            "ToolUseBlock": "tool_use", "ToolResultBlock": "tool_result",
+            "TextBlock": "text",
+            "ThinkingBlock": "thinking",
+            "ToolUseBlock": "tool_use",
+            "ToolResultBlock": "tool_result",
         }.get(type(block).__name__, "")
 
     @staticmethod
@@ -223,7 +306,9 @@ class ClaudeEventNormalizer:
         """Read text/thinking content from an SDK block or raw fixture."""
         if isinstance(block, dict):
             return str(block.get("text") or block.get("thinking") or "")
-        return str(getattr(block, "text", None) or getattr(block, "thinking", None) or "")
+        return str(
+            getattr(block, "text", None) or getattr(block, "thinking", None) or ""
+        )
 
     @classmethod
     def assistant_deltas(
@@ -242,7 +327,11 @@ class ClaudeEventNormalizer:
             slot = "text" if kind == "text" else "thinking"
             field_name = "text" if kind == "text" else "reasoning"
             previous = streamed.get((index, slot), "")
-            remainder = full[len(previous):] if previous and full.startswith(previous) else full
+            remainder = (
+                full[len(previous) :]
+                if previous and full.startswith(previous)
+                else full
+            )
             if remainder:
                 deltas.append((index, slot, field_name, remainder))
         return parent, deltas
@@ -260,19 +349,31 @@ class ClaudeEventNormalizer:
                     continue
                 nested = value[key]
                 if isinstance(nested, list):
-                    return "\n".join(str(item.get("text", "")) for item in nested if isinstance(item, dict))
+                    return "\n".join(
+                        str(item.get("text", ""))
+                        for item in nested
+                        if isinstance(item, dict)
+                    )
                 if isinstance(nested, (dict, list)):
                     import json
+
                     return json.dumps(nested, ensure_ascii=False, default=str)
                 return str(nested or "")
             import json
+
             return json.dumps(value, ensure_ascii=False, default=str)
         if isinstance(value, list):
-            return "\n".join(str(item.get("text", "")) for item in value if isinstance(item, dict) and item.get("type") == "text")
+            return "\n".join(
+                str(item.get("text", ""))
+                for item in value
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
         content = getattr(value, "content", None)
         if isinstance(content, list):
             return "\n".join(
-                str(item.get("text", "")) if isinstance(item, dict) else str(getattr(item, "text", ""))
+                str(item.get("text", ""))
+                if isinstance(item, dict)
+                else str(getattr(item, "text", ""))
                 for item in content
                 if (isinstance(item, dict) and item.get("text") is not None)
                 or getattr(item, "text", None) is not None
@@ -298,15 +399,19 @@ class ClaudeEventNormalizer:
                 int(value.get("inputTokens", 0) or 0)
                 + int(value.get("cacheReadInputTokens", 0) or 0)
                 + int(value.get("cacheCreationInputTokens", 0) or 0)
-                for value in model_usage.values() if isinstance(value, dict)
+                for value in model_usage.values()
+                if isinstance(value, dict)
             )
             output_tokens = sum(
                 int(value.get("outputTokens", 0) or 0)
-                for value in model_usage.values() if isinstance(value, dict)
+                for value in model_usage.values()
+                if isinstance(value, dict)
             )
         else:
             input_tokens = int(raw.get("input_tokens", raw.get("inputTokens", 0)) or 0)
-            output_tokens = int(raw.get("output_tokens", raw.get("outputTokens", 0)) or 0)
+            output_tokens = int(
+                raw.get("output_tokens", raw.get("outputTokens", 0)) or 0
+            )
         return Usage(
             prompt_tokens=input_tokens,
             completion_tokens=output_tokens,

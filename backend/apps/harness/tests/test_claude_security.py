@@ -5,7 +5,12 @@ from __future__ import annotations
 import pytest
 
 from apps.harness.engines.claude.security import StreamingRedactor, redact_text
-from apps.harness.engines.claude.shellpolicy import shell_command_may_mutate
+from apps.harness.engines.claude.shellpolicy import (
+    shell_command_is_explore_safe,
+    shell_command_is_plan_workflow,
+    shell_command_may_mutate,
+    shell_command_requires_plan_approval,
+)
 
 
 @pytest.mark.parametrize(
@@ -124,6 +129,14 @@ def test_streaming_redactor_is_fresh_per_content_block() -> None:
         "git branch --sort=-committerdate feature",
         "git checkout -b feature",
         "git config user.name example",
+        "git config alias.cleanup '!rm -rf .'",
+        "git diff --ext-diff",
+        "git diff --textconv",
+        "git grep --open-files-in-pager=sh pattern",
+        "git status --open-files-in-pager sh",
+        "git status --config-env=alias.x=GIT_CONFIG_COUNT",
+        "git status --config-env alias.x=GIT_CONFIG_COUNT",
+        "git status -c alias.x=sh",
     ],
 )
 def test_git_mutation_commands_require_plan_approval(command: str) -> None:
@@ -142,7 +155,10 @@ def test_git_mutation_commands_require_plan_approval(command: str) -> None:
         "git status --short",
         "git config --list",
         "git config --get user.name",
+        "git config --get alias.cleanup rm",
         "git diff",
+        "git branch --list",
+        "/usr/bin/git status --short",
     ],
 )
 def test_git_read_only_inspection_commands_remain_available(command: str) -> None:
@@ -160,6 +176,23 @@ def test_git_read_only_inspection_commands_remain_available(command: str) -> Non
         "npm run lint",
         "npm exec eslint",
         "git status > result.txt",
+        "git remote add origin https://example.invalid/repo.git",
+        "git remote set-url origin https://example.invalid/repo.git",
+        "sed -i s/a/b/ file.txt",
+        "sed -n '1,4p' file.txt -i.bak",
+        "sed -n '1,4p' file.txt --in-place=backup",
+        "sed -n 'w output.txt' file.txt",
+        "rg --pre rm pattern .",
+        "rg --pre=rm pattern .",
+        "rg --pre=rm=argument pattern .",
+        "find . -fprint0 result.txt",
+        "find . -fprintf result.txt %p",
+        "find . -fls result.txt",
+        "ruff check --fix .",
+        "ruff format .",
+        "pip install package",
+        "npm install package",
+        "pnpm add package",
     ],
 )
 def test_shell_wrappers_and_script_commands_fail_closed(command: str) -> None:
@@ -173,6 +206,165 @@ def test_known_inspection_and_explicit_dry_run_commands_are_read_only(
     command: str,
 ) -> None:
     assert not shell_command_may_mutate(command), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git status",
+        "git diff",
+        "git remote -v",
+        "sed -n '1,4p' file.txt",
+        "git log --oneline -5",
+        "npm --version",
+        "ruff --version",
+    ],
+)
+def test_strict_explore_read_only_command_allowlist(command: str) -> None:
+    assert shell_command_is_explore_safe(command), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git remote add origin URL",
+        "sed -n 'w output.txt' file.txt",
+        "git status; touch file",
+        "git status $(touch file)",
+        "pytest -q > report.txt",
+        "pytest -q || touch src/config.py",
+        "pytest -q > report.txt && pytest -q",
+        "pytest -q >> src/config.py",
+        "pytest -q 2>& src/config.py",
+        "pytest -q &> src/config.py",
+        "pytest -q <<< payload",
+        "pytest -q; touch src/config.py",
+        "rg --pre rm pattern .",
+        "rg --pre=rm pattern .",
+        "rg --pre rm=arg pattern .",
+        "rg --pre=rm=arg pattern .",
+        "python -c 'print(1)'",
+        "some-unknown-tool --help",
+        "./git status",
+        "./pytest -q",
+        "./rg pattern .",
+        "/workspace/bin/git status",
+        "/tmp/pytest -q",
+        "ruff check --fix .",
+        "ruff check --config=/workspace/ruff.toml --no-cache .",
+        "ruff check --output-format=json --no-cache .",
+        "ruff check --no-cache --fix .",
+        "ruff check --no-cache .",
+        "npm test",
+        "npm run test:unit",
+        "git branch -lv",
+        "git status --open-files-in-pager=sh",
+        "git diff --ext-diff",
+        "git diff --textconv",
+        "git config --config-env=alias.x=GIT_CONFIG_COUNT",
+        "git config --list --add user.name x",
+        "go env -w GOPROXY=example",
+        "go test -exec ./test-wrapper",
+        "go test -exec=/workspace/bin/wrapper",
+        "go test -exec /workspace/bin/wrapper",
+        "go test -coverprofile=coverage.out -exec=/workspace/bin/wrapper",
+        "gunicorn app:app -c /workspace/config.py",
+        "gunicorn app:app --config /workspace/config.py",
+        "uvicorn app:app --config=/workspace/config.yml",
+        "uvicorn app:app --log-config /workspace/logging.ini",
+        "find . -fprint results.txt",
+        "find . -fprint0 results.txt",
+        "find . -fprintf results.txt %p",
+        "find . -fls results.txt",
+        "find . -fprint0=results.txt",
+        "find . -fprintfx results.txt %p",
+        "find . -flsx results.txt",
+        "sed -n '1w out.txt' file.txt",
+        "sed -n '1,4p' file.txt -i.bak",
+        "sed -n '1,4p' file.txt --in-place=backup",
+        "sed -n 's/a/b/w out.txt' file.txt",
+    ],
+)
+def test_strict_explore_rejects_unknown_or_mutating_commands(command: str) -> None:
+    assert not shell_command_is_explore_safe(command), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pytest -q",
+        "cd backend && pytest -q",
+        "python -m pytest backend/tests",
+        "npm test",
+        "npm run test:unit",
+        "npm run build",
+        "pnpm dev",
+        "python manage.py runserver",
+        "python -m http.server",
+        "uvicorn apps.main:app",
+        "cd backend && pytest -q",
+        "ruff check --no-cache .",
+        "npm run build && npm run test:unit",
+        "npm run test:unit -- --watch",
+        "pytest -q --junitxml=artifacts/reports/junit.xml",
+        "pytest -q --html=artifacts/reports/report.html",
+        "pytest -q --junitxml=/tmp/junit.xml",
+        "pytest -q --cache-dir=.pytest_cache",
+        "pytest -q --basetemp=artifacts/tmp",
+        "ruff check --no-cache --output-file=artifacts/reports/ruff.xml .",
+        "coverage xml -o artifacts/reports/coverage.xml",
+        "pytest -q --log-file=reports/pytest.log",
+        "npm run build -- --output-path=dist",
+        "npm run build -- --output-file=build/site.html",
+        "npm run test:unit && pytest -q",
+    ],
+)
+def test_plan_allows_normal_workflows_with_temporary_artifacts(command: str) -> None:
+    assert shell_command_is_plan_workflow(command), command
+    assert not shell_command_requires_plan_approval(command), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pytest -q --junitxml=src/generated.py",
+        "pytest -q --junitxml=src/config.json",
+        "pytest -q --junitxml=src/config.yml",
+        "pytest -q --junitxml=src/config.toml",
+        "pytest -q --junitxml=src/notes.md",
+        "pytest -q --junitxml=src/component.vue",
+        "pytest -q --junitxml=src/component.ts",
+        "pytest -q --junitxml=artifacts/config.json",
+        "pytest -q --junitxml=src/generated.xml",
+        "pytest -q --result-json=src/result.json",
+        "pytest -q --basetemp=src/tmp",
+        "pytest -q --cov-report=xml:src/coverage.xml",
+        "pytest -q --cov-report=html:src/htmlcov",
+        "ruff check --no-cache --output-file=src/config.json .",
+        "ruff check --no-cache --output-file=reports/output.json .",
+        "coverage xml -o src/coverage.json",
+        "coverage html -d src/htmlcov",
+        "npm run build -- --output-path=src/generated.vue",
+        "npm run build -- --output-path=src/config.toml",
+        "npm run build -- --config=artifacts/vite.config.ts",
+        "npm run build -- --config=src/vite.config.ts",
+        "pytest -q $(touch generated.py)",
+        "pytest -q `touch generated.py`",
+        "git remote add origin URL",
+        "ruff check --fix .",
+        "sed -i s/a/b/ file.txt",
+        "npm install package",
+        "python script.py",
+        "echo report > out.txt",
+        "npm run custom-task",
+        "git remote add origin URL",
+        "ruff check .",
+        "ruff check --no-cache --fix .",
+        "sed -n 'w out.txt' file.txt",
+    ],
+)
+def test_plan_requires_approval_for_unrecognized_mutations(command: str) -> None:
+    assert shell_command_requires_plan_approval(command), command
 
 
 def test_numeric_usage_metadata_is_not_redacted_as_a_token_secret() -> None:

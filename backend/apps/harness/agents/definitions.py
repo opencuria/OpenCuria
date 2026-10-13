@@ -9,19 +9,16 @@ Permission design (OpenCode-like defaults):
 - ``build`` (primary): ``{"*": "allow"}`` — full read/write/run access.
 - ``plan`` (primary): edits ask for approval (``ask``, deliberately not
   ``deny`` so a planner can still apply a one-off fix after the user
-  approves it). ``bash`` and background processes (``process``) are
-  fully allowed, exactly like ``build`` — the planner may run any
-  command, server, or test suite while scoping; only file edits go
-  through the ask gate.
+  approves it). Research commands, tests, builds, development servers, and
+  their ordinary temporary artifacts may run while scoping; other mutations
+  and background processes require approval.
 - ``general`` (subagent): ``{"*": "allow"}`` plus ``question: deny``
   — delegated subtasks may use every tool (M5 wires up child sessions)
   but never prompt the user directly.
-- ``explore`` (subagent, read-only): ``edit``/``write`` are ``deny``.
-  ``bash`` is ``allow`` (OpenCode-like, so research commands such as
-  ``find``/``rg`` do not block on a hidden child ask) with a
-  last-match deny list for destructive commands (``rm``, ``sudo``,
-  ``mv``, …). Pure research tools (``read``, ``glob``, ``grep``,
-  ``list``, ``webfetch``) stay allowed; ``question`` is ``deny``.
+- ``explore`` (subagent, read-only): ``edit``/``write``/``process`` and
+  ``mcp_*`` tools are denied. Bash is subject to a strict read-only command
+  allowlist at the Claude hook boundary; web research remains available.
+  ``question`` is ``deny``.
 - ``title`` / ``compaction`` (hidden): ``{"*": "deny"}`` so the loop
   offers no tools at all and answers text-only. ``title`` uses the
   ``"small"`` sentinel resolved to ``ProviderConfig.small_model`` at
@@ -46,8 +43,8 @@ SMALL_MODEL = "small"
 
 VALID_MODES: tuple[str, ...] = ("primary", "subagent", "hidden")
 
-#: ``explore`` bash rules: research commands allowed, destructive
-#: denied. Order matters (last-match-wins): catch-all first, denies last.
+#: Shared destructive-command denies; Claude additionally enforces a read-only
+#: allowlist at its hook boundary.
 EXPLORE_BASH_RULES: dict[str, str] = {
     "*": "allow",
     "rm *": "deny",
@@ -59,6 +56,22 @@ EXPLORE_BASH_RULES: dict[str, str] = {
     "chown *": "deny",
     "dd *": "deny",
 }
+
+
+def canonical_subagent_type(value: str) -> str:
+    """Normalize supported SDK task labels and reject unknown child types."""
+    normalized = (value or "").strip().lower().replace("_", "-")
+    aliases = {
+        "explore": "explore",
+        "explorer": "explore",
+        "general": "general",
+        "general-purpose": "general",
+    }
+    try:
+        return aliases[normalized]
+    except KeyError as exc:
+        raise ValueError(f"Unknown Claude subagent type: {value}") from exc
+
 
 #: Subagent/hidden agents never prompt the user directly: pending
 #: question gates of child sessions surface on the parent composer.
@@ -114,18 +127,19 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
         mode="primary",
         description=(
             "Primary planning agent: investigates and proposes plans; "
-            "edits need approval, shell and background processes are free."
+            "source edits and unclassified mutations need approval."
         ),
         system_prompt=(
             "You are opencuria plan, a staff engineer scoping a task. "
-            "Investigate the codebase with read tools (read, glob, grep, "
-            "list), shell commands (bash), and background processes — "
-            "running commands, servers, and test suites is allowed and "
-            "encouraged while scoping. Do NOT edit files without explicit "
-            "user approval. Resolve every ambiguity with the question "
-            "tool before writing the plan; never leave open questions in "
-            "the plan itself. Only after all questions are answered, end "
-            "with a concise step-by-step plan and wait for confirmation."
+            "Investigate with read tools, web research tools, shell research, "
+            "tests, builds, and development servers. These workflows may "
+            "create ordinary temporary artifacts. Ask before source or "
+            "configuration edits and other unclassified mutations; background "
+            "processes are allowed only for those workflows. Resolve every "
+            "ambiguity with the question tool before writing the plan; never "
+            "leave open questions in the plan itself. Only after all questions "
+            "are answered, end with a concise step-by-step plan and wait for "
+            "confirmation."
         ),
         permissions={
             "*": "allow",
@@ -159,21 +173,19 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
         ),
         system_prompt=(
             "You are opencuria explore, a read-only research subagent. Use "
-            "read, glob, grep, list, and harmless shell commands only. "
-            "Never edit or write files and never run mutating commands. "
-            "Return file paths, matching snippets, and a short summary."
+            "read, glob, grep, list, web research tools, and simple "
+            "allowlisted read-only shell commands only. Never edit or write "
+            "files, run mutating commands or tests, or delegate, even in plan "
+            "mode. Return file paths, matching snippets, "
+            "and a short summary."
         ),
         permissions={
             "*": "allow",
             "edit": "deny",
             "write": "deny",
             "process": "deny",
-            "bash": dict(EXPLORE_BASH_RULES),
-            # MCP tools can mutate through third-party servers and their
-            # read/write annotations are not reliable: deny them all for
-            # the read-only explore agent (fnmatch ``*`` matches all
-            # ``mcp_``-prefixed namespaced tools).
             "mcp_*": "deny",
+            "bash": dict(EXPLORE_BASH_RULES),
             **QUESTION_DENY,
         },
         color="green",

@@ -90,6 +90,9 @@ def test_engine_state_and_transcript_are_ordered_encrypted_and_idempotent(
     assert first.id == duplicate.id
     assert first.position == 0
     assert second.position == 1
+    assert HarnessEngineRepository.get_transcript_mtime(
+        session.id, external_session_id="sdk-session-123"
+    ) is not None
     assert "hello" not in first.payload_encrypted
     assert decrypt_value(first.payload_encrypted).find('"hello"') >= 0
     assert HarnessEngineRepository.list_transcript_entries(
