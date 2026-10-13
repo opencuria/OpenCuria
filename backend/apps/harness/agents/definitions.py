@@ -9,9 +9,9 @@ Permission design (OpenCode-like defaults):
 - ``build`` (primary): ``{"*": "allow"}`` — full read/write/run access.
 - ``plan`` (primary): edits ask for approval (``ask``, deliberately not
   ``deny`` so a planner can still apply a one-off fix after the user
-  approves it). Research commands, tests, builds, development servers, and
-  their ordinary temporary artifacts may run while scoping; other mutations
-  and background processes require approval.
+  approves it). Bash, background processes, and registered MCP tools are
+  allowed by default, without an additional plan-mode classifier. Explicit
+  permission rules still apply; this is not a shell sandbox.
 - ``general`` (subagent): ``{"*": "allow"}`` plus ``question: deny``
   — delegated subtasks may use every tool (M5 wires up child sessions)
   but never prompt the user directly.
@@ -127,15 +127,15 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
         mode="primary",
         description=(
             "Primary planning agent: investigates and proposes plans; "
-            "source edits and unclassified mutations need approval."
+            "source edits need approval; shell and processes are allowed."
         ),
         system_prompt=(
             "You are opencuria plan, a staff engineer scoping a task. "
             "Investigate with read tools, web research tools, shell research, "
             "tests, builds, and development servers. These workflows may "
             "create ordinary temporary artifacts. Ask before source or "
-            "configuration edits and other unclassified mutations; background "
-            "processes are allowed only for those workflows. Resolve every "
+            "configuration changes. Shell commands and background processes "
+            "follow the configured tool permissions. Resolve every "
             "ambiguity with the question tool before writing the plan; never "
             "leave open questions in the plan itself. Only after all questions "
             "are answered, end with a concise step-by-step plan and wait for "

@@ -7,9 +7,7 @@ import pytest
 from apps.harness.engines.claude.security import StreamingRedactor, redact_text
 from apps.harness.engines.claude.shellpolicy import (
     shell_command_is_explore_safe,
-    shell_command_is_plan_workflow,
     shell_command_may_mutate,
-    shell_command_requires_plan_approval,
 )
 
 
@@ -139,7 +137,7 @@ def test_streaming_redactor_is_fresh_per_content_block() -> None:
         "git status -c alias.x=sh",
     ],
 )
-def test_git_mutation_commands_require_plan_approval(command: str) -> None:
+def test_git_mutation_commands_are_classified_as_mutating(command: str) -> None:
     assert shell_command_may_mutate(command), command
 
 
@@ -292,41 +290,6 @@ def test_strict_explore_rejects_unknown_or_mutating_commands(command: str) -> No
 @pytest.mark.parametrize(
     "command",
     [
-        "pytest -q",
-        "cd backend && pytest -q",
-        "python -m pytest backend/tests",
-        "npm test",
-        "npm run test:unit",
-        "npm run build",
-        "pnpm dev",
-        "python manage.py runserver",
-        "python -m http.server",
-        "uvicorn apps.main:app",
-        "cd backend && pytest -q",
-        "ruff check --no-cache .",
-        "npm run build && npm run test:unit",
-        "npm run test:unit -- --watch",
-        "pytest -q --junitxml=artifacts/reports/junit.xml",
-        "pytest -q --html=artifacts/reports/report.html",
-        "pytest -q --junitxml=/tmp/junit.xml",
-        "pytest -q --cache-dir=.pytest_cache",
-        "pytest -q --basetemp=artifacts/tmp",
-        "ruff check --no-cache --output-file=artifacts/reports/ruff.xml .",
-        "coverage xml -o artifacts/reports/coverage.xml",
-        "pytest -q --log-file=reports/pytest.log",
-        "npm run build -- --output-path=dist",
-        "npm run build -- --output-file=build/site.html",
-        "npm run test:unit && pytest -q",
-    ],
-)
-def test_plan_allows_normal_workflows_with_temporary_artifacts(command: str) -> None:
-    assert shell_command_is_plan_workflow(command), command
-    assert not shell_command_requires_plan_approval(command), command
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
         "pytest -q --junitxml=src/generated.py",
         "pytest -q --junitxml=src/config.json",
         "pytest -q --junitxml=src/config.yml",
@@ -363,8 +326,8 @@ def test_plan_allows_normal_workflows_with_temporary_artifacts(command: str) -> 
         "sed -n 'w out.txt' file.txt",
     ],
 )
-def test_plan_requires_approval_for_unrecognized_mutations(command: str) -> None:
-    assert shell_command_requires_plan_approval(command), command
+def test_generic_mutation_classifier_marks_unrecognized_writes(command: str) -> None:
+    assert shell_command_may_mutate(command), command
 
 
 def test_numeric_usage_metadata_is_not_redacted_as_a_token_secret() -> None:

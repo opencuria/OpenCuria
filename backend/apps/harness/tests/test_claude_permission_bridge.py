@@ -22,7 +22,7 @@ from apps.harness.engines.claude.permissionbridge import PermissionBridge
 from apps.harness.engines.claude.policy import native_tools_for_claude
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.scopes import permission_scope_matches
-from apps.harness.runner import RunOptions
+from apps.harness.runner import HarnessRunner, RunOptions
 from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
 
@@ -66,6 +66,7 @@ def _bridge_case(
     evaluator: PermissionEvaluator | None = None,
     on_permission: Any = None,
     registry: ToolRegistry | None = None,
+    auto_approve: bool = False,
 ) -> tuple[ClaudeEngine, PermissionBridge, RunOptions, list[dict[str, Any]]]:
     events: list[dict[str, Any]] = []
 
@@ -84,6 +85,7 @@ def _bridge_case(
         session_id="permission-bridge-test",
         workspace_id=accessor.workspace_id,
         on_permission=on_permission,
+        auto_approve=auto_approve,
         max_depth=2,
     )
     definition = get_agent(agent)
@@ -332,6 +334,8 @@ async def test_plan_and_child_native_tool_policy_is_applied_at_hook_boundary(
         ToolPermissionContext(tool_use_id="plan-read"),
     )
     assert isinstance(native_read_result, PermissionResultAllow)
+    # Plan's explicit agent-level edit permission still asks, but the bridge
+    # adds no separate unconditional plan-mode edit gate.
     assert decision(plan_write) == "ask"
     plan_write_result = await bridge.can_use_tool(
         engine,
@@ -350,7 +354,15 @@ async def test_plan_and_child_native_tool_policy_is_applied_at_hook_boundary(
         }
     ]
     assert decision(bash_read_only) == "allow"
-    assert decision(bash_mutation) == "ask"
+    assert decision(bash_mutation) == "allow"
+    mutation_result = await bridge.can_use_tool(
+        engine,
+        "Bash",
+        {"command": "git branch -D fixture"},
+        ToolPermissionContext(tool_use_id="plan-bash-mutation"),
+    )
+    assert isinstance(mutation_result, PermissionResultAllow)
+    assert len(native_approvals) == 1
     assert decision(explore_write) == "deny"
     assert decision(explore_bash) == "deny"
     assert get_agent("explore").permissions["mcp_*"] == "deny"
@@ -392,7 +404,6 @@ async def test_plan_and_child_native_tool_policy_is_applied_at_hook_boundary(
         depth=0,
         max_depth=options.max_depth,
         selected_skills=["selected-skill"],
-        plan_mode=True,
     )
     assert "Task" in root_native_names
     max_depth_native_names = native_tools_for_claude(
@@ -403,7 +414,6 @@ async def test_plan_and_child_native_tool_policy_is_applied_at_hook_boundary(
         depth=options.max_depth,
         max_depth=options.max_depth,
         selected_skills=["selected-skill"],
-        plan_mode=True,
     )
     assert "Task" not in max_depth_native_names
     explore_native_names = native_tools_for_claude(
@@ -414,7 +424,6 @@ async def test_plan_and_child_native_tool_policy_is_applied_at_hook_boundary(
         depth=1,
         max_depth=options.max_depth,
         selected_skills=["selected-skill"],
-        plan_mode=True,
     )
     assert "Task" not in explore_native_names
     assert {"WebFetch", "WebSearch"}.issubset(explore_native_names)
@@ -653,7 +662,7 @@ async def test_permission_wait_cancellation_does_not_approve_or_dispatch(
 
 
 @pytest.mark.asyncio
-async def test_plan_process_start_respects_global_process_ask(
+async def test_plan_process_start_preserves_explicit_global_process_ask(
     fake_accessor,
 ) -> None:
     engine, bridge, _options, _events = _bridge_case(
@@ -663,49 +672,23 @@ async def test_plan_process_start_respects_global_process_ask(
         evaluator=PermissionEvaluator(global_rules={"process": "ask"}),
     )
     start = _pre_hook(bridge, engine)
-    test_result = await start(
-        {
-            "tool_name": "mcp__opencuria__process_start",
-            "tool_input": {"command": "pytest -q", "name": "tests"},
-        },
-        "test-process",
-        None,
-    )
-    research_result = await start(
-        {
-            "tool_name": "mcp__opencuria__process_start",
-            "tool_input": {"command": "cat README.md", "name": "research"},
-        },
-        "research-process",
-        None,
-    )
-    assert test_result["hookSpecificOutput"]["permissionDecision"] == "ask"
-    assert research_result["hookSpecificOutput"]["permissionDecision"] == "ask"
-
-    async def approve(**_kwargs: Any) -> str:
-        return "once"
-
-    _engine, allowed_bridge, _options, _events = _bridge_case(
-        fake_accessor,
-        agent="plan",
-        mode="plan",
-        evaluator=PermissionEvaluator(global_rules={"process": "ask"}),
-        on_permission=approve,
-    )
-    allow_start = _pre_hook(allowed_bridge, _engine)
-    approved = await allow_start(
-        {
-            "tool_name": "mcp__opencuria__process_start",
-            "tool_input": {"command": "pytest -q", "name": "approved-tests"},
-        },
-        "approved-test-process",
-        None,
-    )
-    assert approved["hookSpecificOutput"]["permissionDecision"] == "ask"
+    for call_id, command, name in (
+        ("test-process", "pytest -q", "tests"),
+        ("research-process", "cat README.md", "research"),
+    ):
+        result = await start(
+            {
+                "tool_name": "mcp__opencuria__process_start",
+                "tool_input": {"command": command, "name": name},
+            },
+            call_id,
+            None,
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
 
 
 @pytest.mark.asyncio
-async def test_plan_process_restart_keeps_wildcard_allow_at_ask_precedence(
+async def test_plan_process_restart_allows_unknown_or_registered_processes(
     fake_accessor,
 ) -> None:
     engine, bridge, _options, _events = _bridge_case(
@@ -727,8 +710,6 @@ async def test_plan_process_restart_keeps_wildcard_allow_at_ask_precedence(
         "restart-server",
         None,
     )
-    # Existing operational process tools retain policy decisions, while the
-    # stored command is checked before an approval-free restart.
     assert allowed["hookSpecificOutput"]["permissionDecision"] == "allow"
 
     unknown = await pre_tool(
@@ -739,11 +720,12 @@ async def test_plan_process_restart_keeps_wildcard_allow_at_ask_precedence(
         "restart-missing",
         None,
     )
-    assert unknown["hookSpecificOutput"]["permissionDecision"] == "ask"
+    # Policy does not inspect process state to add a second plan-mode ask.
+    assert unknown["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
 @pytest.mark.asyncio
-async def test_plan_process_restart_checks_stored_command_with_explicit_allow(
+async def test_plan_process_restart_keeps_explicit_global_allow_without_classifier(
     fake_accessor,
 ) -> None:
     engine, bridge, _options, _events = _bridge_case(
@@ -777,7 +759,8 @@ async def test_plan_process_restart_checks_stored_command_with_explicit_allow(
         None,
     )
     assert safe_result["hookSpecificOutput"]["permissionDecision"] == "allow"
-    assert unsafe_result["hookSpecificOutput"]["permissionDecision"] == "ask"
+    # Restart commands and process state do not add a second plan-mode gate.
+    assert unsafe_result["hookSpecificOutput"]["permissionDecision"] == "allow"
 
 
 @pytest.mark.asyncio
@@ -911,12 +894,349 @@ async def test_plan_process_research_and_bookkeeping_are_free(fake_accessor) -> 
             None,
         )
         assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
-    denied = await pre_tool(
+    mutation = await pre_tool(
         {
             "tool_name": "mcp__opencuria__process_start",
             "tool_input": {"command": "rm source.py", "name": "mutation"},
         },
-        "ask-start-mutation",
+        "unclassified-mutation",
         None,
     )
-    assert denied["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert mutation["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+@pytest.mark.asyncio
+async def test_default_allowed_tools_skip_callbacks_and_registered_mcp_dispatches(
+    fake_accessor,
+) -> None:
+    """Default policy allows tools directly without manufacturing an approval."""
+    tool = PersistNoteTool()
+    registry = default_tool_registry()
+    registry.register(tool)
+    callbacks: list[dict[str, Any]] = []
+
+    async def should_not_ask(**kwargs: Any) -> str:
+        callbacks.append(kwargs)
+        return "reject"
+
+    engine, bridge, _options, _events = _bridge_case(
+        fake_accessor,
+        agent="plan",
+        mode="plan",
+        evaluator=PermissionEvaluator(),
+        on_permission=should_not_ask,
+        registry=registry,
+    )
+    wire = "mcp__opencuria__persist_note"
+    args = {"text": "default allowed"}
+    sdk_tool = engine._sdk_tools(
+        [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.parameters_schema(),
+            }
+        ]
+    )[0]
+    engine._wire_to_registry[tool.original_name] = tool.name
+    hook = _pre_hook(bridge, engine)
+    allowed = await hook({"tool_name": wire, "tool_input": args}, "default-mcp", None)
+    assert allowed["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert callbacks == []
+    native_read = await hook(
+        {"tool_name": "Read", "tool_input": {"file_path": "/workspace/a.txt"}},
+        "default-read",
+        None,
+    )
+    assert native_read["hookSpecificOutput"]["permissionDecision"] == "allow"
+    native_read_permission = await bridge.can_use_tool(
+        engine,
+        "Read",
+        {"file_path": "/workspace/a.txt"},
+        ToolPermissionContext(tool_use_id="default-read"),
+    )
+    assert isinstance(native_read_permission, PermissionResultAllow)
+    assert callbacks == []
+    response = await _call_sdk_handler(
+        sdk_tool.handler, tool.original_name, args, "default-mcp"
+    )
+    assert response["is_error"] is False
+    assert tool.calls == [("default allowed", "default-mcp")]
+    assert callbacks == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_ask_still_calls_permission_callback(fake_accessor) -> None:
+    callbacks: list[dict[str, Any]] = []
+
+    async def approve(**kwargs: Any) -> str:
+        callbacks.append(kwargs)
+        return "once"
+
+    engine, bridge, _options, _events = _bridge_case(
+        fake_accessor,
+        evaluator=PermissionEvaluator(global_rules={"bash": "ask"}),
+        on_permission=approve,
+    )
+    hook = _pre_hook(bridge, engine)
+    ask_result = await hook(
+        {"tool_name": "Bash", "tool_input": {"command": "printf fixture"}},
+        "explicit-ask",
+        None,
+    )
+    assert ask_result["hookSpecificOutput"]["permissionDecision"] == "ask"
+    ask_permission = await bridge.can_use_tool(
+        engine,
+        "Bash",
+        {"command": "printf fixture"},
+        ToolPermissionContext(tool_use_id="explicit-ask"),
+    )
+    assert isinstance(ask_permission, PermissionResultAllow)
+    assert len(callbacks) == 1
+    assert callbacks[0]["call_id"] == "explicit-ask"
+
+
+@pytest.mark.asyncio
+async def test_rejected_mcp_approval_never_dispatches(fake_accessor) -> None:
+    tool = PersistNoteTool()
+    registry = default_tool_registry()
+    registry.register(tool)
+
+    async def reject(**_kwargs: Any) -> str:
+        return "reject"
+
+    engine, bridge, _options, events = _bridge_case(
+        fake_accessor,
+        evaluator=PermissionEvaluator(global_rules={tool.permission_key: "ask"}),
+        on_permission=reject,
+        registry=registry,
+    )
+    sdk_tool = engine._sdk_tools(
+        [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.parameters_schema(),
+            }
+        ]
+    )[0]
+    args = {"text": "do not persist"}
+    call_id = "rejected-mcp"
+    hooked = await _pre_hook(bridge, engine)(
+        {"tool_name": "mcp__opencuria__persist_note", "tool_input": args},
+        call_id,
+        None,
+    )
+    assert hooked["hookSpecificOutput"]["permissionDecision"] == "ask"
+    result = await bridge.can_use_tool(
+        engine,
+        "mcp__opencuria__persist_note",
+        args,
+        ToolPermissionContext(tool_use_id=call_id),
+    )
+    assert isinstance(result, PermissionResultDeny)
+    assert not any(
+        event["type"] == "tool_started" and event["call_id"] == call_id
+        for event in events
+    )
+    assert any(
+        event["type"] == "tool_error" and event["call_id"] == call_id
+        for event in events
+    )
+    response = await _call_sdk_handler(
+        sdk_tool.handler, tool.original_name, args, call_id
+    )
+    assert response["is_error"] is True
+    assert tool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_deny_survives_auto_approve(fake_accessor) -> None:
+    engine, bridge, _options, events = _bridge_case(
+        fake_accessor,
+        evaluator=PermissionEvaluator(global_rules={"edit": "deny"}),
+        auto_approve=True,
+    )
+    deny_result = await _pre_hook(bridge, engine)(
+        {
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/workspace/denied.txt", "content": "x"},
+        },
+        "explicit-deny",
+        None,
+    )
+    assert deny_result["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert any(
+        event["type"] == "tool_error" and event["call_id"] == "explicit-deny"
+        for event in events
+    )
+    assert isinstance(
+        await bridge.can_use_tool(
+            engine,
+            "Write",
+            {"file_path": "/workspace/denied.txt", "content": "x"},
+            ToolPermissionContext(tool_use_id="explicit-deny"),
+        ),
+        PermissionResultDeny,
+    )
+
+
+@pytest.mark.asyncio
+async def test_general_child_can_write_in_plan_mode_without_approval(
+    fake_accessor,
+) -> None:
+    callbacks: list[dict[str, Any]] = []
+
+    async def should_not_ask(**kwargs: Any) -> str:
+        callbacks.append(kwargs)
+        return "reject"
+
+    engine, bridge, _options, _events = _bridge_case(
+        fake_accessor,
+        agent="plan",
+        mode="plan",
+        evaluator=PermissionEvaluator(),
+        on_permission=should_not_ask,
+    )
+    engine._agent_parent_tool["general-child"] = "parent-task-call"
+    engine._agent_type_raw["general-child"] = "general"
+    engine._agent_depth["general-child"] = 1
+    engine._tool_events["parent-task-call"] = {"tool": "task"}
+    args = {"file_path": "/workspace/child.txt", "content": "child output"}
+    result = await _pre_hook(bridge, engine)(
+        {"tool_name": "Write", "tool_input": args, "agent_id": "general-child"},
+        "general-child-write",
+        None,
+    )
+    assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+    permission = await bridge.can_use_tool(
+        engine,
+        "Write",
+        args,
+        ToolPermissionContext(tool_use_id="general-child-write"),
+    )
+    assert isinstance(permission, PermissionResultAllow)
+    assert callbacks == []
+
+
+@pytest.mark.parametrize(
+    ("agent_name", "mode", "global_rules", "mode_rules", "tool", "action", "expected"),
+    [
+        ("plan", "plan", {}, {}, "Bash", "git status", "allow"),
+        ("plan", "plan", {}, {}, "Bash", "git branch -D fixture", "allow"),
+        ("build", "plan", {}, {}, "Bash", "git branch -D fixture", "allow"),
+        ("general", "plan", {}, {}, "Bash", "git branch -D fixture", "allow"),
+        ("plan", "plan", {}, {}, "Edit", "/workspace/a.txt", "ask"),
+        ("build", "plan", {}, {}, "Edit", "/workspace/a.txt", "allow"),
+        ("general", "plan", {}, {}, "Edit", "/workspace/a.txt", "allow"),
+        ("plan", "plan", {}, {}, "Write", "/workspace/a.txt", "ask"),
+        ("build", "plan", {}, {}, "Write", "/workspace/a.txt", "allow"),
+        ("general", "plan", {}, {}, "Write", "/workspace/a.txt", "allow"),
+        ("plan", "build", {}, {}, "Edit", "/workspace/a.txt", "ask"),
+        ("plan", "plan", {"bash": "ask"}, {}, "Bash", "echo hi", "ask"),
+        ("build", "build", {"bash": "deny"}, {}, "Bash", "echo hi", "deny"),
+        (
+            "general",
+            "plan",
+            {},
+            {"plan": {"bash": "deny"}},
+            "Bash",
+            "echo hi",
+            "deny",
+        ),
+        ("plan", "build", {}, {"build": {"edit": "ask"}}, "Write", "/workspace/a.txt", "ask"),
+        (
+            "general",
+            "build",
+            {},
+            {"build": {"edit": "ask"}},
+            "edit",
+            "/workspace/a.txt",
+            "ask",
+        ),
+        (
+            "build",
+            "build",
+            {"external_directory": "ask"},
+            {},
+            "bash",
+            "cat /etc/hosts",
+            "ask",
+        ),
+        (
+            "plan",
+            "plan",
+            {"external_directory": "deny"},
+            {},
+            "process_start",
+            "cat /etc/hosts",
+            "deny",
+        ),
+        ("general", "build", {}, {}, "process_start", "echo ok", "allow"),
+        ("plan", "plan", {}, {}, "process_start", "rm -rf /workspace/tmp", "allow"),
+        ("plan", "plan", {}, {}, "mcp_fixture_persist", "persist_note", "allow"),
+        (
+            "build",
+            "build",
+            {"fixture.persist_note": "ask"},
+            {},
+            "mcp_fixture_persist",
+            "persist_note",
+            "ask",
+        ),
+    ],
+)
+def test_native_harness_and_claude_bridge_permission_decision_parity(
+    fake_accessor,
+    agent_name: str,
+    mode: str,
+    global_rules: dict[str, Any],
+    mode_rules: dict[str, dict[str, Any]],
+    tool: str,
+    action: str,
+    expected: str,
+) -> None:
+    """Both engines merge native policy layers identically for each scope."""
+    from apps.harness.tools.shell import detect_external_directory
+
+    evaluator = PermissionEvaluator(
+        global_rules=global_rules,
+        mode_rules=mode_rules,
+    )
+    registry = default_tool_registry()
+    if tool == "mcp_fixture_persist":
+        registry.register(PersistNoteTool())
+    native = object.__new__(HarnessRunner)
+    native.tools = registry
+    native.evaluator = evaluator
+    agent = get_agent(agent_name)
+    harness_tool = {"Bash": "bash", "Write": "write", "Edit": "edit"}.get(
+        tool, tool
+    )
+    external = harness_tool in {"bash", "process_start"} and detect_external_directory(
+        action
+    )
+    native_decision = native._decide(
+        agent, harness_tool, action, mode, external_directory=external
+    )
+    claude_decision = PermissionBridge(
+        tools=registry,
+        evaluator=evaluator,
+        options=RunOptions(),
+        agent=agent,
+        mode=mode,
+        max_depth=2,
+    ).decide(
+        tool,
+        (
+            {"command": action}
+            if tool in {"Bash", "bash", "process", "process_start"}
+            else {"text": action}
+            if tool == "mcp_fixture_persist"
+            else {"file_path": action}
+            if tool in {"Write", "Edit"}
+            else {"path": action}
+        ),
+    )[0]
+    assert native_decision == expected
+    assert claude_decision == expected

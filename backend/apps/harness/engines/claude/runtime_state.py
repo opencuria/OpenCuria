@@ -370,10 +370,9 @@ class ClaudeRuntimeState:
         if mode == "plan":
             value += (
                 "\n\nOpenCuria plan mode cannot switch into build mode. "
-                "Research, tests, builds, and development servers may create "
-                "ordinary temporary artifacts. Use the OpenCuria permission "
-                "gate before deliberate source/configuration edits or other "
-                "unclassified mutations, including delegated work."
+                "Tool permissions follow the configured OpenCuria agent rules, "
+                "including for shell commands, background processes, and "
+                "delegated work."
             )
         return value
 

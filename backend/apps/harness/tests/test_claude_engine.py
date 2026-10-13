@@ -439,6 +439,9 @@ def test_cli_argv_is_explicit_bounded_and_resume_is_uuid() -> None:
     assert "--system-prompt-file" not in argv
     assert "--disallowedTools" in argv
     assert "Skill" not in argv[argv.index("--disallowedTools") + 1]
+    assert argv[argv.index("--permission-mode") + 1] == "default"
+    assert "bypassPermissions" not in argv
+    assert "--dangerously-skip-permissions" not in argv
     assert all(len(value) < 4096 for value in argv)
 
 
@@ -464,6 +467,9 @@ def test_cli_argv_fresh_run_mirrors_session_without_forcing_resume() -> None:
     assert "--session-mirror" in argv
     assert argv[argv.index("--tools") + 1] == "Bash,Read,Skill"
     assert "--plugin-dir" in argv
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+    assert "bypassPermissions" not in argv
+    assert "--dangerously-skip-permissions" not in argv
     assert "Bash" not in argv[argv.index("--disallowedTools") + 1]
 
 
@@ -544,7 +550,6 @@ def test_plan_native_write_asks_and_bash_is_exposed() -> None:
         mode="plan",
         depth=0,
         max_depth=2,
-        plan_mode=True,
     )
     assert ClaudeEngine._command_may_mutate("pytest -q") is False
     assert ClaudeEngine._command_may_mutate("touch notes.py") is True
@@ -671,6 +676,7 @@ async def _run_local_cli_fixture(
     sdk_config_dir: str | None = None,
     history: list[LLMMessage] | None = None,
     fixture_files: dict[str, bytes] | None = None,
+    permission_response: str = "once",
 ) -> tuple[
     Any,
     list[dict[str, Any]],
@@ -746,7 +752,7 @@ async def _run_local_cli_fixture(
 
     async def on_permission(**kwargs: Any) -> str:
         permissions.append(dict(kwargs))
-        return "once"
+        return permission_response
 
     fixture_store = store or FixtureSessionStore()
     engine = ClaudeEngine(

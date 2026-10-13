@@ -161,3 +161,37 @@ async def test_composer_rejects_invalid_mode() -> None:
 async def test_composer_uses_max_context_byte_cap() -> None:
     """The per-file cap constant matches the read tool guard scale."""
     assert MAX_CONTEXT_FILE_BYTES == 32 * 1024
+
+
+async def test_plan_general_prompt_follows_its_own_agent_permissions() -> None:
+    """Delegated general agents do not acquire the root Plan edit restriction."""
+    from apps.harness.engines.claude.runtime_state import ClaudeRuntimeState
+
+    for native_tool_contracts in (False, True):
+        composed = await compose_system_prompt(
+            agent=get_agent("general"),
+            mode="plan",
+            native_tool_contracts=native_tool_contracts,
+        )
+        system = (
+            ClaudeRuntimeState.claude_system_prompt(composed.system, "plan")
+            if native_tool_contracts
+            else composed.system
+        )
+        assert "follow the configured agent permissions" in system
+        assert "Ask before deliberate source" not in system
+        assert "before user approval" not in system
+        assert "unclassified mutations" not in system
+
+
+async def test_plan_explore_prompt_keeps_read_only_restrictions() -> None:
+    """Plan never grants Explore the shell/process or general edit freedoms."""
+    composed = await compose_system_prompt(
+        agent=get_agent("explore"), mode="plan", native_tool_contracts=True
+    )
+    assert (
+        "Plan mode does not relax Explore's read-only restrictions" in composed.system
+    )
+    assert "Do not edit files, run tests or mutating commands, or delegate" in (
+        composed.system
+    )

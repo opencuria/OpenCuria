@@ -16,13 +16,20 @@ their expiry; to reconnect, paste a valid token.
 In a new chat, choose **Claude Agent Build** or **Claude Agent Plan**. Chats keep
 their selected harness; start a new chat to choose another. Model and effort use
 the shared model picker, which offers `sonnet`, `opus`, and `haiku`. These are
-runtime-resolved aliases, not fixed model versions. Both modes use OpenCuria
-permission gates; Plan does not switch to Build automatically. Plan allows
-research, tests, builds, and development servers, including ordinary temporary
-artifacts. Deliberate source/configuration changes and unclassified mutations
-require approval in the root agent, subagents, and background processes. Explore
-remains read-only even in Plan. Command classification is a convenience for
-trusted workspaces, not a shell sandbox.
+runtime-resolved aliases, not fixed model versions. Both modes use the same
+configured permission rules as the native OpenCuria harness. Build allows tools
+by default; the primary Plan agent asks before direct file edits/writes but
+allows Bash, background processes, and registered MCP tools without additional
+Claude-specific approval gates. Explicit `ask`/`deny` rules still apply.
+Subagents use their own OpenCuria agent rules; general subagents are not
+restricted by an extra Plan gate, while Explore remains read-only. Plan does not
+switch to Build automatically.
+
+The SDK/CLI retain their `plan`/`default` modes and route tool decisions through
+OpenCuria hooks and its permission callback; `bypassPermissions` and blanket
+auto-approval are not enabled. This is for trusted workspaces, not a shell
+sandbox: Plan permission gates do not prevent file changes made through an
+allowed shell command, process, or MCP tool.
 
 API tokens are passed as `ANTHROPIC_API_KEY`; subscription tokens as
 `CLAUDE_CODE_OAUTH_TOKEN`. Connections are personal to their owner within the

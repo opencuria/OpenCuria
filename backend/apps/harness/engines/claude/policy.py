@@ -232,16 +232,12 @@ def decide_tool(
     # Explicit hook routing prevents native names such as Write being treated
     # as similarly named registry tools, and MCP wire identities stay exact.
     if raw_source.startswith("mcp__opencuria__"):
-        event_tool, key, action = tool_identity(
-            source_name, arguments, tools, cwd=cwd
-        )
+        event_tool, key, action = tool_identity(source_name, arguments, tools, cwd=cwd)
     elif raw_source.startswith("mcp__"):
         parts = raw_source.split("__", 2)
         if len(parts) == 3:
             return DENY, parts[-1], "", parts[-1]
-        event_tool, key, action = registry_tool_identity(
-            source_name, arguments, tools
-        )
+        event_tool, key, action = registry_tool_identity(source_name, arguments, tools)
     elif raw_source not in NATIVE_TOOL_KEYS:
         event_tool, key, action = registry_tool_identity(source_name, arguments, tools)
         if key.startswith("__unknown_"):
@@ -249,7 +245,6 @@ def decide_tool(
     else:
         event_tool, key, action = tool_identity(source_name, arguments, tools, cwd=cwd)
     raw = str(source_name or "")
-    is_sdk_mcp = raw.startswith("mcp__")
     if key.startswith("__unknown_"):
         return DENY, event_tool, action, event_tool
     if key == "task" and raw in {"Task", "Agent"} and depth >= max_depth:
@@ -322,8 +317,6 @@ def decide_tool(
         evaluator.evaluate(key, action, mode=mode),
         agent_eval.evaluate(key, action, mode=mode),
     )
-    if mode == "plan" and key == "edit":
-        decision = combine_decisions(decision, ASK)
     if key in ("bash", "process") and action:
         from ...tools.shell import detect_external_directory
 
@@ -386,7 +379,6 @@ def native_tools_for_claude(
     depth: int,
     max_depth: int,
     selected_skills: list[str] | None = None,
-    plan_mode: bool = False,
 ) -> list[str]:
     """Build a small allowlist of Claude Code built-ins for this registry."""
     names: list[str] = []
@@ -427,8 +419,6 @@ def native_tools_for_claude(
             evaluator.evaluate(permission_key, "", mode=mode),
             agent_eval.evaluate(permission_key, "", mode=mode),
         )
-        if cli_name == "Bash" and plan_mode and decision == "allow":
-            decision = ASK
         if decision != DENY:
             names.append(cli_name)
     return names

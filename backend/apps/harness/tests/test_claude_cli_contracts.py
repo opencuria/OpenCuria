@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import shlex
 import uuid
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ import claude_agent_sdk
 import pytest
 
 from apps.harness.engines.claude.engine import ClaudeEngine
+from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.tests.conftest import TINY_PNG
 from apps.harness.tests.test_claude_engine import (
     BUNDLED_CLAUDE,
@@ -47,6 +49,38 @@ def _tool_schemas(request: dict[str, Any]) -> list[dict[str, Any]]:
         [item for item in tools if isinstance(item, dict)]
         if isinstance(tools, list)
         else []
+    )
+
+
+def _assert_cli_permission_mode(accessor: Any, mode: str) -> None:
+    """Ensure the real CLI retains OpenCuria's mode without permission bypasses."""
+    argv = accessor.opened[0]["argv"]
+    assert argv[argv.index("--permission-mode") + 1] == (
+        "plan" if mode == "plan" else "default"
+    )
+    assert "bypassPermissions" not in argv
+    assert "--dangerously-skip-permissions" not in argv
+    settings_path = argv[argv.index("--settings") + 1]
+    settings = json.loads(accessor.guest_path(settings_path).read_text())
+    assert "bypassPermissions" not in json.dumps(settings)
+    assert "auto_approve" not in json.dumps(settings)
+
+
+def _bash_write_command(path: Path, content: str, output: str) -> str:
+    """Build a Python-plus-shell command with observable output and a file write."""
+    python_script = "print(6)"
+    return " ".join(
+        [
+            " ".join(shlex.quote(item) for item in ("python3", "-c", python_script)),
+            "&&",
+            "printf",
+            shlex.quote(content),
+            ">",
+            shlex.quote(str(path)),
+            "&&",
+            "printf",
+            shlex.quote(output),
+        ]
     )
 
 
@@ -109,23 +143,28 @@ async def test_real_cli_reuses_fresh_build_binding_and_recomposes_plan_context(
     external_id = str(built.metadata["external_session_id"])
     assert external_id
     uuid.UUID(external_id)
+    _assert_cli_permission_mode(build_accessor, "build")
     assert any("BUILD_CONTEXT_MARKER" in _system_text(item) for item in build_requests)
 
     context_path.write_text("PLAN_CONTEXT_MARKER: revised project rules\n")
+    plan_target = "resumed-plan-bash.txt"
+    plan_command = _bash_write_command(
+        Path(plan_target), "resumed plan file contents", "resumed plan command output"
+    )
     (
         planned,
-        _plan_events,
+        plan_events,
         _plan_questions,
         plan_requests,
-        _plan_permissions,
+        plan_permissions,
         plan_store,
         plan_accessor,
     ) = await _run_local_cli_fixture(
         tmp_path,
-        tool_name="",
-        tool_arguments={},
+        tool_name="Bash",
+        tool_arguments={"command": plan_command},
         tools=default_tool_registry(),
-        prompt="Continue the build-history marker and answer the plan request.",
+        prompt="Continue the build-history marker and execute the scoped check.",
         store=store,
         session_id=session_id,
         external_session_id=external_id,
@@ -134,6 +173,18 @@ async def test_real_cli_reuses_fresh_build_binding_and_recomposes_plan_context(
     )
 
     assert planned.metadata["external_session_id"] == external_id
+    _assert_cli_permission_mode(plan_accessor, "plan")
+    assert plan_permissions == []
+    assert plan_accessor.guest_path(f"/workspace/{plan_target}").read_text() == (
+        "resumed plan file contents"
+    )
+    plan_bash = [
+        event
+        for event in plan_events
+        if event.get("type") == "tool_completed" and event.get("tool") == "bash"
+    ]
+    assert len(plan_bash) == 1
+    assert "resumed plan command output" in plan_bash[0]["output"]
     assert build_store is store and plan_store is store
     assert f"--resume={external_id}" in plan_accessor.opened[0]["argv"]
     assert store.load_calls == [("-workspace", external_id, "")]
@@ -154,6 +205,237 @@ async def test_real_cli_reuses_fresh_build_binding_and_recomposes_plan_context(
     assert "Remember the build-history marker" not in system_text
     assert "ORIGINAL_USER_TURN" in json.dumps(plan_requests)
     assert "Continue the build-history marker" in json.dumps(plan_requests)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["plan", "build"])
+async def test_real_cli_bash_runs_harmless_python_and_shell_without_approval(
+    tmp_path: Path, mode: str
+) -> None:
+    """The OpenCuria Bash bridge executes normal commands in both modes."""
+    _require_pinned_cli()
+    target_name = f"{mode}-bash-contract.txt"
+    command = _bash_write_command(
+        Path(target_name), f"{mode} wrote the file", f"{mode} command output"
+    )
+    (
+        result,
+        events,
+        _questions,
+        _requests,
+        permissions,
+        _store,
+        accessor,
+    ) = await _run_local_cli_fixture(
+        tmp_path,
+        tool_name="Bash",
+        tool_arguments={"command": command},
+        tools=default_tool_registry(),
+        prompt=f"Run this harmless {mode} Bash fixture and report its result.",
+        cwd="/workspace",
+        mode=mode,
+    )
+
+    assert result.output == "fixture answer"
+    _assert_cli_permission_mode(accessor, mode)
+    assert permissions == []
+    assert accessor.guest_path(f"/workspace/{target_name}").read_text() == (
+        f"{mode} wrote the file"
+    )
+    starts = [
+        event
+        for event in events
+        if event.get("type") == "tool_started" and event.get("tool") == "bash"
+    ]
+    completed = [
+        event
+        for event in events
+        if event.get("type") == "tool_completed" and event.get("tool") == "bash"
+    ]
+    assert len(starts) == len(completed) == 1
+    assert "6" in completed[0]["output"]
+    assert f"{mode} command output" in completed[0]["output"]
+
+
+@pytest.mark.asyncio
+async def test_real_cli_explicit_bash_deny_blocks_without_approval_or_execution(
+    tmp_path: Path,
+) -> None:
+    """An explicit Bash deny blocks dispatch without asking for approval."""
+    _require_pinned_cli()
+    target = "explicit-deny-must-not-write.txt"
+    command = _bash_write_command(Path(target), "must not exist", "denied output")
+    (
+        result,
+        events,
+        _questions,
+        _requests,
+        permissions,
+        _store,
+        accessor,
+    ) = await _run_local_cli_fixture(
+        tmp_path,
+        tool_name="Bash",
+        tool_arguments={"command": command},
+        tools=default_tool_registry(),
+        evaluator=PermissionEvaluator(global_rules={"bash": {command: "deny"}}),
+        prompt="Try the explicitly denied command.",
+        cwd="/workspace",
+        mode="plan",
+    )
+
+    assert result.output == "fixture answer"
+    _assert_cli_permission_mode(accessor, "plan")
+    assert permissions == []
+    assert not accessor.guest_path(f"/workspace/{target}").exists()
+    assert not any(
+        event.get("type") in {"tool_started", "tool_completed"}
+        and event.get("tool") == "bash"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["plan", "build"])
+@pytest.mark.parametrize("permission_response", ["once", "reject"])
+async def test_real_cli_explicit_bash_ask_calls_back_and_honors_response(
+    tmp_path: Path, mode: str, permission_response: str
+) -> None:
+    """Explicit scoped Bash ask invokes approval and honors approve or reject."""
+    _require_pinned_cli()
+    target = "explicit-ask-must-not-write.txt"
+    command = _bash_write_command(Path(target), "must not exist", "denied output")
+    (
+        result,
+        events,
+        _questions,
+        _requests,
+        permissions,
+        _store,
+        accessor,
+    ) = await _run_local_cli_fixture(
+        tmp_path,
+        tool_name="Bash",
+        tool_arguments={"command": command},
+        tools=default_tool_registry(),
+        evaluator=PermissionEvaluator(global_rules={"bash": {command: "ask"}}),
+        prompt="Try the explicitly approval-gated command.",
+        cwd="/workspace",
+        mode=mode,
+        permission_response=permission_response,
+    )
+
+    assert result.output == "fixture answer"
+    _assert_cli_permission_mode(accessor, mode)
+    assert len(permissions) == 1
+    assert permissions[0]["tool"] == "bash"
+    assert permissions[0]["key"] == "permission"
+    assert permissions[0]["action"] == command
+    if permission_response == "once":
+        assert accessor.guest_path(f"/workspace/{target}").read_text() == (
+            "must not exist"
+        )
+        assert any(
+            event.get("type") == "tool_started" and event.get("tool") == "bash"
+            for event in events
+        )
+        assert any(
+            event.get("type") == "tool_completed" and event.get("tool") == "bash"
+            for event in events
+        )
+        assert "6" in next(
+            event["output"]
+            for event in events
+            if event.get("type") == "tool_completed" and event.get("tool") == "bash"
+        )
+        return
+    assert not accessor.guest_path(f"/workspace/{target}").exists()
+    assert any(
+        event.get("type") == "tool_error" and event.get("tool") == "bash"
+        for event in events
+    )
+    assert not any(
+        event.get("type") in {"tool_started", "tool_completed"}
+        and event.get("tool") == "bash"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_cli_default_allowed_registered_mcp_dispatches_in_plan(
+    tmp_path: Path,
+) -> None:
+    """A default-allowed configured MCP tool dispatches without an approval."""
+    _require_pinned_cli()
+    registry = default_tool_registry()
+    note = WriteNoteTool()
+    registry.register(note)
+    (
+        result,
+        events,
+        _questions,
+        _requests,
+        permissions,
+        _store,
+        accessor,
+    ) = await _run_local_cli_fixture(
+        tmp_path,
+        tool_name=f"mcp__opencuria__{note.name}",
+        tool_arguments={"text": "plan mode default allowance"},
+        tools=registry,
+        prompt="Call the configured note tool and report its completion.",
+        cwd="/workspace",
+        mode="plan",
+    )
+
+    assert result.output == "fixture answer"
+    _assert_cli_permission_mode(accessor, "plan")
+    assert note.writes == ["plan mode default allowance"]
+    assert permissions == []
+    assert any(
+        event.get("type") == "tool_completed" and event.get("tool") == note.name
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_cli_root_plan_write_still_requires_explicit_approval(
+    tmp_path: Path,
+) -> None:
+    """Plan-mode native Write keeps its approval gate absent global overrides."""
+    _require_pinned_cli()
+    target = tmp_path / "workspace" / "root-plan-write.txt"
+    (
+        result,
+        events,
+        _questions,
+        _requests,
+        permissions,
+        _store,
+        accessor,
+    ) = await _run_local_cli_fixture(
+        tmp_path,
+        tool_name="Write",
+        tool_arguments={
+            "file_path": str(target),
+            "content": "approved plan write",
+        },
+        tools=default_tool_registry(),
+        prompt="Write the requested plan scratch file.",
+        cwd="/workspace",
+        mode="plan",
+    )
+
+    assert result.output == "fixture answer"
+    _assert_cli_permission_mode(accessor, "plan")
+    assert len(permissions) == 1
+    assert permissions[0]["tool"] == "write"
+    assert permissions[0]["action"] == str(target)
+    assert accessor.guest_path(str(target)).read_text() == "approved plan write"
+    assert any(
+        event.get("type") == "tool_completed" and event.get("tool") == "write"
+        for event in events
+    )
 
 
 @pytest.mark.asyncio
@@ -265,9 +547,6 @@ async def test_real_cli_hydrates_png_and_pdf_file_references_once(
     )
 
     assert result.output == "fixture answer"
-    messages = [
-        message for request in requests for message in request.get("messages", [])
-    ]
     user_requests = [
         request
         for request in requests
@@ -310,10 +589,22 @@ async def test_real_cli_hydrates_png_and_pdf_file_references_once(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("subagent_type", "system_marker", "agent_phrase"),
+    ("subagent_type", "system_marker", "agent_phrase", "mode"),
     [
-        ("general", "You are opencuria general", "helpful subagent"),
-        ("explore", "You are opencuria explore", "Read-only research subagent"),
+        ("general", "You are opencuria general", "helpful subagent", "build"),
+        ("general", "You are opencuria general", "helpful subagent", "plan"),
+        (
+            "explore",
+            "You are opencuria explore",
+            "Read-only research subagent",
+            "build",
+        ),
+        (
+            "explore",
+            "You are opencuria explore",
+            "Read-only research subagent",
+            "plan",
+        ),
     ],
 )
 async def test_real_cli_task_child_gets_project_context_and_scoped_tools(
@@ -321,6 +612,7 @@ async def test_real_cli_task_child_gets_project_context_and_scoped_tools(
     subagent_type: str,
     system_marker: str,
     agent_phrase: str,
+    mode: str,
 ) -> None:
     """Native Task/Agent children receive their own context and tool scope."""
     _require_pinned_cli()
@@ -348,6 +640,7 @@ async def test_real_cli_task_child_gets_project_context_and_scoped_tools(
             tools=default_tool_registry(),
             prompt=f"Delegate this fixture request to {subagent_type}.",
             cwd="/workspace",
+            mode=mode,
             fixture_files={
                 "AGENTS.md": b"CHILD_PROJECT_CONTEXT_MARKER: scoped rules\n"
             },
@@ -455,6 +748,7 @@ async def test_real_cli_max_steps_uses_turn_limit_and_records_tool_completion(
     assert isinstance(result.output, str)
     assert note.writes == ["one bounded tool call"]
     assert any(event.get("type") == "tool_completed" for event in events)
-    assert accessor.opened[0]["argv"][
-        accessor.opened[0]["argv"].index("--max-turns") + 1
-    ] == "1"
+    assert (
+        accessor.opened[0]["argv"][accessor.opened[0]["argv"].index("--max-turns") + 1]
+        == "1"
+    )

@@ -21,31 +21,6 @@ _READ_ONLY_COMMANDS = frozenset(
 )
 _READ_GIT = frozenset({"diff", "grep", "log", "ls-files", "rev-parse", "show", "status"})
 _CONFIG_READ = frozenset({"--get", "--get-all", "--get-regexp", "--list", "--get-color"})
-_PLAN_NPM = frozenset(
-    {
-        ("test",),
-        ("t",),
-        ("dev",),
-        ("build",),
-        ("serve",),
-        ("start",),
-        ("preview",),
-        ("typecheck",),
-        ("run", "test"),
-        ("run", "test:unit"),
-        ("run", "test:integration"),
-        ("run", "test:e2e"),
-        ("run", "typecheck"),
-        ("run", "build"),
-        ("run", "dev"),
-        ("run", "serve"),
-        ("run", "start"),
-        ("run", "preview"),
-    }
-)
-_PLAN_SERVERS = frozenset(
-    {"flask", "gunicorn", "http-server", "next", "uvicorn", "vite", "webpack"}
-)
 _ARTIFACT_DIRS = frozenset(
     {".pytest_cache", "artifacts", "build", "coverage", "dist", "reports", "tmp"}
 )
@@ -270,17 +245,6 @@ def _safe_output_path(path: str, *, directory: bool = False) -> bool:
     return suffix in _ARTIFACT_SUFFIXES
 
 
-def _safe_output_destination(path: str) -> bool:
-    """Accept a safe report file or a dedicated artifact directory."""
-    parsed = _output_parts(path)
-    if parsed is None:
-        return False
-    _parts, suffix = parsed
-    if suffix:
-        return _safe_output_path(path)
-    return _safe_output_path(path, directory=True)
-
-
 def _option_value(tokens: list[str], index: int) -> tuple[str, int] | None:
     if "=" in tokens[index]:
         return tokens[index].split("=", 1)[1], index
@@ -400,22 +364,6 @@ def _coverage_outputs_safe(tokens: list[str]) -> bool:
     return True
 
 
-def _go_outputs_safe(tokens: list[str]) -> bool:
-    """Validate Go coverage profile output destinations."""
-    index = 1
-    while index < len(tokens):
-        if tokens[index].startswith("-coverprofile="):
-            if not _safe_output_path(tokens[index].split("=", 1)[1]):
-                return False
-        elif tokens[index] == "-coverprofile":
-            value = _option_value(tokens, index)
-            if value is None or not _safe_output_path(value[0]):
-                return False
-            index = value[1]
-        index += 1
-    return True
-
-
 def _safe_package_query(name: str, tokens: list[str]) -> bool:
     """Allow only recognized package-manager information queries."""
     args = tokens[1:]
@@ -442,20 +390,6 @@ def _safe_package_query(name: str, tokens: list[str]) -> bool:
             "why",
         }
     return False
-
-
-def _npm_script_workflow(tokens: list[str]) -> bool:
-    """Recognize a narrow set of project workflows and validate output flags."""
-    if not tokens or _base(tokens[0]) not in {"npm", "pnpm", "yarn"}:
-        return False
-    args = [_base(token) for token in tokens[1:]]
-    if not args:
-        return False
-    if args[0] == "run" and len(args) > 1:
-        script = ("run", args[1])
-    else:
-        script = (args[0],)
-    return script in _PLAN_NPM and _generic_outputs_safe(tokens)
 
 
 def shell_command_may_mutate(command: str) -> bool:
@@ -607,208 +541,7 @@ def _ruff_flags_are_safe(tokens: list[str]) -> bool:
     return True
 
 
-def _workflow_flags_are_safe(tokens: list[str]) -> bool:
-    """Reject config overrides and external execution wrappers in workflows."""
-    names = [_base(token) for token in tokens]
-    name = names[0]
-    if name == "go" and any(
-        token == "-exec" or token.startswith("-exec=") for token in names[1:]
-    ):
-        return False
-    if name == "cargo" and any(
-        token.startswith("--config") for token in names[1:]
-    ):
-        return False
-    if name in {"gunicorn", "uvicorn"} and any(
-        token == "-c" or token.startswith(("--config", "--log-config"))
-        for token in names[1:]
-    ):
-        return False
-    if name == "git" and _git_may_mutate(names[1:]):
-        return False
-    return True
-
-
-def _plan_workflow(tokens: list[str]) -> bool:
-    """Recognize bounded test/build workflows and conventional dev servers."""
-    if not tokens or not _trusted_executable(tokens[0]):
-        return False
-    if not _workflow_flags_are_safe(tokens):
-        return False
-    names = [_base(token) for token in tokens]
-    name, args = names[0], names[1:]
-    if name in {"pytest", "py.test"}:
-        return not any(arg in {"-c", "--cov", "--cache-clear"} for arg in args) and _pytest_outputs_safe(tokens)
-    if name in {"tox", "nox"}:
-        return not any(arg.startswith(("--conf", "--sitepackages", "--installpkg")) for arg in args)
-    if name in _PLAN_SERVERS:
-        return not any(arg in {"--help", "--version"} for arg in args) and _generic_outputs_safe(tokens)
-    if name in {"python", "python3"}:
-        if len(args) > 1 and args[0] == "-m":
-            if args[1] == "pytest":
-                pytest_command = ["pytest", *tokens[3:]]
-                return _plan_workflow(pytest_command)
-            if args[1] in {"http.server", "uvicorn", "unittest"}:
-                return _generic_outputs_safe(tokens)
-        if len(args) > 1 and args[0].endswith("manage.py") and args[1] in {"runserver", "test"}:
-            if args[1] == "test":
-                return _plan_workflow(["pytest", *args[2:]])
-            return _generic_outputs_safe(tokens)
-    if name == "uv" and len(args) > 1 and args[0] == "run":
-        return _plan_workflow(tokens[2:])
-    if name in {"npm", "pnpm", "yarn"}:
-        return _npm_script_workflow(tokens)
-    if name in {"jest", "vitest", "mocha", "playwright", "cypress"}:
-        return any(arg in {"test", "run", "open"} for arg in args) and _generic_outputs_safe(tokens)
-    if name == "coverage":
-        return _coverage_outputs_safe(tokens)
-    if name == "ruff":
-        return (
-            len(args) > 0
-            and args[0] == "check"
-            and not shell_command_may_mutate(shlex.join(tokens))
-            and _ruff_outputs_safe(tokens)
-        )
-    if name == "make":
-        return len(args) == 1 and args[0] in {"test", "build", "check", "serve", "dev"}
-    if name == "cargo":
-        return len(args) == 1 and args[0] in {"test", "build", "check"} and _generic_outputs_safe(tokens)
-    if name == "go":
-        return (
-            bool(args)
-            and args[0] == "test"
-            and not any(arg == "-exec" or arg.startswith("-exec=") for arg in args)
-            and _go_outputs_safe(tokens)
-        )
-    return False
-
-
-def _generic_outputs_safe(tokens: list[str]) -> bool:
-    """Validate common output-file and directory options on plan workflows."""
-    destination_flags = {
-        "-o",
-        "--output",
-        "--out",
-        "--output-file",
-        "--output-path",
-        "--outfile",
-        "--file",
-        "--junitxml",
-        "--html",
-        "--output-dir",
-        "--output-directory",
-        "--out-dir",
-        "--outdir",
-        "--target-dir",
-        "--dist-dir",
-        "--dir",
-        "--dest",
-    }
-    directory_flags = {
-        "--output-path",
-        "--output-dir",
-        "--output-directory",
-        "--out-dir",
-        "--outdir",
-        "--target-dir",
-        "--dist-dir",
-        "--dir",
-        "--dest",
-    }
-    config_flags = {"--config", "--config-file", "--webpack-config"}
-    index = 1
-    while index < len(tokens):
-        flag = tokens[index].lower().split("=", 1)[0]
-        if flag in {"-exec", "--config-env", "--config-file", "-c"} or flag.startswith(
-            ("--config-env=", "--config-file=")
-        ):
-            return False
-        if flag in config_flags or flag.startswith("--config") or flag.startswith(
-            "--webpack-config"
-        ):
-            # Build-system config overrides may redirect or enable generated
-            # outputs; require approval rather than infer config semantics.
-            return False
-        if flag in destination_flags:
-            value = _option_value(tokens, index)
-            if value is None:
-                return False
-            safe = (
-                _safe_output_path(value[0], directory=True)
-                if flag in directory_flags
-                else _safe_output_destination(value[0])
-            )
-            if not safe:
-                return False
-            index = value[1] + 1
-            continue
-        if flag.startswith(
-            (
-                "--config=",
-                "--config-file=",
-                "--webpack-config=",
-                "--output",
-                "--out-dir",
-                "--outdir",
-                "--outfile",
-                "--target-dir",
-                "--dist-dir",
-                "--junitxml",
-                "--html",
-                "--config",
-                "--config-file",
-                "--webpack-config",
-            )
-        ):
-            return False
-        index += 1
-    return True
-
-
-def _workflow_outputs_are_safe(tokens: list[str]) -> bool:
-    """Validate explicit output destinations for a plan workflow."""
-    if not _plan_workflow(tokens):
-        return False
-    name = _base(tokens[0])
-    if name in {"npm", "pnpm", "yarn"}:
-        return _npm_script_workflow(tokens)
-    if name in {"pytest", "py.test", "tox", "nox"}:
-        return _pytest_outputs_safe(tokens)
-    if name == "ruff":
-        return _ruff_outputs_safe(tokens)
-    if name == "coverage":
-        return _coverage_outputs_safe(tokens)
-    return _generic_outputs_safe(tokens)
-
-
-def shell_command_is_plan_workflow(command: str) -> bool:
-    """Return True when every shell-free && segment is a supported workflow."""
-    segments = _shell_segments(command)
-    return segments is not None and all(
-        (len(segment) > 1 and _base(segment[0]) == "cd") or _plan_workflow(segment)
-        for segment in segments
-    )
-
-
-def shell_command_requires_plan_approval(command: str) -> bool:
-    """Ask before mutations outside safe workflows and harmless reads."""
-    segments = _shell_segments(command)
-    if segments is None:
-        return bool(command.strip())
-    for segment in segments:
-        if len(segment) > 1 and _base(segment[0]) == "cd":
-            continue
-        if _workflow_outputs_are_safe(segment):
-            continue
-        if not shell_command_may_mutate(shlex.join(segment)):
-            continue
-        return True
-    return False
-
-
 __all__ = [
     "shell_command_is_explore_safe",
-    "shell_command_is_plan_workflow",
     "shell_command_may_mutate",
-    "shell_command_requires_plan_approval",
 ]

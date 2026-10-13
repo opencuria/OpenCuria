@@ -13,23 +13,28 @@ from apps.harness.tools import default_tool_registry
 
 
 @pytest.mark.parametrize("source_name", ["Write", "Edit", "NotebookEdit"])
-def test_plan_file_edits_ask_for_root_and_children(source_name: str) -> None:
-    tools = default_tool_registry()
-    for agent_name in ("plan", "general"):
-        decision, _event_tool, _action, _title = decide_tool(
-            source_name=source_name,
-            arguments={"file_path": "/workspace/change.txt", "content": "x"},
-            tools=tools,
-            agent=get_agent(agent_name),
-            evaluator=PermissionEvaluator(global_rules={"*": "allow"}),
-            mode="plan",
-            depth=1 if agent_name == "general" else 0,
-            max_depth=2,
-        )
-        assert decision == "ask"
+@pytest.mark.parametrize(
+    ("agent_name", "expected"),
+    [("plan", "ask"), ("general", "allow"), ("explore", "deny")],
+)
+def test_plan_file_edits_follow_scoped_agent_permissions(
+    source_name: str, agent_name: str, expected: str
+) -> None:
+    """Plan uses each agent's edit rules, not an unconditional mode-level ask."""
+    decision, _event_tool, _action, _title = decide_tool(
+        source_name=source_name,
+        arguments={"file_path": "/workspace/change.txt", "content": "x"},
+        tools=default_tool_registry(),
+        agent=get_agent(agent_name),
+        evaluator=PermissionEvaluator(global_rules={"*": "allow"}),
+        mode="plan",
+        depth=1 if agent_name != "plan" else 0,
+        max_depth=2,
+    )
+    assert decision == expected
 
 
-def test_global_bash_ask_survives_plan_test_workflow_exception() -> None:
+def test_global_bash_ask_applies_to_plan_test_commands() -> None:
     bridge = PermissionBridge(
         tools=default_tool_registry(),
         evaluator=PermissionEvaluator(global_rules={"bash": "ask"}),
@@ -44,7 +49,7 @@ def test_global_bash_ask_survives_plan_test_workflow_exception() -> None:
     assert decision == "ask"
 
 
-def test_plan_edit_deny_is_not_overridden_by_ask() -> None:
+def test_plan_child_edit_deny_overrides_agent_allow() -> None:
     tools = default_tool_registry()
     decision, *_ = decide_tool(
         source_name="Write",

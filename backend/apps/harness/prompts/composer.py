@@ -213,7 +213,7 @@ async def compose_system_prompt(
         "Platform: Linux (isolated OpenCuria workspace)",
         f"Workspace root: {HARNESS_WORKSPACE_ROOT}",
         f"Working directory: {cwd}",
-        f"Mode: {mode} (plan = propose, do not mutate without approval; "
+        f"Mode: {mode} (plan = scope and propose; "
         "build = implement intended changes directly)",
     ]
     if agent.mode != "hidden":
@@ -236,11 +236,16 @@ async def compose_system_prompt(
                 "Do not edit files, run tests or mutating commands, or delegate."
             )
         else:
-            env_lines.append(
+            plan_reminder = (
                 "Plan mode: research, tests, builds, and development servers may "
-                "create ordinary temporary artifacts. Ask before deliberate source/"
-                "configuration edits or other unclassified mutations, including "
-                "delegated work and background processes."
+                "create ordinary temporary artifacts. "
+            )
+            if agent.name == "plan":
+                plan_reminder += "Ask before deliberate source/configuration changes. "
+            env_lines.append(
+                plan_reminder
+                + "Shell commands, background processes, and delegated tools "
+                "follow the configured agent permissions."
             )
     sections.append("\n".join(env_lines))
 

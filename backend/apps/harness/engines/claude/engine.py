@@ -685,7 +685,6 @@ class ClaudeEngine:
                 depth=depth,
                 max_depth=options.max_depth,
                 selected_skills=sorted(self._managed_skill_names),
-                plan_mode=self._mode == "plan",
             )
             schemas = self._bridge_schemas_for_sdk(
                 self._schemas(child, self._mode, depth, options.max_depth)
@@ -774,7 +773,7 @@ class ClaudeEngine:
 
     @staticmethod
     def _command_may_mutate(command: str) -> bool:
-        """Conservatively classify plan-mode shell commands."""
+        """Compatibility helper for conservative shell mutation classification."""
         from .shellpolicy import shell_command_may_mutate
 
         return shell_command_may_mutate(command)
@@ -1607,7 +1606,6 @@ class ClaudeEngine:
                 depth=depth,
                 max_depth=max_depth,
                 selected_skills=list(self._managed_skill_names),
-                plan_mode=mode == "plan",
             ),
             external_session_id=self.external_session_id,
             fresh_session_id=transcript,
@@ -1637,7 +1635,6 @@ class ClaudeEngine:
             depth=depth,
             max_depth=max_depth,
             selected_skills=list(self._managed_skill_names),
-            plan_mode=mode == "plan",
         )
         mirror_env = self._cli_environment(config)
         max_turns = options.max_steps or agent.steps

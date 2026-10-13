@@ -8,7 +8,7 @@ from collections import defaultdict, deque
 from typing import Any
 
 from ...agents.definitions import AgentDefinition, canonical_subagent_type, get_agent
-from ...permissions.evaluator import ASK, DENY, PermissionContext, PermissionEvaluator
+from ...permissions.evaluator import ASK, DENY, PermissionEvaluator
 from ...permissions.scopes import is_permission_scope, permission_scope
 from ...runner import RunOptions
 from ...tools.base import ToolRegistry
@@ -21,16 +21,7 @@ from .policy import (
     tool_identity,
 )
 from .security import redact_action, redact_arguments, redact_title
-from .shellpolicy import (
-    shell_command_is_explore_safe,
-    shell_command_may_mutate,
-    shell_command_requires_plan_approval,
-)
-
-
-def _command_may_mutate(command: str) -> bool:
-    """Compatibility alias for the shared shell classifier."""
-    return shell_command_may_mutate(command)
+from .shellpolicy import shell_command_is_explore_safe
 
 
 class PermissionBridge:
@@ -258,15 +249,6 @@ class PermissionBridge:
                     result[2],
                     "Explore agents cannot use MCP tools",
                 )
-        if (
-            self.mode == "plan"
-            and source_name == "Bash"
-            and result[0] not in {DENY, ASK}
-            and shell_command_requires_plan_approval(
-                str(raw_arguments.get("command") or "")
-            )
-        ):
-            result = (ASK, result[1], result[2], result[3])
         return self._safe_projection(result)
 
     def action_scope(
@@ -291,82 +273,6 @@ class PermissionBridge:
                 source_name, arguments, self.tools
             )
         return permission_scope(raw_action, display_action)
-
-    def _plan_mcp_decision(
-        self,
-        registry_name: str,
-        action: str,
-        decision: str,
-    ) -> str:
-        """Ask for plan-mode MCP calls without a known read-only contract."""
-        if self.mode != "plan" or decision == DENY:
-            return decision
-        if registry_name.lower() in {
-            "read",
-            "glob",
-            "grep",
-            "list",
-            "webfetch",
-            "question",
-            "todowrite",
-            "process_start",
-            "process_restart",
-            "process_get",
-            "process_list",
-            "process_stop",
-            "process_delete",
-        }:
-            return decision
-        try:
-            registered = self.tools.get(registry_name)
-        except KeyError:
-            return ASK
-        key = str(registered.permission_key or registered.name)
-        explicit = self.evaluator.evaluate_context(
-            PermissionContext(tool=key, action=action, mode=self.mode)
-        )
-        if (
-            explicit.decision == "allow"
-            and explicit.matched_rule
-            and explicit.matched_rule not in {"*", "mcp_*"}
-        ):
-            return decision
-        return ASK
-
-    async def _plan_process_decision(
-        self,
-        engine: Any,
-        source_name: str,
-        arguments: dict[str, Any],
-        decision: str,
-    ) -> str:
-        """Allow plan-mode test/server processes; ask before other actions."""
-        if self.mode != "plan" or decision == DENY:
-            return decision
-        if source_name == "process_start":
-            command = str(arguments.get("command") or "")
-            return ASK if shell_command_requires_plan_approval(command) else decision
-        elif source_name == "process_restart":
-            process_id = str(arguments.get("process_id") or "").strip()
-            if not process_id:
-                return ASK
-            try:
-                record = await engine.accessor.process_get(
-                    process_id,
-                    session_id=self.options.session_id or None,
-                )
-            except Exception:
-                # Unknown processes and runner failures cannot prove what would
-                # be launched: never reinterpret either as a free server start.
-                return ASK
-            command = (
-                str(record.get("command") or "") if isinstance(record, dict) else ""
-            )
-        else:
-            return decision
-        if not command or shell_command_requires_plan_approval(command):
-            return ASK
-        return decision
 
     def scope(
         self, engine: Any, hook_input: dict[str, Any]
@@ -439,18 +345,9 @@ class PermissionBridge:
                 policy_source, arguments, agent=agent, depth=depth
             )
             safe_action = redact_action(_action, engine._event_secrets())
-            decision = await self._plan_process_decision(
-                engine, registry_source, arguments, decision
-            )
             permission_action = self.action_scope(
                 policy_source, arguments, display_action=safe_action
             )
-            if is_mcp:
-                decision = self._plan_mcp_decision(registry_source, _action, decision)
-                if registry_source == "process_restart" and decision not in {DENY, ASK}:
-                    decision = await self._plan_process_decision(
-                        engine, registry_source, arguments, decision
-                    )
             if agent.name == "explore":
                 if is_mcp or source in {"Write", "Edit", "NotebookEdit"}:
                     decision = DENY
@@ -787,12 +684,6 @@ class PermissionBridge:
         permission_action = self.action_scope(
             policy_source, arguments, display_action=safe_action
         )
-        if (
-            self.mode == "plan"
-            and decision != DENY
-            and source_name in {"Write", "Edit", "NotebookEdit"}
-        ):
-            decision = ASK
         if agent.name == "explore":
             if is_mcp or source_name in {"Write", "Edit", "NotebookEdit"}:
                 decision = DENY
@@ -800,19 +691,6 @@ class PermissionBridge:
                 str(arguments.get("command") or "")
             ):
                 decision = DENY
-        decision = await self._plan_process_decision(
-            engine, policy_source, arguments, decision
-        )
-        if (
-            not is_mcp
-            and source_name == "Bash"
-            and self.mode == "plan"
-            and decision not in {DENY, ASK}
-            and shell_command_requires_plan_approval(
-                str(arguments.get("command") or "")
-            )
-        ):
-            decision = ASK
         if decision == DENY:
             if not is_mcp:
                 engine._clear_native_snapshot(call_id)
