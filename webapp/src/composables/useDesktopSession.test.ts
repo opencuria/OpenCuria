@@ -17,7 +17,12 @@ import { copyToClipboard } from '@/lib/clipboard'
 const notificationMocks = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }))
 
 type ClipboardCopyContent = string | (() => Promise<string>)
-type ClipboardCopyOptions = { success?: 'toast' | 'silent'; signal?: AbortSignal }
+type ClipboardCopyOptions = {
+  success?: 'toast' | 'silent'
+  signal?: AbortSignal
+  context?: Window
+  fallback?: 'dialog' | 'none'
+}
 function clipboardCopyCalls(): [ClipboardCopyContent, string, ClipboardCopyOptions?][] {
   return (
     copyToClipboard as unknown as {
@@ -50,6 +55,15 @@ vi.mock('@/services/socket', () => ({
 }))
 let count = 0
 const scopes: ReturnType<typeof effectScope>[] = []
+const restoreClipboardStubs: (() => void)[] = []
+function stubNavigatorClipboard(clipboard: { readText?: () => Promise<string> } | undefined): void {
+  const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: clipboard })
+  restoreClipboardStubs.push(() => {
+    if (descriptor) Object.defineProperty(navigator, 'clipboard', descriptor)
+    else Reflect.deleteProperty(navigator, 'clipboard')
+  })
+}
 function surface(id: string, observer = false) {
   const scope = effectScope()
   scopes.push(scope)
@@ -85,6 +99,10 @@ beforeEach(() => {
 })
 afterEach(async () => {
   scopes.splice(0).forEach((scope) => scope.stop())
+  restoreClipboardStubs
+    .splice(0)
+    .reverse()
+    .forEach((restore) => restore())
   await flushPromises()
   vi.useRealTimers()
 })
@@ -338,6 +356,34 @@ describe('VM clipboard copying', () => {
     expect(notificationMocks.success).toHaveBeenCalledWith('Copied from VM')
   })
 
+  it('passes defined context and fallback options and uses its fenced custom loader instead of REST', async () => {
+    const id = `viewer-${++count}`
+    useDesktopStore().setConnected(id, `/ws/desktop/${id}/`)
+    const { session } = surface(id)
+    const context = window
+    const loadText = vi.fn(async () => 'clipboard events ✓')
+    vi.mocked(copyToClipboard).mockImplementationOnce(async (source) => {
+      if (typeof source === 'function') await source()
+      return true
+    })
+
+    expect(await session.copyFromVmClipboard({ context, fallback: 'none', loadText })).toBe(true)
+    expect(copyToClipboard).toHaveBeenCalledWith(
+      expect.any(Function),
+      'VM clipboard',
+      expect.objectContaining({
+        success: 'silent',
+        signal: expect.any(AbortSignal),
+        context,
+        fallback: 'none',
+      }),
+    )
+    expect(typeof clipboardCopyCalls()[0]?.[0]).toBe('function')
+    expect(loadText).toHaveBeenCalledOnce()
+    expect(api.readDesktopClipboard).not.toHaveBeenCalled()
+    expect(notificationMocks.success).not.toHaveBeenCalled()
+  })
+
   it('keeps iframe shortcut delay inside the lazy VM loader', async () => {
     const id = `viewer-${++count}`
     useDesktopStore().setConnected(id, `/ws/desktop/${id}/`)
@@ -519,6 +565,151 @@ describe('VM clipboard copying', () => {
 
     await expect(content()).rejects.toThrow('Unable to load VM clipboard')
     expect(await pending).toBe(true)
+  })
+})
+
+describe('VM clipboard pasting', () => {
+  it.each(['héllo 世界\nsecond line', ''])(
+    'writes supplied native paste text exactly without reading the browser clipboard or toasting (%s)',
+    async (text) => {
+      const id = `viewer-${++count}`
+      const store = useDesktopStore()
+      store.setConnected(id, `/ws/desktop/${id}/`)
+      const { session } = surface(id)
+      const readText = vi.fn(async () => 'must not be read')
+      stubNavigatorClipboard({ readText })
+      vi.mocked(api.writeDesktopClipboard).mockResolvedValue({ text: '' })
+
+      expect(await session.pasteToVmClipboard(text)).toBe(true)
+      expect(readText).not.toHaveBeenCalled()
+      expect(api.writeDesktopClipboard).toHaveBeenCalledExactlyOnceWith(id, text)
+      expect(notificationMocks.success).not.toHaveBeenCalled()
+      expect(notificationMocks.error).not.toHaveBeenCalled()
+    },
+  )
+
+  it('gives an actionable message when toolbar paste has no browser read API', async () => {
+    const id = `viewer-${++count}`
+    useDesktopStore().setConnected(id, `/ws/desktop/${id}/`)
+    const { session } = surface(id)
+    stubNavigatorClipboard(undefined)
+
+    expect(await session.pasteToVmClipboard()).toBe(false)
+    expect(api.writeDesktopClipboard).not.toHaveBeenCalled()
+    expect(notificationMocks.error).toHaveBeenCalledExactlyOnceWith(
+      'Paste failed',
+      'Use Cmd/Ctrl+V inside the desktop to paste.',
+    )
+  })
+
+  it('gives an actionable message when the browser denies clipboard access', async () => {
+    const id = `viewer-${++count}`
+    useDesktopStore().setConnected(id, `/ws/desktop/${id}/`)
+    const { session } = surface(id)
+    stubNavigatorClipboard({
+      readText: vi.fn().mockRejectedValue(new Error('private permission detail')),
+    })
+
+    expect(await session.pasteToVmClipboard()).toBe(false)
+    expect(api.writeDesktopClipboard).not.toHaveBeenCalled()
+    expect(notificationMocks.error).toHaveBeenCalledExactlyOnceWith(
+      'Paste failed',
+      'Use Cmd/Ctrl+V inside the desktop to paste.',
+    )
+    expect(notificationMocks.error.mock.calls.flat().join(' ')).not.toContain(
+      'private permission detail',
+    )
+  })
+
+  it('reports a generic write failure without exposing backend error details', async () => {
+    const id = `viewer-${++count}`
+    useDesktopStore().setConnected(id, `/ws/desktop/${id}/`)
+    const { session } = surface(id)
+    stubNavigatorClipboard({ readText: vi.fn().mockResolvedValue('local text') })
+    vi.mocked(api.writeDesktopClipboard).mockRejectedValueOnce(
+      new Error('sensitive server response'),
+    )
+
+    expect(await session.pasteToVmClipboard()).toBe(false)
+    expect(notificationMocks.error).toHaveBeenCalledExactlyOnceWith(
+      'Paste failed',
+      'Unable to write to the VM clipboard. Please try again.',
+    )
+    expect(notificationMocks.error.mock.calls.flat().join(' ')).not.toContain(
+      'sensitive server response',
+    )
+  })
+
+  it('does not write or report stale browser reads after a workspace switch or disposal', async () => {
+    const id = `viewer-${++count}`
+    useDesktopStore().setConnected(id, `/ws/desktop/${id}/`)
+    const switched = surface(id)
+    let resolveRead!: (value: string) => void
+    stubNavigatorClipboard({ readText: () => new Promise((resolve) => (resolveRead = resolve)) })
+    const switchedPaste = switched.session.pasteToVmClipboard()
+    switched.workspaceId.value = `${id}-next`
+    resolveRead('stale text')
+    expect(await switchedPaste).toBe(false)
+
+    const secondId = `${id}-dispose`
+    useDesktopStore().setConnected(secondId, `/ws/desktop/${secondId}/`)
+    const disposed = surface(secondId)
+    let resolveDisposedRead!: (value: string) => void
+    stubNavigatorClipboard({
+      readText: () => new Promise((resolve) => (resolveDisposedRead = resolve)),
+    })
+    const disposedPaste = disposed.session.pasteToVmClipboard()
+    disposed.scope.stop()
+    resolveDisposedRead('disposed text')
+    expect(await disposedPaste).toBe(false)
+
+    expect(api.writeDesktopClipboard).not.toHaveBeenCalled()
+    expect(notificationMocks.success).not.toHaveBeenCalled()
+    expect(notificationMocks.error).not.toHaveBeenCalled()
+  })
+
+  it('writes only to the captured workspace and suppresses completion feedback after switching mid-write', async () => {
+    const id = `viewer-${++count}`
+    useDesktopStore().setConnected(id, `/ws/desktop/${id}/`)
+    const { session, workspaceId } = surface(id)
+    let resolveWrite!: () => void
+    vi.mocked(api.writeDesktopClipboard).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveWrite = () => resolve({ text: '' })
+      }),
+    )
+
+    const pending = session.pasteToVmClipboard('native text')
+    expect(api.writeDesktopClipboard).toHaveBeenCalledExactlyOnceWith(id, 'native text')
+    workspaceId.value = `${id}-new`
+    resolveWrite()
+    expect(await pending).toBe(false)
+    expect(notificationMocks.success).not.toHaveBeenCalled()
+    expect(notificationMocks.error).not.toHaveBeenCalled()
+  })
+
+  it('rejects read-only or concurrent operations without starting another browser read', async () => {
+    const id = `viewer-${++count}`
+    const store = useDesktopStore()
+    store.setConnected(id, `/ws/desktop/${id}/`)
+    const { session } = surface(id)
+    const readText = vi.fn(async () => 'local text')
+    stubNavigatorClipboard({ readText })
+    store.setComputerUseActive(true)
+    expect(await session.pasteToVmClipboard()).toBe(false)
+    expect(readText).not.toHaveBeenCalled()
+
+    store.setComputerUseActive(false)
+    let resolveRead!: (value: string) => void
+    stubNavigatorClipboard({ readText: () => new Promise((resolve) => (resolveRead = resolve)) })
+    const pending = session.pasteToVmClipboard()
+    expect(session.clipboardBusy.value).toBe(true)
+    expect(await session.pasteToVmClipboard('second paste')).toBe(false)
+    expect(api.writeDesktopClipboard).not.toHaveBeenCalled()
+    resolveRead('first paste')
+    expect(await pending).toBe(true)
+    expect(api.writeDesktopClipboard).toHaveBeenCalledExactlyOnceWith(id, 'first paste')
+    expect(session.clipboardBusy.value).toBe(false)
   })
 })
 

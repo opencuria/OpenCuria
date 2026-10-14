@@ -174,6 +174,42 @@ describe('clipboard operations', () => {
     expect(JSON.stringify(info.mock.calls)).not.toContain('private payload')
   })
 
+  it('uses the supplied iframe realm for its Blob, ClipboardItem, and navigator clipboard', async () => {
+    const frame = document.createElement('iframe')
+    document.body.appendChild(frame)
+    const context = frame.contentWindow as Window & typeof globalThis
+    class FrameClipboardItem {
+      constructor(readonly values: Record<string, unknown>) {}
+    }
+    const write = vi.fn(async (items: FrameClipboardItem[]) => {
+      expect(items[0]).toBeInstanceOf(FrameClipboardItem)
+      const blob = (await items[0]!.values['text/plain']) as Blob
+      expect(blob).toBeInstanceOf(context.Blob as typeof Blob)
+      expect(blob.type).toBe('text/plain')
+    })
+    Object.defineProperty(context, 'ClipboardItem', {
+      configurable: true,
+      value: FrameClipboardItem,
+    })
+    Object.defineProperty(context.navigator, 'clipboard', {
+      configurable: true,
+      value: { write },
+    })
+
+    await expect(
+      copyToClipboard(async () => 'frame payload', 'artifact', {
+        context,
+        success: 'silent',
+      }),
+    ).resolves.toBe(true)
+
+    expect(write).toHaveBeenCalledOnce()
+    expect((write.mock.calls[0]![0][0] as FrameClipboardItem).values['text/plain']).toBeInstanceOf(
+      Promise,
+    )
+    frame.remove()
+  })
+
   it('starts ClipboardItem writing before an async producer settles and invokes it once', async () => {
     stubClipboardItem()
     const text = deferred<string>()
@@ -198,6 +234,83 @@ describe('clipboard operations', () => {
     await expect(operation).resolves.toBe(true)
     expect(loader).toHaveBeenCalledOnce()
     expect(info).not.toHaveBeenCalled()
+  })
+
+  it('uses the no-dialog legacy async fallback with the exact produced text', async () => {
+    stubClipboard(undefined)
+    vi.stubGlobal('ClipboardItem', undefined)
+    const { exec, setData } = stubExecCommand(true)
+    const secret = 'exact async clipboard payload\nsecond line'
+    const loader = vi.fn(async () => secret)
+    const notifications = useNotificationStore()
+    const info = vi.spyOn(notifications, 'info')
+    const error = vi.spyOn(notifications, 'error')
+
+    await expect(
+      copyToClipboard(loader, 'VM clipboard', { fallback: 'none', success: 'silent' }),
+    ).resolves.toBe(true)
+
+    expect(loader).toHaveBeenCalledOnce()
+    expect(exec).toHaveBeenCalledWith('copy')
+    expect(setData).toHaveBeenCalledOnce()
+    expect(setData).toHaveBeenCalledWith('text/plain', secret)
+    expect(info).not.toHaveBeenCalled()
+    expect(error).not.toHaveBeenCalled()
+    expect(JSON.stringify(info.mock.calls.concat(error.mock.calls))).not.toContain(secret)
+  })
+
+  it('reports blocked async legacy copy generically and preserves focused selection', async () => {
+    stubClipboard(undefined)
+    vi.stubGlobal('ClipboardItem', undefined)
+    const { exec, setData } = stubExecCommand(true, false)
+    const secret = 'private async text'
+    const selected = document.createElement('p')
+    selected.textContent = 'keep this selection'
+    const focusTarget = document.createElement('button')
+    document.body.append(selected, focusTarget)
+    focusTarget.focus()
+    const selection = document.getSelection()!
+    const range = document.createRange()
+    range.selectNodeContents(selected)
+    selection.removeAllRanges()
+    selection.addRange(range)
+    const notifications = useNotificationStore()
+    const error = vi.spyOn(notifications, 'error')
+
+    await expect(
+      copyToClipboard(async () => secret, 'VM clipboard', { fallback: 'none' }),
+    ).resolves.toBe(false)
+
+    expect(exec).toHaveBeenCalledWith('copy')
+    expect(setData).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(focusTarget)
+    expect(selection.toString()).toBe('keep this selection')
+    expect(document.querySelector('span')).toBeNull()
+    expect(error).toHaveBeenCalledOnce()
+    expect(error).toHaveBeenCalledWith('Failed to copy VM clipboard', expect.any(String))
+    expect(JSON.stringify(error.mock.calls)).not.toContain(secret)
+  })
+
+  it('does not run the legacy async fallback after its producer is aborted', async () => {
+    stubClipboard(undefined)
+    vi.stubGlobal('ClipboardItem', undefined)
+    const { exec } = stubExecCommand(true)
+    const text = deferred<string>()
+    const controller = new AbortController()
+    const notifications = useNotificationStore()
+    const error = vi.spyOn(notifications, 'error')
+    const operation = copyToClipboard(() => text.promise, 'VM clipboard', {
+      fallback: 'none',
+      signal: controller.signal,
+    })
+
+    controller.abort()
+    text.resolve('late private text')
+    await expect(operation).resolves.toBe(false)
+
+    expect(exec).not.toHaveBeenCalled()
+    expect(error).not.toHaveBeenCalled()
+    expect(useClipboardStore().request).toBeNull()
   })
 
   it('offers Copy now after async Clipboard API rejection without a late execCommand', async () => {

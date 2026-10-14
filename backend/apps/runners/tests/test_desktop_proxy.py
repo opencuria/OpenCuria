@@ -7,6 +7,7 @@ import base64
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -226,6 +227,10 @@ async def test_proxy_root_redirects_with_local_scale_not_remote_resize(
     assert "resize=scale" in location
     assert "resize=remote" not in location
     assert "autoconnect=true" in location
+    redirect_query = parse_qs(urlsplit(location).query)
+    assert redirect_query["clipboard_up"] == ["true"]
+    assert redirect_query["clipboard_down"] == ["true"]
+    assert redirect_query["clipboard_seamless"] == ["false"]
     assert "reconnect=false" in location
     assert f"path=ws%2Fdesktop%2F{workspace_id}%2F%3Ftoken%3Dtest-token" in location
     assert f"path=ws/desktop/{workspace_id}/?token=" not in location
@@ -435,6 +440,27 @@ def test_build_vnc_redirect_url_encodes_ws_path_and_disables_reconnect():
     assert "path=ws%2Fdesktop%2F" in location
     assert "%3Ftoken%3D" in location
     assert f"path=ws/desktop/{workspace_id}/?token=" not in location
+
+
+def test_build_vnc_redirect_preserves_viewer_association_and_authentication():
+    workspace_id = "297de18f-3cc8-4e14-b64a-35c80856d51b"
+    client_id = "e6bd8acd-9977-4d3d-9b49-7c07adbd9eed"
+    token = "authenticated-token"
+
+    location = build_vnc_redirect_url(workspace_id, token, client_id, 12)
+    query = parse_qs(urlsplit(location).query)
+    ws_path_url = urlsplit(query["path"][0])
+    ws_path = parse_qs(ws_path_url.query)
+
+    assert query["token"] == [token]
+    assert query["viewer_client_id"] == [client_id]
+    assert query["intent_revision"] == ["12"]
+    assert ws_path["token"] == [token]
+    assert ws_path["viewer_client_id"] == [client_id]
+    assert ws_path["intent_revision"] == ["12"]
+    assert query["clipboard_up"] == ["true"]
+    assert query["clipboard_down"] == ["true"]
+    assert query["clipboard_seamless"] == ["false"]
 
 
 def test_inject_kasm_idle_guard_inserts_into_head_and_is_idempotent():
