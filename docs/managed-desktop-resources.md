@@ -190,6 +190,51 @@ associated tunnel. An observer without an association does not acquire ownership
 Proxy renewal failure closes that tunnel; the proxy never acquires or releases a
 lease to compensate. The webapp also renews retained intents every 45 seconds.
 
+### Startup and viewer recovery
+
+A `202` start response acknowledges dispatch, not readiness. The webapp observes
+its own intent every second until both the held lease and an active proxy URL
+are confirmed. Startup is bounded to 30 seconds; individual start/renew/status
+requests are abortable after 10 seconds. Transient transport errors only retry
+observation, not ownership acquisition. An expired/released intent or changed
+runner epoch permits a bounded acquisition with a newer revision.
+
+The viewer uses trusted KasmVNC status messages and observes the loaded document's
+`noVNC_connected` class, so a delayed or missing message cannot leave a connected
+frame hidden. Disconnect recovery reconciles ownership before remounting the
+viewer, with three automatic retries and an explicit Retry action after failure.
+Hidden browser tabs pause viewer handshake/retry timers. Switching between the
+sidebar and modal preserves the same iframe and VNC connection.
+
+Desktop process events and heartbeats carry a runner epoch and monotonically
+increasing process generation. Late stops cannot delete a newer proxy route;
+stopped-generation tombstones reject delayed active announcements. A heartbeat
+probe failure is distinct from a confirmed stop. The desktop manager confirms
+negative probes under its lifecycle lock before pruning a session.
+
+Run deterministic fault-injection regressions against a running Vite server:
+
+```bash
+cd e2e
+npx playwright test --config=playwright.desktop-recovery.config.ts
+```
+
+These tests mock API/viewer traffic, use the real webapp components, and have no
+shared backend cleanup. For an opt-in real UI/VM/KasmVNC check, use a disposable
+running workspace (this releases only the test tab's viewer intents):
+
+```bash
+E2E_DESKTOP_STARTUP_LIVE=1 \
+E2E_DESKTOP_STARTUP_WORKSPACE_ID=<running-workspace-uuid> \
+xvfb-run -a npx playwright test --config=playwright.desktop-startup-live.config.ts
+```
+
+Set `E2E_BASE_URL`, `E2E_ADMIN_EMAIL`, and `E2E_ADMIN_PASSWORD` for a non-default
+development setup. The live test delays a real viewer asset, injects a status
+outage, exercises reloads and RFB disconnect/reconnect, and verifies rendered
+canvas pixels. Artifacts are stored under `/workspace/.opencuria/playwright`.
+Backend, runner, and webapp changes must be deployed together.
+
 ## Coordinated rollout
 
 Plan a maintenance window; this is **not a zero-downtime upgrade**.

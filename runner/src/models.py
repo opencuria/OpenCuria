@@ -64,3 +64,5 @@ class DesktopReleaseResult:
     computer_use_active: bool
     mcp_active: bool = False
     holder_count: int = 0
+    generation: int = 0
+    epoch: str | None = None

@@ -476,9 +476,7 @@ class WorkspaceService:
         self._registry.desktop_live = lambda workspace_id: (
             self._is_desktop_session_live(workspace_id)
         )
-        self._registry.desktop_heartbeat_payload = lambda workspace_id, session: (
-            self._desktop_heartbeat_payload(workspace_id, session)
-        )
+        self._registry.desktop_manager = self._desktop
         # Lifecycle cross-cluster hooks: late-bound service facades.
         self._lifecycle.remove_hook = lambda runtime, instance_id, log: (
             self.remove_workspace_credentials(runtime, instance_id, log)
@@ -1949,12 +1947,14 @@ class WorkspaceService:
         """
         return DesktopManager._parse_desktop_holder(holder)
 
-    def _empty_desktop_release_result(self) -> DesktopReleaseResult:
+    def _empty_desktop_release_result(
+        self, workspace_id: uuid.UUID | None = None
+    ) -> DesktopReleaseResult:
         """Return a release result when no desktop process is tracked.
 
         Step 6a: thin facade over ``DesktopManager._empty_desktop_release_result``.
         """
-        return self._desktop._empty_desktop_release_result()
+        return self._desktop._empty_desktop_release_result(workspace_id)
 
     def _desktop_release_result(
         self, session: DesktopSession | None, *, stopped: bool

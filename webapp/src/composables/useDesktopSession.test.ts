@@ -113,17 +113,29 @@ describe('per-tab desktop viewer intents', () => {
     const { session } = surface(id)
     await session.startDesktop()
     expect(desktopViewerClientId).toMatch(/^[\da-f]{8}(-[\da-f]{4}){3}-[\da-f]{12}$/)
-    expect(api.startDesktop).toHaveBeenCalledWith(id, {
-      viewer_client_id: desktopViewerClientId,
-      intent_revision: 1,
-    })
-    expect(api.getDesktopStatus).toHaveBeenCalledWith(id, desktopViewerClientId)
+    expect(api.startDesktop).toHaveBeenCalledWith(
+      id,
+      {
+        viewer_client_id: desktopViewerClientId,
+        intent_revision: 1,
+      },
+      expect.any(AbortSignal),
+    )
+    expect(api.getDesktopStatus).toHaveBeenCalledWith(
+      id,
+      desktopViewerClientId,
+      expect.any(AbortSignal),
+    )
     expect(useDesktopStore().viewerOwned).toBe(true)
     await vi.advanceTimersByTimeAsync(45_000)
-    expect(api.renewDesktop).toHaveBeenCalledWith(id, {
-      viewer_client_id: desktopViewerClientId,
-      intent_revision: 1,
-    })
+    expect(api.renewDesktop).toHaveBeenCalledWith(
+      id,
+      {
+        viewer_client_id: desktopViewerClientId,
+        intent_revision: 1,
+      },
+      expect.any(AbortSignal),
+    )
   })
 
   it('builds a UUID when crypto.randomUUID is missing', () => {
@@ -211,10 +223,14 @@ describe('per-tab desktop viewer intents', () => {
     expect(api.stopDesktop).toHaveBeenCalledTimes(1)
     const second = surface(id)
     await second.session.startDesktop()
-    expect(api.startDesktop).toHaveBeenLastCalledWith(id, {
-      viewer_client_id: desktopViewerClientId,
-      intent_revision: 2,
-    })
+    expect(api.startDesktop).toHaveBeenLastCalledWith(
+      id,
+      {
+        viewer_client_id: desktopViewerClientId,
+        intent_revision: 2,
+      },
+      expect.any(AbortSignal),
+    )
     finish({ task_id: 'old' })
     await pending
     expect(desktopViewerSession(id).revision).toBe(2)
@@ -714,6 +730,387 @@ describe('VM clipboard pasting', () => {
 })
 
 describe('viewer observation fencing and bounded startup', () => {
+  it('waits for route readiness after the own lease is held without renewing every poll', async () => {
+    const id = `viewer-${++count}`
+    const store = useDesktopStore()
+    store.setConnected(id, `/ws/desktop/${id}/`)
+    vi.mocked(api.getDesktopStatus)
+      .mockImplementationOnce(async () => ({
+        ...status(id, 'held'),
+        active: false,
+        proxy_url: null,
+        revision: desktopViewerSession(id).revision,
+      }))
+      .mockImplementationOnce(async () => ({
+        ...status(id, 'held'),
+        revision: desktopViewerSession(id).revision,
+      }))
+    const { session } = surface(id)
+
+    await session.startDesktop()
+    expect(desktopViewerSession(id).leaseState).toBe('held')
+    expect(desktopViewerSession(id).connecting).toBe(true)
+    expect(store.isConnected).toBe(false)
+    expect(store.isConnecting).toBe(true)
+    expect(api.renewDesktop).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    expect(desktopViewerSession(id).connecting).toBe(false)
+    expect(desktopViewerSession(id).startupDeadline).toBe(0)
+    expect(store.isConnected).toBe(true)
+    expect(store.isConnecting).toBe(false)
+    expect(api.getDesktopStatus).toHaveBeenCalledTimes(2)
+    expect(api.renewDesktop).not.toHaveBeenCalled()
+  })
+
+  it('fails permanent missing route at deadline and permits an explicit retry', async () => {
+    const id = `viewer-${++count}`
+    const store = useDesktopStore()
+    store.setConnected(id, `/ws/desktop/${id}/`)
+    vi.mocked(api.getDesktopStatus).mockImplementation(async () => ({
+      ...status(id, 'held'),
+      active: false,
+      proxy_url: null,
+    }))
+    const { session } = surface(id)
+
+    await session.startDesktop()
+    expect(desktopViewerSession(id).connecting).toBe(true)
+    expect(store.isConnected).toBe(false)
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    expect(desktopViewerSession(id).connecting).toBe(false)
+    expect(session.error.value).toContain('could not be confirmed')
+    expect(store.isConnecting).toBe(false)
+    expect(store.isConnected).toBe(false)
+    expect(desktopViewerSession(id).status?.active).toBe(false)
+
+    vi.mocked(api.getDesktopStatus).mockImplementation(async () => status(id, 'held'))
+    await session.startDesktop()
+    expect(api.startDesktop).toHaveBeenCalledTimes(2)
+    expect(desktopViewerSession(id).connecting).toBe(false)
+    expect(store.isConnected).toBe(true)
+    expect(session.error.value).toBeNull()
+  })
+
+  it('aborts a start POST that never settles and permits retry after request timeout', async () => {
+    const id = `viewer-${++count}`
+    let firstStartSignal: AbortSignal | undefined
+    vi.mocked(api.startDesktop)
+      .mockImplementationOnce((_workspaceId, _intent, signal) => {
+        firstStartSignal = signal
+        return new Promise(() => undefined)
+      })
+      .mockResolvedValueOnce({ task_id: 'retry' })
+    vi.mocked(api.getDesktopStatus).mockImplementation(async () => ({
+      ...status(id, 'unknown'),
+      active: false,
+      proxy_url: null,
+      revision: desktopViewerSession(id).revision,
+    }))
+    const { session } = surface(id)
+
+    const firstStart = session.startDesktop()
+    await flushPromises()
+    expect(api.startDesktop).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(10_000)
+    await firstStart
+    expect(firstStartSignal?.aborted).toBe(true)
+    expect(desktopViewerSession(id).connecting).toBe(true)
+    expect(desktopViewerSession(id).pending).toBeNull()
+    expect(session.error.value).toBe('Desktop request timed out')
+
+    // Retry before the outer startup deadline: the timed-out POST no longer
+    // holds the session's single-flight promise.
+    vi.mocked(api.getDesktopStatus).mockImplementation(async () => status(id))
+    await session.startDesktop()
+    expect(api.startDesktop).toHaveBeenCalledTimes(2)
+    expect(api.startDesktop).toHaveBeenLastCalledWith(
+      id,
+      {
+        viewer_client_id: desktopViewerClientId,
+        intent_revision: 2,
+      },
+      expect.any(AbortSignal),
+    )
+    expect(desktopViewerSession(id).connecting).toBe(false)
+    expect(useDesktopStore().viewerOwned).toBe(true)
+    void firstStart
+  })
+
+  it('ignores a status that succeeds after the startup deadline until explicit retry', async () => {
+    const id = `viewer-${++count}`
+    let resolveStatus!: (value: ReturnType<typeof status>) => void
+    let firstStatusSignal: AbortSignal | undefined
+    vi.mocked(api.getDesktopStatus)
+      .mockImplementationOnce((_id, _clientId, signal) => {
+        firstStatusSignal = signal
+        return new Promise((resolve) => {
+          resolveStatus = resolve
+        })
+      })
+      .mockImplementation(async (workspaceId) => ({
+        ...status(workspaceId, 'unknown'),
+        active: false,
+        proxy_url: null,
+        revision: desktopViewerSession(workspaceId).revision,
+      }))
+    const { session } = surface(id)
+    const store = useDesktopStore()
+
+    const firstStart = session.startDesktop()
+    await flushPromises()
+    expect(api.getDesktopStatus).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(firstStatusSignal?.aborted).toBe(true)
+    expect(session.error.value).toBe('Desktop request timed out')
+    expect(store.isConnecting).toBe(true)
+    // The response is still pending in the mock after its fetch signal was
+    // aborted; deadline reconciliation, not that late response, must win.
+    await vi.advanceTimersByTimeAsync(20_000)
+    const deadlineStatus = desktopViewerSession(id).status
+    expect(deadlineStatus?.active).toBe(false)
+    expect(deadlineStatus?.viewer_lease_state).toBe('unknown')
+    expect(session.error.value).toContain('could not be confirmed')
+    resolveStatus(status(id))
+    // Promise.race has already rejected at the request deadline. The abandoned
+    // underlying response must not be allowed to mutate the session.
+    await flushPromises()
+    expect(session.error.value).toContain('could not be confirmed')
+    expect(store.isConnecting).toBe(false)
+    expect(desktopViewerSession(id).status).toBe(deadlineStatus)
+
+    await firstStart
+    await flushPromises()
+    expect(desktopViewerSession(id).status).toBe(deadlineStatus)
+    expect(desktopViewerSession(id).connecting).toBe(false)
+    expect(session.error.value).toContain('could not be confirmed')
+    expect(store.viewerOwned).toBe(false)
+
+    vi.mocked(api.getDesktopStatus).mockImplementation(async () => status(id))
+    await session.startDesktop()
+    expect(api.startDesktop).toHaveBeenCalledTimes(2)
+    expect(desktopViewerSession(id).connecting).toBe(false)
+    expect(store.viewerOwned).toBe(true)
+  })
+
+  it('re-observes a route that disappears after a lease became ready', async () => {
+    const id = `viewer-${++count}`
+    const { session } = surface(id)
+    const store = useDesktopStore()
+    await session.startDesktop()
+    vi.mocked(api.getDesktopStatus).mockResolvedValueOnce({
+      ...status(id, 'held'),
+      active: false,
+      proxy_url: null,
+    })
+
+    await refreshDesktopViewer(id)
+    expect(desktopViewerSession(id).connecting).toBe(true)
+    expect(store.isConnected).toBe(false)
+    expect(store.isConnecting).toBe(true)
+    expect(desktopViewerSession(id).startupDeadline).toBeGreaterThan(Date.now())
+
+    vi.mocked(api.getDesktopStatus).mockImplementation(async () => status(id))
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(desktopViewerSession(id).connecting).toBe(false)
+    expect(store.isConnected).toBe(true)
+    expect(api.startDesktop).toHaveBeenCalledOnce()
+  })
+
+  it('observes a transient status outage promptly and clears store connecting at the startup deadline', async () => {
+    const id = `viewer-${++count}`
+    vi.mocked(api.getDesktopStatus)
+      .mockRejectedValueOnce(new Error('temporarily offline'))
+      .mockImplementation(async () => ({
+        ...status(id, 'unknown'),
+        revision: desktopViewerSession(id).revision,
+      }))
+    const { session } = surface(id)
+    const store = useDesktopStore()
+
+    await session.startDesktop()
+    expect(api.getDesktopStatus).toHaveBeenCalledTimes(1)
+    expect(session.error.value).toBe('temporarily offline')
+    expect(store.isConnecting).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(api.getDesktopStatus).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(29_000)
+
+    expect(desktopViewerSession(id).connecting).toBe(false)
+    expect(session.error.value).toContain('could not be confirmed')
+    expect(store.isConnecting).toBe(false)
+    expect(store.viewerOwned).toBe(false)
+    expect(api.startDesktop).toHaveBeenCalledTimes(1)
+  })
+
+  it('observes after a start transport failure without duplicating the start', async () => {
+    const id = `viewer-${++count}`
+    vi.mocked(api.startDesktop).mockRejectedValueOnce(new Error('connection reset'))
+    vi.mocked(api.getDesktopStatus).mockImplementation(async () => status(id))
+    const { session } = surface(id)
+
+    await session.startDesktop()
+    expect(session.error.value).toBe('connection reset')
+    expect(api.getDesktopStatus).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(api.getDesktopStatus).toHaveBeenCalledOnce()
+    expect(api.startDesktop).toHaveBeenCalledOnce()
+    expect(useDesktopStore().viewerOwned).toBe(true)
+  })
+
+  it('times out a hanging renew so manual reconnect settles and can retry', async () => {
+    const id = `viewer-${++count}`
+    const { session } = surface(id)
+    const store = useDesktopStore()
+    await session.startDesktop()
+    let renewSignal: AbortSignal | undefined
+    vi.mocked(api.renewDesktop).mockImplementationOnce((_id, _intent, signal) => {
+      renewSignal = signal
+      return new Promise(() => undefined)
+    })
+    vi.mocked(api.getDesktopStatus).mockImplementation(async () => status(id))
+
+    const reconnect = session.handleReconnect()
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(10_000)
+    await reconnect
+
+    expect(renewSignal?.aborted).toBe(true)
+    expect(api.getDesktopStatus).toHaveBeenCalledTimes(2)
+    expect(store.viewerGeneration).toBe(1)
+
+    await session.handleReconnect()
+    expect(api.renewDesktop).toHaveBeenCalledTimes(2)
+    expect(store.viewerGeneration).toBe(2)
+  })
+
+  it('times out a hanging reconnect status and allows the next manual retry', async () => {
+    const id = `viewer-${++count}`
+    const { session } = surface(id)
+    const store = useDesktopStore()
+    await session.startDesktop()
+    let statusSignal: AbortSignal | undefined
+    vi.mocked(api.getDesktopStatus).mockImplementationOnce((_id, _clientId, signal) => {
+      statusSignal = signal
+      return new Promise(() => undefined)
+    })
+
+    const firstReconnect = session.handleReconnect()
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(10_000)
+    await firstReconnect
+
+    expect(statusSignal?.aborted).toBe(true)
+    expect(store.viewerGeneration).toBe(0)
+
+    vi.mocked(api.getDesktopStatus).mockImplementation(async () => status(id))
+    await session.handleReconnect()
+    expect(store.viewerGeneration).toBe(1)
+    expect(api.startDesktop).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a manual reconnect single-flight and ignores status after release', async () => {
+    const id = `viewer-${++count}`
+    const { session } = surface(id)
+    const store = useDesktopStore()
+    await session.startDesktop()
+    let resolveStatus!: (value: ReturnType<typeof status>) => void
+    vi.mocked(api.getDesktopStatus).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStatus = resolve
+      }),
+    )
+
+    const firstReconnect = session.handleReconnect()
+    const secondReconnect = session.handleReconnect()
+    expect(secondReconnect).toBe(firstReconnect)
+    await flushPromises()
+    expect(api.getDesktopStatus).toHaveBeenCalledTimes(2)
+    expect(store.viewerGeneration).toBe(0)
+
+    await session.stopDesktop()
+    resolveStatus(status(id, 'held', 'stale-epoch'))
+    await firstReconnect
+    expect(store.viewerGeneration).toBe(0)
+    expect(store.viewerOwned).toBe(false)
+    expect(desktopViewerSession(id).wanted).toBe(false)
+  })
+
+  it('does not restart after unmount while startup observation is pending', async () => {
+    const id = `viewer-${++count}`
+    let resolveStatus!: (value: ReturnType<typeof status>) => void
+    vi.mocked(api.getDesktopStatus).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStatus = resolve
+      }),
+    )
+    const { session, scope } = surface(id)
+    const start = session.startDesktop()
+    await flushPromises()
+    scope.stop()
+    await vi.advanceTimersByTimeAsync(RELEASE_GRACE_MS)
+    resolveStatus(status(id, 'held'))
+    await start
+    await flushPromises()
+
+    expect(api.startDesktop).toHaveBeenCalledOnce()
+    expect(api.stopDesktop).toHaveBeenCalledOnce()
+    expect(desktopViewerSession(id).wanted).toBe(false)
+    expect(desktopViewerSession(id).leaseState).not.toBe('held')
+  })
+
+  it('uses the latest reconciled status after recovery reacquires a new revision', async () => {
+    const id = `viewer-${++count}`
+    const { session } = surface(id)
+    const store = useDesktopStore()
+    await session.startDesktop()
+    vi.mocked(api.getDesktopStatus)
+      .mockImplementationOnce(async () => ({
+        ...status(id, 'expired'),
+        active: false,
+        proxy_url: null,
+        revision: desktopViewerSession(id).revision,
+      }))
+      .mockImplementationOnce(async () => ({
+        ...status(id, 'held', 'epoch-1'),
+        revision: desktopViewerSession(id).revision,
+      }))
+
+    await session.handleReconnect()
+
+    expect(api.startDesktop).toHaveBeenCalledTimes(2)
+    expect(desktopViewerSession(id).revision).toBe(2)
+    expect(desktopViewerSession(id).leaseState).toBe('held')
+    expect(store.viewerGeneration).toBe(1)
+  })
+
+  it('awaits status reconciliation before manually remounting a connected viewer', async () => {
+    const id = `viewer-${++count}`
+    const { session } = surface(id)
+    const store = useDesktopStore()
+    await session.startDesktop()
+    let resolveStatus!: (value: ReturnType<typeof status>) => void
+    vi.mocked(api.getDesktopStatus).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStatus = resolve
+      }),
+    )
+
+    const reconnect = session.handleReconnect()
+    expect(reconnect).toBeInstanceOf(Promise)
+    await flushPromises()
+    expect(store.viewerGeneration).toBe(0)
+
+    resolveStatus(status(id))
+    await reconnect
+    expect(store.viewerGeneration).toBe(1)
+    expect(api.startDesktop).toHaveBeenCalledOnce()
+  })
+
   it('retries reopen only after older closing intent is conclusively ended', async () => {
     const id = `viewer-${++count}`
     const { session } = surface(id)

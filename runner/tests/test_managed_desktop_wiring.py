@@ -158,7 +158,13 @@ class ManagedDesktopWiringTests(unittest.IsolatedAsyncioTestCase):
         self.interface._sio.connected = True
         await self.interface._desktop_lease_tick()
         self.interface._sio.emit.assert_any_await(
-            "desktop:stopped", {"workspace_id": str(self.ws), "stopped": True}
+            "desktop:stopped",
+            {
+                "workspace_id": str(self.ws),
+                "stopped": True,
+                "generation": 0,
+                "epoch": self.desktop.epoch,
+            },
         )
 
     async def test_harness_reserve_does_not_announce_lifecycle(self):

@@ -182,6 +182,7 @@ async def test_desktop_events_preserve_process_aggregates(monkeypatch):
     assert summary["holder_count"] == 2
     assert summary["epoch"] == "runner-epoch"
     assert service.get_desktop_info(workspace)["viewer"] is True
+    service._set_runner_desktop_epoch("runner", "new-epoch")
     await service.handle_desktop_process(
         workspace,
         6901,

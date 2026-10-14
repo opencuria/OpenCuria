@@ -100,6 +100,7 @@ async function request<T>(
   path: string,
   body?: unknown,
   credentials: RequestCredentials = 'same-origin',
+  signal?: AbortSignal,
 ): Promise<T> {
   const url = `${getApiBaseUrl()}${path}`
 
@@ -113,6 +114,7 @@ async function request<T>(
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
     credentials,
+    signal,
   })
 
   // On 401, try refreshing the token and retry once.
@@ -131,6 +133,7 @@ async function request<T>(
         headers: retryHeaders,
         body: body !== undefined ? JSON.stringify(body) : undefined,
         credentials,
+        signal,
       })
     }
 
@@ -171,16 +174,17 @@ async function request<T>(
 // Convenience methods
 // ---------------------------------------------------------------------------
 
-export function get<T>(path: string): Promise<T> {
-  return request<T>('GET', path)
+export function get<T>(path: string, signal?: AbortSignal): Promise<T> {
+  return request<T>('GET', path, undefined, 'same-origin', signal)
 }
 
 export function post<T>(
   path: string,
   body?: unknown,
   credentials?: RequestCredentials,
+  signal?: AbortSignal,
 ): Promise<T> {
-  return request<T>('POST', path, body, credentials)
+  return request<T>('POST', path, body, credentials, signal)
 }
 
 export function del<T>(path: string, credentials?: RequestCredentials): Promise<T> {

@@ -1028,6 +1028,7 @@ def test_step6a_desktop_constants_and_pure_helper_parity() -> None:
     assert svc._desktop_lock_map is svc.desktop._desktop_lock_map
     assert svc._desktop_locks is svc.desktop._desktop_locks
     assert svc._desktop_locks_guard is svc.desktop._desktop_locks_guard
+    assert svc._registry.desktop_manager is svc.desktop
 
     # Pure helper parity: valid/invalid holders, geometry defaults and
     # clamping, run-id validation, desktop env, and start-command shape.
@@ -1076,13 +1077,16 @@ def test_step6a_desktop_constants_and_pure_helper_parity() -> None:
     assert "-geometry 1280x720" in command
     assert "-AcceptSetDesktopSize=0" in command
 
-    empty_facade = svc._empty_desktop_release_result()
-    empty_manager = svc.desktop._empty_desktop_release_result()
+    workspace_id = uuid.uuid4()
+    empty_facade = svc._empty_desktop_release_result(workspace_id)
+    empty_manager = svc.desktop._empty_desktop_release_result(workspace_id)
     assert empty_facade == empty_manager == DesktopReleaseResult(
         stopped=False,
         process_alive=False,
         viewer_held=False,
         computer_use_active=False,
+        generation=0,
+        epoch=svc.desktop.epoch,
     )
 
 

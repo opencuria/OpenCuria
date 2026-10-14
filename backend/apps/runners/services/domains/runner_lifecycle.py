@@ -53,6 +53,7 @@ class RunnerLifecycleMixin:
         *,
         sid: str,
         available_runtimes: list[str] | None = None,
+        desktop_epoch: str | None = None,
     ) -> "Runner":
         """
         Mark a runner as online after it connects and sends runner:register.
@@ -67,6 +68,7 @@ class RunnerLifecycleMixin:
             sid=sid,
             available_runtimes=available_runtimes or ["docker"],
         )
+        self._set_runner_desktop_epoch(str(runner.id), desktop_epoch)
         logger.info(
             "Runner registered: %s",
             runner.id,

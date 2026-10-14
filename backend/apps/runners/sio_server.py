@@ -369,6 +369,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             runner,
             sid=sid,
             available_runtimes=data.get("supported_runtimes", ["docker"]),
+            desktop_epoch=(data.get("desktop_leases") or {}).get("epoch"),
         )
 
         # DB worker owns lifecycle delivery. Result replay from runner runs
@@ -826,8 +827,10 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             container_ip=data.get("container_ip", ""),
             network_name=data.get("network_name", ""),
             runner_id=runner_id,
-            viewer=bool(data.get("viewer", True)),
-            computer_use=bool(data.get("computer_use", False)),
+            viewer=(bool(data["viewer"]) if "viewer" in data else None),
+            computer_use=(
+                bool(data["computer_use"]) if "computer_use" in data else None
+            ),
             mcp=data.get("mcp", data.get("mcp_active")),
             holder_count=data.get("holder_count"),
             generation=data.get("generation"),
@@ -847,8 +850,10 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             container_ip=data.get("container_ip", ""),
             network_name=data.get("network_name", ""),
             runner_id=runner_id,
-            viewer=bool(data.get("viewer", False)),
-            computer_use=bool(data.get("computer_use", False)),
+            viewer=(bool(data["viewer"]) if "viewer" in data else None),
+            computer_use=(
+                bool(data["computer_use"]) if "computer_use" in data else None
+            ),
             mcp=data.get("mcp", data.get("mcp_active")),
             holder_count=data.get("holder_count"),
             generation=data.get("generation"),
@@ -866,6 +871,8 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             task_id=data.get("task_id"),
             workspace_id=data["workspace_id"],
             runner_id=runner_id,
+            generation=data.get("generation"),
+            epoch=data.get("epoch"),
         )
 
     @sio.on("desktop:viewer_released")
@@ -879,7 +886,11 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             task_id=data["task_id"],
             workspace_id=data["workspace_id"],
             runner_id=runner_id,
-            computer_use_active=bool(data.get("computer_use_active", False)),
+            computer_use_active=(
+                bool(data["computer_use_active"])
+                if "computer_use_active" in data
+                else None
+            ),
             viewer_held=data.get("viewer_held", data.get("viewer")),
             mcp=data.get("mcp", data.get("mcp_active")),
             holder_count=data.get("holder_count"),

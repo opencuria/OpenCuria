@@ -283,14 +283,21 @@ class _FakeService:
                 "port": 6901,
                 "viewer": False,
                 "computer_use": True,
+                "generation": fresh.generation,
+                "epoch": "fake-desktop-epoch",
             }
         if action == "release":
+            generation = getattr(
+                self._desktop_sessions.get(workspace_id), "generation", 1
+            )
             return {
                 "ok": True,
                 "stopped": False,
                 "process_alive": True,
                 "viewer_held": False,
                 "computer_use_active": True,
+                "generation": generation,
+                "epoch": "fake-desktop-epoch",
             }
         if action == "screenshot" and args and args.get("fail"):
             raise RuntimeError("Desktop session is not active")
@@ -302,14 +309,18 @@ class _FakeService:
         return self.desktop.get_desktop_state_payload(workspace_id)
 
     def _get_desktop_state_payload_impl(self, workspace_id):
+        session = self._desktop_sessions.get(workspace_id)
+        if session is None:
+            return None
         return {
             "workspace_id": str(workspace_id),
             "port": 6901,
             "container_ip": "172.22.0.2",
             "network_name": f"opencuria-ws-{workspace_id}",
-            "viewer": False,
-            "computer_use": True,
-            "generation": 1,
+            "viewer": session.viewer_held,
+            "computer_use": bool(session.computeruse_run_ids),
+            "generation": session.generation,
+            "epoch": "fake-desktop-epoch",
         }
 
     def get_desktop_session(self, workspace_id):
@@ -788,7 +799,12 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         service = _FakeService()
         interface = _interface(service)
         workspace_id = uuid.uuid4()
-        sentinel = object()
+        from unittest.mock import MagicMock
+
+        sentinel = MagicMock()
+        sentinel.generation = 1
+        sentinel.viewer_held = False
+        sentinel.computeruse_run_ids = {"run-1"}
         service._desktop_sessions[workspace_id] = sentinel
 
         async def _idempotent_hold(ws_id, action, args=None):
@@ -799,6 +815,8 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
                 "port": 6901,
                 "viewer": False,
                 "computer_use": True,
+                "generation": 1,
+                "epoch": "fake-desktop-epoch",
             }
 
         service.desktop.desktop_action = _idempotent_hold  # type: ignore[method-assign]
@@ -806,7 +824,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         service.desktop_action = service.desktop.desktop_action
         closed: list = []
 
-        async def _fake_close(ws_id):
+        async def _fake_close(ws_id, **_kwargs):
             closed.append(ws_id)
 
         interface._close_desktop_proxy_tunnels_for_workspace = _fake_close  # type: ignore[assignment]
@@ -840,7 +858,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         closed: list = []
         orig_emit = interface._sio.emit
 
-        async def _fake_close(ws_id):
+        async def _fake_close(ws_id, **_kwargs):
             closed.append(ws_id)
             close_order.append("close")
 
@@ -879,6 +897,11 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         service = _FakeService()
         interface = _interface(service)
         workspace_id = uuid.uuid4()
+        from unittest.mock import MagicMock
+
+        kept = MagicMock()
+        kept.generation = 1
+        service._desktop_sessions[workspace_id] = kept
         handler = interface._sio.handlers["/"]["harness:desktop_action"]
         await handler(
             _payload(
@@ -901,6 +924,8 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
                     "process_alive": False,
                     "viewer_held": False,
                     "computer_use_active": False,
+                    "generation": 0,
+                    "epoch": "fake-desktop-epoch",
                 }
 
         service2 = StoppingService()
@@ -908,7 +933,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         interface2._desktop_proxy_tunnels["t1"] = object()
         closed: list = []
 
-        async def _fake_close(ws_id):
+        async def _fake_close(ws_id, **_kwargs):
             closed.append(ws_id)
 
         interface2._close_desktop_proxy_tunnels_for_workspace = _fake_close  # type: ignore[assignment]
@@ -962,7 +987,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         interface._desktop_proxy_tunnels["t1"] = object()
         closed: list = []
 
-        async def _fake_close(ws_id):
+        async def _fake_close(ws_id, **_kwargs):
             closed.append(ws_id)
 
         interface._close_desktop_proxy_tunnels_for_workspace = _fake_close  # type: ignore[assignment]
@@ -997,7 +1022,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         closed: list = []
         orig_emit = interface._sio.emit
 
-        async def _fake_close(ws_id):
+        async def _fake_close(ws_id, **_kwargs):
             closed.append(ws_id)
             close_order.append("close")
 

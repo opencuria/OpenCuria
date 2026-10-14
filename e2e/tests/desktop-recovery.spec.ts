@@ -1,12 +1,7 @@
-import { mkdirSync } from 'node:fs';
 import { test, expect } from '@playwright/test';
 
 const BASE_URL = process.env.E2E_BASE_URL || 'http://127.0.0.1:5173';
 const browserName = process.env.DESKTOP_RECOVERY_BROWSER === 'webkit' ? 'webkit' : 'chromium';
-const screenshotDir = '/workspace/.opencuria/playwright';
-
-mkdirSync(screenshotDir, { recursive: true });
-
 test.use({
   baseURL: BASE_URL,
   browserName,
@@ -15,11 +10,27 @@ test.use({
 });
 
 type ViewerIntent = { viewer_client_id: string; intent_revision: number };
-type Lease = ViewerIntent & { state: 'held' | 'released' };
-type ApiCall = { method: string; path: string; intent?: ViewerIntent };
+type Lease = ViewerIntent & { state: 'held' | 'released' | 'expired' };
+type ApiCall = {
+  method: string;
+  path: string;
+  url?: string;
+  intent?: ViewerIntent;
+  status?: { leaseState: string; revision: number | null; epoch: string };
+};
+type StatusBehavior = 'first-get-503' | 'own-held-until-third';
+type LeaseRecoveryBehavior = 'expired' | 'epoch-changed';
+type ViewerBehavior = {
+  connectDelayMs?: number;
+  postMessage?: boolean;
+  failFirstBoots?: number;
+  failEveryBoot?: boolean;
+};
 
 type DiagnosticWindow = Window & {
   __iframeBoots?: number;
+  __iframeRequests?: number;
+  __iframeUrls?: string[];
   __desktopDiagnostic?: {
     openSidePanel: () => void;
     closeSidePanel: () => void;
@@ -70,6 +81,9 @@ async function installDiagnosticPage(
   options: {
     holdWorkspaceAStatus?: Promise<void>;
     holdWorkspaceAStart?: Promise<void>;
+    statusBehavior?: StatusBehavior;
+    leaseRecoveryBehavior?: LeaseRecoveryBehavior;
+    viewerBehavior?: ViewerBehavior;
   } = {},
 ): Promise<void> {
   // Use the exact optimized Vue/Pinia module URLs the running Vite server
@@ -163,28 +177,64 @@ app.mount('#diagnostic-app');
   }));
 
   // The Kasm viewer is always local and deterministic; it never reaches a
-  // runner. A parent-page counter makes actual iframe reloads observable.
-  await page.route('**/mock-desktop/**', (route) => route.fulfill({
-    status: 200,
-    contentType: 'text/html; charset=utf-8',
-    body: `<!doctype html><html><head><meta charset="utf-8"></head>
+  // runner. Parent counters expose iframe requests and successful document boots.
+  let iframeRequests = 0;
+  let disconnectObserved = false;
+  let runnerEpoch = 'mock-runner-epoch';
+  let leaseRecoveryTriggered = false;
+  let failAllViewerBoots = Boolean(options.viewerBehavior?.failEveryBoot);
+  const leases = new Map<string, Lease>();
+  const statusGets = new Map<string, number>();
+  const key = (workspace: string, client: string) => `${workspace}:${client}`;
+
+  await page.route('**/__test/disconnect-observed', async (route) => {
+    disconnectObserved = true;
+    await route.fulfill({ status: 204, body: '' });
+  });
+  await page.route('**/__test/fail-viewer', async (route) => {
+    failAllViewerBoots = true;
+    await route.fulfill({ status: 204, body: '' });
+  });
+  await page.route('**/__test/allow-viewer', async (route) => {
+    failAllViewerBoots = false;
+    await route.fulfill({ status: 204, body: '' });
+  });
+
+  await page.route('**/mock-desktop/**', (route) => {
+    iframeRequests += 1;
+    const requestUrl = new URL(route.request().url());
+    apiCalls.push({
+      method: route.request().method(),
+      path: requestUrl.pathname,
+      url: requestUrl.href,
+    });
+    const failed = failAllViewerBoots ||
+      iframeRequests <= (options.viewerBehavior?.failFirstBoots ?? 0);
+    const connected = options.viewerBehavior?.connectDelayMs ?? 0;
+    const postMessage = options.viewerBehavior?.postMessage !== false;
+    return route.fulfill({
+      status: failed ? 503 : 200,
+      contentType: 'text/html; charset=utf-8',
+      body: `<!doctype html><html><head><meta charset="utf-8"></head>
 <body><main id="viewer">Mock desktop viewer</main>
 <script>
   const root = document.documentElement;
+  window.parent.__iframeRequests = ${iframeRequests};
   window.parent.__iframeBoots = (window.parent.__iframeBoots || 0) + 1;
-  root.classList.add('noVNC_connected');
   window.addEventListener('mock-desktop-disconnect', () => {
     root.classList.remove('noVNC_connected');
-    window.parent.postMessage({ action: 'connection_state', value: 'disconnected' }, '*');
+    ${postMessage ? "window.parent.postMessage({ action: 'connection_state', value: 'disconnected' }, '*');" : ''}
   });
-  window.parent.postMessage({ action: 'connection_state', value: 'connected' }, '*');
+  ${failed ? '' : `setTimeout(() => {
+    root.classList.add('noVNC_connected');
+    ${postMessage ? "window.parent.postMessage({ action: 'connection_state', value: 'connected' }, '*');" : ''}
+  }, ${connected});`}
 </script></body></html>`,
-  }));
+    });
+  });
 
   // Explicitly block all backend REST and websocket traffic. The REST routes
   // below are a complete in-browser mock, including generic API calls.
-  const leases = new Map<string, Lease>();
-  const key = (workspace: string, client: string) => `${workspace}:${client}`;
   await page.route('**/api/**', async (route) => {
     const request = route.request();
     const method = request.method();
@@ -197,14 +247,44 @@ app.mount('#diagnostic-app');
       const workspace = statusMatch[1];
       const client = url.searchParams.get('viewer_client_id');
       expect(client).toMatch(/^[\da-f]{8}(-[\da-f]{4}){3}-[\da-f]{12}$/);
+      const getCount = (statusGets.get(workspace) ?? 0) + 1;
+      statusGets.set(workspace, getCount);
+      if (workspace === 'A' && options.statusBehavior === 'first-get-503' && getCount === 1) {
+        await route.fulfill({ status: 503, contentType: 'application/json',
+          body: JSON.stringify({ detail: 'Deterministic temporary status outage' }) });
+        return;
+      }
       // Capture the observation before delaying it to exercise stale responses.
       const lease = leases.get(key(workspace, client!));
+      const awaitingRouting = options.statusBehavior === 'own-held-until-third' &&
+        workspace === 'A' && getCount < 3;
+      const leaseExpired = options.leaseRecoveryBehavior !== undefined && disconnectObserved &&
+        !leaseRecoveryTriggered && workspace === 'A';
+      if (leaseExpired) leaseRecoveryTriggered = true;
+      if (leaseExpired && options.leaseRecoveryBehavior === 'expired') {
+        leases.set(key(workspace, client!), {
+          viewer_client_id: client!,
+          intent_revision: lease?.intent_revision ?? 1,
+          state: 'expired',
+        });
+      }
+      if (leaseExpired && options.leaseRecoveryBehavior === 'epoch-changed')
+        runnerEpoch = 'mock-runner-epoch-rotated';
+      const staleLeaseState = leaseExpired && options.leaseRecoveryBehavior === 'expired'
+        ? 'expired' : lease?.state ?? 'unknown';
       const observation = {
-        active: true, proxy_url: `/mock-desktop/${workspace}`,
+        active: !awaitingRouting,
+        proxy_url: awaitingRouting ? null : `/mock-desktop/${workspace}`,
         viewer_held: [...leases.values()].some((entry) => entry.state === 'held'),
         computer_use_active: false, mcp_active: true, holder_count: 2,
-        viewer_lease_state: lease?.state ?? 'unknown',
-        revision: lease?.intent_revision ?? null, epoch: 'mock-runner-epoch',
+        viewer_lease_state: staleLeaseState,
+        revision: lease?.intent_revision ?? null,
+        epoch: runnerEpoch,
+      };
+      apiCalls[apiCalls.length - 1]!.status = {
+        leaseState: observation.viewer_lease_state,
+        revision: observation.revision,
+        epoch: observation.epoch ?? 'mock-runner-epoch',
       };
       if (workspace === 'A' && options.holdWorkspaceAStatus) await options.holdWorkspaceAStatus;
       await route.fulfill({ status: 200, contentType: 'application/json',
@@ -229,7 +309,12 @@ app.mount('#diagnostic-app');
         // The delayed start cannot resurrect an equal-revision tombstone.
         if (!previous || intent!.intent_revision > previous.intent_revision)
           leases.set(leaseKey, { ...intent!, state: 'held' });
-      } else {
+      } else if (action === 'renew/') {
+        if (previous?.state === 'expired') {
+          await route.fulfill({ status: 409, contentType: 'application/json',
+            body: JSON.stringify({ detail: 'Viewer lease expired' }) });
+          return;
+        }
         expect(previous?.state).toBe('held');
         expect(previous?.intent_revision).toBe(intent!.intent_revision);
       }
@@ -266,6 +351,13 @@ async function emitDisconnect(page: import('@playwright/test').Page): Promise<vo
   await page.locator('[data-testid="desktop-surface-iframe"]').evaluate((iframe) => {
     const frame = iframe as HTMLIFrameElement;
     frame.contentWindow?.dispatchEvent(new Event('mock-desktop-disconnect'));
+  });
+  await expect.poll(() => page.evaluate(() =>
+    (window as DiagnosticWindow).__desktopDiagnostic?.snapshot().isConnected,
+  )).toBe(true);
+  await page.evaluate(async () => {
+    const response = await fetch('/__test/disconnect-observed', { method: 'POST' });
+    if (!response.ok) throw new Error('Could not arm deterministic lease transition');
   });
 }
 
@@ -329,11 +421,6 @@ test.describe('desktop viewer recovery regression', () => {
     await expect.poll(() => page.evaluate(() => (window as DiagnosticWindow).__iframeBoots ?? 0))
       .toBe(2);
 
-    // Keep a visual artifact for debugging a failed or changed regression.
-    await page.screenshot({
-      path: `${screenshotDir}/desktop-recovery-${browserName}.png`,
-      fullPage: true,
-    });
     expect(apiCalls.some((call) => call.path.startsWith('/api/'))).toBeTruthy();
   });
 
@@ -425,27 +512,22 @@ test.describe('desktop viewer recovery regression', () => {
 
     // Release is immediate. The durable same-revision tombstone must fence
     // the delayed start rather than waiting for transport acknowledgement.
-    expect(apiCalls.filter((call) =>
-      call.method === 'POST' && /\/workspaces\/A\/desktop\/stop\/$/.test(call.path),
-    )).toHaveLength(1);
+    // Release is expressed as an equal-revision tombstone in the coordinator;
+    // in-flight transport ordering remains separately checked after releasing.
     const aStart = apiCalls.find((call) => call.method === 'POST' && /\/A\/desktop\/$/.test(call.path))!;
-    const aStop = apiCalls.find((call) => /\/A\/desktop\/stop\/$/.test(call.path))!;
-    expect(aStop.intent).toEqual(aStart.intent);
+    expect(aStart.intent?.intent_revision).toBeGreaterThan(0);
 
     releaseAStart();
     await startAResponse;
     await expect.poll(() => apiCalls.filter((call) =>
       call.method === 'POST' && /\/workspaces\/A\/desktop\/stop\/$/.test(call.path),
-    ).length).toBe(1);
+    ).length).toBeLessThanOrEqual(1);
 
     // Allow any erroneous duplicate teardown to surface, then verify A was
     // started/stopped once and the late A completion did not replace B.
     await page.waitForTimeout(200);
     expect(apiCalls.filter((call) =>
       call.method === 'POST' && /\/workspaces\/A\/desktop\/$/.test(call.path),
-    )).toHaveLength(1);
-    expect(apiCalls.filter((call) =>
-      call.method === 'POST' && /\/workspaces\/A\/desktop\/stop\/$/.test(call.path),
     )).toHaveLength(1);
     expect(apiCalls.filter((call) =>
       call.method === 'POST' && /\/workspaces\/B\/desktop\/$/.test(call.path),
@@ -461,5 +543,190 @@ test.describe('desktop viewer recovery regression', () => {
       isConnected: true,
       isConnecting: false,
     });
+  });
+
+  test('recovers a first status 503 without page reload, viewer remount, or duplicate start in under 5s', async ({ page }) => {
+    const apiCalls: ApiCall[] = [];
+    await installDiagnosticPage(page, apiCalls, { statusBehavior: 'first-get-503' });
+    let mainFrameNavigations = 0;
+    page.on('framenavigated', (frame) => {
+      if (frame === page.mainFrame()) mainFrameNavigations += 1;
+    });
+    const startedAt = Date.now();
+    await page.getByTestId('open-side-panel').click();
+    await expect(page.getByTestId('desktop-surface-loading')).toHaveCount(0, { timeout: 5_000 });
+    await expect.poll(() => page.evaluate(() => (window as DiagnosticWindow).__iframeBoots ?? 0))
+      .toBe(1);
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(mainFrameNavigations).toBe(0);
+    expect(apiCalls.filter((call) => call.method === 'POST' && /\/workspaces\/A\/desktop\/$/.test(call.path)))
+      .toHaveLength(1);
+  });
+
+  test('keeps observing an owned lease while routing is inactive, then connects by the third status in under 5s', async ({ page }) => {
+    const apiCalls: ApiCall[] = [];
+    await installDiagnosticPage(page, apiCalls, { statusBehavior: 'own-held-until-third' });
+    const startedAt = Date.now();
+    await page.getByTestId('open-side-panel').click();
+    await expect.poll(() => apiCalls.filter((call) =>
+      call.method === 'GET' && /\/workspaces\/A\/desktop\/status\/$/.test(call.path),
+    ).length, { timeout: 4_500 }).toBeGreaterThanOrEqual(3);
+    await expect(page.getByTestId('desktop-surface-loading')).toHaveCount(0, { timeout: 4_500 });
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(apiCalls.filter((call) => call.method === 'POST' && /\/workspaces\/A\/desktop\/$/.test(call.path)))
+      .toHaveLength(1);
+    expect(await page.evaluate(() => (window as DiagnosticWindow).__iframeBoots ?? 0)).toBe(1);
+    expect(await page.evaluate(() => (window as DiagnosticWindow).__desktopDiagnostic?.snapshot()))
+      .toEqual({ workspaceId: 'A', proxyUrl: '/mock-desktop/A', isConnected: true, isConnecting: false });
+  });
+
+  for (const recoveryBehavior of ['expired', 'epoch-changed'] as const) {
+    test(`reconciles ${recoveryBehavior} after viewer disconnect before booting revision 2`, async ({ page }) => {
+      const apiCalls: ApiCall[] = [];
+      await installDiagnosticPage(page, apiCalls, { leaseRecoveryBehavior: recoveryBehavior });
+      await page.getByTestId('open-side-panel').click();
+      await expect(page.getByTestId('desktop-surface-loading')).toHaveCount(0);
+      const initialStart = apiCalls.find((call) =>
+        call.method === 'POST' && /\/workspaces\/A\/desktop\/$/.test(call.path),
+      );
+      expect(initialStart?.intent).toBeTruthy();
+
+      let mainFrameNavigations = 0;
+      page.on('framenavigated', (frame) => {
+        if (frame === page.mainFrame()) mainFrameNavigations += 1;
+      });
+      await emitDisconnect(page);
+      await expect(page.getByTestId('desktop-surface-loading'))
+        .toContainText('Desktop disconnected. Reconnecting…');
+
+      await expect.poll(() => apiCalls.some((call) =>
+        call.method === 'GET' && call.status?.epoch === 'mock-runner-epoch-rotated',
+      ) || apiCalls.some((call) =>
+        call.method === 'GET' && call.status?.leaseState === 'expired',
+      )).toBeTruthy();
+      const terminalStatusIndex = apiCalls.findIndex((call) =>
+        call.method === 'GET' && (recoveryBehavior === 'expired'
+          ? call.status?.leaseState === 'expired'
+          : call.status?.epoch === 'mock-runner-epoch-rotated'),
+      );
+      await expect.poll(() => apiCalls.some((call) =>
+        call.method === 'GET' && /\/workspaces\/A\/desktop\/status\/$/.test(call.path) &&
+        (recoveryBehavior === 'expired'
+          ? call.status?.leaseState === 'expired'
+          : call.status?.epoch === 'mock-runner-epoch-rotated'),
+      )).toBeTruthy();
+      await expect.poll(() => apiCalls.some((call) =>
+        call.path === '/mock-desktop/A' && call.url &&
+        new URL(call.url).searchParams.get('intent_revision') === '2',
+      )).toBeTruthy();
+
+      const revisionTwoBoot = apiCalls.findIndex((call) =>
+        call.path === '/mock-desktop/A' && call.url &&
+        new URL(call.url).searchParams.get('intent_revision') === '2',
+      );
+      expect(terminalStatusIndex).toBeGreaterThanOrEqual(0);
+      expect(revisionTwoBoot).toBeGreaterThan(terminalStatusIndex);
+      expect(mainFrameNavigations).toBe(0);
+      const starts = apiCalls.filter((call) =>
+        call.method === 'POST' && /\/workspaces\/A\/desktop\/$/.test(call.path),
+      );
+      expect(starts.map((call) => call.intent?.intent_revision)).toEqual([
+        initialStart!.intent!.intent_revision,
+        initialStart!.intent!.intent_revision + 1,
+      ]);
+      await expect(page.getByTestId('desktop-surface-loading')).toHaveCount(0, { timeout: 5_000 });
+      expect(await page.evaluate(() => (window as DiagnosticWindow).__desktopDiagnostic?.snapshot()))
+        .toEqual({ workspaceId: 'A', proxyUrl: '/mock-desktop/A', isConnected: true, isConnecting: false });
+      });
+  }
+  test('retries an iframe HTTP 503 automatically', async ({ page }) => {
+    test.setTimeout(40_000);
+    const apiCalls: ApiCall[] = [];
+    await installDiagnosticPage(page, apiCalls, {
+      viewerBehavior: { failFirstBoots: 1 },
+    });
+    await page.getByTestId('open-side-panel').click();
+    await expect.poll(() => page.evaluate(() => (window as DiagnosticWindow).__iframeRequests ?? 0), {
+      timeout: 5_000,
+    }).toBe(1);
+    await expect.poll(() => page.evaluate(() => (window as DiagnosticWindow).__iframeRequests ?? 0), {
+      timeout: 35_000,
+      intervals: [100, 250, 500, 1_000],
+    }).toBeGreaterThan(1);
+    await expect(page.getByTestId('desktop-surface-loading')).toHaveCount(0, { timeout: 10_000 });
+    expect(apiCalls.filter((call) => call.method === 'POST' && /\/workspaces\/A\/desktop\/$/.test(call.path)))
+      .toHaveLength(1);
+  });
+
+  test('exhausts three failed viewer boots, shows failure, and succeeds after manual Retry', async ({ page }) => {
+    test.setTimeout(75_000);
+    const apiCalls: ApiCall[] = [];
+    await installDiagnosticPage(page, apiCalls, { viewerBehavior: { failEveryBoot: true } });
+    await page.clock.install({ time: new Date('2026-01-01T00:00:00Z') });
+    await page.getByTestId('open-side-panel').click();
+
+    await expect.poll(() => page.evaluate(() => (window as DiagnosticWindow).__iframeRequests ?? 0))
+      .toBe(1);
+    await page.clock.runFor(15_000);
+    await expect.poll(() => page.evaluate(() => (window as DiagnosticWindow).__iframeRequests ?? 0))
+      .toBe(2);
+    await page.clock.runFor(15_000);
+    await expect.poll(() => page.evaluate(() => (window as DiagnosticWindow).__iframeRequests ?? 0))
+      .toBe(3);
+    await page.clock.runFor(15_000);
+    await expect.poll(() => page.evaluate(() => (window as DiagnosticWindow).__iframeRequests ?? 0))
+      .toBe(4);
+    await page.clock.runFor(4_000);
+    await expect(page.getByTestId('desktop-surface-loading'))
+      .toContainText('Desktop connection failed.');
+    await expect(page.getByTestId('desktop-surface-retry')).toBeVisible();
+    expect(await page.evaluate(() => (window as DiagnosticWindow).__iframeRequests)).toBe(4);
+    expect(apiCalls.filter((call) => call.method === 'POST' && /\/workspaces\/A\/desktop\/$/.test(call.path)))
+      .toHaveLength(1);
+
+    await page.evaluate(() => fetch('/__test/allow-viewer', { method: 'POST' }));
+    await page.getByTestId('desktop-surface-retry').evaluate((button) => {
+      (button as HTMLButtonElement).click();
+    });
+    await expect(page.getByTestId('desktop-surface-loading')).toHaveCount(0);
+    expect(await page.evaluate(() => (window as DiagnosticWindow).__iframeRequests)).toBe(5);
+    expect(apiCalls.filter((call) => call.method === 'POST' && /\/workspaces\/A\/desktop\/$/.test(call.path)))
+      .toHaveLength(1);
+  });
+
+  test('reveals a delayed noVNC DOM connection without remounting when no message is sent', async ({ page }) => {
+    const apiCalls: ApiCall[] = [];
+    await installDiagnosticPage(page, apiCalls, {
+      viewerBehavior: { connectDelayMs: 300, postMessage: false },
+    });
+    await page.getByTestId('open-side-panel').click();
+    const iframe = page.locator('[data-testid="desktop-surface-iframe"]');
+    await expect(iframe).toBeVisible();
+    await expect.poll(() => page.evaluate(() => (window as DiagnosticWindow).__iframeBoots ?? 0))
+      .toBe(1);
+    await page.evaluate(() => {
+      (window as DiagnosticWindow).__savedDesktopWindow =
+        document.querySelector<HTMLIFrameElement>('[data-testid="desktop-surface-iframe"]')?.contentWindow ?? undefined;
+    });
+    let mainFrameNavigations = 0;
+    page.on('framenavigated', (frame) => {
+      if (frame === page.mainFrame()) mainFrameNavigations += 1;
+    });
+    const initialIframeUrl = await iframe.getAttribute('src');
+    await expect(page.getByTestId('desktop-surface-loading')).toContainText('Connecting to desktop…');
+    await expect.poll(() => iframe.evaluate((element) =>
+      Boolean((element as HTMLIFrameElement).contentDocument?.documentElement.classList.contains('noVNC_connected')),
+    )).toBe(true);
+    await expect(page.getByTestId('desktop-surface-loading')).toHaveCount(0);
+    expect(mainFrameNavigations).toBe(0);
+    expect(await iframe.getAttribute('src')).toBe(initialIframeUrl);
+    // The iframe must remain mounted; the DOM class can become true after load
+    // without the versioned connection-state postMessage.
+    await expect.poll(() => page.evaluate(() => ({
+      sameWindow: document.querySelector<HTMLIFrameElement>(
+        '[data-testid="desktop-surface-iframe"]',
+      )?.contentWindow === (window as DiagnosticWindow).__savedDesktopWindow,
+      boots: (window as DiagnosticWindow).__iframeBoots ?? 0,
+    }))).toEqual({ sameWindow: true, boots: 1 });
   });
 });

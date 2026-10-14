@@ -34,6 +34,7 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
   const retained = new Set<string>()
   const cleanupFns: (() => void)[] = []
   let disposed = false
+  let reconnectPending: Promise<void> | null = null
   let workspaceGeneration = 0
   const vmClipboardControllers = new Set<AbortController>()
 
@@ -58,15 +59,23 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
       )
         return
       error.value = state.error
-      if (state.status) {
+      const startupFailed = Boolean(state.startupDeadline && !state.connecting && state.error)
+      if (startupFailed && desktopStore.workspaceId === id) {
+        // A failure wins over an older active snapshot retained in the session.
+        desktopStore.setDisconnected()
+      } else if (state.status) {
         desktopStore.setComputerUseActive(Boolean(state.status.computer_use_active))
         desktopStore.setGlobalHolders(
           Boolean(state.status.mcp_active),
           state.status.holder_count ?? 0,
         )
-        if (state.status.active && state.status.proxy_url)
-          desktopStore.setConnected(id, state.status.proxy_url)
-        else if (!state.connecting) desktopStore.setDisconnected()
+        if (state.status.active && state.status.proxy_url) {
+          if (state.connecting) desktopStore.setConnecting(id)
+          else desktopStore.setConnected(id, state.status.proxy_url)
+        } else if (desktopStore.workspaceId === id) {
+          // A stale route/status must not preserve an old connected store flag.
+          desktopStore.setDisconnected()
+        }
       }
       desktopStore.setViewerIntent(
         state.wanted ? state.revision : null,
@@ -118,11 +127,22 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
     if (options?.observer) return Promise.resolve(true)
     return closeDesktopViewer(workspaceId.value)
   }
-  function handleReconnect(): void {
-    if (desktopStore.isConnected) {
+  function handleReconnect(): Promise<void> {
+    if (reconnectPending) return reconnectPending
+    const id = workspaceId.value
+    reconnectPending = (async () => {
+      if (!desktopStore.isConnected || desktopStore.workspaceId !== id) {
+        await startDesktop()
+        return
+      }
+
+      const status = await refreshDesktopViewer(id, true)
+      if (disposed || workspaceId.value !== id || !status?.active || !status.proxy_url) return
       desktopStore.bumpViewer()
-      void refreshDesktopViewer(workspaceId.value)
-    } else void startDesktop()
+    })().finally(() => {
+      reconnectPending = null
+    })
+    return reconnectPending
   }
 
   async function takeControl(): Promise<void> {
