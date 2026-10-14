@@ -47,6 +47,7 @@ const uiStubs = {
 }
 
 const wrappers: VueWrapper[] = []
+const originalClipboard = navigator.clipboard
 let workspaceId = ''
 let index = 0
 const intent = () => ({
@@ -56,6 +57,11 @@ const intent = () => ({
 afterEach(async () => {
   wrappers.splice(0).forEach((wrapper) => wrapper.unmount())
   await flushPromises()
+  vi.unstubAllGlobals()
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: originalClipboard,
+  })
 })
 
 function mountDesktop() {
@@ -156,6 +162,46 @@ describe('WorkspaceDesktop modal', () => {
 
     expect(stopDesktop).toHaveBeenCalledWith(workspaceId, intent())
     expect(store.isConnected).toBe(false)
+  })
+
+  it('routes toolbar copy and paste clicks through their explicit clipboard actions', async () => {
+    const store = useDesktopStore()
+    store.setConnected(workspaceId, `/ws/desktop/${workspaceId}/`)
+    vi.mocked(workspacesApi.readDesktopClipboard).mockResolvedValue({ text: 'VM clipboard value' })
+    vi.mocked(workspacesApi.writeDesktopClipboard).mockResolvedValue({ text: '' })
+
+    class MockClipboardItem {
+      constructor(readonly values: Record<string, unknown>) {}
+    }
+    const write = vi.fn(async (items: MockClipboardItem[]) => {
+      const textBlob = (await items[0]!.values['text/plain']) as Blob
+      expect(textBlob).toBeInstanceOf(Blob)
+      expect(await textBlob.text()).toBe('VM clipboard value')
+    })
+    const readText = vi.fn(async () => 'local clipboard value')
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { readText, write },
+    })
+    vi.stubGlobal('ClipboardItem', MockClipboardItem)
+
+    const wrapper = mountDesktop()
+    await wrapper.get('[title="Copy VM clipboard to local clipboard"]').trigger('click')
+    await flushPromises()
+
+    expect(workspacesApi.readDesktopClipboard).toHaveBeenCalledWith(workspaceId)
+    expect(write).toHaveBeenCalledOnce()
+
+    await wrapper.get('[title="Paste local clipboard into VM clipboard"]').trigger('click')
+    await flushPromises()
+
+    expect(readText).toHaveBeenCalledOnce()
+    expect(workspacesApi.writeDesktopClipboard).toHaveBeenCalledOnce()
+    expect(workspacesApi.writeDesktopClipboard).toHaveBeenCalledWith(
+      workspaceId,
+      'local clipboard value',
+    )
+    expect(typeof vi.mocked(workspacesApi.writeDesktopClipboard).mock.calls[0]?.[1]).toBe('string')
   })
 
   it('shows the not-active state with a start button when disconnected', () => {

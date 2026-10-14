@@ -82,3 +82,33 @@ traps, deferred loading, failures, Markdown, and touch/keyboard controls.
 `CLIPBOARD_VITE_URL` selects the Vite server; `CLIPBOARD_CHROMIUM_PATH` optionally
 selects a system Chromium executable. WebKit coverage does not replace a final
 Safari/macOS smoke test.
+
+
+### Desktop clipboard
+
+The same-origin Kasm viewer owns native Cmd/Ctrl+C/V gestures. Paste uses the
+trusted `ClipboardEvent.clipboardData` (including WebKit's empty `types` list),
+not `navigator.clipboard.readText()`. A temporary invisible editable target
+ensures Safari dispatches paste over the canvas. Text is written through the
+existing authorized VM endpoint before one balanced Linux Ctrl+V is forwarded;
+Ctrl+Shift+C/V is preserved for guest terminals. Local editors are excluded.
+
+Copy starts a promise-backed ClipboardItem write in the **focused iframe's**
+realm during the original gesture, then forwards guest Ctrl+C. The guest's
+`clipboardrx` event supplies fresh text; a bounded REST read covers identical
+copies without a new guest event. Desktop shortcuts never open the Copy dialog.
+When the modern API is absent, a confirmed legacy copy event is attempted in
+that iframe. Browser-denied writes preserve the existing clipboard and report
+an actionable error, not success. Use HTTPS for reliable Safari async copy;
+legacy HTTP copy is browser/user-activation dependent. Text is the supported
+shared clipboard format; image and file pastes are not forwarded as stale text.
+
+```sh
+cd ../e2e
+npx playwright test --config=playwright.desktop-clipboard.config.ts
+```
+
+This isolated suite uses native host copy/paste in Chromium and WebKit on HTTP
+and HTTPS, with delayed/failed writes, repeated large Unicode text, guest key
+normalization, read-only computer-use, and stale iframe remounts. Real macOS
+Safari still requires a platform smoke test; Linux WebKit is not Safari on Mac.

@@ -107,7 +107,7 @@ function setModalHost(el: Element | ComponentPublicInstance | null): void {
             class="h-6 w-6 opacity-50 hover:opacity-100"
             :disabled="!desktopStore.isConnected || clipboardBusy || desktopStore.computerUseActive"
             title="Copy VM clipboard to local clipboard"
-            @click="copyFromVmClipboard"
+            @click="copyFromVmClipboard({ fallback: 'none' })"
           >
             <Copy :size="11" />
           </Button>
@@ -117,7 +117,7 @@ function setModalHost(el: Element | ComponentPublicInstance | null): void {
             class="h-6 w-6 opacity-50 hover:opacity-100"
             :disabled="!desktopStore.isConnected || clipboardBusy || desktopStore.computerUseActive"
             title="Paste local clipboard into VM clipboard"
-            @click="pasteToVmClipboard"
+            @click="pasteToVmClipboard()"
           >
             <ClipboardPaste :size="11" />
           </Button>

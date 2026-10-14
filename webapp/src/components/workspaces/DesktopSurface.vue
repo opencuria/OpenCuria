@@ -12,6 +12,8 @@ import type { CSSProperties } from 'vue'
 import { useDesktopStore } from '@/stores/desktop'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useDesktopSession } from '@/composables/useDesktopSession'
+import { bindDesktopClipboard, createDesktopClipboardReader } from '@/lib/desktopClipboard'
+import * as workspacesApi from '@/services/workspaces.api'
 import { getConfig } from '@/services/config'
 import {
   desktopIframeSrc as buildDesktopIframeSrc,
@@ -34,6 +36,7 @@ const desktopStore = useDesktopStore()
 const workspaceStore = useWorkspaceStore()
 const {
   takeControlBusy,
+  clipboardBusy,
   startDesktop,
   stopDesktopIfActive,
   takeControl,
@@ -63,7 +66,9 @@ const surfaceStyle = ref<CSSProperties>({
 let hostResizeObserver: ResizeObserver | null = null
 let iframeKeydownCleanup: (() => void) | null = null
 let iframeErrorCleanup: (() => void) | null = null
-let isDispatchingSyntheticPasteShortcut = false
+const clipboardReader = createDesktopClipboardReader(
+  async () => (await workspacesApi.readDesktopClipboard(props.workspaceId)).text,
+)
 
 const desktopSize = computed(() => {
   const workspace =
@@ -114,106 +119,30 @@ const desktopIframeSrc = computed(() => {
 
 // --- Clipboard shortcuts (Cmd/Ctrl+C/V synced with the VM clipboard) ---
 
-function shouldHandleClipboardShortcut(event: KeyboardEvent): boolean {
-  if (!desktopStore.isConnected) return false
-  const target = event.target as HTMLElement | null
-  if (target?.closest('input, textarea, [contenteditable="true"]')) return false
-  return true
-}
-
-function parseClipboardShortcut(event: KeyboardEvent): 'copy' | 'paste' | null {
-  const key = event.key.toLowerCase()
-  const modifierPressed = event.metaKey || event.ctrlKey
-  if (!modifierPressed || event.altKey || event.shiftKey) return null
-  if (key === 'c') return 'copy'
-  if (key === 'v') return 'paste'
-  return null
-}
-
-function suppressClipboardEvent(event: KeyboardEvent): void {
-  event.preventDefault()
-  event.stopPropagation()
-  event.stopImmediatePropagation()
-}
-
-function dispatchPasteShortcutToVm(event: KeyboardEvent): void {
-  const iframe = desktopIframeRef.value
-  const doc = iframe?.contentDocument
-  if (!iframe || !doc) return
-
-  const activeTarget = (doc.activeElement as HTMLElement | null) ?? doc.body ?? doc.documentElement
-  if (!activeTarget) return
-
-  const modifierKey = event.metaKey ? 'Meta' : 'Control'
-  const shortcutEventInit: KeyboardEventInit = {
-    key: 'v',
-    code: 'KeyV',
-    bubbles: true,
-    cancelable: true,
-    composed: true,
-    ctrlKey: modifierKey === 'Control',
-    metaKey: modifierKey === 'Meta',
-  }
-
-  isDispatchingSyntheticPasteShortcut = true
-  try {
-    activeTarget.dispatchEvent(
-      new KeyboardEvent('keydown', { key: modifierKey, code: `${modifierKey}Left`, bubbles: true }),
-    )
-    activeTarget.dispatchEvent(new KeyboardEvent('keydown', shortcutEventInit))
-    activeTarget.dispatchEvent(new KeyboardEvent('keyup', shortcutEventInit))
-    activeTarget.dispatchEvent(
-      new KeyboardEvent('keyup', { key: modifierKey, code: `${modifierKey}Left`, bubbles: true }),
-    )
-  } finally {
-    isDispatchingSyntheticPasteShortcut = false
-  }
-}
-
-async function handleDesktopIframeKeydown(event: KeyboardEvent): Promise<void> {
-  if (isDispatchingSyntheticPasteShortcut || !shouldHandleClipboardShortcut(event)) return
-  const shortcut = parseClipboardShortcut(event)
-  if (!shortcut) return
-
-  if (shortcut === 'copy') {
-    void copyFromVmClipboard({ delayMs: 120 })
-    return
-  }
-
-  suppressClipboardEvent(event)
-  if (await pasteToVmClipboard()) dispatchPasteShortcutToVm(event)
-}
-
-function handleDesktopIframeKeyup(event: KeyboardEvent): void {
-  if (isDispatchingSyntheticPasteShortcut || !shouldHandleClipboardShortcut(event)) return
-  if (parseClipboardShortcut(event) === 'paste') suppressClipboardEvent(event)
-}
-
 function clearIframeListeners(): void {
   iframeKeydownCleanup?.()
   iframeKeydownCleanup = null
   iframeErrorCleanup?.()
   iframeErrorCleanup = null
+  clipboardReader.cancel()
 }
 
 function bindDesktopIframeListeners(): void {
   clearIframeListeners()
   const iframe = desktopIframeRef.value
-  const doc = iframe?.contentDocument
   const win = iframe?.contentWindow
-  if (!iframe || !doc || !win) return
-  const keydownListener = (event: KeyboardEvent) => void handleDesktopIframeKeydown(event)
-  const keyupListener = (event: KeyboardEvent) => handleDesktopIframeKeyup(event)
-  win.addEventListener('keydown', keydownListener, true)
-  win.addEventListener('keyup', keyupListener, true)
-  doc.addEventListener('keydown', keydownListener, true)
-  doc.addEventListener('keyup', keyupListener, true)
-  iframeKeydownCleanup = () => {
-    win.removeEventListener('keydown', keydownListener, true)
-    win.removeEventListener('keyup', keyupListener, true)
-    doc.removeEventListener('keydown', keydownListener, true)
-    doc.removeEventListener('keyup', keyupListener, true)
-  }
+  if (!iframe || !win) return
+  iframeKeydownCleanup = bindDesktopClipboard(iframe, {
+    enabled: () =>
+      desktopStore.isConnected &&
+      viewerStatus.value === 'connected' &&
+      !desktopStore.computerUseActive,
+    blocked: () => desktopStore.computerUseActive || clipboardBusy.value,
+    copy: (context) => {
+      void copyFromVmClipboard({ context, fallback: 'none', loadText: clipboardReader.read })
+    },
+    paste: pasteToVmClipboard,
+  })
 
   const onFrameError = (event: ErrorEvent) => {
     // Never log the raw message or URL: either may contain the desktop token.
@@ -368,6 +297,10 @@ function handleWindowMessage(event: MessageEvent): void {
   const iframe = desktopIframeRef.value
   if (!isTrustedDesktopMessage(event, iframe, window.location.href)) return
   const status = parseDesktopConnectionStatus(event.data)
+  if (event.data?.action === 'clipboardrx' && typeof event.data.value === 'string') {
+    clipboardReader.receive(event.data.value)
+    return
+  }
   if (!status) return
   if (status === 'connected') markViewerConnected()
   else if (status === 'disconnected') markViewerDisconnected()
@@ -403,21 +336,11 @@ function retryViewer(): void {
   startConnectionTimeout()
 }
 
-function onGlobalKeydown(event: KeyboardEvent): void {
-  if (!desktopStore.isOpen || !shouldHandleClipboardShortcut(event)) return
-  const shortcut = parseClipboardShortcut(event)
-  if (!shortcut) return
-  event.preventDefault()
-  if (shortcut === 'copy') void copyFromVmClipboard()
-  else void pasteToVmClipboard()
-}
-
 onMounted(() => {
   if (desktopStore.workspaceId && desktopStore.workspaceId !== props.workspaceId)
     desktopStore.reset()
   setupSocketListeners()
   if (desktopStore.isOpen) void startDesktop()
-  window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('message', handleWindowMessage)
   window.addEventListener('resize', onViewportChange)
   window.addEventListener('scroll', onViewportChange, true)
@@ -433,7 +356,6 @@ onBeforeUnmount(() => {
   clearIframeListeners()
   connectionTimeout.cancel()
   reconnectBackoff.reset()
-  window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('message', handleWindowMessage)
   window.removeEventListener('resize', onViewportChange)
   window.removeEventListener('scroll', onViewportChange, true)

@@ -3,22 +3,26 @@
  * event before unrelated awaits. Once a native write starts it cannot be
  * cancelled; an abort only prevents fallback and stale success feedback.
  */
-export async function writeClipboardText(text: string, signal?: AbortSignal): Promise<boolean> {
+export async function writeClipboardText(
+  text: string,
+  signal?: AbortSignal,
+  context: Window = window,
+): Promise<boolean> {
   if (signal?.aborted) return false
   try {
-    if (typeof navigator !== 'undefined' && typeof navigator.clipboard?.writeText === 'function') {
-      await navigator.clipboard.writeText(text)
+    if (typeof context.navigator.clipboard?.writeText === 'function') {
+      await context.navigator.clipboard.writeText(text)
       return !signal?.aborted
     }
   } catch {
     // A denied modern write may still allow a legacy write. Otherwise the UI
     // supplies a fresh gesture instead of claiming success after an await.
   }
-  return !signal?.aborted && copyWithExecCommand(text)
+  return !signal?.aborted && copyWithExecCommand(text, context.document)
 }
 
 /** Legacy HTTP path: no focus transfer outside a menu/dialog's focus scope. */
-function copyWithExecCommand(text: string): boolean {
+export function copyWithExecCommand(text: string, document: Document = window.document): boolean {
   if (typeof document === 'undefined' || !document.body) return false
   const selection = document.getSelection()
   if (!selection || typeof document.execCommand !== 'function') return false

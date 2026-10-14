@@ -103,6 +103,10 @@ def build_vnc_redirect_url(
             "autoconnect": "true",
             "resize": "scale",
             "reconnect": "false",
+            "clipboard_up": "true",
+            "clipboard_down": "true",
+            # OpenCuria owns trusted copy/paste, not Kasm's background reads.
+            "clipboard_seamless": "false",
             "path": ws_path,
             **association,
         }

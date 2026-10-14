@@ -139,7 +139,12 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
     }
   }
 
-  async function copyFromVmClipboard(options?: { delayMs?: number }): Promise<boolean> {
+  async function copyFromVmClipboard(options?: {
+    delayMs?: number
+    context?: Window
+    fallback?: 'dialog' | 'none'
+    loadText?: () => Promise<string>
+  }): Promise<boolean> {
     const requestedWorkspaceId = workspaceId.value
     const requestedGeneration = workspaceGeneration
     if (
@@ -169,8 +174,11 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
 
       let text: string
       try {
-        const response = await workspacesApi.readDesktopClipboard(requestedWorkspaceId)
-        text = response.text
+        if (options?.loadText) text = await options.loadText()
+        else {
+          const response = await workspacesApi.readDesktopClipboard(requestedWorkspaceId)
+          text = response.text
+        }
       } catch {
         // Do not expose API/network details through the generic clipboard error.
         throw new Error('Unable to load VM clipboard')
@@ -182,10 +190,13 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
 
     let removeAbortListener: (() => void) | undefined
     try {
-      const copyRequest = copyToClipboard(loadText, 'VM clipboard', {
-        success: 'silent',
+      const copyOptions = {
+        success: 'silent' as const,
         signal,
-      })
+        ...(options?.context !== undefined ? { context: options.context } : {}),
+        ...(options?.fallback !== undefined ? { fallback: options.fallback } : {}),
+      }
+      const copyRequest = copyToClipboard(loadText, 'VM clipboard', copyOptions)
       const copied = await Promise.race([
         copyRequest,
         new Promise<boolean>((resolve) => {
@@ -196,7 +207,7 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
         }),
       ])
       if (!copied || !isCurrentOperation()) return false
-      notifications.success('Copied from VM')
+      if (options?.fallback !== 'none') notifications.success('Copied from VM')
       return true
     } finally {
       removeAbortListener?.()
@@ -205,17 +216,54 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
     }
   }
 
-  async function pasteToVmClipboard(): Promise<boolean> {
-    if (!desktopStore.isConnected || clipboardBusy.value) return false
+  async function pasteToVmClipboard(plainText?: string): Promise<boolean> {
+    const requestedWorkspaceId = workspaceId.value
+    const requestedGeneration = workspaceGeneration
+    const isCurrentOperation = (): boolean =>
+      !disposed &&
+      workspaceGeneration === requestedGeneration &&
+      workspaceId.value === requestedWorkspaceId &&
+      desktopStore.isConnected &&
+      desktopStore.workspaceId === requestedWorkspaceId &&
+      !desktopStore.computerUseActive
+
+    if (!isCurrentOperation() || clipboardBusy.value) return false
     clipboardBusy.value = true
+    let readingBrowserClipboard = false
     try {
-      const text = await navigator.clipboard.readText()
-      await workspacesApi.writeDesktopClipboard(workspaceId.value, text || '')
-      notifications.success('Pasted to VM', 'Local clipboard sent to VM clipboard.')
+      if (!isCurrentOperation()) return false
+      let text = plainText
+      if (text === undefined) {
+        readingBrowserClipboard = true
+        if (
+          typeof navigator === 'undefined' ||
+          typeof navigator.clipboard?.readText !== 'function'
+        ) {
+          if (isCurrentOperation())
+            notifications.error('Paste failed', 'Use Cmd/Ctrl+V inside the desktop to paste.')
+          return false
+        }
+        text = await navigator.clipboard.readText()
+        readingBrowserClipboard = false
+        if (!isCurrentOperation()) return false
+      }
+
+      if (!isCurrentOperation()) return false
+      await workspacesApi.writeDesktopClipboard(requestedWorkspaceId, text)
+      if (!isCurrentOperation()) return false
+      // Native paste events carry trusted text and must not produce another toast.
+      if (plainText === undefined)
+        notifications.success('Pasted to VM', 'Local clipboard sent to VM clipboard.')
       return true
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err)
-      notifications.error('Paste failed', msg)
+    } catch {
+      if (isCurrentOperation()) {
+        notifications.error(
+          'Paste failed',
+          readingBrowserClipboard
+            ? 'Use Cmd/Ctrl+V inside the desktop to paste.'
+            : 'Unable to write to the VM clipboard. Please try again.',
+        )
+      }
       return false
     } finally {
       clipboardBusy.value = false

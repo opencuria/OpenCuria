@@ -106,6 +106,24 @@ function connectionMessage(
   )
 }
 
+function clipboardMessage(source: MessageEventSource | null, value: string) {
+  window.dispatchEvent(
+    new MessageEvent('message', {
+      data: { action: 'clipboardrx', value },
+      source,
+      origin: window.location.origin,
+    }),
+  )
+}
+
+function prepareFrameCanvas(iframe: HTMLIFrameElement): HTMLCanvasElement {
+  const doc = iframe.contentDocument!
+  doc.open()
+  doc.write('<!doctype html><html><body><canvas tabindex="0"></canvas></body></html>')
+  doc.close()
+  return doc.querySelector('canvas')!
+}
+
 describe('DesktopSurface', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -252,21 +270,26 @@ describe('DesktopSurface', () => {
     expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeNull()
   })
 
-  it('starts VM clipboard copying from the iframe keyboard gesture with a lazy loader', async () => {
+  it('resolves the guest clipboard event from the iframe canvas without a REST fallback', async () => {
     const store = useDesktopStore()
     store.setConnected('ws-1', '/ws/desktop/ws-1/')
-    vi.mocked(workspacesApi.readDesktopClipboard).mockResolvedValue({ text: 'vm text' })
     mountSurface()
     await nextTick()
 
     const iframe = document.querySelector('iframe')!
+    const canvas = prepareFrameCanvas(iframe)
+    iframe.dispatchEvent(new Event('load'))
+    await nextTick()
     connectionMessage(iframe.contentWindow, 'connected')
     await nextTick()
-    const frameWindow = iframe.contentWindow!
-    // jsdom keyboard events target Window, unlike browser key events targeting an element.
-    Object.defineProperty(frameWindow, 'closest', { value: () => null, configurable: true })
-    frameWindow.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true }),
+    canvas.focus()
+    canvas.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'c',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
     )
 
     expect(copyToClipboard).toHaveBeenCalledOnce()
@@ -276,8 +299,10 @@ describe('DesktopSurface', () => {
     expect(label).toBe('VM clipboard')
 
     if (typeof content !== 'function') throw new Error('Expected lazy clipboard loader')
-    expect(await content()).toBe('vm text')
-    expect(workspacesApi.readDesktopClipboard).toHaveBeenCalledWith('ws-1')
+    const loadedText = content()
+    clipboardMessage(iframe.contentWindow, 'guest clipboard text')
+    await expect(loadedText).resolves.toBe('guest clipboard text')
+    expect(workspacesApi.readDesktopClipboard).not.toHaveBeenCalled()
   })
 
   it('ignores messages from the wrong origin or a different frame', async () => {

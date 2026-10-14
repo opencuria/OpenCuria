@@ -2,7 +2,7 @@
 import { useNotificationStore } from '@/stores/notifications'
 import { useClipboardStore } from '@/stores/clipboard'
 
-import { writeClipboardText } from './clipboardWrite'
+import { copyWithExecCommand, writeClipboardText } from './clipboardWrite'
 
 export type ClipboardText = string | (() => Promise<string>)
 export { writeClipboardText } from './clipboardWrite'
@@ -15,15 +15,24 @@ export { writeClipboardText } from './clipboardWrite'
 export async function copyToClipboard(
   source: ClipboardText,
   label: string,
-  options: { success?: 'toast' | 'silent'; signal?: AbortSignal } = {},
+  options: {
+    success?: 'toast' | 'silent'
+    signal?: AbortSignal
+    context?: Window
+    fallback?: 'dialog' | 'none'
+  } = {},
 ): Promise<boolean> {
   const notifications = useNotificationStore()
   if (options.signal?.aborted) return false
+  const context = (options.context ?? window) as Window & typeof globalThis
+  const clipboard = context.navigator.clipboard
+  const Item = context.ClipboardItem
+  const allowDialog = options.fallback !== 'none'
   let ok = false
   try {
     if (typeof source === 'string') {
-      ok = await writeClipboardText(source, options.signal)
-      if (!ok && !options.signal?.aborted) {
+      ok = await writeClipboardText(source, options.signal, context)
+      if (!ok && !options.signal?.aborted && allowDialog) {
         notifications.error(
           `Failed to copy ${label}`,
           'Use Copy now or select the text to copy manually.',
@@ -38,24 +47,28 @@ export async function copyToClipboard(
       })
       // Handle a producer rejection even if ClipboardItem construction throws.
       void text.catch(() => {})
-      if (
-        typeof navigator !== 'undefined' &&
-        typeof navigator.clipboard?.write === 'function' &&
-        typeof ClipboardItem !== 'undefined'
-      ) {
+      if (typeof clipboard?.write === 'function' && typeof Item !== 'undefined') {
         const blob = text.then((value) => {
           if (options.signal?.aborted) throw new Error('Copy cancelled')
-          return new Blob([value], { type: 'text/plain' })
+          return new context.Blob([value], { type: 'text/plain' })
         })
         void blob.catch(() => {})
         try {
-          await navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob })])
+          await clipboard.write([new Item({ 'text/plain': blob })])
           ok = true
         } catch {
-          // Do not attempt execCommand after fetching: it needs a fresh click.
+          // Generic copy actions retain the fresh-click dialog fallback.
+          // Desktop keyboard gestures can try the confirmed legacy path below.
         }
       }
-      if (!ok && !options.signal?.aborted) {
+      if (!ok && !options.signal?.aborted && !allowDialog) {
+        // Legacy clipboard events may still be authorized by this keyboard
+        // gesture on HTTP. Require confirmed payload delivery; never copy a
+        // cached value or claim success if the browser blocks the command.
+        const value = await text
+        if (!options.signal?.aborted) ok = copyWithExecCommand(value, context.document)
+      }
+      if (!ok && !options.signal?.aborted && allowDialog) {
         ok = await useClipboardStore().requestCopy(text, label, options.signal)
       }
     }
@@ -68,6 +81,14 @@ export async function copyToClipboard(
     return false
   }
   if (options.signal?.aborted) return false
+  if (!ok && !allowDialog) {
+    notifications.error(
+      `Failed to copy ${label}`,
+      context.isSecureContext === false
+        ? 'Open OpenCuria over HTTPS to enable automatic desktop copying in Safari.'
+        : 'Allow clipboard access for OpenCuria in your browser and try again.',
+    )
+  }
   if (ok && options.success !== 'silent') notifications.info(`Copied ${label}`)
   return ok
 }
