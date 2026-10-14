@@ -20,23 +20,22 @@ living on ``WorkspaceService`` in :mod:`src.service`:
 Refresh merges same-incarnation observations into canonical cache entries.
 Per-workspace lifecycle epochs fence stale snapshots across awaited effects;
 creating-preservation and heartbeat payload shapes remain unchanged.
-Cross-cluster reads (desktop sessions,
-background statuses, desktop liveness) go through optional hooks set
-post-construction by the composer (``WorkspaceService``), so the
-registry stays unit-testable without importing sibling managers:
+Cross-cluster reads (desktop sessions, background statuses) go through
+optional hooks set post-construction by the composer (``WorkspaceService``),
+so the registry stays unit-testable without importing sibling managers:
 
-- ``desktop_sessions``: live ``dict[uuid.UUID, DesktopSession]`` used
-  for heartbeat/recover reads and session pruning.
+- ``desktop_manager``: owner of desktop liveness reconciliation, process
+  tracking, and generation metadata for heartbeat reads.
+- ``desktop_sessions``: read-only view of the live desktop-session map used
+  to capture the expected heartbeat session; the registry never mutates it.
 - ``background_statuses``: async
   ``(runtime, instance_id, entry) -> dict`` hook (normally
   ``BackgroundProcessManager._background_status_locked``).
 - ``background_entries``: live
   ``dict[uuid.UUID, dict[str, BackgroundProcess]]`` tracking dict
   (normally ``BackgroundProcessManager._background_processes``).
-- ``desktop_live``: async ``(workspace_id) -> bool`` hook (normally
-  ``DesktopManager._is_desktop_session_live``).
-- ``desktop_heartbeat_payload``: ``(workspace_id, session) -> dict``
-  hook (normally ``DesktopManager._desktop_heartbeat_payload``).
+- ``desktop_live``: async ``(workspace_id) -> bool`` probe passed into the
+  manager-owned reconciliation operation (normally the desktop TCP probe).
 
 Hooks are only called when set; without them the registry degrades to
 plain cache ownership (heartbeat omits desktop/process enrichment
@@ -94,9 +93,6 @@ class WorkspaceRegistry:
             Callable[[RuntimeBackend, str, Any], Awaitable[dict[str, Any]]] | None
         ) = None
         self.desktop_live: Callable[[uuid.UUID], Awaitable[bool]] | None = None
-        self.desktop_heartbeat_payload: (
-            Callable[[uuid.UUID, DesktopSession], dict[str, Any]] | None
-        ) = None
 
     # -- cache ownership -------------------------------------------------
 
@@ -284,38 +280,26 @@ class WorkspaceRegistry:
                 "status": info.status,
                 "runtime_type": info.runtime_type,
             }
-
             session = sessions.get(workspace_id)
-            if session is not None:
-                if info.status != "running":
-                    # The runtime status was freshly synchronized by the
-                    # heartbeat loop. A stopped workspace cannot host a live
-                    # desktop, so prune without another guest exec probe.
-                    item["desktop"] = None
-                else:
-                    try:
-                        live = (
-                            await self.desktop_live(workspace_id)
-                            if self.desktop_live is not None
-                            else True
-                        )
-                        if live:
-                            if self.desktop_heartbeat_payload is not None:
-                                item["desktop"] = self.desktop_heartbeat_payload(
-                                    workspace_id, session
-                                )
-                        else:
-                            item["desktop"] = None
-                            logger.warning(
-                                "desktop_session_unhealthy",
-                                workspace_id=str(workspace_id),
-                            )
-                    except Exception:
-                        item["desktop"] = None
-                        logger.exception(
-                            "desktop_session_health_check_failed",
-                            workspace_id=str(workspace_id),
-                        )
+            if self.desktop_manager is not None:
+                # DesktopManager serializes lifecycle probes and owns pruning.
+                item["desktop_epoch"] = self.desktop_manager.epoch
+                (
+                    desktop_payload,
+                    tracked,
+                    generation,
+                ) = await self.desktop_manager.reconcile_heartbeat_session(
+                    workspace_id,
+                    session,
+                    workspace_running=info.status == "running",
+                    liveness_probe=self.desktop_live,
+                )
+                item["desktop_generation"] = generation
+                item["desktop_session_tracked"] = tracked
+                item["desktop"] = desktop_payload
+            else:
+                item["desktop_session_tracked"] = session is not None
+                item["desktop"] = None
 
             processes: list[dict[str, Any]] = []
             if info.status == "running":

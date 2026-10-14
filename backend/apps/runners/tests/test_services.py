@@ -667,6 +667,244 @@ class TestDesktopStateCleanup:
 
     @pytest.mark.asyncio
     @pytest.mark.django_db(transaction=True)
+    async def test_stale_desktop_stop_does_not_clear_newer_generation(
+        self, service, runner, workspace, monkeypatch
+    ):
+        """A delayed stop in one runner epoch cannot remove a newer route."""
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        ws_id = str(workspace.id)
+        service._record_active_desktop(
+            ws_id,
+            {
+                "port": 6901,
+                "container_ip": "10.0.0.5",
+                "network_name": "new-net",
+                "generation": 5,
+                "epoch": "desktop-epoch",
+            },
+            runner_id=str(runner.id),
+        )
+
+        await service.handle_desktop_stopped(
+            None,
+            ws_id,
+            runner_id=str(runner.id),
+            generation=4,
+            epoch="desktop-epoch",
+        )
+
+        assert service.get_desktop_info(ws_id)["generation"] == 5
+        assert service.get_desktop_info(ws_id)["container_ip"] == "10.0.0.5"
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_same_generation_desktop_stop_clears_active_route(
+        self, service, runner, workspace, monkeypatch
+    ):
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        ws_id = str(workspace.id)
+        service._set_runner_desktop_epoch(str(runner.id), "desktop-epoch")
+        service._record_active_desktop(
+            ws_id,
+            {
+                "port": 6901,
+                "container_ip": "10.0.0.5",
+                "network_name": "net",
+                "generation": 5,
+                "epoch": "desktop-epoch",
+            },
+            runner_id=str(runner.id),
+        )
+
+        await service.handle_desktop_stopped(
+            None,
+            ws_id,
+            runner_id=str(runner.id),
+            generation=5,
+            epoch="desktop-epoch",
+        )
+
+        assert service.get_desktop_info(ws_id) is None
+        assert service._desktop_state_versions[ws_id] == (
+            str(runner.id),
+            "desktop-epoch",
+            5,
+            False,
+        )
+        emit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_same_generation_active_event_cannot_resurrect_stopped_tombstone(
+        self, service, runner, workspace, monkeypatch
+    ):
+        """A late active update cannot revive the route after a same-gen stop."""
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        ws_id = str(workspace.id)
+        runner_id = str(runner.id)
+        service._set_runner_desktop_epoch(runner_id, "desktop-epoch")
+        service._record_active_desktop(
+            ws_id,
+            {
+                "port": 6901,
+                "container_ip": "10.0.0.5",
+                "network_name": "net",
+                "generation": 5,
+                "epoch": "desktop-epoch",
+            },
+            runner_id=runner_id,
+        )
+
+        await service.handle_desktop_stopped(
+            None,
+            ws_id,
+            runner_id=runner_id,
+            generation=5,
+            epoch="desktop-epoch",
+        )
+        emit.reset_mock()
+
+        await service.handle_desktop_process(
+            ws_id,
+            port=6901,
+            container_ip="10.0.0.9",
+            network_name="late-active",
+            runner_id=runner_id,
+            generation=5,
+            epoch="desktop-epoch",
+        )
+
+        assert service.get_desktop_info(ws_id) is None
+        assert service._desktop_state_versions[ws_id] == (
+            runner_id,
+            "desktop-epoch",
+            5,
+            False,
+        )
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_heartbeat_liveness_failure_preserves_route_but_untracked_stops_it(
+        self, service, runner, workspace
+    ):
+        ws_id = str(workspace.id)
+        service._set_runner_desktop_epoch(str(runner.id), "desktop-epoch")
+        service._record_active_desktop(
+            ws_id,
+            {
+                "port": 6901,
+                "container_ip": "10.0.0.5",
+                "network_name": "net",
+                "generation": 5,
+                "epoch": "desktop-epoch",
+            },
+            runner_id=str(runner.id),
+        )
+
+        service._sync_desktop_state_from_heartbeat(
+            ws_id,
+            None,
+            runner_id=str(runner.id),
+            desktop_epoch="desktop-epoch",
+            desktop_generation=5,
+            desktop_session_tracked=True,
+        )
+        assert service.get_desktop_info(ws_id)["container_ip"] == "10.0.0.5"
+
+        service._sync_desktop_state_from_heartbeat(
+            ws_id,
+            None,
+            runner_id=str(runner.id),
+            desktop_epoch="desktop-epoch",
+            desktop_generation=5,
+            desktop_session_tracked=False,
+        )
+        assert service.get_desktop_info(ws_id) is None
+        assert service._desktop_state_versions[ws_id] == (
+            str(runner.id),
+            "desktop-epoch",
+            5,
+            False,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
+    async def test_stale_desktop_process_and_heartbeat_cannot_replace_newer_generation(
+        self, service, runner, workspace, monkeypatch
+    ):
+        """Process and heartbeat observations share the stop generation fence."""
+        emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        ws_id = str(workspace.id)
+        service._set_runner_desktop_epoch(str(runner.id), "desktop-epoch")
+        service._record_active_desktop(
+            ws_id,
+            {
+                "port": 6901,
+                "container_ip": "10.0.0.5",
+                "network_name": "new-net",
+                "generation": 5,
+                "epoch": "desktop-epoch",
+            },
+            runner_id=str(runner.id),
+        )
+
+        await service.handle_desktop_process(
+            ws_id,
+            port=6901,
+            container_ip="10.0.0.4",
+            network_name="stale-net",
+            runner_id=str(runner.id),
+            generation=4,
+            epoch="desktop-epoch",
+        )
+        service._sync_desktop_state_from_heartbeat(
+            ws_id,
+            {
+                "port": 6901,
+                "container_ip": "10.0.0.3",
+                "network_name": "stale-heartbeat",
+                "generation": 3,
+                "epoch": "desktop-epoch",
+            },
+            runner_id=str(runner.id),
+            desktop_epoch="desktop-epoch",
+        )
+        service._sync_desktop_state_from_heartbeat(
+            ws_id,
+            None,
+            runner_id=str(runner.id),
+            desktop_epoch="desktop-epoch",
+            desktop_generation=4,
+        )
+        assert service.get_desktop_info(ws_id)["container_ip"] == "10.0.0.5"
+        assert service._desktop_state_versions[ws_id] == (
+            str(runner.id),
+            "desktop-epoch",
+            5,
+            True,
+        )
+        await service.handle_desktop_process(
+            ws_id,
+            port=6901,
+            container_ip="10.0.0.2",
+            network_name="same-epoch-stale",
+            runner_id=str(runner.id),
+            generation=4,
+            epoch="desktop-epoch",
+        )
+
+        assert service.get_desktop_info(ws_id)["generation"] == 5
+        assert service.get_desktop_info(ws_id)["container_ip"] == "10.0.0.5"
+        emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.django_db(transaction=True)
     async def test_desktop_stopped_without_task_id_clears_and_forwards(
         self,
         service,

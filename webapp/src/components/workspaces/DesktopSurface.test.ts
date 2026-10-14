@@ -213,13 +213,18 @@ describe('DesktopSurface', () => {
     store.open()
     await flushPromises()
 
-    expect(getDesktopStatus).toHaveBeenCalledWith('ws-1', expect.any(String))
+    expect(getDesktopStatus).toHaveBeenCalledWith(
+      'ws-1',
+      expect.any(String),
+      expect.any(AbortSignal),
+    )
     expect(startDesktop).toHaveBeenCalledWith(
       'ws-1',
       expect.objectContaining({
         viewer_client_id: expect.any(String),
         intent_revision: expect.any(Number),
       }),
+      expect.any(AbortSignal),
     )
   })
 
@@ -249,6 +254,45 @@ describe('DesktopSurface', () => {
     connectionMessage(iframe.contentWindow, 'connected')
     await nextTick()
     expect(iframe.classList.contains('opacity-0')).toBe(false)
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeNull()
+  })
+
+  it('observes a delayed DOM connection and disconnect without status messages', async () => {
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    const iframe = document.querySelector('iframe')!
+    // jsdom does not fetch the proxied document; supply the loaded root.
+    iframe.contentDocument!.appendChild(iframe.contentDocument!.createElement('html'))
+    iframe.dispatchEvent(new Event('load'))
+    await nextTick()
+    const root = iframe.contentDocument!.documentElement
+    root.classList.add('noVNC_connected')
+    await flushPromises()
+    expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeNull()
+    expect(store.viewerGeneration).toBe(0)
+
+    root.classList.remove('noVNC_connected')
+    await flushPromises()
+    expect(document.body.textContent).toContain('Reconnecting')
+  })
+
+  it('bounds unsuccessful viewer retries and lets a manual retry recover', async () => {
+    vi.useFakeTimers()
+    const store = useDesktopStore()
+    store.setConnected('ws-1', '/ws/desktop/ws-1/')
+    mountSurface()
+    await nextTick()
+    // Initial handshake timeout and three retries (1s, 2s, 4s backoff).
+    await vi.advanceTimersByTimeAsync(67_000)
+    expect(store.viewerGeneration).toBe(3)
+    expect(document.body.textContent).toContain('Desktop connection failed.')
+    document.querySelector<HTMLButtonElement>('[data-testid="desktop-surface-retry"]')!.click()
+    await flushPromises()
+    expect(store.viewerGeneration).toBe(4)
+    connectionMessage(document.querySelector('iframe')!.contentWindow, 'connected')
+    await nextTick()
     expect(document.querySelector('[data-testid="desktop-surface-loading"]')).toBeNull()
   })
 
@@ -326,7 +370,12 @@ describe('DesktopSurface', () => {
     expect(document.body.textContent).toContain('Reconnecting')
 
     document.querySelector<HTMLButtonElement>('[data-testid="desktop-surface-retry"]')!.click()
-    await nextTick()
+    await flushPromises()
+    expect(getDesktopStatus).toHaveBeenCalledWith(
+      'ws-1',
+      expect.any(String),
+      expect.any(AbortSignal),
+    )
     expect(store.viewerGeneration).toBe(1)
   })
 

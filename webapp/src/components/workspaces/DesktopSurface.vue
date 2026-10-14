@@ -35,6 +35,7 @@ const workspaceStore = useWorkspaceStore()
 const {
   takeControlBusy,
   startDesktop,
+  handleReconnect,
   stopDesktopIfActive,
   takeControl,
   copyFromVmClipboard,
@@ -63,6 +64,9 @@ const surfaceStyle = ref<CSSProperties>({
 let hostResizeObserver: ResizeObserver | null = null
 let iframeKeydownCleanup: (() => void) | null = null
 let iframeErrorCleanup: (() => void) | null = null
+let iframeConnectionCleanup: (() => void) | null = null
+let disposed = false
+let recoveryPending = false
 let isDispatchingSyntheticPasteShortcut = false
 
 const desktopSize = computed(() => {
@@ -300,7 +304,10 @@ function onViewportChange(): void {
 // --- KasmVNC status, recovery and page visibility ---
 
 const connectionTimeout = createPausableTimer(() => {
-  if (viewerStatus.value === 'connected') return
+  if (readIframeConnection()) {
+    markViewerConnected()
+    return
+  }
   markViewerDisconnected()
 })
 
@@ -315,12 +322,48 @@ const reconnectBackoff = createDesktopReconnectBackoff(
     viewerStatus.value = 'connecting'
     recoveryError.value = false
     iframeLoaded.value = false
-    desktopStore.bumpViewer()
+    void reconnectViewer()
   },
   () => {
     recoveryError.value = true
   },
 )
+
+async function reconnectViewer(): Promise<void> {
+  if (disposed || recoveryPending) return
+  recoveryPending = true
+  try {
+    // Reconcile the lease/runner epoch before loading another viewer URL.
+    await handleReconnect()
+  } finally {
+    recoveryPending = false
+    if (!disposed && viewerStatus.value !== 'connected') startConnectionTimeout()
+  }
+}
+
+function clearIframeConnectionObserver(): void {
+  iframeConnectionCleanup?.()
+  iframeConnectionCleanup = null
+}
+
+function observeIframeConnection(): void {
+  clearIframeConnectionObserver()
+  const iframe = desktopIframeRef.value
+  try {
+    const root = iframe?.contentDocument?.documentElement
+    if (!iframe || !root) return
+    const observer = new MutationObserver(() => {
+      if (disposed || desktopIframeRef.value !== iframe) return
+      if (readIframeConnection()) {
+        if (viewerStatus.value !== 'connected') markViewerConnected()
+      } else if (viewerStatus.value === 'connected') markViewerDisconnected()
+    })
+    observer.observe(root, { attributes: true, attributeFilter: ['class'] })
+    iframeConnectionCleanup = () => observer.disconnect()
+  } catch {
+    // Cross-origin viewers still use trusted postMessage and the timeout.
+  }
+}
 
 function markViewerConnected(): void {
   viewerStatus.value = 'connected'
@@ -355,6 +398,7 @@ function readIframeConnection(): boolean {
 function handleIframeLoad(event: Event): void {
   if (event.currentTarget !== desktopIframeRef.value) return
   bindDesktopIframeListeners()
+  observeIframeConnection()
   if (readIframeConnection()) {
     markViewerConnected()
     return
@@ -426,6 +470,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  disposed = true
+  clearIframeConnectionObserver()
   void stopDesktopIfActive(props.workspaceId)
   cleanupSocketListeners()
   hostResizeObserver?.disconnect()
@@ -457,6 +503,7 @@ watch(
     viewerStatus.value = 'connecting'
     connectionTimeout.cancel()
     clearIframeListeners()
+    clearIframeConnectionObserver()
     await nextTick()
     if (desktopIframeRef.value) startConnectionTimeout()
   },
@@ -465,6 +512,8 @@ watch(
 watch(surfaceRef, refreshHostBounds)
 watch(desktopIframeRef, () => {
   clearIframeListeners()
+  clearIframeConnectionObserver()
+  connectionTimeout.cancel()
   if (desktopIframeRef.value) startConnectionTimeout()
 })
 </script>

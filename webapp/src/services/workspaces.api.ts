@@ -93,23 +93,32 @@ export interface DesktopStatus {
 export function startDesktop(
   id: string,
   intent: DesktopViewerIntent,
+  signal?: AbortSignal,
 ): Promise<{ task_id: string }> {
-  return post<{ task_id: string }>(`/workspaces/${id}/desktop/`, intent)
+  return post<{ task_id: string }>(`/workspaces/${id}/desktop/`, intent, undefined, signal)
 }
 
 export function stopDesktop(id: string, intent: DesktopViewerIntent): Promise<{ task_id: string }> {
   return post<{ task_id: string }>(`/workspaces/${id}/desktop/stop/`, intent)
 }
 
-export function renewDesktop(id: string, intent: DesktopViewerIntent): Promise<DesktopStatus> {
-  return post<DesktopStatus>(`/workspaces/${id}/desktop/renew/`, intent)
+export function renewDesktop(
+  id: string,
+  intent: DesktopViewerIntent,
+  signal?: AbortSignal,
+): Promise<DesktopStatus> {
+  return post<DesktopStatus>(`/workspaces/${id}/desktop/renew/`, intent, undefined, signal)
 }
 
-export function getDesktopStatus(id: string, viewerClientId?: string): Promise<DesktopStatus> {
+export function getDesktopStatus(
+  id: string,
+  viewerClientId?: string,
+  signal?: AbortSignal,
+): Promise<DesktopStatus> {
   const query = viewerClientId
     ? `?${new URLSearchParams({ viewer_client_id: viewerClientId })}`
     : ''
-  return get<DesktopStatus>(`/workspaces/${id}/desktop/status/${query}`)
+  return get<DesktopStatus>(`/workspaces/${id}/desktop/status/${query}`, signal)
 }
 
 export function takeDesktopControl(

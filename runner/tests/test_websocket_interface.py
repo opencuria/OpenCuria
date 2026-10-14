@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 import uuid
-import tempfile
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from src.config import RunnerSettings
@@ -51,6 +51,8 @@ class DummyService:
                         "port": 6901,
                         "viewer_held": True,
                         "computeruse_run_ids": set(),
+                        "generation": 0,
+                        "epoch": "legacy-desktop-epoch",
                     },
                 )()
             )
@@ -63,9 +65,14 @@ class DummyService:
                         "process_alive": False,
                         "viewer_held": False,
                         "computer_use_active": False,
+                        "generation": 0,
+                        "epoch": "legacy-desktop-epoch",
                     },
                 )()
             )
+
+        def get_desktop_generation(self, workspace_id):
+            return 0
 
         def get_desktop_container_ip(self, workspace_id):
             return "127.0.0.1"
@@ -76,6 +83,9 @@ class DummyService:
         def get_desktop_session(self, workspace_id):
             """Stub session lookup: no cached session (cold interface path)."""
             return
+
+    def get_desktop_generation(self, workspace_id):
+        return 0
 
     def get_desktop_session(self, workspace_id):
         """Stub session lookup: no cached session (cold interface path)."""
@@ -276,10 +286,19 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             return_value=type(
                 "Session",
                 (),
-                {"port": 6901, "viewer_held": True, "computeruse_run_ids": set()},
+                {
+                    "port": 6901,
+                    "viewer_held": True,
+                    "computeruse_run_ids": set(),
+                    "generation": 0,
+                    "epoch": "legacy-desktop-epoch",
+                },
             )()
         )
         service.start_desktop = service.desktop.start_desktop
+        service.desktop.get_desktop_session = (
+            lambda _workspace_id: service.desktop.start_desktop.return_value
+        )
         service.desktop.get_desktop_container_ip = lambda workspace_id: "10.100.0.2"
         service.get_desktop_container_ip = service.desktop.get_desktop_container_ip
         service.desktop.get_desktop_network_name = lambda workspace_id: ""
@@ -287,6 +306,9 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
 
         interface = WebSocketInterface(
             service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
+        service.desktop.get_desktop_session = (
+            lambda _: service.desktop.start_desktop.return_value
         )
         interface._sio.emit = AsyncMock()
 
@@ -309,6 +331,8 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
                 "network_name": "",
                 "viewer": True,
                 "computer_use": False,
+                "generation": 0,
+                "epoch": interface._desktop_epoch,
             },
         )
 
@@ -330,8 +354,196 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             {
                 "task_id": task_id,
                 "workspace_id": str(workspace_id),
+                "generation": 0,
+                "epoch": "legacy-desktop-epoch",
             },
         )
+
+    async def test_stop_during_replacement_close_announces_current_generation(
+        self,
+    ) -> None:
+        """A stop awaited during tunnel close must not publish stale generation."""
+        import asyncio
+
+        service = DummyService()
+        workspace_id = uuid.uuid4()
+        old = SimpleNamespace(generation=4, viewer_held=True, computeruse_run_ids=set())
+        new = SimpleNamespace(generation=5, viewer_held=True, computeruse_run_ids=set())
+        current = {"session": None}
+        service.desktop.get_desktop_session = lambda _: current["session"]
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
+        service.desktop.get_desktop_state_payload = lambda ws_id: {
+            "workspace_id": str(ws_id),
+            "port": 6901,
+            "container_ip": "10.0.0.5",
+            "network_name": "net",
+            "generation": 5,
+            "epoch": interface._desktop_epoch,
+            "viewer": True,
+        }
+        interface._sio.emit = AsyncMock()
+        close_entered = asyncio.Event()
+        release_close = asyncio.Event()
+
+        close_calls = 0
+
+        async def blocked_close(
+            _workspace_id,
+            *,
+            generation=None,
+            keep_generation=None,
+            include_generation=False,
+        ):
+            nonlocal close_calls
+            close_calls += 1
+            if close_calls == 1:
+                close_entered.set()
+                await release_close.wait()
+
+        interface._close_desktop_proxy_tunnels_for_workspace = blocked_close
+        stale_stop = asyncio.create_task(
+            interface._announce_desktop_change(
+                workspace_id,
+                old,
+                {"stopped": True, "generation": 4, "epoch": interface._desktop_epoch},
+            )
+        )
+        await asyncio.wait_for(close_entered.wait(), 1)
+        current["session"] = new
+        release_close.set()
+        await stale_stop
+        await interface._announce_desktop_change(
+            workspace_id,
+            new,
+            {"stopped": False, "generation": 5, "epoch": interface._desktop_epoch},
+        )
+        emitted = [call.args for call in interface._sio.emit.await_args_list]
+        self.assertEqual([event for event, _ in emitted], ["desktop:process"])
+        self.assertEqual([payload["generation"] for _, payload in emitted], [5])
+        self.assertEqual(emitted[0][1]["epoch"], interface._desktop_epoch)
+
+    async def test_default_tunnel_close_removes_unknown_generation_tunnel(self) -> None:
+        service = DummyService()
+        workspace_id = uuid.uuid4()
+        other_workspace_id = uuid.uuid4()
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
+        finalize = AsyncMock()
+        interface._finalize_desktop_proxy_tunnel = finalize
+        interface._desktop_proxy_tunnels["unknown"] = SimpleNamespace(
+            workspace_id=workspace_id, desktop_generation=None
+        )
+        interface._desktop_proxy_tunnels["known"] = SimpleNamespace(
+            workspace_id=workspace_id, desktop_generation=5
+        )
+        interface._desktop_proxy_tunnels["other-workspace"] = SimpleNamespace(
+            workspace_id=other_workspace_id, desktop_generation=None
+        )
+
+        await interface._close_desktop_proxy_tunnels_for_workspace(workspace_id)
+
+        self.assertCountEqual(
+            [call.args[0] for call in finalize.await_args_list], ["unknown", "known"]
+        )
+
+    async def test_concurrent_stop_prevents_started_event_after_tunnel_close(
+        self,
+    ) -> None:
+        import asyncio
+
+        service = DummyService()
+        workspace_id = uuid.uuid4()
+        old = SimpleNamespace(generation=4)
+        started = SimpleNamespace(
+            generation=5,
+            port=6901,
+            viewer_held=True,
+            computeruse_run_ids=set(),
+        )
+        current = {"session": old}
+        service.desktop.get_desktop_session = lambda _: current["session"]
+        service.desktop.get_desktop_generation = lambda _: 5
+
+        async def start_desktop(*_args, **_kwargs):
+            current["session"] = started
+            return started
+
+        service.desktop.start_desktop = AsyncMock(side_effect=start_desktop)
+        service.desktop.stop_desktop = AsyncMock(
+            return_value=SimpleNamespace(
+                stopped=True,
+                process_alive=False,
+                generation=5,
+                epoch="legacy-desktop-epoch",
+            )
+        )
+        service.desktop.get_desktop_container_ip = lambda _: "10.0.0.5"
+        service.desktop.get_desktop_network_name = lambda _: "net"
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
+        interface._sio.emit = AsyncMock()
+        close_entered = asyncio.Event()
+        release_start_close = asyncio.Event()
+        close_calls = 0
+
+        async def blocked_close(_workspace_id, **_kwargs):
+            nonlocal close_calls
+            close_calls += 1
+            if close_calls == 1:
+                close_entered.set()
+                await release_start_close.wait()
+            else:
+                current["session"] = None
+
+        interface._close_desktop_proxy_tunnels_for_workspace = blocked_close
+        start = asyncio.create_task(
+            interface._sio.handlers["/"]["task:start_desktop"](
+                {"task_id": "start-race", "workspace_id": str(workspace_id)}
+            )
+        )
+        await asyncio.wait_for(close_entered.wait(), 1)
+        await interface._sio.handlers["/"]["task:stop_desktop"](
+            {"task_id": "stop-race", "workspace_id": str(workspace_id)}
+        )
+        release_start_close.set()
+        await start
+
+        emitted = [call.args[0] for call in interface._sio.emit.await_args_list]
+        self.assertIn("desktop:stopped", emitted)
+        self.assertNotIn("desktop:started", emitted)
+
+    async def test_stop_desktop_emits_generation_and_epoch(self) -> None:
+        service = DummyService()
+        workspace_id = uuid.uuid4()
+        service.desktop.get_desktop_session = lambda _: None
+        service.desktop.get_desktop_state_payload = lambda _: None
+        service.desktop.stop_desktop = AsyncMock(
+            return_value=SimpleNamespace(
+                stopped=True,
+                process_alive=False,
+                viewer_held=False,
+                computer_use_active=False,
+                generation=7,
+                epoch="runner-desktop-epoch",
+            )
+        )
+        interface = WebSocketInterface(
+            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
+        interface._sio.emit = AsyncMock()
+
+        await interface._sio.handlers["/"]["task:stop_desktop"](
+            {"task_id": "task-stop", "workspace_id": str(workspace_id)}
+        )
+
+        event, payload = interface._sio.emit.await_args.args
+        self.assertEqual(event, "desktop:stopped")
+        self.assertEqual(payload["generation"], 7)
+        self.assertEqual(payload["epoch"], "runner-desktop-epoch")
 
     async def test_stop_desktop_emits_viewer_released_when_computer_use_holds(
         self,
@@ -346,6 +558,8 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
                     "process_alive": True,
                     "viewer_held": False,
                     "computer_use_active": True,
+                    "generation": 0,
+                    "epoch": "legacy-desktop-epoch",
                 },
             )()
         )
@@ -366,6 +580,8 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
                 "task_id": task_id,
                 "workspace_id": str(workspace_id),
                 "computer_use_active": True,
+                "generation": 0,
+                "epoch": "legacy-desktop-epoch",
             },
         )
 

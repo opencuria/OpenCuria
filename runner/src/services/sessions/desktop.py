@@ -106,7 +106,7 @@ DESKTOP_STOP_SCRIPT = "/usr/local/bin/opencuria-desktop-stop"
 #: argv nor the stop invocation may contain a literal ``Xvnc``; the
 #: bracketed first letters keep the regex while hiding the literal name.
 DESKTOP_STOPPED_PROBE = (
-    "i=0; while [ \"$i\" -lt 20 ]; do "
+    'i=0; while [ "$i" -lt 20 ]; do '
     "pgrep -f '^(/usr/bin/)?X[v]nc :1|^(/usr/bin/)?X[t]igervnc :1' "
     ">/dev/null || exit 0; i=$((i+1)); sleep 0.25; done; exit 1"
 )
@@ -185,6 +185,9 @@ class DesktopManager:
         self._get_runtime = get_runtime
         self._exec_harness_command = exec_harness_command
         self._desktop_sessions: dict[uuid.UUID, DesktopSession] = {}
+        # Keep the last incarnation number after stop so generations remain
+        # monotonic for this runner epoch and can fence delayed stop events.
+        self._desktop_generations: dict[uuid.UUID, int] = {}
         self._maintenance_locks: dict[uuid.UUID, asyncio.Lock] = {}
         self._maintenance_offsets: dict[uuid.UUID, int] = {}
         self._recording_waiters: dict[str, asyncio.Task] = {}
@@ -508,6 +511,8 @@ class DesktopManager:
             "mcp_active": mcp,
             "holder_count": len(held),
             "active": session is not None,
+            "generation": self.get_desktop_generation(workspace_id),
+            "epoch": self.epoch,
         }
 
     async def _verify_binding(self, workspace_id: uuid.UUID) -> None:
@@ -974,6 +979,8 @@ class DesktopManager:
             "computer_use": bool(session.computeruse_run_ids),
             "mcp": session.mcp_active,
             "holder_count": session.holder_count,
+            "generation": session.generation,
+            "epoch": self.epoch,
         }
 
     @staticmethod
@@ -984,13 +991,19 @@ class DesktopManager:
             raise ValueError(f"Invalid desktop holder: {holder}")
         return value
 
-    def _empty_desktop_release_result(self) -> DesktopReleaseResult:
+    def _empty_desktop_release_result(
+        self, workspace_id: uuid.UUID | None = None
+    ) -> DesktopReleaseResult:
         """Return a release result when no desktop process is tracked."""
         return DesktopReleaseResult(
             stopped=False,
             process_alive=False,
             viewer_held=False,
             computer_use_active=False,
+            generation=(
+                self.get_desktop_generation(workspace_id) if workspace_id else 0
+            ),
+            epoch=self.epoch,
         )
 
     def _desktop_release_result(
@@ -998,6 +1011,7 @@ class DesktopManager:
         session: DesktopSession | None,
         *,
         stopped: bool,
+        workspace_id: uuid.UUID | None = None,
     ) -> DesktopReleaseResult:
         """Build a release result from the current session cache."""
         if session is None:
@@ -1006,12 +1020,20 @@ class DesktopManager:
                 process_alive=not stopped,
                 viewer_held=False,
                 computer_use_active=False,
+                generation=(
+                    self.get_desktop_generation(workspace_id) if workspace_id else 0
+                ),
+                epoch=self.epoch,
             )
         return DesktopReleaseResult(
             stopped=stopped,
             process_alive=not stopped,
             viewer_held=session.viewer_held,
             computer_use_active=bool(session.computeruse_run_ids),
+            mcp_active=session.mcp_active,
+            holder_count=session.holder_count,
+            generation=session.generation,
+            epoch=self.epoch,
         )
 
     @staticmethod
@@ -1105,6 +1127,112 @@ class DesktopManager:
             "exit 1\n"
         )
 
+    def get_desktop_generation(self, workspace_id: uuid.UUID) -> int:
+        """Return the current or most recently stopped desktop generation."""
+        session = self._desktop_sessions.get(workspace_id)
+        return max(
+            session.generation if session is not None else 0,
+            self._desktop_generations.get(workspace_id, 0),
+        )
+
+    async def reconcile_heartbeat_session(
+        self,
+        workspace_id: uuid.UUID,
+        expected_session: DesktopSession | None,
+        *,
+        workspace_running: bool,
+        liveness_probe: Callable[[uuid.UUID], Awaitable[bool]] | None = None,
+    ) -> tuple[dict[str, Any] | None, bool, int]:
+        """Reconcile heartbeat liveness without racing desktop lifecycle work.
+
+        Probe outside the lifecycle lock first so a transient negative cannot
+        block a concurrent acquire. Then take the lock, verify the cached
+        session identity, and confirm a negative while acquires/releases are
+        excluded. Stop-state evidence also prunes only the exact session that
+        the registry observed. Probe errors are unknown and preserve tracking.
+        """
+        probe = liveness_probe or self._is_desktop_session_live
+
+        if not workspace_running:
+            lock = await self._desktop_lock(workspace_id)
+            async with lock:
+                current = self._desktop_sessions.get(workspace_id)
+                if current is not None and current is expected_session:
+                    self._desktop_sessions.pop(workspace_id, None)
+                current = self._desktop_sessions.get(workspace_id)
+                return (
+                    None,
+                    current is not None,
+                    self.get_desktop_generation(workspace_id),
+                )
+
+        initial_live: bool | None = None
+        if expected_session is not None:
+            try:
+                initial_live = await probe(workspace_id)
+            except Exception:
+                logger.exception(
+                    "desktop_session_health_check_failed",
+                    workspace_id=str(workspace_id),
+                )
+                lock = await self._desktop_lock(workspace_id)
+                async with lock:
+                    current = self._desktop_sessions.get(workspace_id)
+                    return (
+                        None,
+                        current is not None,
+                        self.get_desktop_generation(workspace_id),
+                    )
+
+        lock = await self._desktop_lock(workspace_id)
+        async with lock:
+            current = self._desktop_sessions.get(workspace_id)
+            if current is None:
+                return None, False, self.get_desktop_generation(workspace_id)
+
+            # The initial probe only describes the expected session. If a
+            # lifecycle operation installed a replacement while it ran, probe
+            # that replacement under the lock rather than applying stale
+            # evidence to it.
+            confirmed_live = initial_live if current is expected_session else None
+            try:
+                if confirmed_live is None:
+                    confirmed_live = await probe(workspace_id)
+                if confirmed_live:
+                    return (
+                        self._desktop_heartbeat_payload(workspace_id, current),
+                        True,
+                        self.get_desktop_generation(workspace_id),
+                    )
+
+                # A single negative remains provisional. This confirmation is
+                # serialized with acquire/release and applies to `current`.
+                if await probe(workspace_id):
+                    return (
+                        self._desktop_heartbeat_payload(workspace_id, current),
+                        True,
+                        self.get_desktop_generation(workspace_id),
+                    )
+            except Exception:
+                logger.exception(
+                    "desktop_session_health_check_failed",
+                    workspace_id=str(workspace_id),
+                )
+                return None, True, self.get_desktop_generation(workspace_id)
+
+            # The lock keeps this identity stable, but retain the explicit
+            # guard so future changes cannot let stale evidence prune a new
+            # cache entry.
+            if self._desktop_sessions.get(workspace_id) is not current:
+                replacement = self._desktop_sessions.get(workspace_id)
+                return (
+                    None,
+                    replacement is not None,
+                    self.get_desktop_generation(workspace_id),
+                )
+            self._desktop_sessions.pop(workspace_id, None)
+            return None, False, self.get_desktop_generation(workspace_id)
+
     def get_desktop_state_payload(
         self,
         workspace_id: uuid.UUID,
@@ -1121,6 +1249,7 @@ class DesktopManager:
             "viewer": session.viewer_held,
             "computer_use": bool(session.computeruse_run_ids),
             "generation": session.generation,
+            "epoch": self.epoch,
             "mcp": session.mcp_active,
             "holder_count": session.holder_count,
         }
@@ -1162,7 +1291,10 @@ class DesktopManager:
         preserved_runs = (
             set(existing.computeruse_run_ids) if existing is not None else set()
         )
-        preserved_generation = existing.generation if existing is not None else 0
+        preserved_generation = max(
+            existing.generation if existing is not None else 0,
+            self._desktop_generations.get(workspace_id, 0),
+        )
         if existing is not None:
             if await self._is_desktop_session_live(workspace_id):
                 logger.info("desktop_already_running", workspace_id=str(workspace_id))
@@ -1182,6 +1314,7 @@ class DesktopManager:
                 generation=preserved_generation + 1,
             )
             self._desktop_sessions[workspace_id] = recovered
+            self._desktop_generations[workspace_id] = recovered.generation
             logger.info(
                 "desktop_session_recovered_on_start",
                 workspace_id=str(workspace_id),
@@ -1226,6 +1359,7 @@ class DesktopManager:
             generation=preserved_generation + 1,
         )
         self._desktop_sessions[workspace_id] = session
+        self._desktop_generations[workspace_id] = session.generation
         log.info("desktop_started", port=session.port, generation=session.generation)
         return session
 
@@ -1367,6 +1501,8 @@ class DesktopManager:
                 computer_use_active=summary["computer_use_active"],
                 mcp_active=summary["mcp_active"],
                 holder_count=summary["holder_count"],
+                generation=summary["generation"],
+                epoch=self.epoch,
             )
         if kind != DESKTOP_HOLDER_VIEWER:
             self._sanitize_run_id(str(run_id or ""))
@@ -1385,6 +1521,8 @@ class DesktopManager:
                         process_alive=False,
                         viewer_held=False,
                         computer_use_active=False,
+                        generation=self.get_desktop_generation(workspace_id),
+                        epoch=self.epoch,
                     )
                 await self._stop_desktop_process(
                     workspace_id, interrupt_recordings=True
@@ -1394,11 +1532,13 @@ class DesktopManager:
                     process_alive=False,
                     viewer_held=False,
                     computer_use_active=False,
+                    generation=self.get_desktop_generation(workspace_id),
+                    epoch=self.epoch,
                 )
             else:
                 session = self._desktop_sessions.get(workspace_id)
                 if session is None:
-                    return self._empty_desktop_release_result()
+                    return self._empty_desktop_release_result(workspace_id)
 
                 if kind == DESKTOP_HOLDER_VIEWER:
                     session.viewer_held = False
@@ -1419,7 +1559,9 @@ class DesktopManager:
                     computer_use=bool(session.computeruse_run_ids),
                 )
                 if session.viewer_held or session.computeruse_run_ids:
-                    return self._desktop_release_result(session, stopped=False)
+                    return self._desktop_release_result(
+                        session, stopped=False, workspace_id=workspace_id
+                    )
 
                 await self._stop_desktop_process(
                     workspace_id,
@@ -1429,12 +1571,16 @@ class DesktopManager:
                 if self._desktop_sessions.get(workspace_id) is session:
                     # A concurrent start installed a fresh session while the
                     # stop exec ran: report it instead of claiming "stopped".
-                    return self._desktop_release_result(session, stopped=False)
+                    return self._desktop_release_result(
+                        session, stopped=False, workspace_id=workspace_id
+                    )
                 stopped_result = DesktopReleaseResult(
                     stopped=True,
                     process_alive=False,
                     viewer_held=False,
                     computer_use_active=False,
+                    generation=self.get_desktop_generation(workspace_id),
+                    epoch=self.epoch,
                 )
         # No lock cleanup here: the per-workspace lock object is retained
         # for the process lifetime so queued waiters and later callers
@@ -1784,6 +1930,7 @@ class DesktopManager:
             height=payload.get("desktop_height"),
         )
         return {
+            **self.get_desktop_state_payload(workspace_id),
             "ok": True,
             "display": DESKTOP_DISPLAY,
             "port": session.port,
@@ -1811,6 +1958,8 @@ class DesktopManager:
             "process_alive": result.process_alive,
             "viewer_held": result.viewer_held,
             "computer_use_active": result.computer_use_active,
+            "generation": result.generation,
+            "epoch": result.epoch,
         }
 
     async def _desktop_action_display_info(

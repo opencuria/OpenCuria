@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 import uuid
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 from src.config import RunnerSettings
 from src.models import DesktopSession, WorkspaceInfo
@@ -34,6 +34,140 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
             status="running",
             runtime_type="docker",
         )
+
+    async def test_heartbeat_false_probe_then_true_does_not_prune(self) -> None:
+        session = DesktopSession(self.workspace_id, "instance-1", generation=5)
+        self.service._desktop_sessions[self.workspace_id] = session
+        self.service.desktop._desktop_generations[self.workspace_id] = 5
+        probes = AsyncMock(side_effect=[False, True])
+        self.service._registry.desktop_live = probes
+
+        payload = await self.service.get_workspace_heartbeat_statuses()
+
+        self.assertIsNotNone(payload[0]["desktop"])
+        self.assertTrue(payload[0]["desktop_session_tracked"])
+        self.assertIs(self.service._desktop_sessions[self.workspace_id], session)
+        probes.assert_has_awaits([call(self.workspace_id)] * 2)
+
+    async def test_heartbeat_stale_negative_racing_acquire_reuses_session(self) -> None:
+        session = DesktopSession(self.workspace_id, "instance-1", generation=5)
+        self.service._desktop_sessions[self.workspace_id] = session
+        self.service.desktop._desktop_generations[self.workspace_id] = 5
+        initial_probe_started = asyncio.Event()
+        finish_initial_probe = asyncio.Event()
+        heartbeat_probe_count = 0
+
+        async def heartbeat_probe(workspace_id: uuid.UUID) -> bool:
+            nonlocal heartbeat_probe_count
+            self.assertEqual(workspace_id, self.workspace_id)
+            heartbeat_probe_count += 1
+            if heartbeat_probe_count == 1:
+                initial_probe_started.set()
+                await finish_initial_probe.wait()
+                return False
+            return True
+
+        self.service.desktop._is_desktop_session_live = AsyncMock(return_value=True)
+        self.service._registry.desktop_live = heartbeat_probe
+        heartbeat = asyncio.create_task(self.service.get_workspace_heartbeat_statuses())
+        await asyncio.wait_for(initial_probe_started.wait(), timeout=1)
+
+        acquired = await self.service.acquire_desktop(
+            self.workspace_id, holder="viewer"
+        )
+        self.assertIs(acquired, session)
+        self.assertTrue(acquired.viewer_held)
+
+        # The first negative was captured before a valid acquire reused the
+        # same session. Locked re-probing must observe the healthy process.
+        finish_initial_probe.set()
+        payload = await heartbeat
+
+        self.assertIs(self.service._desktop_sessions[self.workspace_id], session)
+        self.assertIsNotNone(payload[0]["desktop"])
+        self.assertTrue(payload[0]["desktop_session_tracked"])
+        self.assertTrue(payload[0]["desktop"]["viewer"])
+        self.assertEqual(heartbeat_probe_count, 2)
+
+    async def test_heartbeat_stale_negative_racing_successful_acquire_replacement(
+        self,
+    ) -> None:
+        stale = DesktopSession(self.workspace_id, "instance-1", generation=5)
+        self.service._desktop_sessions[self.workspace_id] = stale
+        self.service.desktop._desktop_generations[self.workspace_id] = 5
+        initial_probe_started = asyncio.Event()
+        finish_initial_probe = asyncio.Event()
+        heartbeat_probe_count = 0
+
+        async def heartbeat_probe(workspace_id: uuid.UUID) -> bool:
+            nonlocal heartbeat_probe_count
+            self.assertEqual(workspace_id, self.workspace_id)
+            heartbeat_probe_count += 1
+            if heartbeat_probe_count == 1:
+                initial_probe_started.set()
+                await finish_initial_probe.wait()
+                return False
+            return True
+
+        # The acquire observes the cached incarnation as stale, then finds
+        # the replacement process live and installs a fresh session object.
+        self.service.desktop._is_desktop_session_live = AsyncMock(
+            side_effect=[False, True]
+        )
+        self.service._registry.desktop_live = heartbeat_probe
+        heartbeat = asyncio.create_task(self.service.get_workspace_heartbeat_statuses())
+        await asyncio.wait_for(initial_probe_started.wait(), timeout=1)
+
+        acquired = await self.service.acquire_desktop(
+            self.workspace_id, holder="viewer"
+        )
+        self.assertIsNot(acquired, stale)
+        self.assertEqual(acquired.generation, 6)
+        self.assertTrue(acquired.viewer_held)
+
+        # Release the stale negative only after acquire has replaced the cache.
+        # Reconciliation must recognize that identity change and probe the
+        # new session, not apply the old negative to it.
+        finish_initial_probe.set()
+        payload = await heartbeat
+
+        self.assertIs(self.service._desktop_sessions[self.workspace_id], acquired)
+        self.assertIsNotNone(payload[0]["desktop"])
+        self.assertTrue(payload[0]["desktop_session_tracked"])
+        self.assertTrue(payload[0]["desktop"]["viewer"])
+        self.assertEqual(heartbeat_probe_count, 2)
+
+    async def test_heartbeat_probe_exception_preserves_cached_session(self) -> None:
+        session = DesktopSession(self.workspace_id, "instance-1", generation=5)
+        self.service._desktop_sessions[self.workspace_id] = session
+        self.service.desktop._desktop_generations[self.workspace_id] = 5
+        probes = AsyncMock(side_effect=RuntimeError("transient runtime error"))
+        self.service._registry.desktop_live = probes
+
+        payload = await self.service.get_workspace_heartbeat_statuses()
+
+        self.assertIs(self.service._desktop_sessions[self.workspace_id], session)
+        self.assertTrue(payload[0]["desktop_session_tracked"])
+        self.assertIsNone(payload[0]["desktop"])
+        probes.assert_awaited_once_with(self.workspace_id)
+
+    async def test_heartbeat_confirmed_stop_prunes_stale_session(self) -> None:
+        session = DesktopSession(self.workspace_id, "instance-1", generation=5)
+        self.service._desktop_sessions[self.workspace_id] = session
+        self.service.desktop._desktop_generations[self.workspace_id] = 5
+        self.service.desktop._is_desktop_session_live = AsyncMock(
+            side_effect=[False, False]
+        )
+        self.service._registry.desktop_live = (
+            self.service.desktop._is_desktop_session_live
+        )
+
+        payload = await self.service.get_workspace_heartbeat_statuses()
+
+        self.assertIsNone(payload[0]["desktop"])
+        self.assertFalse(payload[0]["desktop_session_tracked"])
+        self.assertEqual(payload[0]["desktop_generation"], 5)
+        self.assertNotIn(self.workspace_id, self.service._desktop_sessions)
 
     async def test_start_desktop_restarts_stale_cached_session(self) -> None:
         self.service._desktop_sessions[self.workspace_id] = DesktopSession(
@@ -639,6 +773,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
                 "viewer": False,
                 "computer_use": True,
                 "generation": payload["generation"],
+                "epoch": payload["epoch"],
                 "mcp": False,
                 "holder_count": 1,
             },
@@ -688,7 +823,10 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
             workspace_id=self.workspace_id,
             instance_id="instance-1",
         )
-        self.runtime.exec_command_wait.return_value = (1, "dead")
+        self.service._registry.desktop_manager = self.service.desktop
+        self.service.desktop._desktop_generations[self.workspace_id] = 0
+        self.service._registry.desktop_live = AsyncMock(return_value=False)
+        self.service._registry.get_cached(self.workspace_id).status = "stopped"
 
         payload = await self.service.get_workspace_heartbeat_statuses()
 
@@ -697,22 +835,35 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
             [
                 {
                     "workspace_id": str(self.workspace_id),
-                    "status": "running",
+                    "status": "stopped",
                     "runtime_type": "docker",
                     "desktop": None,
+                    "desktop_epoch": self.service.desktop.epoch,
+                    "desktop_generation": 0,
+                    "desktop_session_tracked": False,
                     "processes": [],
                 }
             ],
         )
-        self.assertIn(self.workspace_id, self.service._desktop_sessions)
+        self.assertNotIn(self.workspace_id, self.service._desktop_sessions)
 
-    async def test_recover_desktop_sessions_from_runtime_rebuilds_cache(self) -> None:
-        self.runtime.exec_command_wait.return_value = (0, "alive")
+    async def test_recover_desktop_sessions_from_runtime_does_not_probe_or_prune(
+        self,
+    ) -> None:
+        # Observation/reconciliation belongs to the heartbeat path; reconnect
+        # recovery only repairs durable lease bookkeeping and does not infer cache
+        # session removal from a one-shot liveness probe.
+        session = DesktopSession(self.workspace_id, "instance-1", generation=5)
+        self.service._desktop_sessions[self.workspace_id] = session
+        self.service.desktop._desktop_generations[self.workspace_id] = 5
+        self.runtime.exec_command_wait.return_value = (1, "transient refusal")
 
         await self.service.recover_desktop_sessions_from_runtime()
 
-        session = self.service._desktop_sessions[self.workspace_id]
-        self.assertEqual(session.workspace_id, self.workspace_id)
+        self.assertIs(self.service._desktop_sessions[self.workspace_id], session)
+        self.assertEqual(
+            self.service.desktop.get_desktop_generation(self.workspace_id), 5
+        )
 
     async def test_start_desktop_recovers_live_session_missing_from_cache(self) -> None:
         self.runtime.exec_command_wait.return_value = (0, "alive")
@@ -852,6 +1003,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_heartbeat_includes_lease_flags(self) -> None:
         self.runtime.exec_command_wait.return_value = (0, "alive")
+        self.service._registry.desktop_manager = self.service.desktop
         await self.service.acquire_desktop(
             self.workspace_id, holder="computeruse", run_id="run-1"
         )

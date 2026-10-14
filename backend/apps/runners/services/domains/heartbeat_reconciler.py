@@ -155,7 +155,6 @@ class HeartbeatReconcilerMixin:
         """
         # Update heartbeat timestamp
         self.runners.update_heartbeat(runner)
-
         # Build lookup of runner-reported workspace states
         runner_ws_payloads: dict[str, dict] = {}
         runner_ws_states: dict[str, str] = {}
@@ -311,10 +310,23 @@ class HeartbeatReconcilerMixin:
                         )
 
                 if "desktop" in runner_payload:
+                    desktop_epoch = runner_payload.get("desktop_epoch") or (
+                        getattr(self, "_runner_desktop_epochs", {}).get(runner_id_str)
+                    )
+                    desktop_sync_kwargs = {"runner_id": runner_id_str}
+                    if desktop_epoch is not None:
+                        desktop_sync_kwargs["desktop_epoch"] = desktop_epoch
+                    desktop_generation = runner_payload.get("desktop_generation")
+                    if desktop_generation is not None:
+                        desktop_sync_kwargs["desktop_generation"] = desktop_generation
+                    if "desktop_session_tracked" in runner_payload:
+                        desktop_sync_kwargs["desktop_session_tracked"] = (
+                            runner_payload["desktop_session_tracked"]
+                        )
                     self._sync_desktop_state_from_heartbeat(
                         ws_id_str,
                         runner_payload.get("desktop"),
-                        runner_id=runner_id_str,
+                        **desktop_sync_kwargs,
                     )
 
         async_to_sync(self.auto_stop_inactive_workspaces)(

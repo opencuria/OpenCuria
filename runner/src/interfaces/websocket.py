@@ -77,6 +77,7 @@ class DesktopProxyTunnel:
     websocket: aiohttp.ClientWebSocketResponse
     reader_task: asyncio.Task
     workspace_id: uuid.UUID
+    desktop_generation: int | None = None
 
 
 class WebSocketInterface(Interface):
@@ -103,6 +104,7 @@ class WebSocketInterface(Interface):
             },
         )
         self._inventory_epoch = str(uuid.uuid4())
+        self._desktop_epoch = self._inventory_epoch
         self._inventory_sequence = 0
         self._last_inventory_at = 0.0
         self._running_tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
@@ -137,6 +139,8 @@ class WebSocketInterface(Interface):
         configure = getattr(self._service, "configure_desktop_leases", None)
         if configure is not None:
             configure(settings.state_dir, self._inventory_epoch)
+        desktop = getattr(self._service, "desktop", None)
+        self._desktop_epoch = getattr(desktop, "epoch", self._inventory_epoch)
         images = getattr(self._service, "images", None)
         if images is not None:
             images.scrub_proof_hook = self._workspace_scrub_proof
@@ -321,16 +325,25 @@ class WebSocketInterface(Interface):
         reader_task = asyncio.create_task(
             self._desktop_proxy_reader(tunnel_id, websocket)
         )
+        desktop_session = self._service.desktop.get_desktop_session(workspace_id)
         self._desktop_proxy_tunnels[tunnel_id] = DesktopProxyTunnel(
             session=session,
             websocket=websocket,
             reader_task=reader_task,
             workspace_id=workspace_id,
+            desktop_generation=(
+                desktop_session.generation if desktop_session is not None else None
+            ),
         )
         return {"ok": True, "subprotocol": chosen_protocol}
 
     async def _close_desktop_proxy_tunnels_for_workspace(
-        self, workspace_id: uuid.UUID
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        generation: int | None = None,
+        keep_generation: int | None = None,
+        include_generation: bool = False,
     ) -> None:
         """Close runner-side desktop proxy tunnels for one workspace.
 
@@ -342,6 +355,16 @@ class WebSocketInterface(Interface):
             tunnel_id
             for tunnel_id, tunnel in self._desktop_proxy_tunnels.items()
             if tunnel.workspace_id == workspace_id
+            and (
+                generation is None
+                or tunnel.desktop_generation is None
+                or tunnel.desktop_generation < generation
+                or include_generation and tunnel.desktop_generation == generation
+            )
+            and (
+                keep_generation is None
+                or tunnel.desktop_generation != keep_generation
+            )
         ]
         for tunnel_id in tunnel_ids:
             with contextlib.suppress(Exception):
@@ -382,36 +405,57 @@ class WebSocketInterface(Interface):
         """Publish lifecycle before replies; only invalidate replaced processes."""
         after = self._service.desktop.get_desktop_session(workspace_id)
         stopped = bool(result.get("stopped")) or (before is not None and after is None)
-        if after is not before or stopped:
-            await self._close_desktop_proxy_tunnels_for_workspace(workspace_id)
-        if stopped:
+        replaced = after is not None and after is not before
+        ending = stopped and after is None
+        generation = result.get(
+            "generation",
+            getattr(before, "generation", None)
+            if ending
+            else getattr(after, "generation", None),
+        )
+        epoch = result.get("epoch", self._desktop_epoch)
+        if replaced or ending:
+            await self._close_desktop_proxy_tunnels_for_workspace(
+                workspace_id,
+                generation=(after.generation if replaced else generation),
+                keep_generation=after.generation if replaced else None,
+                include_generation=ending,
+            )
+        # Tunnel closure awaits network effects; lifecycle may move on while
+        # suspended. A newer session's own start event owns its fresh route.
+        current = self._service.desktop.get_desktop_session(workspace_id)
+        if replaced and current is not after:
+            return
+        if ending and current is not None:
+            return
+        if current is not None:
+            state = self._desktop_lifecycle_payload(workspace_id)
+            if state is not None:
+                await self._sio.emit("desktop:process", state)
+        elif ending:
             await self._sio.emit(
                 "desktop:stopped",
                 {
                     "workspace_id": str(workspace_id),
                     **result,
+                    "generation": generation,
+                    "epoch": epoch,
                 },
             )
-        elif after is not None or result.get("process_alive"):
+        elif result.get("process_alive") and result.get("generation") is not None:
+            await self._sio.emit(
+                "desktop:viewer_released",
+                {
+                    **result,
+                    "workspace_id": str(workspace_id),
+                    "generation": generation,
+                    "epoch": epoch,
+                },
+            )
+        elif result.get("process_alive"):
             state = self._desktop_lifecycle_payload(workspace_id)
             if state is not None:
-                await self._sio.emit(
-                    "desktop:process",
-                    {
-                        **state,
-                        **{
-                            key: result[key]
-                            for key in (
-                                "viewer",
-                                "computer_use",
-                                "mcp",
-                                "mcp_active",
-                                "holder_count",
-                            )
-                            if key in result
-                        },
-                    },
-                )
+                await self._sio.emit("desktop:process", state)
 
     async def _desktop_lease_tick(self) -> None:
         """Maintain workspaces concurrently without an unbounded task backlog."""
@@ -455,7 +499,17 @@ class WebSocketInterface(Interface):
                 ):
                     if self._sio.connected:
                         await self._announce_desktop_change(
-                            workspace_id, before, {"stopped": current is None}
+                            workspace_id,
+                            before,
+                            {
+                                "stopped": current is None,
+                                "generation": (
+                                    current.get("generation")
+                                    if current is not None
+                                    else desktop.get_desktop_generation(workspace_id)
+                                ),
+                                "epoch": self._desktop_epoch,
+                            },
                         )
                     elif before is not desktop.get_desktop_session(workspace_id):
                         await self._close_desktop_proxy_tunnels_for_workspace(workspace_id)
@@ -586,6 +640,7 @@ class WebSocketInterface(Interface):
                             "workspace_states_observed": False,
                             "snapshot_complete": False,
                             "inventory_epoch": self._inventory_epoch,
+                            "desktop_epoch": self._desktop_epoch,
                             "inventory_sequence": self._inventory_sequence,
                         },
                     )
@@ -619,7 +674,17 @@ class WebSocketInterface(Interface):
                     current = self._desktop_lifecycle_payload(workspace_id)
                     if previous != current and self._sio.connected:
                         await self._announce_desktop_change(
-                            workspace_id, before, {"stopped": current is None}
+                            workspace_id,
+                            before,
+                            {
+                                "stopped": current is None,
+                                "generation": (
+                                    current.get("generation")
+                                    if current is not None
+                                    else desktop.get_desktop_generation(workspace_id)
+                                ),
+                                "epoch": self._desktop_epoch,
+                            },
                         )
                 for workspace_id, info in getattr(
                     getattr(self._service, "_registry", None), "_cache", {}
@@ -646,6 +711,7 @@ class WebSocketInterface(Interface):
                             "workspaces": workspaces,
                             "workspace_states_observed": True,
                             "snapshot_complete": False,
+                            "desktop_epoch": self._desktop_epoch,
                         },
                     )
                     for workspace in workspaces:
@@ -663,6 +729,8 @@ class WebSocketInterface(Interface):
                                     "mcp": bool(desktop.get("mcp")),
                                     "mcp_active": bool(desktop.get("mcp_active")),
                                     "holder_count": desktop.get("holder_count", 0),
+                                    "generation": desktop.get("generation"),
+                                    "epoch": desktop.get("epoch", self._desktop_epoch),
                                 },
                             )
                     await self._operations.replay()
@@ -811,7 +879,7 @@ class WebSocketInterface(Interface):
                     "inventory_epoch": self._inventory_epoch,
                     "desktop_leases": {
                         "protocol_version": 1,
-                        "epoch": self._inventory_epoch,
+                        "epoch": self._desktop_epoch,
                     },
                 },
             )
@@ -1459,6 +1527,9 @@ class WebSocketInterface(Interface):
                         raise RuntimeError("Viewer lease could not be held")
                     await self._announce_desktop_change(workspace_id, before, result)
                     state = self._desktop_lifecycle_payload(workspace_id) or {}
+                    current = self._service.desktop.get_desktop_session(workspace_id)
+                    if current is None:
+                        return
                     await sio.emit(
                         "desktop:started",
                         {
@@ -1466,6 +1537,8 @@ class WebSocketInterface(Interface):
                             **result,
                             "task_id": task_id,
                             "workspace_id": str(workspace_id),
+                            "generation": current.generation,
+                            "epoch": self._desktop_epoch,
                         },
                     )
                     return
@@ -1492,7 +1565,15 @@ class WebSocketInterface(Interface):
                 # (same generation): closing tunnels there would drop
                 # healthy viewers on every reconnect.
                 if session is not before:
-                    await self._close_desktop_proxy_tunnels_for_workspace(workspace_id)
+                    await self._close_desktop_proxy_tunnels_for_workspace(
+                        workspace_id,
+                        generation=session.generation,
+                        keep_generation=session.generation,
+                        include_generation=True,
+                    )
+                    if self._service.desktop.get_desktop_session(workspace_id) is None:
+                        return
+                    session = self._service.desktop.get_desktop_session(workspace_id)
                 await sio.emit(
                     "desktop:started",
                     {
@@ -1503,6 +1584,8 @@ class WebSocketInterface(Interface):
                         "network_name": network_name,
                         "viewer": session.viewer_held,
                         "computer_use": bool(session.computeruse_run_ids),
+                        "generation": session.generation,
+                        "epoch": self._desktop_epoch,
                     },
                 )
                 log.info(
@@ -1539,19 +1622,36 @@ class WebSocketInterface(Interface):
                             **result,
                             "task_id": task_id,
                             "workspace_id": str(workspace_id),
+                            "generation": result["generation"],
+                            "epoch": result["epoch"],
                         },
                     )
                     return
                 result = await self._service.desktop.stop_desktop(workspace_id)
                 if result.stopped or not result.process_alive:
-                    await self._close_desktop_proxy_tunnels_for_workspace(workspace_id)
-                    await sio.emit(
-                        "desktop:stopped",
-                        {
-                            "task_id": task_id,
-                            "workspace_id": str(workspace_id),
-                        },
+                    generation = result.generation
+                    await self._close_desktop_proxy_tunnels_for_workspace(
+                        workspace_id,
+                        generation=generation,
+                        include_generation=True,
                     )
+                    # A fresh hold may have completed while tunnel teardown awaited.
+                    current = self._service.desktop.get_desktop_session(workspace_id)
+                    if current is not None:
+                        await sio.emit(
+                            "desktop:process",
+                            self._desktop_lifecycle_payload(workspace_id),
+                        )
+                    else:
+                        await sio.emit(
+                            "desktop:stopped",
+                            {
+                                "task_id": task_id,
+                                "workspace_id": str(workspace_id),
+                                "generation": generation,
+                                "epoch": result.epoch or self._desktop_epoch,
+                            },
+                        )
                     log.info("desktop_stopped")
                 else:
                     await sio.emit(
@@ -1560,6 +1660,8 @@ class WebSocketInterface(Interface):
                             "task_id": task_id,
                             "workspace_id": str(workspace_id),
                             "computer_use_active": result.computer_use_active,
+                            "generation": result.generation,
+                            "epoch": result.epoch or self._desktop_epoch,
                         },
                     )
                     log.info(

@@ -42,7 +42,9 @@ export function createViewerClientId(): string {
 export const desktopViewerClientId = createViewerClientId()
 const RENEW_MS = 45_000
 const POLL_MS = 1_000
+const STARTUP_OBSERVE_MS = 1_000
 const STARTUP_MS = 30_000
+const DESKTOP_REQUEST_TIMEOUT_MS = 10_000
 const MAX_START_ATTEMPTS = 3
 /** Navigation unmounts a surface before its replacement retains the intent. */
 export const RELEASE_GRACE_MS = 1_500
@@ -66,6 +68,7 @@ export interface ViewerSession {
   startupDeadline: number
   startAttempts: number
   timer: ReturnType<typeof setTimeout> | null
+  startupTimer: ReturnType<typeof setTimeout> | null
   release: DeferredRelease | null
 }
 const sessions = new Map<string, ViewerSession>()
@@ -84,6 +87,7 @@ export function desktopViewerSession(workspaceId: string): ViewerSession {
       owners: new Set(),
       pending: null,
       timer: null,
+      startupTimer: null,
       observation: 0,
       startupDeadline: 0,
       startAttempts: 0,
@@ -103,24 +107,73 @@ function cancelTimer(session: ViewerSession): void {
   session.timer = null
 }
 
+function cancelStartupTimer(session: ViewerSession): void {
+  if (session.startupTimer !== null) clearTimeout(session.startupTimer)
+  session.startupTimer = null
+}
+
 function current(session: ViewerSession, revision: number): boolean {
   return session.wanted && session.owners.size > 0 && session.revision === revision
 }
 
-function schedule(workspaceId: string, session: ViewerSession, delay: number): void {
+function isReady(session: ViewerSession): boolean {
+  return (
+    session.leaseState === 'held' &&
+    Boolean(session.status?.active) &&
+    Boolean(session.status?.proxy_url)
+  )
+}
+
+function withDesktopRequest<T>(request: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController()
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const requestPromise = Promise.resolve().then(() => request(controller.signal))
+  const deadline = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      controller.abort()
+      reject(new Error('Desktop request timed out'))
+    }, DESKTOP_REQUEST_TIMEOUT_MS)
+  })
+  return Promise.race([requestPromise, deadline]).finally(() => {
+    if (timeout !== undefined) clearTimeout(timeout)
+  })
+}
+
+function schedule(workspaceId: string, session: ViewerSession, delay: number, renew = false): void {
   cancelTimer(session)
   if (!current(session, session.revision)) return
   session.timer = setTimeout(() => {
     session.timer = null
-    void refreshDesktopViewer(workspaceId, true)
+    void refreshDesktopViewer(workspaceId, renew)
+  }, delay)
+}
+
+function scheduleStartupDeadline(session: ViewerSession, revision: number): void {
+  cancelStartupTimer(session)
+  const delay = Math.max(0, session.startupDeadline - Date.now())
+  session.startupTimer = setTimeout(() => {
+    session.startupTimer = null
+    if (!current(session, revision) || !session.startupDeadline) return
+    failStartup(session)
   }, delay)
 }
 
 /** Query own lease, never infer ownership from globally active desktop events. */
-export async function refreshDesktopViewer(workspaceId: string, renew = false): Promise<void> {
+export function refreshDesktopViewer(
+  workspaceId: string,
+  renew = false,
+): Promise<api.DesktopStatus | null> {
   const session = desktopViewerSession(workspaceId)
-  const revision = session.revision
-  const wanted = session.wanted
+  return observeDesktopViewer(workspaceId, session, session.revision, session.wanted, renew)
+}
+
+async function observeDesktopViewer(
+  workspaceId: string,
+  session: ViewerSession,
+  revision: number,
+  wanted: boolean,
+  renew: boolean,
+): Promise<api.DesktopStatus | null> {
   const observation = ++session.observation
   const isLatest = () =>
     session.observation === observation &&
@@ -130,11 +183,20 @@ export async function refreshDesktopViewer(workspaceId: string, renew = false): 
     if (renew && current(session, revision) && session.leaseState === 'held') {
       // Renew is only allowed for a confirmed existing intent. Failed renewal
       // is followed by status, not by an implicit start.
-      await api.renewDesktop(workspaceId, intent(session)).catch(() => undefined)
-      if (!isLatest()) return
+      await withDesktopRequest((signal) =>
+        api.renewDesktop(workspaceId, intent(session), signal),
+      ).catch(() => undefined)
+      if (!isLatest()) return null
     }
-    const status = await api.getDesktopStatus(workspaceId, desktopViewerClientId)
-    if (!isLatest()) return
+    const status = await withDesktopRequest((signal) =>
+      api.getDesktopStatus(workspaceId, desktopViewerClientId, signal),
+    )
+    if (!isLatest()) return null
+    if (session.startupDeadline && Date.now() >= session.startupDeadline) {
+      failStartup(session)
+      return null
+    }
+    const wasReady = isReady(session)
     session.status = status
     const remoteRevision = status.revision ?? status.intent_revision
     const state = status.viewer_lease_state ?? 'unknown'
@@ -145,38 +207,69 @@ export async function refreshDesktopViewer(workspaceId: string, renew = false): 
     }
     // A global active/viewer_held summary is explicitly not our membership.
     session.leaseState = remoteRevision === revision ? state : 'unknown'
-    if (!current(session, session.revision)) return
+    if (!current(session, session.revision)) {
+      if (!session.wanted && session.revision === revision) {
+        session.status = null
+        session.leaseState = 'released'
+      }
+      return status
+    }
     const terminal = ['expired', 'released'].includes(state)
     const olderEnded = remoteRevision !== undefined && remoteRevision < revision && terminal
     // A 202 start is only dispatch acknowledgement. It may have been rejected
     // while the previous revision was closing. Retry only after its terminal
     // tombstone is conclusively observed, with a newer revision and a bound.
-    if (session.startupDeadline && Date.now() >= session.startupDeadline) {
-      failStartup(session)
-      return
-    }
     if (epochChanged || olderEnded || ['expired', 'released'].includes(session.leaseState)) {
       session.pending = null
       session.leaseState = 'unknown'
       await acquireDesktopViewer(workspaceId, true)
-      return
+      // Recovery can replace an expired response with a fresh status snapshot.
+      return session.status
     }
-    session.connecting = session.leaseState !== 'held'
-    if (!session.connecting) {
+    if (!isReady(session) && state === 'held' && wasReady) {
+      // A route can disappear after startup. Re-observe promptly without
+      // reacquiring the already-held viewer intent.
+      session.startupDeadline = Date.now() + STARTUP_MS
+      session.startAttempts = 0
+      scheduleStartupDeadline(session, revision)
+    } else if (!isReady(session) && state === 'held' && !session.startupDeadline) {
+      // Preserve the bounded readiness poll even when this composable begins
+      // observing an intent that is already held.
+      session.startupDeadline = Date.now() + STARTUP_MS
+      scheduleStartupDeadline(session, revision)
+    }
+    session.connecting = session.startupDeadline ? !isReady(session) : session.leaseState !== 'held'
+    if (isReady(session)) {
       session.startupDeadline = 0
       session.startAttempts = 0
+      cancelStartupTimer(session)
     }
-    session.error = null
-    schedule(workspaceId, session, session.connecting ? POLL_MS : RENEW_MS)
+    if (isReady(session)) session.error = null
+    if (session.connecting) {
+      // Routing can lag durable lease ownership. Poll status only until both
+      // are ready; do not renew the lease on each readiness observation.
+      schedule(workspaceId, session, POLL_MS)
+    } else {
+      session.error = null
+      schedule(workspaceId, session, RENEW_MS, true)
+    }
+    return status
   } catch (error) {
-    if (!isLatest() || !current(session, revision)) return
+    if (!isLatest() || !current(session, revision)) return null
     if (session.startupDeadline && Date.now() >= session.startupDeadline) {
       failStartup(session)
-      return
+      return null
     }
     session.error = error instanceof Error ? error.message : String(error)
-    // Outages must not resurrect or claim membership. Retry observation only.
-    schedule(workspaceId, session, RENEW_MS)
+    // An outage is not confirmation of this tab's lease. Observe promptly while starting.
+    session.leaseState = 'unknown'
+    schedule(
+      workspaceId,
+      session,
+      session.startupDeadline ? STARTUP_OBSERVE_MS : RENEW_MS,
+      !session.startupDeadline,
+    )
+    return null
   }
 }
 
@@ -196,6 +289,9 @@ export function retainDesktopViewer(workspaceId: string, owner: object): void {
 
 function failStartup(session: ViewerSession): void {
   cancelTimer(session)
+  cancelStartupTimer(session)
+  session.pending = null
+  session.observation += 1
   session.connecting = false
   session.error = 'Desktop startup could not be confirmed. Close and try again.'
 }
@@ -204,7 +300,7 @@ export function acquireDesktopViewer(workspaceId: string, recovery = false): Pro
   const session = desktopViewerSession(workspaceId)
   if (session.owners.size === 0) return Promise.resolve()
   if (session.pending) return session.pending
-  if (session.wanted && session.leaseState === 'held') return Promise.resolve()
+  if (session.wanted && isReady(session)) return Promise.resolve()
   cancelTimer(session)
   if (!recovery || !session.startupDeadline) {
     session.startupDeadline = Date.now() + STARTUP_MS
@@ -222,19 +318,22 @@ export function acquireDesktopViewer(workspaceId: string, recovery = false): Pro
   session.connecting = true
   session.leaseState = 'unknown'
   session.error = null
+  scheduleStartupDeadline(session, revision)
   const payload = intent(session)
   const request = (async () => {
     try {
-      await api.startDesktop(workspaceId, payload)
+      await withDesktopRequest((signal) => api.startDesktop(workspaceId, payload, signal))
       if (!current(session, revision)) return
       await refreshDesktopViewer(workspaceId)
     } catch (error) {
       if (!current(session, revision)) return
-      session.error = error instanceof Error ? error.message : String(error)
-      session.connecting = false
-      // The POST may have reached the runner. Preserve intent until explicit
-      // release, and observe rather than sending another start after outage.
-      schedule(workspaceId, session, RENEW_MS)
+      if (session.startupDeadline && Date.now() >= session.startupDeadline) {
+        failStartup(session)
+      } else {
+        session.error = error instanceof Error ? error.message : String(error)
+        // The POST may have reached the runner. Preserve intent and observe only.
+        schedule(workspaceId, session, STARTUP_OBSERVE_MS)
+      }
     } finally {
       if (session.revision === revision) session.pending = null
     }
@@ -254,7 +353,10 @@ export async function closeDesktopViewer(workspaceId: string): Promise<boolean> 
   session.connecting = false
   session.leaseState = 'released'
   session.pending = null
+  session.observation += 1
+  session.startupDeadline = 0
   cancelTimer(session)
+  cancelStartupTimer(session)
   try {
     await api.stopDesktop(workspaceId, payload)
     if (session.revision === payload.intent_revision && !session.wanted) {

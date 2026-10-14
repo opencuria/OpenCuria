@@ -596,8 +596,8 @@ class InteractiveSessionsMixin:
         network_name: str,
         runner_id: str | None = None,
         *,
-        viewer: bool = True,
-        computer_use: bool = False,
+        viewer: bool | None = None,
+        computer_use: bool | None = None,
         mcp: bool | None = None,
         holder_count: int | None = None,
         generation: int | None = None,
@@ -606,16 +606,32 @@ class InteractiveSessionsMixin:
         """Handle desktop:started after a viewer lease is acquired."""
         from ...sio_server import emit_to_frontend
 
+        current = self.get_desktop_info(workspace_id) or {}
+        epoch, generation = self._inherit_current_desktop_version(
+            workspace_id,
+            runner_id=runner_id,
+            epoch=epoch,
+            generation=generation,
+        )
+        if self._desktop_state_is_stale(
+            workspace_id,
+            epoch=epoch,
+            generation=generation,
+            runner_id=runner_id,
+        ):
+            return
+
         task = None
         if task_id:
             task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(task_id))
             if task and not self._validate_task_runner(task, runner_id):
                 return
 
-        self._record_active_desktop(
+        current = self.get_desktop_info(workspace_id) or {}
+        recorded = self._record_active_desktop(
             workspace_id,
             {
-                **(self.get_desktop_info(workspace_id) or {}),
+                **current,
                 **{
                     key: value
                     for key, value in {
@@ -629,11 +645,13 @@ class InteractiveSessionsMixin:
                 "port": port,
                 "container_ip": container_ip,
                 "network_name": network_name,
-                "viewer": viewer,
-                "computer_use": computer_use,
+                "viewer": True if viewer is None else viewer,
+                **({"computer_use": computer_use} if computer_use is not None else {}),
             },
             runner_id=runner_id,
         )
+        if not recorded:
+            return
 
         if task:
             await sync_to_async(self.tasks.complete)(task)
@@ -654,7 +672,9 @@ class InteractiveSessionsMixin:
                 "workspace_id": workspace_id,
                 "task_id": task_id,
                 "proxy_url": f"/ws/desktop/{workspace_id}/",
-                "computer_use_active": computer_use,
+                "computer_use_active": bool(
+                    (self.get_desktop_info(workspace_id) or {}).get("computer_use")
+                ),
                 **self._desktop_public_summary(workspace_id),
             },
             workspace_id,
@@ -668,8 +688,8 @@ class InteractiveSessionsMixin:
         network_name: str,
         runner_id: str | None = None,
         *,
-        viewer: bool = False,
-        computer_use: bool = False,
+        viewer: bool | None = None,
+        computer_use: bool | None = None,
         mcp: bool | None = None,
         holder_count: int | None = None,
         generation: int | None = None,
@@ -688,11 +708,25 @@ class InteractiveSessionsMixin:
 
         if not await self._desktop_event_owned_by_runner(workspace_id, runner_id):
             return
+        epoch, generation = self._inherit_current_desktop_version(
+            workspace_id,
+            runner_id=runner_id,
+            epoch=epoch,
+            generation=generation,
+        )
+        if self._desktop_state_is_stale(
+            workspace_id,
+            epoch=epoch,
+            generation=generation,
+            runner_id=runner_id,
+        ):
+            return
 
-        self._record_active_desktop(
+        current = self.get_desktop_info(workspace_id) or {}
+        recorded = self._record_active_desktop(
             workspace_id,
             {
-                **(self.get_desktop_info(workspace_id) or {}),
+                **current,
                 **{
                     key: value
                     for key, value in {
@@ -706,23 +740,26 @@ class InteractiveSessionsMixin:
                 "port": port,
                 "container_ip": container_ip,
                 "network_name": network_name,
-                "viewer": viewer,
-                "computer_use": computer_use,
+                **({"viewer": viewer} if viewer is not None else {}),
+                **({"computer_use": computer_use} if computer_use is not None else {}),
             },
             runner_id=runner_id,
         )
+        if not recorded:
+            return
+        updated = self.get_desktop_info(workspace_id) or {}
         logger.info(
             "Desktop process announced: workspace=%s, viewer=%s, computer_use=%s",
             workspace_id,
-            viewer,
-            computer_use,
+            updated.get("viewer", False),
+            updated.get("computer_use", False),
         )
         await emit_to_frontend(
             "desktop:started",
             {
                 "workspace_id": workspace_id,
                 "proxy_url": f"/ws/desktop/{workspace_id}/",
-                "computer_use_active": computer_use,
+                "computer_use_active": bool(updated.get("computer_use")),
                 **self._desktop_public_summary(workspace_id),
             },
             workspace_id,
@@ -734,7 +771,7 @@ class InteractiveSessionsMixin:
         workspace_id: str,
         runner_id: str | None = None,
         *,
-        computer_use_active: bool = False,
+        computer_use_active: bool | None = None,
         viewer_held: bool | None = None,
         mcp: bool | None = None,
         holder_count: int | None = None,
@@ -751,12 +788,39 @@ class InteractiveSessionsMixin:
 
         if not await self._desktop_event_owned_by_runner(workspace_id, runner_id):
             return
+        epoch, generation = self._inherit_current_desktop_version(
+            workspace_id,
+            runner_id=runner_id,
+            epoch=epoch,
+            generation=generation,
+        )
+        if self._desktop_state_is_stale(
+            workspace_id,
+            epoch=epoch,
+            generation=generation,
+            runner_id=runner_id,
+        ):
+            return
 
         task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(task_id))
         if task:
             if not self._validate_task_runner(task, runner_id):
                 return
             await sync_to_async(self.tasks.complete)(task)
+
+        epoch, generation = self._inherit_current_desktop_version(
+            workspace_id,
+            runner_id=runner_id,
+            epoch=epoch,
+            generation=generation,
+        )
+        if self._desktop_state_is_stale(
+            workspace_id,
+            epoch=epoch,
+            generation=generation,
+            runner_id=runner_id,
+        ):
+            return
 
         current = self._active_desktops.get(workspace_id)
         if current is not None:
@@ -777,12 +841,14 @@ class InteractiveSessionsMixin:
                     if value is not None
                 }
             )
-            updated["computer_use"] = computer_use_active
-            self._record_active_desktop(
+            if computer_use_active is not None:
+                updated["computer_use"] = computer_use_active
+            if not self._record_active_desktop(
                 workspace_id,
                 updated,
                 runner_id=runner_id,
-            )
+            ):
+                return
 
         logger.info(
             "Desktop viewer released: workspace=%s, computer_use=%s",
@@ -794,7 +860,11 @@ class InteractiveSessionsMixin:
             {
                 "workspace_id": workspace_id,
                 "task_id": task_id,
-                "computer_use_active": computer_use_active,
+                "computer_use_active": bool(
+                    (self.get_desktop_info(workspace_id) or {}).get(
+                        "computer_use", False
+                    )
+                ),
                 **self._desktop_public_summary(workspace_id),
             },
             workspace_id,
@@ -805,6 +875,9 @@ class InteractiveSessionsMixin:
         task_id: str | None,
         workspace_id: str,
         runner_id: str | None = None,
+        *,
+        generation: int | None = None,
+        epoch: str | None = None,
     ) -> None:
         """Handle desktop:stopped event from a runner.
 
@@ -817,6 +890,21 @@ class InteractiveSessionsMixin:
         from ...sio_server import emit_to_frontend
 
         if not await self._desktop_event_owned_by_runner(workspace_id, runner_id):
+            return
+
+        if self._desktop_state_is_stale(
+            workspace_id,
+            epoch=epoch,
+            generation=generation,
+            runner_id=runner_id,
+            active=False,
+        ):
+            logger.info(
+                "Ignoring stale desktop stop: workspace=%s generation=%s epoch=%s",
+                workspace_id,
+                generation,
+                epoch,
+            )
             return
 
         task = None
@@ -835,6 +923,37 @@ class InteractiveSessionsMixin:
                     return
                 await sync_to_async(self.tasks.complete)(task)
 
+        # Task lookup/completion above can yield to newer process announcements.
+        # Recheck immediately before cache removal so delayed stops cannot win.
+        if self._desktop_state_is_stale(
+            workspace_id,
+            epoch=epoch,
+            generation=generation,
+            runner_id=runner_id,
+            active=False,
+        ):
+            return
+
+        current = self.get_desktop_info(workspace_id) or {}
+        stopped_epoch = epoch or current.get("epoch")
+        stopped_generation = (
+            generation if generation is not None else current.get("generation")
+        )
+        if self._desktop_state_is_stale(
+            workspace_id,
+            epoch=stopped_epoch,
+            generation=stopped_generation,
+            runner_id=runner_id,
+            active=False,
+        ):
+            return
+        self._remember_desktop_state(
+            workspace_id,
+            epoch=stopped_epoch,
+            generation=stopped_generation,
+            runner_id=runner_id or self._desktop_workspace_runner.get(workspace_id),
+            active=False,
+        )
         self._active_desktops.pop(workspace_id, None)
         self._desktop_workspace_runner.pop(workspace_id, None)
 
@@ -845,6 +964,8 @@ class InteractiveSessionsMixin:
             {
                 "workspace_id": workspace_id,
                 "task_id": task_id,
+                "generation": generation,
+                "epoch": epoch,
             },
             workspace_id,
         )

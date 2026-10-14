@@ -86,8 +86,12 @@ describe('SidePanelDesktop', () => {
     mountPanel()
     await flushPromises()
 
-    expect(getDesktopStatus).toHaveBeenCalledWith(workspaceId, desktopViewerClientId)
-    expect(startDesktop).toHaveBeenCalledWith(workspaceId, intent())
+    expect(getDesktopStatus).toHaveBeenCalledWith(
+      workspaceId,
+      desktopViewerClientId,
+      expect.any(AbortSignal),
+    )
+    expect(startDesktop).toHaveBeenCalledWith(workspaceId, intent(), expect.any(AbortSignal))
   })
 
   it('does not auto-start when already connected', async () => {
@@ -136,7 +140,11 @@ describe('SidePanelDesktop', () => {
     store.setConnecting('previous-workspace')
     mountPanel()
     await flushPromises()
-    expect(startDesktop).toHaveBeenCalledExactlyOnceWith(workspaceId, intent())
+    expect(startDesktop).toHaveBeenCalledExactlyOnceWith(
+      workspaceId,
+      intent(),
+      expect.any(AbortSignal),
+    )
     expect(store.workspaceId).toBe(workspaceId)
     expect(store.viewerOwned).toBe(true)
   })
