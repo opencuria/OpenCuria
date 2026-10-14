@@ -224,11 +224,21 @@ async def compose_system_prompt(
         )
         env_lines.append(
             "You are working inside an isolated OpenCuria workspace "
-            "(Linux container or VM), not on the user's machine. The "
-            "environment is disposable: investigate failures thoroughly, "
-            "use the full shell and any installed programs, and install "
-            "missing packages when your current permissions allow it."
+            "(Linux container or VM), not on the user's machine. Use the "
+            "full shell and available tools within your agent permissions. "
+            "External or production services are not isolated; ask before "
+            "changing them."
         )
+        if agent.name != "explore":
+            env_lines.append(
+                "In this disposable environment, take initiative: start/restart "
+                "development servers, install missing packages, run migrations "
+                "on workspace-local test data, and test relevant flows in the "
+                "running app end-to-end. "
+                "Do routine local setup and testing yourself, without "
+                "unnecessary confirmation. Investigate failures yourself; "
+                "preserve existing user work."
+            )
     if mode == "plan":
         if agent.name == "explore":
             env_lines.append(

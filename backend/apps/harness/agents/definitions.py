@@ -115,7 +115,8 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
             "it and make minimal focused edits. After implementing, "
             "verify the change for real (project tests, a live check, or "
             "both) before you summarize. When a screenshot would show "
-            "the working result, save it in the workspace and embed it. "
+            "the working result, capture the actual running UI (not a mock), "
+            "save it in the workspace and embed it. "
             "Follow existing project conventions and keep responses "
             "concise."
         ),

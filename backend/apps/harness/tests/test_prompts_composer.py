@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from apps.harness.access.base import FileContent
 from apps.harness.agents.definitions import get_agent
 from apps.harness.prompts.composer import (
@@ -133,7 +135,60 @@ async def test_composer_sections_and_metadata() -> None:
     assert "Launch independent subagents in one message" in composed.system
     assert "Chat media:" in composed.system
     assert "![Login](screenshots/login.png)" in composed.system
+    assert "actual running UI (not a mock)" in composed.system
     assert composed.truncated is False
+
+
+@pytest.mark.parametrize("native_tool_contracts", [False, True])
+@pytest.mark.parametrize(
+    ("agent_name", "mode"),
+    [("build", "build"), ("plan", "plan"), ("general", "build"), ("general", "plan")],
+)
+async def test_composer_encourages_local_testing_with_boundaries(
+    agent_name: str, mode: str, native_tool_contracts: bool
+) -> None:
+    """Active agents get initiative guidance without bypassing permissions."""
+    composed = await compose_system_prompt(
+        agent=get_agent(agent_name),
+        mode=mode,
+        native_tool_contracts=native_tool_contracts,
+    )
+    assert "take initiative: start/restart development servers" in composed.system
+    assert "install missing packages" in composed.system
+    assert "run migrations on workspace-local test data" in composed.system
+    assert "test relevant flows in the running app end-to-end" in composed.system
+    assert "without unnecessary confirmation" in composed.system
+    assert "Investigate failures yourself" in composed.system
+    assert "preserve existing user work" in composed.system
+    assert "within your agent permissions" in composed.system
+    assert "External or production services are not isolated" in composed.system
+    assert "ask before changing them" in composed.system
+    if agent_name == "plan":
+        assert "Ask before deliberate source/configuration changes" in composed.system
+
+
+@pytest.mark.parametrize("native_tool_contracts", [False, True])
+@pytest.mark.parametrize("agent_name", ["explore", "title", "compaction"])
+@pytest.mark.parametrize("mode", ["plan", "build"])
+async def test_composer_restricted_agents_do_not_get_local_testing_guidance(
+    agent_name: str, mode: str, native_tool_contracts: bool
+) -> None:
+    """Read-only and hidden agents must not be told to mutate the workspace."""
+    composed = await compose_system_prompt(
+        agent=get_agent(agent_name),
+        mode=mode,
+        native_tool_contracts=native_tool_contracts,
+    )
+    assert "take initiative" not in composed.system
+    assert "start/restart development servers" not in composed.system
+    assert "install missing packages" not in composed.system
+    assert "run migrations" not in composed.system
+    if agent_name == "explore":
+        assert "read-only research subagent" in composed.system.lower()
+        assert "Never edit or write files" in composed.system
+    else:
+        assert "not on the user's machine" not in composed.system
+        assert "Chat media:" not in composed.system
 
 
 async def test_composer_skills_references_extension_point() -> None:
@@ -152,8 +207,6 @@ async def test_composer_skills_references_extension_point() -> None:
 
 async def test_composer_rejects_invalid_mode() -> None:
     """Unknown modes raise ValueError."""
-    import pytest
-
     with pytest.raises(ValueError, match="Invalid mode"):
         await compose_system_prompt(agent=get_agent("build"), mode="turbo")
 
