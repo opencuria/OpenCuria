@@ -167,6 +167,7 @@ class HarnessForkIn(Schema):
     """Request schema for forking a harness session."""
 
     message_id: uuid.UUID | None = None
+    include_message: bool = False
 
 
 class HarnessMessageEditIn(Schema):
@@ -1149,7 +1150,7 @@ async def send_harness_message(
 async def fork_harness_session(
     request: HttpRequest, session_id: uuid.UUID, payload: HarnessForkIn
 ):
-    """Fork a session, copying the message prefix (no run, no rollback)."""
+    """Fork a session, excluding the cutoff message unless requested."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     from asgiref.sync import sync_to_async
@@ -1161,7 +1162,11 @@ async def fork_harness_session(
         service = _resolve_harness_service()
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
-        forked = await service.fork_session(session.id, payload.message_id)
+        forked = await service.fork_session(
+            session.id,
+            payload.message_id,
+            include_message=payload.include_message,
+        )
         out = await sync_to_async(_session_to_out_with_unread)(service, forked)
         return 201, out
     except NotFoundError as exc:

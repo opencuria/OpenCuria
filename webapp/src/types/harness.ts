@@ -223,6 +223,8 @@ export interface HarnessMessageIn {
 /** Fork payload (`HarnessForkIn` in the backend). Omit message_id for full-session fork. */
 export interface HarnessForkIn {
   message_id?: string
+  /** Include the selected message in the fork (default: exclusive cutoff). */
+  include_message?: boolean
 }
 
 /** Edit payload (`HarnessMessageEditIn` in the backend): rerun from a user message. */

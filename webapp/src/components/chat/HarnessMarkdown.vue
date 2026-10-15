@@ -60,7 +60,7 @@ const props = withDefaults(
 
 const rootClass = computed(() => {
   const classes = [
-    'prose-output prose prose-sm max-w-3xl break-words',
+    'prose-output prose prose-sm max-w-3xl break-words [&>:last-child>:last-child]:mb-0',
     'prose-pre:p-2 prose-pre:rounded-md',
   ]
   if (props.compact) {

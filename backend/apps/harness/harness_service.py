@@ -491,13 +491,19 @@ class HarnessService:
         self,
         session_id: uuid.UUID,
         message_id: uuid.UUID | None = None,
+        *,
+        include_message: bool = False,
     ) -> HarnessSession:
-        """Fork a root session, copying the message prefix before *message_id*.
+        """Fork a root session, copying messages before *message_id*.
 
-        Inspired by OpenCode
-        ``packages/opencode/src/session/session.ts`` fork (title part
-        only); no file rollback or snapshot is performed here.
+        By default, *message_id* is excluded; set *include_message* to copy it
+        too. Including a message requires a message ID. No file rollback or
+        snapshot is performed here.
         """
+        if include_message and message_id is None:
+            raise ValueError(
+                "message_id is required when include_message is true"
+            )
         session = await sync_to_async(self.get_session)(session_id)
         await sync_to_async(self.sessions.ensure_interactions_available)(
             session.workspace_id
@@ -530,7 +536,10 @@ class HarnessService:
             )
         forked = await sync_to_async(self.sessions.create_fork)(**fork_kwargs)
         await sync_to_async(self.messages.copy_prefix)(
-            session.id, forked.id, message_id
+            session.id,
+            forked.id,
+            message_id,
+            include_message=include_message,
         )
         log.info(
             "harness_session_forked",

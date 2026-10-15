@@ -70,21 +70,30 @@ describe('HarnessMessageView edit/fork', () => {
     resetProviderCatalogCache()
   })
 
-  it('shows edit and fork actions for persisted user messages', () => {
+  it('shows edit but no fork for persisted user messages', () => {
     const wrapper = mount(HarnessMessageView, {
       props: { message: makeUser() },
     })
 
     expect(wrapper.find('[data-testid="message-edit"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="message-fork"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="message-fork"]').exists()).toBe(false)
   })
 
-  it('hides edit/fork for assistant messages', () => {
+  it('shows fork but no edit under assistant messages', () => {
     const wrapper = mount(HarnessMessageView, {
       props: { message: makeAssistant() },
     })
 
     expect(wrapper.find('[data-testid="message-edit"]').exists()).toBe(false)
+    expect(
+      wrapper.get('[data-testid="message-footer"]').find('[data-testid="message-fork"]').exists(),
+    ).toBe(true)
+  })
+
+  it.each([{ disabled: true }, { streaming: true }])('hides assistant fork for %o', (state) => {
+    const wrapper = mount(HarnessMessageView, {
+      props: { message: makeAssistant(), ...state },
+    })
     expect(wrapper.find('[data-testid="message-fork"]').exists()).toBe(false)
   })
 
@@ -156,14 +165,14 @@ describe('HarnessMessageView edit/fork', () => {
     expect(wrapper.emitted('edit')).toBeUndefined()
   })
 
-  it('emits fork with the message id', async () => {
+  it('emits fork with the assistant message id', async () => {
     const wrapper = mount(HarnessMessageView, {
-      props: { message: makeUser() },
+      props: { message: makeAssistant() },
     })
 
     await wrapper.get('[data-testid="message-fork"]').trigger('click')
 
-    expect(wrapper.emitted('fork')).toEqual([['user-1']])
+    expect(wrapper.emitted('fork')).toEqual([['assistant-1']])
   })
 
   it('renders the user bubble without an avatar and with on-primary markdown', () => {
