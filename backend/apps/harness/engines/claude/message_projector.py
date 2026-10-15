@@ -47,71 +47,13 @@ class ClaudeMessageProjector:
             await engine._handle_user_tool_results(message)
             return None
         if isinstance(message, types.task_started):
-            task = str(message.task_id or "")
-            tool = str(message.tool_use_id or "")
-            if not tool and len(engine._pending_task_tool_ids) == 1:
-                tool = next(iter(engine._pending_task_tool_ids))
-            if tool:
-                engine._pending_task_tool_ids.discard(tool)
-                engine._subtask_by_tool[tool] = task
-                if task:
-                    task_data = getattr(message, "data", None)
-                    task_type = str(
-                        getattr(message, "task_type", None)
-                        or (
-                            task_data.get("task_type", "")
-                            if isinstance(task_data, dict)
-                            else ""
-                        )
-                    )
-                    try:
-                        canonical_type = canonical_subagent_type(task_type)
-                    except ValueError:
-                        canonical_type = ""
-                    if canonical_type:
-                        engine._agent_kind[task] = canonical_type
-                        engine._agent_type_raw[task] = canonical_type
-                    elif task not in engine._agent_type_raw:
-                        parent_tool = engine._tool_events.get(tool, {})
-                        arguments = parent_tool.get("event_arguments", {})
-                        requested_type = (
-                            arguments.get("subagent_type")
-                            if isinstance(arguments, dict)
-                            else None
-                        )
-                        try:
-                            canonical_type = canonical_subagent_type(
-                                str(requested_type or "")
-                            )
-                        except ValueError:
-                            canonical_type = ""
-                        if canonical_type:
-                            engine._agent_kind[task] = canonical_type
-                            engine._agent_type_raw[task] = canonical_type
-                    engine._agent_parent_tool[task] = tool
-                    base_depth = engine._tool_events.get(tool, {}).get("depth", 0)
-                    engine._agent_depth[task] = int(base_depth) + 1
-                state = engine._step_states.setdefault(tool, StepState())
-                tool_state = engine._tool_events.get(tool)
-                if tool_state is not None:
-                    state.step = int(tool_state["step"])
-                    state.started = True
-                    state.active_calls.add(tool)
-            if task and tool and task not in engine._started_subtasks:
-                engine._started_subtasks.add(task)
-                await engine._send(
-                    {
-                        "type": "subtask_started",
-                        "subtask_id": task,
-                        "child_session_id": "",
-                        "agent": engine._agent_kind.get(task, "general"),
-                        "description": redact_text(
-                            str(message.description or ""), engine._event_secrets()
-                        )[:500],
-                        "model": engine._model,
-                        "parent_tool_use_id": tool,
-                    }
-                )
+            data = message.data if isinstance(message.data, dict) else {}
+            await self.start_subtask(
+                str(message.task_id or ""),
+                str(message.tool_use_id or ""),
+                str(message.description or ""),
+                task_type=str(message.task_type or data.get("task_type") or ""),
+            )
             return None
         if isinstance(message, types.task_progress):
             await engine._handle_task_progress(message)
@@ -139,6 +81,101 @@ class ClaudeMessageProjector:
                 raise RuntimeError(engine._safe_error_text(detail))
             return message, str(message.result or ""), usage
         return None
+
+    def _subtask_tool(self, task: str, tool: str = "") -> str:
+        """Resolve only admitted task identities, including late terminal updates."""
+        engine = self.engine
+        parent = engine._agent_parent_tool.get(task) or next(
+            (
+                call
+                for call, task_id in engine._subtask_by_tool.items()
+                if task_id == task
+            ),
+            "",
+        )
+        return parent if task and (not tool or tool == parent) else ""
+
+    async def start_subtask(
+        self,
+        task: str,
+        tool: str,
+        description: str,
+        *,
+        task_type: str = "",
+        agent_type: str | None = None,
+    ) -> None:
+        """Admit native agent delegations, never generic CLI background tasks.
+
+        Task lifecycle frames also describe shells and monitors. Classify before
+        consuming a pending Agent/Task call, and share admission with SDK hooks.
+        """
+        engine = self.engine
+        if not task or task in engine._finished_subtasks:
+            return
+        try:
+            canonical_task_type = canonical_subagent_type(task_type)
+        except ValueError:
+            canonical_task_type = ""
+        if task_type and not canonical_task_type and task_type != "local_agent":
+            return
+        known_tool = self._subtask_tool(task)
+        if not tool:
+            tool = known_tool
+            # A completely untyped frame cannot identify a pending delegation.
+            if not tool and not task_type and agent_type is None:
+                return
+            if not tool and len(engine._pending_task_tool_ids) == 1:
+                tool = next(iter(engine._pending_task_tool_ids))
+        if not tool or (known_tool and known_tool != tool):
+            return
+        parent = engine._tool_events.get(tool, {})
+        # The permission key "task" also covers TaskStop/TaskUpdate/etc.; only
+        # the original native invocation proves an actual agent delegation.
+        if not known_tool and parent.get("source_tool") not in {"Agent", "Task"}:
+            return
+        arguments = parent.get("event_arguments", {})
+        requested_type = (
+            arguments.get("subagent_type") if isinstance(arguments, dict) else ""
+        )
+        if agent_type is not None:
+            raw_type = agent_type
+        elif task in engine._agent_type_raw:
+            raw_type = engine._agent_type_raw[task]
+        else:
+            raw_type = canonical_task_type or requested_type or ""
+        try:
+            canonical_type = canonical_subagent_type(str(raw_type))
+        except ValueError:
+            if agent_type is not None:
+                engine._agent_type_raw[task] = agent_type
+            return
+        engine._pending_task_tool_ids.discard(tool)
+        engine._subtask_by_tool[tool] = task
+        engine._agent_parent_tool[task] = tool
+        engine._agent_kind[task] = canonical_type
+        engine._agent_type_raw[task] = canonical_type
+        if task in engine._started_subtasks:
+            return
+        engine._agent_depth[task] = int(parent.get("depth", 0)) + 1
+        state = engine._step_states.setdefault(tool, StepState())
+        if parent:
+            state.step = int(parent["step"])
+            state.started = True
+            state.active_calls.add(tool)
+        engine._started_subtasks.add(task)
+        await engine._send(
+            {
+                "type": "subtask_started",
+                "subtask_id": task,
+                "child_session_id": "",
+                "agent": canonical_type,
+                "description": redact_text(
+                    description or canonical_type, engine._event_secrets()
+                )[:500],
+                "model": engine._model,
+                "parent_tool_use_id": tool,
+            }
+        )
 
     async def handle_user_tool_results(self, message: Any) -> None:
         """Finalize tool calls from SDK tool-result messages if hooks lagged."""
@@ -170,15 +207,10 @@ class ClaudeMessageProjector:
         """Project SDK task progress while its parent task remains active."""
         engine = self.engine
         task = str(message.task_id or "")
-        parent_tool = next(
-            (
-                call
-                for call, task_id in engine._subtask_by_tool.items()
-                if task_id == task
-            ),
-            "",
+        parent_tool = self._subtask_tool(
+            task, str(getattr(message, "tool_use_id", None) or "")
         )
-        if not task or not parent_tool:
+        if not parent_tool or task in engine._finished_subtasks:
             return
         await engine._send(
             {
@@ -200,16 +232,7 @@ class ClaudeMessageProjector:
         """Map task notifications to one terminal subtask status."""
         engine = self.engine
         task = str(message.task_id or "")
-        tool = str(message.tool_use_id or "")
-        if not tool:
-            tool = next(
-                (
-                    call
-                    for call, task_id in engine._subtask_by_tool.items()
-                    if task_id == task
-                ),
-                "",
-            )
+        tool = self._subtask_tool(task, str(message.tool_use_id or ""))
         if not tool or task in engine._finished_subtasks:
             return
         status = (
@@ -240,16 +263,7 @@ class ClaudeMessageProjector:
         if status not in {"completed", "failed", "killed", "stopped"}:
             return
         task = str(data.get("task_id") or "")
-        tool = str(data.get("tool_use_id") or "")
-        if not tool:
-            tool = next(
-                (
-                    call
-                    for call, task_id in engine._subtask_by_tool.items()
-                    if task_id == task
-                ),
-                "",
-            )
+        tool = self._subtask_tool(task, str(data.get("tool_use_id") or ""))
         terminal_status = str(patch.get("status") or "")
         status = (
             "completed"
@@ -279,13 +293,14 @@ class ClaudeMessageProjector:
     ) -> None:
         """Emit exactly one terminal subtask event and release its parent step."""
         engine = self.engine
-        if not task or task in engine._finished_subtasks:
+        if not self._subtask_tool(task, tool) or task in engine._finished_subtasks:
             return
         engine._finished_subtasks.add(task)
         engine._subtask_terminal_status[task] = status
         summary = redact_text(
-            summary or engine._child_text.get(task, ""), engine._event_secrets()
+            summary or engine._child_text.get(tool, ""), engine._event_secrets()
         )
+        engine._subtask_terminal_summary[task] = summary[:500]
         await engine._send(
             {
                 "type": "subtask_finished",
@@ -300,22 +315,22 @@ class ClaudeMessageProjector:
         if tool:
             engine._subtask_by_tool.pop(tool, None)
         engine._stopped_subagents.discard(task)
-        engine._agent_parent_tool.pop(task, None)
+        # Retain identity until run reset to correlate late authoritative aborts.
+        engine._agent_parent_tool[task] = tool
         engine._agent_depth.pop(task, None)
-        engine._agent_kind.pop(task, None)
         engine._agent_type_raw.pop(task, None)
         state = engine._step_states.get(tool)
         if state is not None:
             state.active_calls.discard(tool)
             state.awaiting_next_step = not bool(state.active_calls)
-        engine._child_text.pop(task, None)
+        engine._child_text.pop(tool, None)
 
     async def revise_subtask_terminal_status(
         self, task: str, tool: str, status: str
     ) -> None:
         """Preserve a later authoritative abort after an optimistic completion."""
         engine = self.engine
-        if status != "aborted":
+        if status != "aborted" or not self._subtask_tool(task, tool):
             return
         event = {
             "type": "subtask_finished",
@@ -323,7 +338,7 @@ class ClaudeMessageProjector:
             "child_session_id": "",
             "agent": engine._agent_kind.get(task, "general"),
             "status": status,
-            "summary": engine._child_text.get(task, "")[:500],
+            "summary": engine._subtask_terminal_summary.get(task, ""),
             "parent_tool_use_id": tool,
         }
         await engine._send(event)

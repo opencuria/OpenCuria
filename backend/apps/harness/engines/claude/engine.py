@@ -120,6 +120,7 @@ class ClaudeEngine:
         self._started_subtasks: set[str] = set()
         self._finished_subtasks: set[str] = set()
         self._subtask_terminal_status: dict[str, str] = {}
+        self._subtask_terminal_summary: dict[str, str] = {}
         self._stopped_subagents: set[str] = set()
         self._pending_task_tool_ids: set[str] = set()
         self._root_text: list[str] = []
@@ -982,25 +983,9 @@ class ClaudeEngine:
     async def _finish_subtask_from_tool(
         self, call_id: str, output: str, status: str
     ) -> None:
-        task_id = self._subtask_by_tool.pop(call_id, "")
-        if not task_id or task_id in self._finished_subtasks:
-            return
-        self._finished_subtasks.add(task_id)
-        state = self._step_states.get(call_id)
-        if state is not None:
-            state.active_calls.discard(call_id)
-            state.awaiting_next_step = not bool(state.active_calls)
-        await self._send(
-            {
-                "type": "subtask_finished",
-                "subtask_id": task_id,
-                "child_session_id": "",
-                "agent": self._agent_kind.get(task_id, "general"),
-                "status": status,
-                "summary": str(output or "")[:500],
-                "parent_tool_use_id": call_id,
-            }
-        )
+        task_id = self._subtask_by_tool.get(call_id, "")
+        if task_id:
+            await self._finish_sdk_subtask(task_id, call_id, status, output)
 
     async def _prompt_with_history(self, prompt: str) -> str | list[dict[str, Any]]:
         """Hydrate current prompt and non-resumed history into Claude blocks."""
@@ -1510,6 +1495,7 @@ class ClaudeEngine:
         self._started_subtasks.clear()
         self._finished_subtasks.clear()
         self._subtask_terminal_status.clear()
+        self._subtask_terminal_summary.clear()
         self._stopped_subagents.clear()
         self._pending_task_tool_ids.clear()
         self._root_text.clear()

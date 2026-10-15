@@ -486,15 +486,9 @@ class PermissionBridge:
 
         async def subagent_start(hook_input, tool_use_id, _context):
             agent_id = str(hook_input.get("agent_id") or "")
-            raw_type = str(hook_input.get("agent_type") or "")
-            try:
-                agent_type = canonical_subagent_type(raw_type)
-            except ValueError:
-                agent_type = ""
-            if agent_id:
-                engine._agent_kind[agent_id] = agent_type
-                engine._agent_type_raw[agent_id] = raw_type
-            parent_tool = str(tool_use_id or "")
+            parent_tool = str(
+                tool_use_id or engine._agent_parent_tool.get(agent_id) or ""
+            )
             if not parent_tool and len(engine._pending_task_tool_ids) == 1:
                 candidate = next(iter(engine._pending_task_tool_ids))
                 if candidate in engine._tool_events:
@@ -514,47 +508,12 @@ class PermissionBridge:
                             parent_id=state.get("parent_tool_use_id"),
                         )
                 return {}
-            if parent_tool:
-                engine._pending_task_tool_ids.discard(parent_tool)
-                if agent_id and agent_type:
-                    engine._agent_parent_tool[agent_id] = parent_tool
-                    engine._subtask_by_tool[parent_tool] = agent_id
-                    engine._agent_depth[agent_id] = (
-                        int(
-                            engine._tool_events.get(parent_tool, {}).get(
-                                "depth", self.options.depth
-                            )
-                        )
-                        + 1
-                    )
-                elif agent_id:
-                    engine._agent_parent_tool.pop(agent_id, None)
-                parent_state = engine._step_states.setdefault(parent_tool, StepState())
-                tool_state = engine._tool_events.get(parent_tool)
-                if tool_state is not None:
-                    parent_state.step = int(tool_state["step"])
-                    parent_state.started = True
-                    parent_state.active_calls.add(parent_tool)
-            if (
-                agent_id
-                and agent_type
-                and agent_id not in engine._started_subtasks
-                and parent_tool
-            ):
-                engine._started_subtasks.add(agent_id)
-                await engine._send(
-                    {
-                        "type": "subtask_started",
-                        "subtask_id": agent_id,
-                        "agent": agent_type,
-                        "description": redact_title(
-                            str(hook_input.get("description") or agent_type),
-                            engine._event_secrets(),
-                        ),
-                        "model": engine._model,
-                        "parent_tool_use_id": parent_tool,
-                    }
-                )
+            await engine._message_projector.start_subtask(
+                agent_id,
+                parent_tool,
+                str(hook_input.get("description") or ""),
+                agent_type=str(hook_input.get("agent_type") or ""),
+            )
             return {}
 
         async def subagent_stop(hook_input, _tool_use_id, _context):

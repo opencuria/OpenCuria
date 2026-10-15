@@ -222,8 +222,10 @@ async def test_local_agent_task_type_preserves_hook_identity_for_child_read(
         event.get("type") == "tool_error" and event.get("call_id") == "child-read-call"
         for event in events
     )
-    assert any(
-        event.get("type") == "subtask_started" and event.get("subtask_id")
-        for event in events
-    )
+    starts = [
+        event for event in events if event.get("type") == "subtask_started"
+    ]
+    assert len(starts) == 1
+    assert starts[0].get("subtask_id")
+    assert starts[0].get("agent") == subagent_type
     assert len(requests) >= 3

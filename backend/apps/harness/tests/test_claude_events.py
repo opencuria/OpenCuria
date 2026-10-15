@@ -520,6 +520,10 @@ async def test_cancel_cleanup_bounds_stalled_step_finish_sink(
         ("general-purpose", "local_agent", "explore", "general"),
         ("", "local_agent", "explore", "explore"),
         ("", "local", "", ""),
+        ("", "local_bash", "general", ""),
+        ("", "local_agent", "unknown", ""),
+        ("", "explorer", "", "explore"),
+        ("", "", "general-purpose", "general"),
     ],
 )
 async def test_task_started_keeps_only_strictly_canonical_child_identity(
@@ -531,10 +535,11 @@ async def test_task_started_keeps_only_strictly_canonical_child_identity(
     from apps.harness.permissions.evaluator import PermissionEvaluator
     from apps.harness.runner import RunOptions
 
-    engine, _events = engine_events
+    engine, events = engine_events
     call_id = "task-call"
     task_id = "sdk-child-id"
     engine._tool_events[call_id] = {
+        "source_tool": "Agent",
         "depth": 2,
         "step": 1,
         "event_arguments": (
@@ -577,22 +582,23 @@ async def test_task_started_keeps_only_strictly_canonical_child_identity(
     if expected:
         assert engine._agent_type_raw[task_id] == expected
         assert engine._agent_kind[task_id] == expected
-        parent, child, depth = engine._bridge.scope(
-            engine, {"agent_id": task_id}
-        )
+        parent, child, depth = engine._bridge.scope(engine, {"agent_id": task_id})
         assert parent == call_id
         assert child.name == expected
         assert depth == 3
+        assert [event["agent"] for event in events] == [expected]
     else:
         assert task_id not in engine._agent_type_raw
-        with pytest.raises(ValueError, match="Unknown Claude subagent type"):
+        assert events == []
+        assert not engine._subtask_by_tool
+        assert not engine._agent_parent_tool
+        assert call_id in engine._pending_task_tool_ids
+        with pytest.raises(ValueError, match="Unknown Claude subagent identity"):
             engine._bridge.scope(engine, {"agent_id": task_id})
 
 
 @pytest.mark.asyncio
-async def test_stream_usage_and_max_turns_result_are_attributed_once() -> (
-    None
-):
+async def test_stream_usage_and_max_turns_result_are_attributed_once() -> None:
     from apps.harness.engines.claude.message_projector import ClaudeMessageProjector
 
     class ResultMessage:
@@ -900,3 +906,235 @@ async def test_early_tool_queue_is_updated_by_policy_hook_without_duplicate_queu
     started = [event for event in events if event.get("type") == "tool_started"]
     assert len(started) == 1
     assert started[0]["arguments"] == '{"path": "/workspace/doc.md"}'
+
+
+def _task_message(subtype: str, **data: Any) -> Any:
+    """Parse task lifecycle envelopes through the actual SDK parser."""
+    return parse_message(
+        {
+            "type": "system",
+            "subtype": subtype,
+            "task_id": "child-task",
+            "tool_use_id": "parent-call",
+            "uuid": "fixture-frame",
+            "session_id": "fixture-session",
+            **data,
+        }
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["Bash", "TaskStop", "TaskUpdate", "mcp__x__Agent"])
+@pytest.mark.parametrize("task_type", ["local_bash", "local_agent", "general", ""])
+async def test_non_agent_tools_never_become_subtasks(
+    engine_events, source: str, task_type: str
+) -> None:
+    engine, events = engine_events
+    engine._tool_events["parent-call"] = {
+        "source_tool": source,
+        "tool": "task",
+        "event_arguments": {"subagent_type": "general"},
+        "step": 1,
+    }
+    await engine._handle_message(
+        _task_message("task_started", task_type=task_type, description="shell job")
+    )
+    await engine._handle_message(
+        _task_message(
+            "task_progress", description="running", usage={}, last_tool_name="Bash"
+        )
+    )
+    await engine._handle_message(
+        _task_message(
+            "task_notification", status="completed", summary="done", output_file=""
+        )
+    )
+    await engine._handle_message(
+        _task_message("task_updated", patch={"status": "killed"})
+    )
+    assert events == []
+    assert not engine._subtask_by_tool
+    assert not engine._agent_parent_tool
+    assert not engine._started_subtasks
+    assert not engine._finished_subtasks
+    assert set(engine._step_states) == {""}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending_count", [0, 1, 2])
+@pytest.mark.parametrize("task_type", ["local_bash", "local_agent", ""])
+async def test_task_started_missing_tool_id_only_consumes_unique_agent_call(
+    engine_events, pending_count: int, task_type: str
+) -> None:
+    engine, events = engine_events
+    for index in range(pending_count):
+        call = f"pending-{index}"
+        engine._pending_task_tool_ids.add(call)
+        engine._tool_events[call] = {
+            "source_tool": "Agent",
+            "event_arguments": {"subagent_type": "explore"},
+            "step": 1,
+        }
+    await engine._handle_message(
+        _task_message(
+            "task_started", tool_use_id=None, task_type=task_type, description="job"
+        )
+    )
+    if task_type == "local_agent" and pending_count == 1:
+        assert [event["parent_tool_use_id"] for event in events] == ["pending-0"]
+        assert not engine._pending_task_tool_ids
+    else:
+        assert events == []
+        assert len(engine._pending_task_tool_ids) == pending_count
+        assert not engine._subtask_by_tool
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hook_first", [True, False])
+@pytest.mark.parametrize("source", ["Task", "Agent"])
+async def test_verified_subagent_lifecycle_is_idempotent_after_parent_completes(
+    engine_events, hook_first: bool, source: str
+) -> None:
+    from apps.harness.agents.definitions import get_agent
+    from apps.harness.engines.claude.permissionbridge import PermissionBridge
+    from apps.harness.permissions.evaluator import PermissionEvaluator
+    from apps.harness.runner import RunOptions
+
+    engine, events = engine_events
+    bridge = PermissionBridge(
+        tools=default_tool_registry(),
+        evaluator=PermissionEvaluator(global_rules={"*": "allow"}),
+        options=RunOptions(),
+        agent=get_agent("build"),
+        mode="build",
+        max_depth=2,
+        engine=engine,
+    )
+    hooks = bridge.hooks(engine)
+    await hooks["PreToolUse"][0].hooks[0](
+        {
+            "tool_name": source,
+            "tool_input": {"subagent_type": "explore", "prompt": "read"},
+        },
+        "parent-call",
+        None,
+    )
+
+    async def hook() -> None:
+        await hooks["SubagentStart"][0].hooks[0](
+            {"agent_id": "child-task", "agent_type": "explorer"}, None, None
+        )
+
+    async def message() -> None:
+        await engine._handle_message(
+            _task_message(
+                "task_started", task_type="local_agent", description="inspect"
+            )
+        )
+
+    await (hook() if hook_first else message())
+    await (message() if hook_first else hook())
+    await engine._finish_tool_completed("parent-call", "backgrounded", parent_id=None)
+    await message()
+    assert bridge.scope(engine, {"agent_id": "child-task"})[1].name == "explore"
+    await engine._handle_message(
+        _task_message(
+            "task_progress",
+            tool_use_id=None,
+            description="reading",
+            usage={},
+            last_tool_name="Read",
+        )
+    )
+    # An unrelated task must not settle the known agent merely by sharing a tool ID.
+    await engine._handle_message(
+        _task_message(
+            "task_notification",
+            task_id="unregistered",
+            status="completed",
+            summary="not an agent",
+            output_file="",
+        )
+    )
+    await engine._handle_message(
+        _task_message(
+            "task_notification",
+            tool_use_id=None,
+            status="completed",
+            summary="done",
+            output_file="",
+        )
+    )
+    # Identity must survive normal cleanup for a later authoritative abort.
+    await engine._handle_message(
+        _task_message("task_updated", tool_use_id=None, patch={"status": "killed"})
+    )
+    await engine._handle_message(
+        _task_message("task_updated", patch={"status": "killed"})
+    )
+    await message()
+    await hook()
+    subtask_events = [event for event in events if event["type"].startswith("subtask_")]
+    assert [event["type"] for event in subtask_events] == [
+        "subtask_started",
+        "subtask_updated",
+        "subtask_finished",
+        "subtask_finished",
+    ]
+    assert {event["agent"] for event in subtask_events} == {"explore"}
+    assert [event["status"] for event in subtask_events if "status" in event] == [
+        "completed",
+        "aborted",
+    ]
+    assert engine._step_states["parent-call"].active_calls == set()
+    assert [event["summary"] for event in subtask_events if "summary" in event] == [
+        "done",
+        "done",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_type", ["unknown", ""])
+async def test_unknown_hook_identity_cannot_fall_back_to_requested_general(
+    engine_events, agent_type: str
+) -> None:
+    engine, events = engine_events
+    engine._tool_events["parent-call"] = {
+        "source_tool": "Agent",
+        "step": 1,
+        "event_arguments": {"subagent_type": "general"},
+    }
+    await engine._message_projector.start_subtask(
+        "child-task", "parent-call", "inspect", agent_type=agent_type
+    )
+    await engine._handle_message(
+        _task_message("task_started", task_type="local_agent", description="inspect")
+    )
+    assert events == []
+    assert not engine._agent_parent_tool
+
+
+@pytest.mark.asyncio
+async def test_subtask_cleanup_preserves_streamed_summary_and_is_idempotent(
+    engine_events,
+) -> None:
+    engine, events = engine_events
+    engine._tool_events["parent-call"] = {
+        "source_tool": "Agent",
+        "step": 1,
+        "event_arguments": {"subagent_type": "explore"},
+    }
+    await engine._handle_message(
+        _task_message("task_started", task_type="local_agent", description="inspect")
+    )
+    engine._child_text["parent-call"] = "streamed child answer"
+    await engine._finish_subtask_from_tool("parent-call", "", "error")
+    await engine._finish_subtask_from_tool("parent-call", "", "error")
+    await engine._handle_message(
+        _task_message("task_updated", tool_use_id=None, patch={"status": "killed"})
+    )
+    finishes = [event for event in events if event["type"] == "subtask_finished"]
+    assert [event["status"] for event in finishes] == ["error", "aborted"]
+    assert [event["summary"] for event in finishes] == ["streamed child answer"] * 2
+    assert not engine._child_text
+    assert not engine._subtask_by_tool
