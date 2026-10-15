@@ -836,7 +836,7 @@ describe('HarnessMessageView', () => {
     expect(wrapper.find('pre').exists()).toBe(false)
   })
 
-  it('shows a hover usage footer on finished answers', () => {
+  it('puts usage in the same footer as the answer actions', () => {
     const wrapper = mount(HarnessMessageView, {
       props: {
         models: [
@@ -862,8 +862,10 @@ describe('HarnessMessageView', () => {
 
     const footer = wrapper.get('[data-testid="harness-message-usage"]')
     expect(footer.text()).toBe('Think · High · $0.0123 · 1,204 in · 318 out')
-    expect(footer.classes()).toContain('opacity-0')
-    expect(footer.classes()).toContain('group-hover:opacity-100')
+    const actions = wrapper.get('[data-testid="message-footer"]')
+    expect(actions.element.contains(footer.element)).toBe(true)
+    expect(actions.find('[data-testid="answer-copy"]').exists()).toBe(true)
+    expect(actions.find('[data-testid="message-fork"]').exists()).toBe(true)
   })
 
   it('hides the usage footer while streaming', () => {

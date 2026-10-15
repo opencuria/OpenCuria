@@ -43,6 +43,15 @@ describe('HarnessMarkdown', () => {
     vi.useRealTimers()
   })
 
+  it('removes the last wrapped block margin without changing paragraph spacing inside the message', () => {
+    const wrapper = mountMarkdown('First paragraph\n\nFinal paragraph')
+    expect(wrapper.get('.prose-output').classes()).toContain('[&>:last-child>:last-child]:mb-0')
+    expect(wrapper.findAll('[data-md-html] > p').map((paragraph) => paragraph.text())).toEqual([
+      'First paragraph',
+      'Final paragraph',
+    ])
+  })
+
   it('coalesces markdown parsing during a stream and flushes the latest text on completion', async () => {
     vi.useFakeTimers()
     const parseSpy = vi.spyOn(marked, 'parse')

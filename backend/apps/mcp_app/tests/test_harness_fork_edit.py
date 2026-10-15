@@ -229,6 +229,12 @@ def test_fork_edit_tools_registered_with_run_permission() -> None:
     assert _TOOL_HANDLERS["edit_harness_message"] is _call_edit_harness_message
     assert inspect.iscoroutinefunction(_call_fork_harness_session)
     assert inspect.iscoroutinefunction(_call_edit_harness_message)
+    fork_tool = next(tool for tool in _TOOLS if tool.name == "fork_harness_session")
+    assert fork_tool.inputSchema["properties"]["include_message"] == {
+        "type": "boolean",
+        "default": False,
+    }
+    assert "include_message" in fork_tool.description
 
 
 @pytest.mark.django_db(transaction=True)
@@ -351,6 +357,125 @@ async def test_mcp_fork_happy_path(monkeypatch) -> None:
     )
     assert [m.content for m in forked_msgs] == ["first", "answer one"]
     assert first_user.id is not None
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_mcp_fork_includes_last_assistant_and_parts(monkeypatch) -> None:
+    """MCP inclusive forks copy the selected answer and all preceding parts."""
+    org, user, workspace = await sync_to_async(_setup_owned_workspace)()
+    service = _service()
+    session = await sync_to_async(service.create_session)(
+        workspace_id=workspace.id,
+        organization_id=org.id,
+        prompt="first",
+        user_id=user.id,
+    )
+    await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="user", content="first"
+    )
+    early_assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content="answer one"
+    )
+    early_part = await sync_to_async(HarnessPartRepository.create)(
+        message_id=early_assistant.id,
+        type="text",
+        state="completed",
+        output="answer one part",
+    )
+    await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="user", content="second"
+    )
+    last_assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content="answer two"
+    )
+    last_part = await sync_to_async(HarnessPartRepository.create)(
+        message_id=last_assistant.id,
+        type="text",
+        state="completed",
+        output="answer two part",
+    )
+    source_messages = await sync_to_async(HarnessMessageRepository.list_for_session)(
+        session.id
+    )
+    source_parts = await sync_to_async(HarnessPartRepository.list_for_session)(
+        session.id
+    )
+    source_message_state = [
+        (message.id, message.role, message.content, message.position)
+        for message in source_messages
+    ]
+    source_part_state = [
+        (part.id, part.message_id, part.output, part.position) for part in source_parts
+    ]
+    monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
+
+    result = await _call_fork_harness_session(
+        SimpleNamespace(user=user),
+        org.id,
+        {
+            "session_id": str(session.id),
+            "message_id": str(last_assistant.id),
+            "include_message": True,
+        },
+    )
+    body = _parse(result)
+    forked_messages = await sync_to_async(HarnessMessageRepository.list_for_session)(
+        body["id"]
+    )
+    forked_parts = await sync_to_async(HarnessPartRepository.list_for_session)(
+        body["id"]
+    )
+    assert [message.content for message in forked_messages] == [
+        "first",
+        "answer one",
+        "second",
+        "answer two",
+    ]
+    assert [part.output for part in forked_parts] == [
+        early_part.output,
+        last_part.output,
+    ]
+    assert {part.message_id for part in forked_parts} == {
+        forked_messages[1].id,
+        forked_messages[3].id,
+    }
+    assert {part.id for part in forked_parts}.isdisjoint(
+        {part.id for part in source_parts}
+    )
+    stored_source_messages = await sync_to_async(
+        HarnessMessageRepository.list_for_session
+    )(session.id)
+    stored_source_parts = await sync_to_async(
+        HarnessPartRepository.list_for_session
+    )(session.id)
+    assert [
+        (message.id, message.role, message.content, message.position)
+        for message in stored_source_messages
+    ] == source_message_state
+    assert [
+        (part.id, part.message_id, part.output, part.position)
+        for part in stored_source_parts
+    ] == source_part_state
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_mcp_fork_include_message_without_id(monkeypatch) -> None:
+    """MCP inclusive fork mode requires a message ID."""
+    org, user, workspace = await sync_to_async(_setup_owned_workspace)()
+    service = _service()
+    session = await sync_to_async(service.create_session)(
+        workspace_id=workspace.id,
+        organization_id=org.id,
+        prompt="first",
+        user_id=user.id,
+    )
+    monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
+    result = await _call_fork_harness_session(
+        SimpleNamespace(user=user),
+        org.id,
+        {"session_id": str(session.id), "include_message": True},
+    )
+    assert "message_id is required" in _parse_error(result)
 
 
 @pytest.mark.django_db(transaction=True)

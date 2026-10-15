@@ -247,8 +247,9 @@ export function forkHarnessSession(
   sessionId: string,
   data: HarnessForkIn = {},
 ): Promise<HarnessSession> {
-  const body: Record<string, string> = {}
+  const body: HarnessForkIn = {}
   if (data.message_id) body.message_id = data.message_id
+  if (data.include_message !== undefined) body.include_message = data.include_message
   return post<HarnessSession>(`/harness/sessions/${sessionId}/fork`, body)
 }
 

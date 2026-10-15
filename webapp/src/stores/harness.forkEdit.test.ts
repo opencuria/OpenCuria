@@ -92,6 +92,27 @@ describe('harness store fork/edit', () => {
     expect(partsMock).toHaveBeenCalledTimes(1)
   })
 
+  it('forks after an assistant answer inclusively without prefilling its text', async () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession()]
+    store.messagesBySession['session-1'] = [
+      makeMessage(),
+      makeMessage({ id: 'answer-1', role: 'assistant', content: 'Completed answer' }),
+    ]
+    const forked = makeSession({ id: 'session-fork' })
+    forkMock.mockResolvedValueOnce(forked)
+
+    const result = await store.forkSession('session-1', 'answer-1')
+
+    expect(forkMock).toHaveBeenCalledWith('session-1', {
+      message_id: 'answer-1',
+      include_message: true,
+    })
+    expect(result).toEqual({ session: forked, prefill: '' })
+    expect(store.activeSessionId).toBe('session-fork')
+    expect(partsMock).toHaveBeenCalledWith('session-fork')
+  })
+
   it('forkSession without a message id forks the full session', async () => {
     const store = useHarnessStore()
     store.sessions = [makeSession()]

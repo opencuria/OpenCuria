@@ -207,6 +207,97 @@ async def test_fork_copies_parts_and_clears_child_session_id(
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_fork_includes_early_and_last_assistant_with_parts(
+    harness_workspace,
+) -> None:
+    """Inclusive forks keep the selected answer and its parts without mutation."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+    first_user = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="user", content="first"
+    )
+    first_answer = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content="answer one"
+    )
+    first_part = await sync_to_async(HarnessPartRepository.create)(
+        message_id=first_answer.id,
+        type="text",
+        state="completed",
+        output="answer one part",
+    )
+    second_user = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="user", content="second"
+    )
+    last_answer = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant", content="answer two"
+    )
+    last_part = await sync_to_async(HarnessPartRepository.create)(
+        message_id=last_answer.id,
+        type="text",
+        state="completed",
+        output="answer two part",
+    )
+    source_messages = HarnessMessageRepository.list_for_session(session.id)
+    source_parts = HarnessPartRepository.list_for_session(session.id)
+    source_message_state = [
+        (message.id, message.role, message.content, message.position)
+        for message in source_messages
+    ]
+    source_part_state = [
+        (part.id, part.message_id, part.output, part.position) for part in source_parts
+    ]
+
+    early_fork = await service.fork_session(
+        session.id, first_answer.id, include_message=True
+    )
+    early_messages = HarnessMessageRepository.list_for_session(early_fork.id)
+    early_parts = HarnessPartRepository.list_for_session(early_fork.id)
+    assert [message.content for message in early_messages] == ["first", "answer one"]
+    assert len(early_parts) == 1
+    assert early_parts[0].output == first_part.output
+    assert early_parts[0].message_id == early_messages[-1].id
+    assert early_parts[0].id != first_part.id
+
+    last_fork = await service.fork_session(
+        session.id, last_answer.id, include_message=True
+    )
+    last_messages = HarnessMessageRepository.list_for_session(last_fork.id)
+    last_parts = HarnessPartRepository.list_for_session(last_fork.id)
+    assert [message.content for message in last_messages] == [
+        "first",
+        "answer one",
+        "second",
+        "answer two",
+    ]
+    assert [part.output for part in last_parts] == [first_part.output, last_part.output]
+    assert {part.message_id for part in last_parts} == {
+        last_messages[1].id,
+        last_messages[3].id,
+    }
+    assert {part.id for part in last_parts}.isdisjoint(
+        {part.id for part in source_parts}
+    )
+    assert [
+        (message.id, message.role, message.content, message.position)
+        for message in HarnessMessageRepository.list_for_session(session.id)
+    ] == source_message_state
+    assert [
+        (part.id, part.message_id, part.output, part.position)
+        for part in HarnessPartRepository.list_for_session(session.id)
+    ] == source_part_state
+    assert first_user.id is not None and second_user.id is not None
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_fork_include_message_requires_message_id(harness_workspace) -> None:
+    """Inclusive fork mode requires a cutoff message ID."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+    with pytest.raises(ValueError, match="message_id is required"):
+        await service.fork_session(session.id, include_message=True)
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_fork_full_copy_without_message_id(harness_workspace) -> None:
     """Omitting message_id copies the whole history."""
     service, _, _ = _service()
@@ -1027,6 +1118,10 @@ async def test_repository_copy_prefix_returns_id_map(harness_workspace) -> None:
 
     full_map = HarnessMessageRepository.copy_prefix(session.id, other.id, None)
     assert set(full_map) == {first.id, second.id}
+    with pytest.raises(ValueError, match="cutoff_message_id is required"):
+        HarnessMessageRepository.copy_prefix(
+            session.id, other.id, None, include_message=True
+        )
 
 
 @pytest.mark.django_db(transaction=True)

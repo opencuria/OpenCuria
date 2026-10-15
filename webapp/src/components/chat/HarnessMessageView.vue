@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { pinHarnessMessageKey } from '@/lib/harnessMessagePin'
-import { BookText, GitFork, Pencil } from '@lucide/vue'
+import { BookText } from '@lucide/vue'
 import type { HarnessMessage } from '@/types/harness'
 import type { ComposerFileToken } from '@/lib/composerTokens'
 import { buildMessageBlocks, type MessageRenderBlock, type RenderBlock } from '@/lib/harnessBlocks'
@@ -14,9 +14,7 @@ import { formatHarnessModelEffort, type ProviderModel } from '@/lib/harnessModel
 import { elapsedMs, formatElapsed } from '@/lib/formatElapsed'
 import { useSkillStore } from '@/stores/skills'
 import { Button } from '@/components/ui/button'
-import CopyButton from '@/components/common/CopyButton.vue'
 import { Textarea } from '@/components/ui/textarea'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import HarnessMarkdown from './HarnessMarkdown.vue'
 import HarnessMentionImages from './HarnessMentionImages.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
@@ -25,6 +23,7 @@ import HarnessThinking from './HarnessThinking.vue'
 import HarnessBlockList from './HarnessBlockList.vue'
 import HarnessWorkedFor from './HarnessWorkedFor.vue'
 import HarnessPageControls from './HarnessPageControls.vue'
+import HarnessMessageFooter from './HarnessMessageFooter.vue'
 import { HARNESS_PAGE_SIZE, lastHarnessPage, shouldResetHarnessPage } from '@/lib/harnessPagination'
 
 const props = defineProps<{
@@ -254,7 +253,11 @@ function blockKey(block: MessageRenderBlock, index: number): string {
 const editing = ref(false)
 const editDraft = ref('')
 
-/** Local optimistic ids (`local-user-*`) have no backend row to edit/fork. */
+const isForkableMessage = computed(
+  () => props.message.role === 'assistant' && !props.disabled && finished.value,
+)
+
+/** Local optimistic ids (`local-user-*`) have no backend row to edit. */
 const isEditableMessage = computed(
   () =>
     props.message.role === 'user' && !props.disabled && !props.message.id.startsWith('local-user-'),
@@ -313,7 +316,7 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
   <div
     v-if="message.role === 'user'"
     ref="messageRoot"
-    class="group flex items-start gap-3 justify-end"
+    class="group/message flex items-start gap-3 justify-end"
     @focusin="onMessageFocusIn"
     @focusout="onMessageFocusOut"
   >
@@ -380,51 +383,14 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
           {{ skill.name }}
         </span>
       </div>
-      <div
+      <HarnessMessageFooter
         v-if="!editing"
-        class="mt-1 flex items-center justify-end gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100"
-      >
-        <CopyButton
-          :text="message.content"
-          label="message"
-          data-testid="message-copy"
-          class="h-7 w-7 text-muted-foreground hover:text-foreground"
-        />
-        <TooltipProvider v-if="isEditableMessage && !editing">
-          <Tooltip>
-            <TooltipTrigger as-child>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                class="h-7 w-7 text-muted-foreground hover:text-foreground"
-                data-testid="message-edit"
-                aria-label="Edit message and rerun"
-                @click="startEdit"
-              >
-                <Pencil :size="13" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="top"> Edit &amp; rerun </TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger as-child>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                class="h-7 w-7 text-muted-foreground hover:text-foreground"
-                data-testid="message-fork"
-                aria-label="Fork session from here"
-                @click="forkFromHere"
-              >
-                <GitFork :size="13" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="top"> Fork from here </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-      </div>
+        align="end"
+        :copy-text="message.content"
+        copy-label="message"
+        :editable="isEditableMessage"
+        @edit="startEdit"
+      />
     </div>
   </div>
 
@@ -432,7 +398,7 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
   <div
     v-else
     ref="messageRoot"
-    class="group flex items-start gap-3"
+    class="group/message flex items-start gap-3"
     @focusin="onMessageFocusIn"
     @focusout="onMessageFocusOut"
   >
@@ -497,31 +463,15 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
         </template>
       </div>
       <HarnessThinking v-if="showThinking" :class="blocks.length ? 'mt-2' : ''" />
-      <p
-        v-if="streamingModelLine"
-        data-testid="harness-message-running-model"
-        class="mt-1 text-xs text-muted-foreground"
-      >
-        {{ streamingModelLine }}
-      </p>
-      <div
-        v-if="copyText"
-        class="mt-1 flex items-center justify-start gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100"
-      >
-        <CopyButton
-          :text="copyText"
-          label="answer"
-          data-testid="answer-copy"
-          class="h-7 w-7 text-muted-foreground hover:text-foreground"
-        />
-      </div>
-      <p
-        v-if="usageLine"
-        data-testid="harness-message-usage"
-        class="mt-1 h-4 text-xs text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
-      >
-        {{ usageLine }}
-      </p>
+      <HarnessMessageFooter
+        v-if="copyText || isForkableMessage || usageLine || streamingModelLine"
+        :copy-text="copyText"
+        copy-label="answer"
+        :forkable="isForkableMessage"
+        :metadata="streamingModelLine ?? usageLine"
+        :streaming="streaming"
+        @fork="forkFromHere"
+      />
     </div>
   </div>
 </template>

@@ -1001,14 +1001,16 @@ _TOOLS: list[Tool] = [
     Tool(
         name="fork_harness_session",
         description=(
-            "Fork a harness session, copying messages before a "
-            "message (or the full session)."
+            "Fork a harness session, copying messages before a message by "
+            "default. Set include_message to also copy that message (requires "
+            "message_id); omit message_id to copy the full session."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "session_id": {"type": "string"},
                 "message_id": {"type": "string"},
+                "include_message": {"type": "boolean", "default": False},
             },
             "required": ["session_id"],
         },
@@ -4295,7 +4297,7 @@ async def _call_send_harness_message(api_key, org_id, args: dict) -> list[TextCo
 
 
 async def _call_fork_harness_session(api_key, org_id, args) -> list:  # type: ignore[no-untyped-def]
-    """Fork a session, copying the message prefix (no run, no busy guard)."""
+    """Fork a session, excluding the cutoff message unless requested."""
     import uuid as _uuid
 
     from asgiref.sync import sync_to_async
@@ -4328,7 +4330,11 @@ async def _call_fork_harness_session(api_key, org_id, args) -> list:  # type: ig
     try:
         current = await sync_to_async(service.get_session)(session.id)
         await sync_to_async(service.ensure_user_promptable)(current)
-        forked = await service.fork_session(current.id, message_id)
+        forked = await service.fork_session(
+            current.id,
+            message_id,
+            include_message=args.get("include_message", False),
+        )
         payload = await sync_to_async(_session_dict_with_unread)(service, forked)
         return _text(payload)
     except (NotFoundError, ConflictError, ValueError, KeyError) as exc:

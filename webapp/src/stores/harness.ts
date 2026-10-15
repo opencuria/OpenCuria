@@ -925,10 +925,8 @@ export const useHarnessStore = defineStore('harness', () => {
   }
 
   /**
-   * Fork a session at a user message (or full session when messageId is
-   * omitted). Inspired by OpenCode `session.fork`: the backend copies the
-   * message prefix without starting a run; the caller prefills the composer
-   * with the returned `prefill` text and never auto-sends.
+   * Fork after an assistant answer, before a user prompt, or the full session.
+   * Only user cutoffs return a composer prefill; forking never starts a run.
    */
   async function forkSession(
     sessionId: string,
@@ -937,11 +935,16 @@ export const useHarnessStore = defineStore('harness', () => {
     if (sessionTransitioning(sessionId)) return null
     const notifications = useNotificationStore()
     try {
-      const prefill =
-        messagesBySession.value[sessionId]?.find((item) => item.id === messageId)?.content ?? ''
+      const message = messagesBySession.value[sessionId]?.find((item) => item.id === messageId)
+      const prefill = message?.role === 'user' ? message.content : ''
       const session = await forkHarnessSession(
         sessionId,
-        messageId ? { message_id: messageId } : {},
+        messageId
+          ? {
+              message_id: messageId,
+              ...(message?.role === 'assistant' ? { include_message: true } : {}),
+            }
+          : {},
       )
       upsertSession(session)
       setActiveSession(session.id)

@@ -1000,17 +1000,24 @@ class HarnessMessageRepository:
         src_session_id: uuid.UUID,
         dst_session_id: uuid.UUID,
         cutoff_message_id: uuid.UUID | None,
+        *,
+        include_message: bool = False,
     ) -> dict[uuid.UUID, uuid.UUID]:
-        """Copy message prefix to *dst_session_id* (cutoff exclusive).
+        """Copy a message prefix to *dst_session_id*.
 
-        When *cutoff_message_id* is None or not found, the whole
-        history is copied. New UUIDs are generated; parts are copied
-        per message with ``meta.tail_start_id`` remapped via the id
-        map (dropped when outside the prefix) and subtask
-        ``child_session_id`` cleared. Positions are reallocated
-        sequentially via repo ``create`` so the fork keeps chronological
-        order. Returns the message id map.
+        The cutoff is exclusive by default; set *include_message* to include
+        it. In exclusive mode, a missing or unknown cutoff copies the full
+        history for backward compatibility. Inclusive mode requires a cutoff.
+        New UUIDs are generated; parts are copied per message with
+        ``meta.tail_start_id`` remapped via the id map (dropped when outside
+        the prefix) and subtask ``child_session_id`` cleared. Positions are
+        reallocated sequentially via repo ``create`` to preserve chronological
+        order. Returns the message ID map.
         """
+        if include_message and cutoff_message_id is None:
+            raise ValueError(
+                "cutoff_message_id is required when include_message is true"
+            )
         ordered = list(
             HarnessMessage.objects.filter(session_id=src_session_id).order_by(
                 "position", "created_at", "id"
@@ -1022,7 +1029,7 @@ class HarnessMessageRepository:
                 None,
             )
             if index is not None:
-                ordered = ordered[:index]
+                ordered = ordered[: index + int(include_message)]
         id_map: dict[uuid.UUID, uuid.UUID] = {}
         # Allocate message positions sequentially in chronological order.
         snapshots: list[HarnessMessage] = list(ordered)

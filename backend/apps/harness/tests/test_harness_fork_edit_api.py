@@ -220,6 +220,92 @@ def test_fork_title_increments(fork_edit_setup, fake_fork_service):
 
 
 @pytest.mark.django_db(transaction=True)
+def test_fork_includes_last_assistant_and_parts(
+    fork_edit_setup, fake_fork_service
+):
+    """REST inclusive forks copy the selected answer and its parts."""
+    session = _seed_two_turns(fake_fork_service, fork_edit_setup)
+    source_messages = HarnessMessageRepository.list_for_session(session.id)
+    source_assistants = [
+        message for message in source_messages if message.role == "assistant"
+    ]
+    assistant_parts = []
+    for index, assistant in enumerate(source_assistants, start=1):
+        assistant_parts.append(
+            HarnessPartRepository.create(
+                message_id=assistant.id,
+                type="text",
+                state="completed",
+                output=f"answer part {index}",
+            )
+        )
+    source_parts = HarnessPartRepository.list_for_session(session.id)
+    source_message_state = [
+        (message.id, message.role, message.content, message.position)
+        for message in source_messages
+    ]
+    source_part_state = [
+        (part.id, part.message_id, part.output, part.position) for part in source_parts
+    ]
+    client = _client(
+        user=fork_edit_setup["owner"], org=fork_edit_setup["org"], permissions=RUN
+    )
+    response = client.post(
+        f"/api/v1/harness/sessions/{session.id}/fork",
+        data=json.dumps(
+            {"message_id": str(source_assistants[-1].id), "include_message": True}
+        ),
+        content_type="application/json",
+    )
+    assert response.status_code == 201, response.content[:500]
+    fork_id = response.json()["id"]
+    forked_messages = HarnessMessageRepository.list_for_session(fork_id)
+    assert [message.content for message in forked_messages] == [
+        "first",
+        "answer one",
+        "second",
+        "answer two",
+    ]
+    forked_parts = HarnessPartRepository.list_for_session(fork_id)
+    assert [part.output for part in forked_parts] == [
+        "answer part 1",
+        "answer part 2",
+    ]
+    assert {part.message_id for part in forked_parts} == {
+        forked_messages[1].id,
+        forked_messages[3].id,
+    }
+    assert {part.id for part in forked_parts}.isdisjoint(
+        {part.id for part in source_parts}
+    )
+    assert [
+        (message.id, message.role, message.content, message.position)
+        for message in HarnessMessageRepository.list_for_session(session.id)
+    ] == source_message_state
+    assert [
+        (part.id, part.message_id, part.output, part.position)
+        for part in HarnessPartRepository.list_for_session(session.id)
+    ] == source_part_state
+    assert len(assistant_parts) == 2
+
+
+@pytest.mark.django_db(transaction=True)
+def test_fork_include_message_without_id_is_400(fork_edit_setup, fake_fork_service):
+    """REST inclusive mode requires a message ID."""
+    session = _seed_one_turn(fake_fork_service, fork_edit_setup)
+    client = _client(
+        user=fork_edit_setup["owner"], org=fork_edit_setup["org"], permissions=RUN
+    )
+    response = client.post(
+        f"/api/v1/harness/sessions/{session.id}/fork",
+        data=json.dumps({"include_message": True}),
+        content_type="application/json",
+    )
+    assert response.status_code == 400
+    assert "message_id is required" in response.json()["detail"]
+
+
+@pytest.mark.django_db(transaction=True)
 def test_fork_full_copy_without_message_id(fork_edit_setup, fake_fork_service):
     """Omitting message_id copies the full history."""
     session = _seed_two_turns(fake_fork_service, fork_edit_setup)
