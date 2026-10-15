@@ -227,14 +227,14 @@ export const useFileExplorerStore = defineStore('fileExplorer', () => {
     await fetchDirectory(workspaceId, path)
   }
 
+  /** Open an already-resolved filesystem path (not a URL). */
   async function openPath(
     workspaceId: string,
-    rawPath: string,
+    path: string,
     options: { revealInExplorer?: boolean } = {},
   ): Promise<void> {
     const { revealInExplorer = true } = options
-    const path = decodeURIComponent(rawPath.trim()).replace(/[?#].*$/, '')
-    if (!path.startsWith('/workspace')) {
+    if (path !== '/workspace' && !path.startsWith('/workspace/')) {
       return
     }
 
