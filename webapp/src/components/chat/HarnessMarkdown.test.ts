@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { ref } from 'vue'
+import { nextTick, ref } from 'vue'
+import { marked } from 'marked'
 
 import HarnessMarkdown from './HarnessMarkdown.vue'
 import ImageLightbox from './ImageLightbox.vue'
@@ -16,7 +17,7 @@ vi.mock('@/services/socket', () => ({
 function mountMarkdown(
   text: string,
   workspaceId = 'ws-1',
-  extra: { compact?: boolean; onPrimary?: boolean } = {},
+  extra: { compact?: boolean; onPrimary?: boolean; streaming?: boolean } = {},
 ) {
   return mount(HarnessMarkdown, {
     props: { text, ...extra },
@@ -31,10 +32,91 @@ function mountMarkdown(
 
 describe('HarnessMarkdown', () => {
   beforeEach(() => {
+    vi.useRealTimers()
     setActivePinia(createPinia())
     const store = useWorkspaceImageStore()
     store.reset()
     vi.mocked(sendFilesRead).mockClear()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('coalesces markdown parsing during a stream and flushes the latest text on completion', async () => {
+    vi.useFakeTimers()
+    const parseSpy = vi.spyOn(marked, 'parse')
+    const wrapper = mountMarkdown('First', 'ws-1', { streaming: true })
+    const initialParseCount = parseSpy.mock.calls.length
+    expect(wrapper.find('p').text()).toBe('First')
+
+    await wrapper.setProps({ text: 'First update' })
+    await wrapper.setProps({ text: 'First update final' })
+    await nextTick()
+    expect(parseSpy).toHaveBeenCalledTimes(initialParseCount)
+    expect(wrapper.find('p').text()).toBe('First')
+
+    await vi.advanceTimersByTimeAsync(50)
+    await nextTick()
+    expect(wrapper.find('p').text()).toBe('First update final')
+    expect(parseSpy).toHaveBeenCalledTimes(initialParseCount + 1)
+
+    await wrapper.setProps({ text: 'Final complete', streaming: false })
+    expect(wrapper.find('p').text()).toBe('Final complete')
+    expect(parseSpy).toHaveBeenCalledTimes(initialParseCount + 2)
+    wrapper.unmount()
+    parseSpy.mockRestore()
+  })
+
+  it('cancels a pending streaming render timer when unmounted', async () => {
+    vi.useFakeTimers()
+    const parseSpy = vi.spyOn(marked, 'parse')
+    const wrapper = mountMarkdown('Before', 'ws-1', { streaming: true })
+    const initialParseCount = parseSpy.mock.calls.length
+    await wrapper.setProps({ text: 'After' })
+    wrapper.unmount()
+    await vi.advanceTimersByTimeAsync(50)
+    expect(parseSpy).toHaveBeenCalledTimes(initialParseCount)
+    parseSpy.mockRestore()
+  })
+
+  it('releases visible media pins when a markdown segment is removed', async () => {
+    const store = useWorkspaceImageStore()
+    const payload = Buffer.alloc(20 * 1024 * 1024, 1).toString('base64')
+    store.imageCache['/workspace/a.png'] = `data:image/png;base64,${payload}`
+    const wrapper = mountMarkdown('![a](/workspace/a.png)')
+    await nextTick()
+    store.storeLocalImage('/workspace/b.png', `data:image/png;base64,${payload}`)
+
+    await wrapper.setProps({ text: 'No more media' })
+    await nextTick()
+
+    expect(store.imageCache['/workspace/a.png']).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('reacquires markdown media pins after store reset without stale unpinning', async () => {
+    const store = useWorkspaceImageStore()
+    const payload = Buffer.alloc(20 * 1024 * 1024, 1).toString('base64')
+    store.pinMedia('/workspace/a.png', true)
+    store.storeLocalImage('/workspace/a.png', `data:image/png;base64,${payload}`)
+    const wrapper = mountMarkdown('![a](/workspace/a.png)')
+    store.pinMedia('/workspace/a.png', false)
+    await nextTick()
+    expect(store.getImageUrl('/workspace/a.png')).not.toBeNull()
+
+    store.reset()
+    await nextTick()
+    expect(store.getImageUrl('/workspace/a.png')).toBeNull()
+    const calls = vi.mocked(sendFilesRead).mock.calls
+    const requestId = calls[calls.length - 1]![1]
+    store.handleContentResult(requestId, '/workspace/a.png', payload, undefined, 'image/png')
+    expect(store.imageCache['/workspace/a.png']).toBeDefined()
+
+    store.storeLocalImage('/workspace/b.png', `data:image/png;base64,${payload}`)
+    expect(store.imageCache['/workspace/a.png']).toBeDefined()
+    wrapper.unmount()
+    expect(store.getImageUrl('/workspace/a.png')).toBeNull()
   })
 
   it('renders a video element when the store has a cached URL', () => {

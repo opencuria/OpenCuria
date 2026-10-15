@@ -8,7 +8,7 @@
  * No polling: ChatSidebar handles live updates; a single
  * fetchWorkspaces()/fetchSkills() on mount is enough here.
  */
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Container, Plus } from '@lucide/vue'
 import OpenCuriaLogo from '@/components/branding/OpenCuriaLogo.vue'
@@ -17,7 +17,6 @@ import HarnessSheetStack from '@/components/chat/HarnessSheetStack.vue'
 import SidePanelToggle from '@/components/chat/SidePanelToggle.vue'
 import CreateWorkspaceDialog from '@/components/workspaces/CreateWorkspaceDialog.vue'
 import WorkspacePicker from '@/components/workspaces/WorkspacePicker.vue'
-import WorkspaceToolsSplit from '@/components/workspaces/WorkspaceToolsSplit.vue'
 import { Button } from '@/components/ui/button'
 import { HOME_EXIT_MS, armComposerTransition, prefersReducedMotion } from '@/lib/composerTransition'
 import { buildComposerSheets } from '@/lib/composerSheets'
@@ -32,6 +31,10 @@ import { useSidePanelStore } from '@/stores/sidePanel'
 import { useSkillStore } from '@/stores/skills'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { subscribeToWorkspace, unsubscribeFromWorkspace } from '@/services/socket'
+
+const WorkspaceToolsSplit = defineAsyncComponent(
+  () => import('@/components/workspaces/WorkspaceToolsSplit.vue'),
+)
 
 const LAST_WORKSPACE_KEY = 'opencuria:last-workspace'
 
@@ -95,6 +98,7 @@ function handleMentionHover(index: number): void {
 
 /** Seed the explorer tree so `@` file search works like in the chat. */
 const homeSocketCleanup: Array<() => void> = []
+let disposed = false
 
 function cleanupHomeSocket(workspaceId: string | null): void {
   if (workspaceId) unsubscribeFromWorkspace(workspaceId)
@@ -102,7 +106,7 @@ function cleanupHomeSocket(workspaceId: string | null): void {
 }
 
 function setupHomeFileSearch(workspaceId: string | null): void {
-  if (!workspaceId) return
+  if (disposed || !workspaceId) return
   subscribeToWorkspace(workspaceId)
   // The split side-panel (when open) and composer share the root listing.
   // Avoid overlapping socket requests while retaining an initial root load.
@@ -325,12 +329,14 @@ onMounted(async () => {
   if (workspaceStore.workspaces.length === 0) {
     await workspaceStore.fetchWorkspaces()
   }
+  if (disposed) return
   pickInitialWorkspace()
   void skillStore.fetchSkills()
   setupHomeFileSearch(selectedWorkspaceId.value)
 })
 
 onUnmounted(() => {
+  disposed = true
   cleanupHomeSocket(selectedWorkspaceId.value)
 })
 
@@ -345,10 +351,7 @@ watch(
 </script>
 
 <template>
-  <WorkspaceToolsSplit
-    :workspace-id="selectedWorkspaceId ?? ''"
-    :can-prompt="canPrompt"
-  >
+  <WorkspaceToolsSplit :workspace-id="selectedWorkspaceId ?? ''" :can-prompt="canPrompt">
     <template #header>
       <header
         class="flex shrink-0 items-center justify-end px-1.5 pb-1 pt-2 sm:px-2.5"
@@ -443,7 +446,8 @@ watch(
               @update:effort="harnessStore.setComposerEffort($event)"
               @send="handleSend"
               @mention-change="
-                (open, query, candidates, index) => handleMentionMirror(open, query, candidates, index)
+                (open, query, candidates, index) =>
+                  handleMentionMirror(open, query, candidates, index)
               "
               @mention-select="handleMentionSelect"
             />

@@ -27,56 +27,114 @@ const scrollEl = ref<HTMLElement | null>(null)
 const stickToBottom = ref(true)
 const heights = new Map<string, number>()
 const observer = ref<ResizeObserver | null>(null)
+const observedNodes = new Set<HTMLElement>()
 const pinnedIds = ref(new Set<string>())
 const virtualRange = ref({ start: 0, end: 0 })
-const measured = ref(0)
 const scrollAnchor = ref<{ id: string; top: number } | null>(null)
+const heightRevision = ref(0)
 let resizeFrame = 0
 const estimateHeight = 120
 const rowGap = 24
 const sortedMessages = computed(() => sortHarnessMessages(props.messages))
 const virtualEnabled = computed(() => sortedMessages.value.length >= 40)
 
+let indexedMessageIds: string[] = []
+let messageIndexes = new Map<string, number>()
+// prefix[i] is the height of rows [0, i), including their internal flex gaps.
+let heightPrefix: number[] = [0]
+
+function rebuildHeightPrefix(): void {
+  const prefix: number[] = [0]
+  for (let index = 0; index < indexedMessageIds.length; index += 1) {
+    prefix[index + 1] =
+      prefix[index]! +
+      (heights.get(indexedMessageIds[index]!) ?? estimateHeight) +
+      (index > 0 ? rowGap : 0)
+  }
+  heightPrefix = prefix
+}
+
+function syncMessageIndex(messages: HarnessMessage[]): void {
+  const nextIds = messages.map((message) => message.id)
+  if (
+    nextIds.length === indexedMessageIds.length &&
+    nextIds.every((id, index) => id === indexedMessageIds[index])
+  )
+    return
+
+  const currentIds = new Set(nextIds)
+  for (const id of heights.keys()) {
+    if (!currentIds.has(id)) heights.delete(id)
+  }
+  indexedMessageIds = nextIds
+  messageIndexes = new Map(nextIds.map((id, index) => [id, index]))
+  const rangeStart = Math.min(
+    Math.max(0, virtualRange.value.start),
+    Math.max(0, nextIds.length - 20),
+  )
+  const rangeEnd = Math.min(
+    nextIds.length,
+    Math.max(rangeStart, Math.min(virtualRange.value.end, rangeStart + 40)),
+  )
+  if (virtualRange.value.start !== rangeStart || virtualRange.value.end !== rangeEnd)
+    virtualRange.value = { start: rangeStart, end: rangeEnd }
+  const livePins = new Set([...pinnedIds.value].filter((id) => messageIndexes.has(id)))
+  if (livePins.size !== pinnedIds.value.size) pinnedIds.value = livePins
+  rebuildHeightPrefix()
+  heightRevision.value += 1
+  if (scrollEl.value) scheduleRangeUpdate()
+}
+
+syncMessageIndex(sortedMessages.value)
+
+function hiddenHeight(start: number, end: number): number {
+  if (end <= start) return 0
+  // The flex gap before the first hidden row belongs to a visible boundary,
+  // not to the spacer. Internal gaps between hidden rows remain exact.
+  return heightPrefix[end]! - heightPrefix[start]! - (start > 0 ? rowGap : 0)
+}
+
 const renderEntries = computed(() => {
   const messages = sortedMessages.value
   if (!virtualEnabled.value)
     return messages.map((message) => ({ kind: 'message' as const, message }))
+
+  // Measurement changes update spacer heights without rebuilding the message
+  // index; scrolling only touches the bounded visible/pinned index set.
+  void heightRevision.value
   const indexes = new Set<number>()
-  for (let index = virtualRange.value.start; index < virtualRange.value.end; index += 1)
-    indexes.add(index)
+  for (let index = virtualRange.value.start; index < virtualRange.value.end; index += 1) {
+    if (index >= 0 && index < messages.length) indexes.add(index)
+  }
   for (const id of pinnedIds.value) {
-    const index = messages.findIndex((message) => message.id === id)
-    if (index >= 0 && indexes.size < 1000) indexes.add(index)
+    const index = messageIndexes.get(id)
+    if (index !== undefined && index >= 0 && index < messages.length && indexes.size < 1000)
+      indexes.add(index)
   }
-  // Guard against pathological viewport sizes / pinning while retaining the
-  // visible window first and keeping transcript DOM strictly bounded.
-  if (indexes.size > 1000) {
-    const visible = [...indexes].sort((a, b) => a - b).slice(0, 1000)
-    indexes.clear()
-    visible.forEach((index) => indexes.add(index))
-  }
+
   const entries: Array<
     { kind: 'message'; message: HarnessMessage } | { kind: 'spacer'; id: string; height: number }
   > = []
-  let hiddenStart = -1
-  let hiddenHeight = 0
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index]!
-    if (!indexes.has(index)) {
-      if (hiddenStart < 0) hiddenStart = index
-      else hiddenHeight += rowGap
-      hiddenHeight += heights.get(message.id) ?? estimateHeight
-      continue
+  const renderedIndexes = [...indexes].sort((a, b) => a - b)
+  let nextHiddenIndex = 0
+  for (const index of renderedIndexes) {
+    if (nextHiddenIndex < index) {
+      entries.push({
+        kind: 'spacer',
+        id: `gap-${nextHiddenIndex}-${index}`,
+        height: hiddenHeight(nextHiddenIndex, index),
+      })
     }
-    if (hiddenStart >= 0) {
-      entries.push({ kind: 'spacer', id: `gap-${hiddenStart}-${index}`, height: hiddenHeight })
-      hiddenStart = -1
-      hiddenHeight = 0
-    }
-    entries.push({ kind: 'message', message })
+    entries.push({ kind: 'message', message: messages[index]! })
+    nextHiddenIndex = index + 1
   }
-  if (hiddenStart >= 0)
-    entries.push({ kind: 'spacer', id: `gap-${hiddenStart}-end`, height: hiddenHeight })
+  if (nextHiddenIndex < messages.length) {
+    entries.push({
+      kind: 'spacer',
+      id: `gap-${nextHiddenIndex}-end`,
+      height: hiddenHeight(nextHiddenIndex, messages.length),
+    })
+  }
   return entries
 })
 
@@ -129,33 +187,41 @@ async function scrollToBottom(force = false): Promise<void> {
   const el = scrollEl.value
   if (el && (force || stickToBottom.value)) el.scrollTop = el.scrollHeight
 }
+
+function firstRowEndingAtOrAfter(offset: number, length: number): number {
+  let low = 0
+  let high = length
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2)
+    if (heightPrefix[middle + 1]! >= offset) high = middle
+    else low = middle + 1
+  }
+  return low
+}
+
 function updateRange(): void {
   const el = scrollEl.value
   const messages = sortedMessages.value
   if (!el || !virtualEnabled.value) {
-    virtualRange.value = { start: 0, end: messages.length }
+    if (virtualRange.value.start !== 0 || virtualRange.value.end !== messages.length)
+      virtualRange.value = { start: 0, end: messages.length }
     return
   }
+
   const top = el.scrollTop
   const bottom = top + el.clientHeight
-  const cumulative: number[] = []
-  let total = 0
-  for (let i = 0; i < messages.length; i += 1) {
-    if (i > 0) total += rowGap
-    total += heights.get(messages[i]!.id) ?? estimateHeight
-    cumulative.push(total)
-  }
-  const firstVisible = cumulative.findIndex((end) => end >= top)
-  let start = Math.max(0, (firstVisible < 0 ? messages.length : firstVisible) - 5)
-  const visibleEnd = cumulative.findIndex((end) => end >= bottom)
-  let end = visibleEnd < 0 ? messages.length : Math.min(messages.length, visibleEnd + 6)
+  const firstVisible = firstRowEndingAtOrAfter(top, messages.length)
+  let start = Math.max(0, (firstVisible >= messages.length ? messages.length : firstVisible) - 5)
+  const visibleEnd = firstRowEndingAtOrAfter(bottom, messages.length)
+  let end =
+    visibleEnd >= messages.length ? messages.length : Math.min(messages.length, visibleEnd + 6)
   const maxVisibleRows = 40
   if (end - start > maxVisibleRows) {
     start = Math.max(0, Math.min(start, firstVisible - 5))
     end = Math.min(messages.length, start + maxVisibleRows)
   }
-  virtualRange.value = { start, end }
-  measured.value += 1
+  if (virtualRange.value.start !== start || virtualRange.value.end !== end)
+    virtualRange.value = { start, end }
 }
 function scheduleRangeUpdate(): void {
   if (!virtualEnabled.value || resizeFrame) return
@@ -164,15 +230,45 @@ function scheduleRangeUpdate(): void {
     updateRange()
   })
 }
-function observeMessages(): void {
-  observer.value?.disconnect()
-  scrollEl.value
-    ?.querySelectorAll<HTMLElement>('[data-message-id]')
-    .forEach((node) => observer.value?.observe(node))
+
+function syncObservedMessages(): void {
+  const resizeObserver = observer.value
+  const el = scrollEl.value
+  if (!resizeObserver || !el) return
+
+  const currentNodes = new Set(el.querySelectorAll<HTMLElement>('[data-message-id]'))
+  for (const node of observedNodes) {
+    if (!currentNodes.has(node)) {
+      resizeObserver.unobserve(node)
+      observedNodes.delete(node)
+    }
+  }
+  for (const node of currentNodes) {
+    if (!observedNodes.has(node)) {
+      resizeObserver.observe(node)
+      observedNodes.add(node)
+    }
+  }
 }
+
 function onResize(entries: ResizeObserverEntry[]): void {
   const el = scrollEl.value
   if (!el) return
+
+  const changedEntries: Array<{ node: HTMLElement; id: string; height: number; prior: number }> = []
+  for (const entry of entries) {
+    const node = entry.target as HTMLElement
+    const id = node.dataset.messageId
+    if (!id || !messageIndexes.has(id) || !el.contains(node)) continue
+    const height = entry.contentRect.height
+    const prior = heights.get(id) ?? estimateHeight
+    if (height === prior) continue
+    changedEntries.push({ node, id, height, prior })
+  }
+  // ResizeObserver may report already-settled boxes after observing or a
+  // rerender. Do not schedule more work for those no-op notifications.
+  if (changedEntries.length === 0) return
+
   const nodeFor = (id: string): HTMLElement | undefined =>
     [...el.querySelectorAll<HTMLElement>('[data-message-id]')].find(
       (node) => node.dataset.messageId === id,
@@ -185,16 +281,14 @@ function onResize(entries: ResizeObserverEntry[]): void {
       )
   const anchorTop = savedAnchor?.top ?? anchorNode?.getBoundingClientRect().top ?? 0
   let heightDeltaAboveAnchor = 0
-  for (const entry of entries) {
-    const node = entry.target as HTMLElement
-    const id = node.dataset.messageId
-    if (!id) continue
-    const priorHeight = heights.get(id) ?? estimateHeight
-    if (node !== anchorNode && node.getBoundingClientRect().top < anchorTop) {
-      heightDeltaAboveAnchor += entry.contentRect.height - priorHeight
-    }
-    heights.set(id, entry.contentRect.height)
+  for (const { node, id, height, prior } of changedEntries) {
+    if (node !== anchorNode && node.getBoundingClientRect().top < anchorTop)
+      heightDeltaAboveAnchor += height - prior
+    heights.set(id, height)
   }
+  rebuildHeightPrefix()
+  heightRevision.value += 1
+
   if (stickToBottom.value) {
     void nextTick(() => {
       if (stickToBottom.value) el.scrollTop = el.scrollHeight
@@ -238,7 +332,7 @@ onMounted(() => {
     end: sortedMessages.value.length,
   }
   void nextTick(async () => {
-    observeMessages()
+    syncObservedMessages()
     await scrollToBottom(true)
     updateRange()
   })
@@ -246,20 +340,22 @@ onMounted(() => {
 onUnmounted(() => {
   scrollEl.value?.removeEventListener('scroll', onScroll)
   observer.value?.disconnect()
+  observedNodes.clear()
   if (resizeFrame) cancelAnimationFrame(resizeFrame)
 })
 watch(
   [renderEntries, virtualEnabled],
   () => {
-    void nextTick(observeMessages)
+    void nextTick(syncObservedMessages)
   },
   { flush: 'post' },
 )
 watch(
-  () => measured.value,
-  () => {
-    void nextTick(observeMessages)
+  sortedMessages,
+  (messages) => {
+    syncMessageIndex(messages)
   },
+  { flush: 'sync' },
 )
 watch(
   () => sortedMessages.value.length,
@@ -284,7 +380,10 @@ watch(
   () => {
     stickToBottom.value = true
     heights.clear()
+    rebuildHeightPrefix()
+    heightRevision.value += 1
     pinnedIds.value = new Set()
+    scrollAnchor.value = null
     virtualRange.value = {
       start: Math.max(0, sortedMessages.value.length - 20),
       end: sortedMessages.value.length,

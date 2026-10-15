@@ -19,7 +19,7 @@
  * Uses `store.fetchImage` / `getImageUrl` / `isFetchingImage`; click opens
  * the existing `ImageLightbox`.
  */
-import { computed, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { X } from '@lucide/vue'
 import { Skeleton } from '@/components/ui/skeleton'
 import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
@@ -87,9 +87,7 @@ function isSafeWorkspacePath(path: unknown): path is string {
 const safeImages = computed(() =>
   (props.tokens ?? []).filter(
     (token) =>
-      token &&
-      isSafeWorkspacePath(token.path) &&
-      classifyWorkspaceFile(token.path) === 'image',
+      token && isSafeWorkspacePath(token.path) && classifyWorkspaceFile(token.path) === 'image',
   ),
 )
 
@@ -119,8 +117,65 @@ function isLoading(path: string): boolean {
   }
 }
 
+const pinnedPaths = new Set<string>()
+let pinnedMediaGeneration = imageStore.mediaGeneration
+let pinnedWorkspaceId = props.workspaceId
+const lightbox = ref<{ src: string; alt: string } | null>(null)
+let lightboxPath: string | null = null
+let lightboxMediaGeneration = imageStore.mediaGeneration
+
 watch(
-  () => [props.tokens, props.workspaceId] as const,
+  () =>
+    [
+      safeImages.value.map((token) => token.path),
+      props.workspaceId,
+      imageStore.mediaGeneration,
+    ] as const,
+  ([paths, workspaceId, generation]) => {
+    const nextPaths = new Set(paths)
+    const generationChanged = generation !== pinnedMediaGeneration
+    const workspaceChanged = workspaceId !== pinnedWorkspaceId
+    if (generationChanged) {
+      // reset() cleared the store's pins; never release old ownership into the
+      // newly reset pin table.
+      pinnedPaths.clear()
+      pinnedMediaGeneration = generation
+    } else if (workspaceChanged) {
+      imageStore.releaseMedia(pinnedPaths)
+      pinnedPaths.clear()
+    } else {
+      const releasedPaths: string[] = []
+      for (const path of pinnedPaths) {
+        if (!nextPaths.has(path)) {
+          releasedPaths.push(path)
+          pinnedPaths.delete(path)
+        }
+      }
+      if (releasedPaths.length > 0) imageStore.releaseMedia(releasedPaths)
+    }
+    pinnedWorkspaceId = workspaceId
+    if (lightboxPath && lightboxMediaGeneration !== generation) {
+      lightbox.value = null
+      lightboxPath = null
+      lightboxMediaGeneration = generation
+    }
+    for (const path of nextPaths) {
+      if (!pinnedPaths.has(path)) {
+        imageStore.pinMedia(path, true)
+        pinnedPaths.add(path)
+      }
+    }
+  },
+  { immediate: true, flush: 'sync' },
+)
+
+watch(
+  () =>
+    [
+      safeImages.value.map((token) => token.path),
+      props.workspaceId,
+      imageStore.mediaGeneration,
+    ] as const,
   () => {
     const id = props.workspaceId
     if (!id) return
@@ -135,16 +190,37 @@ watch(
   { immediate: true },
 )
 
-const lightbox = ref<{ src: string; alt: string } | null>(null)
+onUnmounted(() => {
+  if (pinnedMediaGeneration === imageStore.mediaGeneration) {
+    imageStore.releaseMedia(pinnedPaths)
+  }
+  pinnedPaths.clear()
+  if (lightboxPath && lightboxMediaGeneration === imageStore.mediaGeneration) {
+    imageStore.pinMedia(lightboxPath, false)
+  }
+  lightboxPath = null
+})
 
 function openLightbox(path: string): void {
   const url = imageUrl(path)
   if (!url) return
+  if (lightboxPath !== path) {
+    if (lightboxPath && lightboxMediaGeneration === imageStore.mediaGeneration) {
+      imageStore.pinMedia(lightboxPath, false)
+    }
+    imageStore.pinMedia(path, true)
+    lightboxPath = path
+    lightboxMediaGeneration = imageStore.mediaGeneration
+  }
   lightbox.value = { src: url, alt: displayName(path) }
 }
 
 function closeLightbox(): void {
   lightbox.value = null
+  if (lightboxPath && lightboxMediaGeneration === imageStore.mediaGeneration) {
+    imageStore.pinMedia(lightboxPath, false)
+  }
+  lightboxPath = null
 }
 
 function requestRemove(token: MentionFileToken): void {
@@ -219,10 +295,5 @@ function requestRemove(token: MentionFileToken): void {
       </button>
     </div>
   </div>
-  <ImageLightbox
-    v-if="lightbox"
-    :src="lightbox.src"
-    :alt="lightbox.alt"
-    @close="closeLightbox"
-  />
+  <ImageLightbox v-if="lightbox" :src="lightbox.src" :alt="lightbox.alt" @close="closeLightbox" />
 </template>

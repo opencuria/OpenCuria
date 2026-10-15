@@ -1,15 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 
 import WorkspaceSidePanel from './WorkspaceSidePanel.vue'
 import { useSidePanelStore } from '@/stores/sidePanel'
-import {
-  DEFAULT_PANEL_WIDTH,
-  MIN_PANEL_WIDTH,
-  PANEL_WIDTH_STORAGE_KEY,
-} from '@/lib/sidePanel'
+import { DEFAULT_PANEL_WIDTH, MIN_PANEL_WIDTH, PANEL_WIDTH_STORAGE_KEY } from '@/lib/sidePanel'
 
 const tabStubs = {
   WorkspaceTerminal: { template: '<div data-testid="stub-terminal" />', props: ['workspaceId'] },
@@ -102,6 +98,26 @@ describe('WorkspaceSidePanel', () => {
     expect(store.isOpen).toBe(false)
   })
 
+  it('loads only the active tab module and keeps loaded tab instances alive', async () => {
+    const store = useSidePanelStore()
+    store.open('git')
+    const wrapper = mountPanel()
+
+    expect(wrapper.find('[data-testid="stub-files"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="stub-terminal"]').exists()).toBe(false)
+
+    store.setTab('files')
+    await flushPromises()
+    const files = wrapper.find('[data-testid="stub-files"]')
+    expect(files.exists()).toBe(true)
+    expect(wrapper.find('[data-testid="stub-terminal"]').exists()).toBe(false)
+
+    store.setTab('git')
+    await nextTick()
+    expect(files.exists()).toBe(true)
+    expect(files.isVisible()).toBe(false)
+  })
+
   it('lazily mounts tab contents on first activation', async () => {
     const store = useSidePanelStore()
     store.open('git')
@@ -110,6 +126,7 @@ describe('WorkspaceSidePanel', () => {
     expect(wrapper.find('[data-testid="stub-terminal"]').exists()).toBe(false)
 
     store.setTab('terminal')
+    await flushPromises()
     await nextTick()
     expect(wrapper.find('[data-testid="stub-terminal"]').exists()).toBe(true)
 

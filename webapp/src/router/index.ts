@@ -1,5 +1,4 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import AppLayout from '@/components/layout/AppLayout.vue'
 import { useAuthStore } from '@/stores/auth'
 import { resolveSettingsTab } from '@/components/settings/settingsTabs'
 
@@ -33,7 +32,7 @@ const router = createRouter({
     // ---- Authenticated routes (inside AppLayout) ----
     {
       path: '/',
-      component: AppLayout,
+      component: () => import('@/components/layout/AppLayout.vue'),
       meta: { requiresAuth: true, requiresOrg: true },
       children: [
         {
@@ -59,7 +58,10 @@ const router = createRouter({
           // ScheduledTaskDialogHost strips only this query and preserves others.
           path: 'scheduled-tasks',
           name: 'scheduled-tasks',
-          redirect: (to) => ({ path: '/', query: { ...to.query, scheduledTask: to.query.task ?? 'latest' } }),
+          redirect: (to) => ({
+            path: '/',
+            query: { ...to.query, scheduledTask: to.query.task ?? 'latest' },
+          }),
           meta: { title: 'Scheduled tasks' },
         },
         {
@@ -130,7 +132,11 @@ router.beforeEach(async (to) => {
   const isGuestOnly = to.meta.guest === true
 
   // Users with existing organizations should never see create-organization page
-  if (to.name === 'create-organization' && authStore.isAuthenticated && authStore.hasOrganizations) {
+  if (
+    to.name === 'create-organization' &&
+    authStore.isAuthenticated &&
+    authStore.hasOrganizations
+  ) {
     return '/'
   }
 

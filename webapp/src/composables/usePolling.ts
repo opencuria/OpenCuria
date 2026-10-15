@@ -23,6 +23,7 @@ export function usePolling(
   let runImmediatelyWhenFree = false
   let wasHidden = !pageIsVisible()
   let visibilityListener: (() => void) | null = null
+  let disposed = false
 
   function clearTimer(): void {
     if (timer !== null) {
@@ -37,16 +38,19 @@ export function usePolling(
 
   function scheduleNext(): void {
     clearTimer()
-    if (!isPolling.value || !pageIsVisible() || inFlight) return
+    if (disposed || !isPolling.value || !pageIsVisible() || inFlight) return
     const delay = toValue(intervalMs)
-    timer = setTimeout(() => {
-      timer = null
-      void runFetch()
-    }, Number.isFinite(delay) ? Math.max(0, delay) : 5000)
+    timer = setTimeout(
+      () => {
+        timer = null
+        void runFetch()
+      },
+      Number.isFinite(delay) ? Math.max(0, delay) : 5000,
+    )
   }
 
   async function runFetch(): Promise<void> {
-    if (!isPolling.value || !pageIsVisible()) return
+    if (disposed || !isPolling.value || !pageIsVisible()) return
     if (inFlight) {
       runImmediatelyWhenFree = true
       return
@@ -88,7 +92,7 @@ export function usePolling(
   }
 
   function start(): void {
-    if (isPolling.value) return
+    if (disposed || isPolling.value) return
     isPolling.value = true
     wasHidden = !pageIsVisible()
     if (typeof document !== 'undefined') {
@@ -120,7 +124,10 @@ export function usePolling(
     },
   )
 
-  onUnmounted(stop)
+  onUnmounted(() => {
+    disposed = true
+    stop()
+  })
 
   return { isPolling, start, stop, restart }
 }
