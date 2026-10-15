@@ -63,8 +63,7 @@ def qcow(path, backing=None):
 
 def qemu_ready(tmp_path):
     r = runtime(tmp_path)
-    r._ssh_connections = {}
-    r._ssh_locks = {}
+    r._ssh_states = {}
     r._host_key_cache = {}
     r._destroy_workspace_network = AsyncMock()
     r._create_workspace_network = AsyncMock(
