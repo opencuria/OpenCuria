@@ -120,8 +120,25 @@ function posixNormalize(path: string): string {
  * Remote URLs and sandbox escapes return null.
  */
 export function resolveWorkspaceMediaPath(rawDest: string): string | null {
-  const dest = parseMarkdownLinkDest(rawDest)
+  return resolveWorkspacePath(parseMarkdownLinkDest(rawDest))
+}
+
+/** Resolve a sanitized anchor href, decoding its path exactly once. */
+export function resolveWorkspaceLinkPath(href: string): string | null {
+  const dest = href.trim()
   if (!dest || REMOTE_DEST_RE.test(dest)) return null
+  // Query/fragment syntax is not part of a filename; encoded %3F/%23 is.
+  const path = dest.replace(/[?#].*$/, '')
+  if (!path) return null
+  try {
+    return resolveWorkspacePath(decodeURIComponent(path))
+  } catch {
+    return null
+  }
+}
+
+function resolveWorkspacePath(dest: string): string | null {
+  if (!dest || REMOTE_DEST_RE.test(dest) || /[\\\p{Cc}]/u.test(dest)) return null
   const candidate = dest.startsWith('/') ? dest : `${WORKSPACE_ROOT}/${dest}`
   const normalized = posixNormalize(candidate)
   if (normalized !== WORKSPACE_ROOT && !normalized.startsWith(`${WORKSPACE_ROOT}/`)) {

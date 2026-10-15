@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick, ref } from 'vue'
 import { marked } from 'marked'
@@ -8,9 +8,15 @@ import HarnessMarkdown from './HarnessMarkdown.vue'
 import ImageLightbox from './ImageLightbox.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
-import { sendFilesRead } from '@/services/socket'
+import { useFileExplorerStore } from '@/stores/fileExplorer'
+import { useSidePanelStore } from '@/stores/sidePanel'
+import FileViewer from '@/components/files/FileViewer.vue'
+import { sendFilesList, sendFilesRead } from '@/services/socket'
 
 vi.mock('@/services/socket', () => ({
+  sendFilesList: vi.fn(),
+  sendFilesFind: vi.fn(),
+  sendFilesDownload: vi.fn(),
   sendFilesRead: vi.fn(),
 }))
 
@@ -30,16 +36,24 @@ function mountMarkdown(
   })
 }
 
+function click(element: Element, options: MouseEventInit = {}): boolean {
+  return element.dispatchEvent(
+    new MouseEvent('click', { bubbles: true, cancelable: true, ...options }),
+  )
+}
+
 describe('HarnessMarkdown', () => {
   beforeEach(() => {
     vi.useRealTimers()
     setActivePinia(createPinia())
     const store = useWorkspaceImageStore()
     store.reset()
-    vi.mocked(sendFilesRead).mockClear()
+    vi.clearAllMocks()
   })
 
   afterEach(() => {
+    useFileExplorerStore().reset()
+    vi.restoreAllMocks()
     vi.useRealTimers()
   })
 
@@ -173,6 +187,147 @@ describe('HarnessMarkdown', () => {
     expect(wrapper.find('video').exists()).toBe(false)
     expect(wrapper.find('img').exists()).toBe(false)
     expect(wrapper.get('.prose-output > div').find('h2').exists()).toBe(true)
+  })
+
+  it.each([
+    'sb-laden-konzept/sb-laden-konzept.pdf',
+    '/workspace/sb-laden-konzept/sb-laden-konzept.pdf',
+    './sb-laden-konzept/../sb-laden-konzept/sb-laden-konzept.pdf?download=1#page=2',
+  ])('opens the existing PDF viewer from a formatted file link: %s', async (href) => {
+    const path = '/workspace/sb-laden-konzept/sb-laden-konzept.pdf'
+    const store = useFileExplorerStore()
+    useSidePanelStore().close()
+    vi.mocked(sendFilesList).mockImplementation((id, requestId, directory) => {
+      queueMicrotask(() => store.handleListResult(requestId, directory, [], undefined, id))
+      return true
+    })
+    const wrapper = mountMarkdown(`**[Aktualisierte PDF öffnen](${href})**`)
+    const viewer = mount(FileViewer, { props: { workspaceId: 'ws-1' } })
+
+    expect(wrapper.get('strong a').text()).toBe('Aktualisierte PDF öffnen')
+    expect(wrapper.get('a').attributes('target')).toBeUndefined()
+    expect(sendFilesRead).not.toHaveBeenCalled()
+    expect(click(wrapper.get('strong a').element)).toBe(false)
+    await flushPromises()
+    expect(useSidePanelStore().isOpen).toBe(false)
+    expect(store.selectedPath).toBe(path)
+    expect(sendFilesRead).toHaveBeenCalledWith('ws-1', expect.any(String), path)
+    expect(viewer.find('[data-testid="file-viewer-loading"]').exists()).toBe(true)
+
+    const calls = vi.mocked(sendFilesRead).mock.calls
+    const requestId = calls[calls.length - 1]![1]
+    store.handleContentResult(requestId, path, btoa('%PDF-1.4\n'), 9, false)
+    await flushPromises()
+    expect(viewer.get('[data-testid="file-viewer-name"]').text()).toBe('sb-laden-konzept.pdf')
+    expect(viewer.get('iframe[title="PDF preview"]').attributes('src')).toMatch(
+      /^data:application\/pdf;base64,/,
+    )
+    await viewer.get('[data-testid="file-viewer-close"]').trigger('click')
+    expect(store.viewingFile).toBeNull()
+    wrapper.unmount()
+    viewer.unmount()
+  })
+
+  it.each([
+    ['[File](docs/Updated%20plan%20%C3%A4.txt)', '/workspace/docs/Updated plan ä.txt'],
+    ['[File](<docs/Updated plan.txt>)', '/workspace/docs/Updated plan.txt'],
+    ['[File](docs/100%25%20done%23final%3F.txt)', '/workspace/docs/100% done#final?.txt'],
+    ['[File](docs/%252e%252e.txt)', '/workspace/docs/%2e%2e.txt'],
+    ['[File][doc]\n\n[doc]: /workspace/README.md "Read me"', '/workspace/README.md'],
+  ])('reads the exact decoded filename for %s', async (text, path) => {
+    const store = useFileExplorerStore()
+    vi.mocked(sendFilesList).mockImplementation((id, requestId, directory) => {
+      queueMicrotask(() => store.handleListResult(requestId, directory, [], undefined, id))
+      return true
+    })
+    const wrapper = mountMarkdown(text)
+    await wrapper.get('a').trigger('click')
+    await flushPromises()
+    expect(sendFilesRead).toHaveBeenCalledWith('ws-1', expect.any(String), path)
+    wrapper.unmount()
+  })
+
+  it('shows existing viewer errors when a linked file cannot be read', async () => {
+    const store = useFileExplorerStore()
+    vi.mocked(sendFilesList).mockImplementation((id, requestId, directory) => {
+      queueMicrotask(() => store.handleListResult(requestId, directory, [], undefined, id))
+      return true
+    })
+    const wrapper = mountMarkdown('[Missing](missing.pdf)')
+    const viewer = mount(FileViewer, { props: { workspaceId: 'ws-1' } })
+    await wrapper.get('a').trigger('click')
+    await flushPromises()
+    const calls = vi.mocked(sendFilesRead).mock.calls
+    const requestId = calls[calls.length - 1]![1]
+    store.handleContentResult(
+      requestId,
+      '/workspace/missing.pdf',
+      '',
+      0,
+      false,
+      'Permission denied',
+    )
+    await flushPromises()
+    expect(viewer.get('[data-testid="file-viewer-error"]').text()).toContain('Permission denied')
+    expect(viewer.find('iframe').exists()).toBe(false)
+    wrapper.unmount()
+    viewer.unmount()
+  })
+
+  it.each([
+    'https://example.com/plan.pdf',
+    '//example.com/plan.pdf',
+    'mailto:a@example.com',
+    '#section',
+    '?query=only',
+    '../etc/passwd',
+    '/tmp/plan.pdf',
+    '/workspace/%2e%2e/etc/passwd',
+    'bad%ZZ.pdf',
+    'javascript:alert(1)',
+  ])('does not intercept non-workspace or invalid links: %s', async (href) => {
+    const openPath = vi.spyOn(useFileExplorerStore(), 'openPath')
+    const wrapper = mountMarkdown(`[Link](${href})`)
+    expect(click(wrapper.get('a').element)).toBe(true)
+    expect(openPath).not.toHaveBeenCalled()
+    expect(sendFilesRead).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('leaves links alone without workspace context', async () => {
+    const openPath = vi.spyOn(useFileExplorerStore(), 'openPath')
+    const wrapper = mountMarkdown('[File](plan.pdf)', '')
+    expect(wrapper.get('a').attributes('target')).toBe('_blank')
+    expect(click(wrapper.get('a').element)).toBe(true)
+    expect(openPath).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it.each([
+    { ctrlKey: true },
+    { metaKey: true },
+    { shiftKey: true },
+    { altKey: true },
+    { button: 1 },
+  ])('preserves modified link navigation: %j', async (modifiers) => {
+    const openPath = vi.spyOn(useFileExplorerStore(), 'openPath')
+    const wrapper = mountMarkdown('[File](plan.pdf)')
+    expect(click(wrapper.get('a').element, modifiers)).toBe(true)
+    expect(openPath).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('opens links when their formatted child is activated and uses the current workspace', async () => {
+    const openPath = vi.spyOn(useFileExplorerStore(), 'openPath').mockResolvedValue()
+    const workspaceId = ref('ws-1')
+    const wrapper = mount(HarnessMarkdown, {
+      props: { text: '[**File**](plan.pdf)' },
+      global: { provide: { [harnessWorkspaceIdKey as symbol]: workspaceId } },
+    })
+    workspaceId.value = 'ws-2'
+    click(wrapper.get('a strong').element, { detail: 0 })
+    expect(openPath).toHaveBeenCalledWith('ws-2', '/workspace/plan.pdf', { revealInExplorer: false })
+    wrapper.unmount()
   })
 
   it('shows a loading placeholder while media is fetching', () => {

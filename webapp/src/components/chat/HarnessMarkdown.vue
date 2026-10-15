@@ -17,9 +17,14 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
 import ImageLightbox from './ImageLightbox.vue'
 import HarnessCodeBlock from './HarnessCodeBlock.vue'
-import { classifyWorkspaceFile, resolveWorkspaceMediaPath } from '@/lib/workspaceFileRefs'
+import {
+  classifyWorkspaceFile,
+  resolveWorkspaceLinkPath,
+  resolveWorkspaceMediaPath,
+} from '@/lib/workspaceFileRefs'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
+import { useFileExplorerStore } from '@/stores/fileExplorer'
 import {
   parseComposerSegments,
   type ComposerFileToken,
@@ -117,7 +122,7 @@ function parseMarkdownRoot(text: string): { html: string; root: HTMLElement | nu
   const sanitized = DOMPurify.sanitize(rawHtml, {
     ADD_DATA_URI_TAGS: ['img'],
     ALLOWED_URI_REGEXP:
-      /^(?:(?:https?|ftp|mailto|tel|file|data|blob):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i,
+      /^(?:(?:https?|ftp|mailto|tel|file|data|blob):|[^a-z]|[a-z+.-]+(?:[^a-z+.:-]|$))/i,
   })
   if (typeof DOMParser === 'undefined') return { html: sanitized, root: null }
 
@@ -127,7 +132,11 @@ function parseMarkdownRoot(text: string): { html: string; root: HTMLElement | nu
   if (!root) return { html: sanitized, root: null }
 
   for (const link of Array.from(root.querySelectorAll('a[href]'))) {
-    link.setAttribute('target', '_blank')
+    if (workspaceId.value && resolveWorkspaceLinkPath(link.getAttribute('href') ?? '')) {
+      link.removeAttribute('target')
+    } else {
+      link.setAttribute('target', '_blank')
+    }
     link.setAttribute('rel', 'noopener noreferrer')
   }
   for (const image of Array.from(root.querySelectorAll('img[src]'))) {
@@ -146,7 +155,7 @@ function parseMarkdownRoot(text: string): { html: string; root: HTMLElement | nu
   return { html: root.innerHTML, root }
 }
 
-/** Render harness markdown as sanitized HTML (links open in a new tab). */
+/** Render harness markdown as sanitized HTML. */
 function renderMarkdown(text: string): string {
   return parseMarkdownRoot(text).html
 }
@@ -472,6 +481,21 @@ function closeLightbox(): void {
   lightboxMediaPath = null
 }
 
+/** Route local file links to the existing viewer; leave browser links alone. */
+function onHtmlClick(event: MouseEvent): void {
+  onHtmlImageActivate(event)
+  if (event.defaultPrevented || !workspaceId.value || event.button !== 0) return
+  if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return
+  const target = event.target
+  if (!(target instanceof Element)) return
+  const link = target.closest('a[href]')
+  if (!link?.closest('[data-md-html]') || !rootEl.value?.contains(link)) return
+  const path = resolveWorkspaceLinkPath(link.getAttribute('href') ?? '')
+  if (!path) return
+  event.preventDefault()
+  void useFileExplorerStore().openPath(workspaceId.value, path, { revealInExplorer: false })
+}
+
 /** Activate only sanitized HTML images, never decorative mention icons or links. */
 function onHtmlImageActivate(event: MouseEvent | KeyboardEvent): void {
   if (event instanceof KeyboardEvent && event.key !== 'Enter' && event.key !== ' ') return
@@ -740,7 +764,7 @@ export type { HarnessPart }
 </script>
 
 <template>
-  <div ref="rootEl" :class="rootClass" @click="onHtmlImageActivate" @keydown="onHtmlImageActivate">
+  <div ref="rootEl" :class="rootClass" @click="onHtmlClick" @keydown="onHtmlImageActivate">
     <template v-for="(segment, index) in segments" :key="index">
       <component
         :is="HtmlSegmentRenderer"
