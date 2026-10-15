@@ -1211,7 +1211,7 @@ async def start_process(
             name=payload.name,
             user=request.user,
         )
-        status = 201 if int(getattr(process, "run_count", 1) or 1) <= 1 else 200
+        status = 201 if getattr(process, "_was_created", False) else 200
         return status, _process_to_out(process)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)

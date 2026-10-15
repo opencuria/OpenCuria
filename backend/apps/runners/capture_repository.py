@@ -19,7 +19,7 @@ from .models import (
 )
 from .operations import OperationRepository
 from .phase_children import fence_unknown_child
-from .repositories import TaskRepository
+from .repositories import TaskRepository, WorkspaceProcessRepository
 
 MAX_MESSAGE_LENGTH = 500
 
@@ -112,6 +112,7 @@ class CaptureRepository:
                 generation=ImageLineRepository.next_captured_version(line.id),
                 message=(message or "").strip()[:MAX_MESSAGE_LENGTH],
                 min_disk_size_gb=ws.qemu_disk_size_gb,
+                process_definitions=WorkspaceProcessRepository.snapshot_definitions(ws.id),
                 status="capturing",
             )
             request = CaptureRequest.objects.create(

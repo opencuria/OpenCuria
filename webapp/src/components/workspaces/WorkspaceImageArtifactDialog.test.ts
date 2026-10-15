@@ -53,6 +53,9 @@ it('captures a running QEMU workspace as a new image and retains failure errors'
     global: { stubs },
   })
   await flushPromises()
+  expect(w.text()).toContain('running processes stop')
+  expect(w.text()).toContain('Persistent process definitions are included')
+  expect(w.text()).toContain('start them manually in new workspaces')
   await w.get('[data-testid="capture-name-input"]').setValue('Capture')
   await w.get('[data-testid="capture-message-input"]').setValue('  Added tools ')
   await w.get('form').trigger('submit')

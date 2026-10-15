@@ -88,7 +88,22 @@ describe('HarnessProcessSheet', () => {
     expect(wrapper.text()).not.toContain('Force')
   })
 
-  it('hides stop for finished processes but shows start/restart/delete', () => {
+  it('shows Not started and only start/delete for imported process definitions', () => {
+    const store = useProcessesStore()
+    store.processesByWorkspace['workspace-1'] = [
+      makeProcess({ status: ProcessStatus.EXITED, run_count: 0, pid: null, log_path: '' }),
+    ]
+    const wrapper = mountSheet()
+    expect(wrapper.text()).toContain('Not started')
+    expect(wrapper.text()).not.toContain('exited')
+    expect(wrapper.find('[data-testid="composer-process-stop"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-process-start"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-process-restart"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-process-delete"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-process-log-path"]').exists()).toBe(false)
+  })
+
+  it('hides stop for finished started processes but shows start/restart/delete', () => {
     const store = useProcessesStore()
     store.processesByWorkspace['workspace-1'] = [makeProcess({ status: ProcessStatus.EXITED })]
     const wrapper = mountSheet()
@@ -145,11 +160,13 @@ describe('HarnessProcessSheet', () => {
     expect(workspacesApi.restartProcess).toHaveBeenCalledWith('workspace-1', 'process-1')
   })
 
-  it('starts a stopped process via the restart endpoint', async () => {
+  it('starts a not-yet-run process via the restart endpoint', async () => {
     const store = useProcessesStore()
-    store.processesByWorkspace['workspace-1'] = [makeProcess({ status: ProcessStatus.EXITED })]
+    store.processesByWorkspace['workspace-1'] = [
+      makeProcess({ status: ProcessStatus.EXITED, run_count: 0, pid: null, log_path: '' }),
+    ]
     vi.mocked(workspacesApi.restartProcess).mockResolvedValue(
-      makeProcess({ status: ProcessStatus.RUNNING, run_count: 2 }),
+      makeProcess({ status: ProcessStatus.RUNNING, run_count: 1 }),
     )
     const wrapper = mountSheet()
     await wrapper.find('[data-testid="composer-process-start"]').trigger('click')

@@ -67,6 +67,22 @@ preserve runner bytes/journal before deploying both components together.
   Interrupted create/build/capture is never blindly executed again. Retained
   fences require exact journal/runtime evidence and explicit operator action.
 
+## Captured workspace processes
+
+Each captured `ImageInstance` stores an immutable snapshot of all persistent
+process definitions (name, command and working directory), including stopped
+or failed processes. Capture reservation and definition writes share the
+runner/workspace lock boundary. Temporary session processes and per-process
+`env` overrides are excluded; workspace credentials remain separately selected.
+Commands are copied verbatim: use credential references rather than inline secrets.
+
+Both workspace creation paths restore the selected version's snapshot atomically
+with the new workspace and task. Restored processes have new IDs, no runtime/log
+associations and `run_count=0`; they never auto-start. Use **Start** in the existing
+background-process panel. The first run creates a fresh log and increments to one.
+The snapshot survives source-workspace deletion. Existing images default to an
+empty snapshot; reset/update of an existing workspace keeps its own process rows.
+
 ## Durable command wire contract
 
 Every lifecycle command carries existing payload plus `operation_id == task_id`,

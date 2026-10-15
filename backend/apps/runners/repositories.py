@@ -681,6 +681,63 @@ class WorkspaceProcessRepository:
     """Data access for WorkspaceProcess records."""
 
     @staticmethod
+    def snapshot_definitions(workspace_id: uuid.UUID) -> list[dict[str, str]]:
+        """Snapshot persistent start configuration, never session or runtime state."""
+        return list(
+            WorkspaceProcess.objects.filter(
+                workspace_id=workspace_id, kind="persistent"
+            )
+            .order_by("name")
+            .values("name", "command", "workdir")
+        )
+
+    @staticmethod
+    def restore_definitions(
+        workspace: Workspace,
+        definitions: list[dict[str, str]],
+        *,
+        created_by=None,
+    ) -> None:
+        """Create never-started processes in a new workspace from an image snapshot."""
+        from .enums import ProcessStatus
+
+        WorkspaceProcess.objects.bulk_create(
+            [
+                WorkspaceProcess(
+                    workspace=workspace,
+                    name=definition["name"],
+                    command=definition["command"],
+                    workdir=definition["workdir"],
+                    kind="persistent",
+                    status=ProcessStatus.EXITED,
+                    run_count=0,
+                    created_by=created_by,
+                )
+                for definition in definitions
+            ]
+        )
+
+    @staticmethod
+    def _lock_definition_workspace(
+        workspace_id: uuid.UUID, *, require_running: bool = True
+    ) -> Workspace:
+        """Fence definition writes against capture using the same lock order."""
+        from common.exceptions import ConflictError
+
+        from .exceptions import WorkspaceStateError
+
+        runner_id = Workspace.objects.values_list("runner_id", flat=True).get(
+            pk=workspace_id
+        )
+        lock_runner(runner_id)
+        workspace = Workspace.objects.select_for_update().get(pk=workspace_id)
+        if workspace.active_operation or workspace.current_task_id:
+            raise ConflictError("Workspace lifecycle outcome unresolved")
+        if require_running and workspace.status != WorkspaceStatus.RUNNING:
+            raise WorkspaceStateError("Workspace must be running to start processes")
+        return workspace
+
+    @staticmethod
     def create(
         *,
         process_id: uuid.UUID,
@@ -696,18 +753,20 @@ class WorkspaceProcessRepository:
         """Create a new process record in running state."""
         from .enums import ProcessStatus
 
-        return WorkspaceProcess.objects.create(
-            id=process_id,
-            workspace=workspace,
-            command=command,
-            workdir=workdir or "/workspace",
-            name=name or "",
-            status=ProcessStatus.RUNNING,
-            created_by=created_by,
-            session_id=session_id,
-            run_count=run_count,
-            kind=kind or "persistent",
-        )
+        with transaction.atomic():
+            WorkspaceProcessRepository._lock_definition_workspace(workspace.id)
+            return WorkspaceProcess.objects.create(
+                id=process_id,
+                workspace=workspace,
+                command=command,
+                workdir=workdir or "/workspace",
+                name=name or "",
+                status=ProcessStatus.RUNNING,
+                created_by=created_by,
+                session_id=session_id,
+                run_count=run_count,
+                kind=kind or "persistent",
+            )
 
     @staticmethod
     def get_by_id(process_id: uuid.UUID) -> WorkspaceProcess | None:
@@ -868,7 +927,22 @@ class WorkspaceProcessRepository:
             fields["created_by"] = created_by
         if session_id is not None:
             fields["session_id"] = session_id
-        return WorkspaceProcess.objects.filter(id=process_id).update(**fields)
+        with transaction.atomic():
+            workspace_id = WorkspaceProcess.objects.values_list(
+                "workspace_id", flat=True
+            ).get(pk=process_id)
+            WorkspaceProcessRepository._lock_definition_workspace(workspace_id)
+            process = WorkspaceProcess.objects.select_for_update().get(pk=process_id)
+            if (
+                process.status == ProcessStatus.RUNNING
+                or run_count != max(process.run_count or 0, 0) + 1
+            ):
+                from common.exceptions import ConflictError
+
+                raise ConflictError(
+                    "Process changed during start; refresh and try again"
+                )
+            return WorkspaceProcess.objects.filter(id=process_id).update(**fields)
 
     @staticmethod
     def list_by_workspace(
@@ -988,10 +1062,14 @@ class WorkspaceProcessRepository:
         workspace_id: uuid.UUID,
     ) -> int:
         """Delete a process scoped to a workspace. Returns rows deleted."""
-        deleted, _ = WorkspaceProcess.objects.filter(
-            id=process_id, workspace_id=workspace_id
-        ).delete()
-        return deleted
+        with transaction.atomic():
+            WorkspaceProcessRepository._lock_definition_workspace(
+                workspace_id, require_running=False
+            )
+            deleted, _ = WorkspaceProcess.objects.filter(
+                id=process_id, workspace_id=workspace_id
+            ).delete()
+            return deleted
 
 
 # ---------------------------------------------------------------------------

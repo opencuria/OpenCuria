@@ -802,6 +802,14 @@ class ImageInstance(models.Model):
         db_default="",
         help_text="Short description of what changed in this version.",
     )
+    process_definitions = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "Persistent process definitions captured with this version "
+            "(name, command, workdir); restored without starting them."
+        ),
+    )
     min_disk_size_gb = models.PositiveIntegerField(
         null=True,
         blank=True,
@@ -926,7 +934,7 @@ class ImageInstance(models.Model):
         ]
 
     def save(self, *args, **kwargs) -> None:
-        """Generation identity and build target are write-once."""
+        """Generation identity, process definitions and build target are write-once."""
         if not self._state.adding:
             identity_fields = (
                 "runner_id",
@@ -942,9 +950,11 @@ class ImageInstance(models.Model):
             previous = (
                 type(self)
                 .objects.filter(id=self.id)
-                .values(*identity_fields, "runner_ref")
+                .values(*identity_fields, "runner_ref", "process_definitions")
                 .first()
             )
+            if previous and previous["process_definitions"] != self.process_definitions:
+                raise ValueError("Image process definitions are immutable")
             if previous and not previous["is_legacy"]:
                 if any(previous[key] != getattr(self, key) for key in identity_fields):
                     raise ValueError("Image generation identity is immutable")

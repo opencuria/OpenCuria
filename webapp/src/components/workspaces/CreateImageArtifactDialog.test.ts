@@ -66,6 +66,9 @@ it.each([WorkspaceStatus.RUNNING, WorkspaceStatus.STOPPED])(
         },
       },
     })
+    expect(wrapper.text()).toContain('running processes stop')
+    expect(wrapper.text()).toContain('Persistent process definitions are included')
+    expect(wrapper.text()).toContain('start them manually in new workspaces')
     await wrapper.get('input').setValue('Snapshot')
     await wrapper.get('[data-testid="select"]').trigger('click')
     await wrapper.get('form').trigger('submit')

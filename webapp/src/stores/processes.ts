@@ -202,9 +202,10 @@ export const useProcessesStore = defineStore('processes', () => {
     try {
       const updated = await workspacesApi.restartProcess(workspaceId, processId)
       upsertProcess(workspaceId, updated)
+      const startedForFirstTime = updated.run_count === 1
       notifications.success(
-        'Process restarted',
-        `Process ${updated.name || updated.id.slice(0, 8)} was restarted.`,
+        startedForFirstTime ? 'Process started' : 'Process restarted',
+        `Process ${updated.name || updated.id.slice(0, 8)} was ${startedForFirstTime ? 'started' : 'restarted'}.`,
       )
       return true
     } catch (e: unknown) {

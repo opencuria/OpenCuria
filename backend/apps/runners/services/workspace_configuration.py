@@ -12,7 +12,11 @@ from common.exceptions import NotFoundError
 
 from ..locking import lock_runner
 from ..models import Task, Workspace
-from ..repositories import TaskRepository, WorkspaceRepository
+from ..repositories import (
+    TaskRepository,
+    WorkspaceProcessRepository,
+    WorkspaceRepository,
+)
 
 
 class WorkspaceConfigurationService:
@@ -44,9 +48,12 @@ class WorkspaceConfigurationService:
 
             selected = workspace_fields.get("base_image_instance")
             if selected is not None:
-                workspace_fields["base_image_instance"] = (
-                    ImageGenerationRepository.validate_selection(selected.id)
-                )
+                selected = ImageGenerationRepository.validate_selection(selected.id)
+                if selected.captured_image_id and (
+                    user is None or selected.created_by_id != user.id
+                ):
+                    raise NotFoundError("Image artifact", str(selected.id))
+                workspace_fields["base_image_instance"] = selected
             credentials = self._resolve_final_credentials(
                 credentials, owner=user, org_id=organization_id
             )
@@ -61,6 +68,10 @@ class WorkspaceConfigurationService:
                     "Missing required credentials for selected plugins", gaps
                 )
             workspace = self.workspaces.create(**workspace_fields)
+            if selected is not None:
+                WorkspaceProcessRepository.restore_definitions(
+                    workspace, selected.process_definitions, created_by=user
+                )
             self.workspaces.set_credentials(workspace, credentials)
             if credentials_present:
                 self.workspaces.update_credentials_present(workspace, True)

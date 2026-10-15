@@ -280,6 +280,25 @@ describe('processes store', () => {
     )
   })
 
+  it('starts a not-yet-run process through restart and notifies "Process started"', async () => {
+    const store = useProcessesStore()
+    store.processesByWorkspace['workspace-1'] = [
+      makeProcess({ status: ProcessStatus.EXITED, run_count: 0, pid: null, log_path: '' }),
+    ]
+    const started = makeProcess({ status: ProcessStatus.RUNNING, run_count: 1 })
+    vi.mocked(workspacesApi.restartProcess).mockResolvedValue(started)
+
+    const ok = await store.restartProcess('workspace-1', 'process-1')
+
+    expect(ok).toBe(true)
+    expect(workspacesApi.restartProcess).toHaveBeenCalledWith('workspace-1', 'process-1')
+    expect(store.processesFor('workspace-1')[0]).toEqual(started)
+    expect(toast.success).toHaveBeenCalledWith(
+      'Process started',
+      expect.objectContaining({ description: expect.any(String) }),
+    )
+  })
+
   it('restarts a process and upserts the returned record', async () => {
     const store = useProcessesStore()
     store.processesByWorkspace['workspace-1'] = [makeProcess({ status: ProcessStatus.EXITED })]

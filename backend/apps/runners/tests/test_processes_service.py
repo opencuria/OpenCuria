@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import uuid
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from django.db import IntegrityError
 
 from apps.runners.enums import ProcessStatus, RunnerStatus, WorkspaceStatus
 from apps.runners.exceptions import RunnerOfflineError, WorkspaceStateError
@@ -39,6 +41,24 @@ def _make_process(service: RunnerService, workspace, **kwargs) -> WorkspaceProce
     }
     defaults.update(kwargs)
     return service.processes.create(**defaults)
+
+
+def _make_process_definition(
+    workspace,
+    *,
+    name: str = "configured",
+    command: str = "python -m app",
+    workdir: str = "/app",
+) -> WorkspaceProcess:
+    """Create a never-started persistent process definition as restored from an image."""
+    return WorkspaceProcess.objects.create(
+        workspace=workspace,
+        name=name,
+        command=command,
+        workdir=workdir,
+        status=ProcessStatus.EXITED,
+        run_count=0,
+    )
 
 
 def _feed_reply(
@@ -98,9 +118,89 @@ class TestStartProcess:
         assert process.pid == 4242
         assert process.log_path == ".opencuria/processes/abc.log"
         assert process.status == ProcessStatus.RUNNING
+        assert process._was_created is True
         assert WorkspaceProcess.objects.filter(id=process.id).exists()
         assert pushes
         assert pushes[0][0] == "process:status_changed"
+
+    @pytest.mark.asyncio
+    async def test_start_existing_never_started_definition_uses_first_run_log(
+        self, service, runner, workspace, user
+    ):
+        """Starting an imported count-zero definition keeps its id and first log."""
+        definition = _make_process_definition(workspace)
+        transport = AsyncMock(return_value={"pid": 2121})
+        service._await_process_result = transport  # type: ignore[method-assign]
+        service._forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
+
+        started = await service.start_process(
+            workspace.id,
+            "python -m updated_app",
+            workdir="/srv/app",
+            env=None,
+            name=definition.name,
+            user=user,
+        )
+
+        assert started.id == definition.id
+        assert started.run_count == 1
+        assert started._was_created is False
+        assert started.command == "python -m updated_app"
+        assert started.workdir == "/srv/app"
+        assert started.status == ProcessStatus.RUNNING
+        transport.assert_awaited_once()
+        payload = transport.await_args.kwargs["payload"]
+        assert payload["process_id"] == str(definition.id)
+        assert payload["command"] == "python -m updated_app"
+        assert payload["workdir"] == "/srv/app"
+        assert payload["env"] == {}
+        assert payload["run_count"] == 1
+        assert payload["log_path"] == (
+            f"/workspace/.opencuria/processes/{definition.id}.log"
+        )
+        assert "_r2" not in payload["log_path"]
+
+    @pytest.mark.asyncio
+    async def test_start_integrity_error_retries_count_zero_winner(
+        self, service, workspace, user
+    ):
+        """An upsert race restarts the winner at run one, not run two."""
+        winner = _make_process_definition(workspace, name="race-winner")
+        transport = AsyncMock(return_value={"pid": 3232})
+        service._await_process_result = transport  # type: ignore[method-assign]
+        service._forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
+        with (
+            patch.object(
+                service.processes, "get_by_name", side_effect=[None, winner]
+            ) as get_by_name,
+            patch.object(
+                service.processes, "create", side_effect=IntegrityError
+            ) as create,
+        ):
+            started = await service.start_process(
+                workspace.id,
+                "python -m winner",
+                workdir="/srv/winner",
+                name="race-winner",
+                user=user,
+            )
+
+        assert get_by_name.call_count == 2
+        assert all(
+            call.args == (workspace.id, "race-winner")
+            for call in get_by_name.call_args_list
+        )
+        create.assert_called_once()
+        assert started.id == winner.id
+        assert started.run_count == 1
+        assert started._was_created is False
+        payload = transport.await_args.kwargs["payload"]
+        assert payload["process_id"] == str(winner.id)
+        assert payload["run_count"] == 1
+        assert payload["log_path"] == (
+            f"/workspace/.opencuria/processes/{winner.id}.log"
+        )
+        assert "_r2" not in payload["log_path"]
 
     @pytest.mark.asyncio
     async def test_start_runner_error_marks_failed(
@@ -129,6 +229,7 @@ class TestStartProcess:
         ).first()
         assert failed is not None
         assert failed.status == ProcessStatus.FAILED
+        assert failed.run_count == 1
 
     @pytest.mark.asyncio
     async def test_start_rejects_foreign_runner_reply(
@@ -192,6 +293,101 @@ class TestStartProcess:
         """Unknown workspace IDs raise WorkspaceNotFoundError."""
         with pytest.raises(NotFoundError):
             await service.start_process(uuid.uuid4(), "sleep 60", name="sleeper", user=user)
+
+
+@pytest.mark.django_db(transaction=True)
+class TestRestartProcess:
+    @pytest.mark.asyncio
+    async def test_restart_existing_never_started_definition_uses_first_run_log(
+        self, service, workspace, user
+    ):
+        """Explicit restart reuses the definition's row and stored config."""
+        definition = _make_process_definition(
+            workspace,
+            name="configured-restart",
+            command="python -m configured_app",
+            workdir="/srv/configured",
+        )
+        transport = AsyncMock(return_value={"pid": 2122})
+        service._await_process_result = transport  # type: ignore[method-assign]
+        service._forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
+
+        restarted = await service.restart_process(
+            workspace.id, definition.id, user=user
+        )
+
+        assert restarted.id == definition.id
+        assert restarted.run_count == 1
+        assert restarted.status == ProcessStatus.RUNNING
+        assert restarted.command == "python -m configured_app"
+        assert restarted.workdir == "/srv/configured"
+        payload = transport.await_args.kwargs["payload"]
+        assert payload["process_id"] == str(definition.id)
+        assert payload["command"] == "python -m configured_app"
+        assert payload["workdir"] == "/srv/configured"
+        assert payload["env"] == {}
+        assert payload["run_count"] == 1
+        assert payload["log_path"] == (
+            f"/workspace/.opencuria/processes/{definition.id}.log"
+        )
+        assert "_r2" not in payload["log_path"]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_restarts_reject_second_stale_count_zero_copy(
+        self, service, workspace, user
+    ):
+        """Only one restart using the same stale count-zero snapshot can win."""
+        definition = _make_process_definition(
+            workspace,
+            name="concurrent-restart",
+            command="python -m concurrent_app",
+            workdir="/srv/concurrent",
+        )
+        resolved_both = asyncio.Event()
+        resolved: list[WorkspaceProcess] = []
+
+        async def _resolve_stale_copy(*args, **kwargs):
+            stale = copy.copy(definition)
+            resolved.append(stale)
+            if len(resolved) == 2:
+                resolved_both.set()
+            await resolved_both.wait()
+            return stale
+
+        service._resolve_process = AsyncMock(  # type: ignore[method-assign]
+            side_effect=_resolve_stale_copy
+        )
+        transport = AsyncMock(return_value={"pid": 4343})
+        service._await_process_result = transport  # type: ignore[method-assign]
+        service._forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
+
+        outcomes = await asyncio.gather(
+            service.restart_process(workspace.id, definition.id, user=user),
+            service.restart_process(workspace.id, definition.id, user=user),
+            return_exceptions=True,
+        )
+
+        assert len(resolved) == 2
+        assert resolved[0] is not resolved[1]
+        assert [item.run_count for item in resolved] == [0, 0]
+        successes = [item for item in outcomes if not isinstance(item, BaseException)]
+        conflicts = [item for item in outcomes if isinstance(item, ConflictError)]
+        assert len(successes) == 1
+        assert len(conflicts) == 1
+        assert successes[0].id == definition.id
+        assert successes[0].run_count == 1
+
+        transport.assert_awaited_once()
+        payload = transport.await_args.kwargs["payload"]
+        assert payload["process_id"] == str(definition.id)
+        assert payload["run_count"] == 1
+        assert payload["log_path"] == (
+            f"/workspace/.opencuria/processes/{definition.id}.log"
+        )
+        assert "_r2" not in payload["log_path"]
+        definition.refresh_from_db()
+        assert definition.status == ProcessStatus.RUNNING
+        assert definition.run_count == 1
 
 
 @pytest.mark.django_db(transaction=True)
@@ -457,6 +653,33 @@ class TestListProcesses:
 
         assert rows[0].status == ProcessStatus.RUNNING
         assert rows[0].pid == 4242
+
+    @pytest.mark.asyncio
+    async def test_live_empty_listing_preserves_never_started_definition(
+        self, service, runner, workspace
+    ):
+        """An empty runner list and stale-row sweep leave EXITED definitions alone."""
+        definition = _make_process_definition(workspace)
+        transport = AsyncMock(return_value={"processes": []})
+        service._await_process_result = transport  # type: ignore[method-assign]
+
+        rows = await service.list_processes(workspace.id, live=True)
+
+        assert [row.id for row in rows] == [definition.id]
+        assert rows[0].status == ProcessStatus.EXITED
+        assert rows[0].run_count == 0
+        transport.assert_awaited_once()
+        assert transport.await_args.kwargs["event"] == "harness:process_list"
+
+        changed, vanished = service.reconcile_workspace_processes(
+            str(workspace.id), []
+        )
+        assert changed == []
+        assert vanished == []
+        assert service.sweep_unconfirmed_processes(str(workspace.id)) == []
+        definition.refresh_from_db()
+        assert definition.status == ProcessStatus.EXITED
+        assert definition.run_count == 0
 
     @pytest.mark.asyncio
     async def test_live_defaults_to_existing_runner_reconciliation(
