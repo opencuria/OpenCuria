@@ -198,7 +198,9 @@ async def test_claude_run_still_requests_nonmatching_allowlist_action(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_claude_media_permission_callback_uses_shared_allowlist(harness_workspace):
+async def test_claude_media_permission_callback_uses_shared_allowlist(
+    harness_workspace,
+):
     """External engines receive the shared permission_read authorization hook."""
     permissions = PermissionService(
         evaluator=PermissionEvaluator(global_rules={"read": "ask"})
@@ -375,6 +377,118 @@ class FakeClaudeEngine:
         self.behavior = behavior
         self.kwargs = kwargs
 
+    async def _run_shell_task(
+        self, agent, model, mode, opts
+    ) -> None:  # type: ignore[no-untyped-def]
+        """Exercise the real SDK message projector and Bash permission hooks."""
+        from claude_agent_sdk._internal.message_parser import parse_message
+
+        from apps.harness.agents.definitions import get_agent
+        from apps.harness.engines.claude.engine import ClaudeEngine
+        from apps.harness.engines.claude.permissionbridge import PermissionBridge
+
+        engine = ClaudeEngine(
+            tools=self.kwargs["tools"],
+            accessor=self.kwargs["accessor"],
+            emit=self.kwargs["emit"],
+            on_child_event=self.kwargs["on_child_event"],
+            evaluator=self.kwargs.get("evaluator"),
+        )
+        engine._options = opts
+        engine._agent = get_agent(agent)
+        engine._mode = mode
+        engine._model = model
+        engine._bridge = PermissionBridge(
+            tools=engine.tools,
+            evaluator=engine.evaluator,
+            options=opts,
+            agent=engine._agent,
+            mode=mode,
+            max_depth=opts.max_depth,
+            engine=engine,
+        )
+
+        call_id = "local-bash-call"
+        arguments = {
+            "command": "printf 'local bash output'",
+            "workdir": "/workspace",
+        }
+        pre_tool_use = engine._permission_hooks()["PreToolUse"][0].hooks[0]
+        decision = await pre_tool_use(
+            {"tool_name": "Bash", "tool_input": arguments}, call_id, None
+        )
+        assert decision["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+        async def handle(raw_message: dict[str, Any]) -> None:
+            await engine._handle_message(parse_message(raw_message))
+
+        await handle(
+            {
+                "type": "system",
+                "subtype": "task_started",
+                "task_id": "local-bash-task",
+                "description": "Run a local shell command",
+                "task_type": "local_bash",
+                "tool_use_id": call_id,
+                "uuid": "local-bash-started",
+                "session_id": "claude-sdk-session",
+            }
+        )
+        await handle(
+            {
+                "type": "system",
+                "subtype": "task_progress",
+                "task_id": "local-bash-task",
+                "description": "Running command",
+                "last_tool_name": "Bash",
+                "usage": {},
+                "tool_use_id": call_id,
+                "uuid": "local-bash-progress",
+                "session_id": "claude-sdk-session",
+            }
+        )
+        await handle(
+            {
+                "type": "user",
+                "uuid": "local-bash-result",
+                "session_id": "claude-sdk-session",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": call_id,
+                            "content": [{"type": "text", "text": "local bash output"}],
+                        }
+                    ],
+                },
+            }
+        )
+        await handle(
+            {
+                "type": "system",
+                "subtype": "task_notification",
+                "task_id": "local-bash-task",
+                "tool_use_id": call_id,
+                "status": "completed",
+                "summary": "local bash output",
+                "output_file": "",
+                "uuid": "local-bash-notification",
+                "session_id": "claude-sdk-session",
+            }
+        )
+        await handle(
+            {
+                "type": "system",
+                "subtype": "task_updated",
+                "task_id": "local-bash-task",
+                "tool_use_id": call_id,
+                "patch": {"status": "completed", "result": "local bash output"},
+                "uuid": "local-bash-updated",
+                "session_id": "claude-sdk-session",
+            }
+        )
+
     async def run(self, prompt, agent, model, mode, opts):  # type: ignore[no-untyped-def]
         if self.behavior == "media_read":
             allowed = await opts.authorize_file_read(
@@ -409,9 +523,16 @@ class FakeClaudeEngine:
                     "mode": mode,
                 },
             )
-            await self.kwargs["emit"](
-                {"type": "part_updated", "step": 1, "delta": {"text": "Claude: "}}
-            )
+            if self.behavior == "shell_task":
+                await self._run_shell_task(agent, model, mode, opts)
+            else:
+                await self.kwargs["emit"](
+                    {
+                        "type": "part_updated",
+                        "step": 1,
+                        "delta": {"text": "Claude: "},
+                    }
+                )
             if self.behavior in {"cleanup_pending", "closing_error"}:
                 await self.kwargs["on_owner"](lease, "closing")
                 raise RuntimeError("Claude failed while closing")
@@ -786,6 +907,56 @@ async def test_claude_engine_error_is_generic_in_message_and_terminal_attempt(
     attempt = HarnessRunRepository.model.objects.get(assistant_message=assistant)
     assert attempt.status == "error"
     assert attempt.error == "Engine run failed."
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_claude_local_bash_task_lifecycle_stays_in_root_tool_part(
+    harness_workspace,
+):
+    service, _registry, _connections, events = _service(
+        connection_id=uuid.uuid4(), behavior="shell_task"
+    )
+    session = await _new_session(service, harness_workspace)
+
+    assistant = await service.start_run(
+        session,
+        "run a local bash command",
+        organization_id=session.organization_id,
+        user_id=harness_workspace.created_by_id,
+    )
+    await service._tasks[str(session.id)]
+
+    assistant.refresh_from_db()
+    bash_part = HarnessPart.objects.get(
+        message=assistant, type="tool", call_id="local-bash-call"
+    )
+    assert bash_part.input["tool"] == "bash"
+    assert bash_part.state == "completed"
+    assert bash_part.output == "local bash output"
+    bash_part_events = [
+        data.get("delta", {})
+        for name, data in events
+        if name == FRONTEND_EVENT_PART
+        and data.get("session_id") == str(session.id)
+        and data.get("delta", {}).get("call_id") == "local-bash-call"
+    ]
+    assert any(
+        delta.get("tool_started") == "bash" and delta.get("state") == "pending"
+        for delta in bash_part_events
+    )
+    assert any(
+        delta.get("tool_started") == "bash" and delta.get("state") == "running"
+        for delta in bash_part_events
+    )
+    assert any(
+        delta.get("tool_completed") == "bash" and delta.get("state") == "completed"
+        for delta in bash_part_events
+    )
+    assert not HarnessSession.objects.filter(parent_id=session.id).exists()
+    assert not HarnessPart.objects.filter(message=assistant, type="subtask").exists()
+    assert not any(name.startswith("harness.subtask_") for name, _data in events)
+    attempt = HarnessRunRepository.model.objects.get(assistant_message=assistant)
+    assert attempt.status == "completed"
 
 
 @pytest.mark.django_db(transaction=True)

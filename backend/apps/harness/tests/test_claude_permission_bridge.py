@@ -1144,7 +1144,10 @@ async def test_general_child_can_write_in_plan_mode_without_approval(
             "echo hi",
             "deny",
         ),
-        ("plan", "build", {}, {"build": {"edit": "ask"}}, "Write", "/workspace/a.txt", "ask"),
+        (
+            "plan", "build", {}, {"build": {"edit": "ask"}},
+            "Write", "/workspace/a.txt", "ask",
+        ),
         (
             "general",
             "build",
@@ -1240,3 +1243,42 @@ def test_native_harness_and_claude_bridge_permission_decision_parity(
     )[0]
     assert native_decision == expected
     assert claude_decision == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_type", ["", "unknown", None])
+async def test_unknown_subagent_hook_type_never_uses_requested_general(
+    fake_accessor, agent_type: str | None
+) -> None:
+    from claude_agent_sdk._internal.message_parser import parse_message
+
+    engine, bridge, _options, events = _bridge_case(fake_accessor)
+    await _pre_hook(bridge, engine)(
+        {
+            "tool_name": "Agent",
+            "tool_input": {"subagent_type": "general", "prompt": "inspect"},
+        },
+        "parent-call",
+        None,
+    )
+    await bridge.hooks(engine)["SubagentStart"][0].hooks[0](
+        {"agent_id": "unknown-child", "agent_type": agent_type}, "parent-call", None
+    )
+    await engine._handle_message(
+        parse_message(
+            {
+                "type": "system",
+                "subtype": "task_started",
+                "task_id": "unknown-child",
+                "task_type": "local_agent",
+                "tool_use_id": "parent-call",
+                "description": "inspect",
+                "uuid": "start-frame",
+                "session_id": "fixture-session",
+            }
+        )
+    )
+    assert not [event for event in events if event["type"].startswith("subtask_")]
+    assert not engine._agent_parent_tool
+    with pytest.raises(ValueError, match="Unknown Claude subagent identity"):
+        bridge.scope(engine, {"agent_id": "unknown-child"})

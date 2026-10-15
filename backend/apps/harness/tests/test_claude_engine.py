@@ -44,6 +44,7 @@ class FakeProcessStream:
         self.guest_config = local_config_dir.encode()
         self.remote_config = remote_config_dir.encode()
         self.stderr = b""
+        self.frames: list[dict[str, Any]] = []
         self._stderr = asyncio.create_task(self._drain_stderr())
 
     async def _drain_stderr(self) -> None:
@@ -56,6 +57,7 @@ class FakeProcessStream:
         if not line:
             return b""
         frame = json.loads(line)
+        self.frames.append(frame)
         if frame.get("type") == "transcript_mirror":
             path = str(frame.get("filePath") or "")
             local = self.guest_config.decode()
@@ -900,6 +902,61 @@ async def test_real_cli_fresh_session_mirror_is_resumable_without_network(
     assert any(
         "Answer fixture without calling tools." in json.dumps(req)
         for req in resume_requests
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_sdk_cli_local_bash_task_does_not_emit_subtask_events(
+    tmp_path: Path,
+) -> None:
+    """A foreground Bash task has CLI task frames but is not an Agent subtask."""
+    if claude_agent_sdk.__version__ != "0.2.164" or not BUNDLED_CLAUDE.is_file():
+        pytest.skip("Pinned SDK CLI is unavailable")
+
+    (
+        result,
+        events,
+        _questions,
+        _requests,
+        _permissions,
+        _store,
+        accessor,
+    ) = await _run_local_cli_fixture(
+        tmp_path,
+        tool_name="Bash",
+        tool_arguments={"command": "sleep 3; printf 'local-bash-completed\\n'"},
+        tools=default_tool_registry(),
+        prompt=(
+            "Run this foreground Bash command without delegating it: "
+            "sleep 3; printf 'local-bash-completed\\n'. "
+            "Then report its output."
+        ),
+        cwd="/workspace",
+    )
+
+    assert result.output == "fixture answer"
+    completed = [
+        event
+        for event in events
+        if event.get("type") == "tool_completed" and event.get("tool") == "bash"
+    ]
+    assert len(completed) == 1
+    assert "local-bash-completed" in completed[0]["output"]
+
+    # Observe raw pinned-CLI frames: absence of projected child events is only
+    # meaningful if the CLI actually reported its local Bash task lifecycle.
+    local_bash_starts = [
+        frame
+        for frame in accessor.opened[0]["stream"].frames
+        if frame.get("type") == "system"
+        and frame.get("subtype") == "task_started"
+        and frame.get("task_type") == "local_bash"
+    ]
+    assert local_bash_starts
+    assert not any(
+        event.get("type")
+        in {"subtask_started", "subtask_updated", "subtask_finished"}
+        for event in events
     )
 
 
