@@ -5,12 +5,14 @@ import { usePolling } from './usePolling'
 
 function createPoller(fetchFn: () => Promise<void>, interval: Ref<number> = ref(1000)) {
   let controls!: ReturnType<typeof usePolling>
-  const wrapper = mount(defineComponent({
-    setup() {
-      controls = usePolling(fetchFn, interval)
-      return () => null
-    },
-  }))
+  const wrapper = mount(
+    defineComponent({
+      setup() {
+        controls = usePolling(fetchFn, interval)
+        return () => null
+      },
+    }),
+  )
   return { controls, wrapper }
 }
 
@@ -46,7 +48,12 @@ describe('usePolling', () => {
 
   it('does not overlap slow requests or queue interval callbacks', async () => {
     let resolve!: () => void
-    const fetchFn = vi.fn(() => new Promise<void>((done) => { resolve = done }))
+    const fetchFn = vi.fn(
+      () =>
+        new Promise<void>((done) => {
+          resolve = done
+        }),
+    )
     const { controls, wrapper } = createPoller(fetchFn)
     controls.start()
 
@@ -77,7 +84,12 @@ describe('usePolling', () => {
 
   it('runs once on return if an earlier fetch is still in flight', async () => {
     let resolve!: () => void
-    const fetchFn = vi.fn(() => new Promise<void>((done) => { resolve = done }))
+    const fetchFn = vi.fn(
+      () =>
+        new Promise<void>((done) => {
+          resolve = done
+        }),
+    )
     const { controls, wrapper } = createPoller(fetchFn)
     controls.start()
     setVisibility('hidden')
@@ -122,6 +134,19 @@ describe('usePolling', () => {
     wrapper.unmount()
     await vi.advanceTimersByTimeAsync(5000)
     expect(fetchFn).toHaveBeenCalledTimes(2)
+  })
+
+  it('ignores start calls after the owner has unmounted', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(undefined)
+    const { controls, wrapper } = createPoller(fetchFn)
+
+    wrapper.unmount()
+    controls.start()
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(controls.isPolling.value).toBe(false)
   })
 
   it('continues polling after a rejected fetch', async () => {

@@ -377,6 +377,9 @@ export function applyPartDelta(
   // message_id must not resurrect them nor leak into the latest turn.
   if (message.completed_at != null) return message
 
+  const initialPartCount = message.parts.length
+  let partPositionChanged = false
+
   if (delta.text) {
     closeRunningStreams(message, 'text')
     const part = ensureTextPart(message, sessionId, opts.partId)
@@ -672,9 +675,20 @@ export function applyPartDelta(
   // keeps newly merged snapshots in the same chronological order.
   if (opts.partId && opts.partPosition !== undefined) {
     const positioned = message.parts.find((part) => part.id === opts.partId)
-    if (positioned) positioned.position = opts.partPosition
+    if (positioned && positioned.position !== opts.partPosition) {
+      positioned.position = opts.partPosition
+      partPositionChanged = true
+    }
   }
-  message.parts = sortHarnessParts(message.parts)
+  // Text deltas mutate their existing part in place. Sorting/replacing the
+  // array on every chunk needlessly invalidates consumers that derive maps
+  // from part membership and IDs (for example, subtask lookup maps).
+  if (message.parts.length !== initialPartCount || partPositionChanged) {
+    const sortedParts = sortHarnessParts(message.parts)
+    if (sortedParts.some((part, index) => part !== message.parts[index])) {
+      message.parts = sortedParts
+    }
+  }
   return message
 }
 

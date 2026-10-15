@@ -7,7 +7,7 @@
  */
 
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, ref, toRaw } from 'vue'
 
 import type {
   HarnessMessage,
@@ -107,6 +107,12 @@ export const useHarnessStore = defineStore('harness', () => {
   const pinnedDetailKeys = new Set<string>()
   const detailErrors = ref<Record<string, string>>({})
   const DETAIL_CACHE_LIMIT = 100
+  // Inactive hydrated transcripts are a UI cache only; the server remains
+  // authoritative. Protected sessions may exceed either inactive-cache limit.
+  const INACTIVE_TRANSCRIPT_LIMIT = 4
+  const INACTIVE_TRANSCRIPT_BUDGET_BYTES = 16 * 1024 * 1024
+  /** Session -> estimated payload bytes, ordered least- to most-recently used. */
+  const transcriptLru = new Map<string, number>()
   let activeSelectionGeneration = 0
   const todoGenerations = new Map<string, number>()
   let sessionsGeneration = 0
@@ -182,6 +188,200 @@ export const useHarnessStore = defineStore('harness', () => {
     return messagesBySession.value[sessionId]!
   }
 
+  /** Estimate retained transcript size without allocating a serialized copy. */
+  function estimateTranscriptBytes(messages: HarnessMessage[]): number {
+    const stack: Array<{ value: unknown; multiplier: number }> = [
+      { value: messages, multiplier: 1 },
+    ]
+    const visited = new WeakMap<object, number>()
+    let bytes = 0
+
+    while (stack.length) {
+      const { value, multiplier } = stack.pop()!
+      if (typeof value === 'string') {
+        bytes += value.length * 2 * multiplier
+      } else if (
+        typeof value === 'number' ||
+        typeof value === 'boolean' ||
+        typeof value === 'bigint'
+      ) {
+        bytes += 8 * multiplier
+      } else if (value && typeof value === 'object') {
+        const raw = toRaw(value)
+        const previousMultiplier = visited.get(raw) ?? 0
+        if (previousMultiplier >= multiplier) continue
+
+        const isDetailedPart =
+          !Array.isArray(raw) &&
+          'detail_loaded' in raw &&
+          raw.detail_loaded === true &&
+          'type' in raw &&
+          ['tool', 'reasoning', 'agent', 'patch', 'compaction'].includes(String(raw.type))
+        const effectiveMultiplier = isDetailedPart ? multiplier * 2 : multiplier
+        const additionalMultiplier = effectiveMultiplier - previousMultiplier
+        visited.set(raw, effectiveMultiplier)
+
+        if (Array.isArray(raw)) {
+          bytes += (24 + raw.length * 8) * additionalMultiplier
+          for (const item of raw) stack.push({ value: item, multiplier: effectiveMultiplier })
+        } else {
+          bytes += 32 * additionalMultiplier
+          for (const key of Object.keys(raw)) {
+            bytes += (key.length * 2 + 8) * additionalMultiplier
+            stack.push({
+              value: (raw as Record<string, unknown>)[key],
+              multiplier: effectiveMultiplier,
+            })
+          }
+        }
+      }
+    }
+
+    return bytes
+  }
+
+  function touchTranscript(sessionId: string, recalculateBytes = false): void {
+    const messages = messagesBySession.value[sessionId]
+    if (!messages) return
+    const bytes =
+      recalculateBytes || !transcriptLru.has(sessionId)
+        ? estimateTranscriptBytes(messages)
+        : transcriptLru.get(sessionId)!
+    transcriptLru.delete(sessionId)
+    transcriptLru.set(sessionId, bytes)
+  }
+
+  /** Protect a lineage family when its contents support the active subtask UI. */
+  function protectedTranscriptSessions(): Set<string> {
+    const protectedIds = new Set<string>()
+    const protectFamily = (sessionId: string): void => {
+      protectedIds.add(sessionId)
+      for (const ancestor of collectAncestorSessions(sessionId, sessions.value)) {
+        protectedIds.add(ancestor.id)
+      }
+      for (const descendantId of collectDescendantSessionIds(sessionId, sessions.value)) {
+        protectedIds.add(descendantId)
+      }
+    }
+
+    for (const sessionId of [activeSessionId.value, viewingSessionId.value]) {
+      if (sessionId) protectFamily(sessionId)
+    }
+    for (const session of sessions.value) {
+      if (session.status === 'busy') protectFamily(session.id)
+    }
+    for (const request of Object.values(pendingPermissions.value)) {
+      protectFamily(request.session_id)
+    }
+    for (const request of Object.values(pendingQuestions.value)) {
+      protectFamily(request.session_id)
+    }
+    // A live fetch or explicitly pinned detail is an explicit temporary cache pin.
+    for (const key of pinnedDetailKeys) protectFamily(key.slice(0, key.lastIndexOf(':')))
+    const inFlightSessionIds = new Set([
+      ...[...partFetches.keys()].map((key) => key.slice(0, key.lastIndexOf(':'))),
+      ...[...detailFetches.keys()].map((key) => key.slice(0, key.lastIndexOf(':'))),
+      ...todoFetches.keys(),
+    ])
+    for (const sessionId of inFlightSessionIds) protectFamily(sessionId)
+    return protectedIds
+  }
+
+  function forgetTranscript(sessionId: string): void {
+    transcriptLru.delete(sessionId)
+    partGenerations.set(sessionId, (partGenerations.get(sessionId) ?? 0) + 1)
+    detailGenerations.set(sessionId, (detailGenerations.get(sessionId) ?? 0) + 1)
+    todoGenerations.set(sessionId, (todoGenerations.get(sessionId) ?? 0) + 1)
+    for (const key of partFetches.keys()) {
+      if (key.startsWith(`${sessionId}:`)) partFetches.delete(key)
+    }
+    for (const key of detailFetches.keys()) {
+      if (key.startsWith(`${sessionId}:`)) detailFetches.delete(key)
+    }
+    todoFetches.delete(sessionId)
+    for (const [key, part] of detailCache) {
+      if (part.session_id !== sessionId) continue
+      detailCache.delete(key)
+      pinnedDetailKeys.delete(key)
+    }
+    for (const key of pinnedDetailKeys) {
+      if (key.startsWith(`${sessionId}:`)) pinnedDetailKeys.delete(key)
+    }
+    const errors = { ...detailErrors.value }
+    for (const key of Object.keys(errors)) {
+      if (key.startsWith(`${sessionId}:`)) delete errors[key]
+    }
+    detailErrors.value = errors
+    const dismissed = { ...dismissedNoticeIds.value }
+    for (const message of messagesBySession.value[sessionId] ?? []) {
+      delete dismissed[message.id]
+    }
+    dismissedNoticeIds.value = dismissed
+    delete messagesBySession.value[sessionId]
+    delete todosBySession.value[sessionId]
+  }
+
+  /** Keep only a small LRU of unprotected inactive transcripts. */
+  function trimInactiveTranscripts(): void {
+    const protectedIds = protectedTranscriptSessions()
+    let inactiveCount = 0
+    let inactiveBytes = 0
+    for (const [sessionId, bytes] of transcriptLru) {
+      if (protectedIds.has(sessionId)) continue
+      inactiveCount += 1
+      inactiveBytes += bytes
+    }
+    for (const sessionId of transcriptLru.keys()) {
+      if (
+        inactiveCount <= INACTIVE_TRANSCRIPT_LIMIT &&
+        inactiveBytes <= INACTIVE_TRANSCRIPT_BUDGET_BYTES
+      ) {
+        break
+      }
+      if (protectedIds.has(sessionId)) continue
+      const bytes = transcriptLru.get(sessionId) ?? 0
+      forgetTranscript(sessionId)
+      inactiveCount -= 1
+      inactiveBytes -= bytes
+    }
+  }
+
+  /** Clear transcript caches and invalidate all outstanding session fetches. */
+  function clearTranscriptCaches(): void {
+    const sessionIdFromKey = (key: string): string => key.slice(0, key.indexOf(':'))
+    const partSessionIds = new Set([
+      ...partGenerations.keys(),
+      ...[...partFetches.keys()].map(sessionIdFromKey),
+    ])
+    const detailSessionIds = new Set([
+      ...detailGenerations.keys(),
+      ...[...detailFetches.keys()].map(sessionIdFromKey),
+    ])
+    const todoSessionIds = new Set([...todoGenerations.keys(), ...todoFetches.keys()])
+    for (const sessionId of partSessionIds) {
+      partGenerations.set(sessionId, (partGenerations.get(sessionId) ?? 0) + 1)
+    }
+    for (const sessionId of detailSessionIds) {
+      detailGenerations.set(sessionId, (detailGenerations.get(sessionId) ?? 0) + 1)
+    }
+    for (const sessionId of todoSessionIds) {
+      todoGenerations.set(sessionId, (todoGenerations.get(sessionId) ?? 0) + 1)
+    }
+    transcriptLru.clear()
+    partFetches.clear()
+    detailFetches.clear()
+    todoFetches.clear()
+    detailCache.clear()
+    pinnedDetailKeys.clear()
+    detailErrors.value = {}
+    messagesBySession.value = {}
+    todosBySession.value = {}
+    pendingPermissions.value = {}
+    pendingQuestions.value = {}
+    dismissedNoticeIds.value = {}
+    readFlights.clear()
+  }
+
   // --- Actions ---
 
   function rememberPartDetail(sessionId: string, part: HarnessPart): void {
@@ -224,7 +424,10 @@ export const useHarnessStore = defineStore('harness', () => {
         detailCache.delete(key)
         detailCache.set(key, cached)
       }
-    } else pinnedDetailKeys.delete(key)
+    } else {
+      pinnedDetailKeys.delete(key)
+      trimInactiveTranscripts()
+    }
   }
 
   function invalidatePartDetails(sessionId: string, clear = false): void {
@@ -293,6 +496,7 @@ export const useHarnessStore = defineStore('harness', () => {
           detail_loaded: true,
         })
         rememberPartDetail(sessionId, currentPart)
+        touchTranscript(sessionId, true)
         const errors = { ...detailErrors.value }
         delete errors[key]
         detailErrors.value = errors
@@ -311,7 +515,10 @@ export const useHarnessStore = defineStore('harness', () => {
         throw e
       }
     })().finally(() => {
-      if (detailFetches.get(key) === flight) detailFetches.delete(key)
+      if (detailFetches.get(key) === flight) {
+        detailFetches.delete(key)
+        trimInactiveTranscripts()
+      }
     })
     detailFetches.set(key, flight)
     return flight
@@ -324,8 +531,10 @@ export const useHarnessStore = defineStore('harness', () => {
       sessionsGeneration += 1
       sessionFetches.clear()
       if (isWorkspaceSwitch) {
+        clearTranscriptCaches()
         sessions.value = []
         setActiveSession(null)
+        viewingSessionId.value = null
         // A new workspace needs its own initial load; the chat must not
         // flash the previous workspace's skeleton state.
         sessionsLoaded.value = false
@@ -340,6 +549,10 @@ export const useHarnessStore = defineStore('harness', () => {
           if (generation !== sessionsGeneration) return
           const previous = sessions.value
           sessions.value = result
+          const sessionIds = new Set(result.map((session) => session.id))
+          for (const session of previous) {
+            if (!sessionIds.has(session.id)) forgetTranscript(session.id)
+          }
           if (
             activeSessionId.value &&
             !result.some((session) => session.id === activeSessionId.value) &&
@@ -384,12 +597,20 @@ export const useHarnessStore = defineStore('harness', () => {
   }
 
   function setActiveSession(sessionId: string | null): void {
-    if (activeSessionId.value !== sessionId) activeSelectionGeneration += 1
+    if (activeSessionId.value !== sessionId) {
+      const previous = activeSessionId.value
+      if (previous) touchTranscript(previous)
+      activeSelectionGeneration += 1
+    }
     activeSessionId.value = sessionId
+    if (sessionId && messagesBySession.value[sessionId]) touchTranscript(sessionId)
+    trimInactiveTranscripts()
   }
 
   function setViewingSession(sessionId: string | null): void {
     viewingSessionId.value = sessionId
+    if (sessionId && messagesBySession.value[sessionId]) touchTranscript(sessionId)
+    trimInactiveTranscripts()
     if (!sessionId) return
     const session = sessions.value.find((row) => row.id === sessionId)
     if (session?.status === 'idle' && !session.manual_unread && session.unread) {
@@ -486,6 +707,7 @@ export const useHarnessStore = defineStore('harness', () => {
             session?.status === 'busy'
               ? mergeBusyFetchedMessages(previous, incoming)
               : settleOpenStreamParts(incoming)
+          touchTranscript(sessionId, true)
           // Timeline parts intentionally omit parent ids. Restore them from
           // the enclosing REST envelope after reconciliation too, since a
           // busy merge can carry forward live-only rows from the previous
@@ -526,7 +748,10 @@ export const useHarnessStore = defineStore('harness', () => {
           }
         }
       })().finally(() => {
-        if (partFetches.get(key) === flight) partFetches.delete(key)
+        if (partFetches.get(key) === flight) {
+          partFetches.delete(key)
+          trimInactiveTranscripts()
+        }
       })
       partFetches.set(key, flight)
     }
@@ -559,7 +784,10 @@ export const useHarnessStore = defineStore('harness', () => {
           if (todoGenerations.get(sessionId) === generation) todosBySession.value[sessionId] = []
         })
         .finally(() => {
-          if (todoFetches.get(sessionId) === flight) todoFetches.delete(sessionId)
+          if (todoFetches.get(sessionId) === flight) {
+            todoFetches.delete(sessionId)
+            trimInactiveTranscripts()
+          }
         })
       todoFetches.set(sessionId, flight)
     }
@@ -664,9 +892,8 @@ export const useHarnessStore = defineStore('harness', () => {
     try {
       await deleteHarnessSession(sessionId)
       invalidatePartDetails(sessionId, true)
+      forgetTranscript(sessionId)
       sessions.value = sessions.value.filter((session) => session.id !== sessionId)
-      delete messagesBySession.value[sessionId]
-      delete todosBySession.value[sessionId]
       if (activeSessionId.value === sessionId) {
         setActiveSession(null)
       }
@@ -824,6 +1051,7 @@ export const useHarnessStore = defineStore('harness', () => {
     todosBySession.value[sessionId] = applyTodoUpdate(todosBySession.value[sessionId] ?? [], {
       todos,
     })
+    trimInactiveTranscripts()
   }
 
   function handleSubtaskStarted(
@@ -926,6 +1154,8 @@ export const useHarnessStore = defineStore('harness', () => {
     const session = sessions.value.find((s) => s.id === sessionId)
     if (session) {
       session.status = status
+      // Busy sessions remain protected; account for streamed growth once the
+      // run settles instead of recalculating its size on every delta.
       if (extras?.model) session.model = extras.model
       if (extras?.reasoning_effort !== undefined) {
         session.reasoning_effort = extras.reasoning_effort
@@ -953,6 +1183,9 @@ export const useHarnessStore = defineStore('harness', () => {
     stampRunModel(sessionId, extras?.message_id, extras)
     if (status === 'idle') {
       stampAssistantCompleted(sessionId, extras?.message_id)
+      // Include sessions first populated only by streamed deltas in the LRU.
+      touchTranscript(sessionId, true)
+      trimInactiveTranscripts()
       if (viewingSessionId.value === sessionId && !session?.manual_unread) {
         if (session) session.unread = true
         void markSessionRead(sessionId)
@@ -1102,35 +1335,18 @@ export const useHarnessStore = defineStore('harness', () => {
   }
 
   function reset(): void {
+    clearTranscriptCaches()
     sessions.value = []
-    for (const id of partGenerations.keys())
-      partGenerations.set(id, (partGenerations.get(id) ?? 0) + 1)
-    for (const id of detailGenerations.keys())
-      detailGenerations.set(id, (detailGenerations.get(id) ?? 0) + 1)
-    detailFetches.clear()
-    detailCache.clear()
-    pinnedDetailKeys.clear()
-    detailErrors.value = {}
     activeSelectionGeneration += 1
     sessionsGeneration += 1
     activeSessionsWorkspace = null
     sessionFetches.clear()
-    for (const [id, generation] of partGenerations) partGenerations.set(id, generation + 1)
-    for (const [id, generation] of todoGenerations) todoGenerations.set(id, generation + 1)
-    partFetches.clear()
-    todoFetches.clear()
-    readFlights.clear()
-    messagesBySession.value = {}
-    todosBySession.value = {}
-    pendingPermissions.value = {}
-    pendingQuestions.value = {}
     setActiveSession(null)
     viewingSessionId.value = null
     loading.value = false
     sessionsLoaded.value = false
     sessionsLoadedWorkspace.value = null
     error.value = null
-    dismissedNoticeIds.value = {}
     agentConfigs.value = []
     composerDirty.value = false
   }

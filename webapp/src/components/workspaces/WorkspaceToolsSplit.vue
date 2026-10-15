@@ -5,12 +5,9 @@
  * keeping slot content mounted. Owns file-socket routing and tool-store
  * reset when the workspace changes or this host unmounts.
  */
-import { computed, onUnmounted, toRef, watch } from 'vue'
-import FileViewer from '@/components/files/FileViewer.vue'
-import GitDiffViewer from '@/components/git/GitDiffViewer.vue'
+import { computed, defineAsyncComponent, onUnmounted, toRef, watch } from 'vue'
 import DesktopSurface from '@/components/workspaces/DesktopSurface.vue'
 import WorkspaceDesktop from '@/components/workspaces/WorkspaceDesktop.vue'
-import WorkspaceSidePanel from '@/components/workspaces/WorkspaceSidePanel.vue'
 import { useWorkspaceFileEvents } from '@/composables/useWorkspaceFileEvents'
 import { useDesktopStore } from '@/stores/desktop'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
@@ -18,6 +15,12 @@ import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { useGitStore } from '@/stores/git'
 import { useSidePanelStore } from '@/stores/sidePanel'
 import { useTerminalStore } from '@/stores/terminal'
+
+const FileViewer = defineAsyncComponent(() => import('@/components/files/FileViewer.vue'))
+const GitDiffViewer = defineAsyncComponent(() => import('@/components/git/GitDiffViewer.vue'))
+const WorkspaceSidePanel = defineAsyncComponent(
+  () => import('@/components/workspaces/WorkspaceSidePanel.vue'),
+)
 
 // Media URLs are keyed by path in the store. Keep them across Home → chat
 // transitions for the same workspace, but never reuse them in another one.
@@ -41,8 +44,8 @@ const terminalStore = useTerminalStore()
 
 useWorkspaceFileEvents(toRef(props, 'workspaceId'))
 
-const showingGitDiff = computed(
-  () => Boolean(gitStore.viewingDiffChange || gitStore.viewingCommitDiff),
+const showingGitDiff = computed(() =>
+  Boolean(gitStore.viewingDiffChange || gitStore.viewingCommitDiff),
 )
 const showingFile = computed(
   () =>

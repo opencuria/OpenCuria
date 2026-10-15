@@ -128,6 +128,38 @@ describe('workspaceImages timeouts and assembled errors', () => {
     }
   })
 
+  it('ignores late timeout errors and unsolicited errors without releasing unrelated slots', () => {
+    vi.useFakeTimers()
+    try {
+      const store = useWorkspaceImageStore()
+      store.fetchImage(WS_ID, IMG_PATH)
+      const timedOutRequest = lastReadRequestId()
+      vi.advanceTimersByTime(30_001)
+      expect(store.isFetchingImage(IMG_PATH)).toBe(false)
+
+      const paths = [
+        '/workspace/b.png',
+        '/workspace/c.png',
+        '/workspace/d.png',
+        '/workspace/e.png',
+        '/workspace/f.png',
+      ]
+      for (const path of paths) store.fetchImage(WS_ID, path)
+      expect(vi.mocked(sendFilesRead)).toHaveBeenCalledTimes(5)
+
+      store.handleContentResult(timedOutRequest, IMG_PATH, '', 'late error')
+      store.handleContentResult('unsolicited', '/workspace/other.png', '', 'noise')
+      expect(vi.mocked(sendFilesRead)).toHaveBeenCalledTimes(5)
+      expect(store.isFetchingImage(paths[4]!)).toBe(true)
+
+      const activeRequest = vi.mocked(sendFilesRead).mock.calls[1]![1]
+      store.handleContentResult(activeRequest, paths[0]!, '', 'release one slot')
+      expect(vi.mocked(sendFilesRead)).toHaveBeenCalledTimes(6)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('times out a fetchVideo with no reply (fake timers)', () => {
     vi.useFakeTimers()
     try {

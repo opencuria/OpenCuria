@@ -1,5 +1,15 @@
 <script setup lang="ts">
-import { computed, defineComponent, h, inject, nextTick, onMounted, ref, watch } from 'vue'
+import {
+  computed,
+  defineComponent,
+  h,
+  inject,
+  nextTick,
+  onMounted,
+  onUnmounted,
+  ref,
+  watch,
+} from 'vue'
 import type { PropType, VNodeChild } from 'vue'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
@@ -325,29 +335,115 @@ function buildSegments(text: string): MarkdownSegment[] {
 }
 
 const streaming = computed(() => props.streaming === true)
-const segments = computed(() => buildSegments(props.text))
+const renderedText = ref(props.text)
+const segments = computed(() => buildSegments(renderedText.value))
 const markdownRevision = ref(0)
+const STREAM_RENDER_INTERVAL_MS = 50
+let renderTimer: ReturnType<typeof setTimeout> | undefined
+
+function clearRenderTimer(): void {
+  if (renderTimer === undefined) return
+  clearTimeout(renderTimer)
+  renderTimer = undefined
+}
+
+function flushRenderedText(): void {
+  clearRenderTimer()
+  renderedText.value = props.text
+}
+
 watch(
-  () => [props.text, props.mentions] as const,
+  () => [props.text, streaming.value] as const,
+  ([text, isStreaming], [previousText, wasStreaming]) => {
+    if (!isStreaming) {
+      // Complete/non-streaming markdown stays immediate, and the latest
+      // stream delta is flushed as soon as the turn ends.
+      if (text !== renderedText.value || wasStreaming) flushRenderedText()
+    } else if (text !== previousText && text !== renderedText.value && renderTimer === undefined) {
+      // Fixed-window coalescing bounds full-document markdown parsing while
+      // streaming without attempting unsafe incremental markdown parsing.
+      renderTimer = setTimeout(() => {
+        renderTimer = undefined
+        renderedText.value = props.text
+      }, STREAM_RENDER_INTERVAL_MS)
+    }
+  },
+  { flush: 'sync' },
+)
+
+watch(
+  () => [renderedText.value, props.mentions] as const,
   ([, mentions], [, previousMentions]) => {
     if (mentions || previousMentions) markdownRevision.value += 1
   },
   { flush: 'sync' },
 )
 
-watch(
-  () => [props.text, workspaceId.value] as const,
-  () => {
-    const id = workspaceId.value
-    if (!id) return
-    for (const segment of segments.value) {
-      for (const media of segment.media) {
-        if (media.kind === 'image') imageStore.fetchImage(id, media.path)
-        else imageStore.fetchVideo(id, media.path)
+const pinnedMediaPaths = new Set<string>()
+let pinnedMediaGeneration = imageStore.mediaGeneration
+let pinnedWorkspaceId = workspaceId.value
+const lightbox = ref<{ src: string; alt: string } | null>(null)
+let lightboxMediaPath: string | null = null
+let lightboxMediaGeneration = imageStore.mediaGeneration
+
+function syncVisibleMedia(): void {
+  const generation = imageStore.mediaGeneration
+  const id = workspaceId.value
+  const media = segments.value.flatMap((segment) => segment.media)
+  const nextPaths = new Set(media.map((item) => item.path))
+  const workspaceChanged = id !== pinnedWorkspaceId
+
+  if (generation !== pinnedMediaGeneration) {
+    // reset() cleared the store-side refcounts; discard old local ownership
+    // without releasing it into the new generation.
+    pinnedMediaPaths.clear()
+    pinnedMediaGeneration = generation
+    if (lightboxMediaPath && lightboxMediaGeneration !== generation) {
+      lightbox.value = null
+      lightboxMediaPath = null
+      lightboxMediaGeneration = generation
+    }
+  } else if (workspaceChanged) {
+    if (pinnedMediaGeneration === generation) imageStore.releaseMedia(pinnedMediaPaths)
+    pinnedMediaPaths.clear()
+  } else {
+    const releasedPaths: string[] = []
+    for (const path of pinnedMediaPaths) {
+      if (!nextPaths.has(path)) {
+        releasedPaths.push(path)
+        pinnedMediaPaths.delete(path)
       }
     }
+    if (releasedPaths.length > 0) imageStore.releaseMedia(releasedPaths)
+  }
+  pinnedWorkspaceId = id
+  if (!id) return
+  if (lightboxMediaPath && lightboxMediaGeneration !== generation) {
+    lightboxMediaPath = null
+    lightboxMediaGeneration = generation
+  }
+
+  // Pin all current media before requesting it, so even an oversized fresh
+  // response is protected from immediate cache trimming.
+  for (const path of nextPaths) {
+    if (!pinnedMediaPaths.has(path)) {
+      imageStore.pinMedia(path, true)
+      pinnedMediaPaths.add(path)
+    }
+  }
+  for (const item of media) {
+    if (item.kind === 'image') imageStore.fetchImage(id, item.path)
+    else imageStore.fetchVideo(id, item.path)
+  }
+}
+
+watch(
+  () => [renderedText.value, workspaceId.value, imageStore.mediaGeneration] as const,
+  syncVisibleMedia,
+  {
+    immediate: true,
+    flush: 'post',
   },
-  { immediate: true },
 )
 
 function mediaUrl(segment: MediaSegment): string | null {
@@ -356,11 +452,24 @@ function mediaUrl(segment: MediaSegment): string | null {
     : imageStore.getVideoUrl(segment.path)
 }
 
-const lightbox = ref<{ src: string; alt: string } | null>(null)
-
 function openImage(segment: ImageSegment): void {
   const src = mediaUrl(segment)
-  if (src) lightbox.value = { src, alt: segment.label || segment.path }
+  if (!src) return
+  if (lightboxMediaPath !== segment.path) {
+    if (lightboxMediaPath) imageStore.pinMedia(lightboxMediaPath, false)
+    imageStore.pinMedia(segment.path, true)
+    lightboxMediaPath = segment.path
+    lightboxMediaGeneration = imageStore.mediaGeneration
+  }
+  lightbox.value = { src, alt: segment.label || segment.path }
+}
+
+function closeLightbox(): void {
+  lightbox.value = null
+  if (lightboxMediaPath && lightboxMediaGeneration === imageStore.mediaGeneration) {
+    imageStore.pinMedia(lightboxMediaPath, false)
+  }
+  lightboxMediaPath = null
 }
 
 /** Activate only sanitized HTML images, never decorative mention icons or links. */
@@ -542,7 +651,7 @@ function enhanceMentionBadges(): void {
   if (!root || typeof document === 'undefined') return
   let tokens: ComposerToken[]
   try {
-    tokens = parseComposerSegments(props.text).filter(
+    tokens = parseComposerSegments(renderedText.value).filter(
       (segment): segment is ComposerToken => segment.kind !== 'text',
     )
   } catch {
@@ -595,7 +704,7 @@ function scheduleMentionEnhance(): void {
 // The `segments` computed re-renders the `data-md-html` containers on text
 // changes, so one post-render pass is enough (no retry timers).
 watch(
-  () => [props.text, props.mentions, segments.value] as const,
+  () => [renderedText.value, props.mentions, segments.value] as const,
   () => {
     scheduleMentionEnhance()
   },
@@ -612,6 +721,18 @@ watch(
 
 onMounted(() => {
   scheduleMentionEnhance()
+})
+
+onUnmounted(() => {
+  clearRenderTimer()
+  if (pinnedMediaGeneration === imageStore.mediaGeneration) {
+    imageStore.releaseMedia(pinnedMediaPaths)
+  }
+  pinnedMediaPaths.clear()
+  if (lightboxMediaPath && lightboxMediaGeneration === imageStore.mediaGeneration) {
+    imageStore.pinMedia(lightboxMediaPath, false)
+  }
+  lightboxMediaPath = null
 })
 
 defineExpose({ renderMarkdown })
@@ -632,5 +753,5 @@ export type { HarnessPart }
       <div v-else data-md-html v-html="segment.html" />
     </template>
   </div>
-  <ImageLightbox v-if="lightbox" :src="lightbox.src" :alt="lightbox.alt" @close="lightbox = null" />
+  <ImageLightbox v-if="lightbox" :src="lightbox.src" :alt="lightbox.alt" @close="closeLightbox" />
 </template>

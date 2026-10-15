@@ -105,6 +105,56 @@ describe('HarnessChatContainer', () => {
     expect(messages).toHaveLength(100)
   })
 
+  it('clamps a scrolled virtual range when a large session is replaced by a shorter one', async () => {
+    const scheduledFrames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      scheduledFrames.push(callback)
+      return scheduledFrames.length
+    })
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    const renderErrors: unknown[] = []
+    const wrapper = mount(HarnessChatContainer, {
+      props: {
+        messages: Array.from({ length: 80 }, (_, index) =>
+          makeMessage({ id: `old-session-${index}`, session_id: 'session-old', position: index }),
+        ),
+      },
+      global: {
+        stubs: { HarnessMessageView: HarnessMessageViewStub },
+        config: { errorHandler: (error) => renderErrors.push(error) },
+      },
+    })
+    await nextTick()
+    const scroller = wrapper.element as HTMLElement
+    Object.defineProperties(scroller, {
+      clientHeight: { configurable: true, value: 500 },
+      scrollHeight: { configurable: true, value: 80 * 144 },
+    })
+
+    scroller.scrollTop = 9000
+    scroller.dispatchEvent(new Event('scroll'))
+    scheduledFrames.splice(0).forEach((frame) => frame(0))
+    await nextTick()
+    expect(wrapper.findAll('[data-message-id]').length).toBeLessThan(40)
+
+    // Leave the next range update queued while the message index changes.
+    scroller.dispatchEvent(new Event('scroll'))
+    expect(scheduledFrames).toHaveLength(1)
+    await wrapper.setProps({
+      messages: Array.from({ length: 45 }, (_, index) =>
+        makeMessage({ id: `new-session-${index}`, session_id: 'session-new', position: index }),
+      ),
+    })
+
+    const renderedIds = wrapper
+      .findAll('[data-message-id]')
+      .map((node) => node.attributes('data-message-id'))
+    expect(renderedIds.length).toBeLessThan(40)
+    expect(renderedIds.every((id) => id?.startsWith('new-session-'))).toBe(true)
+    expect(renderErrors).toEqual([])
+    wrapper.unmount()
+  })
+
   it('mounts a fresh transcript when the history session changes', async () => {
     const wrapper = mount(HarnessChatContainer, {
       props: {
@@ -234,6 +284,113 @@ describe('HarnessChatContainer', () => {
     )
     await nextTick()
     expect(scroller.scrollTop).toBe(5100)
+  })
+
+  it('does not reschedule or reconnect observers for unchanged resize entries', async () => {
+    const scheduledFrames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      scheduledFrames.push(callback)
+      return scheduledFrames.length
+    })
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    const resizeCallback: { current?: ResizeObserverCallback } = {}
+    let observeCalls = 0
+    let disconnectCalls = 0
+    let unobserveCalls = 0
+    class FakeResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback.current = callback
+      }
+      observe(): void {
+        observeCalls += 1
+      }
+      unobserve(): void {
+        unobserveCalls += 1
+      }
+      disconnect(): void {
+        disconnectCalls += 1
+      }
+    }
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver)
+    const messages = Array.from({ length: 80 }, (_, index) =>
+      makeMessage({ id: `unchanged-${index}`, position: index }),
+    )
+    const wrapper = mount(HarnessChatContainer, {
+      props: { messages },
+      global: { stubs: { HarnessMessageView: HarnessMessageViewStub } },
+    })
+    await nextTick()
+    await nextTick()
+    const observedNodes = wrapper.findAll('[data-message-id]').map((node) => node.element)
+    const initialObserveCalls = observeCalls
+    const initialUnobserveCalls = unobserveCalls
+    scheduledFrames.length = 0
+
+    resizeCallback.current?.(
+      observedNodes.map(
+        (target) =>
+          ({
+            target,
+            contentRect: { height: 120 },
+          }) as ResizeObserverEntry,
+      ),
+      {} as ResizeObserver,
+    )
+    await nextTick()
+
+    expect(scheduledFrames).toHaveLength(0)
+    expect(observeCalls).toBe(initialObserveCalls)
+    expect(unobserveCalls).toBe(initialUnobserveCalls)
+    expect(disconnectCalls).toBe(0)
+    wrapper.unmount()
+  })
+
+  it('uses cached height indexes instead of reading every message id on scroll', async () => {
+    const scheduledFrames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      scheduledFrames.push(callback)
+      return scheduledFrames.length
+    })
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    const messages = Array.from({ length: 5000 }, (_, index) => {
+      const message = makeMessage({ position: index })
+      const id = `large-${index}`
+      Object.defineProperty(message, 'id', {
+        configurable: true,
+        get() {
+          idReads += 1
+          return id
+        },
+      })
+      return message
+    })
+    let idReads = 0
+    const wrapper = mount(HarnessChatContainer, {
+      props: { messages },
+      global: { stubs: { HarnessMessageView: HarnessMessageViewStub } },
+    })
+    await nextTick()
+    await nextTick()
+    const scroller = wrapper.element as HTMLElement
+    Object.defineProperties(scroller, {
+      clientHeight: { configurable: true, value: 500 },
+      scrollHeight: { configurable: true, value: 5000 * 144 },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => ({ top: 0, bottom: 500, left: 0, right: 0, width: 0, height: 500 }),
+      },
+    })
+    scheduledFrames.length = 0
+    idReads = 0
+
+    scroller.scrollTop = 60000
+    scroller.dispatchEvent(new Event('scroll'))
+    scheduledFrames.splice(0).forEach((frame) => frame(0))
+    await nextTick()
+
+    expect(idReads).toBeLessThan(1000)
+    expect(wrapper.findAll('[data-message-id]').length).toBeLessThan(40)
+    wrapper.unmount()
   })
 
   it('shows the skeleton only for the initial load, not over existing chat', () => {

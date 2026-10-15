@@ -14,17 +14,20 @@
  * alive via v-show so the terminal session and desktop stream survive tab
  * switches and panel collapse.
  */
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue'
 import type { CSSProperties } from 'vue'
 import { useSidePanelStore } from '@/stores/sidePanel'
 import type { SidePanelTab } from '@/lib/sidePanel'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
 import { GitBranch, Monitor, TerminalSquare, FolderTree, PanelRightClose } from '@lucide/vue'
-import WorkspaceTerminal from './WorkspaceTerminal.vue'
-import SidePanelDesktop from './SidePanelDesktop.vue'
-import FileExplorerPanel from '@/components/files/FileExplorerPanel.vue'
-import GitPanel from '@/components/git/GitPanel.vue'
+
+const WorkspaceTerminal = defineAsyncComponent(() => import('./WorkspaceTerminal.vue'))
+const SidePanelDesktop = defineAsyncComponent(() => import('./SidePanelDesktop.vue'))
+const FileExplorerPanel = defineAsyncComponent(
+  () => import('@/components/files/FileExplorerPanel.vue'),
+)
+const GitPanel = defineAsyncComponent(() => import('@/components/git/GitPanel.vue'))
 
 const props = defineProps<{
   workspaceId: string

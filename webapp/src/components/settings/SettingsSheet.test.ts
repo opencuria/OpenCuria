@@ -186,6 +186,11 @@ function mountSheet() {
   return wrapper
 }
 
+async function settleAsyncComponents(): Promise<void> {
+  await vi.dynamicImportSettled()
+  await flushPromises()
+}
+
 // Gestoppte Instanzen abmelden, damit `opencuria:open-settings`-Listener
 // früherer Tests nicht in spätere Tests hineinfeuern.
 const mountedWrappers: Array<{ unmount: () => void }> = []
@@ -219,6 +224,20 @@ describe('SettingsSheet', () => {
     ])
   })
 
+  it('loads only the active settings panel and retains the global event listener', async () => {
+    const wrapper = mountSheet()
+    expect(wrapper.findComponent({ name: 'WorkspacePolicyTab' }).exists()).toBe(false)
+    window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'general' } }))
+    await settleAsyncComponents()
+    expect(wrapper.findComponent({ name: 'WorkspacePolicyTab' }).exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'ProviderConfigTab' }).exists()).toBe(false)
+
+    window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'provider' } }))
+    await settleAsyncComponents()
+    expect(wrapper.findComponent({ name: 'ProviderConfigTab' }).exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'WorkspacePolicyTab' }).exists()).toBe(false)
+  })
+
   it('renders all nav items for admins', () => {
     const wrapper = mountSheet()
     for (const tab of [
@@ -250,13 +269,14 @@ describe('SettingsSheet', () => {
 
   it('switches content on tab click', async () => {
     const wrapper = mountSheet()
-    await flushPromises()
+    window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'general' } }))
+    await settleAsyncComponents()
 
     // Default: General (workspace policy)
     expect(wrapper.text()).toContain('Workspace Policy')
 
     await wrapper.find('[data-testid="settings-nav-provider"]').trigger('click')
-    await flushPromises()
+    await settleAsyncComponents()
     expect(wrapper.text()).toContain('Providers')
   })
 
@@ -265,7 +285,7 @@ describe('SettingsSheet', () => {
     expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('General')
 
     window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'provider' } }))
-    await flushPromises()
+    await settleAsyncComponents()
     await wrapper.vm.$nextTick()
 
     expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Provider & Models')
@@ -329,7 +349,7 @@ describe('SettingsSheet', () => {
         new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'runners', runnerId: 'r' } }),
       )
     openRunner()
-    await flushPromises()
+    await settleAsyncComponents()
     const panel = () => wrapper.get('[role="tabpanel"]')
     const runners = () => wrapper.findComponent({ name: 'RunnersPanel' })
     expect(panel().classes()).toContain('max-w-3xl')
@@ -341,7 +361,7 @@ describe('SettingsSheet', () => {
     await wrapper.vm.$nextTick()
     expect(panel().classes()).toContain('max-w-3xl')
     openRunner()
-    await flushPromises()
+    await settleAsyncComponents()
     expect(runners().props('contextVersion')).toBeGreaterThan(version)
     runners().vm.$emit('detail-change', true)
     await wrapper.find('[data-testid="settings-nav-general"]').trigger('click')
@@ -349,12 +369,12 @@ describe('SettingsSheet', () => {
     await wrapper.find('[data-testid="settings-nav-runners"]').trigger('click')
     expect(runners().props('runnerId')).toBeUndefined()
     openRunner()
-    await flushPromises()
+    await settleAsyncComponents()
     runners().vm.$emit('detail-change', true)
     window.dispatchEvent(new Event('opencuria:close-settings'))
     await flushPromises()
     expect(panel().classes()).toContain('max-w-3xl')
-    expect(runners().props('runnerId')).toBeUndefined()
+    expect(runners().exists()).toBe(false)
     expect(wrapper.get('[data-testid="settings-sheet"]').classes()).toContain('min-w-0')
     expect(wrapper.get('nav').classes()).toContain('min-w-0')
   })

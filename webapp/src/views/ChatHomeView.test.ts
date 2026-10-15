@@ -160,7 +160,7 @@ function makeRouter() {
   })
 }
 
-async function mountHome() {
+async function mountHome(settle = true) {
   const router = makeRouter()
   await router.push('/')
   await router.isReady()
@@ -206,7 +206,10 @@ async function mountHome() {
       },
     },
   })
-  await flushPromises()
+  if (settle) {
+    await vi.dynamicImportSettled()
+    await flushPromises()
+  }
   return { wrapper, router }
 }
 
@@ -221,6 +224,24 @@ describe('ChatHomeView', () => {
     workspaceStore.activeWorkspace = null
     harnessStore.activeSessionId = null
     harnessStore.createSession.mockReset()
+  })
+
+  it('does not subscribe or fetch file listings when workspace loading resolves after unmount', async () => {
+    let resolveWorkspaces!: () => void
+    workspaceStore.workspaces = []
+    workspaceStore.fetchWorkspaces.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (resolveWorkspaces = resolve)),
+    )
+    const { wrapper } = await mountHome(false)
+
+    expect(workspaceStore.fetchWorkspaces).toHaveBeenCalledOnce()
+    wrapper.unmount()
+    resolveWorkspaces()
+    await flushPromises()
+
+    expect(vi.mocked(subscribeToWorkspace)).not.toHaveBeenCalled()
+    expect(fileExplorerStore.fetchDirectory).not.toHaveBeenCalled()
+    expect(skillStore.fetchSkills).not.toHaveBeenCalled()
   })
 
   it('greets with the email prefix and renders picker and composer without suggestions', async () => {
@@ -270,7 +291,10 @@ describe('ChatHomeView', () => {
   })
 
   it('passes the selected Claude harness to the new session and navigates to workspace-detail', async () => {
-    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })))
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: true })),
+    )
     const { wrapper, router } = await mountHome()
     const pushSpy = vi.spyOn(router, 'push')
     harnessStore.createSession.mockResolvedValue({ id: 'session-1' })

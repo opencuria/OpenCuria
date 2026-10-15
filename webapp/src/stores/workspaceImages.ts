@@ -4,12 +4,9 @@
  */
 
 import { defineStore } from 'pinia'
-import { ref, reactive } from 'vue'
+import { nextTick, ref, reactive } from 'vue'
 import { sendFilesRead } from '@/services/socket'
-import {
-  createChunkedTransferStore,
-  type ChunkedTransferStore,
-} from '@/lib/fileChunks'
+import { createChunkedTransferStore, type ChunkedTransferStore } from '@/lib/fileChunks'
 import { useNotificationStore } from '@/stores/notifications'
 
 let requestCounter = 0
@@ -27,12 +24,36 @@ type PendingReadRequest = {
 const MAX_CONCURRENT = 4
 
 const IMAGE_EXTENSIONS = new Set([
-  'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'tiff', 'tif', 'avif',
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'svg',
+  'bmp',
+  'ico',
+  'tiff',
+  'tif',
+  'avif',
 ])
 
 const VIDEO_EXTENSIONS = new Set([
-  'mp4', 'webm', 'ogg', 'ogv', 'mov', 'm4v', 'avi', 'mkv', 'wmv', 'flv', 'mpeg',
-  'mpg', '3gp', '3g2', 'ts', 'm2ts',
+  'mp4',
+  'webm',
+  'ogg',
+  'ogv',
+  'mov',
+  'm4v',
+  'avi',
+  'mkv',
+  'wmv',
+  'flv',
+  'mpeg',
+  'mpg',
+  '3gp',
+  '3g2',
+  'ts',
+  'm2ts',
 ])
 
 const IMAGE_MIME_MAP: Record<string, string> = {
@@ -70,6 +91,12 @@ const VIDEO_MIME_MAP: Record<string, string> = {
 
 const VIDEO_READ_MAX_SIZE = 100 * 1024 * 1024 // 100 MB
 
+/** Maximum retained media payload size, excluding protected visible media. */
+export const MEDIA_CACHE_BUDGET_BYTES = 32 * 1024 * 1024
+
+/** Base64 strings are retained as UTF-16 JavaScript strings. */
+const BASE64_STORAGE_BYTES_PER_CHAR = 2
+
 /** Max buffered base64 chars for one chunked media read (~140 MiB chars). */
 const MEDIA_CHUNK_MAX_CHARS = 140 * 1024 * 1024
 
@@ -82,6 +109,130 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
   const videoCache = reactive<Record<string, string>>({})
   // path → resolved video MIME type
   const videoMimeTypes = reactive<Record<string, string>>({})
+
+  type MediaEntry = {
+    kind: 'image' | 'video'
+    url: string
+    bytes: number
+    lastUsed: number
+  }
+  const mediaEntries = new Map<string, MediaEntry>()
+  const mediaPins = new Map<string, number>()
+  const mediaGeneration = ref(0)
+  const retiredVideoUrls = new Map<string, Set<string>>()
+  const failedUploadPaths = new Set<string>()
+  let mediaUseCounter = 0
+
+  function mediaUrl(path: string): string | undefined {
+    return imageCache[path] ?? videoCache[path]
+  }
+
+  function estimateDataUrlBytes(url: string): number {
+    return url.length * BASE64_STORAGE_BYTES_PER_CHAR
+  }
+
+  function trackMedia(path: string, kind: 'image' | 'video', url: string, bytes: number): void {
+    const previous = mediaEntries.get(path)
+    if (previous?.kind === 'video' && previous.url !== url) {
+      if ((mediaPins.get(path) ?? 0) > 0) {
+        const retired = retiredVideoUrls.get(path) ?? new Set<string>()
+        retired.add(previous.url)
+        retiredVideoUrls.set(path, retired)
+      } else {
+        URL.revokeObjectURL(previous.url)
+      }
+    }
+    mediaEntries.set(path, {
+      kind,
+      url,
+      bytes,
+      lastUsed: ++mediaUseCounter,
+    })
+  }
+
+  function syncMediaEntry(path: string): MediaEntry | undefined {
+    const image = imageCache[path]
+    const video = videoCache[path]
+    const url = image ?? video
+    const kind = image ? 'image' : video ? 'video' : undefined
+    if (!url || !kind) {
+      mediaEntries.delete(path)
+      return undefined
+    }
+    const known = mediaEntries.get(path)
+    if (known?.url === url && known.kind === kind) return known
+    const bytes = kind === 'video' ? (known?.bytes ?? 0) : estimateDataUrlBytes(url)
+    trackMedia(path, kind, url, bytes)
+    return mediaEntries.get(path)
+  }
+
+  function trimMediaCache(): void {
+    // Reconcile direct cache assignments used by legacy callers/tests. This
+    // sweep runs on mutations/releases, never on render getters.
+    const paths = new Set([...Object.keys(imageCache), ...Object.keys(videoCache)])
+    for (const path of mediaEntries.keys()) {
+      if (!paths.has(path)) mediaEntries.delete(path)
+    }
+    for (const path of paths) syncMediaEntry(path)
+
+    let totalBytes = [...mediaEntries.values()].reduce((sum, entry) => sum + entry.bytes, 0)
+    if (totalBytes <= MEDIA_CACHE_BUDGET_BYTES) return
+
+    const candidates = [...mediaEntries.entries()]
+      .filter(([path]) => (mediaPins.get(path) ?? 0) === 0)
+      .sort(([, left], [, right]) => left.lastUsed - right.lastUsed)
+    for (const [path, entry] of candidates) {
+      if (totalBytes <= MEDIA_CACHE_BUDGET_BYTES) break
+      if (entry.kind === 'image') delete imageCache[path]
+      else {
+        delete videoCache[path]
+        delete videoMimeTypes[path]
+        URL.revokeObjectURL(entry.url)
+      }
+      mediaEntries.delete(path)
+      totalBytes -= entry.bytes
+    }
+  }
+
+  function releaseMediaPath(path: string): void {
+    const count = mediaPins.get(path) ?? 0
+    if (count <= 1) {
+      mediaPins.delete(path)
+      for (const url of retiredVideoUrls.get(path) ?? []) URL.revokeObjectURL(url)
+      retiredVideoUrls.delete(path)
+      if (failedUploadPaths.delete(path)) removeMedia(path)
+    } else {
+      mediaPins.set(path, count - 1)
+    }
+  }
+
+  /** Release multiple visible-media pins and trim the cache once. */
+  function releaseMedia(paths: Iterable<string>): void {
+    for (const path of paths) releaseMediaPath(path)
+    trimMediaCache()
+  }
+
+  function pinMedia(path: string, pin: boolean): void {
+    if (!pin) {
+      releaseMedia([path])
+      return
+    }
+    const count = mediaPins.get(path) ?? 0
+    mediaPins.set(path, count + 1)
+    syncMediaEntry(path)
+  }
+
+  function removeMedia(path: string): void {
+    if ((mediaPins.get(path) ?? 0) > 0) return
+    delete imageCache[path]
+    const video = videoCache[path]
+    if (video) {
+      delete videoCache[path]
+      URL.revokeObjectURL(video)
+    }
+    delete videoMimeTypes[path]
+    mediaEntries.delete(path)
+  }
 
   // requestId → pending read metadata
   const pendingReadRequests = ref<Map<string, PendingReadRequest>>(new Map())
@@ -97,9 +248,10 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
         maxChars: MEDIA_CHUNK_MAX_CHARS,
         onTimeout: (requestId) => {
           const pending = pendingReadRequests.value.get(requestId)
-          const path = pending?.path ?? ''
+          if (!pending) return
           pendingReadRequests.value.delete(requestId)
-          if (path) failPendingMedia(path, pending?.kind)
+          clearFetchTimeout(requestId)
+          failPendingMedia(pending.path, pending.kind)
         },
       })
     }
@@ -119,19 +271,15 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
   const MEDIA_FETCH_TIMEOUT_MS = 30_000
   const fetchTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
 
-  // requestId → whether its timeout already fired (prevents double slot
-  // release when both the timeout callback and a late result run).
-  const timedOutRequests = new Set<string>()
-
   function armFetchTimeout(requestId: string): void {
     clearFetchTimeout(requestId)
     const timer = setTimeout(() => {
       fetchTimeouts.delete(requestId)
-      timedOutRequests.add(requestId)
       const pending = pendingReadRequests.value.get(requestId)
+      if (!pending) return
       pendingReadRequests.value.delete(requestId)
       getMediaChunks().cancel(requestId)
-      if (pending) failPendingMedia(pending.path, pending.kind)
+      failPendingMedia(pending.path, pending.kind)
     }, MEDIA_FETCH_TIMEOUT_MS)
     fetchTimeouts.set(requestId, timer)
   }
@@ -146,6 +294,8 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
 
   // Upload state tracking: path → status
   const uploadStatuses = reactive<Record<string, UploadStatus>>({})
+  const uploadStatusTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
+  const uploadPinnedPaths = new Set<string>()
   // requestId → path for in-flight uploads
   const pendingUploadIds = ref<Map<string, string>>(new Map())
 
@@ -191,10 +341,14 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
   }
 
   function getImageUrl(path: string): string | null {
+    const entry = mediaEntries.get(path)
+    if (entry && imageCache[path] === entry.url) entry.lastUsed = ++mediaUseCounter
     return imageCache[path] ?? null
   }
 
   function getVideoUrl(path: string): string | null {
+    const entry = mediaEntries.get(path)
+    if (entry && videoCache[path] === entry.url) entry.lastUsed = ++mediaUseCounter
     return videoCache[path] ?? null
   }
 
@@ -258,65 +412,45 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
     mimeType?: string,
     options: { chunked?: boolean; totalChunks?: number } = {},
   ): void {
-    // A late result for an already-timed-out request must never repopulate
-    // the cache or release the slot twice: drop it (the timeout already
-    // ran failPendingMedia exactly once).
-    if (timedOutRequests.has(requestId)) {
-      timedOutRequests.delete(requestId)
-      pendingReadRequests.value.delete(requestId)
-      getMediaChunks().cancel(requestId)
-      return
-    }
+    const pending = pendingReadRequests.value.get(requestId)
+    // Unsolicited/late results have no owned request and must not release a
+    // concurrency slot that may now belong to another request.
+    if (!pending) return
     // Error first: a failed final must clear fetching flags and the
     // concurrency slot (including the request safety timer) before any
     // other handling.
     if (error) {
-      const pending = pendingReadRequests.value.get(requestId)
       pendingReadRequests.value.delete(requestId)
       clearFetchTimeout(requestId)
       getMediaChunks().cancel(requestId)
-      failPendingMedia(pending?.path ?? path, pending?.kind)
+      failPendingMedia(pending.path, pending.kind)
       const notify = useNotificationStore()
       notify.error('Media load failed', error)
       return
     }
-    const pending = pendingReadRequests.value.get(requestId)
-    const hasChunks = getMediaChunks().has(requestId)
-    if (!pending && !hasChunks) return
-
     if (options.chunked) {
       try {
         const assembled = getMediaChunks().finish(requestId, options.totalChunks)
-        const expectedPath = pending?.path ?? assembled.path ?? path
+        const expectedPath = pending.path
         if (path !== expectedPath || (assembled.path && assembled.path !== expectedPath)) {
           throw new Error(`path mismatch for ${requestId}`)
         }
         pendingReadRequests.value.delete(requestId)
         clearFetchTimeout(requestId)
-        storeAssembledMedia(
-          expectedPath,
-          pending?.kind ?? 'image',
-          assembled.content,
-          mimeType,
-        )
+        storeAssembledMedia(expectedPath, pending.kind, assembled.content, mimeType)
       } catch {
         pendingReadRequests.value.delete(requestId)
         clearFetchTimeout(requestId)
         getMediaChunks().cancel(requestId)
-        failPendingMedia(pending?.path ?? path, pending?.kind)
+        failPendingMedia(pending.path, pending.kind)
       }
       return
     }
 
-    if (!pending) {
-      // Final result for an unknown transfer (e.g. timed-out video fetch):
-      // drop it so stale payloads never populate the cache.
-      return
-    }
     pendingReadRequests.value.delete(requestId)
     clearFetchTimeout(requestId)
 
-    if (error || !content) {
+    if (!content) {
       failPendingMedia(pending.path, pending.kind)
       return
     }
@@ -341,10 +475,9 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
     totalChunks: number,
     content: string,
   ): void {
-    if (timedOutRequests.has(requestId)) return
     const pending = pendingReadRequests.value.get(requestId)
-    if (!pending && !getMediaChunks().has(requestId)) return
-    if (pending && pending.path !== path) {
+    if (!pending) return
+    if (pending.path !== path) {
       pendingReadRequests.value.delete(requestId)
       clearFetchTimeout(requestId)
       getMediaChunks().cancel(requestId)
@@ -354,7 +487,7 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
     try {
       const store = getMediaChunks()
       if (!store.has(requestId)) {
-        store.start(requestId, totalChunks, { totalChunks }, pending?.path ?? path)
+        store.start(requestId, totalChunks, { totalChunks }, pending.path)
       }
       store.addChunk(requestId, {
         workspace_id: '',
@@ -368,7 +501,7 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
       pendingReadRequests.value.delete(requestId)
       clearFetchTimeout(requestId)
       getMediaChunks().cancel(requestId)
-      failPendingMedia(pending?.path ?? path, pending?.kind)
+      failPendingMedia(pending.path, pending.kind)
     }
   }
 
@@ -403,7 +536,9 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
       if (kind === 'image') {
         const ext = getExt(path)
         const mime = mimeType || IMAGE_MIME_MAP[ext] || 'image/png'
-        imageCache[path] = `data:${mime};base64,${cleanBase64}`
+        const dataUrl = `data:${mime};base64,${cleanBase64}`
+        imageCache[path] = dataUrl
+        trackMedia(path, 'image', dataUrl, estimateDataUrlBytes(dataUrl))
         delete fetchingPaths[path]
       } else {
         const ext = getExt(path)
@@ -419,10 +554,9 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
           bytes[i] = binary.charCodeAt(i)
         }
 
-        if (videoCache[path]) {
-          URL.revokeObjectURL(videoCache[path]!)
-        }
-        videoCache[path] = URL.createObjectURL(new Blob([bytes], { type: resolvedMime }))
+        const url = URL.createObjectURL(new Blob([bytes], { type: resolvedMime }))
+        videoCache[path] = url
+        trackMedia(path, 'video', url, bytes.byteLength)
         videoMimeTypes[path] = resolvedMime
         delete fetchingVideos[path]
       }
@@ -433,6 +567,7 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
       return
     }
 
+    trimMediaCache()
     activeCount = Math.max(0, activeCount - 1)
     processQueue()
   }
@@ -443,13 +578,33 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
    */
   function storeLocalImage(path: string, dataUrl: string): void {
     imageCache[path] = dataUrl
+    trackMedia(path, 'image', dataUrl, estimateDataUrlBytes(dataUrl))
     delete fetchingPaths[path]
+    if (failedUploadPaths.has(path)) {
+      failedUploadPaths.delete(path)
+      if (!uploadPinnedPaths.has(path)) {
+        uploadPinnedPaths.add(path)
+        pinMedia(path, true)
+      }
+    } else if (uploadStatuses[path] === 'uploading' && !uploadPinnedPaths.has(path)) {
+      uploadPinnedPaths.add(path)
+      pinMedia(path, true)
+    }
+    trimMediaCache()
   }
 
   /** Register an in-flight upload so the UI can show upload feedback. */
   function trackUpload(requestId: string, path: string): void {
+    const previousTimeout = uploadStatusTimeouts.get(path)
+    if (previousTimeout !== undefined) clearTimeout(previousTimeout)
+    uploadStatusTimeouts.delete(path)
     pendingUploadIds.value.set(requestId, path)
     uploadStatuses[path] = 'uploading'
+    failedUploadPaths.delete(path)
+    if (mediaUrl(path) && !uploadPinnedPaths.has(path)) {
+      uploadPinnedPaths.add(path)
+      pinMedia(path, true)
+    }
   }
 
   /**
@@ -462,17 +617,21 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
 
     if (status === 'success' && !error) {
       uploadStatuses[path] = 'done'
-      setTimeout(() => {
+      const timeout = setTimeout(() => {
+        uploadStatusTimeouts.delete(path)
         if (uploadStatuses[path] === 'done') delete uploadStatuses[path]
       }, 3000)
+      uploadStatusTimeouts.set(path, timeout)
+      if (uploadPinnedPaths.delete(path)) pinMedia(path, false)
+      trimMediaCache()
     } else {
+      const previousTimeout = uploadStatusTimeouts.get(path)
+      if (previousTimeout !== undefined) clearTimeout(previousTimeout)
+      uploadStatusTimeouts.delete(path)
       uploadStatuses[path] = 'error'
-      delete imageCache[path]
-      if (videoCache[path]) {
-        URL.revokeObjectURL(videoCache[path]!)
-        delete videoCache[path]
-      }
-      delete videoMimeTypes[path]
+      removeMedia(path)
+      if ((mediaPins.get(path) ?? 0) > 0) failedUploadPaths.add(path)
+      if (uploadPinnedPaths.delete(path)) pinMedia(path, false)
     }
   }
 
@@ -481,23 +640,46 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
   }
 
   function reset(): void {
-    Object.keys(imageCache).forEach((k) => { delete imageCache[k] })
+    const urlsToRevoke = Object.values(videoCache)
+    for (const urls of retiredVideoUrls.values()) urlsToRevoke.push(...urls)
+    Object.keys(imageCache).forEach((k) => {
+      delete imageCache[k]
+    })
     Object.keys(videoCache).forEach((k) => {
-      URL.revokeObjectURL(videoCache[k]!)
       delete videoCache[k]
     })
-    Object.keys(videoMimeTypes).forEach((k) => { delete videoMimeTypes[k] })
-    Object.keys(fetchingPaths).forEach((k) => { delete fetchingPaths[k] })
-    Object.keys(fetchingVideos).forEach((k) => { delete fetchingVideos[k] })
-    Object.keys(uploadStatuses).forEach((k) => { delete uploadStatuses[k] })
+    Object.keys(videoMimeTypes).forEach((k) => {
+      delete videoMimeTypes[k]
+    })
+    Object.keys(fetchingPaths).forEach((k) => {
+      delete fetchingPaths[k]
+    })
+    Object.keys(fetchingVideos).forEach((k) => {
+      delete fetchingVideos[k]
+    })
+    Object.keys(uploadStatuses).forEach((k) => {
+      delete uploadStatuses[k]
+    })
     fetchTimeouts.forEach((t) => clearTimeout(t))
     fetchTimeouts.clear()
-    timedOutRequests.clear()
+    uploadStatusTimeouts.forEach((t) => clearTimeout(t))
+    uploadStatusTimeouts.clear()
+    mediaEntries.clear()
+    mediaUseCounter = 0
+    mediaPins.clear()
+    retiredVideoUrls.clear()
+    failedUploadPaths.clear()
+    uploadPinnedPaths.clear()
     pendingReadRequests.value.clear()
     pendingUploadIds.value.clear()
     mediaChunks?.clear()
     fetchQueue.length = 0
     activeCount = 0
+    mediaGeneration.value += 1
+    void nextTick(() => {
+      for (const url of urlsToRevoke) URL.revokeObjectURL(url)
+      trimMediaCache()
+    })
   }
 
   return {
@@ -507,6 +689,7 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
     fetchingPaths,
     fetchingVideos,
     uploadStatuses,
+    mediaGeneration,
     isImagePath,
     isVideoPath,
     getImageUrl,
@@ -517,6 +700,8 @@ export const useWorkspaceImageStore = defineStore('workspaceImages', () => {
     fetchImage,
     fetchVideo,
     storeLocalImage,
+    pinMedia,
+    releaseMedia,
     trackUpload,
     handleUploadResult,
     getUploadStatus,

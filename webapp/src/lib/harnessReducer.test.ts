@@ -36,18 +36,42 @@ describe('harnessReducer', () => {
     resetHarnessPartCounter()
   })
 
-  it('appends text deltas to a single running text part', () => {
+  it('appends text deltas without replacing the parts array when order is unchanged', () => {
     const messages = makeMessages()
 
-    applyPartDelta(messages, 'session-1', { text: 'Hello ' })
-    applyPartDelta(messages, 'session-1', { text: 'world' })
-
+    applyPartDelta(messages, 'session-1', { text: 'Hello ' }, { partId: 'text-1' })
     const assistant = ensureAssistantMessage(messages, 'session-1')
+    const parts = assistant.parts
+
+    applyPartDelta(messages, 'session-1', { text: 'world' }, { partId: 'text-1' })
+
     const textParts = assistant.parts.filter((p) => p.type === 'text')
+    expect(assistant.parts).toBe(parts)
     expect(textParts).toHaveLength(1)
     expect(textParts[0]!.output).toBe('Hello world')
     expect(assistant.content).toBe('Hello world')
     expect(textParts[0]!.state).toBe('running')
+  })
+
+  it('keeps chronological part order when a positioned part is added mid-stream', () => {
+    const messages = makeMessages()
+    applyPartDelta(
+      messages,
+      'session-1',
+      { text: 'answer' },
+      { messageId: 'assistant-1', partId: 'text-1', partPosition: 1 },
+    )
+    const assistant = messages.find((message) => message.id === 'assistant-1')!
+
+    applyPartDelta(
+      messages,
+      'session-1',
+      { tool_started: 'bash', call_id: 'call-1' },
+      { messageId: 'assistant-1', partId: 'tool-1', partPosition: 0 },
+    )
+
+    expect(assistant.parts.map((part) => part.id)).toEqual(['tool-1', 'text-1'])
+    expect(assistant.parts.map((part) => part.position)).toEqual([0, 1])
   })
 
   it('keeps compact live tool projections unloaded while preserving legacy full deltas', () => {
@@ -63,7 +87,7 @@ describe('harnessReducer', () => {
       { partId: 'tool-live' },
     )
     let assistant = ensureAssistantMessage(messages, 'session-1')
-    let tool = findPart(assistant, { partId: 'tool-live' })!
+    const tool = findPart(assistant, { partId: 'tool-live' })!
     expect(tool.detail_loaded).toBe(false)
     expect(tool.input).toEqual({ tool: 'read' })
 

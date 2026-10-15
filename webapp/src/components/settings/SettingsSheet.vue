@@ -12,7 +12,7 @@
   Focus trap / Esc / backdrop come from Dialog (reka-ui).
 -->
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   BookText,
   Bot,
@@ -31,23 +31,26 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useAuthStore } from '@/stores/auth'
 import { cn } from '@/lib/utils'
-import WorkspacePolicyTab from './WorkspacePolicyTab.vue'
-import ProviderConfigTab from './ProviderConfigTab.vue'
-import AgentConfigTab from './AgentConfigTab.vue'
-import CredentialServicesTab from './CredentialServicesTab.vue'
-import SkillsPanel from './SkillsPanel.vue'
-import CredentialsPanel from './CredentialsPanel.vue'
-import PluginsPanel from './PluginsPanel.vue'
-import ApiKeysPanel from './ApiKeysPanel.vue'
-import CapturedImagesPanel from './CapturedImagesPanel.vue'
-import RunnersPanel from './RunnersPanel.vue'
-import ImageDefinitionsTab from '@/components/images/ImageDefinitionsTab.vue'
 import {
   CLOSE_SETTINGS_EVENT,
   OPEN_SETTINGS_EVENT,
   resolveSettingsTab,
   type SettingsTabId,
 } from './settingsTabs'
+
+const WorkspacePolicyTab = defineAsyncComponent(() => import('./WorkspacePolicyTab.vue'))
+const ProviderConfigTab = defineAsyncComponent(() => import('./ProviderConfigTab.vue'))
+const AgentConfigTab = defineAsyncComponent(() => import('./AgentConfigTab.vue'))
+const CredentialServicesTab = defineAsyncComponent(() => import('./CredentialServicesTab.vue'))
+const SkillsPanel = defineAsyncComponent(() => import('./SkillsPanel.vue'))
+const CredentialsPanel = defineAsyncComponent(() => import('./CredentialsPanel.vue'))
+const PluginsPanel = defineAsyncComponent(() => import('./PluginsPanel.vue'))
+const ApiKeysPanel = defineAsyncComponent(() => import('./ApiKeysPanel.vue'))
+const CapturedImagesPanel = defineAsyncComponent(() => import('./CapturedImagesPanel.vue'))
+const RunnersPanel = defineAsyncComponent(() => import('./RunnersPanel.vue'))
+const ImageDefinitionsTab = defineAsyncComponent(
+  () => import('@/components/images/ImageDefinitionsTab.vue'),
+)
 
 const authStore = useAuthStore()
 
@@ -277,12 +280,12 @@ watch(isAdmin, (admin) => {
             role="tabpanel"
             :aria-label="activeLabel"
           >
-            <WorkspacePolicyTab v-if="activeTab === 'general'" />
-            <ProviderConfigTab v-else-if="activeTab === 'provider'" />
-            <AgentConfigTab v-else-if="activeTab === 'agents'" />
-            <SkillsPanel v-else-if="activeTab === 'skills'" />
+            <WorkspacePolicyTab v-if="open && activeTab === 'general'" />
+            <ProviderConfigTab v-else-if="open && activeTab === 'provider'" />
+            <AgentConfigTab v-else-if="open && activeTab === 'agents'" />
+            <SkillsPanel v-else-if="open && activeTab === 'skills'" />
             <CredentialsPanel
-              v-else-if="activeTab === 'credentials'"
+              v-else-if="open && activeTab === 'credentials'"
               :initial-service-id="settingsContext.serviceId"
               :initial-credential-id="settingsContext.credentialId"
               :workspace-draft-id="settingsContext.workspaceDraftId"
@@ -290,21 +293,21 @@ watch(isAdmin, (admin) => {
               @context-consumed="clearCredentialsContext"
             />
             <PluginsPanel
-              v-else-if="activeTab === 'plugins'"
+              v-else-if="open && activeTab === 'plugins'"
               :initial-plugin-id="settingsContext.pluginId"
               :context-version="settingsContext.version"
             />
-            <ApiKeysPanel v-else-if="activeTab === 'api-keys'" />
-            <CapturedImagesPanel v-else-if="activeTab === 'images'" />
+            <ApiKeysPanel v-else-if="open && activeTab === 'api-keys'" />
+            <CapturedImagesPanel v-else-if="open && activeTab === 'images'" />
             <RunnersPanel
-              v-else-if="activeTab === 'runners' && isAdmin"
+              v-else-if="open && activeTab === 'runners' && isAdmin"
               :runner-id="selectedRunnerId"
               :runner-activity="selectedRunnerActivity"
               :context-version="settingsContext.version"
               @detail-change="runnerDetailOpen = $event"
             />
-            <CredentialServicesTab v-else-if="activeTab === 'credential-services'" />
-            <ImageDefinitionsTab v-else-if="activeTab === 'image-definitions'" />
+            <CredentialServicesTab v-else-if="open && activeTab === 'credential-services'" />
+            <ImageDefinitionsTab v-else-if="open && activeTab === 'image-definitions'" />
           </div>
         </ScrollArea>
       </div>
