@@ -275,9 +275,7 @@ class ProcessManagerMixin:
         run_count: int
         if existing is not None:
             process_id = existing.id
-            run_count = (existing.run_count or 1) + 1
-            if existing.run_count is None or existing.run_count <= 0:
-                run_count = 2
+            run_count = max(existing.run_count or 0, 0) + 1
             await sync_to_async(self.processes.update_for_restart)(
                 process_id,
                 command=cleaned_command,
@@ -327,9 +325,7 @@ class ProcessManagerMixin:
                         winner.id
                     ) or winner
                     existing = winner
-                run_count = (winner.run_count or 1) + 1
-                if winner.run_count is None or winner.run_count <= 0:
-                    run_count = 2
+                run_count = max(winner.run_count or 0, 0) + 1
                 await sync_to_async(self.processes.update_for_restart)(
                     process_id,
                     command=cleaned_command,
@@ -420,6 +416,8 @@ class ProcessManagerMixin:
             refreshed.pid,
             run_count,
         )
+        # Row creation differs from a first run of a definition imported from an image.
+        refreshed._was_created = existing is None
         return refreshed
 
     async def _stop_running_process(
@@ -838,9 +836,7 @@ class ProcessManagerMixin:
                 or current
             )
 
-        run_count = (current.run_count or 1) + 1
-        if current.run_count is None or current.run_count <= 0:
-            run_count = 2
+        run_count = max(current.run_count or 0, 0) + 1
         process_id = current.id
         command = current.command
         workdir = current.workdir

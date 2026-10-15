@@ -131,7 +131,8 @@ function handleClose(): void {
         <DialogTitle>Capture Image</DialogTitle>
         <DialogDescription>
           The workspace briefly stops and continues on the captured version. Files, chats and
-          settings are kept; running processes stop.
+          settings are kept; running processes stop. Persistent process definitions are included;
+          start them manually in new workspaces.
         </DialogDescription>
       </DialogHeader>
 

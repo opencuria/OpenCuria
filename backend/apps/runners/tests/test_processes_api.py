@@ -88,12 +88,14 @@ def _process_dict(process: WorkspaceProcess) -> dict:
     }
 
 
-def _make_process_record(*, workspace, name="sleeper", run_count=1, status=None):
+def _make_process_record(
+    *, workspace, name="sleeper", run_count=1, status=None, was_created=False
+):
     """Build an unsaved WorkspaceProcess record for mocked service returns."""
     from django.utils import timezone as _tz
 
     now = _tz.now()
-    return WorkspaceProcess(
+    process = WorkspaceProcess(
         id=uuid.uuid4(),
         workspace_id=workspace.id,
         name=name,
@@ -108,6 +110,8 @@ def _make_process_record(*, workspace, name="sleeper", run_count=1, status=None)
         ended_at=None,
         updated_at=now,
     )
+    process._was_created = was_created
+    return process
 
 
 def _full_permissions() -> list[str]:
@@ -264,6 +268,7 @@ def test_processes_start_list_stop_happy_path(client: Client, monkeypatch):
         ended_at=None,
         updated_at=now,
     )
+    process._was_created = True
     stopped = WorkspaceProcess(
         id=process.id,
         workspace_id=workspace.id,
@@ -352,6 +357,137 @@ def test_processes_start_list_stop_happy_path(client: Client, monkeypatch):
     )
     assert stop.status_code == 200
     assert stop.json()["status"] == "killed"
+
+
+@pytest.mark.django_db
+def test_processes_start_existing_definition_and_restart_use_real_service(
+    client: Client, monkeypatch
+):
+    """A count-zero image definition lists and starts/restarts as an existing row."""
+    import apps.runners.api as runners_api
+    from apps.runners.services import RunnerService
+
+    user, org, runner, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_full_permissions())
+    definition = WorkspaceProcess.objects.create(
+        workspace=workspace,
+        name="configured",
+        command="python -m app",
+        workdir="/app",
+        status=ProcessStatus.EXITED,
+        run_count=0,
+    )
+    restart_definition = WorkspaceProcess.objects.create(
+        workspace=workspace,
+        name="configured-restart",
+        command="python -m restart_app",
+        workdir="/srv/restart",
+        status=ProcessStatus.EXITED,
+        run_count=0,
+    )
+    service = RunnerService(sio_server=None)
+    transport = AsyncMock(return_value={"pid": 4242})
+    service._await_process_result = transport  # type: ignore[method-assign]
+    service._forward_to_frontend = lambda *args: None  # type: ignore[method-assign]
+    monkeypatch.setattr(runners_api, "_get_service", lambda: service)
+
+    headers = _auth_headers(token, str(org.id))
+    url = f"/api/v1/workspaces/{workspace.id}/processes/"
+    listing = client.get(url, **headers)
+    assert listing.status_code == 200
+    listed = {item["name"]: item for item in listing.json()}
+    listed_definition = listed["configured"]
+    assert listed_definition["id"] == str(definition.id)
+    assert listed_definition["workspace_id"] == str(workspace.id)
+    assert listed_definition["command"] == "python -m app"
+    assert listed_definition["workdir"] == "/app"
+    assert listed_definition["status"] == ProcessStatus.EXITED
+    assert listed_definition["run_count"] == 0
+    assert listed_definition["started_at"]
+    assert listed_definition["updated_at"]
+    assert listed_definition["pid"] is None
+    assert listed_definition["log_path"] == ""
+    assert listed_definition["exit_code"] is None
+    assert listed_definition["ended_at"] is None
+    assert listed_definition["kind"] == "persistent"
+    assert listed["configured-restart"]["id"] == str(restart_definition.id)
+    assert listed["configured-restart"]["run_count"] == 0
+
+    start = client.post(
+        url,
+        data=json.dumps(
+            {
+                "command": "python -m updated_app",
+                "workdir": "/srv/app",
+                "name": "configured",
+            }
+        ),
+        content_type="application/json",
+        **headers,
+    )
+    assert start.status_code == 200
+    assert start.json()["id"] == str(definition.id)
+    assert start.json()["run_count"] == 1
+
+    restarted = client.post(
+        f"{url}{restart_definition.id}/restart/",
+        content_type="application/json",
+        **headers,
+    )
+    assert restarted.status_code == 200
+    assert restarted.json()["id"] == str(restart_definition.id)
+    assert restarted.json()["run_count"] == 1
+    assert transport.await_count == 2
+    first_payload = transport.await_args_list[0].kwargs["payload"]
+    assert first_payload["env"] == {}
+    assert first_payload["log_path"] == (
+        f"/workspace/.opencuria/processes/{definition.id}.log"
+    )
+    assert "_r2" not in first_payload["log_path"]
+    restart_payload = transport.await_args_list[1].kwargs["payload"]
+    assert restart_payload["process_id"] == str(restart_definition.id)
+    assert restart_payload["run_count"] == 1
+    assert restart_payload["command"] == "python -m restart_app"
+    assert restart_payload["workdir"] == "/srv/restart"
+    assert restart_payload["env"] == {}
+    assert restart_payload["log_path"] == (
+        f"/workspace/.opencuria/processes/{restart_definition.id}.log"
+    )
+    assert "_r2" not in restart_payload["log_path"]
+
+
+@pytest.mark.django_db
+def test_processes_start_owner_check_returns_404(client: Client):
+    """A foreign owner cannot start an existing process definition."""
+    user, org, runner, workspace = _make_context()
+    other = get_user_model().objects.create_user(
+        email=f"foreign-{uuid.uuid4().hex[:8]}@test.local", password="secret"
+    )
+    Membership.objects.create(
+        user=other, organization=org, role=MembershipRole.MEMBER
+    )
+    token = _create_api_key(user=other, permissions=_full_permissions())
+    definition = WorkspaceProcess.objects.create(
+        workspace=workspace,
+        name="configured",
+        command="python -m app",
+        workdir="/app",
+        status=ProcessStatus.EXITED,
+        run_count=0,
+    )
+
+    response = client.post(
+        f"/api/v1/workspaces/{workspace.id}/processes/",
+        data=json.dumps({"command": "python -m attempted", "name": "configured"}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 404
+    definition.refresh_from_db()
+    assert definition.status == ProcessStatus.EXITED
+    assert definition.run_count == 0
+    assert WorkspaceProcess.objects.filter(id=definition.id).count() == 1
 
 
 @pytest.mark.django_db

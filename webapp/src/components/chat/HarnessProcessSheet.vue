@@ -43,6 +43,14 @@ function isRunning(process: WorkspaceProcess): boolean {
   return process.status === ProcessStatus.RUNNING
 }
 
+function displayStatus(process: WorkspaceProcess): string {
+  return process.run_count === 0 && !isRunning(process) ? 'Not started' : process.status
+}
+
+function hasStarted(process: WorkspaceProcess): boolean {
+  return process.run_count !== 0
+}
+
 function isTemp(process: WorkspaceProcess): boolean {
   return process.kind === ProcessKind.TEMP
 }
@@ -150,7 +158,7 @@ async function handleDelete(process: WorkspaceProcess): Promise<void> {
           >
             {{ displayName(process) }}
           </span>
-          <Badge :variant="statusVariant(process.status)">{{ process.status }}</Badge>
+          <Badge :variant="statusVariant(process.status)">{{ displayStatus(process) }}</Badge>
           <Badge
             v-if="isTemp(process)"
             variant="outline"
@@ -180,7 +188,7 @@ async function handleDelete(process: WorkspaceProcess): Promise<void> {
             Start
           </Button>
           <Button
-            v-if="!isTemp(process)"
+            v-if="!isTemp(process) && (hasStarted(process) || isRunning(process))"
             type="button"
             variant="ghost"
             size="xs"
