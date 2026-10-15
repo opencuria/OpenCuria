@@ -21,7 +21,7 @@ import type {
   CapturedImage,
   WorkspaceRecreateOut,
 } from '@/types'
-import { get, post, del, patch } from './api'
+import { get, post, del, patch, postDuringClipboardGesture } from './api'
 
 export function listWorkspaces(runnerId?: string): Promise<Workspace[]> {
   const query = runnerId ? `?runner_id=${runnerId}` : ''
@@ -143,6 +143,21 @@ export function readDesktopClipboard(id: string): Promise<{ text: string }> {
   return post<{ text: string }>(
     `/workspaces/${id}/desktop/clipboard/read/`,
   )
+}
+
+/** Atomically copy the VM selection without leaving the browser's copy gesture. */
+export function copyDesktopSelectionDuringGesture(
+  id: string,
+  context: Window,
+  shift = false,
+): string {
+  const response = postDuringClipboardGesture<{ text: unknown }>(
+    `/workspaces/${id}/desktop/clipboard/read/`,
+    { copy_selection: true, shift },
+    context,
+  )
+  if (typeof response?.text !== 'string') throw new Error('Invalid clipboard response')
+  return response.text
 }
 
 // --- Background process API (workspace-bound) ---

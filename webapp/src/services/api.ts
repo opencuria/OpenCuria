@@ -187,6 +187,28 @@ export function post<T>(
   return request<T>('POST', path, body, credentials, signal)
 }
 
+/**
+ * HTTP desktop copy must finish inside Safari's original trusted key handler.
+ * Keep this exceptional synchronous transport out of all normal API actions.
+ * The selection-copy endpoint bounds server work; a stalled network can still
+ * block the browser until its own network timeout (sync XHR forbids timeout).
+ */
+export function postDuringClipboardGesture<T>(path: string, body: unknown, context: Window): T {
+  const win = context as Window & typeof globalThis
+  const xhr = new win.XMLHttpRequest()
+  xhr.open('POST', `${getApiBaseUrl()}${path}`, false)
+  for (const [key, value] of Object.entries({
+    'Content-Type': 'application/json',
+    ...getAuthHeaders(),
+  }))
+    xhr.setRequestHeader(key, value)
+  xhr.send(JSON.stringify(body))
+  // Never refresh/retry a non-idempotent selection copy inside this gesture.
+  if (xhr.status < 200 || xhr.status >= 300)
+    throw new ApiRequestError(xhr.status, 'Unable to copy the desktop selection')
+  return JSON.parse(xhr.responseText) as T
+}
+
 export function del<T>(path: string, credentials?: RequestCredentials): Promise<T> {
   return request<T>('DELETE', path, undefined, credentials)
 }

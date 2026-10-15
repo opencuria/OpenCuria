@@ -23,6 +23,24 @@ type ClipboardCopyOptions = {
   context?: Window
   fallback?: 'dialog' | 'none'
 }
+function stubExecCommand(order: string[] = [], commandResult = true) {
+  const descriptor = Object.getOwnPropertyDescriptor(document, 'execCommand')
+  const setData = vi.fn()
+  const exec = vi.fn(() => {
+    order.push('execCommand')
+    const event = new Event('copy', { bubbles: true, cancelable: true })
+    Object.defineProperty(event, 'clipboardData', { value: { setData } })
+    document.dispatchEvent(event)
+    return commandResult
+  })
+  Object.defineProperty(document, 'execCommand', { configurable: true, value: exec })
+  restoreClipboardStubs.push(() => {
+    if (descriptor) Object.defineProperty(document, 'execCommand', descriptor)
+    else Reflect.deleteProperty(document, 'execCommand')
+  })
+  return { exec, setData }
+}
+
 function clipboardCopyCalls(): [ClipboardCopyContent, string, ClipboardCopyOptions?][] {
   return (
     copyToClipboard as unknown as {
@@ -42,6 +60,7 @@ vi.mock('@/services/workspaces.api', () => ({
   takeDesktopControl: vi.fn(),
   writeDesktopClipboard: vi.fn(),
   readDesktopClipboard: vi.fn(),
+  copyDesktopSelectionDuringGesture: vi.fn(),
 }))
 vi.mock('@/stores/notifications', () => ({
   useNotificationStore: () => notificationMocks,
@@ -581,6 +600,106 @@ describe('VM clipboard copying', () => {
 
     await expect(content()).rejects.toThrow('Unable to load VM clipboard')
     expect(await pending).toBe(true)
+  })
+})
+
+describe('synchronous desktop selection copying', () => {
+  function connectedSurface() {
+    const id = `selection-${++count}`
+    const store = useDesktopStore()
+    store.setConnected(id, `/ws/desktop/${id}/`)
+    return { id, store, ...surface(id) }
+  }
+
+  it('performs the HTTP selection request and execCommand synchronously in order', () => {
+    const { id, session } = connectedSurface()
+    const order: string[] = []
+    const { exec, setData } = stubExecCommand(order)
+    const context = window
+    vi.mocked(api.copyDesktopSelectionDuringGesture).mockImplementationOnce(
+      (workspaceId, frame, shift) => {
+        order.push('selection-request')
+        expect(workspaceId).toBe(id)
+        expect(frame).toBe(context)
+        expect(shift).toBe(true)
+        return 'Selection ✓ — 東京'
+      },
+    )
+
+    const result = session.copySelectionDuringGesture(context, true)
+
+    expect(result).toBe(true)
+    expect(result).not.toBeInstanceOf(Promise)
+    expect(order).toEqual(['selection-request', 'execCommand'])
+    expect(api.copyDesktopSelectionDuringGesture).toHaveBeenCalledExactlyOnceWith(id, context, true)
+    expect(exec).toHaveBeenCalledExactlyOnceWith('copy')
+    expect(setData).toHaveBeenCalledExactlyOnceWith('text/plain', 'Selection ✓ — 東京')
+    expect(session.clipboardBusy.value).toBe(false)
+    expect(copyToClipboard).not.toHaveBeenCalled()
+    expect(api.readDesktopClipboard).not.toHaveBeenCalled()
+  })
+
+  it('never copies stale or cached clipboard content when the synchronous request fails', () => {
+    const { session } = connectedSurface()
+    const { exec, setData } = stubExecCommand()
+    vi.mocked(api.copyDesktopSelectionDuringGesture).mockImplementationOnce(() => {
+      throw new Error('secret backend details')
+    })
+
+    expect(session.copySelectionDuringGesture(window)).toBe(false)
+    expect(exec).not.toHaveBeenCalled()
+    expect(setData).not.toHaveBeenCalled()
+    expect(notificationMocks.error).toHaveBeenCalledExactlyOnceWith(
+      'Copy failed',
+      'Unable to copy the desktop selection. Try again.',
+    )
+    expect(notificationMocks.error.mock.calls.flat().join(' ')).not.toContain('secret backend')
+    expect(copyToClipboard).not.toHaveBeenCalled()
+  })
+
+  it('excludes busy, read-only, disposed and changed-workspace surfaces', () => {
+    const { store, session, scope } = connectedSurface()
+    const { exec } = stubExecCommand()
+
+    session.clipboardBusy.value = true
+    expect(session.copySelectionDuringGesture(window)).toBe(false)
+    session.clipboardBusy.value = false
+    store.setComputerUseActive(true)
+    expect(session.copySelectionDuringGesture(window)).toBe(false)
+    store.setComputerUseActive(false)
+    expect(api.copyDesktopSelectionDuringGesture).not.toHaveBeenCalled()
+
+    scope.stop()
+    expect(session.copySelectionDuringGesture(window)).toBe(false)
+    expect(api.copyDesktopSelectionDuringGesture).not.toHaveBeenCalled()
+    expect(exec).not.toHaveBeenCalled()
+
+    // A workspace switch makes the previous selection stale before it can
+    // reach the local clipboard, even if the synchronous transport returns.
+    const switched = connectedSurface()
+    vi.mocked(api.copyDesktopSelectionDuringGesture).mockImplementationOnce(() => {
+      switched.workspaceId.value = `${switched.id}-next`
+      return 'must not be copied after a workspace switch'
+    })
+    expect(switched.session.copySelectionDuringGesture(window)).toBe(false)
+    expect(api.copyDesktopSelectionDuringGesture).toHaveBeenCalledExactlyOnceWith(
+      switched.id,
+      window,
+      false,
+    )
+    expect(exec).not.toHaveBeenCalled()
+  })
+
+  it('reports a generic failure when the local browser copy is blocked', () => {
+    const { session } = connectedSurface()
+    const { exec } = stubExecCommand([], false)
+    vi.mocked(api.copyDesktopSelectionDuringGesture).mockReturnValueOnce('text')
+
+    expect(session.copySelectionDuringGesture(window)).toBe(false)
+    expect(notificationMocks.error).toHaveBeenCalledExactlyOnceWith(
+      'Copy failed',
+      'Unable to copy the desktop selection. Try again.',
+    )
   })
 })
 

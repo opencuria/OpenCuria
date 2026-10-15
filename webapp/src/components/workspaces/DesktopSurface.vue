@@ -42,6 +42,7 @@ const {
   stopDesktopIfActive,
   takeControl,
   copyFromVmClipboard,
+  copySelectionDuringGesture,
   pasteToVmClipboard,
   setupSocketListeners,
   cleanupSocketListeners,
@@ -146,6 +147,7 @@ function bindDesktopIframeListeners(): void {
       void copyFromVmClipboard({ context, fallback: 'none', loadText: clipboardReader.read })
     },
     paste: pasteToVmClipboard,
+    copySelectionDuringGesture,
   })
 
   const onFrameError = (event: ErrorEvent) => {

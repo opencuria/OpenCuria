@@ -342,6 +342,28 @@ List workspaces. Supports query params:
 
 ---
 
+#### `POST /workspaces/{workspace_id}/desktop/clipboard/read/` [org]
+
+Requires `terminal:access` and workspace ownership or organization-admin access.
+A bodyless request reads the current plain-text VM clipboard.
+
+To copy the active desktop selection first (used by HTTP browser copy gestures):
+
+```json
+{ "copy_selection": true, "shift": false }
+```
+
+Options are strict booleans; unknown fields and `shift: true` without
+`copy_selection: true` are rejected. `shift` uses the guest terminal copy chord.
+Selection copy rejects capture/computer-use conflicts and is bounded to four
+seconds server-side. It fails rather than returning an old clipboard snapshot.
+
+**Response 200:** `{ "text": "copied text" }`.
+**Response 409:** selection unavailable or timed out; no clipboard text returned.
+The MCP equivalent is `read_desktop_clipboard` with the same options.
+
+---
+
 #### `POST /workspaces/` [org]
 
 Create (and start) a new workspace. Returns immediately — creation happens asynchronously.

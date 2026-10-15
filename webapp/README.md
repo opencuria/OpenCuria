@@ -93,15 +93,32 @@ ensures Safari dispatches paste over the canvas. Text is written through the
 existing authorized VM endpoint before one balanced Linux Ctrl+V is forwarded;
 Ctrl+Shift+C/V is preserved for guest terminals. Local editors are excluded.
 
-Copy starts a promise-backed ClipboardItem write in the **focused iframe's**
-realm during the original gesture, then forwards guest Ctrl+C. The guest's
-`clipboardrx` event supplies fresh text; a bounded REST read covers identical
-copies without a new guest event. Desktop shortcuts never open the Copy dialog.
-When the modern API is absent, a confirmed legacy copy event is attempted in
-that iframe. Browser-denied writes preserve the existing clipboard and report
-an actionable error, not success. Use HTTPS for reliable Safari async copy;
-legacy HTTP copy is browser/user-activation dependent. Text is the supported
-shared clipboard format; image and file pastes are not forwarded as stale text.
+With the modern API, copy starts a promise-backed ClipboardItem write in the
+**focused iframe's** realm during the original gesture, then forwards guest
+Ctrl+C. The guest's `clipboardrx` event supplies fresh text; a bounded REST read
+covers identical copies without a new guest event.
+
+On HTTP, where `navigator.clipboard` is absent, the shortcut instead makes one
+**synchronous** authenticated clipboard-read request with `copy_selection: true`.
+The runner arms an XFixes listener, sends the Linux copy shortcut and returns
+only text acknowledged by a new guest clipboard ownership event. Plain-text
+clipboard ownership is temporarily replaced with the same text so identical
+copies remain observable; rich clipboards are not replaced. The browser then
+executes its native copy command in the original key-handler call stack. There
+is no second iframe Ctrl+C and no Copy dialog. Server work is bounded to four
+seconds (the guest script has its own shorter deadline). Synchronous XHR cannot
+set a main-thread timeout, so a network/proxy stall can still block the viewer
+until the browser's network timeout; HTTPS keeps the nonblocking modern path.
+Failed reads or denied browser writes preserve the host clipboard, never copy
+an old snapshot, and report a generic error.
+
+The existing clipboard-read endpoint accepts an optional strict body
+`{ "copy_selection": true, "shift": false }`; bodyless reads retain their snapshot
+semantics. Both modes require `terminal:access`, organization membership and
+workspace ownership (or organization admin). Selection copy also respects
+capture/computer-use fencing. The matching MCP tool is `read_desktop_clipboard`.
+Text is the supported shared clipboard format; image/file pastes are not sent
+as stale text. Desktop shortcuts never open the Copy dialog.
 
 ```sh
 cd ../e2e

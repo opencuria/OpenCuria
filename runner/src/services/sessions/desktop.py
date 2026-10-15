@@ -62,11 +62,12 @@ from urllib.parse import urlparse
 import structlog
 
 from ...models import DesktopReleaseResult, DesktopSession, WorkspaceInfo
-from ...runtime.managed_process import validate_guest_token
 from ...runtime.base import RuntimeBackend
+from ...runtime.managed_process import validate_guest_token
 from ..capture_fence import CaptureFence, live_interaction
 from ..exec_kernel import KeyedLockMap
 from ..exec_kernel import sanitize_path as _sanitize_path
+from .clipboard_selection import build_guest_command
 from .desktop_leases import DesktopLeaseStore
 from .xdotool import (
     _normalize_xdotool_key_combo,
@@ -2373,9 +2374,67 @@ class DesktopManager:
         if exit_code != 0:
             raise RuntimeError(f"Failed to write desktop clipboard: {output}")
 
+    async def _copy_selection_desktop_clipboard(
+        self, workspace_id: uuid.UUID, *, shift: bool
+    ) -> str:
+        """Copy the current browser selection and return only its fresh text."""
+        lock = await self._desktop_lock(workspace_id)
+        async with lock:
+            if self.capture_fence is not None:
+                self.capture_fence.check_current(workspace_id)
+
+            session = self._desktop_sessions.get(workspace_id)
+            if session is not None and session.computeruse_run_ids:
+                raise RuntimeError("Clipboard copy is unavailable during computer use")
+
+            if not self._legacy_mode:
+                rows = await self.lease_store.list_unfinished(str(workspace_id))
+                if any(
+                    row["kind"] in {"agent", "computeruse"}
+                    and row["state"] in {"reserved", "held", "closing"}
+                    for row in rows
+                ):
+                    raise RuntimeError(
+                        "Clipboard copy is unavailable during computer use"
+                    )
+
+            if not await self._is_desktop_session_live(workspace_id):
+                raise RuntimeError("Desktop session is not active")
+            if self.capture_fence is not None:
+                self.capture_fence.check_current(workspace_id)
+
+            command = build_guest_command(shift=shift)
+            try:
+                exit_code, output = await asyncio.wait_for(
+                    self._exec_desktop_shell(workspace_id, command), timeout=3.0
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError("Failed to copy desktop selection") from None
+            except Exception:
+                raise RuntimeError("Failed to copy desktop selection") from None
+            if exit_code != 0:
+                raise RuntimeError("Failed to copy desktop selection")
+            return output
+
     @live_interaction
-    async def read_desktop_clipboard(self, workspace_id: uuid.UUID) -> str:
-        """Read plain text from the desktop clipboard inside the workspace VM/container."""
+    async def read_desktop_clipboard(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        copy_selection: bool = False,
+        shift: bool = False,
+    ) -> str:
+        """Read clipboard text, optionally atomically copying the current selection."""
+        if type(copy_selection) is not bool:
+            raise ValueError("copy_selection must be a boolean")
+        if type(shift) is not bool:
+            raise ValueError("shift must be a boolean")
+        if copy_selection:
+            return await self._copy_selection_desktop_clipboard(
+                workspace_id, shift=shift
+            )
+        if shift:
+            raise ValueError("shift requires copy_selection")
         if not await self._is_desktop_session_live(workspace_id):
             raise RuntimeError("Desktop session is not active")
 

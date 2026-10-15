@@ -5,6 +5,7 @@ export function bindDesktopClipboard(
     enabled: () => boolean
     blocked?: () => boolean
     copy: (context: Window) => void
+    copySelectionDuringGesture?: (context: Window, shift: boolean) => void
     paste: (text: string) => Promise<boolean>
   },
 ): () => void {
@@ -99,8 +100,31 @@ export function bindDesktopClipboard(
       suppress(event)
       // Start a promise-backed write in the focused iframe's trusted gesture,
       // then send the guest copy. A parent write loses Safari's focus/activation.
-      actions.copy(win)
-      dispatch(target, 'c', event.shiftKey)
+      if (
+        typeof win.navigator.clipboard?.write !== 'function' &&
+        actions.copySelectionDuringGesture
+      ) {
+        // The runner sends exactly one guest copy and returns acknowledged text
+        // synchronously. Replaying C here too would race/duplicate that copy.
+        replaying = true
+        try {
+          for (const modifier of ['Meta', 'Control', 'Shift'])
+            for (const side of ['Left', 'Right'])
+              target.dispatchEvent(
+                new win.KeyboardEvent('keyup', {
+                  key: modifier,
+                  code: `${modifier}${side}`,
+                  bubbles: true,
+                }),
+              )
+        } finally {
+          replaying = false
+        }
+        actions.copySelectionDuringGesture(win, event.shiftKey)
+      } else {
+        actions.copy(win)
+        dispatch(target, 'c', event.shiftKey)
+      }
     } else {
       // Native paste needs default processing and an editable target on Safari,
       // including HTTP where navigator.clipboard is completely absent.

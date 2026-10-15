@@ -1,4 +1,6 @@
 import { mkdirSync } from 'node:fs'
+import { createServer, type Server } from 'node:http'
+import { networkInterfaces } from 'node:os'
 import { test, expect, type Page } from '@playwright/test'
 
 const viteUrl = process.env.CLIPBOARD_VITE_URL || 'http://127.0.0.1:5173'
@@ -11,11 +13,18 @@ const artifacts = '/workspace/.opencuria/playwright'
 mkdirSync(artifacts, { recursive: true })
 
 type BackendWrite = { text: string; startedAt: number; finishedAt?: number; status?: number }
-type BackendRead = { text: string; startedAt: number; finishedAt: number }
+type BackendRead = { text: string; startedAt: number; finishedAt: number; copySelection?: boolean; shift?: boolean }
+type SelectionRequest = { copy_selection: boolean; shift: boolean; startedAt: number }
 type Fixture = {
   writes: BackendWrite[]
   reads: BackendRead[]
   apiRequests: string[]
+  selectionRequests: SelectionRequest[]
+  selectionText: string
+  selectionDelayMs: number
+  selectionStatus: number
+  selectionOrigin?: string
+  closeSelectionServer?: () => Promise<void>
   writeStatus: number
   releaseWrite: (() => void) | null
 }
@@ -32,7 +41,66 @@ type DebugWindow = Window & {
 const fixtures = new WeakMap<Page, Fixture>()
 
 function makeFixture(writeStatus = 200): Fixture {
-  return { writes: [], reads: [], apiRequests: [], writeStatus, releaseWrite: null }
+  return { writes: [], reads: [], apiRequests: [], selectionRequests: [], selectionText: '', selectionDelayMs: 0, selectionStatus: 200, writeStatus, releaseWrite: null }
+}
+
+/** Real TCP HTTP endpoint: sync XHR cannot use Playwright route.fulfill on Linux WebKit. */
+async function startSelectionServer(fixture: Fixture): Promise<string> {
+  const address = process.env.CLIPBOARD_SELECTION_HOST || Object.values(networkInterfaces()).flat().find((item) => item && item.family === 'IPv4' && !item.internal && !item.address.startsWith('169.254.'))?.address
+  if (!address) throw new Error('No external IPv4 address is available for the real HTTP clipboard fixture')
+  const server: Server = createServer((request, response) => {
+    const path = request.url ?? '/'
+    if (request.method === 'GET' && path.startsWith('/mock-kasm')) {
+      response.writeHead(200, { 'Content-Type': 'text/html' }).end(mockKasmHtml)
+      return
+    }
+    if (request.method === 'GET' && path === '/desktop-clipboard-diagnostic') {
+      response.writeHead(200, { 'Content-Type': 'text/html' }).end(
+        '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Desktop clipboard fixture</title></head><body><div id="desktop-diagnostic-app"></div><script type="module" src="/src/desktop-clipboard-diagnostic.js"></script></body></html>',
+      )
+      return
+    }
+    if (request.method === 'GET') {
+      void fetch(`${viteUrl}${path}`).then(async (proxied) => {
+        response.writeHead(proxied.status, Object.fromEntries(proxied.headers.entries()))
+        response.end(Buffer.from(await proxied.arrayBuffer()))
+      }).catch(() => response.writeHead(502).end('Vite proxy failed'))
+      return
+    }
+    response.setHeader('Access-Control-Allow-Origin', '*')
+    response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+    if (request.method === 'OPTIONS') { response.writeHead(204).end(); return }
+    if (request.method !== 'POST' || path !== `/api/v1/workspaces/${workspaceId}/desktop/clipboard/read/`) {
+      response.writeHead(404).end('not found'); return
+    }
+    let body = ''
+    request.setEncoding('utf8')
+    request.on('data', (chunk: string) => { body += chunk })
+    request.on('end', () => {
+      let parsed: { copy_selection?: unknown; shift?: unknown }
+      try { parsed = JSON.parse(body) as typeof parsed } catch { response.writeHead(400).end('invalid JSON'); return }
+      if (parsed.copy_selection !== true || typeof parsed.shift !== 'boolean') {
+        response.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ detail: 'copy_selection and shift required' })); return
+      }
+      const startedAt = Date.now()
+      fixture.selectionRequests.push({ copy_selection: true, shift: parsed.shift, startedAt })
+      fixture.apiRequests.push(`POST ${path}`)
+      setTimeout(() => {
+        const text = fixture.selectionText
+        fixture.reads.push({ text, startedAt, finishedAt: Date.now(), copySelection: true, shift: parsed.shift as boolean })
+        response.writeHead(fixture.selectionStatus, { 'Content-Type': 'application/json' })
+          .end(JSON.stringify(fixture.selectionStatus >= 200 && fixture.selectionStatus < 300 ? { text } : { detail: 'fixture selection copy rejected' }))
+      }, fixture.selectionDelayMs)
+    })
+  })
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, address, resolve) })
+  const origin = `http://${address}:${(server.address() as { port: number }).port}`
+  fixture.selectionOrigin = origin
+  fixture.closeSelectionServer = () => new Promise((resolve, reject) => {
+    server.closeAllConnections(); server.close((error) => error ? reject(error) : resolve())
+  })
+  return origin
 }
 
 /** Mount the production surface, dialog, stores, and composable under Vite. */
@@ -55,7 +123,7 @@ async function installFixture(page: Page, origin: string, fixture: Fixture): Pro
   expect(pinia, 'optimized Pinia import').toBeTruthy()
 
   // Proxy modules to Vite while preserving the test page's HTTP/HTTPS origin.
-  await page.route(`${origin}/**`, async (route) => {
+  if (!fixture.selectionOrigin) await page.route(`${origin}/**`, async (route) => {
     const url = new URL(route.request().url())
     await route.fulfill({ response: await route.fetch({ url: `${viteUrl}${url.pathname}${url.search}` }) })
   })
@@ -68,13 +136,18 @@ async function installFixture(page: Page, origin: string, fixture: Fixture): Pro
     expect(noHmr).not.toBe(body)
     await route.fulfill({ response, body: noHmr })
   })
-  await page.route('**/mock-kasm*', (route) => route.fulfill({ contentType: 'text/html', body: mockKasmHtml }))
+  if (!fixture.selectionOrigin) await page.route('**/mock-kasm*', (route) => route.fulfill({ contentType: 'text/html', body: mockKasmHtml }))
   await page.route('**/src/services/socket.ts*', (route) => route.fulfill({
     contentType: 'text/javascript',
     body: 'export const isConnected = { value: false }; export function onEvent() { return () => {}; }',
   }))
+  await page.route('**/config.json', (route) => route.fulfill({
+    contentType: 'application/json',
+    body: JSON.stringify({ apiBaseUrl: fixture.selectionOrigin ? `${fixture.selectionOrigin}/api/v1` : '/api/v1', wsBaseUrl: '' }),
+  }))
   await page.route('**/api/**', async (route) => {
     const url = new URL(route.request().url())
+    if (fixture.selectionOrigin === url.origin) return route.continue()
     fixture.apiRequests.push(`${route.request().method()} ${url.pathname}`)
     if (url.pathname === `/api/v1/workspaces/${workspaceId}/desktop/clipboard/read/`) {
       const startedAt = Date.now()
@@ -136,6 +209,8 @@ import { Toaster } from '/src/components/ui/sonner/index.ts';
 import { sidebarDesktopHost } from '/src/lib/desktopSurfaceHost.ts';
 import { useDesktopStore } from '/src/stores/desktop.ts';
 import { useWorkspaceStore } from '/src/stores/workspaces.ts';
+import { loadConfig } from '/src/services/config.ts';
+await loadConfig();
 const app = createApp({ setup() {
   const desktop = useDesktopStore();
   const workspaces = useWorkspaceStore();
@@ -171,7 +246,7 @@ app.use(createPinia());
 app.mount('#desktop-diagnostic-app');
 sidebarDesktopHost.value = document.querySelector('#desktop-host');
 `
-  await page.route('**/desktop-clipboard-diagnostic', (route) => route.fulfill({
+  if (!fixture.selectionOrigin) await page.route('**/desktop-clipboard-diagnostic', (route) => route.fulfill({
     contentType: 'text/html',
     body: '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Desktop clipboard fixture</title></head><body><div id="desktop-diagnostic-app"></div><script type="module" src="/src/desktop-clipboard-diagnostic.js"></script></body></html>',
   }))
@@ -187,7 +262,8 @@ sidebarDesktopHost.value = document.querySelector('#desktop-host');
   await expect(page.frameLocator('[data-testid="desktop-surface-iframe"]').locator('#desktop-canvas')).toBeVisible()
   expect(await page.evaluate(() => window.isSecureContext)).toBe(origin.startsWith('https:'))
   if (origin.startsWith('http:')) {
-    expect(await page.evaluate(() => typeof navigator.clipboard?.readText)).toBe('undefined')
+    if (!fixture.selectionOrigin)
+      expect(await page.evaluate(() => typeof navigator.clipboard?.readText)).toBe('undefined')
     // Prove the desktop paste route consumes native ClipboardEvent data, rather
     // than sneaking in an asynchronous clipboard read on insecure HTTP.
     await page.evaluate(() => {
@@ -252,7 +328,9 @@ async function noReadText(page: Page): Promise<void> {
 test.describe('real DesktopSurface clipboard bridge', () => {
   test.afterEach(async ({ page }, info) => {
     // Release any test-held API response even if an assertion aborts the test.
-    fixtures.get(page)?.releaseWrite?.()
+    const fixture = fixtures.get(page)
+    fixture?.releaseWrite?.()
+    await fixture?.closeSelectionServer?.().catch(() => undefined)
     if (info.status !== info.expectedStatus) {
       const title = info.title.toLowerCase().replace(/[^a-z0-9]+/g, '-')
       await screenshot(page, `${info.project.name}-failure-${title}`).catch(() => undefined)
@@ -436,34 +514,6 @@ test.describe('real DesktopSurface clipboard bridge', () => {
     await screenshot(page, `${test.info().project.name}-blocked-write-preserves-sentinel`)
   })
 
-  test('insecure guest copy succeeds when Kasm clipboardrx is immediate (not a delayed-Safari guarantee)', async ({ page }) => {
-    const fixture = makeFixture()
-    await installFixture(page, origins.insecure, fixture)
-    const sentinel = 'old host clipboard sentinel'
-    const guestText = 'VM clipboard from Kasm 😀\nsecond line'
-    await primeClipboard(page, sentinel)
-    await page.evaluate((text) => (window as DebugWindow).__desktopClipboardFixture?.setVmClipboard(text), guestText)
-    await focusCanvas(page)
-    // The outer Ctrl+C is a real browser keyboard action. The stand-in then
-    // sends clipboardrx immediately as Kasm's ordinary parent postMessage;
-    // this models the fast path only, not a delayed HTTP Safari API response.
-    await page.keyboard.press('Control+C')
-    await expect.poll(async () => (await guestEvents(page)).filter((event) => event.type === 'keydown' && event.key === 'c').length).toBe(1)
-    // The mock Kasm sends an ordinary postMessage after the replayed Ctrl+C;
-    // it is not a new trusted user-activation event. In this immediate fixture
-    // path it arrives well before the 350ms REST fallback deadline.
-    await page.waitForTimeout(100)
-    await noDialog(page)
-    const readback = page.getByTestId('clipboard-readback')
-    await readback.focus()
-    await readback.fill('')
-    await page.keyboard.press('Control+V')
-    await expect(readback, 'immediate Kasm clipboardrx should reach host via native Ctrl+V').toHaveValue(guestText)
-    expect(fixture.writes).toHaveLength(0)
-    await noDialog(page)
-    await screenshot(page, `${test.info().project.name}-insecure-immediate-guest-copy`)
-  })
-
   test('paste response arriving after iframe remount never replays into the stale guest', async ({ page }) => {
     const fixture = makeFixture()
     await installFixture(page, origins.insecure, fixture)
@@ -491,7 +541,7 @@ test.describe('real DesktopSurface clipboard bridge', () => {
 
   test('synthetic Meta+C is separately mapped to guest Ctrl+C', async ({ page }) => {
     const fixture = makeFixture()
-    await installFixture(page, origins.insecure, fixture)
+    await installFixture(page, origins.secure, fixture)
     await focusCanvas(page)
     await page.evaluate(() => {
       const frame = document.querySelector<HTMLIFrameElement>('[data-testid="desktop-surface-iframe"]')!
@@ -579,64 +629,73 @@ test.describe('real DesktopSurface clipboard bridge', () => {
     await screenshot(page, `${test.info().project.name}-delayed-secure-clipboardrx-rest-fallback`)
   })
 
-  test('delayed HTTP copy uses REST fallback and handles an explicitly denied legacy write without a dialog', async ({ page }) => {
+  test('HTTP trusted copy gesture sends selection RPC and copies fresh exact text once', async ({ page }) => {
     const fixture = makeFixture()
-    await installFixture(page, origins.insecure, fixture)
-    const sentinel = 'old host clipboard sentinel for delayed copy'
-    const text = 'fallback payload from guest after delay — 漢字'
-    await primeClipboard(page, sentinel)
-    await page.evaluate((payload) => {
-      const debug = window as DebugWindow
-      debug.__desktopClipboardFixture?.setVmClipboard(payload)
-      debug.__desktopClipboardFixture?.setGuestCopyDelay(600)
-    }, text)
-    const child = page.frameLocator('[data-testid="desktop-surface-iframe"]').locator('html')
-    if (test.info().project.name === 'webkit') {
-      // In this headless browser, WebKit's native execCommand remains more
-      // permissive than live Safari's arbitrary-IP HTTP behavior. Deterministically
-      // model the observed Safari denial to exercise the user-facing failure path.
-      await child.evaluate((html) => {
-        const doc = html.ownerDocument as Document & { __deniedCopyCommandCalls?: number }
-        doc.__deniedCopyCommandCalls = 0
-        Object.defineProperty(doc, 'execCommand', {
-          configurable: true,
-          value: () => { doc.__deniedCopyCommandCalls! += 1; return false },
-        })
-      })
+    const origin = await startSelectionServer(fixture)
+    await installFixture(page, origin, fixture)
+    await primeClipboard(page, 'native clipboard sentinel before HTTP selection copy')
+
+    const repeated = 'same fresh selection on repeated copy — café 東京 😀\nsecond line'
+    const large = 'λ/漢字/👾\n'.repeat(13_000)
+    expect(large.length).toBeGreaterThan(100_000)
+    const cases = [
+      { text: 'new selection, not the old host clipboard — Grüße 👩🏽‍💻\nsecond line', shift: false, delay: 250 },
+      { text: repeated, shift: true, delay: 600 },
+      { text: repeated, shift: false, delay: 250 },
+      { text: large, shift: false, delay: 600 },
+    ]
+    const readback = page.getByTestId('clipboard-readback')
+    for (const [index, item] of cases.entries()) {
+      fixture.selectionText = item.text
+      fixture.selectionDelayMs = item.delay
+      await focusCanvas(page)
+      await page.keyboard.press(item.shift ? 'Control+Shift+C' : 'Control+C')
+      await expect.poll(() => fixture.selectionRequests.length, { message: `api=${JSON.stringify(fixture.apiRequests)}` }).toBe(index + 1)
+      await expect.poll(() => fixture.reads.length).toBe(index + 1)
+      expect(fixture.selectionRequests[index]).toMatchObject({ copy_selection: true, shift: item.shift })
+      const read = fixture.reads[index]!
+      expect(read).toMatchObject({ text: item.text, copySelection: true, shift: item.shift })
+      expect(read.finishedAt - read.startedAt).toBeGreaterThanOrEqual(item.delay - 10)
+      expect(fixture.apiRequests.filter((request) => request.includes('/desktop/clipboard/read/'))).toHaveLength(index + 1)
+      await noDialog(page)
+      await expect(page.getByText('Copy failed')).toHaveCount(0)
+      await noReadText(page)
+      // Runner sends guest C atomically; no synthetic iframe C may be replayed.
+      expect(await guestEvents(page), 'no duplicate iframe C in atomic HTTP path').toEqual([])
+      await readback.focus()
+      await readback.fill('')
+      await page.keyboard.press('Control+V')
+      await expect(readback, `native paste of HTTP copy ${index + 1}`).toHaveValue(item.text)
     }
+    expect(fixture.writes).toHaveLength(0)
+    await noDialog(page)
+    await screenshot(page, `${test.info().project.name}-http-gesture-selection-copy`)
+  })
+
+  test('failed HTTP selection copy preserves native sentinel, reports an actionable error, and opens no dialog', async ({ page }) => {
+    const fixture = makeFixture()
+    fixture.selectionStatus = 503
+    fixture.selectionText = 'must not replace native clipboard sentinel'
+    fixture.selectionDelayMs = 250
+    const origin = await startSelectionServer(fixture)
+    await installFixture(page, origin, fixture)
+    const sentinel = 'preserve native host clipboard on HTTP selection failure'
+    await primeClipboard(page, sentinel)
     await focusCanvas(page)
     await page.keyboard.press('Control+C')
-
-    // Kasm's ordinary clipboardrx arrives after the 350ms reader timeout. The
-    // production composable must obtain the actual guest text from REST.
-    await expect.poll(() => fixture.reads.length, { timeout: 8_000 }).toBe(1)
-    expect(fixture.reads[0]?.text).toBe(text)
-    await expect.poll(async () => (await guestEvents(page)).filter((event) => event.type === 'keydown' && event.key === 'c').length).toBe(1)
-    const guestCopy = (await guestEvents(page)).find((event) => event.type === 'keydown' && event.key === 'c')
-    expect(guestCopy).toBeDefined()
-    expect(fixture.reads[0]!.startedAt - guestCopy!.at).toBeGreaterThanOrEqual(300)
+    await expect.poll(() => fixture.selectionRequests.length).toBe(1)
+    expect(fixture.selectionRequests[0]).toMatchObject({ copy_selection: true, shift: false })
+    await expect(page.getByText('Unable to copy the desktop selection. Try again.')).toBeVisible()
     await noDialog(page)
-
+    expect(await guestEvents(page), 'failed atomic request must not replay iframe C').toEqual([])
     const readback = page.getByTestId('clipboard-readback')
     await readback.focus()
     await readback.fill('')
     await page.keyboard.press('Control+V')
-    if (test.info().project.name === 'webkit') {
-      // Real arbitrary-IP HTTP Safari can lose user activation during the
-      // delayed Test2/Kasm round trip; execCommand then returns false. Require
-      // the HTTPS guidance and prove the old native clipboard is unchanged.
-      await expect(page.getByText(/Open OpenCuria over HTTPS to enable automatic desktop copying in Safari\./)).toBeVisible()
-      await expect(readback, 'failed delayed Safari copy preserves native sentinel').toHaveValue(sentinel)
-      await expect.poll(() => child.evaluate((html) =>
-        (html.ownerDocument as Document & { __deniedCopyCommandCalls?: number }).__deniedCopyCommandCalls ?? 0,
-      )).toBe(1)
-    } else {
-      await expect(readback, 'Chromium native copy after REST fallback').toHaveValue(text)
-    }
-    expect(fixture.reads).toHaveLength(1)
-    expect(fixture.apiRequests.filter((request) => request.includes('/desktop/clipboard/read/'))).toHaveLength(1)
+    await expect(readback, 'failed selection copy preserves native sentinel').toHaveValue(sentinel)
+    expect(fixture.selectionRequests).toHaveLength(1)
     expect(fixture.writes).toHaveLength(0)
     await noDialog(page)
-    await screenshot(page, `${test.info().project.name}-delayed-insecure-clipboardrx-rest-fallback`)
+    await screenshot(page, `${test.info().project.name}-http-selection-copy-failed`)
   })
 })

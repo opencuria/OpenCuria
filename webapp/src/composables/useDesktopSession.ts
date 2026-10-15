@@ -3,6 +3,7 @@ import { computed, getCurrentScope, onScopeDispose, ref, watch, type Ref } from 
 import { useDesktopStore } from '@/stores/desktop'
 import { useNotificationStore } from '@/stores/notifications'
 import * as workspacesApi from '@/services/workspaces.api'
+import { copyWithExecCommand } from '@/lib/clipboardWrite'
 import { copyToClipboard } from '@/lib/clipboard'
 import { onEvent } from '@/services/socket'
 import {
@@ -236,6 +237,34 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
     }
   }
 
+  function copySelectionDuringGesture(context: Window, shift = false): boolean {
+    const id = workspaceId.value
+    const generation = workspaceGeneration
+    const current = () =>
+      !disposed &&
+      workspaceGeneration === generation &&
+      workspaceId.value === id &&
+      desktopStore.isConnected &&
+      desktopStore.workspaceId === id &&
+      !desktopStore.computerUseActive
+    if (!current() || clipboardBusy.value) return false
+    clipboardBusy.value = true
+    try {
+      const text = workspacesApi.copyDesktopSelectionDuringGesture(id, context, shift)
+      if (!current()) return false
+      // No Promise/await between the response and execCommand: this is the
+      // trusted shortcut's original call stack even on HTTP Safari.
+      if (!copyWithExecCommand(text, context.document)) throw new Error('Copy blocked')
+      return true
+    } catch {
+      if (current())
+        notifications.error('Copy failed', 'Unable to copy the desktop selection. Try again.')
+      return false
+    } finally {
+      clipboardBusy.value = false
+    }
+  }
+
   async function pasteToVmClipboard(plainText?: string): Promise<boolean> {
     const requestedWorkspaceId = workspaceId.value
     const requestedGeneration = workspaceGeneration
@@ -328,6 +357,7 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
     handleReconnect,
     takeControl,
     copyFromVmClipboard,
+    copySelectionDuringGesture,
     pasteToVmClipboard,
     setupSocketListeners,
     cleanupSocketListeners,

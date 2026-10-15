@@ -1691,13 +1691,35 @@ class WebSocketInterface(Interface):
 
         @sio.on("desktop:clipboard_read")
         async def on_desktop_clipboard_read(data: dict) -> dict:
-            workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(workspace_id=str(workspace_id))
+            workspace_id: uuid.UUID | None = None
             try:
-                text = await self._service.desktop.read_desktop_clipboard(workspace_id)
+                if not isinstance(data, dict):
+                    raise TypeError("Invalid clipboard read request")
+                workspace_id = uuid.UUID(data["workspace_id"])
+                options: dict[str, bool] = {}
+                copy_requested = False
+                if "copy_selection" in data:
+                    if type(data["copy_selection"]) is not bool:
+                        raise ValueError("copy_selection must be a boolean")
+                    copy_requested = data["copy_selection"]
+                if "shift" in data:
+                    if type(data["shift"]) is not bool:
+                        raise ValueError("shift must be a boolean")
+                    if not copy_requested:
+                        raise ValueError("shift requires copy_selection")
+                if copy_requested:
+                    options["copy_selection"] = True
+                    if "shift" in data:
+                        options["shift"] = data["shift"]
+                text = await self._service.desktop.read_desktop_clipboard(
+                    workspace_id, **options
+                )
                 return {"ok": True, "text": text}
             except Exception as exc:
-                log.exception("desktop_clipboard_read_failed")
+                logger.exception(
+                    "desktop_clipboard_read_failed",
+                    workspace_id=str(workspace_id) if workspace_id else None,
+                )
                 return {"ok": False, "error": str(exc)}
 
         @sio.on("desktop:proxy_http_request")

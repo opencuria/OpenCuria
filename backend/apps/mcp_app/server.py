@@ -75,6 +75,7 @@ Tools and their required permissions
 - edit_harness_message → harness:run
 - abort_harness_session → harness:run
 - take_desktop_control → harness:run (also requires terminal:access)
+- read_desktop_clipboard → terminal:access
 - list_harness_parts → harness:read
 - get_harness_timeline → harness:read
 - get_harness_part → harness:read
@@ -1086,6 +1087,27 @@ _TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="read_desktop_clipboard",
+        description=(
+            "Read text from the desktop clipboard, optionally copying the "
+            "current selection first."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "format": "uuid"},
+                "copy_selection": {"type": "boolean", "default": False},
+                "shift": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Hold Shift while copying the selected text.",
+                },
+            },
+            "required": ["workspace_id"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
         name="list_harness_parts",
         description="List messages, parts, and pending permission/question gates of a harness session.",
         inputSchema={
@@ -1644,6 +1666,7 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "edit_harness_message": APIKeyPermission.HARNESS_RUN,
     "abort_harness_session": APIKeyPermission.HARNESS_RUN,
     "take_desktop_control": APIKeyPermission.HARNESS_RUN,
+    "read_desktop_clipboard": APIKeyPermission.TERMINAL_ACCESS,
     **{
         name: APIKeyPermission.TERMINAL_ACCESS
         for name in ("start_desktop", "stop_desktop", "renew_desktop", "desktop_status")
@@ -4443,6 +4466,76 @@ def _call_viewer_desktop(api_key, org_id, args: dict, action: str) -> list[TextC
         return _error(str(exc))
 
 
+def _call_read_desktop_clipboard(api_key, org_id, args: dict) -> list[TextContent]:
+    """Read clipboard text from a workspace the API key can access."""
+    import uuid as _uuid
+
+    from asgiref.sync import async_to_sync
+    from pydantic import ValidationError
+
+    from apps.accounts.models import APIKeyPermission
+    from apps.runners.schemas import DesktopClipboardReadIn
+
+    if not api_key.has_permission(APIKeyPermission.TERMINAL_ACCESS):
+        return _error("Permission denied: terminal:access required")
+
+    workspace_id_str = args.get("workspace_id")
+    if not workspace_id_str:
+        return _error("workspace_id is required")
+    if not isinstance(workspace_id_str, str):
+        return _error("Invalid workspace_id UUID")
+    try:
+        workspace_id = _uuid.UUID(workspace_id_str)
+    except ValueError:
+        return _error("Invalid workspace_id UUID")
+
+    if set(args) - {"workspace_id", "copy_selection", "shift"}:
+        return _error("Invalid clipboard read options")
+    try:
+        options = DesktopClipboardReadIn.model_validate(
+            {
+                "copy_selection": args.get("copy_selection", False),
+                "shift": args.get("shift", False),
+            }
+        )
+    except ValidationError:
+        return _error("Invalid clipboard read options")
+
+    from apps.organizations.services import OrganizationService
+
+    service = _runner_service()
+    organization_service = OrganizationService()
+    organization_service.require_membership(api_key.user, org_id)
+    if organization_service.get_user_role(api_key.user, org_id) == "admin":
+        workspace = service.get_workspace(workspace_id)
+        if workspace is None or workspace.runner.organization_id != org_id:
+            return _error("Workspace not found")
+    else:
+        workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+        if error is not None:
+            return error
+
+    try:
+        if options.copy_selection:
+            text = async_to_sync(service.read_desktop_clipboard)(
+                workspace.id,
+                copy_selection=True,
+                shift=options.shift,
+            )
+        else:
+            text = async_to_sync(service.read_desktop_clipboard)(workspace.id)
+    except Exception:
+        # Clipboard text and runner exception details are sensitive; do not log
+        # them or forward them as MCP errors.
+        message = (
+            "Unable to copy the desktop selection. Try again."
+            if options.copy_selection
+            else "Unable to read desktop clipboard"
+        )
+        return _error(message)
+    return _text({"text": text})
+
+
 def _call_take_desktop_control(api_key, org_id, args: dict) -> list[TextContent]:
     """Abort busy computer-use sessions so a human can drive the desktop."""
     import asyncio
@@ -5773,6 +5866,7 @@ _TOOL_HANDLERS = {
     "edit_harness_message": _call_edit_harness_message,
     "abort_harness_session": _call_abort_harness_session,
     "take_desktop_control": _call_take_desktop_control,
+    "read_desktop_clipboard": _call_read_desktop_clipboard,
     **{
         name: (
             lambda api_key, org_id, args, action=action: _call_viewer_desktop(

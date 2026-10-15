@@ -34,6 +34,7 @@ vi.mock('@/services/workspaces.api', () => ({
   takeDesktopControl: vi.fn(),
   writeDesktopClipboard: vi.fn(),
   readDesktopClipboard: vi.fn(),
+  copyDesktopSelectionDuringGesture: vi.fn(),
 }))
 
 vi.mock('@/services/config', () => ({
@@ -327,6 +328,12 @@ describe('DesktopSurface', () => {
     connectionMessage(iframe.contentWindow, 'connected')
     await nextTick()
     canvas.focus()
+    // This test covers the secure/async lazy-loader branch. Without a frame
+    // clipboard writer jsdom models HTTP and takes the new synchronous path.
+    Object.defineProperty(iframe.contentWindow!.navigator, 'clipboard', {
+      configurable: true,
+      value: { write: vi.fn() },
+    })
     canvas.dispatchEvent(
       new KeyboardEvent('keydown', {
         key: 'c',

@@ -91,6 +91,68 @@ describe('bindDesktopClipboard', () => {
     expect(doc.querySelector('[aria-label="Desktop clipboard input"]')).toBeNull()
   })
 
+  it('uses synchronous HTTP selection copy once, releases Mac modifiers and does not replay guest C', () => {
+    const { frame, doc, win, canvas } = createFrame()
+    Object.defineProperty(win.navigator, 'clipboard', { configurable: true, value: undefined })
+    const copy = vi.fn()
+    const copySelectionDuringGesture = vi.fn()
+    const cleanup = bindDesktopClipboard(frame, {
+      enabled: () => true,
+      copy,
+      copySelectionDuringGesture,
+      paste: async () => true,
+    })
+    const forwarded: Array<[string, string, string, boolean]> = []
+    canvas.addEventListener('keydown', (event) => {
+      const key = event as KeyboardEvent
+      forwarded.push(['keydown', key.key, key.code, key.ctrlKey])
+    })
+    canvas.addEventListener('keyup', (event) => {
+      const key = event as KeyboardEvent
+      forwarded.push(['keyup', key.key, key.code, key.ctrlKey])
+    })
+
+    const original = keyboard(win, canvas, 'keydown', {
+      key: 'c',
+      metaKey: true,
+      shiftKey: true,
+    })
+
+    expect(original.defaultPrevented).toBe(true)
+    expect(copySelectionDuringGesture).toHaveBeenCalledOnce()
+    expect(copySelectionDuringGesture).toHaveBeenCalledWith(win, true)
+    expect(copy).not.toHaveBeenCalled()
+    expect(forwarded).toEqual(
+      ['Meta', 'Control', 'Shift'].flatMap((key) => [
+        ['keyup', key, `${key}Left`, false],
+        ['keyup', key, `${key}Right`, false],
+      ]),
+    )
+    cleanup()
+    expect(doc.querySelector('[aria-label="Desktop clipboard input"]')).toBeNull()
+  })
+
+  it('keeps the secure-context async clipboard path unchanged', () => {
+    const { frame, win, canvas } = createFrame()
+    const clipboard = { write: vi.fn() }
+    Object.defineProperty(win.navigator, 'clipboard', { configurable: true, value: clipboard })
+    const copy = vi.fn()
+    const copySelectionDuringGesture = vi.fn()
+    const cleanup = bindDesktopClipboard(frame, {
+      enabled: () => true,
+      copy,
+      copySelectionDuringGesture,
+      paste: async () => true,
+    })
+
+    keyboard(win, canvas, 'keydown', { key: 'c', ctrlKey: true })
+
+    expect(copy).toHaveBeenCalledOnce()
+    expect(copy).toHaveBeenCalledWith(win)
+    expect(copySelectionDuringGesture).not.toHaveBeenCalled()
+    cleanup()
+  })
+
   it('suppresses repeat shortcuts without copying or forwarding another chord', () => {
     const { frame, win, canvas } = createFrame()
     const copy = vi.fn()

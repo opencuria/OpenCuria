@@ -16,11 +16,13 @@ imports keep their depth/semantics.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import TYPE_CHECKING
 
 from asgiref.sync import sync_to_async
+from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 from common.exceptions import ConflictError
 
@@ -555,37 +557,89 @@ class InteractiveSessionsMixin:
     async def read_desktop_clipboard(
         self,
         workspace_id: uuid.UUID,
+        *,
+        copy_selection: bool = False,
+        shift: bool = False,
     ) -> str:
-        """Read plain text from a running desktop session clipboard."""
-        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
-        if workspace is None:
-            raise WorkspaceNotFoundError(str(workspace_id))
+        """Read clipboard text, optionally copying the current desktop selection."""
+        if type(copy_selection) is not bool:
+            raise ValueError("copy_selection must be a boolean")
+        if type(shift) is not bool:
+            raise ValueError("shift must be a boolean")
+        if shift and not copy_selection:
+            raise ValueError("shift requires copy_selection")
 
-        self._ensure_workspace_available(workspace)
-        runner = workspace.runner
-        if not runner.is_online:
-            raise RunnerOfflineError(str(runner.id))
+        async def _read() -> str:
+            workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
+            if workspace is None:
+                raise WorkspaceNotFoundError(str(workspace_id))
 
-        if not self.is_desktop_active(str(workspace_id)):
-            raise ConflictError(
-                "Desktop session is not active. Start the desktop first."
+            self._ensure_workspace_available(workspace)
+            runner = workspace.runner
+            if not runner.is_online:
+                raise RunnerOfflineError(str(runner.id))
+
+            if not self.is_desktop_active(str(workspace_id)):
+                raise ConflictError(
+                    "Desktop session is not active. Start the desktop first."
+                )
+
+            if copy_selection:
+                info = self.get_desktop_info(str(workspace_id)) or {}
+                if info.get("computer_use"):
+                    raise ConflictError(
+                        "Unable to copy the desktop selection. Try again."
+                    )
+                from apps.harness.repositories import HarnessSessionRepository
+
+                busy_sessions = await sync_to_async(
+                    HarnessSessionRepository.list_busy_computeruse_for_workspace
+                )(workspace_id)
+                if busy_sessions:
+                    raise ConflictError(
+                        "Unable to copy the desktop selection. Try again."
+                    )
+
+            args = {"workspace_id": str(workspace_id)}
+            if copy_selection:
+                args["copy_selection"] = True
+                if shift:
+                    args["shift"] = True
+            response = await self._call_runner(
+                runner,
+                "desktop:clipboard_read",
+                args,
+                timeout=3.5 if copy_selection else 120,
             )
+            await sync_to_async(self.workspaces.touch_activity)(workspace)
+            if copy_selection:
+                if (
+                    not isinstance(response, dict)
+                    or response.get("ok") is not True
+                    or not isinstance(response.get("text"), str)
+                ):
+                    raise RuntimeError("Unable to copy the desktop selection")
+                return response["text"]
 
-        response = await self._call_runner(
-            runner,
-            "desktop:clipboard_read",
-            {
-                "workspace_id": str(workspace_id),
-            },
-            timeout=120,
-        )
-        await sync_to_async(self.workspaces.touch_activity)(workspace)
-        if isinstance(response, dict) and response.get("ok") is False:
-            raise RuntimeError(str(response.get("error") or "Clipboard read failed"))
-        if not isinstance(response, dict):
-            return ""
-        value = response.get("text", "")
-        return value if isinstance(value, str) else str(value)
+            if isinstance(response, dict) and response.get("ok") is False:
+                raise RuntimeError(
+                    str(response.get("error") or "Clipboard read failed")
+                )
+            if not isinstance(response, dict):
+                return ""
+            value = response.get("text", "")
+            return value if isinstance(value, str) else str(value)
+
+        if not copy_selection:
+            return await _read()
+
+        try:
+            async with asyncio.timeout(4):
+                return await _read()
+        except (RuntimeError, TimeoutError, SocketIOTimeoutError):
+            raise ConflictError(
+                "Unable to copy the desktop selection. Try again."
+            ) from None
 
     async def handle_desktop_started(
         self,

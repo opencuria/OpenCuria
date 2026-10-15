@@ -22,7 +22,8 @@ from django.core.exceptions import ObjectDoesNotExist, SynchronousOnlyOperation
 from django.db.models import Q
 from django.http import HttpRequest
 from django.utils import timezone
-from ninja import Schema, Router
+from ninja import Body, Schema, Router
+from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
@@ -37,6 +38,7 @@ from .exceptions import RunnerOfflineError
 from .storage_schemas import RunnerStorageOut
 from .repositories import RunnerRepository, RunnerSystemMetricsRepository
 from .schemas import (
+    DesktopClipboardReadIn,
     DesktopClipboardReadOut,
     DesktopClipboardWriteIn,
     DesktopRenewOut,
@@ -854,6 +856,7 @@ async def desktop_clipboard_write(
 async def desktop_clipboard_read(
     request: HttpRequest,
     workspace_id: uuid.UUID,
+    payload: DesktopClipboardReadIn | None = Body(None),
 ):
     """Read plain text from the VM desktop clipboard for local copy."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
@@ -862,6 +865,7 @@ async def desktop_clipboard_read(
     is_admin = await _get_org_admin_flag_async(request, org_id)
 
     service = _get_service()
+    options = payload or DesktopClipboardReadIn()
     try:
         workspace = await sync_to_async(service.get_workspace)(workspace_id)
         if workspace.runner.organization_id != org_id:
@@ -869,12 +873,26 @@ async def desktop_clipboard_read(
         if not is_admin and workspace.created_by_id != request.user.id:
             raise NotFoundError("Workspace", str(workspace_id))
 
-        text = await service.read_desktop_clipboard(workspace_id)
+        if options.copy_selection:
+            text = await service.read_desktop_clipboard(
+                workspace_id,
+                copy_selection=True,
+                shift=options.shift,
+            )
+        else:
+            text = await service.read_desktop_clipboard(workspace_id)
         return 200, DesktopClipboardReadOut(text=text)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
+    except (RuntimeError, TimeoutError, SocketIOTimeoutError):
+        if not options.copy_selection:
+            raise
+        return 409, ErrorOut(
+            detail="Unable to copy the desktop selection. Try again.",
+            code="conflict",
+        )
 
 
 @workspace_router.patch(

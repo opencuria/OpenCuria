@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { get, patch, post } from './api'
 import {
+  copyDesktopSelectionDuringGesture,
   createWorkspaceFromCapturedImage,
   getDesktopStatus,
   listCapturedImages,
@@ -11,7 +12,17 @@ import {
   stopDesktop,
 } from './workspaces.api'
 
-vi.mock('./api', () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() }))
+const apiMocks = vi.hoisted(() => ({ postDuringClipboardGesture: vi.fn() }))
+
+const postDuringClipboardGesture = apiMocks.postDuringClipboardGesture
+
+vi.mock('./api', () => ({
+  get: vi.fn(),
+  post: vi.fn(),
+  postDuringClipboardGesture: apiMocks.postDuringClipboardGesture,
+  patch: vi.fn(),
+  del: vi.fn(),
+}))
 
 beforeEach(() => vi.clearAllMocks())
 describe('desktop viewer transport', () => {
@@ -66,6 +77,31 @@ describe('desktop viewer transport', () => {
     )
     expect(get).toHaveBeenNthCalledWith(2, '/workspaces/ws/desktop/status/', undefined)
   })
+})
+
+describe('clipboard selection transport', () => {
+  it('requests selection text synchronously with the exact copy intent and shift flag', () => {
+    const response = { text: 'Unicode: café — 東京 🐈' }
+    vi.mocked(postDuringClipboardGesture).mockReturnValueOnce(response)
+
+    expect(copyDesktopSelectionDuringGesture('workspace/a', window, true)).toBe(response.text)
+    expect(postDuringClipboardGesture).toHaveBeenCalledOnce()
+    expect(postDuringClipboardGesture).toHaveBeenCalledWith(
+      '/workspaces/workspace/a/desktop/clipboard/read/',
+      { copy_selection: true, shift: true },
+      window,
+    )
+  })
+
+  it.each([undefined, null, {}, { text: 42 }, { text: null }])(
+    'rejects a malformed or non-string response (%s)',
+    (response) => {
+      vi.mocked(postDuringClipboardGesture).mockReturnValueOnce(response as never)
+      expect(() => copyDesktopSelectionDuringGesture('ws', window)).toThrow(
+        'Invalid clipboard response',
+      )
+    },
+  )
 })
 
 describe('versioned images transport', () => {

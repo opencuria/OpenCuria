@@ -346,6 +346,21 @@ class DesktopClipboardWriteIn(Schema):
     text: str
 
 
+class DesktopClipboardReadIn(Schema):
+    """Optional request options for reading or copying desktop text."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    copy_selection: bool = Field(default=False, strict=True)
+    shift: bool = Field(default=False, strict=True)
+
+    @model_validator(mode="after")
+    def _shift_requires_selection(self) -> DesktopClipboardReadIn:
+        if self.shift and not self.copy_selection:
+            raise ValueError("shift requires copy_selection")
+        return self
+
+
 class DesktopClipboardReadOut(Schema):
     """Response schema for reading plain text from the VM clipboard."""
 

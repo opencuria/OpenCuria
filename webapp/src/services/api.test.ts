@@ -1,9 +1,102 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { get, post } from './api'
+import { ApiRequestError, get, post, postDuringClipboardGesture } from './api'
 
 afterEach(() => {
   vi.unstubAllGlobals()
   localStorage.clear()
+})
+
+describe('synchronous clipboard-gesture requests', () => {
+  const context = window
+
+  it('uses the supplied frame realm synchronously with auth, organization and exact JSON', () => {
+    localStorage.setItem('kern_access_token', 'access-token')
+    localStorage.setItem('kern_active_org_id', 'organization-7')
+    const xhr = {
+      status: 200,
+      responseText: '{"text":"snowman ☃ and 漢字"}',
+      open: vi.fn(),
+      setRequestHeader: vi.fn(),
+      send: vi.fn(),
+    }
+    const FrameXHR = vi.fn(function XMLHttpRequest() {
+      return xhr
+    })
+    const frame = { XMLHttpRequest: FrameXHR } as unknown as Window
+    const fetchMock = vi.fn<typeof fetch>()
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = postDuringClipboardGesture<{ text: string }>(
+      '/workspaces/ws-1/desktop/clipboard/read/',
+      { copy_selection: true, shift: true },
+      frame,
+    )
+
+    expect(result).toEqual({ text: 'snowman ☃ and 漢字' })
+    expect(FrameXHR).toHaveBeenCalledOnce()
+    expect(xhr.open).toHaveBeenCalledOnce()
+    expect(xhr.open).toHaveBeenCalledWith(
+      'POST',
+      '/api/v1/workspaces/ws-1/desktop/clipboard/read/',
+      false,
+    )
+    expect(xhr.setRequestHeader.mock.calls).toEqual([
+      ['Content-Type', 'application/json'],
+      ['Authorization', 'Bearer access-token'],
+      ['X-Organization-Id', 'organization-7'],
+    ])
+    expect(xhr.send).toHaveBeenCalledOnce()
+    expect(xhr.send).toHaveBeenCalledWith('{"copy_selection":true,"shift":true}')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['denied', 401, '{"detail":"private error"}', undefined],
+    ['HTTP failure', 503, '{"detail":"private error"}', undefined],
+    ['network failure', 0, '', new Error('network internals')],
+    ['malformed response', 200, '{not json', undefined],
+  ])('does not retry after %s', (_kind, status, responseText, sendError) => {
+    localStorage.setItem('kern_refresh_token', 'refresh-token')
+    const xhr = {
+      status,
+      responseText,
+      open: vi.fn(),
+      setRequestHeader: vi.fn(),
+      send: sendError
+        ? vi.fn(() => {
+            throw sendError
+          })
+        : vi.fn(),
+    }
+    const FrameXHR = vi.fn(function XMLHttpRequest() {
+      return xhr
+    })
+    const frame = { XMLHttpRequest: FrameXHR } as unknown as Window
+    const fetchMock = vi.fn<typeof fetch>()
+    vi.stubGlobal('fetch', fetchMock)
+
+    if (_kind === 'denied' || _kind === 'HTTP failure') {
+      expect(() =>
+        postDuringClipboardGesture(
+          '/workspaces/ws-1/desktop/clipboard/read/',
+          { copy_selection: true },
+          frame,
+        ),
+      ).toThrow(ApiRequestError)
+    } else {
+      expect(() =>
+        postDuringClipboardGesture(
+          '/workspaces/ws-1/desktop/clipboard/read/',
+          { copy_selection: true },
+          frame,
+        ),
+      ).toThrow()
+    }
+    expect(FrameXHR).toHaveBeenCalledOnce()
+    expect(xhr.send).toHaveBeenCalledOnce()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(localStorage.getItem('kern_refresh_token')).toBe('refresh-token')
+  })
 })
 
 describe('abortable requests', () => {
