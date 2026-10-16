@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import libvirt
+
 from src.runtime.qemu_runtime import QemuRuntime
 
 
@@ -258,6 +260,123 @@ class QemuRuntimeAgentStdinTests(unittest.IsolatedAsyncioTestCase):
         stdin.write.assert_called_once_with(isolated_agent_env_preamble(env))
         stdin.drain.assert_awaited_once()
         stdin.write_eof.assert_not_called()
+
+
+class QemuRuntimeUsageTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.runtime = object.__new__(QemuRuntime)
+
+    async def test_usage_uses_allocated_overlay_bytes_and_running_domain_capacity(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            disk_path = Path(tmpdir) / "workspace.qcow2"
+            with disk_path.open("wb") as disk:
+                disk.truncate(64 * 1024 * 1024)
+                disk.seek(1024 * 1024)
+                disk.write(b"allocated")
+            disk_stat = disk_path.stat()
+            expected_used = disk_stat.st_blocks * 512
+            self.assertNotEqual(disk_stat.st_size, expected_used)
+            self.assertNotEqual(expected_used, 987654321)
+
+            self.runtime._disk_path = MagicMock(return_value=disk_path)
+            domain = MagicMock()
+            domain.state.return_value = (libvirt.VIR_DOMAIN_RUNNING, 0)
+            domain.info.return_value = (1, 4096, 3072, 4, 123456)
+            domain.memoryStats.return_value = {
+                "actual": 4096,
+                "rss": 3000,
+                "unused": 1024,
+            }
+            domain.blockInfo.return_value = (128 * 1024**3, 987654321, 0)
+            self.runtime._get_domain = MagicMock(return_value=domain)
+
+            usage = await self.runtime.get_workspace_usage("workspace")
+
+        self.assertEqual(
+            usage,
+            {
+                "cpu_time_ns": 123456,
+                "vcpu_count": 4,
+                "ram_used_bytes": 3 * 1024 * 1024,
+                "ram_total_bytes": 4 * 1024 * 1024,
+                "disk_used_bytes": expected_used,
+                "disk_total_bytes": 128 * 1024**3,
+            },
+        )
+        domain.blockInfo.assert_called_once_with("vda", 0)
+
+    async def test_usage_returns_host_disk_usage_for_stopped_domain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            disk_path = Path(tmpdir) / "workspace.qcow2"
+            disk_path.write_bytes(b"overlay content")
+            expected_used = disk_path.stat().st_blocks * 512
+            self.runtime._disk_path = MagicMock(return_value=disk_path)
+            domain = MagicMock()
+            domain.state.return_value = (libvirt.VIR_DOMAIN_SHUTOFF, 0)
+            self.runtime._get_domain = MagicMock(return_value=domain)
+
+            usage = await self.runtime.get_workspace_usage("workspace")
+
+        self.assertEqual(
+            usage,
+            {
+                "cpu_time_ns": 0,
+                "vcpu_count": 0,
+                "ram_used_bytes": 0,
+                "ram_total_bytes": 0,
+                "disk_used_bytes": expected_used,
+                "disk_total_bytes": 0,
+            },
+        )
+        domain.info.assert_not_called()
+        domain.memoryStats.assert_not_called()
+        domain.blockInfo.assert_not_called()
+
+    async def test_usage_uses_xml_disk_target_when_default_bus_is_unavailable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            disk_path = Path(tmpdir) / "workspace.qcow2"
+            disk_path.write_bytes(b"overlay")
+            expected_used = disk_path.stat().st_blocks * 512
+            self.runtime._disk_path = MagicMock(return_value=disk_path)
+            domain = MagicMock()
+            domain.state.return_value = (libvirt.VIR_DOMAIN_RUNNING, 0)
+            domain.info.return_value = (1, 2048, 1024, 2, 50)
+            domain.memoryStats.return_value = {"actual": 2048, "rss": 1024}
+            domain.blockInfo.side_effect = [
+                libvirt.libvirtError("unknown disk vda"),
+                (16 * 1024**3, 87654321, 0),
+            ]
+            domain.XMLDesc.return_value = (
+                "<domain><devices><disk device='disk'>"
+                "<target dev='sda' bus='scsi'/></disk></devices></domain>"
+            )
+            self.runtime._get_domain = MagicMock(return_value=domain)
+
+            usage = await self.runtime.get_workspace_usage("workspace")
+
+        self.assertEqual(usage["disk_used_bytes"], expected_used)
+        self.assertEqual(usage["disk_total_bytes"], 16 * 1024**3)
+        self.assertEqual(domain.blockInfo.call_args_list[0].args, ("vda", 0))
+        self.assertEqual(domain.blockInfo.call_args_list[1].args, ("sda", 0))
+
+    async def test_usage_returns_none_when_overlay_stat_fails(self) -> None:
+        for error in (
+            PermissionError("permission denied"),
+            FileNotFoundError("missing overlay"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                self.runtime._disk_path = MagicMock()
+                self.runtime._disk_path.return_value.stat.side_effect = error
+                self.runtime._get_domain = MagicMock()
+
+                usage = await self.runtime.get_workspace_usage("workspace")
+
+                self.assertIsNone(usage)
+                self.runtime._get_domain.assert_not_called()
 
 
 class QemuRuntimeDesktopProxyTests(unittest.TestCase):

@@ -1827,17 +1827,28 @@ class QemuRuntime(RuntimeBackend):
         return result
 
     async def get_workspace_usage(self, instance_id: str) -> dict[str, int] | None:
-        """Return host-observed VM usage stats for a running workspace.
+        """Return host-observed VM usage stats for a workspace.
 
         Values are returned in bytes and nanoseconds so callers can derive
-        percentages over time without executing commands inside the VM.
+        percentages over time without executing commands inside the VM. Disk
+        usage is the allocated host space used by the QCOW2 overlay.
         """
 
         def _collect() -> dict[str, int] | None:
+            disk_stat = self._disk_path(instance_id).stat()
+            disk_used_bytes = disk_stat.st_blocks * 512
+
             domain = self._get_domain(instance_id)
             state, _ = domain.state()
             if state != libvirt.VIR_DOMAIN_RUNNING:
-                return None
+                return {
+                    "cpu_time_ns": 0,
+                    "vcpu_count": 0,
+                    "ram_used_bytes": 0,
+                    "ram_total_bytes": 0,
+                    "disk_used_bytes": disk_used_bytes,
+                    "disk_total_bytes": 0,
+                }
 
             # Domain info: (state, maxMemKiB, memoryKiB, nrVirtCpu, cpuTimeNs)
             info = domain.info()
@@ -1854,9 +1865,8 @@ class QemuRuntime(RuntimeBackend):
                 used_memory_kib = rss_memory_kib
 
             disk_capacity_bytes = 0
-            disk_used_bytes = 0
             try:
-                disk_capacity_bytes, disk_used_bytes, _ = domain.blockInfo("vda", 0)
+                disk_capacity_bytes, _, _ = domain.blockInfo("vda", 0)
             except libvirt.libvirtError:
                 # Fallback for unusual bus names: read the first VM disk target.
                 xml = domain.XMLDesc(0)
@@ -1864,22 +1874,20 @@ class QemuRuntime(RuntimeBackend):
                 disk_target = root.find("./devices/disk[@device='disk']/target")
                 target_dev = disk_target.get("dev") if disk_target is not None else None
                 if target_dev:
-                    disk_capacity_bytes, disk_used_bytes, _ = domain.blockInfo(
-                        target_dev, 0
-                    )
+                    disk_capacity_bytes, _, _ = domain.blockInfo(target_dev, 0)
 
             return {
                 "cpu_time_ns": cpu_time_ns,
                 "vcpu_count": vcpu_count,
                 "ram_used_bytes": max(used_memory_kib, 0) * 1024,
                 "ram_total_bytes": max(total_memory_kib, 0) * 1024,
-                "disk_used_bytes": max(int(disk_used_bytes), 0),
+                "disk_used_bytes": disk_used_bytes,
                 "disk_total_bytes": max(int(disk_capacity_bytes), 0),
             }
 
         try:
             return await asyncio.to_thread(_collect)
-        except libvirt.libvirtError:
+        except (libvirt.libvirtError, OSError):
             return None
 
     async def put_archive(self, instance_id: str, path: str, data: bytes) -> None:

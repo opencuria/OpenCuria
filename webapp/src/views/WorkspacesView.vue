@@ -182,6 +182,8 @@ onMounted(async () => {
     <WorkspaceList
       v-else
       :workspaces="filteredWorkspaces"
+      :storage-bytes-by-workspace-id="storageBytesByWorkspaceId"
+      :warning-workspace-ids="warningWorkspaceIds"
       @select="openWorkspace"
     />
   </div>

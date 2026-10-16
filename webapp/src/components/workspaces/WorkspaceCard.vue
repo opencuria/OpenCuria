@@ -167,7 +167,7 @@ function formatStorage(bytes?: number | null): string {
       <!-- Footer: Storage + Actions -->
       <div class="flex items-center justify-between gap-3">
         <div class="min-w-0 text-xs text-muted-foreground font-mono">
-          <div>{{ formatStorage(storageBytes) }}</div>
+          <div title="Overlay storage used on disk">{{ formatStorage(storageBytes) }}</div>
           <div v-if="imminentAutoStopLabel" class="mt-1 text-amber-600 dark:text-amber-400">
             {{ imminentAutoStopLabel }}
           </div>
