@@ -14,6 +14,7 @@ import * as orgApi from '@/services/organizations.api'
 import { ApiRequestError } from '@/services/api'
 import { useNotificationStore } from './notifications'
 import { clearWorkspaceDrafts } from '@/lib/workspaceDraft'
+import { clearQuestionInputCaches } from '@/lib/questionInputCache'
 
 const ACCESS_TOKEN_KEY = 'kern_access_token'
 const REFRESH_TOKEN_KEY = 'kern_refresh_token'
@@ -80,6 +81,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function _clearAuth(): void {
+    clearQuestionInputCaches()
     clearWorkspaceDrafts()
     accessToken.value = null
     refreshToken.value = null
@@ -165,7 +167,10 @@ export const useAuthStore = defineStore('auth', () => {
   async function fetchMe(): Promise<void> {
     try {
       const data = await authApi.getMe()
-      if (user.value && user.value.id !== data.id) clearWorkspaceDrafts()
+      if (user.value && user.value.id !== data.id) {
+        clearWorkspaceDrafts()
+        clearQuestionInputCaches()
+      }
       const nextUser: User = {
         id: data.id,
         email: data.email,

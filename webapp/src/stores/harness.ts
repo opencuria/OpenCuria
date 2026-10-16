@@ -62,6 +62,8 @@ import { loadAgentConfigsCached } from '@/lib/agentConfigs'
 import { recordRecentModelUsage } from '@/lib/recentModels'
 import type { AgentConfig } from '@/lib/harnessAgents'
 import { resolveCatalogModel, snapEffort, type ProviderModel } from '@/lib/harnessModels'
+import { clearQuestionInputCache, pruneQuestionInputCaches } from '@/lib/questionInputCache'
+import { useAuthStore } from './auth'
 import { useWorkspaceStore } from './workspaces'
 import { useNotificationStore } from './notifications'
 import { useHarnessConversationStore } from './harnessConversations'
@@ -662,6 +664,8 @@ export const useHarnessStore = defineStore('harness', () => {
       const generation = (partGenerations.get(sessionId) ?? 0) + 1
       partGenerations.set(sessionId, generation)
       flight = (async () => {
+        const auth = useAuthStore()
+        const identity = { userId: auth.user?.id, organizationId: auth.activeOrganizationId }
         try {
           const response = await listHarnessParts(sessionId)
           if (partGenerations.get(sessionId) !== generation) return
@@ -727,6 +731,11 @@ export const useHarnessStore = defineStore('harness', () => {
             nextPermissions[request.request_id] = { ...request, status: 'pending' }
           }
           pendingPermissions.value = nextPermissions
+          pruneQuestionInputCaches(
+            identity,
+            { workspace_id: response.session.workspace_id, session_id: sessionId },
+            (response.questions ?? []).map((request) => request.request_id),
+          )
           const nextQuestions = { ...pendingQuestions.value }
           for (const id of Object.keys(nextQuestions)) {
             if (nextQuestions[id]?.session_id === sessionId) delete nextQuestions[id]
@@ -1216,6 +1225,14 @@ export const useHarnessStore = defineStore('harness', () => {
   }
 
   function handleQuestionResolved(requestId: string, status: string): void {
+    const request = pendingQuestions.value[requestId]
+    if (request) {
+      const auth = useAuthStore()
+      clearQuestionInputCache(
+        { userId: auth.user?.id, organizationId: auth.activeOrganizationId },
+        request,
+      )
+    }
     delete pendingQuestions.value[requestId]
     if (status === 'answered') return
   }
@@ -1228,10 +1245,21 @@ export const useHarnessStore = defineStore('harness', () => {
   ): Promise<void> {
     if (sessionTransitioning(sessionId)) return
     const notifications = useNotificationStore()
-    if (!pendingQuestions.value[requestId]) return
+    const request = pendingQuestions.value[requestId]
+    if (!request) return
+    const auth = useAuthStore()
+    const identity = { userId: auth.user?.id, organizationId: auth.activeOrganizationId }
     try {
-      const outcome = await resolveHarnessQuestion(sessionId, requestId, answers, reject)
-      handleQuestionResolved(requestId, outcome.status)
+      await resolveHarnessQuestion(sessionId, requestId, answers, reject)
+      // Navigation may reset pending state or switch accounts while the POST is in flight.
+      clearQuestionInputCache(identity, request)
+      if (
+        auth.user?.id === identity.userId &&
+        auth.activeOrganizationId === identity.organizationId &&
+        pendingQuestions.value[requestId]?.session_id === request.session_id &&
+        pendingQuestions.value[requestId]?.workspace_id === request.workspace_id
+      )
+        delete pendingQuestions.value[requestId]
     } catch (e: unknown) {
       notifications.error('Question failed', e instanceof Error ? e.message : 'Unknown error')
     }
