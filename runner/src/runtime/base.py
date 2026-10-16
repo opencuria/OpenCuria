@@ -198,6 +198,15 @@ class RuntimeBackend(abc.ABC):
     async def get_workspace_status(self, instance_id: str) -> RuntimeStatus:
         """Return current status information for the workspace."""
 
+    async def check_reachable(self, instance_id: str) -> bool:
+        """Return whether a lightweight command can run in the workspace.
+
+        Runtime implementations may override this with a transport-specific
+        probe. The default uses the runtime's normal command execution path.
+        """
+        exit_code, _ = await self.exec_command_wait(instance_id, ["echo", "ok"])
+        return exit_code == 0
+
     @abc.abstractmethod
     async def list_workspaces(self) -> list[RuntimeWorkspaceInfo]:
         """Discover all opencuria workspaces managed by this runtime.

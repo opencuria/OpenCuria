@@ -789,7 +789,7 @@ class WorkspaceLifecycle:
     async def _check_workspace_reachable(
         self, workspace_id: uuid.UUID, info: WorkspaceInfo
     ) -> bool:
-        """Return True if the workspace responds to a lightweight exec probe.
+        """Return True if the runtime's lightweight reachability probe succeeds.
 
         Uses a short timeout so the loop does not block for a long time.
         """
@@ -798,14 +798,10 @@ class WorkspaceLifecycle:
             return True  # cannot check — assume reachable to avoid false restarts
 
         try:
-            exit_code, _ = await asyncio.wait_for(
-                runtime.exec_command_wait(
-                    info.instance_id,
-                    command=["echo", "ok"],
-                ),
+            return await asyncio.wait_for(
+                runtime.check_reachable(info.instance_id),
                 timeout=15,
             )
-            return exit_code == 0
         except Exception:
             return False
 

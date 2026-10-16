@@ -21,6 +21,7 @@ import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,6 +53,23 @@ logger = structlog.get_logger(__name__)
 
 # Label prefix stored in VM description (JSON metadata)
 _LABEL_PREFIX = "opencuria"
+
+_SSH_KEEPALIVE_INTERVAL = 30
+_SSH_KEEPALIVE_COUNT_MAX = 5
+_SSH_CLOSE_TIMEOUT = 2.0
+
+
+@dataclass
+class _SSHState:
+    """Stable per-instance ownership, retained across lifecycle invalidations."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    connection: asyncssh.SSHClientConnection | None = None
+    generation: int = 0
+    blocked: bool = False
+    probing: bool = False
+    probe_connection: asyncssh.SSHClientConnection | None = None
+
 
 # Cloud-init template for initial VM network config
 _CLOUD_INIT_META = """\
@@ -182,11 +200,7 @@ class QemuRuntime(RuntimeBackend):
         self._publication_hash_lock = threading.Lock()
         self._settings = settings
         self._conn: libvirt.virConnect | None = None
-        self._ssh_connections: dict[str, asyncssh.SSHClientConnection] = {}
-        # Per-instance lock: ensures only one coroutine at a time does the
-        # SSH liveness check or reconnect, avoiding a burst of N concurrent
-        # `echo ok` channels when many commands arrive simultaneously.
-        self._ssh_locks: dict[str, asyncio.Lock] = {}
+        self._ssh_states: dict[str, _SSHState] = {}
         self._disk_dir = Path(settings.qemu_disk_dir)
         self._snapshot_dir = Path(settings.qemu_snapshot_dir)
         self._ensure_host_directory(
@@ -443,7 +457,7 @@ class QemuRuntime(RuntimeBackend):
             if progress_callback is not None:
                 await progress_callback(line.rstrip("\n"))
         await process.wait_closed()
-        exit_code = int(process.exit_status or 0)
+        exit_code = self._require_exit_status(process)
         if exit_code != 0:
             raise RuntimeError(f"QEMU image build failed with exit code {exit_code}")
 
@@ -807,108 +821,188 @@ class QemuRuntime(RuntimeBackend):
                 error=str(exc),
             )
 
+    def _ssh_state(self, instance_id: str) -> _SSHState:
+        """Keep lock identity stable for queued acquires across stop/recreate."""
+        state = self._ssh_states.get(instance_id)
+        if state is None:
+            state = _SSHState()
+            self._ssh_states[instance_id] = state
+        return state
+
+    @staticmethod
+    def _check_ssh_generation(state: _SSHState, generation: int) -> None:
+        if state.blocked or state.generation != generation:
+            raise RuntimeError("SSH lifecycle changed while connecting")
+
+    @staticmethod
+    async def _close_ssh_connection(conn: asyncssh.SSHClientConnection) -> None:
+        """Close an owned transport without delaying lifecycle work indefinitely."""
+        conn.close()
+        try:
+            await asyncio.wait_for(conn.wait_closed(), timeout=_SSH_CLOSE_TIMEOUT)
+        except (OSError, asyncssh.Error, asyncio.TimeoutError):
+            conn.abort()
+        except asyncio.CancelledError:
+            conn.abort()
+            raise
+
+    async def _invalidate_ssh(self, instance_id: str) -> None:
+        """Fence late connects before awaiting deliberate transport shutdown."""
+        state = self._ssh_state(instance_id)
+        state.generation += 1
+        state.blocked = True
+        conn, state.connection = state.connection, None
+        probe, state.probe_connection = state.probe_connection, None
+        await asyncio.gather(
+            *(
+                self._close_ssh_connection(owned)
+                for owned in (conn, probe)
+                if owned is not None
+            )
+        )
+
+    async def _connect_ssh(
+        self,
+        instance_id: str,
+        state: _SSHState,
+        generation: int,
+        timeout: float,
+    ) -> asyncssh.SSHClientConnection:
+        """Connect under the state lock; never publish a stale candidate."""
+        self._check_ssh_generation(state, generation)
+        cached = state.connection
+        if cached is not None and not cached.is_closed():
+            return cached
+        state.connection = None
+        conn = await self._open_ssh_transport(instance_id, state, generation, timeout)
+        state.connection = conn
+        return conn
+
+    async def _open_ssh_transport(
+        self,
+        instance_id: str,
+        state: _SSHState,
+        generation: int,
+        timeout: float,
+    ) -> asyncssh.SSHClientConnection:
+        """Authenticate with one host-key policy, keepalive and generation fence."""
+        ip = await self._get_vm_ip(instance_id)
+        self._check_ssh_generation(state, generation)
+        try:
+            conn = await asyncssh.connect(
+                ip,
+                username=self._ssh_user,
+                client_keys=[str(self._ssh_key_path)],
+                known_hosts=self._load_tofu_key(instance_id, ip),
+                connect_timeout=timeout,
+                keepalive_interval=_SSH_KEEPALIVE_INTERVAL,
+                keepalive_count_max=_SSH_KEEPALIVE_COUNT_MAX,
+            )
+        except asyncssh.HostKeyNotVerifiable as exc:
+            raise RuntimeError(
+                f"SSH host key mismatch for VM {instance_id} ({ip}) — "
+                "possible MITM or VM was recreated. "
+                f"Delete {self._host_key_file(instance_id)} to reset."
+            ) from exc
+        try:
+            self._check_ssh_generation(state, generation)
+            if not self._host_key_cache.get(instance_id):
+                await self._save_tofu_key(instance_id, ip, conn)
+            self._check_ssh_generation(state, generation)
+            return conn
+        except BaseException:
+            await self._close_ssh_connection(conn)
+            raise
+
     async def _wait_for_ssh(self, instance_id: str) -> str:
-        """Wait for the VM to become reachable via SSH, return its IP.
+        """Enable SSH after VM startup and wait for authenticated readiness.
 
-        The VM's IP is always the second host address in its dedicated /30
-        network (gateway + 1), so there is no DHCP discovery needed.
-
-        On the first successful connection the server's host key is saved
-        (TOFU).  All subsequent calls to ``_get_ssh`` will verify against
-        the stored key.
+        Initial setup and subsequent starts share connection ownership and
+        persisted host-key verification with normal reconnects. Only explicit
+        startup reopens admission after a lifecycle invalidation.
         """
-        vm_ip = self._get_workspace_vm_ip(instance_id)
-        deadline = asyncio.get_event_loop().time() + self._ssh_timeout
-
-        # Errors that warrant a retry rather than an immediate failure.
-        _SSH_RETRY_ERRORS = (OSError, asyncssh.Error, asyncio.TimeoutError)
-
-        while asyncio.get_event_loop().time() < deadline:
-            try:
-                conn = await asyncssh.connect(
-                    vm_ip,
-                    username=self._ssh_user,
-                    client_keys=[str(self._ssh_key_path)],
-                    known_hosts=None,  # first connect: TOFU — key saved below
-                    connect_timeout=5,
-                )
-                self._ssh_connections[instance_id] = conn
-                # Persist the host key so all future reconnects can verify it.
-                await self._save_tofu_key(instance_id, vm_ip, conn)
-                logger.info(
-                    "vm_ssh_ready",
-                    instance_id=instance_id,
-                    ip=vm_ip,
-                )
-                return vm_ip
-            except _SSH_RETRY_ERRORS:
-                pass
-
-            await asyncio.sleep(2)
-
+        state = self._ssh_state(instance_id)
+        generation = state.generation
+        state.blocked = False
+        deadline = asyncio.get_running_loop().time() + self._ssh_timeout
+        async with state.lock:
+            self._check_ssh_generation(state, generation)
+            while (remaining := deadline - asyncio.get_running_loop().time()) > 0:
+                try:
+                    await self._connect_ssh(
+                        instance_id, state, generation, min(5, remaining)
+                    )
+                    vm_ip = self._get_workspace_vm_ip(instance_id)
+                    logger.info("vm_ssh_ready", instance_id=instance_id, ip=vm_ip)
+                    return vm_ip
+                except (OSError, asyncssh.Error, asyncio.TimeoutError):
+                    self._check_ssh_generation(state, generation)
+                remaining = deadline - asyncio.get_running_loop().time()
+                await asyncio.sleep(min(2, max(0, remaining)))
+                self._check_ssh_generation(state, generation)
         raise RuntimeError(
             f"VM {instance_id} did not become reachable via SSH "
             f"within {self._ssh_timeout}s"
         )
 
     async def _get_ssh(self, instance_id: str) -> asyncssh.SSHClientConnection:
-        """Get an existing SSH connection or reconnect.
+        """Reuse open transports; only reconnect after an observed disconnect.
 
-        A per-instance lock ensures that only one coroutine at a time
-        performs the liveness check or reconnection, preventing a burst of
-        concurrent ``echo ok`` SSH channels when many commands arrive at once.
+        Exec/channel failures say nothing about transport liveness. Protocol
+        keepalives detect silent failures without consuming a session channel
+        or tearing down streams because a guest command was slow. No issued
+        command is ever replayed on the replacement transport.
         """
-        lock = self._ssh_locks.get(instance_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._ssh_locks[instance_id] = lock
-
-        async with lock:
-            conn = self._ssh_connections.get(instance_id)
-            if conn is not None:
-                # Quick liveness check
-                try:
-                    result = await conn.run("echo ok", check=True, timeout=5)
-                    if result.stdout.strip() == "ok":
-                        return conn
-                except Exception:
-                    pass
-                # Connection stale — remove and reconnect
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                del self._ssh_connections[instance_id]
-
-            # Reconnect — also catches asyncio.TimeoutError (not an OSError in Python ≤3.10)
-            ip = await self._get_vm_ip(instance_id)
-            # Use the stored TOFU host key for all reconnections so that a
-            # rogue process impersonating the VM's IP is rejected.
-            known_hosts = self._load_tofu_key(instance_id, ip)
+        state = self._ssh_state(instance_id)
+        generation = state.generation
+        self._check_ssh_generation(state, generation)
+        async with state.lock:
             try:
-                conn = await asyncssh.connect(
-                    ip,
-                    username=self._ssh_user,
-                    client_keys=[str(self._ssh_key_path)],
-                    known_hosts=known_hosts,
-                    connect_timeout=10,
-                )
-            except asyncssh.HostKeyNotVerifiable as exc:
-                raise RuntimeError(
-                    f"SSH host key mismatch for VM {instance_id} ({ip}) — "
-                    "possible MITM or VM was recreated. "
-                    f"Delete {self._host_key_file(instance_id)} to reset."
-                ) from exc
+                return await self._connect_ssh(instance_id, state, generation, 10)
             except (OSError, asyncssh.Error, asyncio.TimeoutError) as exc:
                 raise RuntimeError(
-                    f"SSH reconnect to VM {instance_id} ({ip}) failed: {exc}"
+                    f"SSH reconnect to VM {instance_id} failed: {exc}"
                 ) from exc
-            # If no key was stored yet (e.g. runner restarted before save),
-            # save it now — still within the isolated network so TOFU is safe.
-            if not self._host_key_cache.get(instance_id):
-                await self._save_tofu_key(instance_id, ip, conn)
-            self._ssh_connections[instance_id] = conn
-            return conn
+
+    async def check_reachable(self, instance_id: str) -> bool:
+        """Probe guest execution on an owned, disposable SSH transport.
+
+        A session open can stall before AsyncSSH exposes its channel handle.
+        Owning the probe transport lets cancellation close even that pending
+        channel without disturbing agent streams. The caller bounds the probe;
+        cleanup is bounded separately. At most one probe runs per instance.
+        """
+        state = self._ssh_state(instance_id)
+        generation = state.generation
+        self._check_ssh_generation(state, generation)
+        if state.probing:
+            return False
+        state.probing = True
+        conn = None
+        try:
+            # Serialize authentication/TOFU publication, not probe execution.
+            async with state.lock:
+                conn = await self._open_ssh_transport(
+                    instance_id, state, generation, 10
+                )
+                state.probe_connection = conn
+            process = await conn.create_process(
+                "echo ok",
+                stdin=asyncssh.DEVNULL,
+                stdout=asyncssh.DEVNULL,
+                stderr=asyncssh.DEVNULL,
+            )
+            await process.wait_closed()
+            self._check_ssh_generation(state, generation)
+            return process.exit_status == 0
+        finally:
+            try:
+                if conn is not None:
+                    await self._close_ssh_connection(conn)
+            finally:
+                if state.probe_connection is conn:
+                    state.probe_connection = None
+                state.probing = False
 
     async def _get_vm_ip(self, instance_id: str) -> str:
         """Get the IP address of a running VM.
@@ -1002,11 +1096,7 @@ class QemuRuntime(RuntimeBackend):
     @storage_mutation
     async def stop_workspace(self, instance_id: str) -> None:
         """Gracefully shut down the VM (ACPI shutdown)."""
-        # Close SSH connection and remove associated lock
-        conn = self._ssh_connections.pop(instance_id, None)
-        if conn:
-            conn.close()
-        self._ssh_locks.pop(instance_id, None)
+        await self._invalidate_ssh(instance_id)
 
         domain = await asyncio.to_thread(self._get_domain, instance_id)
         state, _ = await asyncio.to_thread(domain.state)
@@ -1030,10 +1120,13 @@ class QemuRuntime(RuntimeBackend):
         domain = await asyncio.to_thread(self._get_domain, instance_id)
         state, _ = await asyncio.to_thread(domain.state)
         if state != libvirt.VIR_DOMAIN_RUNNING:
+            # An externally stopped guest may leave a silent cached transport.
+            await self._invalidate_ssh(instance_id)
             await asyncio.to_thread(domain.create)
             await self._wait_for_ssh(instance_id)
         logger.info("vm_workspace_started", instance_id=instance_id)
 
+    @storage_mutation
     async def restart_workspace(self, instance_id: str) -> None:
         """Force-restart a VM for self-healing.
 
@@ -1042,11 +1135,7 @@ class QemuRuntime(RuntimeBackend):
         again.  It is intentionally fast because it is called only when the
         VM is already unresponsive.
         """
-        # Drop the cached SSH connection — it is no longer usable.
-        conn = self._ssh_connections.pop(instance_id, None)
-        if conn:
-            conn.close()
-        self._ssh_locks.pop(instance_id, None)
+        await self._invalidate_ssh(instance_id)
 
         def _force_restart() -> None:
             conn_lv = self._libvirt_conn()
@@ -1177,11 +1266,7 @@ class QemuRuntime(RuntimeBackend):
         disk = self._disk_path(instance_id)
         await self._assert_workspace_resources_unconsumed(instance_id)
 
-        # Close SSH connection and remove associated lock
-        conn = self._ssh_connections.pop(instance_id, None)
-        if conn:
-            conn.close()
-        self._ssh_locks.pop(instance_id, None)
+        await self._invalidate_ssh(instance_id)
 
         try:
             domain = await asyncio.to_thread(self._get_domain, instance_id)
@@ -1298,7 +1383,7 @@ class QemuRuntime(RuntimeBackend):
         async for line in process.stdout:
             yield line
         await process.wait_closed()
-        exit_code = int(process.exit_status or 0)
+        exit_code = self._require_exit_status(process)
         if exit_code != 0:
             raise CommandExecutionError(exit_code)
 
@@ -1320,9 +1405,22 @@ class QemuRuntime(RuntimeBackend):
         cmd_str = self._build_shell_command(command, workdir, env)
 
         result = await ssh.run(cmd_str, check=False)
-        exit_code = result.exit_status or 0
+        exit_code = self._require_exit_status(result)
         output = (result.stdout or "") + (result.stderr or "")
         return exit_code, output
+
+    @staticmethod
+    def _require_exit_status(
+        process: asyncssh.SSHClientProcess | asyncssh.SSHCompletedProcess,
+    ) -> int:
+        """Require exit evidence where the execution contract promises an int."""
+        try:
+            code = process.exit_status
+        except (OSError, asyncssh.Error):
+            code = None
+        if code is None:
+            raise RuntimeError("QEMU command exit status is unknown")
+        return int(code)
 
     def _build_shell_command(
         self,
@@ -1613,7 +1711,7 @@ class QemuRuntime(RuntimeBackend):
             code = process.exit_status
         except (asyncssh.Error, OSError):
             code = None
-        return int(code or 0)
+        return int(code) if code is not None else None
 
     async def process_detach(self, handle: ProcessHandle) -> None:
         """Close only the existing SSH channel, never exec a replacement guest."""
@@ -1627,8 +1725,8 @@ class QemuRuntime(RuntimeBackend):
 
         Robust close order for the single-SSH-channel transport: the
         process-group kill runs on a *separate* SSH channel
-        (``_kill_stream_tree`` opens its own connection) so it never
-        deadlocks against the closing session channel.  ``wait_closed``
+        (``_kill_stream_tree`` uses the shared transport) so it never deadlocks
+        against the closing session channel.  ``wait_closed``
         is only awaited once *before* the kill with a short timeout and
         never again after ``close()`` (which already implies closure) —
         the old double-wait could hang when the channel was already

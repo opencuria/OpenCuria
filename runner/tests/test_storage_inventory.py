@@ -162,8 +162,7 @@ async def test_publication_crash_marker_enospc_and_invalid_path(tmp_path, monkey
 @pytest.mark.asyncio
 async def test_failed_remove_retains_disk(tmp_path):
     r = runtime(tmp_path)
-    r._ssh_connections = {}
-    r._ssh_locks = {}
+    r._ssh_states = {}
     disk = r._disk_dir / "workspace.qcow2"
     qcow(disk)
     dom = MagicMock()
@@ -282,8 +281,7 @@ async def test_journal_recovers_exact_publication_without_rerun(tmp_path):
 @pytest.mark.asyncio
 async def test_explicit_partial_create_removal_preserves_unrelated_disk(tmp_path):
     r = runtime(tmp_path)
-    r._ssh_connections = {}
-    r._ssh_locks = {}
+    r._ssh_states = {}
     r._host_key_cache = {}
     r._host_key_file = lambda instance: tmp_path / (instance + ".pub")
     r._destroy_workspace_network = AsyncMock()
@@ -347,8 +345,7 @@ async def test_workspace_delete_rechecks_after_undefine(tmp_path):
     disk = r._disk_path(ws)
     qcow(disk)
     domain = source_domain(r, ws, disk)
-    r._ssh_connections = {}
-    r._ssh_locks = {}
+    r._ssh_states = {}
     r._destroy_workspace_network = AsyncMock()
     domain.undefineFlags.side_effect = lambda _: qcow(
         r._snapshot_dir / "late.qcow2", disk
@@ -796,8 +793,7 @@ async def test_cloud_init_shared_consumer_blocks_workspace_unlink(tmp_path, late
     disk = r._disk_path(ws)
     qcow(disk)
     domain, iso = cloud_init_domain(r, ws, disk)
-    r._ssh_connections = {}
-    r._ssh_locks = {}
+    r._ssh_states = {}
     r._destroy_workspace_network = AsyncMock()
     foreign = MagicMock()
     foreign.name.return_value = "foreign-seed-consumer"
@@ -832,8 +828,7 @@ async def test_standalone_capture_survives_origin_disk_and_seed_removal(tmp_path
         operation_id="capture",
         credential_clean=True,
     )
-    r._ssh_connections = {}
-    r._ssh_locks = {}
+    r._ssh_states = {}
     r._host_key_cache = {}
     r._host_key_file = lambda _: tmp_path / "host-key"
     r._destroy_workspace_network = AsyncMock()
