@@ -7,6 +7,7 @@
  */
 
 import type { ApiError } from '@/types'
+import { clearQuestionInputCaches } from '@/lib/questionInputCache'
 import { getConfig } from './config'
 
 function getApiBaseUrl(): string {
@@ -139,6 +140,7 @@ async function request<T>(
 
     // Still 401 after refresh — clear auth and redirect to login
     if (res.status === 401) {
+      clearQuestionInputCaches()
       localStorage.removeItem('kern_access_token')
       localStorage.removeItem('kern_refresh_token')
       localStorage.removeItem('kern_active_org_id')

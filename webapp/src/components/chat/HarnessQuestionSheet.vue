@@ -6,6 +6,12 @@ import { Button } from '@/components/ui/button'
 import { optionLetter } from '@/lib/composerSheets'
 import { gateSourceLabel } from '@/lib/harnessSubtaskActivity'
 import type { HarnessQuestionRequest } from '@/types/harness'
+import { useAuthStore } from '@/stores/auth'
+import {
+  loadQuestionInputCache,
+  questionInputCacheKey,
+  saveQuestionInputCache,
+} from '@/lib/questionInputCache'
 
 /**
  * Separator for multi-select answers. Must match the backend contract and
@@ -23,7 +29,9 @@ const emit = defineEmits<{
   skip: [requestId: string]
 }>()
 
+const auth = useAuthStore()
 const page = ref(0)
+const cacheKeys: Record<string, string> = {}
 /**
  * Raw option selections per request id, one entry per question. Multi-select
  * values are stored separator-joined.
@@ -42,38 +50,38 @@ const request = computed<HarnessQuestionRequest | null>(
 
 const sourceLabel = computed(() => gateSourceLabel(request.value?.agent_name))
 
-function slotsFor(store: Record<string, string[]>, requestId: string, count: number): string[] {
-  let slots = store[requestId]
-  if (!slots) {
-    slots = Array.from({ length: count }, () => '')
-    store[requestId] = slots
-  }
-  return slots
-}
-
-function pruneStore(store: Record<string, string[]>, requests: HarnessQuestionRequest[]): void {
-  for (const id of Object.keys(store)) {
-    if (!requests.some((item) => item.request_id === id)) {
-      delete store[id]
-    }
-  }
-}
-
 watch(
-  () => props.requests,
-  (requests) => {
+  [() => props.requests, () => auth.user?.id, () => auth.activeOrganizationId],
+  ([requests, userId, organizationId]) => {
     if (page.value > requests.length - 1) {
       page.value = Math.max(0, requests.length - 1)
     }
     for (const item of requests) {
-      slotsFor(answersByRequest.value, item.request_id, item.questions.length)
-      slotsFor(customByRequest.value, item.request_id, item.questions.length)
+      const id = item.request_id
+      const key = questionInputCacheKey({ userId, organizationId }, item)
+      if (cacheKeys[id] === key && answersByRequest.value[id]) continue
+      const draft = loadQuestionInputCache(key, item.questions.length)
+      answersByRequest.value[id] = draft?.answers ?? item.questions.map(() => '')
+      customByRequest.value[id] = draft?.custom ?? item.questions.map(() => '')
+      cacheKeys[id] = key
     }
-    pruneStore(answersByRequest.value, requests)
-    pruneStore(customByRequest.value, requests)
+    // Leaving a chat is not a resolution: prune only local state, not the cache.
+    for (const id of Object.keys(cacheKeys)) {
+      if (requests.some((item) => item.request_id === id)) continue
+      delete cacheKeys[id]
+      delete answersByRequest.value[id]
+      delete customByRequest.value[id]
+    }
   },
-  { immediate: true },
+  { immediate: true, flush: 'sync' },
 )
+
+function saveDraft(requestId: string): void {
+  saveQuestionInputCache(cacheKeys[requestId] ?? '', {
+    answers: answersByRequest.value[requestId] ?? [],
+    custom: customByRequest.value[requestId] ?? [],
+  })
+}
 
 function selectedOptions(requestId: string, questionIndex: number): string[] {
   const raw = answersByRequest.value[requestId]?.[questionIndex] ?? ''
@@ -95,6 +103,7 @@ function setCustom(requestId: string, questionIndex: number, value: string): voi
   if (question?.options?.length && !question.multiple) {
     setAnswer(requestId, questionIndex, '')
   }
+  saveDraft(requestId)
 }
 
 function toggleOption(
@@ -109,11 +118,13 @@ function toggleOption(
       ? current.filter((item) => item !== label)
       : [...current, label]
     setAnswer(requestId, questionIndex, next.join(MULTI_SELECT_SEPARATOR))
+    saveDraft(requestId)
     return
   }
   setAnswer(requestId, questionIndex, label)
   const customs = customByRequest.value[requestId]
   if (customs) customs[questionIndex] = ''
+  saveDraft(requestId)
 }
 
 function isOptionSelected(requestId: string, questionIndex: number, label: string): boolean {

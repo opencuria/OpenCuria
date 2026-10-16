@@ -4,6 +4,7 @@ import { get, post } from './api'
 afterEach(() => {
   vi.unstubAllGlobals()
   localStorage.clear()
+  sessionStorage.clear()
 })
 
 describe('abortable requests', () => {
@@ -58,4 +59,19 @@ describe('abortable requests', () => {
       expect.objectContaining({ signal: undefined }),
     )
   })
+})
+
+it('clears question drafts on confirmed authentication expiry', async () => {
+  const location = { href: 'http://localhost/workspaces' }
+  const storage = window.sessionStorage
+  vi.stubGlobal('window', { location, sessionStorage: storage })
+  sessionStorage.setItem('question-input:test', 'private draft')
+  sessionStorage.setItem('chat-input-test', 'unrelated draft')
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ status: 401 }))
+
+  await expect(get('/ordinary/')).rejects.toMatchObject({ status: 401 })
+
+  expect(sessionStorage.getItem('question-input:test')).toBeNull()
+  expect(sessionStorage.getItem('chat-input-test')).toBe('unrelated draft')
+  expect(location.href).toBe('/login')
 })

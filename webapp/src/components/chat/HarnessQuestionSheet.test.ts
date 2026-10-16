@@ -1,8 +1,21 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
 
 import HarnessQuestionSheet from './HarnessQuestionSheet.vue'
 import type { HarnessQuestionRequest } from '@/types/harness'
+import { useAuthStore } from '@/stores/auth'
+import { loadQuestionInputCache, questionInputCacheKey } from '@/lib/questionInputCache'
+
+beforeEach(() => {
+  localStorage.clear()
+  sessionStorage.clear()
+  setActivePinia(createPinia())
+  const auth = useAuthStore()
+  auth.user = { id: 1, email: 'test@example.test', first_name: '', last_name: '' }
+  auth.activeOrganizationId = 'org-1'
+})
+afterEach(() => vi.restoreAllMocks())
 
 function makeRequest(overrides: Partial<HarnessQuestionRequest> = {}): HarnessQuestionRequest {
   return {
@@ -134,9 +147,9 @@ describe('HarnessQuestionSheet', () => {
   it('hints single vs multi choice per question', () => {
     const single = mount(HarnessQuestionSheet, { props: { requests: [makeRequest()] } })
     expect(single.find('[data-testid="composer-question-hint"]').text()).toContain('Select one')
-    expect(
-      single.findAll('[data-testid="composer-question-option"]')[0]!.attributes('role'),
-    ).toBe('radio')
+    expect(single.findAll('[data-testid="composer-question-option"]')[0]!.attributes('role')).toBe(
+      'radio',
+    )
 
     const multi = mount(HarnessQuestionSheet, {
       props: {
@@ -159,9 +172,9 @@ describe('HarnessQuestionSheet', () => {
     expect(multi.find('[data-testid="composer-question-hint"]').text()).toContain(
       'Select all that apply',
     )
-    expect(
-      multi.findAll('[data-testid="composer-question-option"]')[0]!.attributes('role'),
-    ).toBe('checkbox')
+    expect(multi.findAll('[data-testid="composer-question-option"]')[0]!.attributes('role')).toBe(
+      'checkbox',
+    )
   })
 
   it('keeps multiple option selections in single questions exclusive', async () => {
@@ -172,5 +185,110 @@ describe('HarnessQuestionSheet', () => {
     await options[1]!.trigger('click')
     await wrapper.find('[data-testid="composer-question-submit"]').trigger('click')
     expect(wrapper.emitted('submit')).toEqual([['q-1', ['Option B', '']]])
+  })
+})
+
+describe('question draft restoration', () => {
+  it('saves every edit immediately and restores after unmount without submitting', async () => {
+    const request = makeRequest()
+    const key = questionInputCacheKey({ userId: 1, organizationId: 'org-1' }, request)
+    const wrapper = mount(HarnessQuestionSheet, { props: { requests: [request] } })
+    await wrapper.findAll('[data-testid="composer-question-option"]')[1]!.trigger('click')
+    const input = wrapper.findAll('[data-testid="composer-question-custom"]')[1]!
+    ;(input.element as HTMLInputElement).value = '  unfinished answer  '
+    const edit = input.trigger('input')
+    // No nextTick/unmount hook is required for the last keystroke to be safe.
+    expect(loadQuestionInputCache(key, 2)).toEqual({
+      answers: ['Option B', ''],
+      custom: ['', '  unfinished answer  '],
+    })
+    await edit
+    expect(wrapper.emitted('submit')).toBeUndefined()
+    wrapper.unmount()
+
+    const restored = mount(HarnessQuestionSheet, { props: { requests: [request] } })
+    expect(
+      restored.findAll('[data-testid="composer-question-option"]')[1]!.attributes('aria-checked'),
+    ).toBe('true')
+    expect(
+      (restored.findAll('[data-testid="composer-question-custom"]')[1]!.element as HTMLInputElement)
+        .value,
+    ).toBe('  unfinished answer  ')
+    await restored.get('[data-testid="composer-question-submit"]').trigger('click')
+    expect(restored.emitted('submit')).toEqual([['q-1', ['Option B', 'unfinished answer']]])
+    // Emitting alone is not a successful submission; only the store clears it.
+    expect(loadQuestionInputCache(key, 2)).not.toBeNull()
+    restored.unmount()
+  })
+
+  it('preserves multi-select and own answers through request list changes', async () => {
+    const request = makeRequest({
+      questions: [{ question: 'Pick', multiple: true, options: [{ label: 'A' }, { label: 'B' }] }],
+    })
+    const wrapper = mount(HarnessQuestionSheet, { props: { requests: [request] } })
+    for (const option of wrapper.findAll('[data-testid="composer-question-option"]'))
+      await option.trigger('click')
+    await wrapper.get('[data-testid="composer-question-custom"]').setValue('extra')
+    await wrapper.setProps({ requests: [] })
+    await wrapper.setProps({ requests: [makeRequest({ request_id: 'other' })] })
+    expect(
+      (wrapper.findAll('[data-testid="composer-question-custom"]')[0]!.element as HTMLInputElement)
+        .value,
+    ).toBe('')
+    await wrapper.setProps({ requests: [request] })
+    await wrapper.get('[data-testid="composer-question-submit"]').trigger('click')
+    expect(wrapper.emitted('submit')).toEqual([['q-1', ['A\0B\0extra']]])
+    wrapper.unmount()
+  })
+
+  it('isolates a reused request id across chat, workspace, user and organization changes', async () => {
+    const request = makeRequest()
+    const wrapper = mount(HarnessQuestionSheet, { props: { requests: [request] } })
+    await wrapper.findAll('[data-testid="composer-question-custom"]')[1]!.setValue('original')
+    for (const changed of [
+      makeRequest({ session_id: 'other-session' }),
+      makeRequest({ workspace_id: 'other-workspace' }),
+    ]) {
+      await wrapper.setProps({ requests: [changed] })
+      expect(
+        (
+          wrapper.findAll('[data-testid="composer-question-custom"]')[1]!
+            .element as HTMLInputElement
+        ).value,
+      ).toBe('')
+    }
+    await wrapper.setProps({ requests: [request] })
+    const auth = useAuthStore()
+    auth.activeOrganizationId = 'org-2'
+    await wrapper.vm.$nextTick()
+    expect(
+      (wrapper.findAll('[data-testid="composer-question-custom"]')[1]!.element as HTMLInputElement)
+        .value,
+    ).toBe('')
+    auth.activeOrganizationId = 'org-1'
+    auth.user = { ...auth.user!, id: 2 }
+    await wrapper.vm.$nextTick()
+    expect(
+      (wrapper.findAll('[data-testid="composer-question-custom"]')[1]!.element as HTMLInputElement)
+        .value,
+    ).toBe('')
+    auth.user = { ...auth.user!, id: 1 }
+    await wrapper.vm.$nextTick()
+    expect(
+      (wrapper.findAll('[data-testid="composer-question-custom"]')[1]!.element as HTMLInputElement)
+        .value,
+    ).toBe('original')
+    wrapper.unmount()
+  })
+
+  it('keeps editing usable when storage writes fail', async () => {
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('quota')
+    })
+    const wrapper = mount(HarnessQuestionSheet, { props: { requests: [makeRequest()] } })
+    await wrapper.findAll('[data-testid="composer-question-custom"]')[0]!.setValue('manual')
+    await wrapper.get('[data-testid="composer-question-submit"]').trigger('click')
+    expect(wrapper.emitted('submit')).toEqual([['q-1', ['manual', '']]])
+    wrapper.unmount()
   })
 })
