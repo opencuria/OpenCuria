@@ -1156,4 +1156,33 @@ describe('HarnessMessageView', () => {
     expect(wrapper.text()).toContain('Hello')
     expect(wrapper.text()).not.toContain('aborted by user')
   })
+
+  it('shows the summary sentence quietly below the finished answer', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        message: makeAssistant([makePart({ id: 't1', type: 'text', output: 'Fixed it.' })]),
+        summary: 'Login fixed, review the change next.',
+      },
+    })
+
+    const summary = wrapper.get('[data-testid="message-summary"]')
+    expect(summary.text()).toContain('Login fixed, review the change next.')
+    const html = wrapper.html()
+    expect(html.indexOf('Fixed it.')).toBeLessThan(html.indexOf('message-summary'))
+    expect(html.indexOf('message-summary')).toBeLessThan(html.indexOf('message-footer'))
+  })
+
+  it('shows no summary line without a sentence or while the answer streams', () => {
+    const message = makeAssistant([makePart({ id: 't1', type: 'text', output: 'Fixed it.' })])
+
+    expect(
+      mount(HarnessMessageView, { props: { message } }).find('[data-testid="message-summary"]')
+        .exists(),
+    ).toBe(false)
+    expect(
+      mount(HarnessMessageView, {
+        props: { message, summary: 'Login fixed.', streaming: true },
+      }).find('[data-testid="message-summary"]').exists(),
+    ).toBe(false)
+  })
 })

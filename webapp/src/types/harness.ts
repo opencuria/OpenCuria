@@ -129,6 +129,8 @@ export interface HarnessSession {
   harness_id?: HarnessId
   connection_id?: string | null
   title: string
+  /** One sentence: state + next step of the last finished run (empty while busy). */
+  summary?: string
   mode: HarnessSessionMode
   agent_name: string
   model: string
@@ -380,6 +382,12 @@ export interface HarnessSessionStatusEvent {
   user_message_id?: string
   model?: string
   reasoning_effort?: string
+}
+
+export interface HarnessSessionSummaryEvent {
+  workspace_id: string
+  session_id: string
+  summary: string
 }
 
 export interface HarnessTodoUpdatedEvent {

@@ -40,6 +40,7 @@ import type {
   HarnessQuestionRequiredEvent,
   HarnessQuestionResolvedEvent,
   HarnessSessionStatusEvent,
+  HarnessSessionSummaryEvent,
   HarnessSubtaskFinishedEvent,
   HarnessSubtaskStartedEvent,
   HarnessTodoUpdatedEvent,
@@ -53,6 +54,7 @@ export type {
   HarnessQuestionRequiredEvent,
   HarnessQuestionResolvedEvent,
   HarnessSessionStatusEvent,
+  HarnessSessionSummaryEvent,
   HarnessSubtaskFinishedEvent,
   HarnessSubtaskStartedEvent,
   HarnessTodoUpdatedEvent,
@@ -177,6 +179,7 @@ type EventMap = {
   'harness.permission_required': HarnessPermissionRequiredEvent
   'harness.question_required': HarnessQuestionRequiredEvent
   'harness.session_status': HarnessSessionStatusEvent
+  'harness.session_summary': HarnessSessionSummaryEvent
   'harness.conversations_changed': { workspace_id: string }
   'harness.todo_updated': HarnessTodoUpdatedEvent
   'harness.subtask_started': HarnessSubtaskStartedEvent

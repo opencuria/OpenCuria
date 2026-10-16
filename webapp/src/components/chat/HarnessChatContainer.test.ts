@@ -529,4 +529,42 @@ describe('HarnessChatContainer', () => {
       { id: 'assistant-2', streaming: '1' },
     ])
   })
+
+  it('passes the summary only to the final assistant answer', () => {
+    const SummaryStub = {
+      name: 'HarnessMessageView',
+      props: ['message', 'streaming', 'childSessionIds', 'summary'],
+      template: '<div :data-message-id="message.id" :data-summary="summary">{{ message.content }}</div>',
+    }
+    const messages = [
+      makeMessage({ id: 'user-1', created_at: '2026-03-29T10:00:00.000Z' }),
+      makeMessage({
+        id: 'assistant-1',
+        role: 'assistant',
+        created_at: '2026-03-29T10:00:01.000Z',
+      }),
+      makeMessage({ id: 'user-2', created_at: '2026-03-29T10:00:02.000Z' }),
+      makeMessage({
+        id: 'assistant-2',
+        role: 'assistant',
+        created_at: '2026-03-29T10:00:03.000Z',
+      }),
+    ]
+    const summaries = (list: HarnessMessage[]) =>
+      mount(HarnessChatContainer, {
+        props: { messages: list, summary: 'Login fixed.' },
+        global: { stubs: { HarnessMessageView: SummaryStub } },
+      })
+        .findAll('[data-message-id]')
+        .map((node) => [node.attributes('data-message-id'), node.attributes('data-summary')])
+
+    expect(summaries(messages)).toEqual([
+      ['user-1', ''],
+      ['assistant-1', ''],
+      ['user-2', ''],
+      ['assistant-2', 'Login fixed.'],
+    ])
+    // A pending user prompt as the newest message means the sentence is outdated.
+    expect(summaries(messages.slice(0, 3)).map(([, summary]) => summary)).toEqual(['', '', ''])
+  })
 })

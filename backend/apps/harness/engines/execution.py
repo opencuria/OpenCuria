@@ -87,6 +87,7 @@ async def execute_external_run(
         if accessor is not None and (session.agent_name or "").lower() not in {
             "computeruse",
             "title",
+            "summary",
             "compaction",
         }:
             import apps.harness.mcp_client.runtime as mcp_runtime_module

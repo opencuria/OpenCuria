@@ -414,6 +414,15 @@ class HarnessSession(models.Model):
             "(not tools, not last open)."
         ),
     )
+    summary = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text=(
+            "One-sentence status and next step of the last finished run. "
+            "Cleared when a new run starts."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
