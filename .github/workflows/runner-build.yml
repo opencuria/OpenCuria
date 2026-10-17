@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - main
+      - "feat/expo-mobile-app"
     tags:
       - "*"
   pull_request:
@@ -43,8 +44,7 @@ jobs:
         run: python scripts/check_python_critical_vulns.py backend/requirements.txt
       - name: Audit runner Python dependencies
         run: python scripts/check_python_critical_vulns.py runner/requirements.txt
-      - name: Audit webapp Node dependencies
-        working-directory: webapp
+      - name: Audit Node workspace dependencies
         run: npm audit --package-lock-only --audit-level=critical
       - name: Audit e2e Node dependencies
         working-directory: e2e
@@ -102,19 +102,37 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: webapp/package-lock.json
+          cache-dependency-path: package-lock.json
       - name: Install dependencies
+        working-directory: .
         run: npm ci
       - name: Run tests
         run: npm test
       - name: Run type-check
         run: npm run type-check
 
+  test-mobile:
+    name: Test mobile and shared packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run test:shared
+      - run: npm run type-check -w mobile
+      - run: npx tsc -p packages/client/tsconfig.json
+      - run: npm run test -w mobile
+      - run: npm run export -w mobile
+
   build-images:
     name: Build ${{ matrix.name }} image
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    needs: [security-audit, test-backend, test-runner, test-webapp]
+    needs: [security-audit, test-backend, test-runner, test-webapp, test-mobile]
     permissions:
       contents: read
       packages: write
@@ -128,7 +146,7 @@ jobs:
             dockerfile: ./backend/Dockerfile
           - name: webapp
             image: ghcr.io/opencuria/webapp
-            context: ./webapp
+            context: .
             dockerfile: ./webapp/Dockerfile
           - name: runner
             image: ghcr.io/opencuria/runner

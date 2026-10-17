@@ -37,8 +37,8 @@ services:
   webapp:
     image: ghcr.io/opencuria/webapp:${OPENCURIA_TAG:-latest}
     build:
-      context: ./webapp
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: webapp/Dockerfile
     container_name: opencuria_local_webapp
     restart: unless-stopped
     depends_on:

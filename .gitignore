@@ -26,3 +26,10 @@ dist/
 .idea/
 # Local verification artifacts
 /.opencuria/
+
+# Generated native projects and Expo state (use Expo prebuild)
+/mobile/.expo/
+/mobile/android/
+/mobile/ios/
+/mobile/coverage/
+/mobile/.worklets/

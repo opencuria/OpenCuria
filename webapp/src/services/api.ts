@@ -1,197 +1,74 @@
 /**
- * Base HTTP client for the OpenCuria REST API.
+ * Shared REST transport for the webapp.
  *
- * Uses native `fetch` — no extra dependencies needed.
- * Auth headers (JWT Bearer) and org context (X-Organization-Id)
- * are injected automatically from the auth store.
+ * Authentication, retries, response parsing, and structured errors are owned by
+ * `@opencuria/client`; this adapter preserves the webapp's historic exports.
  */
-
-import type { ApiError } from '@/types'
+import {
+  ApiClient,
+  ApiRequestError,
+  type FetchLike,
+} from '@opencuria/client/api'
 import { getConfig } from './config'
+
+export { ApiRequestError }
+
+const ACCESS_TOKEN_KEY = 'kern_access_token'
+const REFRESH_TOKEN_KEY = 'kern_refresh_token'
+const ORGANIZATION_ID_KEY = 'kern_active_org_id'
+let client: ApiClient | null = null
+let clientBaseUrl = ''
 
 function getApiBaseUrl(): string {
   return getConfig().apiBaseUrl
 }
 
-// ---------------------------------------------------------------------------
-// Auth headers — reads JWT + org from localStorage (avoids Pinia import cycle)
-// ---------------------------------------------------------------------------
+function getClient(): ApiClient {
+  const apiBaseUrl = getApiBaseUrl()
+  if (!client || clientBaseUrl !== apiBaseUrl) {
+    clientBaseUrl = apiBaseUrl
+    client = new ApiClient({
+      apiBaseUrl,
+      getAccessToken: () => localStorage.getItem(ACCESS_TOKEN_KEY),
+      getRefreshToken: () => localStorage.getItem(REFRESH_TOKEN_KEY),
+      setTokens: (tokens) => {
+        localStorage.setItem(ACCESS_TOKEN_KEY, tokens.access_token)
+        localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh_token)
+      },
+      getOrganizationId: () => localStorage.getItem(ORGANIZATION_ID_KEY),
+      onAuthenticationExpired: () => {
+        localStorage.removeItem(ACCESS_TOKEN_KEY)
+        localStorage.removeItem(REFRESH_TOKEN_KEY)
+        localStorage.removeItem(ORGANIZATION_ID_KEY)
+        window.location.href = '/login'
+      },
+      // Resolve fetch when a request is made, so test spies/polyfills installed
+      // after module import retain the same behavior as the former wrapper.
+      fetch: ((...args) => globalThis.fetch(...args)) as FetchLike,
+      credentials: 'same-origin',
+      refreshCredentials: 'same-origin',
+    })
+  }
+  return client
+}
 
-/**
- * Returns auth and org-context headers for every API request.
- *
- * Reads directly from localStorage to avoid circular Pinia imports.
- */
+/** Legacy compatibility helper used by the web Socket.IO connector. */
+export async function tryRefreshToken(): Promise<boolean> {
+  return getClient().refreshAccessToken()
+}
+
 function getAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = {}
-
-  const token = localStorage.getItem('kern_access_token')
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`
-  }
-
-  const orgId = localStorage.getItem('kern_active_org_id')
-  if (orgId) {
-    headers['X-Organization-Id'] = orgId
-  }
-
+  const token = localStorage.getItem(ACCESS_TOKEN_KEY)
+  const organizationId = localStorage.getItem(ORGANIZATION_ID_KEY)
+  if (token) headers.Authorization = `Bearer ${token}`
+  if (organizationId) headers['X-Organization-Id'] = organizationId
   return headers
-}
-
-// ---------------------------------------------------------------------------
-// Token refresh logic
-// ---------------------------------------------------------------------------
-
-let refreshPromise: Promise<boolean> | null = null
-
-export async function tryRefreshToken(): Promise<boolean> {
-  // Use a shared promise so multiple concurrent 401s don't trigger
-  // multiple refresh calls.
-  if (refreshPromise) return refreshPromise
-
-  refreshPromise = (async () => {
-    const refreshToken = localStorage.getItem('kern_refresh_token')
-    if (!refreshToken) return false
-
-    try {
-      const res = await fetch(`${getApiBaseUrl()}/auth/refresh/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh_token: refreshToken }),
-      })
-
-      if (!res.ok) return false
-
-      const data = await res.json()
-      localStorage.setItem('kern_access_token', data.access_token)
-      localStorage.setItem('kern_refresh_token', data.refresh_token)
-      return true
-    } catch {
-      return false
-    }
-  })()
-
-  const result = await refreshPromise
-  refreshPromise = null
-  return result
-}
-
-// ---------------------------------------------------------------------------
-// Generic request helper
-// ---------------------------------------------------------------------------
-
-export class ApiRequestError extends Error {
-  status: number
-  code: string
-  /** Raw error payload (e.g. git 409 conflict with `snapshot`/`message`). */
-  data: unknown
-
-  constructor(status: number, detail: string, code: string = 'error', data?: unknown) {
-    super(detail)
-    this.name = 'ApiRequestError'
-    this.status = status
-    this.code = code
-    this.data = data
-  }
-}
-
-async function request<T>(
-  method: string,
-  path: string,
-  body?: unknown,
-  credentials: RequestCredentials = 'same-origin',
-  signal?: AbortSignal,
-): Promise<T> {
-  const url = `${getApiBaseUrl()}${path}`
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...getAuthHeaders(),
-  }
-
-  let res = await fetch(url, {
-    method,
-    headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-    credentials,
-    signal,
-  })
-
-  // On 401, try refreshing the token and retry once.
-  // Skip for auth endpoints — they return 401 for invalid credentials
-  // and should not trigger a token refresh or redirect loop.
-  const isAuthEndpoint = path.startsWith('/auth/')
-  if (res.status === 401 && !isAuthEndpoint) {
-    const refreshed = await tryRefreshToken()
-    if (refreshed) {
-      const retryHeaders: Record<string, string> = {
-        'Content-Type': 'application/json',
-        ...getAuthHeaders(),
-      }
-      res = await fetch(url, {
-        method,
-        headers: retryHeaders,
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-        credentials,
-        signal,
-      })
-    }
-
-    // Still 401 after refresh — clear auth and redirect to login
-    if (res.status === 401) {
-      localStorage.removeItem('kern_access_token')
-      localStorage.removeItem('kern_refresh_token')
-      localStorage.removeItem('kern_active_org_id')
-      window.location.href = '/login'
-      throw new ApiRequestError(401, 'Session expired', 'authentication_error')
-    }
-  }
-
-  // 204 No Content
-  if (res.status === 204) {
-    return undefined as T
-  }
-
-  const data = await res.json()
-
-  if (!res.ok) {
-    const payload = (data ?? {}) as Record<string, unknown> & ApiError
-    const detail =
-      typeof payload.detail === 'string'
-        ? payload.detail
-        : typeof payload.message === 'string'
-          ? payload.message
-          : 'Unknown error'
-    const code =
-      typeof payload.code === 'string' && payload.code.length > 0 ? payload.code : 'error'
-    throw new ApiRequestError(res.status, detail, code, data)
-  }
-
-  return data as T
-}
-
-// ---------------------------------------------------------------------------
-// Convenience methods
-// ---------------------------------------------------------------------------
-
-export function get<T>(path: string, signal?: AbortSignal): Promise<T> {
-  return request<T>('GET', path, undefined, 'same-origin', signal)
-}
-
-export function post<T>(
-  path: string,
-  body?: unknown,
-  credentials?: RequestCredentials,
-  signal?: AbortSignal,
-): Promise<T> {
-  return request<T>('POST', path, body, credentials, signal)
 }
 
 /**
  * HTTP desktop copy must finish inside Safari's original trusted key handler.
- * Keep this exceptional synchronous transport out of all normal API actions.
- * The selection-copy endpoint bounds server work; a stalled network can still
- * block the browser until its own network timeout (sync XHR forbids timeout).
+ * Keep this exceptional synchronous transport out of normal API actions.
  */
 export function postDuringClipboardGesture<T>(path: string, body: unknown, context: Window): T {
   const win = context as Window & typeof globalThis
@@ -200,50 +77,47 @@ export function postDuringClipboardGesture<T>(path: string, body: unknown, conte
   for (const [key, value] of Object.entries({
     'Content-Type': 'application/json',
     ...getAuthHeaders(),
-  }))
+  })) {
     xhr.setRequestHeader(key, value)
+  }
   xhr.send(JSON.stringify(body))
   // Never refresh/retry a non-idempotent selection copy inside this gesture.
-  if (xhr.status < 200 || xhr.status >= 300)
+  if (xhr.status < 200 || xhr.status >= 300) {
     throw new ApiRequestError(xhr.status, 'Unable to copy the desktop selection')
+  }
   return JSON.parse(xhr.responseText) as T
 }
 
+export function get<T>(path: string, signal?: AbortSignal): Promise<T> {
+  return getClient().requestWithCredentials<T>('GET', path, undefined, 'same-origin', signal)
+}
+
+export function post<T>(
+  path: string,
+  body?: unknown,
+  credentials?: RequestCredentials,
+  signal?: AbortSignal,
+): Promise<T> {
+  return getClient().postWithCredentials<T>(path, body, credentials, signal)
+}
+
 export function del<T>(path: string, credentials?: RequestCredentials): Promise<T> {
-  return request<T>('DELETE', path, undefined, credentials)
+  return getClient().deleteWithCredentials<T>(path, credentials)
 }
 
 export function patch<T>(path: string, body?: unknown): Promise<T> {
-  return request<T>('PATCH', path, body)
+  return getClient().requestWithCredentials<T>('PATCH', path, body, 'same-origin')
 }
 
 export function put<T>(path: string, body?: unknown): Promise<T> {
-  return request<T>('PUT', path, body)
+  return getClient().requestWithCredentials<T>('PUT', path, body, 'same-origin')
 }
 
-/** Fetch JSON and return HTTP status without throwing on non-2xx responses. */
-export async function requestWithStatus<T>(
+/** Fetch JSON and return HTTP status without throwing for non-2xx responses. */
+export function requestWithStatus<T>(
   method: string,
   path: string,
   body?: unknown,
 ): Promise<{ ok: boolean; status: number; data: T }> {
-  const url = `${getApiBaseUrl()}${path}`
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...getAuthHeaders(),
-  }
-
-  const res = await fetch(url, {
-    method,
-    headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  })
-
-  if (res.status === 204) {
-    return { ok: res.ok, status: res.status, data: undefined as T }
-  }
-
-  const data = (await res.json()) as T
-  return { ok: res.ok, status: res.status, data }
+  return getClient().requestWithStatus<T>(method, path, body, undefined, 'same-origin')
 }

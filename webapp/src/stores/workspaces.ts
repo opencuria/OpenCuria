@@ -19,6 +19,7 @@ import type {
 } from '@/types'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
+import { isWorkspaceReadyForChat } from '@opencuria/chat-core/workspaceReadiness'
 import { useNotificationStore } from './notifications'
 import { useImageStore } from './images'
 
@@ -154,9 +155,8 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
       workspaces.value.find((item) => item.id === workspaceId) ??
       (activeWorkspace.value?.id === workspaceId ? activeWorkspace.value : null)
     return Boolean(
-      workspace?.status === WorkspaceStatus.RUNNING &&
-      workspace.runner_online &&
-      !isWorkspaceTransitioning(workspaceId),
+      workspace &&
+        isWorkspaceReadyForChat(workspace, isWorkspaceTransitioning(workspaceId)),
     )
   }
 
