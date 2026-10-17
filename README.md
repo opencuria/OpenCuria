@@ -127,6 +127,15 @@ For Docker-only runner hosts, leave `RUNNER_QEMU_SSH_USER` at its default `root`
 unless you are intentionally customizing the QEMU guest image to use a different
 SSH login user.
 
+### Production-safe single-server upgrades
+
+For PostgreSQL/Redis blue-green updates with a dedicated advisory-lock migration
+job, version compatibility checks, and worker draining, see
+[`docs/production-updates.md`](./docs/production-updates.md). The
+[verification report](./docs/production-update-verification.md) records tested
+flows and explicit limits. The new path is opt-in and does not change the
+existing Compose deployment defaults.
+
 ### 3. Remote QEMU runner
 
 If a runner host should support QEMU/KVM, run it natively on Linux instead of inside a container.

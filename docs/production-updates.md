@@ -42,7 +42,10 @@ included in this application rollout contract.
   release, root, workspace and runner identity. Redis pub/sub carries transient
   bytes; metadata routes are bounded/expiring and renewed for quiet live streams.
   Stream acknowledgements reflect acceptance by the actual consuming worker.
-- Shell/MCP effects have no general exactly-once guarantee after a crash. Never
+- Shell/MCP effects have no general exactly-once guarantee after a crash.
+  Cancelling a native RPC or receiving a runtime execution error can also leave
+  an unknown effect: managed ownership stays closing/busy until proven quiescent.
+  A user stop is not, by itself, a remote process-termination certificate. Never
   blindly retry an unknown effect. Native recovery requires both independently
   proven worker death and confirmed runner quiescence; external engine recovery
   additionally requires confirmed lease/process cleanup. Unknown ownership stays

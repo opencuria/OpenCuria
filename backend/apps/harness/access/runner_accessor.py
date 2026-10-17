@@ -651,6 +651,11 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         finally:
             self._unregister(request_id)
             if not completed:
+                from ..runtime_authority import mark_current_run_uncertain
+
+                # Cancelling a socket waiter is not proof that a shell/file
+                # mutation in the workspace stopped. Managed runs stay fenced.
+                mark_current_run_uncertain()
                 future.cancel()
                 await self._emit_cancel(request_id)
 
@@ -659,6 +664,12 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         """Raise RunnerAccessorError when the runner reported an error."""
         error = result.get("error")
         if error:
+            if operation in {"harness:exec_wait", "harness:exec_stream"}:
+                from ..runtime_authority import mark_current_run_uncertain
+
+                # A runtime deadline/transport error may race a live external
+                # effect. A generic tool error must not invite blind replay.
+                mark_current_run_uncertain()
             raise RunnerAccessorError(f"{operation} failed: {error}")
 
     # -- WorkspaceAccessor API --------------------------------------------

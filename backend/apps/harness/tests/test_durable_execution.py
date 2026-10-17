@@ -264,3 +264,51 @@ async def test_subagent_started_after_drain_inherits_worker_and_release(
     assert child.root_run_id == root.id
     assert {row.owner_worker_id for row in rows} == {"tree-worker"}
     assert {row.status for row in rows} == {"completed"}
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_cancelled_native_rpc_retains_uncertain_ownership(harness_workspace):
+    """User abort cancels local execution, but cannot certify remote shell death."""
+    from apps.harness.access.runner_accessor import RunnerWorkspaceAccessor
+    from apps.harness.tests.conftest import FakeAccessor
+
+    dispatched = asyncio.Event()
+
+    async def emit(event, payload):
+        if event == "harness:exec_wait":
+            dispatched.set()
+
+    remote = RunnerWorkspaceAccessor(str(harness_workspace.id), emit=emit)
+
+    class RealRpcAccessor(FakeAccessor):
+        async def exec_wait(self, *args, **kwargs):
+            return await remote.exec_wait(*args, **kwargs)
+
+    service = HarnessWorkerService(
+        deployment=HarnessDeployment("worker", "cancel-v1", "cancel-worker"),
+        gateway=False,
+        provider_factory=lambda _: FakeProvider(
+            [_tool_step("bash", {"command": "sleep 30"})]
+        ),
+        accessor_factory=AsyncMock(return_value=RealRpcAccessor()),
+        emit=AsyncMock(),
+    )
+    await sync_to_async(HarnessWorkerRepository.register)(
+        "cancel-worker", "cancel-v1", pid=11
+    )
+    session = await sync_to_async(HarnessSession.objects.create)(
+        workspace=harness_workspace,
+        organization_id=harness_workspace.runner.organization_id,
+        model="fake/model",
+    )
+    assistant = await service.start_run(session, "cancel remote shell")
+    task = service._tasks[str(session.id)]
+    await asyncio.wait_for(dispatched.wait(), 5)
+    await service.abort_run(session.id)
+    await asyncio.gather(task, return_exceptions=True)
+    run = await sync_to_async(HarnessRun.objects.get)(assistant_message=assistant)
+    await sync_to_async(session.refresh_from_db)()
+    assert run.status == "closing"
+    assert run.abort_requested_at is not None
+    assert session.status == "busy"
+    assert not remote._pending
