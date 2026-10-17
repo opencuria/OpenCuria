@@ -382,7 +382,7 @@ class ClaudeEventNormalizer:
 
     @staticmethod
     def result_usage(result: Any) -> Usage:
-        """Map one SDK result's cumulative usage and cost to the common type."""
+        """Map one SDK result's per-run tokens and reported cost to the common type."""
         if isinstance(result, dict):
             raw = result.get("usage")
             cost = result.get("total_cost_usd", result.get("totalCostUSD", 0.0))
@@ -394,6 +394,17 @@ class ClaudeEventNormalizer:
         if not isinstance(model_usage, dict):
             model_usage = getattr(result, "modelUsage", None)
         raw = raw if isinstance(raw, dict) else {}
+        # ``usage`` covers this run only. ``modelUsage`` is restored by the CLI on
+        # ``--resume`` and spans the whole conversation, so summing it would count
+        # earlier turns again and inflate the last step_finish (the context size).
+        per_run = ClaudeEventNormalizer.message_usage(raw)
+        if per_run is not None:
+            return Usage(
+                prompt_tokens=per_run.prompt_tokens,
+                completion_tokens=per_run.completion_tokens,
+                total_tokens=per_run.total_tokens,
+                cost=float(cost or 0.0),
+            )
         if isinstance(model_usage, dict) and model_usage:
             input_tokens = sum(
                 int(value.get("inputTokens", 0) or 0)
@@ -408,10 +419,7 @@ class ClaudeEventNormalizer:
                 if isinstance(value, dict)
             )
         else:
-            input_tokens = int(raw.get("input_tokens", raw.get("inputTokens", 0)) or 0)
-            output_tokens = int(
-                raw.get("output_tokens", raw.get("outputTokens", 0)) or 0
-            )
+            input_tokens = output_tokens = 0
         return Usage(
             prompt_tokens=input_tokens,
             completion_tokens=output_tokens,

@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import re
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import Any
 
 import structlog
@@ -36,6 +38,7 @@ from .message_projector import ClaudeMessageProjector
 from .permissionbridge import PermissionBridge
 from .policy import NATIVE_TOOL_KEYS, native_tools_for_claude, tool_schemas_for_claude
 from .runtime_state import (
+    CLI_TOTAL_COST_KEY,
     MANAGED_STATE_PREFIX,
     ClaudeRuntimeState,
     validate_claude_skills,
@@ -73,6 +76,7 @@ class ClaudeEngine:
         evaluator: PermissionEvaluator | None = None,
         runtime_artifact_ensurer: Callable[..., Awaitable[Any]] | None = None,
         effort: str = "high",
+        engine_state: dict[str, Any] | None = None,
     ) -> None:
         """Bind harness runtime ports and session-scoped SDK state."""
         self.tools = tools
@@ -80,6 +84,13 @@ class ClaudeEngine:
         self._emit = emit or self._noop_emit
         self.auth_env = dict(auth_env or {})
         self.external_session_id = (external_session_id or "").strip()
+        # The CLI restores its cumulative cost on ``--resume``; remember where
+        # the previous turn ended so only this run's cost is reported.
+        self._cost_baseline = (
+            self._stored_cost_baseline(engine_state)
+            if self.external_session_id
+            else 0.0
+        )
         self.session_store = session_store
         self.on_binding = on_binding
         self.on_child_event = on_child_event
@@ -1429,6 +1440,26 @@ class ClaudeEngine:
     async def _bind_external_session(self, external_id: str) -> None:
         await self._message_projector.bind_external_session(external_id)
 
+    @staticmethod
+    def _stored_cost_baseline(engine_state: dict[str, Any] | None) -> float:
+        """Read the persisted cumulative CLI cost; ignore malformed values."""
+        value = (engine_state or {}).get(CLI_TOTAL_COST_KEY)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 0.0
+        return float(value) if math.isfinite(value) and value > 0 else 0.0
+
+    def _per_run_usage(self, usage: Usage) -> Usage:
+        """Reduce the CLI's cumulative cost to what this run spent.
+
+        ``total_cost_usd`` includes every turn the CLI restored on ``--resume``.
+        If the restored state was lost, the total restarts below the stored
+        baseline and already is this run's cost.
+        """
+        total = usage.cost if math.isfinite(usage.cost) else 0.0
+        baseline = self._cost_baseline
+        run_cost = total - baseline if total >= baseline else total
+        return replace(usage, cost=max(0.0, run_cost))
+
     async def _notify_owner(self, lease: Any, phase: str) -> None:
         """Publish fenced runner lease ownership to the run owner."""
         if self.on_owner is None:
@@ -1725,6 +1756,8 @@ class ClaudeEngine:
             if not output:
                 output = "".join(self._root_text)
             output = redact_text(output, self._event_secrets())
+            cli_total_cost = usage.cost
+            usage = self._per_run_usage(usage)
             await self._flush_open_steps(usage)
             finish = (
                 "aborted"
@@ -1749,6 +1782,7 @@ class ClaudeEngine:
                     "reasoning_effort": effort,
                     "context_sources": list(composed.sources),
                     "context_truncated": bool(composed.truncated),
+                    CLI_TOTAL_COST_KEY: cli_total_cost,
                 },
             )
         except asyncio.CancelledError as exc:

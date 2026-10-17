@@ -9,6 +9,7 @@ import structlog
 from ...agents.definitions import canonical_subagent_type
 from ...providers.base import Usage
 from .events import ClaudeEventNormalizer, StepState
+from .runtime_state import CLI_TOTAL_COST_KEY
 from .security import redact_text
 
 if TYPE_CHECKING:
@@ -356,13 +357,14 @@ class ClaudeMessageProjector:
         if external_id in engine._bound_session_ids:
             return
         engine._bound_session_ids.add(external_id)
-        await engine.on_binding(
-            external_id,
-            {
-                "harness_id": "claude",
-                "cli_version": self.cli_version,
-                "sdk_version": self.sdk_version,
-                "model": engine._model,
-                "mode": engine._mode,
-            },
-        )
+        state: dict[str, Any] = {
+            "harness_id": "claude",
+            "cli_version": self.cli_version,
+            "sdk_version": self.sdk_version,
+            "model": engine._model,
+            "mode": engine._mode,
+        }
+        # Binding replaces the stored engine state; carry the cost baseline over.
+        if engine._cost_baseline > 0:
+            state[CLI_TOTAL_COST_KEY] = engine._cost_baseline
+        await engine.on_binding(external_id, state)

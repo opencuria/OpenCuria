@@ -217,6 +217,7 @@ def claude_api_setup(db, monkeypatch):
         session_usage=None,
         session_cost=0.0,
         tail_remainder="",
+        engine_state_updates=None,
     ):
         attempt = HarnessRunRepository.get_by_id(run_id)
         if attempt is None or attempt.owner_token != owner_token:
@@ -256,6 +257,7 @@ def claude_api_setup(db, monkeypatch):
         session_usage=None,
         session_cost=0.0,
         tail_remainder="",
+        engine_state_updates=None,
     ):
         return finalize_fake_turn(
             self.run_id,
@@ -268,6 +270,7 @@ def claude_api_setup(db, monkeypatch):
             session_usage=session_usage,
             session_cost=session_cost,
             tail_remainder=tail_remainder,
+            engine_state_updates=engine_state_updates,
         )
 
     monkeypatch.setattr(RunOwnership, "finalize_turn", finalize_fake_ownership)

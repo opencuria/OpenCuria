@@ -42,6 +42,7 @@ def _create_claude_engine(**kwargs: Any) -> HarnessEngine:
         on_owner=kwargs.get("on_owner"),
         evaluator=kwargs.get("evaluator"),
         effort=kwargs.get("effort", "high"),
+        engine_state=kwargs.get("engine_state"),
     )
 
 

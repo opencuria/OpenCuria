@@ -309,3 +309,49 @@ def test_owner_fenced_part_persistence_is_not_accidentally_native(harness_worksp
         assistant_message=native_message
     ).exists()
     assert HarnessPart.objects.filter(message_id=native_message.id).count() == 0
+
+
+@pytest.mark.django_db(transaction=True)
+def test_finalize_turn_persists_cost_baseline_with_session_cost(harness_workspace):
+    from apps.harness.engines.repositories import HarnessEngineRepository
+
+    session, _assistant, owner = _make_attempt(harness_workspace)
+    session.engine_state = {"harness_id": "claude", "cli_total_cost_usd": 1.0}
+    session.cost = 1.0
+    session.save(update_fields=["engine_state", "cost"])
+    assert HarnessRunRepository.start_if_owner(owner.run_id, owner.owner_token)
+
+    assert HarnessEngineRepository.finalize_owned_turn(
+        owner.run_id,
+        owner.owner_token,
+        status=HarnessRunStatus.COMPLETED,
+        finish="stop",
+        session_usage={"prompt": 10, "completion": 5, "total": 15},
+        session_cost=0.5,
+        engine_state_updates={"cli_total_cost_usd": 1.5},
+    )
+
+    session.refresh_from_db()
+    assert session.cost == pytest.approx(1.5)
+    assert session.engine_state == {"harness_id": "claude", "cli_total_cost_usd": 1.5}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_finalize_turn_without_updates_keeps_engine_state(harness_workspace):
+    from apps.harness.engines.repositories import HarnessEngineRepository
+
+    session, _assistant, owner = _make_attempt(harness_workspace)
+    session.engine_state = {"cli_total_cost_usd": 2.0}
+    session.save(update_fields=["engine_state"])
+    assert HarnessRunRepository.start_if_owner(owner.run_id, owner.owner_token)
+
+    assert HarnessEngineRepository.finalize_owned_turn(
+        owner.run_id,
+        owner.owner_token,
+        status=HarnessRunStatus.ERROR,
+        finish="error",
+        error="boom",
+    )
+
+    session.refresh_from_db()
+    assert session.engine_state == {"cli_total_cost_usd": 2.0}
