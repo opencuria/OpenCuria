@@ -3179,10 +3179,23 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
                 ws_id, "stage", "/workspace/fresh", {"paths": ["a.txt"]}
             )
             self.assertTrue(staged["ok"])
+            # Model a newer/localized Git diagnostic to prove fallback uses
+            # the missing-HEAD exit status rather than an English substring.
+            original_exec = _runtime.exec_command_wait
+
+            async def changed_diagnostic(instance_id, command, **kwargs):
+                inner = git_ops.unwrap_git_exec_argv(command) or command
+                if inner[:3] == ["git", "restore", "--staged"]:
+                    return 128, "fatal: invalid reference: HEAD"
+                return await original_exec(instance_id, command, **kwargs)
+
+            _runtime.exec_command_wait = changed_diagnostic
             unstaged = await service.execute_git_operation(
                 ws_id, "unstage", "/workspace/fresh", {"paths": ["a.txt"]}
             )
-            self.assertTrue(unstaged["ok"])
+            self.assertTrue(unstaged["ok"], unstaged)
+            self.assertTrue(Path(repo_dir, "a.txt").exists())
+            self.assertEqual(Path(repo_dir, "a.txt").read_text(), "a\n")
 
     async def test_branch_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

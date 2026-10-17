@@ -1666,13 +1666,18 @@ class GitService:
             runtime, instance_id, ["git", "restore", "--staged", "--", *paths],
             workdir=repo_root, env=env, timeout=timeout,
         )
-        if exit_code != 0 and "could not resolve HEAD" in output:
-            # Unborn HEAD: nothing to restore from; staged additions are
-            # dropped from the index instead (matches VS Code behaviour).
-            exit_code, output = await self._git_exec(
-                runtime, instance_id, ["git", "rm", "--cached", "-r", "--", *paths],
+        if exit_code != 0:
+            head_code, _ = await self._git_exec(
+                runtime, instance_id, ["git", "rev-parse", "--verify", "HEAD"],
                 workdir=repo_root, env=env, timeout=timeout,
             )
+            if head_code != 0:
+                # Detect an unborn repo by exit status, not Git-version- or
+                # locale-dependent restore diagnostics. Preserve worktree files.
+                exit_code, output = await self._git_exec(
+                    runtime, instance_id, ["git", "rm", "--cached", "-r", "--", *paths],
+                    workdir=repo_root, env=env, timeout=timeout,
+                )
         if exit_code != 0:
             raise git_ops.GitError(
                 "git_failed", "git unstage failed",

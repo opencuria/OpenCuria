@@ -18,7 +18,9 @@
   },
   "dependencies": {
     "@fontsource-variable/noto-sans": "^5.2.10",
-    "@lucide/vue": "^1.43.0",
+    "@lucide/vue": "1.43.0",
+    "@opencuria/chat-core": "0.0.0",
+    "@opencuria/client": "0.0.0",
     "@tailwindcss/vite": "^4.1.18",
     "@types/dompurify": "^3.0.5",
     "@types/marked": "^5.0.2",
@@ -28,10 +30,10 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "dompurify": "^3.3.1",
-    "marked": "^17.0.3",
+    "marked": "17.0.3",
     "material-icon-theme": "5.38.1",
     "pinia": "^3.0.4",
-    "reka-ui": "^2.10.4",
+    "reka-ui": "2.10.4",
     "shadcn-vue": "^2.7.4",
     "socket.io-client": "^4.8.3",
     "tailwind-merge": "^3.6.0",
@@ -63,10 +65,7 @@
     "vite": "^7.3.1",
     "vite-plugin-vue-devtools": "^8.0.6",
     "vitest": "^3.2.7",
-    "vue-tsc": "^3.2.4"
-  },
-  "overrides": {
-    "shell-quote": "^1.8.5"
+    "vue-tsc": "3.2.4"
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"

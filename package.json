@@ -1,0 +1,43 @@
+{
+  "name": "opencuria-workspace",
+  "version": "0.0.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "workspaces": [
+    "webapp",
+    "mobile",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev -w webapp",
+    "dev:mobile": "npm run start -w mobile",
+    "test:shared": "vitest run --config packages/chat-core/vitest.config.ts && vitest run --config packages/client/vitest.config.ts",
+    "test:mobile": "npm run test -w mobile",
+    "type-check": "npm run type-check -w webapp && npm run type-check -w mobile && tsc -p packages/client/tsconfig.json",
+    "test": "npm run test:shared && npm run test:mobile && npm test -w webapp"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3",
+    "vitest": "^3.2.7",
+    "jsdom": "29.0.1"
+  },
+  "overrides": {
+    "shell-quote": "^1.8.5",
+    "tinypool": "^2.1.2",
+    "proxy-addr": "^2.0.8",
+    "vue": "3.5.28",
+    "@vue/runtime-core": "3.5.28",
+    "@vue/runtime-dom": "3.5.28",
+    "@vue/reactivity": "3.5.28",
+    "@vue/shared": "3.5.28",
+    "@vue/compiler-core": "3.5.28",
+    "@vue/compiler-dom": "3.5.28",
+    "@vue/compiler-sfc": "3.5.28",
+    "@vue/compiler-ssr": "3.5.28",
+    "@vue/server-renderer": "3.5.28"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}

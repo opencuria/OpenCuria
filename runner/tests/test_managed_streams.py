@@ -834,7 +834,7 @@ async def test_agent_stream_private_environment_ignores_workspace_credentials(
                 "or k.startswith('MAX_')}}))"
             ),
         ],
-        workdir="/workspace",
+        workdir=str(tmp_path),
         env={
             "ANTHROPIC_API_KEY": "subscription-key",
             "CLAUDE_CONFIG_DIR": f"{runtime.config_root}/{workspace}/config",

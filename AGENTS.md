@@ -12,8 +12,14 @@ OpenCuria centrally provisions, manages, and monitors AI coding agents.
 - `runner/` (Python, asyncio): dumb exec daemon. Runs Docker/QEMU workspaces,
   exposes lifecycle, exec, files, terminal, desktop, and git RPC. No agent logic.
 - `webapp/` (Vue 3): dashboard for workspaces, chat, credentials, images.
+- `mobile/` (Expo + React Native): native iOS/Android client for existing chats.
+- `packages/chat-core/` and `packages/client/`: framework-neutral chat rules
+  and shared REST/Socket.IO client for web and mobile.
 
-Flow: `webapp` → REST/WS → `backend` → Socket.IO `harness:*` RPC → `runner` → workspace.
+Flow: web/mobile → REST + Socket.IO `/frontend` → `backend` → Socket.IO
+`harness:*` RPC → `runner` → workspace. Mobile feature screens live in
+`mobile/src/screens/`; `mobile/app/` is Expo Router routes only. See
+`docs/mobile-app.md` for setup, mobile boundaries and fixture limitations.
 
 ## 2. Goal: modular and extensible
 
@@ -40,12 +46,16 @@ layer, one implementation per behavior, composition over duplication.
 - All agentic knowledge lives in `backend/apps/harness/`. The runner never
   prompts, never decides, never owns provider/tool/permission logic.
 - `webapp`: use only shadcn-vue components from `webapp/src/components/ui/`.
+- `mobile`: reuse `@opencuria/chat-core` and `@opencuria/client`; keep native
+  screens in `mobile/src/screens/` (not `mobile/src/app/`, which collides with
+  Expo Router's `mobile/app/`). Native React chat snapshots must stay immutable.
 - UI: less is more. Use fewer controls and less text; remaining copy must
   describe intent clearly and concisely. Combine related choices rather than
   adding separate buttons, selectors, or repeated explanations.
 - Keep one design language. Reuse existing components and interaction patterns
-  before creating anything new. Use the shared `ModelPicker` for model/effort
-  selection in composers and settings; do not add competing selectors.
+  before creating anything new. Use the shared `ModelPicker` in webapp composers
+  and settings; mobile may present a native picker but must reuse shared model
+  rules instead of duplicating business logic.
 - Docs/setup details live in `README.md` and component READMEs; do not
   duplicate them here.
 
@@ -85,8 +95,13 @@ Run what your change touches:
 ```bash
 cd backend && source .venv/bin/activate && pytest -q
 cd runner && source .venv/bin/activate && pytest -q
-cd webapp && npm run test
+npm run type-check
+npm run test
 ```
+
+Install npm workspace dependencies with `npm ci` from the repository root; do not
+use a component-local npm lockfile. Mobile-specific Expo/device checks are in
+`docs/mobile-app.md`.
 
 Commit gate: `./.githooks/pre-commit` must print `Ready to commit.` Fresh clone
 first: `./scripts/setup-dev.sh`. After implementing, verify for real and embed

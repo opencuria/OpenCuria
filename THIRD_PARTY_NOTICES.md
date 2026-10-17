@@ -183,3 +183,136 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
+
+## Mobile application (Expo / React Native)
+
+The native client is under `mobile/`; the root `package-lock.json` pins the npm workspace dependency tree. It uses the following direct UI/runtime components (versions are pinned in `mobile/package.json` and `package-lock.json`):
+
+- **Expo SDK 57.0.30 and Expo modules**, **React 19.2.3**, **React Native 0.86.3**, `react-native-*` support modules, `@legendapp/list` 3.3.3, `react-native-enriched-markdown` 1.0.1 and `marked` 17.0.3 are MIT-licensed upstream components. Their license files are distributed in their respective npm packages.
+- **`remend` 1.3.0** (Vercel, [upstream](https://github.com/vercel/streamdown)): Apache-2.0.
+- **`lucide-react-native` 1.58.0** ([upstream](https://github.com/lucide-icons/lucide)): ISC. Its upstream license also identifies the Feather-derived icons and their MIT copyright notice; see the installed package's `LICENSE`.
+- **`socket.io-client` 4.8.3**: MIT.
+- `@opencuria/client` and `@opencuria/chat-core` are in-repository OpenCuria packages licensed AGPL-3.0-only, like the surrounding project.
+
+The native Markdown package has additional bundled components:
+
+- **MD4C** (MIT, Martin Mitáš; [upstream](https://github.com/mity/md4c)) and **Tree-sitter** (MIT, Max Brunsfeld; [upstream](https://github.com/tree-sitter/tree-sitter)). The curated Tree-sitter grammar sources included by `react-native-enriched-markdown` have individual MIT license files in `cpp/highlight/vendor/grammars/*/LICENSE` inside that package. Unicode/ICU headers used by Tree-sitter are under the Unicode/ICU notices in `cpp/highlight/vendor/tree-sitter/src/unicode/LICENSE` (Unicode, Inc. / ICU).
+- **RaTeX**, native LaTeX math dependency ([upstream](https://github.com/erweixin/RaTeX)): MIT. The Android build resolves `io.github.erweixin:ratex-android` 0.1.10; the package's iOS vendor source and prebuilt XCFramework are pinned to RaTeX v0.1.14 in `react-native-enriched-markdown`.
+- **KaTeX mathematical fonts** (`KaTeX_*.ttf`, including in the RaTeX native artifacts): SIL Open Font License 1.1, **not** MIT. They originate from [KaTeX](https://github.com/KaTeX/KaTeX), are distributed by RaTeX without modification, and retain their separate font license. Copyright/source details are in [RaTeX's font notice](https://github.com/erweixin/RaTeX/blob/v0.1.14/crates/ratex-katex-fonts/fonts/FONT_NOTICE.txt); the complete OFL text is [`SIL-OFL-1.1.txt`](https://github.com/erweixin/RaTeX/blob/v0.1.14/licenses/SIL-OFL-1.1.txt). RaTeX's [third-party notice](https://github.com/erweixin/RaTeX/blob/v0.1.14/THIRD_PARTY_NOTICES.txt) specifically asks redistributors of binaries/SDKs that contain these fonts to retain the notice and OFL attribution.
+
+The full license texts for npm components are in their installed package `LICENSE` files (the lockfile identifies the exact package versions); transitive native component notices are in the upstream package/source locations linked above. When redistributing a mobile binary or SDK, include the applicable license texts and notices with the distribution, including the separate OFL font notice/license. No native store/release binary or app-level license bundle is produced by this documentation change.
+
+### KaTeX font notice and SIL Open Font License 1.1
+
+The following TrueType fonts are from [KaTeX](https://github.com/KaTeX/KaTeX):
+`KaTeX_*.ttf`. They are licensed under the SIL Open Font License, Version 1.1;
+KaTeX's MIT software license does not apply to these font binaries. The fonts
+are distributed unmodified by RaTeX. This notice and the complete font license
+are included here because native Markdown/LaTeX renderers may bundle them into
+mobile application artifacts.
+
+```text
+KaTeX font files (KaTeX_*.ttf)
+================================
+
+These TrueType fonts are taken from the KaTeX project:
+  https://github.com/KaTeX/KaTeX
+
+These unmodified font binaries are not licensed under the MIT License in the
+KaTeX/RaTeX software repositories. They are licensed under the SIL Open Font
+License, Version 1.1.
+
+Copyright (c) 2009-2010, Design Science, Inc. (<www.mathjax.org>)
+Copyright (c) 2014-2018 Khan Academy (<www.khanacademy.org>),
+with Reserved Font Name KaTeX_Main. Each font face declares its own Reserved
+Font Name (for example, KaTeX_Math, KaTeX_AMS and KaTeX_Caligraphic).
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+Full license text:
+
+SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
+-----------------------------------------------------------
+
+PREAMBLE
+The goals of the Open Font License (OFL) are to stimulate worldwide
+development of collaborative font projects, to support the font creation
+efforts of academic and linguistic communities, and to provide a free and
+open framework in which fonts may be shared and improved in partnership
+with others.
+
+The OFL allows the licensed fonts to be used, studied, modified and
+redistributed freely as long as they are not sold by themselves. The
+fonts, including any derivative works, can be bundled, embedded,
+redistributed and/or sold with any software provided that any reserved
+names are not used by derivative works. The fonts and derivatives,
+however, cannot be released under any other type of license. The
+requirement for fonts to remain under this license does not apply
+to any document created using the fonts or their derivatives.
+
+DEFINITIONS
+"Font Software" refers to the set of files released by the Copyright
+Holder(s) under this license and clearly marked as such. This may
+include source files, build scripts and documentation.
+
+"Reserved Font Name" refers to any names specified as such after the
+copyright statement(s).
+
+"Original Version" refers to the collection of Font Software components as
+distributed by the Copyright Holder(s).
+
+"Modified Version" refers to any derivative made by adding to, deleting,
+or substituting -- in part or in whole -- any of the components of the
+Original Version, by changing formats or by porting the Font Software to a
+new environment.
+
+"Author" refers to any designer, engineer, programmer, technical
+writer or other person who contributed to the Font Software.
+
+PERMISSION & CONDITIONS
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of the Font Software, to use, study, copy, merge, embed, modify,
+redistribute, and sell modified and unmodified copies of the Font
+Software, subject to the following conditions:
+
+1) Neither the Font Software nor any of its individual components,
+in Original or Modified Versions, may be sold by itself.
+
+2) Original or Modified Versions of the Font Software may be bundled,
+redistributed and/or sold with any software, provided that each copy
+contains the above copyright notice and this license. These can be
+included either as stand-alone text files, human-readable headers or
+in the appropriate machine-readable metadata fields within text or
+binary files as long as those fields can be easily viewed by the user.
+
+3) No Modified Version of the Font Software may use the Reserved Font
+Name(s) unless explicit written permission is granted by the corresponding
+Copyright Holder. This restriction only applies to the primary font name as
+presented to the users.
+
+4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font
+Software shall not be used to promote, endorse or advertise any
+Modified Version, except to acknowledge the contribution(s) of the
+Copyright Holder(s) and the Author(s) or with their explicit written
+permission.
+
+5) The Font Software, modified or unmodified, in part or in whole,
+must be distributed entirely under this license, and must not be
+distributed under any other license. The requirement for fonts to
+remain under this license does not apply to any document created
+using the Font Software.
+
+TERMINATION
+This license becomes null and void if any of the above conditions are
+not met.
+
+DISCLAIMER
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
+OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
+DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
+OTHER DEALINGS IN THE FONT SOFTWARE.
+```

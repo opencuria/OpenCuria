@@ -245,7 +245,14 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_blocked_inventory_does_not_block_health_or_operation_lease(self):
         import asyncio
+        from unittest.mock import patch
 
+        # Replace only this module's clock reference, not asyncio's clock.
+        fresh_host_clock = patch(
+            "src.interfaces.websocket.time", SimpleNamespace(monotonic=lambda: 1.0)
+        )
+        fresh_host_clock.start()
+        self.addCleanup(fresh_host_clock.stop)
         service = DummyService()
         blocked = asyncio.Event()
         entered = asyncio.Event()
@@ -256,7 +263,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
 
         service.inventory_for_runner = AsyncMock(side_effect=scan)
         interface = WebSocketInterface(
-            service, RunnerSettings(state_dir=tempfile.mkdtemp())
+            service, RunnerSettings(state_dir=tempfile.mkdtemp(), inventory_interval=0)
         )
         interface._sio.connected = True
         emitted = asyncio.Event()
@@ -272,13 +279,22 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         interface._sio.emit = AsyncMock(side_effect=emit)
         interface._operations.replay = AsyncMock()
         observation = asyncio.create_task(interface._observation_loop())
-        await asyncio.wait_for(entered.wait(), 1)
-        heartbeat = asyncio.create_task(interface._heartbeat_loop())
-        await asyncio.wait_for(emitted.wait(), 1)
-        interface._operations.replay.assert_any_await(recover=False)
-        heartbeat.cancel()
-        observation.cancel()
-        await asyncio.gather(heartbeat, observation)
+        heartbeat = None
+        try:
+            # Explicit inventory_interval=0 forces the scan on the first tick,
+            # even on a freshly booted CI host whose monotonic uptime is <120s.
+            # Keep initialization bounded without assuming host performance.
+            await asyncio.wait_for(entered.wait(), 10)
+            heartbeat = asyncio.create_task(interface._heartbeat_loop())
+            await asyncio.wait_for(emitted.wait(), 10)
+            interface._operations.replay.assert_any_await(recover=False)
+            assert not blocked.is_set()
+            assert not observation.done()
+        finally:
+            tasks = [task for task in (heartbeat, observation) if task is not None]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def test_start_desktop_emits_qemu_proxy_metadata(self) -> None:
         service = DummyService()

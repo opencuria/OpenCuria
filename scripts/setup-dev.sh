@@ -165,7 +165,7 @@ install_system_deps
 setup_git_hooks
 setup_python_component backend
 setup_runner_python_environment
-setup_node_component webapp
+setup_node_component .
 run_backend_migrations
 
 if [[ "$BUILD_WORKSPACE_IMAGE" -eq 1 ]]; then

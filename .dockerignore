@@ -1,0 +1,13 @@
+.git
+**/node_modules
+**/.venv
+**/__pycache__
+**/.env*
+**/dist
+**/.expo
+mobile/android
+mobile/ios
+.opencuria
+backend
+runner
+e2e

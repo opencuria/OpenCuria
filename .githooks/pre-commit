@@ -41,9 +41,9 @@ ensure_vitest_dependencies() {
   local app_dir="$1"
   local label="$2"
 
-  if [[ ! -x "$app_dir/node_modules/.bin/vitest" ]]; then
+  if [[ ! -x "$REPO_ROOT/node_modules/.bin/vitest" ]]; then
     print_section "$label dependencies"
-    if (cd "$app_dir" && npm ci); then
+    if (cd "$REPO_ROOT" && npm ci); then
       record_result "PASS" "$label dependencies installed via npm ci"
     else
       local exit_code=$?
@@ -63,7 +63,19 @@ run_test_phase() {
     "runner tests" \
     "cd '$REPO_ROOT/runner' && source .venv/bin/activate && pytest -q"
 
-  ensure_vitest_dependencies "$REPO_ROOT/webapp" "webapp"
+  ensure_vitest_dependencies "$REPO_ROOT" "Node workspaces"
+  run_command_check \
+    "shared packages tests" \
+    "cd '$REPO_ROOT' && npm run test:shared"
+  run_command_check \
+    "shared client type-check" \
+    "cd '$REPO_ROOT' && node_modules/.bin/tsc -p packages/client/tsconfig.json"
+  run_command_check \
+    "mobile type-check" \
+    "cd '$REPO_ROOT' && npm run type-check -w mobile"
+  run_command_check \
+    "mobile tests" \
+    "cd '$REPO_ROOT' && npm run test -w mobile"
   run_command_check \
     "webapp type-check" \
     "cd '$REPO_ROOT/webapp' && npm run type-check"

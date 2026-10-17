@@ -61,6 +61,8 @@ OpenCuria is a control plane for AI coding agents.
 - `backend/` is the Django API and runner control plane
 - `webapp/` is the dashboard
 - `runner/` executes Docker workspaces or QEMU VMs
+- `mobile/` is a native Expo iOS/Android client for existing OpenCuria
+  workspaces and chats
 
 Use it when you want:
 
@@ -212,6 +214,14 @@ QEMU image definitions currently require `ubuntu:<version>` as the base distro.
 When a QEMU image build is triggered, the runner downloads the matching Ubuntu
 cloud image into `RUNNER_QEMU_IMAGE_CACHE_DIR` on first use.
 
+## 📱 Native mobile app
+
+A native Expo/React Native iOS and Android client for existing OpenCuria chats
+is under [`mobile/`](./mobile/). It reuses the shared API/chat packages and the
+root npm workspace. Start with the [mobile developer guide](./mobile/README.md);
+architecture, security and device-network setup are in
+[docs/mobile-app.md](./docs/mobile-app.md).
+
 ## 📦 Images
 
 Published via GHCR:
@@ -249,6 +259,12 @@ cd backend
 .venv/bin/python manage.py migrate --noinput
 .venv/bin/uvicorn config.asgi:application --host 127.0.0.1 --port 8000 --workers 1 --lifespan on --ws websockets-sansio --ws-max-size 209715200
 ```
+
+The webapp and mobile app are npm workspaces in this repository. Install their
+dependencies once at the repository root with `npm ci` (the root
+`package-lock.json` is authoritative), then use `npm run dev:web` or
+`npm run dev:mobile`. Mobile build and local API/device networking notes are in
+the [mobile app guide](./docs/mobile-app.md).
 
 The Docker backend entrypoint runs migrations automatically and starts one Uvicorn
 ASGI worker. The worker owns the in-process scheduled-task loop alongside Socket.IO
