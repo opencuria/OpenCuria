@@ -40,6 +40,7 @@ import type {
   HarnessQuestionRequiredEvent,
   HarnessQuestionResolvedEvent,
   HarnessSessionStatusEvent,
+  HarnessSteerQueueEvent,
   HarnessSubtaskFinishedEvent,
   HarnessSubtaskStartedEvent,
   HarnessTodoUpdatedEvent,
@@ -53,6 +54,7 @@ export type {
   HarnessQuestionRequiredEvent,
   HarnessQuestionResolvedEvent,
   HarnessSessionStatusEvent,
+  HarnessSteerQueueEvent,
   HarnessSubtaskFinishedEvent,
   HarnessSubtaskStartedEvent,
   HarnessTodoUpdatedEvent,
@@ -179,6 +181,7 @@ type EventMap = {
   'harness.session_status': HarnessSessionStatusEvent
   'harness.conversations_changed': { workspace_id: string }
   'harness.todo_updated': HarnessTodoUpdatedEvent
+  'harness.steer_queue': HarnessSteerQueueEvent
   'harness.subtask_started': HarnessSubtaskStartedEvent
   'harness.subtask_finished': HarnessSubtaskFinishedEvent
   'terminal:started': TerminalStartedEvent

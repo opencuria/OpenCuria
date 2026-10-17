@@ -971,6 +971,179 @@ describe('HarnessChatInput', () => {
     const attach = wrapper.find('[data-testid="composer-attach"]')
     expect(attach.attributes('disabled')).toBeDefined()
   })
+
+  describe('while a run is active (steering)', () => {
+    beforeEach(() => sessionStorage.clear())
+
+    function editor(wrapper: VueWrapper) {
+      return wrapper.get('[data-testid="composer-textarea"]')
+    }
+
+    it('keeps the editor enabled with a steer placeholder and no amber hint', () => {
+      const wrapper = mountInput({ stoppable: true })
+
+      expect(editor(wrapper).attributes('contenteditable')).toBe('true')
+      expect(editor(wrapper).attributes('data-placeholder')).toBe('Steer the agent…')
+      expect(wrapper.text()).not.toContain('Agent is running')
+      expect(wrapper.find('.text-amber-600').exists()).toBe(false)
+    })
+
+    it('uses the regular placeholder when idle', () => {
+      const wrapper = mountInput()
+      expect(editor(wrapper).attributes('data-placeholder')).toBe(
+        'Plan or Build, / for skills, @ for context',
+      )
+    })
+
+    it('locks the pickers that only apply at run start but keeps attach usable', () => {
+      const wrapper = mountInput({ stoppable: true })
+
+      expect(
+        wrapper.get('[data-testid="composer-mode-trigger"]').attributes('disabled'),
+      ).toBeDefined()
+      expect(
+        wrapper.get('[data-testid="composer-model-trigger"]').attributes('disabled'),
+      ).toBeDefined()
+      expect(wrapper.get('[data-testid="composer-attach"]').attributes('disabled')).toBeUndefined()
+    })
+
+    it('shows only Stop while the composer is empty', async () => {
+      const wrapper = mountInput({ stoppable: true })
+
+      expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(false)
+      const stops = wrapper.findAll('[data-testid="composer-stop"]')
+      expect(stops).toHaveLength(1)
+      expect(stops[0]!.classes()).toContain('bg-primary')
+      await stops[0]!.trigger('click')
+      expect(wrapper.emitted('stop')).toHaveLength(1)
+      expect(wrapper.emitted('send')).toBeUndefined()
+    })
+
+    it('turns the primary action into Send once there is text, keeping a compact Stop', async () => {
+      const wrapper = mountInput({ stoppable: true })
+      await setEditorText(wrapper, 'Use pnpm instead')
+
+      const send = wrapper.get('[data-testid="composer-send"]')
+      expect(send.classes()).toContain('bg-primary')
+      expect(send.attributes('disabled')).toBeUndefined()
+      expect(send.attributes('title')).toBe('Steer the agent')
+      const stops = wrapper.findAll('[data-testid="composer-stop"]')
+      expect(stops).toHaveLength(1)
+      expect(stops[0]!.classes()).not.toContain('bg-primary')
+
+      await stops[0]!.trigger('click')
+      expect(wrapper.emitted('stop')).toHaveLength(1)
+      expect(editorText(wrapper)).toBe('Use pnpm instead')
+
+      await send.trigger('click')
+      expect(wrapper.emitted('send')?.[0]?.slice(0, 2)).toEqual(['Use pnpm instead', 'build'])
+      expect(editorText(wrapper)).toBe('')
+      // Back to the empty state: the primary action is Stop again.
+      expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(false)
+      expect(wrapper.findAll('[data-testid="composer-stop"]')).toHaveLength(1)
+    })
+
+    it('sends on Enter and keeps Shift+Enter for newlines', async () => {
+      const wrapper = mountInput({ stoppable: true })
+      await setEditorText(wrapper, 'steer me')
+
+      await editor(wrapper).trigger('keydown', { key: 'Enter', shiftKey: true })
+      expect(wrapper.emitted('send')).toBeUndefined()
+
+      await editor(wrapper).trigger('keydown', { key: 'Enter' })
+      expect(wrapper.emitted('send')).toHaveLength(1)
+      expect(wrapper.emitted('send')?.[0]?.[0]).toBe('steer me')
+    })
+
+    it('blocks a second send and stop while a request is in flight', async () => {
+      const wrapper = mountInput({ stoppable: true, sending: true })
+      await setEditorText(wrapper, 'steer me')
+
+      expect(wrapper.get('[data-testid="composer-send"]').attributes('disabled')).toBeDefined()
+      expect(wrapper.get('[data-testid="composer-stop"]').attributes('disabled')).toBeDefined()
+      await editor(wrapper).trigger('keydown', { key: 'Enter' })
+      expect(wrapper.emitted('send')).toBeUndefined()
+    })
+
+    it('does not offer skill suggestions for a steer', async () => {
+      const wrapper = mountInput({
+        stoppable: true,
+        mentionControlled: true,
+        skillOptions: [
+          {
+            id: 'skill-1',
+            name: 'Linear',
+            description: '',
+            content: '',
+            enabled: true,
+            created_at: '',
+            updated_at: '',
+          } as never,
+        ],
+      })
+      await setEditorText(wrapper, '/Lin')
+      editorCursor(wrapper, 4)
+      await editor(wrapper).trigger('input')
+
+      const changes = wrapper.emitted('mention-change') ?? []
+      expect(changes.some(([open]) => open === true)).toBe(false)
+    })
+
+    it('stays fully locked when the workspace cannot take prompts', () => {
+      const wrapper = mountInput({
+        stoppable: true,
+        disabled: true,
+        busyMessage: 'Workspace is not ready for prompts.',
+      })
+
+      expect(editor(wrapper).attributes('contenteditable')).toBe('false')
+      expect(wrapper.text()).toContain('Workspace is not ready for prompts.')
+      expect(wrapper.get('[data-testid="composer-attach"]').attributes('disabled')).toBeDefined()
+    })
+
+    it('restores text without losing a draft: replace by default, append after a blank line', async () => {
+      const wrapper = mountInput({ stoppable: true, sessionId: 'session-1' })
+      const vm = wrapper.vm as unknown as {
+        setPrompt(text: string, options?: { append?: boolean; focus?: boolean }): void
+      }
+
+      vm.setPrompt('first')
+      await wrapper.vm.$nextTick()
+      expect(editorText(wrapper)).toBe('first')
+
+      vm.setPrompt('second', { append: true })
+      await wrapper.vm.$nextTick()
+      expect(editorText(wrapper)).toBe('first\n\nsecond')
+      expect(sessionStorage.getItem('chat-input-ws-1-session-1')).toBe('first\n\nsecond')
+
+      vm.setPrompt('replaced')
+      await wrapper.vm.$nextTick()
+      expect(editorText(wrapper)).toBe('replaced')
+    })
+
+    it('appending onto an empty composer just sets the text', async () => {
+      const wrapper = mountInput({ stoppable: true })
+      const vm = wrapper.vm as unknown as {
+        setPrompt(text: string, options?: { append?: boolean }): void
+      }
+
+      vm.setPrompt('restored', { append: true })
+      await wrapper.vm.$nextTick()
+
+      expect(editorText(wrapper)).toBe('restored')
+    })
+
+    it('keeps the per-session draft while the run is active', async () => {
+      const wrapper = mountInput({ stoppable: true, sessionId: 'session-1' })
+      await setEditorText(wrapper, 'half-typed steer')
+
+      expect(sessionStorage.getItem('chat-input-ws-1-session-1')).toBe('half-typed steer')
+      wrapper.unmount()
+      const remounted = mountInput({ stoppable: true, sessionId: 'session-1' })
+      await flushPromises()
+      expect(editorText(remounted)).toBe('half-typed steer')
+    })
+  })
 })
 
 /** Build a FileList-like with real File objects (jsdom has File but no DataTransfer). */

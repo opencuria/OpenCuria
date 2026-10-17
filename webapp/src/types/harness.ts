@@ -21,6 +21,7 @@ export type HarnessPartType =
   | 'patch'
   | 'agent'
   | 'compaction'
+  | 'steer'
 
 /** Lifecycle states of a part (`HarnessPartState` in the backend). */
 export type HarnessPartState = 'pending' | 'running' | 'completed' | 'error'
@@ -241,6 +242,17 @@ export interface HarnessPartsOut {
   messages: HarnessMessage[]
 }
 
+/**
+ * A user message sent while the agent runs ("steering"). Queued entries are
+ * delivered into the running turn at the next step boundary; delivered ones
+ * become a `steer` part inside the assistant message.
+ */
+export interface HarnessSteer {
+  id: string
+  content: string
+  created_at: string
+}
+
 /** Org-wide harness conversation row for the dashboard feed. */
 export interface HarnessConversation {
   session_id: string
@@ -295,6 +307,10 @@ export interface HarnessPartDelta {
   /** Safe plan summary riding the live `agent` event (untrusted transport). */
   agent_meta?: Partial<HarnessAgentMeta>
   compaction?: boolean
+  /** Delivered steer text (a user message injected into the running turn). */
+  steer?: string
+  /** Id of the delivered queue entry (`meta.steer_id` on the `steer` part). */
+  steer_id?: string
   /**
    * Live tool lifecycle state.
    *
@@ -380,6 +396,13 @@ export interface HarnessSessionStatusEvent {
   user_message_id?: string
   model?: string
   reasoning_effort?: string
+}
+
+/** Full snapshot of the queued (not yet delivered) steers of a session. */
+export interface HarnessSteerQueueEvent {
+  workspace_id: string
+  session_id: string
+  steers: HarnessSteer[]
 }
 
 export interface HarnessTodoUpdatedEvent {

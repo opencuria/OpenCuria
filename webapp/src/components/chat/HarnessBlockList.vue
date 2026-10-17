@@ -11,6 +11,7 @@ import HarnessSubtaskCard from './HarnessSubtaskCard.vue'
 import HarnessPatchCard from './HarnessPatchCard.vue'
 import { isQuestionToolPart } from '@/lib/harnessBlocks'
 import HarnessCompactionRow from './HarnessCompactionRow.vue'
+import HarnessSteerRow from './HarnessSteerRow.vue'
 import HarnessPageControls from './HarnessPageControls.vue'
 import { HARNESS_PAGE_SIZE, lastHarnessPage, shouldResetHarnessPage } from '@/lib/harnessPagination'
 
@@ -167,6 +168,13 @@ function blockKey(block: RenderBlock, index: number): string {
         class="py-1"
       >
         <HarnessCompactionRow :part="entry.block.part" />
+      </div>
+      <div
+        v-else-if="entry.block.kind === 'steer'"
+        :data-block-kind="'steer'"
+        :data-part-id="entry.block.part.id"
+      >
+        <HarnessSteerRow :part="entry.block.part" />
       </div>
     </template>
   </div>

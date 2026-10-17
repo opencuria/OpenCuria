@@ -91,9 +91,16 @@ export interface ChatUploadDragState {
 }
 
 const props = defineProps<{
+  /** Composer fully locked (e.g. workspace not ready for prompts). */
   disabled?: boolean
   sending?: boolean
+  /**
+   * A run is active. The composer stays editable and sends steer the running
+   * turn; an empty composer shows Stop, typed text shows Send plus a compact
+   * Stop. Model/mode pickers lock because they only apply at run start.
+   */
   stoppable?: boolean
+  /** Reason the composer is unavailable (shown below the card). */
   busyMessage?: string
   workspaceId?: string
   sessionId?: string | null
@@ -210,8 +217,25 @@ const selectedSkills = computed(() =>
   (props.skillOptions ?? []).filter((skill) => selectedSkillIds.value.includes(skill.id)),
 )
 
-const canSend = computed(() => prompt.value.trim().length > 0 && !props.disabled && !props.sending)
+const hasText = computed(() => prompt.value.trim().length > 0)
+const canSend = computed(() => hasText.value && !props.disabled && !props.sending)
 const canStop = computed(() => Boolean(props.stoppable) && !props.sending)
+/** A run is active in a chat composer: sends steer it instead of starting one. */
+const steering = computed(() => Boolean(props.stoppable) && !isScheduledTask.value)
+/** Empty composer while steering: the primary action is Stop. */
+const primaryIsStop = computed(() => steering.value && !hasText.value)
+const primaryEnabled = computed(() => (primaryIsStop.value ? canStop.value : canSend.value))
+const primaryTitle = computed(() => {
+  if (primaryIsStop.value) return 'Stop current run'
+  return steering.value ? 'Steer the agent' : 'Send'
+})
+const pickersLocked = computed(() => Boolean(props.disabled) || steering.value)
+const composerPlaceholder = computed(() => {
+  if (isScheduledTask.value) {
+    return 'Describe the recurring work… Use / for skills and @ for context'
+  }
+  return steering.value ? 'Steer the agent…' : 'Plan or Build, / for skills, @ for context'
+})
 const canManageFiles = computed(
   () =>
     !props.disabled &&
@@ -929,11 +953,18 @@ function clearInput(): void {
 /**
  * Prefill the composer without sending (OpenCode fork parity: navigate
  * with prompt). Persists to the per-session cache so it survives remounts.
+ * `append` keeps existing text and adds `text` after a blank line (restoring
+ * withdrawn or stopped steers); `focus` moves the caret to the end.
  */
-function setPrompt(text: string): void {
-  prompt.value = text
-  if (!isScheduledTask.value) saveToCache(text)
+function setPrompt(text: string, options: { append?: boolean; focus?: boolean } = {}): void {
+  // Appending keeps what the user already typed; restored text follows after
+  // a blank line.
+  const current = prompt.value.replace(/\s+$/, '')
+  const next = options.append && current ? `${current}\n\n${text}` : text
+  prompt.value = next
+  if (!isScheduledTask.value) saveToCache(next)
   void nextTick(resizeTextarea)
+  if (options.focus) focusTextarea()
 }
 
 const fileExplorer = useFileExplorerStore()
@@ -1119,7 +1150,8 @@ function refreshComposerQuery(): void {
     scheduleMentionFileSearch(mention)
     return
   }
-  const slash = detectSlashQuery(text, cursor)
+  // Skills only apply at run start; a steer cannot carry them.
+  const slash = steering.value ? null : detectSlashQuery(text, cursor)
   if (slash !== null) {
     if (composerKind.value === 'mention') cancelMentionFileSearch()
     composerKind.value = 'skill'
@@ -1300,11 +1332,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
               ref="textareaRef"
               v-model="prompt"
               :disabled="disabled"
-              :placeholder="
-                isScheduledTask
-                  ? 'Describe the recurring work… Use / for skills and @ for context'
-                  : 'Plan or Build, / for skills, @ for context'
-              "
+              :placeholder="composerPlaceholder"
               :aria-label="isScheduledTask ? 'Scheduled task prompt' : 'Chat prompt'"
               :aria-invalid="isScheduledTask ? Boolean(promptError) : undefined"
               :aria-describedby="isScheduledTask && promptError ? 'task-prompt-error' : undefined"
@@ -1388,7 +1416,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
                     size="sm"
                     class="h-8 min-w-0 max-w-full shrink gap-1.5 rounded-full px-2.5 text-xs font-medium"
                     data-testid="composer-mode-trigger"
-                    :disabled="disabled"
+                    :disabled="pickersLocked"
                   >
                     <component :is="modeIcon" :size="14" class="shrink-0" />
                     <span class="min-w-0 truncate">{{ modeMenuLabel }}</span>
@@ -1488,7 +1516,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
                 :recent-models="recentModels"
                 :recent-efforts="localHarnessId === 'native' ? recentEntries : []"
                 :loading="modelLoading"
-                :disabled="disabled"
+                :disabled="pickersLocked"
                 :default-model-label="isScheduledTask ? 'Agent default' : 'Select model…'"
                 :allow-default="isScheduledTask"
                 @update:model="setModel"
@@ -1559,36 +1587,35 @@ function onComposerKeydown(e: KeyboardEvent): void {
                 />
               </div>
               <Button
-                v-if="stoppable && !isScheduledTask"
-                :disabled="!canStop"
+                v-if="steering && hasText"
+                type="button"
+                variant="ghost"
                 size="icon"
-                class="h-8 w-8 shrink-0 rounded-full transition-all"
-                :class="
-                  canStop
-                    ? 'bg-primary text-primary-foreground hover:bg-primary/90'
-                    : 'bg-muted text-muted-foreground'
-                "
+                class="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+                :disabled="!canStop"
                 title="Stop current run"
+                aria-label="Stop current run"
                 data-testid="composer-stop"
                 @click="emit('stop')"
               >
                 <Square :size="14" />
               </Button>
               <Button
-                v-else-if="!isScheduledTask"
-                :disabled="!canSend"
+                v-if="!isScheduledTask"
+                :disabled="!primaryEnabled"
                 size="icon"
                 class="h-8 w-8 shrink-0 rounded-full transition-all"
                 :class="
-                  canSend
+                  primaryEnabled
                     ? 'bg-primary text-primary-foreground hover:bg-primary/90'
                     : 'bg-muted text-muted-foreground'
                 "
-                title="Send"
-                data-testid="composer-send"
-                @click="handleSend"
+                :title="primaryTitle"
+                :data-testid="primaryIsStop ? 'composer-stop' : 'composer-send'"
+                @click="primaryIsStop ? emit('stop') : handleSend()"
               >
-                <Send :size="16" />
+                <Square v-if="primaryIsStop" :size="14" />
+                <Send v-else :size="16" />
               </Button>
             </div>
           </div>

@@ -143,6 +143,7 @@ const composerSheets = computed(() =>
         : null,
     questions: activeQuestions.value,
     permissions: activeRequests.value,
+    queue: harness.activeQueuedSteers,
     notice: activeNotice.value,
     todos: harness.activeTodos,
     processesOpen: Boolean(props.processesOpen),
@@ -153,7 +154,7 @@ const composerSheets = computed(() =>
 
 const chatInputRef = ref<{
   chooseMention: (candidate: MentionCandidate) => void
-  setPrompt: (text: string) => void
+  setPrompt: (text: string, options?: { append?: boolean; focus?: boolean }) => void
   uploadChatFiles: (files: File[] | FileList) => Promise<void>
 } | null>(null)
 
@@ -161,8 +162,8 @@ const chatInputRef = ref<{
  * Chat-wide drop zone: files dropped anywhere over history + composer
  * upload into `/workspace/.opencuria/user-uploaded` and insert an `@file:`
  * token. Subtle composer highlight only (no overlay). Ignored while the
- * workspace is not ready for prompts (`inputDisabled` covers stopped,
- * offline and busy sessions).
+ * workspace is not ready for prompts (`inputDisabled`); a running session
+ * still accepts uploads because its composer steers the run.
  */
 const chatDragCounter = ref(0)
 const chatDragActive = ref(false)
@@ -301,16 +302,14 @@ const messageActionsDisabled = computed(
   () => !props.canPrompt || isSubagentSession.value || activeSession.value?.status === 'busy',
 )
 
-const inputDisabled = computed(() => !props.canPrompt || activeSession.value?.status === 'busy')
+/** A running session keeps its composer: new messages steer the run. */
+const inputDisabled = computed(() => !props.canPrompt)
 const inputStoppable = computed(() =>
   Boolean(props.canPrompt && activeSession.value?.status === 'busy'),
 )
-const busyMessage = computed(() => {
-  if (!props.canPrompt) return 'Workspace is not ready for prompts.'
-  if (activeSession.value?.status === 'busy')
-    return 'Agent is running — stop or wait to send another message.'
-  return undefined
-})
+const busyMessage = computed(() =>
+  props.canPrompt ? undefined : 'Workspace is not ready for prompts.',
+)
 
 const cleanupFns: Array<() => void> = []
 
@@ -366,6 +365,14 @@ function setupSocketListeners(): void {
   )
 
   cleanupFns.push(
+    onEvent('harness.steer_queue', (data) => {
+      if (data.workspace_id === props.workspaceId) {
+        harness.handleSteerQueue(data.session_id, data.steers)
+      }
+    }),
+  )
+
+  cleanupFns.push(
     onEvent('harness.subtask_started', (data) => {
       if (data.workspace_id === props.workspaceId) {
         harness.handleSubtaskStarted(data.session_id, {
@@ -415,6 +422,11 @@ function setupSocketListeners(): void {
           message_id: data.message_id,
           user_message_id: data.user_message_id,
         })
+        if (data.status === 'busy' && data.user_message_id) {
+          // A run opened by the server (queued steer follow-up) brings a user
+          // message this client has not loaded yet.
+          void harness.ensureUserTurnLoaded(data.session_id, data.user_message_id)
+        }
         if (data.status === 'idle') {
           void harness.refreshPartsAfterIdle(data.session_id)
           void harness.fetchTodos(data.session_id)
@@ -607,7 +619,8 @@ async function handleSend(
   if (!props.canPrompt || isSubagentSession.value) return
   sending.value = true
   try {
-    if (!harness.activeSessionId) {
+    const sessionId = harness.activeSessionId
+    if (!sessionId) {
       await harness.createSession(
         props.workspaceId,
         prompt,
@@ -617,8 +630,19 @@ async function handleSend(
         effort,
         harnessId,
       )
+    } else if (activeSession.value?.status === 'busy') {
+      // The composer already cleared itself; give the text back on failure.
+      const accepted = await harness.steerSession(sessionId, prompt, {
+        mode,
+        model,
+        skillIds,
+        reasoningEffort: effort,
+      })
+      if (!accepted && harness.activeSessionId === sessionId) {
+        chatInputRef.value?.setPrompt(prompt, { append: true })
+      }
     } else {
-      await harness.sendMessage(harness.activeSessionId, prompt, {
+      await harness.sendMessage(sessionId, prompt, {
         mode,
         model,
         skillIds,
@@ -631,8 +655,22 @@ async function handleSend(
 }
 
 async function handleStop(): Promise<void> {
-  if (!props.canPrompt || !harness.activeSessionId) return
-  await harness.abortSession(harness.activeSessionId)
+  const sessionId = harness.activeSessionId
+  if (!props.canPrompt || !sessionId) return
+  const restored = await harness.abortSession(sessionId)
+  // Stopping drops the queue server-side: put the unsent messages back.
+  if (restored?.length && harness.activeSessionId === sessionId && !isSubagentSession.value) {
+    chatInputRef.value?.setPrompt(restored.join('\n\n'), { append: true })
+  }
+}
+
+async function handleWithdrawSteer(steerId: string): Promise<void> {
+  const sessionId = harness.activeSessionId
+  if (!props.canPrompt || !sessionId) return
+  const text = await harness.withdrawSteer(sessionId, steerId)
+  if (text && harness.activeSessionId === sessionId) {
+    chatInputRef.value?.setPrompt(text, { append: true, focus: true })
+  }
 }
 
 async function handleResolve(
@@ -736,6 +774,7 @@ async function handleForkMessage(messageId: string): Promise<void> {
           @close-context="handleCloseContext"
           @close-processes="handleCloseProcesses"
           @dismiss-notice="handleDismissNotice"
+          @withdraw-steer="handleWithdrawSteer"
         />
         <HarnessChatInput
           ref="chatInputRef"

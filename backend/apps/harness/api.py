@@ -41,7 +41,11 @@ from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
-from .timeline import project_question_definitions, timeline_part_payload
+from .timeline import (
+    TIMELINE_TEXT_PART_TYPES,
+    project_question_definitions,
+    timeline_part_payload,
+)
 
 harness_router = Router(tags=["harness"])
 
@@ -161,6 +165,20 @@ class HarnessMessageIn(Schema):
     model: str = ""
     reasoning_effort: str = ""
     skill_ids: list[str] = []
+
+
+class HarnessSteerIn(Schema):
+    """Request schema for a message sent into a running turn."""
+
+    prompt: str
+
+
+class HarnessSteerOut(Schema):
+    """A queued (or withdrawn) message addressed to a running turn."""
+
+    id: uuid.UUID
+    content: str
+    created_at: datetime
 
 
 class HarnessForkIn(Schema):
@@ -1142,6 +1160,80 @@ async def send_harness_message(
         return 400, {"detail": str(exc), "code": "validation_error"}
 
 
+def _steer_to_out(entry) -> HarnessSteerOut:  # type: ignore[no-untyped-def]
+    """Map a :class:`SteerEntry` to its response schema."""
+    return HarnessSteerOut(
+        id=uuid.UUID(entry.id), content=entry.content, created_at=entry.created_at
+    )
+
+
+@harness_router.post(
+    "/harness/sessions/{session_id}/steer",
+    response={202: HarnessSteerOut, 400: dict, 403: dict, 404: dict, 409: dict},
+    summary="Send a message into the running turn of a harness session",
+)
+async def steer_harness_session(
+    request: HttpRequest, session_id: uuid.UUID, payload: HarnessSteerIn
+):
+    """Queue a message the active run picks up at its next step boundary.
+
+    Answers 409 ``no_active_run`` when the run already ended; clients then
+    send the message as a regular prompt. A message still queued when the
+    run settles automatically starts a follow-up run.
+    """
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+    from asgiref.sync import sync_to_async
+
+    org_id = _get_org_id(request)
+    await sync_to_async(OrganizationService().require_membership)(request.user, org_id)
+    try:
+        service = _resolve_harness_service()
+        session = await sync_to_async(service.get_session)(session_id)
+        await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
+        _require_claude_session_owner(session, request.user.id)
+        entry = await service.steer_run(
+            session, payload.prompt, user_id=request.user.id
+        )
+        return 202, _steer_to_out(entry)
+    except AuthenticationError as exc:
+        return 403, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except ConflictError as exc:
+        return 409, {"detail": exc.message, "code": exc.code}
+    except (ValueError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+@harness_router.delete(
+    "/harness/sessions/{session_id}/steer/{steer_id}",
+    response={200: HarnessSteerOut, 403: dict, 404: dict},
+    summary="Withdraw a queued message before the running turn picked it up",
+)
+async def withdraw_harness_steer(
+    request: HttpRequest, session_id: uuid.UUID, steer_id: uuid.UUID
+):
+    """Remove a queued message; 404 ``not_found`` once the run consumed it."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
+        return _perm_denied(APIKeyPermission.HARNESS_RUN)
+    from asgiref.sync import sync_to_async
+
+    org_id = _get_org_id(request)
+    await sync_to_async(OrganizationService().require_membership)(request.user, org_id)
+    try:
+        service = _resolve_harness_service()
+        session = await sync_to_async(service.get_session)(session_id)
+        await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
+        _require_claude_session_owner(session, request.user.id)
+        entry = await service.withdraw_steer(session, str(steer_id))
+        return 200, _steer_to_out(entry)
+    except AuthenticationError as exc:
+        return 403, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+
+
 @harness_router.post(
     "/harness/sessions/{session_id}/fork",
     response={201: HarnessSessionOut, 400: dict, 403: dict, 404: dict},
@@ -1489,7 +1581,7 @@ def _harness_conversation_payload(
                 payload = timeline_part_payload(
                     part,
                     text_output=getattr(part, "timeline_output", "")
-                    if part.type == "text"
+                    if part.type in TIMELINE_TEXT_PART_TYPES
                     else None,
                 )
             else:
@@ -1565,6 +1657,9 @@ def _harness_conversation_payload(
                 session.id, include_descendants=True
             ),
             "questions": pending_questions,
+            "steers": [
+                entry.to_payload() for entry in service.list_pending_steers(session.id)
+            ],
         }
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}

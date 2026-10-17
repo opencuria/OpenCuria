@@ -19,6 +19,7 @@ import type {
   HarnessSession,
   HarnessSessionMode,
   HarnessId,
+  HarnessSteer,
   HarnessTodo,
 } from '@/types/harness'
 import {
@@ -37,6 +38,8 @@ import {
   resolveHarnessQuestion,
   sendHarnessMessage,
   setSessionMode,
+  steerHarnessSession,
+  withdrawHarnessSteer,
 } from '@/services/harness.api'
 import { ApiRequestError } from '@/services/api'
 import { hydrateHarnessPart } from '@/lib/toolDisplay'
@@ -47,6 +50,7 @@ import {
   applyTodoUpdate,
   ensureAssistantMessage,
   ensureBusyAssistant,
+  hasDeliveredSteer,
   mergeBusyFetchedMessages,
   routeAssistantMessage,
   settleOpenStreamParts,
@@ -68,6 +72,14 @@ import { useWorkspaceStore } from './workspaces'
 import { useNotificationStore } from './notifications'
 import { useHarnessConversationStore } from './harnessConversations'
 
+/** Run options of a new user turn (a steer falls back to them when the run ended). */
+interface SendOptions {
+  mode?: HarnessSessionMode
+  model?: string
+  skillIds?: string[]
+  reasoningEffort?: string
+}
+
 export const useHarnessStore = defineStore('harness', () => {
   // --- State ---
   const sessions = ref<HarnessSession[]>([])
@@ -79,6 +91,8 @@ export const useHarnessStore = defineStore('harness', () => {
   const pendingPermissions = ref<Record<string, HarnessPermissionRequest>>({})
   /** Pending question requests keyed by request id. */
   const pendingQuestions = ref<Record<string, HarnessQuestionRequest>>({})
+  /** Queued (not yet delivered) steers keyed by session id, FIFO. */
+  const queuedSteers = ref<Record<string, HarnessSteer[]>>({})
   const activeSessionId = ref<string | null>(null)
   /** Session currently open in the chat panel; cleared when the panel unmounts. */
   const viewingSessionId = ref<string | null>(null)
@@ -120,6 +134,13 @@ export const useHarnessStore = defineStore('harness', () => {
   let sessionsGeneration = 0
   let activeSessionsWorkspace: string | null = null
   const readFlights = new Map<string, Promise<boolean>>()
+  /**
+   * Bumped whenever a session's steer queue changes. Responses that were in
+   * flight while a newer socket snapshot landed must not overwrite it.
+   */
+  const steerRevisions = new Map<string, number>()
+  /** Sessions with a user-initiated turn request in flight (they fetch themselves). */
+  const userTurnRequests = new Map<string, number>()
 
   // --- Getters ---
   const activeSession = computed(
@@ -132,6 +153,10 @@ export const useHarnessStore = defineStore('harness', () => {
 
   const activeTodos = computed<HarnessTodo[]>(() =>
     activeSessionId.value ? (todosBySession.value[activeSessionId.value] ?? []) : [],
+  )
+
+  const activeQueuedSteers = computed<HarnessSteer[]>(() =>
+    activeSessionId.value ? (queuedSteers.value[activeSessionId.value] ?? []) : [],
   )
 
   const activeLineageIds = computed(() => {
@@ -321,6 +346,8 @@ export const useHarnessStore = defineStore('harness', () => {
     dismissedNoticeIds.value = dismissed
     delete messagesBySession.value[sessionId]
     delete todosBySession.value[sessionId]
+    delete queuedSteers.value[sessionId]
+    steerRevisions.delete(sessionId)
   }
 
   /** Keep only a small LRU of unprotected inactive transcripts. */
@@ -380,6 +407,8 @@ export const useHarnessStore = defineStore('harness', () => {
     todosBySession.value = {}
     pendingPermissions.value = {}
     pendingQuestions.value = {}
+    queuedSteers.value = {}
+    steerRevisions.clear()
     dismissedNoticeIds.value = {}
     readFlights.clear()
   }
@@ -666,6 +695,7 @@ export const useHarnessStore = defineStore('harness', () => {
       flight = (async () => {
         const auth = useAuthStore()
         const identity = { userId: auth.user?.id, organizationId: auth.activeOrganizationId }
+        const steerRevision = steerRevisions.get(sessionId) ?? 0
         try {
           const response = await listHarnessParts(sessionId)
           if (partGenerations.get(sessionId) !== generation) return
@@ -744,6 +774,11 @@ export const useHarnessStore = defineStore('harness', () => {
             nextQuestions[request.request_id] = { ...request, status: 'pending' }
           }
           pendingQuestions.value = nextQuestions
+          // A socket snapshot that landed while this request was in flight is
+          // newer than the response; an absent field (older backend) is no news.
+          if (response.steers && (steerRevisions.get(sessionId) ?? 0) === steerRevision) {
+            setQueuedSteers(sessionId, response.steers)
+          }
           if (hydrateChildren) {
             const childIds = collectRunningChildSessionIds(messagesBySession.value[sessionId] ?? [])
             await Promise.all(childIds.map((childId) => fetchParts(childId, false)))
@@ -851,17 +886,46 @@ export const useHarnessStore = defineStore('harness', () => {
     }
   }
 
-  async function sendMessage(
+  /** Mark a user-initiated turn request so the matching busy event skips its own fetch. */
+  async function trackUserTurn<T>(sessionId: string, request: () => Promise<T>): Promise<T> {
+    userTurnRequests.set(sessionId, (userTurnRequests.get(sessionId) ?? 0) + 1)
+    try {
+      return await request()
+    } finally {
+      const remaining = (userTurnRequests.get(sessionId) ?? 1) - 1
+      if (remaining > 0) userTurnRequests.set(sessionId, remaining)
+      else userTurnRequests.delete(sessionId)
+    }
+  }
+
+  /**
+   * A run can start without this client asking for it (the follow-up of a
+   * queued steer, another tab, a schedule). Load the transcript when the
+   * user message that opened the run is unknown locally.
+   */
+  async function ensureUserTurnLoaded(sessionId: string, userMessageId: string): Promise<void> {
+    if (userTurnRequests.has(sessionId)) return
+    if (!sessions.value.some((item) => item.id === sessionId)) return
+    const messages = messagesBySession.value[sessionId] ?? []
+    if (messages.some((message) => message.id === userMessageId)) return
+    await fetchParts(sessionId)
+  }
+
+  /** Send a follow-up message; resolves `true` once the server accepted it. */
+  function sendMessage(
     sessionId: string,
     prompt: string,
-    options: {
-      mode?: HarnessSessionMode
-      model?: string
-      skillIds?: string[]
-      reasoningEffort?: string
-    } = {},
-  ): Promise<void> {
-    if (sessionTransitioning(sessionId)) return
+    options: SendOptions = {},
+  ): Promise<boolean> {
+    return trackUserTurn(sessionId, () => sendMessageRequest(sessionId, prompt, options))
+  }
+
+  async function sendMessageRequest(
+    sessionId: string,
+    prompt: string,
+    options: SendOptions,
+  ): Promise<boolean> {
+    if (sessionTransitioning(sessionId)) return false
     const notifications = useNotificationStore()
     try {
       const previousSession = sessions.value.find((item) => item.id === sessionId)
@@ -879,8 +943,87 @@ export const useHarnessStore = defineStore('harness', () => {
       await fetchParts(sessionId)
       if ((session.harness_id ?? previousSession?.harness_id) !== 'claude')
         recordRecentModelUsage(options.model ?? '', options.reasoningEffort ?? '')
+      return true
     } catch (e: unknown) {
       notifications.error('Prompt failed', e instanceof Error ? e.message : 'Unknown error')
+      return false
+    }
+  }
+
+  /** Replace a session's steer queue (idempotent snapshot semantics). */
+  function setQueuedSteers(sessionId: string, steers: HarnessSteer[]): void {
+    steerRevisions.set(sessionId, (steerRevisions.get(sessionId) ?? 0) + 1)
+    if (steers.length === 0) delete queuedSteers.value[sessionId]
+    else queuedSteers.value[sessionId] = steers.map((steer) => ({ ...steer }))
+  }
+
+  /**
+   * Send a message into the running turn. It is queued server-side and flows
+   * into the run at the next step boundary. Resolves `true` when the message
+   * was accepted (queued, or sent as a normal prompt because the run had just
+   * ended) and `false` when it failed so the composer can keep the text.
+   */
+  async function steerSession(
+    sessionId: string,
+    prompt: string,
+    fallback: SendOptions = {},
+  ): Promise<boolean> {
+    if (sessionTransitioning(sessionId)) return false
+    const notifications = useNotificationStore()
+    const revision = steerRevisions.get(sessionId) ?? 0
+    try {
+      const steer = await steerHarnessSession(sessionId, prompt)
+      const queue = queuedSteers.value[sessionId] ?? []
+      // The socket snapshot normally lands first; only fill the gap. A newer
+      // snapshot (delivery, discard, abort) or an already delivered steer
+      // must never be resurrected by this late response.
+      if (
+        revision === (steerRevisions.get(sessionId) ?? 0) &&
+        sessions.value.some((item) => item.id === sessionId) &&
+        !queue.some((item) => item.id === steer.id) &&
+        !hasDeliveredSteer(messagesBySession.value[sessionId] ?? [], steer.id)
+      ) {
+        setQueuedSteers(sessionId, [...queue, steer])
+      }
+      return true
+    } catch (e: unknown) {
+      // The run ended between the click and the request: send a regular turn.
+      if (e instanceof ApiRequestError && e.status === 409 && e.code === 'no_active_run') {
+        return sendMessage(sessionId, prompt, fallback)
+      }
+      notifications.error('Steer failed', e instanceof Error ? e.message : 'Unknown error')
+      return false
+    }
+  }
+
+  /**
+   * Withdraw a queued steer. Resolves with its text to put back into the
+   * composer, or `null` when it was already delivered (or the call failed).
+   */
+  async function withdrawSteer(sessionId: string, steerId: string): Promise<string | null> {
+    if (sessionTransitioning(sessionId)) return null
+    const notifications = useNotificationStore()
+    const dropLocal = (): void => {
+      const queue = queuedSteers.value[sessionId] ?? []
+      if (queue.some((item) => item.id === steerId)) {
+        setQueuedSteers(
+          sessionId,
+          queue.filter((item) => item.id !== steerId),
+        )
+      }
+    }
+    try {
+      const steer = await withdrawHarnessSteer(sessionId, steerId)
+      dropLocal()
+      return steer.content
+    } catch (e: unknown) {
+      if (e instanceof ApiRequestError && e.status === 404) {
+        // Delivered in the meantime: it is part of the run now, not queued.
+        dropLocal()
+        return null
+      }
+      notifications.error('Withdraw failed', e instanceof Error ? e.message : 'Unknown error')
+      return null
     }
   }
 
@@ -922,14 +1065,26 @@ export const useHarnessStore = defineStore('harness', () => {
     }
   }
 
-  async function abortSession(sessionId: string): Promise<void> {
-    if (sessionTransitioning(sessionId)) return
+  /**
+   * Stop the running turn. The server drops queued steers on abort; the texts
+   * that were queued (and not delivered meanwhile) are returned so the
+   * composer can restore them. Resolves empty when the abort failed.
+   */
+  async function abortSession(sessionId: string): Promise<string[]> {
+    if (sessionTransitioning(sessionId)) return []
     const notifications = useNotificationStore()
+    const queued = [...(queuedSteers.value[sessionId] ?? [])]
     try {
       const session = await abortHarnessSession(sessionId)
       upsertSession(session)
+      if (queuedSteers.value[sessionId]) setQueuedSteers(sessionId, [])
+      const messages = messagesBySession.value[sessionId] ?? []
+      return queued
+        .filter((steer) => !hasDeliveredSteer(messages, steer.id))
+        .map((steer) => steer.content)
     } catch (e: unknown) {
       notifications.error('Abort failed', e instanceof Error ? e.message : 'Unknown error')
+      return []
     }
   }
 
@@ -984,24 +1139,26 @@ export const useHarnessStore = defineStore('harness', () => {
   ): Promise<void> {
     if (sessionTransitioning(sessionId)) return
     const notifications = useNotificationStore()
-    try {
-      invalidatePartDetails(sessionId, true)
-      const session = await editHarnessMessage(sessionId, messageId, {
-        prompt,
-        mode: options.mode,
-        model: options.model,
-        skill_ids: options.skillIds,
-        reasoning_effort: options.reasoningEffort,
-      })
-      upsertSession(session)
-      await fetchParts(sessionId)
-    } catch (e: unknown) {
-      if (e instanceof ApiRequestError && e.status === 409) {
-        notifications.error('Agent is running — stop it before editing this message.', e.message)
-        return
+    await trackUserTurn(sessionId, async () => {
+      try {
+        invalidatePartDetails(sessionId, true)
+        const session = await editHarnessMessage(sessionId, messageId, {
+          prompt,
+          mode: options.mode,
+          model: options.model,
+          skill_ids: options.skillIds,
+          reasoning_effort: options.reasoningEffort,
+        })
+        upsertSession(session)
+        await fetchParts(sessionId)
+      } catch (e: unknown) {
+        if (e instanceof ApiRequestError && e.status === 409) {
+          notifications.error('Agent is running — stop it before editing this message.', e.message)
+          return
+        }
+        notifications.error('Edit failed', e instanceof Error ? e.message : 'Unknown error')
       }
-      notifications.error('Edit failed', e instanceof Error ? e.message : 'Unknown error')
-    }
+    })
   }
 
   function upsertSession(session: HarnessSession): void {
@@ -1064,6 +1221,11 @@ export const useHarnessStore = defineStore('harness', () => {
       todos,
     })
     trimInactiveTranscripts()
+  }
+
+  /** `harness.steer_queue`: full snapshot of the queued steers. */
+  function handleSteerQueue(sessionId: string, steers: HarnessSteer[] | undefined): void {
+    setQueuedSteers(sessionId, steers ?? [])
   }
 
   function handleSubtaskStarted(
@@ -1389,6 +1551,7 @@ export const useHarnessStore = defineStore('harness', () => {
     todosBySession,
     pendingPermissions,
     pendingQuestions,
+    queuedSteers,
     activeSessionId,
     viewingSessionId,
     loading,
@@ -1404,6 +1567,7 @@ export const useHarnessStore = defineStore('harness', () => {
     activeSession,
     activeMessages,
     activeTodos,
+    activeQueuedSteers,
     activePermissionRequests,
     activeQuestionRequests,
     rootSessions,
@@ -1422,6 +1586,9 @@ export const useHarnessStore = defineStore('harness', () => {
     fetchTodos,
     createSession,
     sendMessage,
+    steerSession,
+    withdrawSteer,
+    ensureUserTurnLoaded,
     forkSession,
     editMessage,
     renameSession,
@@ -1444,6 +1611,7 @@ export const useHarnessStore = defineStore('harness', () => {
     messagesFor,
     handlePartUpdated,
     handleTodoUpdated,
+    handleSteerQueue,
     handleSubtaskStarted,
     handleSubtaskFinished,
     handleSessionStatus,

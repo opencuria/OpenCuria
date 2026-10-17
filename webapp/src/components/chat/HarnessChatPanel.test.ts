@@ -6,6 +6,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import HarnessChatPanel from './HarnessChatPanel.vue'
 import { useHarnessStore } from '@/stores/harness'
 import { listHarnessSessions, markHarnessSessionRead } from '@/services/harness.api'
+import { onEvent } from '@/services/socket'
 import { armComposerTransition, clearComposerTransition } from '@/lib/composerTransition'
 import type { HarnessSession } from '@/types/harness'
 
@@ -65,13 +66,15 @@ const HarnessChatInputStub = {
     'mode',
     'model',
     'effort',
+    'busyMessage',
   ],
   emits: ['prefill', 'send', 'stop', 'update:harnessId', 'update:mode'],
   methods: {
-    setPrompt(prompt: string) {
+    setPrompt(prompt: string, options?: { append?: boolean; focus?: boolean }) {
       ;(this as unknown as { $emit: (event: string, ...args: unknown[]) => void }).$emit(
         'prefill',
         prompt,
+        ...(options ? [options] : []),
       )
     },
     uploadChatFiles(_files: File[] | FileList) {
@@ -297,7 +300,7 @@ describe('HarnessChatPanel', () => {
     })
     await flushPromises()
     const store = useHarnessStore()
-    const send = vi.spyOn(store, 'sendMessage').mockResolvedValue(undefined)
+    const send = vi.spyOn(store, 'sendMessage').mockResolvedValue(true)
     const create = vi.spyOn(store, 'createSession')
     wrapper
       .findComponent(HarnessChatInputStub)
@@ -411,7 +414,7 @@ describe('HarnessChatPanel', () => {
     expect(input.props('stopOnly')).toBe(true)
     expect(input.props('stoppable')).toBe(true)
     expect(input.props('disabled')).toBe(true)
-    const stop = vi.spyOn(store, 'abortSession').mockResolvedValue(undefined)
+    const stop = vi.spyOn(store, 'abortSession').mockResolvedValue([])
     input.vm.$emit('stop')
     await flushPromises()
     expect(stop).toHaveBeenCalledWith('session-child')
@@ -859,8 +862,8 @@ describe('HarnessChatPanel', () => {
     expect(stack.props('questionSubmitting')).toBe(true)
     const edit = vi.spyOn(store, 'editMessage').mockResolvedValue(undefined)
     const fork = vi.spyOn(store, 'forkSession').mockResolvedValue(null)
-    const send = vi.spyOn(store, 'sendMessage').mockResolvedValue(undefined)
-    const stop = vi.spyOn(store, 'abortSession').mockResolvedValue(undefined)
+    const send = vi.spyOn(store, 'sendMessage').mockResolvedValue(true)
+    const stop = vi.spyOn(store, 'abortSession').mockResolvedValue([])
     container.vm.$emit('edit', 'user-1', 'edited')
     container.vm.$emit('fork', 'user-1')
     input.vm.$emit('send', 'blocked', 'build', 'm', [], '')
@@ -1223,5 +1226,223 @@ describe('HarnessChatPanel', () => {
     expect(store.messagesBySession['session-root']).toHaveLength(1)
     const container = wrapper.findComponent({ name: 'HarnessChatContainer' })
     expect(container.props('loading')).toBe(false)
+  })
+
+  describe('steering a running session', () => {
+    async function mountBusyRoot() {
+      const wrapper = mount(HarnessChatPanel, {
+        props: { workspaceId: 'ws-1', canPrompt: true },
+        global: { plugins: [router], stubs },
+      })
+      await flushPromises()
+      const store = useHarnessStore()
+      store.sessions = [makeSession({ status: 'busy' })]
+      store.setActiveSession('session-root')
+      await flushPromises()
+      return { wrapper, store, input: wrapper.findComponent(HarnessChatInputStub) }
+    }
+
+    function makeSteer(id: string, content = `Steer ${id}`) {
+      return { id, content, created_at: '2026-10-16T10:00:00Z' }
+    }
+
+    function socketHandlers(): Record<string, (data: unknown) => void> {
+      const handlers: Record<string, (data: unknown) => void> = {}
+      vi.mocked(onEvent).mockImplementation(((event: string, handler: (data: unknown) => void) => {
+        handlers[event] = handler
+        return () => {}
+      }) as unknown as typeof onEvent)
+      return handlers
+    }
+
+    it('keeps the composer enabled and stoppable while busy, without a busy message', async () => {
+      const { input } = await mountBusyRoot()
+
+      expect(input.props('disabled')).toBe(false)
+      expect(input.props('stoppable')).toBe(true)
+      expect(input.props('busyMessage')).toBeUndefined()
+    })
+
+    it('keeps the composer locked with a reason when the workspace is not ready', async () => {
+      const { wrapper, input } = await mountBusyRoot()
+      await wrapper.setProps({ canPrompt: false })
+
+      expect(input.props('disabled')).toBe(true)
+      expect(input.props('busyMessage')).toBe('Workspace is not ready for prompts.')
+    })
+
+    it('sends a busy-session message as a steer, never as a new turn', async () => {
+      const { store, input } = await mountBusyRoot()
+      const steer = vi.spyOn(store, 'steerSession').mockResolvedValue(true)
+      const send = vi.spyOn(store, 'sendMessage').mockResolvedValue(true)
+
+      input.vm.$emit('send', 'Use pnpm', 'build', 'm', ['skill-1'], 'high', 'native')
+      await flushPromises()
+
+      expect(steer).toHaveBeenCalledWith('session-root', 'Use pnpm', {
+        mode: 'build',
+        model: 'm',
+        skillIds: ['skill-1'],
+        reasoningEffort: 'high',
+      })
+      expect(send).not.toHaveBeenCalled()
+      expect(input.emitted('prefill')).toBeUndefined()
+    })
+
+    it('puts the text back into the composer when the steer failed', async () => {
+      const { store, input } = await mountBusyRoot()
+      vi.spyOn(store, 'steerSession').mockResolvedValue(false)
+
+      input.vm.$emit('send', 'Use pnpm', 'build', 'm', [], '', 'native')
+      await flushPromises()
+
+      expect(input.emitted('prefill')).toEqual([['Use pnpm', { append: true }]])
+    })
+
+    it('does not restore into another session after the user switched away', async () => {
+      const { store, input } = await mountBusyRoot()
+      let resolveSteer: (accepted: boolean) => void = () => {}
+      vi.spyOn(store, 'steerSession').mockReturnValue(
+        new Promise((resolve) => (resolveSteer = resolve)),
+      )
+      store.sessions = [...store.sessions, makeSession({ id: 'other', status: 'idle' })]
+
+      input.vm.$emit('send', 'Use pnpm', 'build', 'm', [], '', 'native')
+      await flushPromises()
+      store.setActiveSession('other')
+      await flushPromises()
+      resolveSteer(false)
+      await flushPromises()
+
+      expect(input.emitted('prefill')).toBeUndefined()
+    })
+
+    it('uses the normal send once the session is idle again', async () => {
+      const { store, input } = await mountBusyRoot()
+      store.sessions[0]!.status = 'idle'
+      await flushPromises()
+      const steer = vi.spyOn(store, 'steerSession').mockResolvedValue(true)
+      const send = vi.spyOn(store, 'sendMessage').mockResolvedValue(true)
+
+      input.vm.$emit('send', 'next', 'build', 'm', [], '', 'native')
+      await flushPromises()
+
+      expect(send).toHaveBeenCalledWith('session-root', 'next', expect.any(Object))
+      expect(steer).not.toHaveBeenCalled()
+    })
+
+    it('restores queued messages into the composer after stopping', async () => {
+      const { store, input } = await mountBusyRoot()
+      const abort = vi.spyOn(store, 'abortSession').mockResolvedValue(['first', 'second'])
+
+      input.vm.$emit('stop')
+      await flushPromises()
+
+      expect(abort).toHaveBeenCalledWith('session-root')
+      expect(input.emitted('prefill')).toEqual([['first\n\nsecond', { append: true }]])
+    })
+
+    it('leaves the composer alone when stopping had nothing queued', async () => {
+      const { store, input } = await mountBusyRoot()
+      vi.spyOn(store, 'abortSession').mockResolvedValue([])
+
+      input.vm.$emit('stop')
+      await flushPromises()
+
+      expect(input.emitted('prefill')).toBeUndefined()
+    })
+
+    it('shows queued steers as a composer sheet only for root sessions', async () => {
+      const { wrapper, store } = await mountBusyRoot()
+      store.handleSteerQueue('session-root', [makeSteer('a')])
+      await flushPromises()
+
+      const stack = wrapper.findComponent({ name: 'HarnessSheetStack' })
+      const sheets = stack.props('sheets') as Array<{ kind: string; queue?: unknown[] }>
+      expect(sheets.map((sheet) => sheet.kind)).toEqual(['queue'])
+      expect(sheets[0]!.queue).toHaveLength(1)
+
+      store.handleSteerQueue('session-root', [])
+      await flushPromises()
+      expect(stack.props('sheets')).toEqual([])
+
+      store.sessions = [
+        ...store.sessions,
+        makeSession({ id: 'session-child', parent_id: 'session-root', status: 'busy' }),
+      ]
+      store.handleSteerQueue('session-child', [makeSteer('x')])
+      store.setActiveSession('session-child')
+      await flushPromises()
+      expect(wrapper.findComponent({ name: 'HarnessSheetStack' }).exists()).toBe(false)
+    })
+
+    it('withdraws a queued steer back into the composer and focuses it', async () => {
+      const { wrapper, store, input } = await mountBusyRoot()
+      const withdraw = vi.spyOn(store, 'withdrawSteer').mockResolvedValue('Use pnpm')
+
+      wrapper.findComponent({ name: 'HarnessSheetStack' }).vm.$emit('withdraw-steer', 'a')
+      await flushPromises()
+
+      expect(withdraw).toHaveBeenCalledWith('session-root', 'a')
+      expect(input.emitted('prefill')).toEqual([['Use pnpm', { append: true, focus: true }]])
+    })
+
+    it('does not touch the composer when the steer was already delivered', async () => {
+      const { wrapper, store, input } = await mountBusyRoot()
+      vi.spyOn(store, 'withdrawSteer').mockResolvedValue(null)
+
+      wrapper.findComponent({ name: 'HarnessSheetStack' }).vm.$emit('withdraw-steer', 'a')
+      await flushPromises()
+
+      expect(input.emitted('prefill')).toBeUndefined()
+    })
+
+    it('applies queue snapshots from the workspace socket and ignores other workspaces', async () => {
+      const handlers = socketHandlers()
+      const { store } = await mountBusyRoot()
+
+      handlers['harness.steer_queue']!({
+        workspace_id: 'ws-other',
+        session_id: 'session-root',
+        steers: [makeSteer('nope')],
+      })
+      expect(store.activeQueuedSteers).toEqual([])
+
+      handlers['harness.steer_queue']!({
+        workspace_id: 'ws-1',
+        session_id: 'session-root',
+        steers: [makeSteer('a'), makeSteer('b')],
+      })
+      expect(store.activeQueuedSteers.map((steer) => steer.id)).toEqual(['a', 'b'])
+
+      handlers['harness.steer_queue']!({
+        workspace_id: 'ws-1',
+        session_id: 'session-root',
+        steers: [],
+      })
+      expect(store.activeQueuedSteers).toEqual([])
+    })
+
+    it('loads the user message of a run the server started itself', async () => {
+      const handlers = socketHandlers()
+      const { store } = await mountBusyRoot()
+      const ensure = vi.spyOn(store, 'ensureUserTurnLoaded').mockResolvedValue(undefined)
+
+      handlers['harness.session_status']!({
+        workspace_id: 'ws-1',
+        session_id: 'session-root',
+        status: 'busy',
+        message_id: 'assistant-2',
+        user_message_id: 'user-2',
+      })
+      expect(ensure).toHaveBeenCalledWith('session-root', 'user-2')
+
+      handlers['harness.session_status']!({
+        workspace_id: 'ws-1',
+        session_id: 'session-root',
+        status: 'idle',
+      })
+      expect(ensure).toHaveBeenCalledTimes(1)
+    })
   })
 })

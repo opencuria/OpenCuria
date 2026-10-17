@@ -30,7 +30,11 @@ from .models import (
     SubagentConfig,
     Todo,
 )
-from .timeline import append_part_display, build_part_display
+from .timeline import (
+    TIMELINE_TEXT_PART_TYPES,
+    append_part_display,
+    build_part_display,
+)
 
 
 class ProviderConfigRepository:
@@ -1273,7 +1277,7 @@ class HarnessPartRepository:
             .annotate(
                 message_position=F("message__position"),
                 timeline_output=Case(
-                    When(type="text", then=F("output")),
+                    When(type__in=TIMELINE_TEXT_PART_TYPES, then=F("output")),
                     default=Value(""),
                     output_field=TextField(),
                 ),

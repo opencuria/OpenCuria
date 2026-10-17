@@ -61,6 +61,7 @@ from .repositories import (
     TodoRepository,
 )
 from .runner import HarnessRunner, RunOptions
+from .steering import NO_ACTIVE_RUN_CODE, SteerEntry, SteeringChannel
 from .tools import default_tool_registry
 from .tools.subagents import TaskArgs, validate_subagent_delegation
 from .tools.todos import TodoWriteTool, repository_for_session
@@ -117,6 +118,7 @@ FRONTEND_EVENT_TODO = "harness.todo_updated"
 FRONTEND_EVENT_SUBTASK_STARTED = "harness.subtask_started"
 FRONTEND_EVENT_SUBTASK_FINISHED = "harness.subtask_finished"
 FRONTEND_EVENT_CONVERSATIONS_CHANGED = "harness.conversations_changed"
+FRONTEND_EVENT_STEER_QUEUE = "harness.steer_queue"
 
 
 class HarnessService:
@@ -1383,6 +1385,12 @@ class HarnessService:
                 "subtask_parts": {},
                 "skill_bodies": skill_bodies,
             }
+            if session.parent_id is None:
+                run_context["steering"] = SteeringChannel(
+                    deliver=lambda entries: self._deliver_steers(
+                        session, assistant, entries
+                    )
+                )
             self._runs[key] = run_context
             if engine_id != "native":
                 run_context["initiated_by_id"] = run_user_id
@@ -1537,6 +1545,8 @@ class HarnessService:
         await sync_to_async(self.sessions.ensure_interactions_available)(
             session.workspace_id
         )
+        # Stop means stop: queued steers must not survive as a follow-up run.
+        await self._discard_steers(session)
         engine_id = getattr(session, "harness_id", "native") or "native"
         if engine_id != "native" and not self.is_running(session.id):
             await self._ensure_external_attempt_reconciled(session, force=True)
@@ -1551,6 +1561,153 @@ class HarnessService:
                 if parent is not None:
                     return await self._abort_run_tree(parent)
         return await self._abort_run_tree(session)
+
+    # -- live steering ------------------------------------------------------
+
+    def _steering_channel(self, session_id: uuid.UUID | str) -> SteeringChannel | None:
+        """Return the open steering channel of an active run, if any."""
+        channel = self._runs.get(str(session_id), {}).get("steering")
+        return channel if isinstance(channel, SteeringChannel) else None
+
+    def list_pending_steers(self, session_id: uuid.UUID) -> list[SteerEntry]:
+        """Return queued steers a running turn has not picked up yet."""
+        channel = self._steering_channel(session_id)
+        return channel.pending() if channel is not None else []
+
+    async def steer_run(
+        self, session: HarnessSession, prompt: str, *, user_id: int | None = None
+    ) -> SteerEntry:
+        """Queue *prompt* so the active run receives it at its next boundary.
+
+        Raises:
+            ConflictError: ``no_active_run`` when nothing can take the message
+                (idle, stopping, or already settled).
+            ValueError: For empty/oversized prompts and subagent sessions.
+        """
+        self.ensure_user_promptable(session)
+        channel = self._steering_channel(session.id)
+        if (
+            channel is None
+            or channel.closed
+            or not self.is_running(session.id)
+            or self._user_abort_requested(session)
+        ):
+            raise ConflictError(
+                f"Harness session '{session.id}' has no active run to steer",
+                code=NO_ACTIVE_RUN_CODE,
+            )
+        entry = channel.submit(prompt, user_id=user_id)
+        await self._emit_steer_queue(session)
+        log.info("harness_steer_queued", session_id=str(session.id), steer_id=entry.id)
+        return entry
+
+    async def withdraw_steer(
+        self, session: HarnessSession, steer_id: str
+    ) -> SteerEntry:
+        """Remove a queued steer the run has not consumed yet."""
+        channel = self._steering_channel(session.id)
+        entry = channel.withdraw(steer_id) if channel is not None else None
+        if entry is None:
+            raise NotFoundError("Steer", steer_id)
+        await self._emit_steer_queue(session)
+        return entry
+
+    async def _discard_steers(self, session: HarnessSession) -> None:
+        """Drop queued steers (user stop) and publish the empty queue."""
+        channel = self._steering_channel(session.id)
+        if channel is not None and channel.discard():
+            await self._emit_steer_queue(session)
+
+    async def _emit_steer_queue(self, session: HarnessSession) -> None:
+        """Publish the full queue snapshot (replace semantics for clients)."""
+        await self._emit_frontend(
+            FRONTEND_EVENT_STEER_QUEUE,
+            {
+                "workspace_id": str(session.workspace_id),
+                "session_id": str(session.id),
+                "steers": [
+                    entry.to_payload() for entry in self.list_pending_steers(session.id)
+                ],
+            },
+            str(session.workspace_id),
+        )
+
+    async def _emit_empty_steer_queue(self, session_id: str, workspace_id: str) -> None:
+        """Tell clients that no steer is queued for *session_id* anymore."""
+        await self._emit_frontend(
+            FRONTEND_EVENT_STEER_QUEUE,
+            {"workspace_id": workspace_id, "session_id": session_id, "steers": []},
+            workspace_id,
+        )
+
+    async def _deliver_steers(
+        self,
+        session: HarnessSession,
+        assistant: HarnessMessage,
+        entries: list[SteerEntry],
+    ) -> None:
+        """Persist steers the engine took as ordered parts of the live turn.
+
+        The part is created where the engine actually received the message so
+        the transcript reads exactly as the model saw it. Running text streams
+        are closed first: the answer continues in a fresh part after it.
+        """
+        workspace_id = str(session.workspace_id)
+        session_id = str(session.id)
+        async with self._event_lock(session_id):
+            await self._close_running_stream_parts(session)
+            for entry in entries:
+                part = await sync_to_async(self.parts.create)(
+                    message_id=assistant.id,
+                    type="steer",
+                    state="completed",
+                    call_id=entry.id,
+                    output=entry.content,
+                    meta={"steer_id": entry.id},
+                )
+                await self._emit_frontend(
+                    FRONTEND_EVENT_PART,
+                    {
+                        "workspace_id": workspace_id,
+                        "session_id": session_id,
+                        "message_id": str(assistant.id),
+                        "delta": {"steer": entry.content, "steer_id": entry.id},
+                        "part_id": str(part.id),
+                    },
+                    workspace_id,
+                )
+        await self._emit_steer_queue(session)
+
+    def _close_steering(self, key: str) -> list[SteerEntry]:
+        """Close the run's channel; return entries nobody consumed."""
+        channel = self._runs.get(key, {}).pop("steering", None)
+        return channel.close() if isinstance(channel, SteeringChannel) else []
+
+    def _schedule_steer_followup(
+        self, session: HarnessSession, entries: list[SteerEntry]
+    ) -> None:
+        """Turn steers left over after a settled run into the next run."""
+        if not entries:
+            return
+        self._spawn_background(self._start_steer_followup(session, entries))
+
+    async def _start_steer_followup(
+        self, session: HarnessSession, entries: list[SteerEntry]
+    ) -> None:
+        """Start a normal run with steers that arrived too late to flow in."""
+        try:
+            fresh = await sync_to_async(self.get_session)(session.id)
+            await self.start_run(
+                fresh,
+                "\n\n".join(entry.content for entry in entries),
+                organization_id=fresh.organization_id,
+                workspace_id=str(fresh.workspace_id),
+                user_id=entries[-1].user_id,
+            )
+        except Exception:
+            log.exception("harness_steer_followup_failed", session_id=str(session.id))
+        finally:
+            await self._emit_steer_queue(session)
 
     def _remember_run(self, session: HarnessSession) -> None:
         """Index a live session under its parent before the next await."""
@@ -1574,6 +1731,16 @@ class HarnessService:
 
     def _drop_run_tracking(self, key: str) -> None:
         """Release local task bookkeeping without publishing a terminal status."""
+        workspace_id = str(self._runs.get(key, {}).get("workspace_id") or "")
+        dropped = self._close_steering(key)
+        if dropped and workspace_id:
+            # No follow-up here (the run's cleanup is unconfirmed), but clients
+            # must not keep showing messages that will never be delivered.
+            log.warning("harness_steers_discarded", session_id=key, count=len(dropped))
+            try:
+                self._spawn_background(self._emit_empty_steer_queue(key, workspace_id))
+            except RuntimeError:  # pragma: no cover - no running loop
+                pass
         self._runs.pop(key, None)
         self._event_locks.pop(key, None)
         if self._tasks.get(key) is asyncio.current_task():
@@ -1967,7 +2134,8 @@ class HarnessService:
                 parts,
                 summary=checkpoint_summary if message.id == compaction_msg_id else "",
             )
-            if not tool_parts:
+            has_steers = any(part.type == "steer" and part.output for part in parts)
+            if not tool_parts and not has_steers:
                 history.append(
                     LLMMessage(
                         role="assistant",
@@ -2039,6 +2207,17 @@ class HarnessService:
                     if pending_calls:
                         flush_segment()
                     text += part.output
+                elif part.type == "steer" and part.output:
+                    # A message the user sent while the turn was running sits
+                    # between the answer segments that surround it.
+                    flush_segment()
+                    history.append(
+                        LLMMessage(
+                            role="user",
+                            content=part.output,
+                            message_id=str(message.id),
+                        )
+                    )
                 elif part.id in tool_ids:
                     pending_calls.append(part)
             flush_segment()
@@ -2406,6 +2585,7 @@ class HarnessService:
                     if mcp_snapshot is not None
                     else [],
                 ),
+                steering=self._runs.get(key, {}).get("steering"),
                 context_length=context_length,
                 max_output_tokens=model_max_output_tokens,
                 last_step_prompt_tokens=last_step_prompt_tokens,
@@ -2560,7 +2740,9 @@ class HarnessService:
                 if session.parent_id is None:
                     await self._emit_conversations_changed(session.workspace_id)
         finally:
+            leftovers = self._close_steering(key)
             self._drop_run_tracking(key)
+            self._schedule_steer_followup(session, leftovers)
 
     async def _on_claude_root_event(
         self, session: HarnessSession, assistant: HarnessMessage, event: dict[str, Any]
@@ -2848,6 +3030,8 @@ class HarnessService:
                 if session.parent_id is None:
                     await self._emit_conversations_changed(session.workspace_id)
         finally:
+            leftovers = self._close_steering(key)
+            followup = bool(leftovers) and not self._user_abort_requested(session)
             self._runs.pop(key, None)
             self._event_locks.pop(key, None)
             self._abort_requested.discard(key)
@@ -2855,6 +3039,8 @@ class HarnessService:
             if self._tasks.get(key) is asyncio.current_task():
                 self._tasks.pop(key, None)
             self._forget_run(key)
+            if followup:
+                self._schedule_steer_followup(session, leftovers)
 
     async def _cleanup_session_processes(
         self,

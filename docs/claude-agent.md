@@ -40,6 +40,18 @@ native harness. Usage and billing follow the account for the token you provide;
 CLI-reported cost is usage information, not an Anthropic invoice. See Anthropic's
 [Claude Code legal and compliance information](https://docs.anthropic.com/en/docs/claude-code/legal-and-compliance).
 
+## Messages while the agent runs
+
+You can keep typing while a run is active (native and Claude Agent chats alike).
+The message is queued above the composer and joins the running turn at its next
+step: native runs add it after the current tool results, and Claude Agent
+streams it to the CLI as a `next`-priority user message, which the CLI folds
+into the turn after the current tool call. Delivered messages appear inline in
+the transcript where the agent received them. If the turn ends first, the queued
+message starts a follow-up run automatically; **Stop** discards the queue.
+`POST /harness/sessions/{id}/steer` and the MCP tool `steer_harness_session`
+expose the same behavior.
+
 ## Runtime and updates
 
 Deploy matching OpenCuria backend and runner versions; apply migrations

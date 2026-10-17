@@ -603,6 +603,7 @@ class HarnessPartType(models.TextChoices):
     PATCH = "patch", "Patch"
     AGENT = "agent", "Agent"
     COMPACTION = "compaction", "Compaction"
+    STEER = "steer", "Steer"
 
 
 class HarnessPartState(models.TextChoices):

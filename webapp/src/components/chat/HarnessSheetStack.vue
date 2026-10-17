@@ -5,6 +5,7 @@ import HarnessMentionSheet from '@/components/chat/HarnessMentionSheet.vue'
 import HarnessNoticeSheet from '@/components/chat/HarnessNoticeSheet.vue'
 import HarnessPermissionSheet from '@/components/chat/HarnessPermissionSheet.vue'
 import HarnessProcessSheet from '@/components/chat/HarnessProcessSheet.vue'
+import HarnessQueueSheet from '@/components/chat/HarnessQueueSheet.vue'
 import HarnessQuestionSheet from '@/components/chat/HarnessQuestionSheet.vue'
 import HarnessTodoSheet from '@/components/chat/HarnessTodoSheet.vue'
 import type { MentionCandidate } from '@/lib/harnessMentions'
@@ -26,6 +27,7 @@ const emit = defineEmits<{
   'close-context': []
   'close-processes': []
   'dismiss-notice': [messageId: string]
+  'withdraw-steer': [steerId: string]
 }>()
 
 const todoOpen = ref(false)
@@ -89,6 +91,12 @@ function peekOffset(index: number): number {
             :requests="sheets[0].permissions!"
             :resolving="permissionResolving"
             @resolve="(requestId, response) => emit('resolve', requestId, response)"
+          />
+        </template>
+        <template v-else-if="sheets[0]?.kind === 'queue' && sheets[0]?.queue">
+          <HarnessQueueSheet
+            :steers="sheets[0].queue!"
+            @withdraw="(steerId) => emit('withdraw-steer', steerId)"
           />
         </template>
         <template v-else-if="sheets[0]?.kind === 'notice' && sheets[0]?.notice">

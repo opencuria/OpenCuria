@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
 import { buildComposerSheets, optionLetter } from './composerSheets'
-import type { HarnessPermissionRequest, HarnessQuestionRequest, HarnessTodo } from '@/types/harness'
+import type {
+  HarnessPermissionRequest,
+  HarnessQuestionRequest,
+  HarnessSteer,
+  HarnessTodo,
+} from '@/types/harness'
 
 function makeQuestion(id: string): HarnessQuestionRequest {
   return {
@@ -25,6 +30,10 @@ function makePermission(id: string): HarnessPermissionRequest {
 
 function makeTodo(id: string): HarnessTodo {
   return { id, content: id, status: 'pending', priority: 'medium', order: 0 }
+}
+
+function makeSteer(id: string): HarnessSteer {
+  return { id, content: `Steer ${id}`, created_at: '2026-10-16T10:00:00Z' }
 }
 
 describe('buildComposerSheets', () => {
@@ -142,6 +151,43 @@ describe('buildComposerSheets', () => {
     expect(sheets[0]?.kind).toBe('permission')
     expect(sheets[0]?.permissions).toHaveLength(2)
     expect(sheets[0]?.permission?.request_id).toBe('p1')
+  })
+})
+
+describe('buildComposerSheets queue', () => {
+  it('lets gates win the primary slot and ranks the queue above notices and todos', () => {
+    const sheets = buildComposerSheets({
+      todos: [makeTodo('t1')],
+      notice: { messageId: 'msg-1', text: 'Run stopped by user', tone: 'info' },
+      queue: [makeSteer('s1')],
+      permissions: [makePermission('p1')],
+      questions: [makeQuestion('q1')],
+      processesOpen: true,
+    })
+
+    expect(sheets.map((sheet) => sheet.kind)).toEqual([
+      'processes',
+      'question',
+      'permission',
+      'queue',
+      'notice',
+      'todos',
+    ])
+  })
+
+  it('shows the queue on top of todos while nothing else needs attention', () => {
+    const sheets = buildComposerSheets({
+      todos: [makeTodo('t1')],
+      queue: [makeSteer('s1'), makeSteer('s2')],
+    })
+
+    expect(sheets.map((sheet) => sheet.kind)).toEqual(['queue', 'todos'])
+    expect(sheets[0]?.queue?.map((steer) => steer.id)).toEqual(['s1', 's2'])
+  })
+
+  it('contributes no sheet for an empty or absent queue', () => {
+    expect(buildComposerSheets({ queue: [] })).toEqual([])
+    expect(buildComposerSheets({})).toEqual([])
   })
 })
 

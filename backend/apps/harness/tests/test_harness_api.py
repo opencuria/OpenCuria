@@ -1149,3 +1149,135 @@ def test_start_run_dismisses_prior_notices(harness_setup, fake_harness_service):
     assert sent.status_code == 202, sent.content[:500]
     old.refresh_from_db()
     assert old.notice_dismissed_at is not None
+
+
+@pytest.fixture
+def active_run(fake_harness_service):
+    """Pretend a run is active for a session so steers can be queued."""
+    import asyncio as _asyncio
+
+    from apps.harness.steering import SteeringChannel
+
+    loop = _asyncio.new_event_loop()
+    tasks = []
+
+    def _start(session):  # type: ignore[no-untyped-def]
+        async def _never() -> None:
+            await _asyncio.Event().wait()
+
+        key = str(session.id)
+        task = loop.create_task(_never())
+        loop.run_until_complete(_asyncio.sleep(0))
+        tasks.append(task)
+
+        async def _deliver(_entries):  # type: ignore[no-untyped-def]
+            return None
+
+        channel = SteeringChannel(deliver=_deliver)
+        fake_harness_service._tasks[key] = task
+        fake_harness_service._runs[key] = {"steering": channel}
+        return channel
+
+    yield _start
+    for task in tasks:
+        task.cancel()
+    loop.close()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_steer_queues_message_for_active_run(
+    harness_setup, fake_harness_service, active_run
+):
+    """POST .../steer queues, lists in /parts, and can be withdrawn."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="seed",
+    )
+    channel = active_run(session)
+    client = _client(
+        user=harness_setup["owner"],
+        org=harness_setup["org"],
+        permissions=RUN + READ,
+    )
+    response = client.post(
+        f"/api/v1/harness/sessions/{session.id}/steer",
+        data=json.dumps({"prompt": "  also add tests  "}),
+        content_type="application/json",
+    )
+    assert response.status_code == 202, response.content[:500]
+    body = response.json()
+    assert body["content"] == "also add tests"
+    assert [entry.id for entry in channel.pending()] == [body["id"]]
+
+    for url in ("parts", "timeline"):
+        listed = client.get(f"/api/v1/harness/sessions/{session.id}/{url}")
+        assert listed.status_code == 200
+        assert [item["id"] for item in listed.json()["steers"]] == [body["id"]]
+
+    steer_url = f"/api/v1/harness/sessions/{session.id}/steer/{body['id']}"
+    withdrawn = client.delete(steer_url)
+    assert withdrawn.status_code == 200
+    assert withdrawn.json()["content"] == "also add tests"
+    assert channel.pending() == []
+    assert client.delete(steer_url).status_code == 404
+
+
+@pytest.mark.django_db(transaction=True)
+def test_steer_without_active_run_is_409(harness_setup, fake_harness_service):
+    """An idle session cannot be steered; clients fall back to /message."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="seed",
+    )
+    client = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
+    )
+    response = client.post(
+        f"/api/v1/harness/sessions/{session.id}/steer",
+        data=json.dumps({"prompt": "hello?"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "no_active_run"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_steer_rejects_empty_subagent_foreign_and_read_only_keys(
+    harness_setup, fake_harness_service, active_run
+):
+    """Validation, scope and key permission are enforced like /message."""
+    session = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="seed",
+    )
+    child = fake_harness_service.create_session(
+        workspace_id=harness_setup["owned"].id,
+        organization_id=harness_setup["org"].id,
+        prompt="child",
+        parent_id=session.id,
+    )
+    active_run(session)
+    owner = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=RUN
+    )
+
+    def steer(client, target, prompt="hi"):  # type: ignore[no-untyped-def]
+        return client.post(
+            f"/api/v1/harness/sessions/{target.id}/steer",
+            data=json.dumps({"prompt": prompt}),
+            content_type="application/json",
+        )
+
+    assert steer(owner, session, "   ").status_code == 400
+    assert steer(owner, child).status_code == 400
+    stranger = _client(
+        user=harness_setup["stranger"], org=harness_setup["org"], permissions=RUN
+    )
+    assert steer(stranger, session).status_code == 404
+    read_only = _client(
+        user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
+    )
+    assert steer(read_only, session).status_code == 403

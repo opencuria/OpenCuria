@@ -3,6 +3,7 @@ import { mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 import HarnessMessageView from './HarnessMessageView.vue'
+import HarnessMessageFooter from './HarnessMessageFooter.vue'
 import type { HarnessMessage, HarnessPart } from '@/types/harness'
 import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 
@@ -1155,5 +1156,59 @@ describe('HarnessMessageView', () => {
 
     expect(wrapper.text()).toContain('Hello')
     expect(wrapper.text()).not.toContain('aborted by user')
+  })
+
+  it('keeps a delivered steer visible between two Worked for cards in chronological order', async () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        message: makeAssistant([
+          makePart({ id: 't1', type: 'text', output: 'Looking around' }),
+          makePart({ id: 'tool-1', type: 'tool', tool: 'read', title: 'Read index.ts' }),
+          makePart({
+            id: 'steer-1',
+            type: 'steer',
+            output: 'Use pnpm instead',
+            meta: { steer_id: 's1' },
+          }),
+          makePart({ id: 't2', type: 'text', output: 'Switching now' }),
+          makePart({ id: 'tool-2', type: 'tool', tool: 'bash', title: 'Run pnpm install' }),
+          makePart({ id: 't3', type: 'text', output: 'All done' }),
+        ]),
+      },
+    })
+
+    const kinds = wrapper
+      .findAll('[data-block-kind]')
+      .map((node) => node.attributes('data-block-kind'))
+      .filter((kind) => ['workedFor', 'steer', 'text'].includes(kind ?? ''))
+    expect(kinds.slice(0, 3)).toEqual(['workedFor', 'steer', 'workedFor'])
+    // The steer is a top-level row, not nested in a collapsed card.
+    const steer = wrapper.get('[data-block-kind="steer"]')
+    expect(steer.element.closest('[data-block-kind="workedFor"]')).toBeNull()
+    expect(steer.text()).toContain('Use pnpm instead')
+    expect(wrapper.findAll('[data-testid="harness-worked-for"]')).toHaveLength(2)
+    // The footer copies only the closing answer, never the user's steer.
+    expect(wrapper.findComponent(HarnessMessageFooter).props('copyText')).toBe('All done')
+  })
+
+  it('shows a steer inline while the turn is still streaming', () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: {
+        streaming: true,
+        message: {
+          ...makeAssistant([
+            makePart({ id: 't1', type: 'text', output: 'Before' }),
+            makePart({ id: 'steer-1', type: 'steer', output: 'Change course' }),
+            makePart({ id: 't2', type: 'text', state: 'running', output: 'After' }),
+          ]),
+          completed_at: null,
+        },
+      },
+    })
+
+    expect(
+      wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind')),
+    ).toEqual(['text', 'steer', 'text'])
+    expect(wrapper.get('[data-block-kind="steer"]').text()).toContain('Change course')
   })
 })

@@ -71,6 +71,7 @@ from .providers.base import (
     Usage,
 )
 from .providers.resolver import ResolvedModel, StaticModelResolver
+from .steering import SteeringChannel
 from .tools.base import ToolContext, ToolRegistry, ToolResult
 
 log = structlog.get_logger(__name__)
@@ -157,6 +158,8 @@ class RunOptions:
     last_step_prompt_tokens: int = 0
     last_step_completion_tokens: int = 0
     last_step_total_tokens: int = 0
+    #: Queue of user messages the model should see mid-run (root runs only).
+    steering: SteeringChannel | None = None
 
 
 @dataclass
@@ -1100,6 +1103,27 @@ class HarnessRunner:
                 )
             if not calls:
                 messages.append(LLMMessage(role="assistant", content=text))
+                steered = await self._take_steering(opts)
+                if steered:
+                    # The user spoke while the model was answering: continue
+                    # the turn with their message instead of stopping.
+                    messages.extend(steered)
+                    if is_overflow(
+                        prompt_tokens=usage.prompt_tokens,
+                        completion_tokens=usage.completion_tokens,
+                        total_tokens=usage.total_tokens,
+                        limits=limits,
+                        auto=opts.auto_compact,
+                    ):
+                        messages = await self._maybe_compact_history(
+                            messages=messages,
+                            agent=agent,
+                            model=model,
+                            mode=mode,
+                            opts=opts,
+                            limits=limits,
+                        )
+                    continue
                 if is_overflow(
                     prompt_tokens=usage.prompt_tokens,
                     completion_tokens=usage.completion_tokens,
@@ -1164,6 +1188,22 @@ class HarnessRunner:
                     opts=opts,
                     limits=limits,
                 )
+            # Tool results must stay adjacent to their calls, so a steer joins
+            # the conversation only after every outcome (and any compaction).
+            messages.extend(await self._take_steering(opts))
+
+    async def _take_steering(self, opts: RunOptions) -> list[LLMMessage]:
+        """Deliver queued steers and return them as user messages."""
+        if opts.steering is None:
+            return []
+        entries = await opts.steering.take()
+        steered: list[LLMMessage] = []
+        for entry in entries:
+            content: Any = entry.content
+            if self.accessor is not None:
+                content = await hydrate_workspace_images(content, self.accessor)
+            steered.append(LLMMessage(role="user", content=content))
+        return steered
 
     async def _run_computeruse_inner(
         self,
@@ -1558,6 +1598,7 @@ class HarnessRunner:
                     "arguments": raw,
                 }
             )
+
         async for delta in resolved.adapter.chat_stream(
             resolved.model_id,
             messages,

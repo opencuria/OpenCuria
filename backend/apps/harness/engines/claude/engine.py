@@ -1002,6 +1002,30 @@ class ClaudeEngine:
             ),
         )
 
+    async def _steer_content(self, text: str) -> str | list[dict[str, Any]]:
+        """Hydrate a steered message like the prompt, without replaying history.
+
+        A message that cannot be hydrated (e.g. an unreadable attachment) still
+        reaches the agent as plain text: a failing input stream would otherwise
+        end the CLI's stdin early.
+        """
+        options = self._options
+        try:
+            return await build_user_content(
+                text,
+                accessor=self.accessor,
+                history=None,
+                include_history=False,
+                authorize_read=(
+                    options.authorize_file_read
+                    if options is not None and options.authorize_file_read is not None
+                    else self._authorize_media_read
+                ),
+            )
+        except Exception:
+            log.warning("claude_steer_hydration_failed")
+            return text
+
     async def _authorize_media_read(self, path: str) -> bool:
         """Apply the native Read policy to explicit user attachments as well."""
         if self._bridge is None or self._options is None:
@@ -1681,6 +1705,8 @@ class ClaudeEngine:
             )
             client = ClaudeSDKClient(options=sdk_options, transport=transport)
 
+            steering = options.steering
+
             async def inputs():
                 user_content = await self._prompt_with_history(prompt)
                 yield {
@@ -1693,6 +1719,25 @@ class ClaudeEngine:
                     "session_id": "default",
                     "origin": {"kind": "human"},
                 }
+                # Messages typed while the turn runs reach the CLI as they
+                # arrive. ``priority: next`` makes it fold them into the running
+                # turn after the current tool; the default (``later``) would
+                # hold them back until the turn is over.
+                while steering is not None:
+                    entry = await steering.next()
+                    if entry is None:
+                        return
+                    yield {
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": await self._steer_content(entry.content),
+                        },
+                        "parent_tool_use_id": None,
+                        "session_id": "default",
+                        "priority": "next",
+                        "origin": {"kind": "human"},
+                    }
 
             # Let the SDK own the input-stream lifecycle: its async-iterable
             # connect path keeps stdin available through task continuations,
@@ -1706,6 +1751,10 @@ class ClaudeEngine:
                     outcome = await self._handle_message(message)
                     if outcome is not None:
                         terminal, output, usage = outcome
+                        if steering is not None:
+                            # The turn is over: later steers become a follow-up
+                            # run and the SDK may close the CLI's stdin.
+                            steering.end_feed()
                         await self._bind_external_session(
                             str(terminal.session_id or "")
                         )
