@@ -100,3 +100,9 @@ the inventory/heartbeat independence test. Its event waits now have a bounded
 ten-second CI budget and tasks are always cancelled in `finally`; assertions
 still prove heartbeat/replay runs while the inventory scan is blocked. No
 production heartbeat timeout or interval was changed.
+
+The remaining hosted timeout was traced to host uptime, not heartbeat speed:
+the test inherited a 120-second inventory interval, while a fresh CI VM's
+monotonic clock could still be below 120 seconds. The test now explicitly uses
+`inventory_interval=0` to force its first inventory tick, rather than depending
+on the host's age. The event-based blocked-scan assertions remain intact.
