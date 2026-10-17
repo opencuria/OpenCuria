@@ -197,6 +197,7 @@ async def execute_external_run(
             on_owner=on_owner,
             evaluator=service.permissions.evaluator,
             effort=session.reasoning_effort or "high",
+            critical_event_errors=True,
         )
         await ensure_current()
         result = await engine.run(
@@ -230,6 +231,9 @@ async def execute_external_run(
             if result.finish_reason == "aborted"
             else HarnessRunStatus.COMPLETED
         )
+        context["terminal_status"] = status
+        context["terminal_finish"] = str(result.finish_reason or "stop")
+        context["terminal_error"] = ""
         safe_error = (
             "aborted by user"
             if status == HarnessRunStatus.INTERRUPTED
@@ -241,6 +245,13 @@ async def execute_external_run(
     except asyncio.CancelledError:
         status = HarnessRunStatus.INTERRUPTED
         user_abort = service._user_abort_requested(session)
+        context["terminal_status"] = (
+            HarnessRunStatus.INTERRUPTED if user_abort else HarnessRunStatus.ERROR
+        )
+        context["terminal_finish"] = "aborted" if user_abort else "error"
+        context["terminal_error"] = (
+            "aborted by user" if user_abort else "Run interrupted unexpectedly"
+        )
         safe_error = "aborted by user" if user_abort else "Run interrupted unexpectedly"
         public_error = safe_error
         if ownership is not None and await ownership.is_owner_for_finalization():
@@ -251,6 +262,9 @@ async def execute_external_run(
         raise
     except Exception as exc:
         status = HarnessRunStatus.ERROR
+        context["terminal_status"] = HarnessRunStatus.ERROR
+        context["terminal_finish"] = "error"
+        context["terminal_error"] = "Claude run failed."
         public_error = "Claude run failed."
         try:
             safe_error = service._redact_claude_error(exc, auth)
@@ -310,7 +324,11 @@ async def execute_external_run(
                 except Exception:
                     cleanup_confirmed = False
                 finalized = False
-                if cleanup_confirmed and await ownership.is_owner_for_finalization():
+                if (
+                    cleanup_confirmed
+                    and not context.get("terminal_unresolved")
+                    and await ownership.is_owner_for_finalization()
+                ):
                     if result is not None:
                         await sync_to_async(
                             assistant.refresh_from_db, thread_sensitive=True
@@ -410,7 +428,9 @@ async def execute_external_run(
                             assistant_content=assistant_content,
                             engine_meta=allowed_metadata or None,
                         )
-            if context.get("cleanup_confirmed", True):
+            if context.get("cleanup_confirmed", True) and not context.get(
+                "terminal_unresolved"
+            ):
                 await service._finalize_claude_children(session, assistant)
                 if status != HarnessRunStatus.ERROR:
                     await service._finalize_run(session, assistant)

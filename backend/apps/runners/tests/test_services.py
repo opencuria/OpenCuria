@@ -40,6 +40,7 @@ from apps.runners.models import (
     ImageDefinition,
     ImageInstance,
     Runner,
+    TerminalSession,
     Task,
     Workspace,
 )
@@ -2879,6 +2880,101 @@ class TestStartTerminal:
         assert "env_vars" not in payload
         assert "ssh_keys" not in payload
         assert "files" not in payload
+
+    @pytest.mark.asyncio
+    async def test_start_is_idempotent_and_specific_terminal_id_reattaches(
+        self, service, sio_mock, workspace
+    ):
+        task = await service.start_terminal(workspace.id)
+        session = TerminalSession.objects.get(task=task)
+        await service.handle_terminal_started(
+            str(task.id),
+            str(workspace.id),
+            str(session.terminal_id),
+            runner_id=str(workspace.runner_id),
+        )
+        sio_mock.emit.reset_mock()
+
+        reattached = await service.start_terminal(workspace.id)
+        assert reattached.id == task.id
+        assert TerminalSession.objects.filter(workspace=workspace).count() == 1
+        event, payload = sio_mock.emit.await_args.args[:2]
+        assert event == "terminal:attach"
+        assert payload["terminal_id"] == str(session.terminal_id)
+
+        sio_mock.emit.reset_mock()
+        reattached = await service.start_terminal(
+            workspace.id, terminal_id=session.terminal_id, after_seq=4
+        )
+        assert reattached.id == task.id
+        event, payload = sio_mock.emit.await_args.args[:2]
+        assert event == "terminal:attach"
+        assert payload["terminal_id"] == str(session.terminal_id)
+        assert payload["after_seq"] == 4
+
+    @pytest.mark.asyncio
+    async def test_terminal_output_is_runner_owned_and_replay_sequence_accepted(
+        self, service, sio_mock, workspace, monkeypatch
+    ):
+        frontend_emit = AsyncMock()
+        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", frontend_emit)
+        task = await service.start_terminal(workspace.id)
+        session = TerminalSession.objects.get(task=task)
+        await service.handle_terminal_started(
+            str(task.id),
+            str(workspace.id),
+            str(session.terminal_id),
+            runner_id=str(workspace.runner_id),
+        )
+        sio_mock.emit.reset_mock()
+        frontend_emit.reset_mock()
+
+        await service.handle_terminal_output(
+            str(workspace.id),
+            str(session.terminal_id),
+            "aGVsbG8=",
+            runner_id=str(workspace.runner_id),
+            sequence=1,
+        )
+        session.refresh_from_db()
+        assert session.last_sequence == 1
+        await service.handle_terminal_output(
+            str(workspace.id),
+            str(session.terminal_id),
+            "aGVsbG8=",
+            runner_id=str(workspace.runner_id),
+            sequence=2,
+        )
+        session.refresh_from_db()
+        assert session.last_sequence == 2
+        assert frontend_emit.await_args_list[0].args[:2] == (
+            "terminal:output",
+            {
+                "workspace_id": str(workspace.id),
+                "terminal_id": str(session.terminal_id),
+                "sequence": 1,
+                "data": "aGVsbG8=",
+            },
+        )
+        assert frontend_emit.await_args_list[1].args[:2] == (
+            "terminal:output",
+            {
+                "workspace_id": str(workspace.id),
+                "terminal_id": str(session.terminal_id),
+                "sequence": 2,
+                "data": "aGVsbG8=",
+            },
+        )
+
+        frontend_emit.reset_mock()
+        await service.handle_terminal_output(
+            str(workspace.id),
+            str(session.terminal_id),
+            "not-owned",
+            runner_id=str(uuid.uuid4()),
+            sequence=2,
+        )
+        assert not frontend_emit.await_args_list
 
 
 @pytest.mark.django_db(transaction=True)

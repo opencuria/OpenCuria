@@ -276,16 +276,19 @@ class TaskOut(Schema):
 
 
 class TerminalStartIn(Schema):
-    """Request schema for starting an interactive terminal."""
+    """Request schema for starting or reattaching to an interactive terminal."""
 
-    cols: int = 80
-    rows: int = 24
+    cols: int = Field(default=80, ge=2, le=500)
+    rows: int = Field(default=24, ge=1, le=300)
+    terminal_id: uuid.UUID | None = None
+    after_seq: int = Field(default=0, ge=0)
 
 
 class TerminalStartOut(Schema):
-    """Response schema after terminal start is dispatched."""
+    """Response schema after terminal start/reattach was accepted."""
 
-    task_id: uuid.UUID
+    task_id: uuid.UUID | None = None
+    terminal_id: uuid.UUID | None = None
 
 
 # ---------------------------------------------------------------------------

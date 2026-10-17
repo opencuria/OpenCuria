@@ -45,7 +45,10 @@ class HarnessRunRepository:
         session_id: uuid.UUID,
         assistant_message_id: uuid.UUID,
         user_id: object | None = None,
-        harness_id: str = "claude",
+        harness_id: str = "native",
+        worker_id: str = "",
+        deployment_version: str = "",
+        root_run_id: uuid.UUID | None = None,
     ) -> HarnessRun:
         """Create a unique live attempt for the supplied assistant turn."""
         with transaction.atomic():
@@ -57,12 +60,10 @@ class HarnessRunRepository:
                 raise HarnessSession.DoesNotExist
             session = HarnessSession.objects.get(id=session_id)
             engine_id = (harness_id or "").strip()
-            if (
-                not engine_id
-                or engine_id == "native"
-                or session.harness_id != engine_id
-            ):
-                raise ValueError("Run attempt must match a non-native session engine")
+            if engine_id == "native":
+                raise ValueError("Legacy attempts are non-native; native must use durable admission")
+            if not engine_id or session.harness_id != engine_id:
+                raise ValueError("Run attempt must match its session engine")
             message = HarnessMessage.objects.filter(
                 id=assistant_message_id,
                 session_id=session_id,
@@ -83,6 +84,9 @@ class HarnessRunRepository:
                     organization_id=session.organization_id,
                     initiated_by_id=user_id,
                     harness_id=engine_id[:16],
+                    owner_worker_id=worker_id,
+                    deployment_version=deployment_version,
+                    root_run_id=root_run_id,
                 )
             except IntegrityError as exc:
                 # The partial unique constraint is the final admission fence for
@@ -109,7 +113,7 @@ class HarnessRunRepository:
             HarnessRun.objects.filter(
                 session_id__in=session_ids,
                 status__in=LIVE_STATUSES,
-            ).only("id", "session_id", "status", "lease_id")
+            ).only("id", "session_id", "status", "lease_id", "owner_worker_id")
         )
 
     @staticmethod
@@ -130,14 +134,20 @@ class HarnessRunRepository:
         )
 
     @staticmethod
-    def start_if_owner(run_id: uuid.UUID, owner_token: uuid.UUID) -> bool:
-        """Move a freshly created attempt to running under its original owner."""
+    def start_if_owner(
+        run_id: uuid.UUID, owner_token: uuid.UUID, *, worker_id: str = ""
+    ) -> bool:
+        """Start an attempt once under its owner, except already claimed runs."""
         return bool(
             HarnessRun.objects.filter(
                 id=run_id,
                 owner_token=owner_token,
                 status=HarnessRunStatus.STARTING,
-            ).update(status=HarnessRunStatus.RUNNING, heartbeat_at=timezone.now())
+            )
+            .filter(
+                owner_worker_id=worker_id or "",
+            )
+            .update(status=HarnessRunStatus.RUNNING, heartbeat_at=timezone.now())
         )
 
     @staticmethod
@@ -239,12 +249,14 @@ class HarnessRunRepository:
         *,
         cutoff: datetime,
         owner_token: uuid.UUID | None = None,
+        owner_worker_id: str = "",
     ) -> bool:
         """Fence a stale owner before any external cleanup is attempted."""
         query = HarnessRun.objects.filter(
             id=run_id,
             status__in=(HarnessRunStatus.STARTING, HarnessRunStatus.RUNNING),
             heartbeat_at__lte=cutoff,
+            owner_worker_id=owner_worker_id,
         )
         if owner_token is not None:
             query = query.filter(owner_token=owner_token)

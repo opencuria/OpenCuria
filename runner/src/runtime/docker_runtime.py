@@ -983,6 +983,9 @@ class DockerRuntime(RuntimeBackend):
                 environment=environment,
             )["Id"]
             sock = api.exec_start(exec_id, socket=True, tty=True)
+            # Docker's HTTP client timeout is not PTY EOF. A quiet interactive
+            # shell must survive indefinitely until explicitly closed.
+            sock._sock.settimeout(None)
             # Resize to initial dimensions
             api.exec_resize(exec_id, height=rows, width=cols)
             return PtyHandle(

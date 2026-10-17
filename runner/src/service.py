@@ -1853,6 +1853,8 @@ class WorkspaceService:
         workspace_id: uuid.UUID,
         cols: int = 80,
         rows: int = 24,
+        *,
+        terminal_id: str | None = None,
     ) -> str:
         """Open an interactive PTY shell in the workspace.
 
@@ -1862,7 +1864,7 @@ class WorkspaceService:
         Step 2: thin facade over ``TerminalManager.start_terminal``.
         """
         return await self._terminals_manager.start_terminal(
-            workspace_id, cols=cols, rows=rows
+            workspace_id, cols=cols, rows=rows, terminal_id=terminal_id
         )
 
     async def read_terminal(self, terminal_id: str) -> AsyncIterator[bytes]:
@@ -1875,12 +1877,48 @@ class WorkspaceService:
         async for chunk in self._terminals_manager.read_terminal(terminal_id):
             yield chunk
 
-    async def write_terminal(self, terminal_id: str, data: bytes) -> None:
-        """Write raw bytes (user input) to the PTY stdin.
+    def has_terminal(self, terminal_id: str) -> bool:
+        """Return whether the terminal manager still owns this PTY."""
+        return self._terminals_manager.has_terminal(terminal_id)
 
-        Step 2: thin facade over ``TerminalManager.write_terminal``.
-        """
-        await self._terminals_manager.write_terminal(terminal_id, data)
+    def terminal_output_cursor(self, terminal_id: str) -> int:
+        """Return the current sequence cursor for the PTY."""
+        return self._terminals_manager.output_cursor(terminal_id)
+
+    def terminal_confirmed_inputs(self, terminal_id: str) -> list[str]:
+        """Return input identifiers retained by the PTY manager."""
+        return self._terminals_manager.confirmed_inputs(terminal_id)
+
+    async def reattach_terminal(
+        self, terminal_id: str, after_seq: int, *, deliver
+    ) -> list[tuple[int, bytes]]:
+        """Replay output and atomically resume delivery to an attached client."""
+        return await self._terminals_manager.reattach_terminal(
+            terminal_id, after_seq, deliver=deliver
+        )
+
+    async def set_terminal_attached(self, terminal_id: str, attached: bool) -> None:
+        """Enable or suppress network output delivery without closing the PTY."""
+        await self._terminals_manager.set_attached(terminal_id, attached)
+
+    async def detach_all_terminals(self) -> None:
+        """Keep PTYs alive across a transport loss while suppressing socket writes."""
+        await self._terminals_manager.detach_all()
+
+    async def read_terminal_events(
+        self, terminal_id: str
+    ) -> AsyncIterator[tuple[int, bytes]]:
+        """Read sequence-numbered PTY output for interactive transports."""
+        async for item in self._terminals_manager.read_terminal_events(terminal_id):
+            yield item
+
+    async def write_terminal(
+        self, terminal_id: str, data: bytes, *, input_id: str | None = None
+    ) -> bool:
+        """Write one idempotency-keyed PTY input through the terminal manager."""
+        return await self._terminals_manager.write_terminal(
+            terminal_id, data, input_id=input_id
+        )
 
     async def resize_terminal(self, terminal_id: str, cols: int, rows: int) -> None:
         """Resize the PTY window.

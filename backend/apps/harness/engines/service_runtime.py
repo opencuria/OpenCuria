@@ -23,6 +23,7 @@ def _create_native_engine(**kwargs: Any) -> HarnessEngine:
         accessor=kwargs.get("accessor"),
         emit=kwargs.get("emit"),
         chat_options=kwargs.get("chat_options") or ChatOptions(),
+        critical_emit_errors=bool(kwargs.get("critical_emit_errors", False)),
     )
 
 
@@ -42,6 +43,7 @@ def _create_claude_engine(**kwargs: Any) -> HarnessEngine:
         on_owner=kwargs.get("on_owner"),
         evaluator=kwargs.get("evaluator"),
         effort=kwargs.get("effort", "high"),
+        critical_event_errors=bool(kwargs.get("critical_event_errors", False)),
     )
 
 

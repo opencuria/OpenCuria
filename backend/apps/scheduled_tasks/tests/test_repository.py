@@ -109,9 +109,7 @@ def test_owner_queries_are_scoped_by_owner_and_organization():
     ScheduledTaskRepository.delete(schedule)
     run.refresh_from_db()
     assert run.scheduled_task_id == schedule.id
-    assert ScheduledTaskRepository.list_runs(
-        schedule, limit=100
-    ) == [run]
+    assert ScheduledTaskRepository.list_runs(schedule, limit=100) == [run]
     assert (
         ScheduledTaskRepository.get_for_owner(
             schedule.id, organization_id=organization.id, owner_id=owner.id

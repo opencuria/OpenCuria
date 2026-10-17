@@ -33,13 +33,21 @@ class RunOwnership:
         self.run_id = run.id
         self.owner_token = run.owner_token
         self.repository = repository or HarnessRunRepository
+        self.worker_id = run.owner_worker_id
+        self.deployment_version = run.deployment_version
         self._heartbeat_task: asyncio.Task[None] | None = None
 
     async def start(self) -> bool:
-        """Claim the new attempt's starting row as running."""
+        """Start an unclaimed attempt; worker-dispatched runs are already running."""
+        if self.worker_id:
+            return await self.is_current_owner()
         return await sync_to_async(
             self.repository.start_if_owner, thread_sensitive=True
-        )(self.run_id, self.owner_token)
+        )(
+            self.run_id,
+            self.owner_token,
+            worker_id=self.worker_id,
+        )
 
     async def is_owner_for_finalization(self) -> bool:
         """Retain settlement authority after this owner's closing transition."""
@@ -216,7 +224,10 @@ class HarnessRunService:
         session_id: uuid.UUID,
         assistant_message_id: uuid.UUID,
         user_id: object | None = None,
-        harness_id: str = "claude",
+        harness_id: str = "native",
+        worker_id: str = "",
+        deployment_version: str = "",
+        root_run_id: uuid.UUID | None = None,
     ) -> RunOwnership:
         """Create a durable attempt after session/message admission succeeds."""
         row = self.repository.create_attempt(
@@ -224,11 +235,18 @@ class HarnessRunService:
             assistant_message_id=assistant_message_id,
             user_id=user_id,
             harness_id=harness_id,
+            worker_id=worker_id,
+            deployment_version=deployment_version,
+            root_run_id=root_run_id,
         )
         return RunOwnership(row, repository=self.repository)
 
     async def prepare_session(
-        self, session_id: uuid.UUID, accessor: Any = None
+        self,
+        session_id: uuid.UUID,
+        accessor: Any = None,
+        *,
+        confirmed_native_quiescent: bool = False,
     ) -> bool:
         """Recover a stale attempt or raise while a process may still be live.
 
@@ -242,6 +260,36 @@ class HarnessRunService:
         if row is None:
             return True
 
+        if row.owner_worker_id:
+            # A stale heartbeat is not proof that a process or side-effecting
+            # RPC is dead. Require an explicit operator-marked STOPPED/FAILED
+            # worker before cleanup/interruption can proceed.
+            from ..models import HarnessWorkerRegistration
+
+            worker = await sync_to_async(
+                HarnessWorkerRegistration.objects.filter(
+                    worker_id=row.owner_worker_id
+                ).first,
+                thread_sensitive=True,
+            )()
+            if worker is None or worker.state not in {
+                HarnessWorkerRegistration.State.STOPPED,
+                HarnessWorkerRegistration.State.FAILED,
+            }:
+                raise ConflictError(
+                    "Worker run ownership is unresolved; confirm worker death "
+                    "before recovery"
+                )
+
+        if (
+            row.owner_worker_id
+            and row.harness_id == "native"
+            and not confirmed_native_quiescent
+        ):
+            raise ConflictError(
+                "Native runner effects require confirmed quiescence before recovery"
+            )
+
         cutoff = timezone.now() - self.heartbeat_grace
         stale = row.status == HarnessRunStatus.CLOSING or row.heartbeat_at <= cutoff
         if not stale:
@@ -250,7 +298,12 @@ class HarnessRunService:
         if row.status != HarnessRunStatus.CLOSING:
             fenced = await sync_to_async(
                 self.repository.begin_close_if_stale, thread_sensitive=True
-            )(row.id, cutoff=cutoff, owner_token=row.owner_token)
+            )(
+                row.id,
+                cutoff=cutoff,
+                owner_token=row.owner_token,
+                owner_worker_id=row.owner_worker_id,
+            )
             if not fenced:
                 raise ConflictError("Harness session run ownership changed")
         else:

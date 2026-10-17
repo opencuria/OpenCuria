@@ -374,7 +374,8 @@ async def test_step2_terminal_lifecycle_via_facade_and_manager() -> None:
     assert runtime.exec_kwargs["rows"] == 40
     assert runtime.exec_kwargs["command"][0] == "/bin/bash"
 
-    await svc.write_terminal(terminal_id, b"ls\n")
+    assert await svc.write_terminal(terminal_id, b"ls\n", input_id="input-1") is True
+    assert await svc.write_terminal(terminal_id, b"ls\n", input_id="input-1") is False
     assert runtime.written == [b"ls\n"]
 
     await svc.resize_terminal(terminal_id, 120, 50)
@@ -382,6 +383,10 @@ async def test_step2_terminal_lifecycle_via_facade_and_manager() -> None:
 
     chunks = [chunk async for chunk in svc.read_terminal(terminal_id)]
     assert chunks == [b"hello"]
+    assert svc.terminal_manager.output_cursor(terminal_id) == 1
+    replay = await svc.terminal_manager.reattach_terminal(terminal_id, 0)
+    assert replay == [(1, b"hello")]
+    assert await svc.terminal_manager.reattach_terminal(terminal_id, 1) == []
 
     await svc.close_terminal(terminal_id)
     assert terminal_id not in svc._terminals
@@ -448,11 +453,11 @@ def test_step2_websocket_handlers_use_managers() -> None:
 
     source = inspect.getsource(websocket_module.WebSocketInterface)
     for handler_snippet in (
-        "self._service.terminal_manager.start_terminal",
-        "self._service.terminal_manager.read_terminal",
-        "self._service.terminal_manager.write_terminal",
-        "self._service.terminal_manager.resize_terminal",
-        "self._service.terminal_manager.close_terminal",
+        "self._service.start_terminal",
+        "self._service.read_terminal_events",
+        "self._service.write_terminal",
+        "self._service.resize_terminal",
+        "self._service.close_terminal",
         "self._service.images.build_image",
         "self._service.images.create_image_artifact",
         "self._service.images.list_image_artifacts",

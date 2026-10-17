@@ -36,6 +36,8 @@ def capture_socket(monkeypatch):
     server = socketio.AsyncServer(async_mode="asgi")
     sio_server._register_frontend_handlers(server)
     server.emit = AsyncMock()
+    server.enter_room = AsyncMock()
+    server.leave_room = AsyncMock()
     server.get_session = AsyncMock(return_value={"user_id": "123"})
     access = AsyncMock(return_value=True)
     monkeypatch.setattr(sio_server, "_frontend_user_can_access_workspace", access)
@@ -48,10 +50,20 @@ def capture_socket(monkeypatch):
         current_task_id=uuid.uuid4(),
         runner=SimpleNamespace(id=uuid.uuid4(), is_online=True),
     )
+    workspace.runner_id = workspace.runner.id
     service = RunnerService(sio_server=server)
     service.workspaces = Mock()
     service.workspaces.get_by_id.return_value = workspace
     service._emit_to_runner = AsyncMock()
+    from apps.runners.terminal_registry import TerminalSessionRepository
+
+    monkeypatch.setattr(
+        TerminalSessionRepository,
+        "get_active",
+        lambda *args: SimpleNamespace(
+            runner_id=workspace.runner.id,
+        ),
+    )
     monkeypatch.setattr(sio_server, "get_runner_service", lambda: service)
     monkeypatch.setattr(sio_server, "get_sio_server", lambda: server)
     return server, service, workspace, access
@@ -62,7 +74,7 @@ def request(workspace):
         "workspace_id": str(workspace.id),
         "request_id": "request-1",
         "upload_id": "upload-1",
-        "terminal_id": "terminal-1",
+        "terminal_id": "12345678-1234-4234-8234-123456789abc",
         "path": "/workspace/test.txt",
         "query": "test",
         "data": "echo test",
@@ -170,7 +182,10 @@ async def test_capture_allows_subscriptions_and_status_delivery(capture_socket):
     status = {**data, "status": "running", "active_operation": "capturing_image"}
     await sio_server.emit_to_frontend("workspace:status_changed", status, workspace_id)
     server.emit.assert_awaited_once_with(
-        "workspace:status_changed", status, to="caller", namespace="/frontend"
+        "workspace:status_changed",
+        status,
+        to=f"workspace:{workspace_id}",
+        namespace="/frontend",
     )
     await handlers["frontend:unsubscribe_workspace"]("caller", data)
     assert workspace_id not in sio_server._frontend_subscriptions

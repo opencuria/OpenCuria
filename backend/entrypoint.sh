@@ -1,6 +1,24 @@
 #!/bin/bash
 set -e
 
+# Managed production deployments run a separate, compatibility-checked migration
+# job before starting new processes. Legacy source/local startup remains unchanged.
+if [ "${OPENCURIA_MANAGED_DEPLOYMENT:-0}" = "1" ]; then
+    if [ "$#" -gt 0 ]; then
+        exec "$@"
+    fi
+    set -- uvicorn config.asgi:application \
+        --workers 1 \
+        --host 0.0.0.0 \
+        --port 8000 \
+        --proxy-headers \
+        --ws websockets-sansio \
+        --ws-max-size $((200 * 1024 * 1024)) \
+        --ws-max-queue 32 \
+        --lifespan on
+    exec "$@"
+fi
+
 echo "==> Running database migrations..."
 python manage.py migrate --noinput
 

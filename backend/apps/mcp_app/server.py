@@ -159,6 +159,25 @@ _TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="start_terminal",
+        description=(
+            "Start an interactive terminal or reattach to an existing terminal_id. "
+            "A new terminal starts only when terminal_id is omitted."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "format": "uuid"},
+                "terminal_id": {"type": "string", "format": "uuid"},
+                "after_seq": {"type": "integer", "minimum": 0, "default": 0},
+                "cols": {"type": "integer", "minimum": 2, "maximum": 500, "default": 80},
+                "rows": {"type": "integer", "minimum": 1, "maximum": 300, "default": 24},
+            },
+            "required": ["workspace_id"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
         name="create_workspace",
         description="Create a new workspace on a runner.",
         inputSchema={
@@ -1591,6 +1610,7 @@ _TOOLS: list[Tool] = [
 _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "list_workspaces": APIKeyPermission.WORKSPACES_READ,
     "get_workspace": APIKeyPermission.WORKSPACES_READ,
+    "start_terminal": APIKeyPermission.TERMINAL_ACCESS,
     "create_workspace": APIKeyPermission.WORKSPACES_CREATE,
     "update_workspace": APIKeyPermission.WORKSPACES_UPDATE,
     "stop_workspace": APIKeyPermission.WORKSPACES_STOP,
@@ -1802,6 +1822,54 @@ def _call_list_workspaces(api_key, org_id, args: dict) -> list[TextContent]:
         for w in workspaces
     ]
     return _text(result)
+
+
+async def _call_start_terminal(api_key, org_id, args: dict) -> list[TextContent]:
+    """Use the same durable terminal start/reattach service as REST."""
+    import uuid as _uuid
+
+    from apps.accounts.models import APIKeyPermission
+    from apps.runners.schemas import TerminalStartIn
+    from common.exceptions import ConflictError, NotFoundError
+    from pydantic import ValidationError
+
+    if not api_key.has_permission(APIKeyPermission.TERMINAL_ACCESS):
+        return _error("Permission denied: terminal:access required")
+    try:
+        if set(args) - {"workspace_id", "terminal_id", "after_seq", "cols", "rows"}:
+            return _error("Invalid terminal start options")
+        payload = TerminalStartIn.model_validate(
+            {key: value for key, value in args.items() if key != "workspace_id"}
+        )
+        workspace_id = _uuid.UUID(str(args["workspace_id"]))
+    except (ValueError, TypeError, ValidationError):
+        return _error("Invalid terminal start options")
+
+    workspace, error = _get_owned_workspace_or_error(api_key, org_id, workspace_id)
+    if error is not None:
+        return error
+    try:
+        task = await _runner_service().start_terminal(
+            workspace.id,
+            cols=payload.cols,
+            rows=payload.rows,
+            terminal_id=payload.terminal_id,
+            after_seq=payload.after_seq,
+        )
+        from apps.runners.terminal_registry import TerminalSessionRepository
+        from asgiref.sync import sync_to_async
+
+        session = await sync_to_async(TerminalSessionRepository.get_active)(
+            workspace.id, payload.terminal_id
+        )
+        return _text(
+            {
+                "task_id": str(task.id) if task else None,
+                "terminal_id": str(session.terminal_id) if session else None,
+            }
+        )
+    except (ConflictError, NotFoundError, ValueError) as exc:
+        return _error(str(exc))
 
 
 def _call_get_workspace(api_key, org_id, args: dict) -> list[TextContent]:
@@ -5795,6 +5863,7 @@ def _call_toggle_org_credential_service_activation(
 _TOOL_HANDLERS = {
     "list_workspaces": _call_list_workspaces,
     "get_workspace": _call_get_workspace,
+    "start_terminal": _call_start_terminal,
     "create_workspace": _call_create_workspace,
     "update_workspace": _call_update_workspace,
     "stop_workspace": _call_stop_workspace,

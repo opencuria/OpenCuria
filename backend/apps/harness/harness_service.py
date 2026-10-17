@@ -68,6 +68,11 @@ from .tools.truncate import truncate_tool_output
 
 log = structlog.get_logger(__name__)
 
+
+class CriticalHarnessPersistenceError(ConflictError):
+    """A critical durable tool timeline event failed to commit."""
+
+
 EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
@@ -172,6 +177,8 @@ class HarnessService:
         self._engine_connections = engine_connections
         self._run_service = run_service
         self._claude_child_contexts: dict[str, dict[str, Any]] = {}
+        self._worker_authorities: dict[str, Any] = {}
+        self._durable_admission = False
 
     def _engine_registry_for_run(self) -> Any:
         """Return the configured factory or the default native/Claude adapter."""
@@ -375,6 +382,8 @@ class HarnessService:
             raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
         session = self.get_session(session_id)
         self.sessions.ensure_interactions_available(session.workspace_id)
+        if self._durable_admission and self.is_running(session.id):
+            raise ConflictError("Harness session has an unresolved durable run")
         updated = self.sessions.set_mode(session, normalized)
         if updated.parent_id is None:
             self._emit_conversations_changed_sync(updated.workspace_id)
@@ -384,6 +393,8 @@ class HarnessService:
         """Persist a model override for subsequent runs."""
         session = self.get_session(session_id)
         self.sessions.ensure_interactions_available(session.workspace_id)
+        if self._durable_admission and self.is_running(session.id):
+            raise ConflictError("Harness session has an unresolved durable run")
         value = (model or "").strip()
         if getattr(session, "harness_id", "native") == "claude":
             from .engines.catalog import normalize_claude_model
@@ -397,6 +408,8 @@ class HarnessService:
         """Persist a reasoning-effort override for subsequent runs."""
         session = self.get_session(session_id)
         self.sessions.ensure_interactions_available(session.workspace_id)
+        if self._durable_admission and self.is_running(session.id):
+            raise ConflictError("Harness session has an unresolved durable run")
         if getattr(session, "harness_id", "native") == "claude":
             from .engines.catalog import normalize_claude_effort
 
@@ -428,6 +441,8 @@ class HarnessService:
         """Persist skill selection after validating visibility."""
         session = self.get_session(session_id)
         self.sessions.ensure_interactions_available(session.workspace_id)
+        if self._durable_admission and self.is_running(session.id):
+            raise ConflictError("Harness session has an unresolved durable run")
         normalized = _normalize_skill_ids(skill_ids)
         if normalized:
             resolve_skill_bodies(
@@ -443,6 +458,8 @@ class HarnessService:
         await sync_to_async(self.sessions.ensure_interactions_available)(
             session.workspace_id
         )
+        if self._durable_admission:
+            await self._ensure_no_durable_run(session)
         if (
             session.parent_id is not None
             and getattr(session, "harness_id", "native") == "claude"
@@ -462,6 +479,15 @@ class HarnessService:
         await sync_to_async(self.sessions.delete)(session)
         if session.parent_id is None:
             await self._emit_conversations_changed(session.workspace_id)
+
+    async def _ensure_no_durable_run(self, session: HarnessSession) -> None:
+        """Reject destructive mutation while any process owns this session."""
+        attempt = await sync_to_async(
+            self._run_service_for_engine().repository.get_open_for_session,
+            thread_sensitive=True,
+        )(session.id)
+        if attempt is not None:
+            raise ConflictError("Harness session has an unresolved durable run")
 
     async def _ensure_external_attempt_reconciled(
         self, session: HarnessSession, *, force: bool = False
@@ -501,9 +527,7 @@ class HarnessService:
         snapshot is performed here.
         """
         if include_message and message_id is None:
-            raise ValueError(
-                "message_id is required when include_message is true"
-            )
+            raise ValueError("message_id is required when include_message is true")
         session = await sync_to_async(self.get_session)(session_id)
         await sync_to_async(self.sessions.ensure_interactions_available)(
             session.workspace_id
@@ -571,6 +595,8 @@ class HarnessService:
             session.workspace_id
         )
         self.ensure_user_promptable(session)
+        if self._durable_admission:
+            await self._ensure_no_durable_run(session)
         if self.is_running(session.id):
             raise ConflictError(
                 f"Harness session '{session.id}' already has an active run"
@@ -1137,10 +1163,21 @@ class HarnessService:
     # -- run orchestration --------------------------------------------------
 
     def is_running(self, session_id: uuid.UUID) -> bool:
-        """Return True when a run task is active for *session_id*."""
+        """Return whether local execution or durable DB ownership is active."""
         key = str(session_id)
         task = self._tasks.get(key) or self._admissions.get(key)
-        return task is not None and not task.done()
+        if task is not None and not task.done():
+            return True
+        if not self._durable_admission:
+            return False
+        try:
+            from .engines.run_repository import HarnessRunRepository
+
+            return HarnessRunRepository.get_open_for_session(session_id) is not None
+        except Exception:
+            # Fail closed when durable state cannot be checked. A caller may
+            # surface temporary unavailability but must not reset ownership.
+            return True
 
     async def start_run(
         self,
@@ -1165,6 +1202,18 @@ class HarnessService:
         """
         if not prompt or not prompt.strip():
             raise ValueError("prompt must not be empty")
+        if self._durable_admission:
+            return await self._start_durable_run(
+                session,
+                prompt,
+                organization_id=organization_id,
+                provider=provider,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                skill_ids=skill_ids,
+                scheduled=scheduled,
+                max_depth=max_depth,
+            )
         engine_id = (getattr(session, "harness_id", "native") or "native").strip()
         run_user_id = user_id
         if engine_id == "claude":
@@ -1818,6 +1867,10 @@ class HarnessService:
             session.workspace_id
         )
         result = await sync_to_async(self.permissions.resolve)(request_id, response)
+        self._wake_local_gate(request_id, permission=True, value=result.decision)
+        await sync_to_async(self._mark_gate_command_done, thread_sensitive=True)(
+            session, "permission", str(request_id)
+        )
         future = self._pending_permissions.pop(str(request_id), None)
         if future is not None and not future.done():
             future.set_result(result.decision)
@@ -1864,6 +1917,15 @@ class HarnessService:
             answers=list(answers or []),
             status=status,
         )
+        self._wake_local_gate(
+            question_id,
+            permission=False,
+            value=[] if reject else list(answers or []),
+            reject=reject,
+        )
+        await sync_to_async(self._mark_gate_command_done, thread_sensitive=True)(
+            session, "question", str(question_id)
+        )
         future = self._pending_questions.pop(str(question_id), None)
         resumed = False
         if future is not None and not future.done():
@@ -1889,7 +1951,7 @@ class HarnessService:
                 session_id=str(session.id),
                 request_id=str(question_id),
                 status=status,
-                running=self.is_running(session.id),
+                running=await sync_to_async(self.is_running)(session.id),
             )
         await self._emit_frontend(
             FRONTEND_EVENT_QUESTION,
@@ -2219,6 +2281,143 @@ class HarnessService:
         depth: int,
         max_depth: int,
     ) -> None:
+        """Run one engine under durable ownership when this attempt is owned."""
+        key = str(session.id)
+        context = self._runs.get(key, {})
+        ownership = context.get("ownership")
+        if ownership is None or not self._durable_admission:
+            await self._execute_run_impl(
+                session=session,
+                prompt=prompt,
+                history=history,
+                assistant=assistant,
+                provider=provider,
+                organization_id=organization_id,
+                depth=depth,
+                max_depth=max_depth,
+            )
+            return
+        authority = self._worker_authorities.get(key)
+        if authority is None:
+            raise ConflictError("Durable run authority context is missing")
+        if not await ownership.start():
+            raise ConflictError("Harness run ownership was superseded")
+        ownership.start_heartbeat(on_lost=lambda: self._cancel_owned_task(key))
+        from .runtime_authority import use_run_authority
+
+        try:
+            with use_run_authority(authority):
+                if session.harness_id == "native":
+                    await self._execute_run_impl(
+                        session=session,
+                        prompt=prompt,
+                        history=history,
+                        assistant=assistant,
+                        provider=provider,
+                        organization_id=organization_id,
+                        depth=depth,
+                        max_depth=max_depth,
+                    )
+                else:
+                    await self._execute_external_run(
+                        engine_id=session.harness_id,
+                        session=session,
+                        prompt=prompt,
+                        history=history,
+                        assistant=assistant,
+                        organization_id=organization_id,
+                        depth=depth,
+                        max_depth=max_depth,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("harness_durable_run_execution_failed", session_id=key)
+            if not context.get("terminal_unresolved"):
+                context["terminal_status"] = HarnessRunStatus.ERROR
+                context["terminal_finish"] = "error"
+                context["terminal_error"] = "Harness run failed."
+                await self._fail_open_parts(
+                    assistant,
+                    state="error",
+                    output="Harness run failed.",
+                    session=session,
+                )
+        finally:
+            await ownership.stop_heartbeat()
+            from .runtime_authority import run_outcome_uncertain, forget_run_uncertainty
+
+            if run_outcome_uncertain(ownership.run_id):
+                context["terminal_unresolved"] = True
+            forget_run_uncertainty(ownership.run_id)
+            if context.get("terminal_unresolved"):
+                try:
+                    await ownership.begin_close()
+                    await ownership.settle_shell(
+                        finish="error",
+                        error="Tool execution outcome could not be persisted.",
+                        assistant_content=assistant.content or "",
+                    )
+                except Exception:
+                    log.exception(
+                        "harness_unresolved_shell_persist_failed", session_id=key
+                    )
+                self._drop_run_tracking(key)
+                return
+            if session.harness_id == "native":
+                with use_run_authority(authority):
+                    await self._finalize_owned_native_run(session, assistant, ownership)
+            self._worker_authorities.pop(key, None)
+
+    async def _finalize_owned_native_run(
+        self, session: HarnessSession, assistant: HarnessMessage, ownership: Any
+    ) -> None:
+        """Finish native shell/run/session together without resetting unknown owners."""
+        key = str(session.id)
+        context = self._runs.get(key, {})
+        await sync_to_async(assistant.refresh_from_db, thread_sensitive=True)()
+        terminal_status = context.get("terminal_status")
+        if terminal_status is None:
+            terminal_status = (
+                HarnessRunStatus.INTERRUPTED
+                if assistant.finish == "aborted"
+                else HarnessRunStatus.ERROR
+                if assistant.finish == "error"
+                else HarnessRunStatus.COMPLETED
+            )
+        try:
+            if not await ownership.is_owner_for_finalization():
+                raise ConflictError("Harness run ownership was superseded")
+            if not await ownership.begin_close():
+                raise ConflictError("Harness run ownership changed before finalize")
+            finalized = await ownership.finalize_turn(
+                status=terminal_status,
+                finish=context.get("terminal_finish") or assistant.finish or "stop",
+                error=context.get("terminal_error") or assistant.error or "",
+                assistant_content=assistant.content or "",
+            )
+        except Exception:
+            log.exception("native_run_durable_finalize_failed", session_id=key)
+            finalized = False
+        if finalized:
+            await sync_to_async(assistant.refresh_from_db, thread_sensitive=True)()
+            await self._finalize_run(session, assistant)
+        else:
+            # Fail closed: session stays busy while unresolved ownership remains.
+            self._drop_run_tracking(key)
+
+    async def _execute_run_impl(
+        self,
+        *,
+        session: HarnessSession,
+        prompt: str,
+        history: list[LLMMessage],
+        assistant: HarnessMessage,
+        provider: ProviderAdapter | None,
+        organization_id: uuid.UUID,
+        depth: int,
+        max_depth: int,
+    ) -> None:
         """Run the loop, persist events, and finalize the assistant message."""
         from .providers.resolver import StaticModelResolver
         from .services import ProviderConfigService
@@ -2226,9 +2425,15 @@ class HarnessService:
         key = str(session.id)
         run_context = self._runs.get(key, {})
         run_context["execution_started"] = True
+        ownership = run_context.get("ownership")
+        if ownership is not None and not await ownership.is_current_owner():
+            raise ConflictError("Harness run ownership was superseded")
         engine_id = (getattr(session, "harness_id", "native") or "native").strip()
         mcp_runtime = None
         phase = "startup"
+        run_context["terminal_status"] = HarnessRunStatus.COMPLETED
+        run_context["terminal_finish"] = "stop"
+        run_context["terminal_error"] = ""
         if engine_id != "native":
             await self._execute_external_run(
                 engine_id=engine_id,
@@ -2369,7 +2574,7 @@ class HarnessService:
                         session_id=key,
                         skipped=mcp_runtime.skipped,
                     )
-            if self._runner_factory is not None:
+            if self._runner_factory is not None and ownership is None:
                 loop_runner = self._runner_factory(
                     provider=provider,
                     model_resolver=model_resolver,
@@ -2387,6 +2592,7 @@ class HarnessService:
                     accessor=accessor,
                     emit=lambda event: self._on_runner_event(session, assistant, event),
                     chat_options=ChatOptions(reasoning_effort=effort),
+                    critical_emit_errors=ownership is not None,
                 )
             opts = RunOptions(
                 depth=depth,
@@ -2457,17 +2663,36 @@ class HarnessService:
             )
             await self._settle_open_stream_parts(assistant)
         except asyncio.CancelledError:
-            await self._record_run_interruption(session, assistant, phase=phase)
+            if ownership is None:
+                await self._record_run_interruption(session, assistant, phase=phase)
+            else:
+                user_abort = self._user_abort_requested(session)
+                run_context["terminal_status"] = (
+                    HarnessRunStatus.INTERRUPTED
+                    if user_abort
+                    else HarnessRunStatus.ERROR
+                )
+                run_context["terminal_finish"] = "aborted" if user_abort else "error"
+                run_context["terminal_error"] = (
+                    "aborted by user" if user_abort else "Run interrupted unexpectedly"
+                )
             raise
         except Exception as exc:
             # SDK cancellation is level-triggered until its scopes are closed.
-            with anyio.CancelScope(shield=True):
-                await sync_to_async(self.messages.complete)(
-                    assistant, finish="error", error=str(exc)
-                )
-                await self._fail_open_parts(
-                    assistant, state="error", output=str(exc), session=session
-                )
+            if ownership is None:
+                with anyio.CancelScope(shield=True):
+                    await sync_to_async(self.messages.complete)(
+                        assistant, finish="error", error=str(exc)
+                    )
+                    await self._fail_open_parts(
+                        assistant, state="error", output=str(exc), session=session
+                    )
+            else:
+                run_context["terminal_status"] = HarnessRunStatus.ERROR
+                run_context["terminal_finish"] = "error"
+                run_context["terminal_error"] = "Harness run failed."
+            if isinstance(exc, CriticalHarnessPersistenceError):
+                run_context["terminal_unresolved"] = True
             log.exception("harness_run_failed", session_id=key)
         finally:
             self._runs.get(key, {})["finalizing"] = True
@@ -2492,7 +2717,8 @@ class HarnessService:
                         reason="run_finished",
                     )
             finally:
-                await self._finalize_run(session, assistant)
+                if ownership is None:
+                    await self._finalize_run(session, assistant)
 
     @staticmethod
     def _redact_claude_error(error: object, auth: Any | None) -> str:
@@ -2542,9 +2768,9 @@ class HarnessService:
                 from apps.scheduled_tasks.services import ScheduledTaskService
 
                 try:
-                    await sync_to_async(
-                        ScheduledTaskService().complete_assistant_run
-                    )(assistant.id)
+                    await sync_to_async(ScheduledTaskService().complete_assistant_run)(
+                        assistant.id
+                    )
                 except Exception:
                     log.exception("scheduled_task_completion_failed", session_id=key)
                 await self._emit_frontend(
@@ -2566,6 +2792,9 @@ class HarnessService:
         self, session: HarnessSession, assistant: HarnessMessage, event: dict[str, Any]
     ) -> None:
         """Project SDK task notifications to persisted OpenCuria child sessions."""
+        root_ownership = self._runs.get(str(session.id), {}).get("ownership")
+        if root_ownership is not None and not await root_ownership.is_current_owner():
+            raise ConflictError("Harness run ownership was superseded")
         if event.get("type") == "subtask_started":
             raw_agent = str(event.get("agent") or "general").strip().lower()
             agent = "explore" if raw_agent in {"explore", "explorer"} else "general"
@@ -2635,6 +2864,20 @@ class HarnessService:
             if child_ctx is not None:
                 await self._finish_claude_child(child_ctx, event)
                 event = {**event, "child_session_id": str(child_ctx["session"].id)}
+        ownership = self._runs.get(str(session.id), {}).get("ownership")
+        if ownership is not None and self._durable_admission:
+            from .runtime_authority import run_outcome_uncertain
+
+            if run_outcome_uncertain(ownership.run_id):
+                self._runs.get(str(session.id), {})["terminal_unresolved"] = True
+                raise CriticalHarnessPersistenceError(
+                    "Runner effect outcome is unknown"
+                )
+        if ownership is not None and not await ownership.is_current_owner():
+            log.warning("harness_stale_run_event_rejected", session_id=str(session.id))
+            raise CriticalHarnessPersistenceError(
+                "Run no longer owns execution authority"
+            )
         await self._on_runner_event(session, assistant, event)
 
     def _claude_child_for_event(
@@ -2671,6 +2914,9 @@ class HarnessService:
         )
         if child_ctx is None:
             return
+        root_ownership = self._runs.get(root_key, {}).get("ownership")
+        if root_ownership is not None and not await root_ownership.is_current_owner():
+            raise ConflictError("Harness run ownership was superseded")
         await self._on_runner_event(child_ctx["session"], child_ctx["assistant"], event)
 
     async def _finish_claude_child(
@@ -2790,13 +3036,13 @@ class HarnessService:
             # Execution never entered, so no runner lease or CLI process could
             # have been created. Fence the durable attempt and shell together.
             user_abort = self._user_abort_requested(session)
+            await ownership.stop_heartbeat()
+            await ownership.begin_close()
             finalized = await ownership.finalize_turn(
                 status=HarnessRunStatus.INTERRUPTED,
                 finish="aborted" if user_abort else "error",
                 error=(
-                    "aborted by user"
-                    if user_abort
-                    else "Run interrupted unexpectedly"
+                    "aborted by user" if user_abort else "Run interrupted unexpectedly"
                 ),
                 assistant_content=assistant.content or "",
             )
@@ -2818,23 +3064,23 @@ class HarnessService:
         self._runs.get(key, {})["finalizing"] = True
         try:
             with anyio.CancelScope(shield=True):
-                await sync_to_async(self.sessions.mark_status)(
-                    session, HarnessSessionStatus.IDLE
-                )
+                durable_owner = self._runs.get(key, {}).get("ownership")
+                if durable_owner is None:
+                    await sync_to_async(self.sessions.mark_status)(
+                        session, HarnessSessionStatus.IDLE
+                    )
                 # Task history must settle even when the scheduler is not running.
                 # Use a local import to keep harness/task service imports acyclic.
                 from apps.scheduled_tasks.services import ScheduledTaskService
 
                 try:
-                    await sync_to_async(
-                        ScheduledTaskService().complete_assistant_run
-                    )(assistant.id)
+                    await sync_to_async(ScheduledTaskService().complete_assistant_run)(
+                        assistant.id
+                    )
                 except Exception:
                     # The scheduler/history read can repair a failed projection;
                     # it must never prevent idle emission or tracking cleanup.
-                    log.exception(
-                        "scheduled_task_completion_failed", session_id=key
-                    )
+                    log.exception("scheduled_task_completion_failed", session_id=key)
                 await self._emit_frontend(
                     FRONTEND_EVENT_STATUS,
                     self._session_status_payload(
@@ -2848,6 +3094,7 @@ class HarnessService:
                 if session.parent_id is None:
                     await self._emit_conversations_changed(session.workspace_id)
         finally:
+            self._worker_authorities.pop(key, None)
             self._runs.pop(key, None)
             self._event_locks.pop(key, None)
             self._abort_requested.discard(key)
@@ -3180,6 +3427,9 @@ class HarnessService:
             return "once"
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
+        ownership = self._runs.get(str(session.id), {}).get("ownership")
+        if ownership is not None and not await ownership.is_current_owner():
+            raise ConflictError("Harness run ownership was superseded")
         request = await sync_to_async(self.permissions.requests.create)(
             organization_id=session.organization_id,
             session_id=session.id,
@@ -3189,6 +3439,9 @@ class HarnessService:
             title=title,
             message_id=assistant.id,
             call_id=call_id,
+        )
+        await sync_to_async(self._enqueue_gate_resolution, thread_sensitive=True)(
+            session, "permission", str(request.id)
         )
         self._pending_permissions[str(request.id)] = future
         await self._emit_frontend(
@@ -3218,6 +3471,9 @@ class HarnessService:
         call_id = str(kwargs.get("call_id", ""))
         loop = asyncio.get_running_loop()
         future: asyncio.Future[list[Any]] = loop.create_future()
+        ownership = self._runs.get(str(session.id), {}).get("ownership")
+        if ownership is not None and not await ownership.is_current_owner():
+            raise ConflictError("Harness run ownership was superseded")
         request = await sync_to_async(QuestionRequestRepository.create)(
             organization_id=session.organization_id,
             session_id=session.id,
@@ -3225,6 +3481,9 @@ class HarnessService:
             message_id=assistant.id,
             call_id=call_id,
             questions=questions,
+        )
+        await sync_to_async(self._enqueue_gate_resolution, thread_sensitive=True)(
+            session, "question", str(request.id)
         )
         self._pending_questions[str(request.id)] = future
         await self._emit_frontend(
@@ -3263,15 +3522,132 @@ class HarnessService:
         finally:
             self._pending_questions.pop(str(request.id), None)
 
+    def _wake_local_gate(
+        self,
+        request_id: uuid.UUID,
+        *,
+        permission: bool,
+        value: Any,
+        reject: bool = False,
+    ) -> None:
+        """Resolve the same-process worker future regardless of gateway role."""
+        key = str(request_id)
+        future = (
+            self._pending_permissions.pop(key, None)
+            if permission
+            else self._pending_questions.pop(key, None)
+        )
+        if future is None or future.done():
+            return
+        if reject:
+            future.set_exception(ValueError("Question rejected by user"))
+        else:
+            future.set_result(value)
+
+    def _mark_gate_command_done(
+        self, session: HarnessSession, gate_type: str, request_id: str
+    ) -> None:
+        """Record a completed gate command without storing its answer."""
+        if not self._durable_admission:
+            return
+        from django.utils import timezone
+
+        from .models import HarnessRun, HarnessRunCommand
+
+        run = (
+            HarnessRun.objects.filter(
+                session_id=session.id,
+                status__in=(
+                    HarnessRunStatus.STARTING,
+                    HarnessRunStatus.RUNNING,
+                    HarnessRunStatus.CLOSING,
+                ),
+            )
+            .order_by("-created_at")
+            .first()
+        )
+        if run is None:
+            return
+        command_type = (
+            HarnessRunCommand.Type.PERMISSION
+            if gate_type == "permission"
+            else HarnessRunCommand.Type.QUESTION
+        )
+        HarnessRunCommand.objects.filter(
+            run=run, command_type=command_type, dedupe_key=request_id
+        ).update(
+            state=HarnessRunCommand.State.DONE,
+            completed_at=timezone.now(),
+        )
+
+    def _enqueue_gate_resolution(
+        self, session: HarnessSession, gate_type: str, request_id: str
+    ) -> None:
+        """Persist a gate wake-up as an identifier-only worker command."""
+        if not self._durable_admission:
+            return
+        from .models import HarnessRun, HarnessRunCommand
+
+        run = HarnessRun.objects.filter(
+            session_id=session.id,
+            status__in=(
+                HarnessRunStatus.STARTING,
+                HarnessRunStatus.RUNNING,
+                HarnessRunStatus.CLOSING,
+            ),
+        ).first()
+        if run is None:
+            return
+        HarnessRunCommand.objects.get_or_create(
+            run=run,
+            command_type=(
+                HarnessRunCommand.Type.PERMISSION
+                if gate_type == "permission"
+                else HarnessRunCommand.Type.QUESTION
+            ),
+            dedupe_key=request_id,
+            defaults={
+                "deployment_version": run.deployment_version,
+                "target_worker_id": run.owner_worker_id,
+                "payload": {"request_id": request_id},
+            },
+        )
+
     async def _on_runner_event(
         self,
         session: HarnessSession,
         assistant: HarnessMessage,
         event: dict[str, Any],
     ) -> None:
-        """Persist a runner streaming event and forward it to frontend."""
+        """Persist only when this callback still has durable owner authority."""
+        ownership = self._runs.get(str(session.id), {}).get("ownership")
+        if ownership is not None and self._durable_admission:
+            from .runtime_authority import run_outcome_uncertain
+
+            if run_outcome_uncertain(ownership.run_id):
+                self._runs.get(str(session.id), {})["terminal_unresolved"] = True
+                raise CriticalHarnessPersistenceError(
+                    "Runner effect outcome is unknown"
+                )
+
+        if ownership is not None and not await ownership.is_current_owner():
+            log.warning("harness_stale_run_event_rejected", session_id=str(session.id))
+            raise CriticalHarnessPersistenceError(
+                "Run no longer owns execution authority"
+            )
         async with self._event_lock(str(session.id)):
-            await self._persist_runner_event(session, assistant, event)
+            critical = event.get("type") in {"tool_started", "tool_completed"}
+            try:
+                await self._persist_runner_event(session, assistant, event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if critical and ownership is not None:
+                    self._runs.get(str(session.id), {})["terminal_unresolved"] = True
+                    raise CriticalHarnessPersistenceError(
+                        "Durable tool event could not be committed"
+                    ) from exc
+                raise
 
     async def _persist_runner_event(
         self,
@@ -3301,6 +3677,9 @@ class HarnessService:
           step/tool, we rebind the queued part instead of creating a second row.
         """
         etype = str(event.get("type", ""))
+        ownership = self._runs.get(str(session.id), {}).get("ownership")
+        if ownership is not None and not await ownership.is_current_owner():
+            raise ConflictError("Harness run ownership was superseded")
         workspace_id = str(session.workspace_id)
         session_id = str(session.id)
         message_id = str(assistant.id)
@@ -4716,7 +5095,7 @@ class HarnessService:
                 f"task_id '{raw}' does not belong to this session",
                 tool="task",
             )
-        if self.is_running(child.id):
+        if await sync_to_async(self.is_running)(child.id):
             raise ToolError(
                 f"Subagent '{raw}' is still running; wait for it to finish "
                 "before resuming it",
@@ -4867,10 +5246,10 @@ _default_harness_service: HarnessService | None = None
 
 
 def create_default_harness_service() -> HarnessService:
-    """Build the production service with runner-backed workspace access.
+    """Build the process-role-specific service with runner-backed access.
 
-    REST and MCP both use :func:`get_harness_service` so abort, permissions,
-    and in-flight runs share one task registry.
+    ``local`` preserves the legacy injectable, same-process execution path;
+    gateway and worker roles use durable database admission/ownership.
     """
     from apps.runners.sio_server import get_runner_service
 
@@ -4888,6 +5267,29 @@ def create_default_harness_service() -> HarnessService:
             workspace_id, session_id, reason=reason or "run_finished"
         )
 
+    deployment = None
+    try:
+        from .worker_protocol import HarnessDeployment
+
+        deployment = HarnessDeployment.from_environment()
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    service_type = None
+    if deployment.mode == "gateway":
+        from .gateway import HarnessGatewayService
+
+        service_type = HarnessGatewayService
+    elif deployment.mode == "worker":
+        from .gateway import HarnessWorkerService
+
+        service_type = HarnessWorkerService
+    if service_type is not None:
+        return service_type(
+            deployment=deployment,
+            gateway=deployment.mode == "gateway",
+            accessor_factory=accessor_factory,
+            process_cleanup=process_cleanup,
+        )
     return HarnessService(
         accessor_factory=accessor_factory, process_cleanup=process_cleanup
     )

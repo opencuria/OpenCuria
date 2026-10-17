@@ -334,6 +334,7 @@ class HarnessRunner:
         accessor: WorkspaceAccessor | None = None,
         emit: EmitCallback | None = None,
         chat_options: ChatOptions | None = None,
+        critical_emit_errors: bool = False,
     ) -> None:
         """Create a runner.
 
@@ -363,6 +364,7 @@ class HarnessRunner:
         self.accessor = accessor
         self.chat_options = chat_options or ChatOptions()
         self._emit = emit or self._noop_emit
+        self._critical_emit_errors = critical_emit_errors
 
     @staticmethod
     async def _noop_emit(event: dict[str, Any]) -> None:
@@ -370,13 +372,25 @@ class HarnessRunner:
         return None
 
     async def _send(self, event: dict[str, Any]) -> None:
-        """Emit *event* without breaking the loop on emitter errors."""
+        """Emit events; durable tool lifecycle commits may never be dropped."""
         try:
             await self._emit(event)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # pragma: no cover - defensive
-            log.warning("emit_failed", error=str(exc), event_type=event.get("type"))
+        except Exception as exc:
+            if self._critical_emit_errors:
+                from .harness_service import CriticalHarnessPersistenceError
+
+                if isinstance(exc, CriticalHarnessPersistenceError) or event.get(
+                    "type"
+                ) in {
+                    "tool_started",
+                    "tool_completed",
+                }:
+                    raise
+            log.warning(
+                "emit_failed", error=type(exc).__name__, event_type=event.get("type")
+            )
 
     def _filtered_schemas(
         self, agent: AgentDefinition, mode: str, *, depth: int, max_depth: int
@@ -655,21 +669,16 @@ class HarnessRunner:
             result = await self.tools.execute(call.name, call.arguments, call_ctx)
         except asyncio.CancelledError:
             raise
-        except KeyError as exc:
-            error = _with_args(f"Unknown tool '{call.name}': {exc}", call)
-            await self._send(
-                {
-                    "type": "tool_error",
-                    "step": step,
-                    "call_id": call.call_id,
-                    "queued_id": call.queued_id,
-                    "tool": call.name,
-                    "error": error,
-                }
-            )
-            return self._tool_error_outcome(call, error)
         except Exception as exc:
-            error = _with_args(f"Tool '{call.name}' failed: {exc}", call)
+            if self._critical_emit_errors:
+                from .harness_service import CriticalHarnessPersistenceError
+
+                if isinstance(exc, CriticalHarnessPersistenceError):
+                    raise
+            if isinstance(exc, KeyError):
+                error = _with_args(f"Unknown tool '{call.name}': {exc}", call)
+            else:
+                error = _with_args(f"Tool '{call.name}' failed: {exc}", call)
             await self._send(
                 {
                     "type": "tool_error",
@@ -788,6 +797,11 @@ class HarnessRunner:
                 # not the owning run. Preserve siblings and let the model recover.
                 item = RuntimeError("Tool execution interrupted unexpectedly")
             if isinstance(item, BaseException):
+                if self._critical_emit_errors:
+                    from .harness_service import CriticalHarnessPersistenceError
+
+                    if isinstance(item, CriticalHarnessPersistenceError):
+                        raise item
                 log.warning(
                     "tool_dispatch_failed",
                     tool=call.name,
@@ -1538,9 +1552,7 @@ class HarnessRunner:
 
         async def _emit_queued(key: Any) -> None:
             slot = fragments[key]
-            queued_id = _provisional_call_id(
-                key, str(slot.get("id", "") or "")
-            )
+            queued_id = _provisional_call_id(key, str(slot.get("id", "") or ""))
             slot["queued_id"] = queued_id
             name = str(slot.get("name", "") or "")
             raw = str(slot.get("arguments", "") or "")
@@ -1558,6 +1570,7 @@ class HarnessRunner:
                     "arguments": raw,
                 }
             )
+
         async for delta in resolved.adapter.chat_stream(
             resolved.model_id,
             messages,
@@ -1860,8 +1873,14 @@ class _MissingAccessor(WorkspaceAccessor):
         raise RuntimeError("No workspace accessor configured")
 
     async def process_start(  # type: ignore[no-untyped-def]
-        self, command, workdir="/workspace", env=None, name="",
-        *, session_id=None, kind="persistent",
+        self,
+        command,
+        workdir="/workspace",
+        env=None,
+        name="",
+        *,
+        session_id=None,
+        kind="persistent",
     ):
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")

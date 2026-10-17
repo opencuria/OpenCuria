@@ -194,5 +194,4 @@ def test_facade_constants_reachable():
     assert svc._PROCESS_RPC_TIMEOUT_SECONDS == 30
     assert svc._STREAM_CHUNK_SIZE == 64 * 1024
     assert "workspace:stream_start" in svc._CALL_REPLY_EVENTS
-    assert isinstance(RunnerService._active_terminals, dict)
     assert isinstance(RunnerService._active_desktops, dict)

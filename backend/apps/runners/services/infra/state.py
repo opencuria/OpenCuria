@@ -14,7 +14,9 @@ aliases, optional expiry sweep); they are NOT a new Future system.
 
 Deliberately NOT moved here (Phase-5 remainder, documented):
 
-- ``_active_terminals`` / ``_terminal_workspace_runner`` /
+  Terminal routing is intentionally outside these in-memory service stores;
+  ``TerminalSessionRepository`` is the durable source of truth.
+
   ``_active_desktops`` / ``_desktop_workspace_runner`` stay class
   attributes on the ``RunnerService`` facade: tests read and write them
   directly, so rebinding them per instance would break the shared-state
@@ -94,12 +96,9 @@ class SessionMap(dict):
     values are normalized state dicts (see
     ``SessionStoreMixin._normalize_desktop_state``).
 
-    Currently documentation-only: the live maps
-    (``_active_terminals`` / ``_terminal_workspace_runner`` /
-    ``_active_desktops`` / ``_desktop_workspace_runner``) stay class
-    attributes on the ``RunnerService`` facade for test compatibility
-    and are NOT rebound to ``SessionMap`` instances. Use this class when
-    a future phase moves them to instance state.
+    Currently documentation-only: desktop maps stay class attributes on
+    the ``RunnerService`` facade for existing test compatibility. Terminal
+    routes live in the database registry and are not in this map.
     """
 
     def get_session(self, workspace_id: str, default: Any = None) -> Any:

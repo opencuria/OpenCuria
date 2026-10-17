@@ -83,13 +83,21 @@ class DesktopProxyTunnel:
 class WebSocketInterface(Interface):
     """python-socketio async client that bridges backend ↔ service."""
 
-    def __init__(self, service: WorkspaceService, settings: RunnerSettings) -> None:
+    def __init__(
+        self,
+        service: WorkspaceService,
+        settings: RunnerSettings,
+        *,
+        sio_client=None,
+        own_journal: bool = True,
+    ) -> None:
         super().__init__(service)
         self._settings = settings
+        self._own_journal = own_journal
         self.capture_fence: CaptureFence | None = getattr(
             service, "capture_fence", None
         )
-        self._sio = socketio.AsyncClient(
+        self._sio = sio_client or socketio.AsyncClient(
             reconnection=True,
             reconnection_attempts=0,  # unlimited
             reconnection_delay=2,
@@ -123,31 +131,45 @@ class WebSocketInterface(Interface):
         # so partial uploads can never grow without bounds.
         self._upload_transfers: dict[str, dict] = {}
         self._setup_handlers()
-        from ..journal import Journal, OperationExecutor
+        self._operations = None
+        if own_journal:
+            from ..journal import Journal, OperationExecutor
 
-        self._operations = OperationExecutor(
-            self._sio,
-            Journal(settings.state_dir, defer_recovery=True),
-            reconciler=getattr(self._service, "publication_evidence", None),
-            observer=self._service,
-        )
-        lifecycle = getattr(self._service, "_lifecycle", None)
-        if lifecycle is not None:
-            lifecycle.checkpoint_hook = self._checkpoint_workspace
-            lifecycle.scrub_proof_hook = self._workspace_scrub_proof
-        self._service._journal = self._operations.journal
-        configure = getattr(self._service, "configure_desktop_leases", None)
-        if configure is not None:
-            configure(settings.state_dir, self._inventory_epoch)
-        desktop = getattr(self._service, "desktop", None)
-        self._desktop_epoch = getattr(desktop, "epoch", self._inventory_epoch)
-        images = getattr(self._service, "images", None)
-        if images is not None:
-            images.scrub_proof_hook = self._workspace_scrub_proof
-            images.checkpoint_hook = self._checkpoint_workspace
+            self._operations = OperationExecutor(
+                self._sio,
+                Journal(settings.state_dir, defer_recovery=True),
+                reconciler=getattr(self._service, "publication_evidence", None),
+                observer=self._service,
+            )
+            lifecycle = getattr(self._service, "_lifecycle", None)
+            if lifecycle is not None:
+                lifecycle.checkpoint_hook = self._checkpoint_workspace
+                lifecycle.scrub_proof_hook = self._workspace_scrub_proof
+            self._service._journal = self._operations.journal
+            configure = getattr(self._service, "configure_desktop_leases", None)
+            if configure is not None:
+                configure(settings.state_dir, self._inventory_epoch)
+            desktop = getattr(self._service, "desktop", None)
+            self._desktop_epoch = getattr(desktop, "epoch", self._inventory_epoch)
+            images = getattr(self._service, "images", None)
+            if images is not None:
+                images.scrub_proof_hook = self._workspace_scrub_proof
+                images.checkpoint_hook = self._checkpoint_workspace
+        else:
+            desktop = getattr(self._service, "desktop", None)
+            self._desktop_epoch = getattr(desktop, "epoch", self._inventory_epoch)
+
+    @property
+    def _journal(self):
+        """Expose the supervisor-owned journal to terminal lifecycle handlers."""
+        if self._operations is not None:
+            return self._operations.journal
+        return getattr(self._service, "_journal", None)
 
     async def _workspace_scrub_proof(self, workspace_id: uuid.UUID) -> bool:
         """Verify the durable scrub checkpoint against a fresh unchanged incarnation."""
+        if self._operations is None:
+            return False
         observed = await self._service.workspace_incarnation(str(workspace_id))
         if not observed or observed[1] not in {"exited", "stopped"}:
             self._operations.journal.invalidate_checkpoint(str(workspace_id))
@@ -170,6 +192,8 @@ class WebSocketInterface(Interface):
         self, workspace_id: uuid.UUID, credentials_present: bool | None, event: str
     ) -> None:
         """Checkpoint scrub/readiness against inspected identity, not caller booleans."""
+        if self._operations is None:
+            return
         if event == "injecting":
             self._operations.journal.invalidate_checkpoint(str(workspace_id))
             return
@@ -644,7 +668,8 @@ class WebSocketInterface(Interface):
                             "inventory_sequence": self._inventory_sequence,
                         },
                     )
-                    await self._operations.replay(recover=False)
+                    if self._operations is not None:
+                        await self._operations.replay(recover=False)
                 await asyncio.sleep(self._settings.heartbeat_interval)
             except asyncio.CancelledError:
                 break
@@ -686,22 +711,23 @@ class WebSocketInterface(Interface):
                                 "epoch": self._desktop_epoch,
                             },
                         )
-                for workspace_id, info in getattr(
-                    getattr(self._service, "_registry", None), "_cache", {}
-                ).items():
-                    observed = await self._service.workspace_incarnation(
-                        str(workspace_id)
-                    )
-                    if observed:
-                        proof = self._operations.journal.proof(
-                            str(workspace_id), observed[0]
+                if self._operations is not None:
+                    for workspace_id, info in getattr(
+                        getattr(self._service, "_registry", None), "_cache", {}
+                    ).items():
+                        observed = await self._service.workspace_incarnation(
+                            str(workspace_id)
                         )
-                        if proof and (
-                            proof.get("state") == observed[1]
-                            or proof.get("event") == "scrubbed"
-                            and observed[1] in {"exited", "stopped"}
-                        ):
-                            info.credentials_present = proof.get("credentials_present")
+                        if observed:
+                            proof = self._operations.journal.proof(
+                                str(workspace_id), observed[0]
+                            )
+                            if proof and (
+                                proof.get("state") == observed[1]
+                                or proof.get("event") == "scrubbed"
+                                and observed[1] in {"exited", "stopped"}
+                            ):
+                                info.credentials_present = proof.get("credentials_present")
                 workspaces = await self._service.get_workspace_heartbeat_statuses()
                 self._cached_heartbeat_workspaces = workspaces
                 if self._sio.connected:
@@ -733,7 +759,8 @@ class WebSocketInterface(Interface):
                                     "epoch": desktop.get("epoch", self._desktop_epoch),
                                 },
                             )
-                    await self._operations.replay()
+                    if self._operations is not None:
+                        await self._operations.replay()
                 if (
                     time.monotonic() - self._last_inventory_at
                     >= self._settings.inventory_interval
@@ -863,6 +890,112 @@ class WebSocketInterface(Interface):
     def _setup_handlers(self) -> None:
         sio = self._sio
 
+        def _start_terminal_reader(workspace_id: str, terminal_id: str) -> None:
+            """Start one output reader without transferring ownership of the PTY."""
+            key = f"terminal:{terminal_id}"
+            current = self._running_tasks.get(key)
+            if current is not None and not current.done():
+                return
+            log = logger.bind(workspace_id=workspace_id, terminal_id=terminal_id)
+
+            async def read_pty() -> None:
+                cancelled = False
+                try:
+                    async for sequence, chunk in self._service.read_terminal_events(
+                        terminal_id
+                    ):
+                        try:
+                            await sio.emit(
+                                "terminal:output",
+                                {
+                                    "workspace_id": workspace_id,
+                                    "terminal_id": terminal_id,
+                                    "sequence": sequence,
+                                    "data": base64.b64encode(chunk).decode("ascii"),
+                                },
+                            )
+                        except Exception:
+                            # The PTY reader owns output collection, not the
+                            # socket lifetime. Preserve bounded bytes and keep
+                            # draining while disconnected; attach replays later.
+                            await self._service.set_terminal_attached(terminal_id, False)
+                            log.warning("pty_output_detached")
+                except asyncio.CancelledError:
+                    cancelled = True
+                    raise
+                except Exception:
+                    log.exception("pty_read_failed")
+                finally:
+                    if not cancelled:
+                        try:
+                            await self._service.close_terminal(terminal_id)
+                        except Exception:
+                            log.exception("terminal_cleanup_failed")
+                        with contextlib.suppress(Exception):
+                            await sio.emit(
+                                "terminal:closed",
+                                {
+                                    "workspace_id": workspace_id,
+                                    "terminal_id": terminal_id,
+                                },
+                            )
+                    if self._running_tasks.get(key) is asyncio.current_task():
+                        self._running_tasks.pop(key, None)
+
+            self._running_tasks[key] = asyncio.create_task(read_pty())
+
+        @sio.on("terminal:attach")
+        async def on_terminal_attach(data: dict) -> dict:
+            """Reattach the existing PTY without creating or replacing it."""
+            terminal_id = str(data.get("terminal_id", ""))
+            workspace_id = str(data.get("workspace_id", ""))
+            after_seq = data.get("after_seq", 0)
+            if type(after_seq) is not int or after_seq < 0:
+                return {"ok": False, "error": "Invalid terminal output cursor"}
+            try:
+                async def emit_replay(sequence: int, chunk: bytes) -> None:
+                    await sio.emit(
+                        "terminal:output",
+                        {
+                            "workspace_id": workspace_id,
+                            "terminal_id": terminal_id,
+                            "sequence": sequence,
+                            "data": base64.b64encode(chunk).decode("ascii"),
+                        },
+                    )
+
+                if not self._service.has_terminal(terminal_id):
+                    raise ValueError("Terminal PTY is no longer running")
+                journal = self._journal
+                if journal is not None:
+                    journal.remember_terminal(workspace_id, terminal_id)
+                await self._service.reattach_terminal(
+                    terminal_id, after_seq, deliver=emit_replay
+                )
+                _start_terminal_reader(workspace_id, terminal_id)
+                await sio.emit(
+                    "terminal:started",
+                    {
+                        "task_id": None,
+                        "workspace_id": workspace_id,
+                        "terminal_id": terminal_id,
+                        "replayed": True,
+                        "output_sequence": self._service.terminal_output_cursor(terminal_id),
+                        "confirmed_input_ids": self._service.terminal_confirmed_inputs(terminal_id),
+                    },
+                )
+                return {"ok": True}
+            except Exception as exc:
+                await sio.emit(
+                    "terminal:attach_error",
+                    {
+                        "workspace_id": workspace_id,
+                        "terminal_id": terminal_id,
+                        "error": str(exc),
+                    },
+                )
+                return {"ok": False, "error": str(exc)}
+
         @sio.on("inventory:refresh")
         async def refresh_inventory(data=None) -> None:
             await self._send_inventory()
@@ -904,6 +1037,9 @@ class WebSocketInterface(Interface):
         @sio.event
         async def disconnect() -> None:
             logger.warning("websocket_disconnected")
+            # Keep PTY readers alive; they drain into their bounded replay
+            # buffer; delivery is disabled until a subsequent attach resumes it.
+            await self._service.detach_all_terminals()
             # Connection loss is not runtime shutdown authority. Keep lifecycle
             # handlers and execution streams alive; journal results for replay.
             # Continue offline inventory collection; never infer absent resources
@@ -1410,10 +1546,11 @@ class WebSocketInterface(Interface):
 
             try:
                 # Step 2: terminal sessions go through the TerminalManager.
-                terminal_id = await self._service.terminal_manager.start_terminal(
+                terminal_id = await self._service.start_terminal(
                     workspace_id,
                     cols=cols,
                     rows=rows,
+                    terminal_id=data.get("terminal_id"),
                 )
                 await sio.emit(
                     "terminal:started",
@@ -1421,60 +1558,56 @@ class WebSocketInterface(Interface):
                         "task_id": task_id,
                         "workspace_id": str(workspace_id),
                         "terminal_id": terminal_id,
+                        "output_sequence": self._service.terminal_output_cursor(terminal_id),
                     },
                 )
-
-                # Start background reader task
-                async def _read_pty() -> None:
-                    try:
-                        async for chunk in self._service.terminal_manager.read_terminal(
-                            terminal_id
-                        ):
-                            await sio.emit(
-                                "terminal:output",
-                                {
-                                    "workspace_id": str(workspace_id),
-                                    "terminal_id": terminal_id,
-                                    "data": base64.b64encode(chunk).decode("ascii"),
-                                },
-                            )
-                    except Exception:
-                        log.exception("pty_read_failed")
-                    finally:
-                        try:
-                            await self._service.terminal_manager.close_terminal(
-                                terminal_id
-                            )
-                        except Exception:
-                            log.exception("terminal_cleanup_failed")
-                        await sio.emit(
-                            "terminal:closed",
-                            {
-                                "workspace_id": str(workspace_id),
-                                "terminal_id": terminal_id,
-                            },
-                        )
-                        self._running_tasks.pop(f"terminal:{terminal_id}", None)
-
-                reader = asyncio.create_task(_read_pty())
-                self._running_tasks[f"terminal:{terminal_id}"] = reader
+                _start_terminal_reader(str(workspace_id), terminal_id)
 
                 log.info("terminal_started", terminal_id=terminal_id)
             except Exception as exc:
                 await sio.emit(
-                    "workspace:error",
-                    {"task_id": task_id, "error": str(exc)},
+                    "terminal:attach_error",
+                    {
+                        "task_id": task_id,
+                        "workspace_id": str(workspace_id),
+                        "terminal_id": data.get("terminal_id", ""),
+                        "error": str(exc),
+                    },
                 )
                 log.exception("start_terminal_failed")
 
         @sio.on("terminal:input")
-        async def on_terminal_input(data: dict) -> None:
+        async def on_terminal_input(data: dict) -> dict:
             terminal_id = data["terminal_id"]
             raw = base64.b64decode(data["data"])
+            request_id = str(data.get("input_id", ""))
             try:
-                await self._service.terminal_manager.write_terminal(terminal_id, raw)
-            except Exception:
+                written = await self._service.write_terminal(
+                    terminal_id, raw, input_id=request_id or None
+                )
+                result = {
+                    "workspace_id": data.get("workspace_id", ""),
+                    "terminal_id": terminal_id,
+                    "input_id": request_id,
+                    "ok": True,
+                    "duplicate": not written,
+                }
+                receipt = await sio.call("terminal:input_ack", result, timeout=15)
+                if not isinstance(receipt, dict) or receipt.get("ok") is not True:
+                    raise RuntimeError("Input acknowledgement was not delivered")
+                return result
+            except Exception as exc:
                 logger.exception("terminal_write_failed", terminal_id=terminal_id)
+                result = {
+                    "workspace_id": data.get("workspace_id", ""),
+                    "terminal_id": terminal_id,
+                    "input_id": request_id,
+                    "ok": False,
+                    "error": str(exc),
+                }
+                with contextlib.suppress(Exception):
+                    await sio.emit("terminal:input_ack", result)
+                return result
 
         @sio.on("terminal:resize")
         async def on_terminal_resize(data: dict) -> None:
@@ -1482,7 +1615,7 @@ class WebSocketInterface(Interface):
             cols = data.get("cols", 80)
             rows = data.get("rows", 24)
             try:
-                await self._service.terminal_manager.resize_terminal(
+                await self._service.resize_terminal(
                     terminal_id, cols, rows
                 )
             except Exception:
@@ -1497,7 +1630,10 @@ class WebSocketInterface(Interface):
                 reader = self._running_tasks.pop(f"terminal:{terminal_id}", None)
                 if reader:
                     reader.cancel()
-                await self._service.terminal_manager.close_terminal(terminal_id)
+                await self._service.close_terminal(terminal_id)
+                journal = self._journal
+                if journal is not None:
+                    journal.forget_terminal(workspace_id, terminal_id)
                 await sio.emit(
                     "terminal:closed",
                     {
@@ -3791,7 +3927,7 @@ class WebSocketInterface(Interface):
         """Cancel running tasks, stop heartbeat and metrics loop, and disconnect."""
         # Runtime effects in executor threads are not cancellable. Wait for
         # lifecycle completion/journal fsync instead of announcing interruption.
-        if self._operations.running:
+        if self._operations is not None and self._operations.running:
             await asyncio.gather(
                 *self._operations.running.values(), return_exceptions=True
             )
@@ -3826,5 +3962,7 @@ class WebSocketInterface(Interface):
             logger.info("task_cancelled", task_id=task_id)
         self._running_tasks.clear()
 
+        if self._own_journal and self._operations is not None:
+            self._operations.journal.close()
         if self._sio.connected:
             await self._sio.disconnect()

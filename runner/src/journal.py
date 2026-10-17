@@ -51,14 +51,23 @@ class Journal:
         self._lock_file = (path / "operations.lock").open("a")
         fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         self.db = sqlite3.connect(path / "operations.sqlite3")
+        self._active_terminal: tuple[str, str] | None = None
         os.chmod(path / "operations.sqlite3", 0o600)
         self.instance_id = str(uuid.uuid4())
         self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS terminal_sessions "
+            "(workspace_id TEXT PRIMARY KEY, terminal_id TEXT NOT NULL)"
+        )
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS operations "
             "(id TEXT PRIMARY KEY, fingerprint TEXT, identity TEXT, "
             "event TEXT, result TEXT, ack INTEGER DEFAULT 0)"
+        )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS terminal_sessions "
+            "(workspace_id TEXT PRIMARY KEY, terminal_id TEXT NOT NULL)"
         )
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS checkpoints "
@@ -127,10 +136,42 @@ class Journal:
                 },
             )
 
+    def remember_terminal(self, workspace_id: str, terminal_id: str) -> None:
+        """Persist only the live PTY identity; never journal terminal bytes."""
+        with self.db:
+            self.db.execute(
+                "INSERT OR REPLACE INTO terminal_sessions VALUES(?, ?)",
+                (workspace_id, terminal_id),
+            )
+        self._active_terminal = (workspace_id, terminal_id)
+
+    def forget_terminal(self, workspace_id: str, terminal_id: str) -> None:
+        """Forget a PTY identity only when its exact session closes."""
+        with self.db:
+            self.db.execute(
+                "DELETE FROM terminal_sessions WHERE workspace_id = ? AND terminal_id = ?",
+                (workspace_id, terminal_id),
+            )
+        if self._active_terminal == (workspace_id, terminal_id):
+            self._active_terminal = None
+
     def close(self) -> None:
         """Release storage after executor has drained all handlers."""
         self.db.close()
         self._lock_file.close()
+
+    @property
+    def active_terminal(self) -> tuple[str, str] | None:
+        """Return the most recent terminal identity for legacy diagnostics."""
+        return self._active_terminal
+
+    def active_terminals(self) -> dict[str, str]:
+        """Return runner-local PTY identities retained across worker replacement."""
+        return dict(
+            self.db.execute(
+                "SELECT workspace_id, terminal_id FROM terminal_sessions"
+            ).fetchall()
+        )
 
     def begin(self, event: str, data: dict) -> bool:
         """Reserve identity before any runtime effect; reject payload collisions."""
@@ -319,6 +360,9 @@ class OperationExecutor:
         self.emit = sio.emit
         self.running: dict[str, asyncio.Task] = {}
         sio.emit = self.record_emit
+        self.command_events = frozenset(COMMANDS)
+        if getattr(sio, "supervised_owner", False):
+            return
         sio.on("operation:ack", journal.acknowledge)
         sio.on("operation:inspect", self.inspect)
         sio.on("operation:seal", self.seal)

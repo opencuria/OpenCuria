@@ -8,8 +8,13 @@ from django.contrib.auth import get_user_model
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
-from apps.runners.sio_server import _frontend_user_can_access_workspace
+from apps.runners.sio_server import _frontend_user_can_access_workspace, _frontend_workspace_room
 from common.utils import hash_token
+
+
+def test_frontend_workspace_room_name_is_stable():
+    """Frontend fanout uses a shared Socket.IO workspace room."""
+    assert _frontend_workspace_room("workspace-1") == "workspace:workspace-1"
 
 
 # Async ORM calls use separate connections and need committed fixture data.

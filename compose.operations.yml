@@ -1,0 +1,158 @@
+# Stable process plane: updates require deliberate maintenance, not HTTP rollout.
+name: opencuria-operations
+services:
+  scheduler:
+    image: ghcr.io/opencuria/backend:${OPENCURIA_OPERATIONS_TAG:?Pin the stable operations image}
+    init: true
+    restart: unless-stopped
+    env_file:
+    - .env.operations
+    environment:
+      DJANGO_ENV: production
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?Read from .env.operations}
+      DB_NAME: ${DB_NAME:-opencuria}
+      DB_USER: ${DB_USER:-opencuria}
+      DB_PASSWORD: ${DB_PASSWORD:?Read from .env.operations}
+      DB_HOST: ${OPENCURIA_DB_HOST:-opencuria-infra-db-1}
+      DB_PORT: '5432'
+      REDIS_URL: ${OPENCURIA_REDIS_URL:-redis://opencuria-infra-redis-1:6379/0}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?Read from .env.operations}
+      MCP_OAUTH_CALLBACK_URL: ${MCP_OAUTH_CALLBACK_URL:?OAuth callback required}
+      MCP_OAUTH_FRONTEND_RETURN_URL: ${MCP_OAUTH_FRONTEND_RETURN_URL:?Frontend return required}
+      OPENCURIA_DEPLOYMENT_VERSION: ${OPENCURIA_DEPLOYMENT_VERSION:?Operations release required}
+      OPENCURIA_PROTOCOL_MIN: ${OPENCURIA_PROTOCOL_MIN:?Protocol range required}
+      OPENCURIA_PROTOCOL_MAX: ${OPENCURIA_PROTOCOL_MAX:?Protocol range required}
+      OPENCURIA_DATABASE_SCHEMA: ${OPENCURIA_DATABASE_SCHEMA:?Schema version required}
+      OPENCURIA_DATABASE_SCHEMA_MIN: ${OPENCURIA_DATABASE_SCHEMA_MIN:?Schema range required}
+      OPENCURIA_DATABASE_SCHEMA_MAX: ${OPENCURIA_DATABASE_SCHEMA_MAX:?Schema range required}
+      OPENCURIA_GATEWAY_WORKER_VERSIONS: ${OPENCURIA_GATEWAY_WORKER_VERSIONS:?List every generation allowed
+        to receive roots}
+      OPENCURIA_HARNESS_MODE: gateway
+      OPENCURIA_GATEWAY_ROLE: gateway
+      OPENCURIA_SCHEDULER_OWNER_ID: ${OPENCURIA_SCHEDULER_OWNER_ID:-scheduler-1}
+      OPENCURIA_MANAGED_DEPLOYMENT: '1'
+      OPENCURIA_SCHEDULER_ENABLED: 'true'
+    command:
+    - python
+    - manage.py
+    - run_scheduled_task_scheduler
+    - --owner-id
+    - ${OPENCURIA_SCHEDULER_OWNER_ID:-scheduler-1}
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - manage.py
+      - check_scheduler
+      - --release-version
+      - ${OPENCURIA_DEPLOYMENT_VERSION:?Operations release required}
+      - --owner-id
+      - ${OPENCURIA_SCHEDULER_OWNER_ID:-scheduler-1}
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    stop_grace_period: 1h
+    networks:
+    - upgrade
+  recovery:
+    image: ghcr.io/opencuria/backend:${OPENCURIA_OPERATIONS_TAG:?Pin the stable operations image}
+    init: true
+    restart: unless-stopped
+    env_file:
+    - .env.operations
+    environment:
+      DJANGO_ENV: production
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?Read from .env.operations}
+      DB_NAME: ${DB_NAME:-opencuria}
+      DB_USER: ${DB_USER:-opencuria}
+      DB_PASSWORD: ${DB_PASSWORD:?Read from .env.operations}
+      DB_HOST: ${OPENCURIA_DB_HOST:-opencuria-infra-db-1}
+      DB_PORT: '5432'
+      REDIS_URL: ${OPENCURIA_REDIS_URL:-redis://opencuria-infra-redis-1:6379/0}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?Read from .env.operations}
+      MCP_OAUTH_CALLBACK_URL: ${MCP_OAUTH_CALLBACK_URL:?OAuth callback required}
+      MCP_OAUTH_FRONTEND_RETURN_URL: ${MCP_OAUTH_FRONTEND_RETURN_URL:?Frontend return required}
+      OPENCURIA_DEPLOYMENT_VERSION: ${OPENCURIA_DEPLOYMENT_VERSION:?Operations release required}
+      OPENCURIA_PROTOCOL_MIN: ${OPENCURIA_PROTOCOL_MIN:?Protocol range required}
+      OPENCURIA_PROTOCOL_MAX: ${OPENCURIA_PROTOCOL_MAX:?Protocol range required}
+      OPENCURIA_DATABASE_SCHEMA: ${OPENCURIA_DATABASE_SCHEMA:?Schema version required}
+      OPENCURIA_DATABASE_SCHEMA_MIN: ${OPENCURIA_DATABASE_SCHEMA_MIN:?Schema range required}
+      OPENCURIA_DATABASE_SCHEMA_MAX: ${OPENCURIA_DATABASE_SCHEMA_MAX:?Schema range required}
+      OPENCURIA_RECOVERY_OWNER_ID: ${OPENCURIA_RECOVERY_OWNER_ID:-recovery-1}
+      OPENCURIA_MANAGED_DEPLOYMENT: '1'
+      OPENCURIA_SCHEDULER_ENABLED: 'false'
+    command:
+    - python
+    - manage.py
+    - recover_lifecycle
+    - --owner-id
+    - ${OPENCURIA_RECOVERY_OWNER_ID:-recovery-1}
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - manage.py
+      - check_recovery_worker
+      - --owner-id
+      - ${OPENCURIA_RECOVERY_OWNER_ID:-recovery-1}
+      - --release-version
+      - ${OPENCURIA_DEPLOYMENT_VERSION:?Operations release required}
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+    - upgrade
+  socket-gateway:
+    image: ghcr.io/opencuria/backend:${OPENCURIA_OPERATIONS_TAG:?Pin the stable operations image}
+    init: true
+    restart: unless-stopped
+    env_file:
+    - .env.operations
+    environment:
+      DJANGO_ENV: production
+      OPENCURIA_MANAGED_DEPLOYMENT: '1'
+      OPENCURIA_SCHEDULER_ENABLED: 'false'
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?Read from .env.operations}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost}
+      DB_NAME: ${DB_NAME:-opencuria}
+      DB_USER: ${DB_USER:-opencuria}
+      DB_PASSWORD: ${DB_PASSWORD:?Read from .env.operations}
+      DB_HOST: ${OPENCURIA_DB_HOST:-opencuria-infra-db-1}
+      DB_PORT: '5432'
+      REDIS_URL: ${OPENCURIA_REDIS_URL:-redis://opencuria-infra-redis-1:6379/0}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?Read from .env.operations}
+      MCP_OAUTH_CALLBACK_URL: ${MCP_OAUTH_CALLBACK_URL:?OAuth callback required}
+      MCP_OAUTH_FRONTEND_RETURN_URL: ${MCP_OAUTH_FRONTEND_RETURN_URL:?Frontend return required}
+      OPENCURIA_DEPLOYMENT_VERSION: ${OPENCURIA_DEPLOYMENT_VERSION:?Operations release required}
+      OPENCURIA_PROTOCOL_MIN: ${OPENCURIA_PROTOCOL_MIN:?Protocol range required}
+      OPENCURIA_PROTOCOL_MAX: ${OPENCURIA_PROTOCOL_MAX:?Protocol range required}
+      OPENCURIA_DATABASE_SCHEMA: ${OPENCURIA_DATABASE_SCHEMA:?Schema version required}
+      OPENCURIA_DATABASE_SCHEMA_MIN: ${OPENCURIA_DATABASE_SCHEMA_MIN:?Schema range required}
+      OPENCURIA_DATABASE_SCHEMA_MAX: ${OPENCURIA_DATABASE_SCHEMA_MAX:?Schema range required}
+      OPENCURIA_GATEWAY_WORKER_VERSIONS: ${OPENCURIA_GATEWAY_WORKER_VERSIONS:?List every generation accepted
+        by socket gateway}
+      OPENCURIA_HARNESS_MODE: gateway
+      OPENCURIA_GATEWAY_ROLE: worker
+      OPENCURIA_ALLOW_STAGED_RELEASE: '1'
+      OPENCURIA_WORKER_ID: ${OPENCURIA_SOCKET_WORKER_ID:-socket-gateway-1}
+    command:
+    - /entrypoint.sh
+    expose:
+    - 8000
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/')
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    stop_grace_period: 15s
+    networks:
+    - upgrade
+networks:
+  upgrade:
+    name: opencuria-upgrade
+    external: true

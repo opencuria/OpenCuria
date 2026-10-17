@@ -230,6 +230,7 @@ async def test_existing_starting_operation_waits_for_resume_confirmation(monkeyp
     service = ScheduledTaskService(
         repository=repo, runner=UnexpectedRunner(), harness=FakeHarness()
     )
+
     async def no_sleep(_):
         return None
 
@@ -292,6 +293,7 @@ async def test_resume_revalidates_state_before_start(monkeypatch):
         ]
     )
     repo.workspace_resume_state = lambda workspace_id: next(state_reads)
+
     class UnexpectedHarness:
         def create_session(self, **values):
             pytest.fail("state changed during resume; do not start a run")

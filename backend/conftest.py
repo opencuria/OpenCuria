@@ -13,3 +13,9 @@ def django_db_modify_db_settings(
     if connection.vendor == "sqlite":
         directory = tmp_path_factory.mktemp("backend-sqlite")
         connection.settings_dict["TEST"]["NAME"] = str(directory / "db.sqlite3")
+
+
+@pytest.fixture(autouse=True)
+def fast_test_password_hashing(settings) -> None:
+    """Keep fixture users inexpensive; production hashing settings are unchanged."""
+    settings.PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]

@@ -73,11 +73,13 @@ class ClaudeEngine:
         evaluator: PermissionEvaluator | None = None,
         runtime_artifact_ensurer: Callable[..., Awaitable[Any]] | None = None,
         effort: str = "high",
+        critical_event_errors: bool = False,
     ) -> None:
         """Bind harness runtime ports and session-scoped SDK state."""
         self.tools = tools
         self.accessor = accessor
         self._emit = emit or self._noop_emit
+        self._critical_event_errors = critical_event_errors
         self.auth_env = dict(auth_env or {})
         self.external_session_id = (external_session_id or "").strip()
         self.session_store = session_store
@@ -151,12 +153,17 @@ class ClaudeEngine:
         return result if isinstance(result, dict) else {}
 
     async def _send(self, event: dict[str, Any]) -> None:
-        """Forward a root event without letting observer failures abort a run."""
+        """Forward events; durable tool lifecycle commit errors are fatal."""
         try:
             await self._emit(self._sanitize_event(event))
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # pragma: no cover - observer isolation
+        except Exception as exc:
+            if self._critical_event_errors:
+                from ...harness_service import CriticalHarnessPersistenceError
+
+                if isinstance(exc, CriticalHarnessPersistenceError):
+                    raise
             log.warning(
                 "claude_engine_emit_failed",
                 event_type=event.get("type"),
@@ -166,7 +173,7 @@ class ClaudeEngine:
     async def _publish(
         self, event: dict[str, Any], *, parent_tool_use_id: str | None = None
     ) -> None:
-        """Route nested events to the parent task without losing ownership."""
+        """Route nested events without swallowing durable lifecycle failures."""
         if not parent_tool_use_id:
             await self._send(event)
             return
@@ -176,7 +183,12 @@ class ClaudeEngine:
             await self.on_child_event(parent_tool_use_id, self._sanitize_event(event))
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # pragma: no cover - observer isolation
+        except Exception as exc:
+            if self._critical_event_errors:
+                from ...harness_service import CriticalHarnessPersistenceError
+
+                if isinstance(exc, CriticalHarnessPersistenceError):
+                    raise
             log.warning("claude_child_event_failed", error=type(exc).__name__)
 
     @staticmethod
@@ -612,7 +624,12 @@ class ClaudeEngine:
                     parent_id=state.get("parent_tool_use_id"),
                 )
                 raise
-            except Exception:
+            except Exception as exc:
+                if self._critical_event_errors:
+                    from ...harness_service import CriticalHarnessPersistenceError
+
+                    if isinstance(exc, CriticalHarnessPersistenceError):
+                        raise
                 message = "OpenCuria tool execution failed"
                 result = ToolResult(output=message, metadata={"is_error": True})
                 self._tool_results[call_id] = result

@@ -62,12 +62,23 @@ export function recreateWorkspace(id: string, imageId: string): Promise<Workspac
 
 // --- Terminal API ---
 
+export interface TerminalStartResponse {
+  task_id: string | null
+  terminal_id: string | null
+}
+
 export function startTerminal(
   id: string,
   cols: number = 80,
   rows: number = 24,
-): Promise<{ task_id: string }> {
-  return post<{ task_id: string }>(`/workspaces/${id}/terminal/`, { cols, rows })
+  options: { terminalId?: string; afterSeq?: number } = {},
+): Promise<TerminalStartResponse> {
+  return post<TerminalStartResponse>(`/workspaces/${id}/terminal/`, {
+    cols,
+    rows,
+    ...(options.terminalId ? { terminal_id: options.terminalId } : {}),
+    ...(options.afterSeq !== undefined ? { after_seq: options.afterSeq } : {}),
+  })
 }
 
 // --- Desktop API ---

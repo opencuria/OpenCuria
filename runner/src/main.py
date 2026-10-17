@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from pathlib import Path
 from typing import Annotated
 
 import structlog
@@ -59,6 +60,81 @@ app = typer.Typer(
 )
 
 
+async def build_workspace_service(settings: RunnerSettings, log=None):
+    """Build and sync one generation's service using configured runtimes."""
+    from .config import RUNTIME_DOCKER, RUNTIME_QEMU
+    from .runtime.docker_runtime import DockerRuntime
+    from .service import WorkspaceService
+
+    runtimes: dict[str, object] = {}
+    enabled = settings.enabled_runtime_list
+    if RUNTIME_DOCKER in enabled:
+        runtimes[RUNTIME_DOCKER] = DockerRuntime(base_url=settings.docker_socket)
+        if log is not None:
+            log.info("runtime_enabled", runtime=RUNTIME_DOCKER)
+    if RUNTIME_QEMU in enabled:
+        from .runtime.qemu_runtime import QemuRuntime
+
+        runtimes[RUNTIME_QEMU] = QemuRuntime(settings=settings)
+        if log is not None:
+            log.info("runtime_enabled", runtime=RUNTIME_QEMU)
+    if not runtimes:
+        raise RuntimeError("No enabled workspace runtimes")
+    service = WorkspaceService(runtimes, settings)
+    await service.sync_from_runtime()
+    return service
+
+
+@app.command()
+def stage_generation(
+    source: Annotated[
+        Path,
+        typer.Argument(help="Local runner source directory containing src/"),
+    ],
+    version: Annotated[
+        str,
+        typer.Argument(help="Immutable generation identifier, e.g. release-2026-10-16"),
+    ],
+    state_dir: Annotated[
+        Path | None,
+        typer.Option("--state-dir", help="Runner state directory"),
+    ] = None,
+    activate: Annotated[
+        bool,
+        typer.Option("--activate/--stage-only", help="Atomically request activation"),
+    ] = True,
+) -> None:
+    """Stage immutable runner code locally; requires supervised mode to activate."""
+    from .supervisor import stage_generation as _stage
+
+    settings = RunnerSettings()
+    selected_state = str(state_dir or settings.state_dir)
+    digest = _stage(source, selected_state, version, activate=activate)
+    typer.echo(f"Staged generation {version} sha256:{digest}")
+    if activate:
+        typer.echo("Activation requested. It is applied only by supervised mode.")
+
+
+@app.command()
+def upgrade_status(
+    state_dir: Annotated[
+        Path | None,
+        typer.Option("--state-dir", help="Runner state directory"),
+    ] = None,
+) -> None:
+    """Show local supervisor generations and session-drain state."""
+    import json
+
+    from .supervisor import read_supervisor_status
+
+    settings = RunnerSettings()
+    typer.echo(
+        json.dumps(
+            read_supervisor_status(str(state_dir or settings.state_dir)), indent=2
+        )
+    )
+
+
 @app.command()
 def serve(
     backend_url: Annotated[
@@ -85,42 +161,21 @@ def serve(
         sys.exit(1)
 
     async def _run() -> None:
-        from .config import RUNTIME_DOCKER, RUNTIME_QEMU
-        from .runtime.docker_runtime import DockerRuntime
-        from .service import WorkspaceService
+        if settings.supervised_mode:
+            from .supervisor import RunnerSupervisor
+
+            await RunnerSupervisor(settings).run()
+            return
+
         from .interfaces.websocket import WebSocketInterface
 
-        # Build runtime backends based on configuration
-        runtimes: dict[str, object] = {}
-        enabled = settings.enabled_runtime_list
-
-        if RUNTIME_DOCKER in enabled:
-            runtimes[RUNTIME_DOCKER] = DockerRuntime(
-                base_url=settings.docker_socket,
-            )
-            log.info("runtime_enabled", runtime=RUNTIME_DOCKER)
-
-        if RUNTIME_QEMU in enabled:
-            from .runtime.qemu_runtime import QemuRuntime
-
-            runtimes[RUNTIME_QEMU] = QemuRuntime(settings=settings)
-            log.info("runtime_enabled", runtime=RUNTIME_QEMU)
-
-        if not runtimes:
-            log.error(
-                "no_runtimes_enabled",
-                hint="Set RUNNER_ENABLED_RUNTIMES to 'docker', 'qemu', or 'docker,qemu'",
-            )
-            sys.exit(1)
-
-        service = WorkspaceService(runtimes, settings)
-        await service.sync_from_runtime()
+        service = await build_workspace_service(settings, log)
         ws_interface = WebSocketInterface(service, settings)
 
         log.info(
             "runner_starting",
             backend_url=settings.backend_url,
-            runtimes=list(runtimes.keys()),
+            runtimes=settings.enabled_runtime_list,
         )
 
         try:
@@ -147,7 +202,14 @@ def main() -> None:
     """Entry point for ``python -m src.main``."""
     settings = RunnerSettings()
     _configure_logging(settings)
-    app()
+    if (
+        len(sys.argv) == 1
+        or sys.argv[1].startswith("--")
+        and sys.argv[1] not in {"--help", "--version"}
+    ):
+        app(args=["serve", *sys.argv[1:]])
+    else:
+        app()
 
 
 if __name__ == "__main__":

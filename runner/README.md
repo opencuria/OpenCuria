@@ -13,6 +13,50 @@ for local development.
   process-group cleanup limits, epoch recovery, and coordinated rollout.
 - [Lifecycle recovery](../docs/image-lifecycle-implementation.md#recovery-hardening-operator-workflow).
 
+## Versioned code generation updates (opt-in)
+
+Normal `serve` stays on the legacy in-process runner unless
+`RUNNER_SUPERVISED_MODE=true` is explicitly enabled. Supervised mode keeps one
+stable backend Socket.IO identity and one exclusive operation Journal in the
+supervisor, while each handler/service generation runs from a separate immutable
+source snapshot in a child Python process. The generation bridge uses a private
+mode-0600 Unix socket, same-UID peer credentials, a random per-supervisor secret,
+bounded length-prefixed IPC and explicit request/ACK replies. Workers never open
+the Journal and never connect to the backend.
+
+```sh
+# Initial rollout is a scheduled restart; default config remains legacy.
+RUNNER_SUPERVISED_MODE=true opencuria-runner serve
+# Stage source from a local runner checkout (never downloaded by a network RPC).
+opencuria-runner stage-generation /srv/runner-src release-2026-10-16 --stage-only
+opencuria-runner stage-generation /srv/runner-src release-2026-10-16
+opencuria-runner upgrade-status
+```
+
+The activation marker is local/admin-owned and applied only after the new worker
+connects to IPC and reports the required real handler capability manifest. Existing
+terminal IDs, stream connection IDs, desktop tunnel IDs, process IDs, lifecycle
+operations and in-flight request IDs remain pinned to their original generation.
+Workspace lifecycle/maintenance is serialized by the supervisor; per-generation
+caches are not shared. Old generations are retained while session ownership or
+active callbacks remain, without a fixed kill timeout. Draining state and owned
+session counts are available from `upgrade-status` and the heartbeat metadata.
+The desktop epoch and durable SQLite lease stores stay owned by the stable
+supervisor across generation changes.
+
+A worker that loses IPC after a command may have completed a guest-side effect;
+that request is never automatically replayed on another generation. Its result is
+unknown until existing journal/runtime evidence resolves it. Stream output uses
+supervisor `sio.call` and returns its backend ACK before the worker advances, so
+existing output backpressure remains end-to-end. A fully drained old generation
+can be retired without disconnecting backend or sessions in the active generation.
+
+The stable supervisor itself is intentionally not hot-updated. Updating it still
+requires the ordinary maintenance restart; do not force-stop it while status
+reports owned sessions. A deployment runner image must include the same Python
+runtime dependencies/source environment as the worker generations; the local
+snapshot contains source only and Python imports shared installed dependencies.
+
 ## QEMU SSH resilience
 
 Open process/terminal channels share a cached SSH transport. Acquiring it never

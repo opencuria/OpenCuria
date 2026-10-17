@@ -33,7 +33,9 @@ class ScheduledTaskService:
         repository: type[ScheduledTaskRepository] | None = None,
         harness: HarnessService | None = None,
         runner: Any | None = None,
+        deployment_version: str = "",
     ) -> None:
+        self.deployment_version = deployment_version
         self.repository = repository or ScheduledTaskRepository
         self.harness = harness
         self.runner = runner
@@ -917,13 +919,20 @@ class ScheduledTaskService:
 
 
 class ScheduledTaskScheduler:
-    """Single asyncio-loop scheduler started only by ASGI lifespan."""
+    """Single-leased asyncio scheduler, usable by ASGI or a worker command."""
 
     def __init__(
-        self, service: ScheduledTaskService | None = None, *, interval: float = 5.0
+        self,
+        service: ScheduledTaskService | None = None,
+        *,
+        interval: float = 5.0,
+        deployment_version: str = "",
+        owner_id: str = "local",
     ) -> None:
         self.service = service or ScheduledTaskService()
         self.interval = interval
+        self.deployment_version = deployment_version
+        self.owner_id = owner_id
         self._task: asyncio.Task[None] | None = None
         self._lease_task: asyncio.Task[None] | None = None
         self._launch_tasks: set[asyncio.Task[None]] = set()
@@ -936,16 +945,57 @@ class ScheduledTaskScheduler:
             return
         from .lease import ScheduledTaskLease
 
-        lease = ScheduledTaskLease()
+        try:
+            lease = ScheduledTaskLease(
+                deployment_version=self.deployment_version,
+                owner_id=self.owner_id,
+            )
+        except TypeError:
+            # Backwards-compatible injection seam for existing fake lease tests.
+            lease = ScheduledTaskLease(deployment_version=self.deployment_version)
         if not await lease.acquire():
             await lease.release()
             raise RuntimeError(
                 "Another backend process owns the scheduled-task scheduler; "
                 "run exactly one backend ASGI worker"
             )
+        if self.deployment_version:
+            from apps.deployments.services import (
+                live_generation_manifests,
+                require_compatible_releases,
+            )
+            from common.deployment_compatibility import ReleaseManifest
+            from django.conf import settings
+
+            candidate = ReleaseManifest.from_mapping(settings.DEPLOYMENT_RELEASE)
+            if candidate.version != self.deployment_version:
+                await lease.release()
+                raise RuntimeError(
+                    "Scheduler worker release must match OPENCURIA_DEPLOYMENT_VERSION"
+                )
+            retained = await sync_to_async(live_generation_manifests)()
+            require_compatible_releases((*retained, candidate))
         self._lease = lease
         try:
-            await sync_to_async(self.service.repository.recover_backend_restart)()
+            # A clean rolling lease handoff does not mean any job process died.
+            # Legacy ASGI mode keeps its historic restart recovery behavior;
+            # managed mode recovers only once after a crash/expired owner.
+            if (
+                lease.recovered_previous_owner
+                and lease._clean_handoff is False
+                and self.deployment_version
+            ):
+                previous_owner = lease.previous_owner_id
+                if not previous_owner:
+                    raise RuntimeError(
+                        "Prior scheduler owner identity is unavailable; refusing a "
+                        "broad restart recovery during a release handoff"
+                    )
+                await sync_to_async(
+                    self.service.repository.recover_backend_restart
+                )(owner_id=previous_owner, all_generations=False)
+            elif not self.deployment_version:
+                await sync_to_async(self.service.repository.recover_backend_restart)()
             await self.service.skip_due_on_startup()
         except BaseException:
             try:
@@ -961,6 +1011,10 @@ class ScheduledTaskScheduler:
 
     async def stop(self) -> None:
         """Stop supervised work and release ownership even on teardown errors."""
+        # Stop new claims/renewals first, but let an already-claimed occurrence
+        # finish its indivisible admission against the durable harness outbox.
+        # This wait intentionally has no timeout: relinquishing a clean lease
+        # while a claim is still crossing to the DB can lose a scheduled task.
         for task in (self._task, self._lease_task):
             if task is not None:
                 task.cancel()
@@ -968,10 +1022,8 @@ class ScheduledTaskScheduler:
             pending = [task for task in (self._task, self._lease_task) if task]
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
-            for launch in self._launch_tasks:
-                launch.cancel()
-            if self._launch_tasks:
-                await asyncio.gather(*self._launch_tasks, return_exceptions=True)
+            while self._launch_tasks:
+                await asyncio.gather(*tuple(self._launch_tasks), return_exceptions=True)
         finally:
             if self._lease is not None:
                 await asyncio.shield(self._lease.release())
@@ -1026,9 +1078,17 @@ class ScheduledTaskScheduler:
             self._launch_tasks.add(launch)
             launch.add_done_callback(self._launch_tasks.discard)
             return
+        async def admit_claim() -> None:
+            if self._lease is not None:
+                snapshot = dict(ledger.configuration_snapshot or {})
+                snapshot["scheduler_owner_id"] = self._lease.owner_id
+                await sync_to_async(self.service.repository.update_run)(
+                    ledger, configuration_snapshot=snapshot
+                )
+            await self.service._dispatch_claimed(task, scheduled_for, ledger=ledger)
+
         launch = asyncio.create_task(
-            self.service._dispatch_claimed(task, scheduled_for, ledger=ledger),
-            name=f"scheduled-task-launch-{task.id}",
+            admit_claim(), name=f"scheduled-task-launch-{task.id}",
         )
         self._launch_tasks.add(launch)
         launch.add_done_callback(self._launch_tasks.discard)

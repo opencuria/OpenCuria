@@ -191,13 +191,6 @@ class RunnerService(
         self._git_locks: dict[str, asyncio.Lock] = {}
         self._git_locks_guard = asyncio.Lock()
 
-    # In-memory mapping: workspace_id (str) → terminal_id (str)
-    _active_terminals: dict[str, str] = {}
-    # In-memory mapping: workspace_id (str) → runner_id (str)
-    # Populated when a terminal starts so terminal:output can be validated
-    # without a DB lookup on every single chunk.
-    _terminal_workspace_runner: dict[str, str] = {}
-
     # In-memory desktop session state
     _active_desktops: dict[str, dict] = {}
     _desktop_workspace_runner: dict[str, str] = {}

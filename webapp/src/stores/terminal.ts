@@ -14,6 +14,9 @@ export const useTerminalStore = defineStore('terminal', () => {
   const isConnected = ref(false)
   const terminalId = ref<string | null>(null)
   const workspaceId = ref<string | null>(null)
+  const outputSequence = ref(0)
+  const pendingInputs = ref<string[]>([])
+  const unconfirmedInputs = ref<string[]>([])
 
   function toggle(): void {
     isOpen.value = !isOpen.value
@@ -39,15 +42,45 @@ export const useTerminalStore = defineStore('terminal', () => {
     isMinimized.value = false
   }
 
-  function setConnected(id: string, wsId: string): void {
+  function setConnected(id: string, wsId: string, sequence?: number): void {
     terminalId.value = id
     workspaceId.value = wsId
+    if (sequence !== undefined && sequence > outputSequence.value) {
+      outputSequence.value = sequence
+    }
     isConnected.value = true
   }
 
-  function setDisconnected(): void {
-    terminalId.value = null
+  function setDisconnected(preserveSession = false): void {
+    if (!preserveSession) {
+      terminalId.value = null
+      outputSequence.value = 0
+      pendingInputs.value = []
+      unconfirmedInputs.value = []
+    }
     isConnected.value = false
+  }
+
+  function recordOutput(sequence: number): boolean {
+    if (!Number.isSafeInteger(sequence) || sequence <= outputSequence.value) return false
+    if (sequence !== outputSequence.value + 1) return false
+    outputSequence.value = sequence
+    return true
+  }
+
+  function addPendingInput(inputId: string): void {
+    if (!pendingInputs.value.includes(inputId)) pendingInputs.value.push(inputId)
+    if (!unconfirmedInputs.value.includes(inputId)) unconfirmedInputs.value.push(inputId)
+  }
+
+  function settlePendingInput(inputId: string): void {
+    pendingInputs.value = pendingInputs.value.filter((id) => id !== inputId)
+    unconfirmedInputs.value = unconfirmedInputs.value.filter((id) => id !== inputId)
+  }
+
+  function confirmPendingInputs(inputIds: string[]): void {
+    const confirmed = new Set(inputIds)
+    for (const id of confirmed) settlePendingInput(id)
   }
 
   function reset(): void {
@@ -56,6 +89,9 @@ export const useTerminalStore = defineStore('terminal', () => {
     isConnected.value = false
     terminalId.value = null
     workspaceId.value = null
+    outputSequence.value = 0
+    pendingInputs.value = []
+    unconfirmedInputs.value = []
   }
 
   return {
@@ -64,6 +100,9 @@ export const useTerminalStore = defineStore('terminal', () => {
     isConnected,
     terminalId,
     workspaceId,
+    outputSequence,
+    pendingInputs,
+    unconfirmedInputs,
     toggle,
     open,
     close,
@@ -71,6 +110,10 @@ export const useTerminalStore = defineStore('terminal', () => {
     restore,
     setConnected,
     setDisconnected,
+    recordOutput,
+    addPendingInput,
+    settlePendingInput,
+    confirmPendingInputs,
     reset,
   }
 })

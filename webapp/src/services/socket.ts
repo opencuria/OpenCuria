@@ -126,13 +126,32 @@ export interface WorkspaceErrorEvent {
 export interface TerminalStartedEvent {
   workspace_id: string
   terminal_id: string
-  task_id: string
+  task_id: string | null
+  replayed?: boolean
+  output_sequence?: number
+  confirmed_input_ids?: string[]
 }
 
 export interface TerminalOutputEvent {
   workspace_id: string
   terminal_id: string
+  sequence: number
   data: string // base64-encoded bytes
+}
+
+export interface TerminalErrorEvent {
+  workspace_id: string
+  terminal_id: string
+  error: string
+  code: string
+}
+
+export interface TerminalInputAckEvent {
+  workspace_id: string
+  terminal_id: string
+  input_id: string
+  ok: boolean
+  error?: string
 }
 
 export interface TerminalClosedEvent {
@@ -184,6 +203,8 @@ type EventMap = {
   'terminal:started': TerminalStartedEvent
   'terminal:output': TerminalOutputEvent
   'terminal:closed': TerminalClosedEvent
+  'terminal:error': TerminalErrorEvent
+  'terminal:input_ack': TerminalInputAckEvent
   'desktop:started': DesktopStartedEvent
   'desktop:stopped': DesktopStoppedEvent
   'desktop:viewer_released': DesktopViewerReleasedEvent
@@ -264,7 +285,7 @@ export function connect(): void {
 
     if (isReconnect) {
       // Notify registered reconnect callbacks (e.g. terminal)
-      for (const cb of [...reconnectCallbacks]) cb()
+      for (const cb of reconnectCallbacks) cb()
     }
   })
 
@@ -402,13 +423,21 @@ export function onReconnect(callback: () => void): () => void {
 /**
  * Send terminal stdin input to the backend (base64-encoded).
  */
-export function sendTerminalInput(workspaceId: string, terminalId: string, data: string): void {
-  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
-  socket?.emit('frontend:terminal_input', {
+export function sendTerminalInput(
+  workspaceId: string,
+  terminalId: string,
+  data: string,
+): string | null {
+  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return null
+  if (!socket?.connected) return null
+  const inputId = crypto.randomUUID()
+  socket.emit('frontend:terminal_input', {
     workspace_id: workspaceId,
     terminal_id: terminalId,
+    input_id: inputId,
     data,
   })
+  return inputId
 }
 
 /**

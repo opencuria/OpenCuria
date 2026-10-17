@@ -1,0 +1,8 @@
+{
+  "version": "1.2.3",
+  "protocol_min": 1,
+  "protocol_max": 1,
+  "database_schema": 1,
+  "database_schema_min": 1,
+  "database_schema_max": 1
+}

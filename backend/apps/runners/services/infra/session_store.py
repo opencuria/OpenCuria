@@ -4,9 +4,8 @@ Generation-fenced routing state shared by lifecycle events and heartbeats.
 The backing dicts ``_active_desktops`` / ``_desktop_workspace_runner`` intentionally
 remain class attributes on the ``RunnerService`` facade (tests read and
 write them directly, e.g. ``service._active_desktops[...] = ...``); this
-mixin only accesses them via ``self``. ``_active_terminals`` /
-``_terminal_workspace_runner`` likewise stay on the facade -- they belong
-to the Phase 3 ``interactive_sessions`` extraction.
+mixin only accesses them via ``self``. Terminal session routing is stored
+in the database through ``TerminalSessionRepository``.
 """
 
 from __future__ import annotations

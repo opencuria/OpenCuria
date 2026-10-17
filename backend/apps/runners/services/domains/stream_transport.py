@@ -180,16 +180,16 @@ class StreamTransportMixin:
         stream_router = getattr(self, "_harness_stream_router", None)
         if stream_router is not None:
             if event == "workspace:stream_output":
-                return stream_router.route_stream_output(data)
-            return stream_router.route_stream_closed(data)
+                return bool(stream_router.route_stream_output(data))
+            return bool(stream_router.route_stream_closed(data))
         from apps.harness.access.runner_accessor import (
             route_stream_closed,
             route_stream_output,
         )
 
         if event == "workspace:stream_output":
-            return route_stream_output(data)
-        return route_stream_closed(data)
+            return bool(route_stream_output(data))
+        return bool(route_stream_closed(data))
 
     async def call_stream_event(
         self,

@@ -71,7 +71,7 @@ class ProcessManagerMixin:
         event: str,
         data: dict,
         runner_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Route a harness:process_*_result reply to its waiter (sync).
 
         Called from Socket.IO handlers via ``sync_to_async``. Validates
@@ -79,12 +79,12 @@ class ProcessManagerMixin:
         the correlated request future.
         """
         if event not in self._PROCESS_RESULT_EVENTS:
-            return
+            return False
         workspace_id = str(data.get("workspace_id", ""))
         request_id = str(data.get("request_id", ""))
         if not request_id:
             logger.warning("%s rejected: missing request_id", event)
-            return
+            return False
         if runner_id and workspace_id:
             try:
                 workspace_uuid = uuid.UUID(workspace_id)
@@ -94,12 +94,12 @@ class ProcessManagerMixin:
                     event,
                     workspace_id,
                 )
-                return
+                return False
             if not self._validate_harness_workspace_runner(
                 workspace_uuid, runner_id
             ):
-                return
-        self._resolve_process_future(request_id, data)
+                return False
+        return self._resolve_process_future(request_id, data)
 
     async def _await_process_result(
         self,

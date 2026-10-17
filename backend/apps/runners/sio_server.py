@@ -42,6 +42,11 @@ _frontend_subscriptions: dict[str, set[str]] = defaultdict(set)
 _frontend_sid_workspaces: dict[str, set[str]] = defaultdict(set)
 
 
+def _frontend_workspace_room(workspace_id: str) -> str:
+    """Shared Redis-backed room name, independent of API process ownership."""
+    return f"workspace:{workspace_id}"
+
+
 @sync_to_async
 def _frontend_user_can_access_workspace(user_id: int, workspace_id: str) -> bool:
     """Return whether a frontend user may access a workspace.
@@ -169,7 +174,38 @@ def get_runner_service():
     if _runner_service is None:
         from .services import RunnerService
 
-        _runner_service = RunnerService(sio_server=get_sio_server())
+        if os.environ.get("OPENCURIA_HARNESS_MODE", "local") == "worker":
+            from apps.harness.runner_rpc import HarnessRunnerRpcClient, WorkerRpcSocket
+
+            client = HarnessRunnerRpcClient(os.environ["OPENCURIA_WORKER_ID"])
+            _runner_service = RunnerService(sio_server=WorkerRpcSocket(client))
+            _runner_service._harness_runner_rpc_client = client
+            _runner_service._frontend_bus = client.publish_frontend_event
+        else:
+            _runner_service = RunnerService(sio_server=get_sio_server())
+            if os.environ.get("OPENCURIA_HARNESS_MODE") == "gateway":
+                from apps.harness.runner_rpc import get_gateway_broker
+
+                broker = get_gateway_broker()
+                role = (
+                    "worker"
+                    if os.environ.get("OPENCURIA_GATEWAY_ROLE") == "worker"
+                    else "api"
+                )
+                broker.configure_runner_service(_runner_service, role=role)
+                if role == "api":
+                    from apps.harness.runner_rpc import (
+                        HarnessRunnerRpcClient,
+                        WorkerRpcSocket,
+                    )
+
+                    client = HarnessRunnerRpcClient(
+                        f"api-{uuid.uuid4().hex}", control_plane=True
+                    )
+                    _runner_service.sio = WorkerRpcSocket(
+                        client, fallback=get_sio_server()
+                    )
+                    _runner_service._harness_runner_rpc_client = client
     return _runner_service
 
 
@@ -218,8 +254,74 @@ async def _require_runner_id(
     return runner_id
 
 
+async def _route_worker_reply(event: str, data: dict, runner_id: str):
+    """Route durable worker replies before falling back to local waiters."""
+    if os.environ.get("OPENCURIA_HARNESS_MODE") != "gateway":
+        return None
+    from apps.harness.runner_rpc import get_gateway_broker
+
+    return await get_gateway_broker().route_reply(event, data, runner_id)
+
+
 def _register_event_handlers(sio: socketio.AsyncServer) -> None:
     """Register all Socket.IO event handlers."""
+
+    @sio.on("terminal:attach_error")
+    async def terminal_attach_error(sid: str, data: dict):
+        runner_id = await _require_runner_id(sio, sid, "terminal:attach_error")
+        if not runner_id:
+            return {"ok": False}
+        await get_runner_service().handle_terminal_attach_error(
+            data.get("workspace_id", ""),
+            data.get("terminal_id", ""),
+            str(data.get("error", "Terminal replay unavailable")),
+            runner_id,
+        )
+        return {"ok": True}
+
+    @sio.on("terminal:input_ack")
+    async def terminal_input_ack(sid: str, data: dict):
+        runner_id = await _require_runner_id(sio, sid, "terminal:input_ack")
+        if not runner_id or not await get_runner_service().validate_terminal_owner(
+            data.get("workspace_id", ""), data.get("terminal_id", ""), runner_id
+        ):
+            return {"ok": False}
+        await emit_to_frontend("terminal:input_ack", data, data["workspace_id"])
+        return {"ok": True}
+
+    @sio.on("runner:run_states")
+    async def runner_run_states(sid: str, data: dict):
+        runner_id = await _require_runner_id(sio, sid, "runner:run_states")
+        if not runner_id:
+            return {"terminal_run_ids": []}
+        from apps.harness.models import HarnessRun
+
+        ids = data.get("run_ids", [])
+        if not isinstance(ids, list) or len(ids) > 512:
+            return {"terminal_run_ids": []}
+        try:
+            parsed = [uuid.UUID(str(value)) for value in ids]
+        except (ValueError, TypeError):
+            return {"terminal_run_ids": []}
+        terminal = await sync_to_async(
+            lambda: list(
+                HarnessRun.objects.filter(
+                    id__in=parsed,
+                    session__workspace__runner_id=runner_id,
+                    status__in=("completed", "interrupted", "error"),
+                ).values_list("id", flat=True)
+            )
+        )()
+        return {"terminal_run_ids": [str(value) for value in terminal]}
+
+    @sio.on("runner:authorize_request")
+    async def authorize_request(sid: str, data: dict):
+        runner_id = await _require_runner_id(sio, sid, "runner:authorize_request")
+        if not runner_id:
+            return {"ok": False}
+        from apps.harness.runner_rpc import authorize_runner_request
+
+        return await sync_to_async(authorize_runner_request)(runner_id, data)
 
     # Existing legacy callbacks remain for non-lifecycle RPC; durable lifecycle
     # terminal events are admitted exclusively through operation:result.
@@ -546,6 +648,9 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "harness:exec_chunk")
         if not runner_id:
             return
+        forwarded = await _route_worker_reply("harness:exec_chunk", data, runner_id)
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         await sync_to_async(service.handle_harness_reply)(
             "harness:exec_chunk", data, runner_id=runner_id
@@ -557,6 +662,9 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "harness:exec_done")
         if not runner_id:
             return
+        forwarded = await _route_worker_reply("harness:exec_done", data, runner_id)
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         await sync_to_async(service.handle_harness_reply)(
             "harness:exec_done", data, runner_id=runner_id
@@ -568,6 +676,11 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "harness:exec_wait_result")
         if not runner_id:
             return
+        forwarded = await _route_worker_reply(
+            "harness:exec_wait_result", data, runner_id
+        )
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         await sync_to_async(service.handle_harness_reply)(
             "harness:exec_wait_result", data, runner_id=runner_id
@@ -579,6 +692,11 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "harness:read_file_result")
         if not runner_id:
             return
+        forwarded = await _route_worker_reply(
+            "harness:read_file_result", data, runner_id
+        )
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         await sync_to_async(service.handle_harness_reply)(
             "harness:read_file_result", data, runner_id=runner_id
@@ -590,6 +708,11 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "harness:read_file_chunk")
         if not runner_id:
             return
+        forwarded = await _route_worker_reply(
+            "harness:read_file_chunk", data, runner_id
+        )
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         await sync_to_async(service.handle_harness_reply)(
             "harness:read_file_chunk", data, runner_id=runner_id
@@ -601,6 +724,11 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "harness:write_file_result")
         if not runner_id:
             return
+        forwarded = await _route_worker_reply(
+            "harness:write_file_result", data, runner_id
+        )
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         await sync_to_async(service.handle_harness_reply)(
             "harness:write_file_result", data, runner_id=runner_id
@@ -612,6 +740,9 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "harness:list_result")
         if not runner_id:
             return
+        forwarded = await _route_worker_reply("harness:list_result", data, runner_id)
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         await sync_to_async(service.handle_harness_reply)(
             "harness:list_result", data, runner_id=runner_id
@@ -623,6 +754,9 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "harness:stat_result")
         if not runner_id:
             return
+        forwarded = await _route_worker_reply("harness:stat_result", data, runner_id)
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         await sync_to_async(service.handle_harness_reply)(
             "harness:stat_result", data, runner_id=runner_id
@@ -634,6 +768,11 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "harness:desktop_action_result")
         if not runner_id:
             return
+        forwarded = await _route_worker_reply(
+            "harness:desktop_action_result", data, runner_id
+        )
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         await sync_to_async(service.handle_harness_reply)(
             "harness:desktop_action_result", data, runner_id=runner_id
@@ -646,6 +785,9 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, event)
         if not runner_id:
             return
+        forwarded = await _route_worker_reply(event, data, runner_id)
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         await sync_to_async(service.handle_harness_reply)(
             event, data, runner_id=runner_id
@@ -664,6 +806,9 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "git:operation_result")
         if not runner_id:
             return
+        forwarded = await _route_worker_reply("git:operation_result", data, runner_id)
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         await sync_to_async(service.handle_git_reply)(
             "git:operation_result", data, runner_id=runner_id
@@ -675,6 +820,11 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "harness:process_start_result")
         if not runner_id:
             return
+        forwarded = await _route_worker_reply(
+            "harness:process_start_result", data, runner_id
+        )
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         await sync_to_async(service.handle_process_reply)(
             "harness:process_start_result", data, runner_id=runner_id
@@ -686,6 +836,11 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "harness:process_list_result")
         if not runner_id:
             return
+        forwarded = await _route_worker_reply(
+            "harness:process_list_result", data, runner_id
+        )
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         await sync_to_async(service.handle_process_reply)(
             "harness:process_list_result", data, runner_id=runner_id
@@ -697,6 +852,11 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "harness:process_get_result")
         if not runner_id:
             return
+        forwarded = await _route_worker_reply(
+            "harness:process_get_result", data, runner_id
+        )
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         await sync_to_async(service.handle_process_reply)(
             "harness:process_get_result", data, runner_id=runner_id
@@ -708,6 +868,11 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "harness:process_stop_result")
         if not runner_id:
             return
+        forwarded = await _route_worker_reply(
+            "harness:process_stop_result", data, runner_id
+        )
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         await sync_to_async(service.handle_process_reply)(
             "harness:process_stop_result", data, runner_id=runner_id
@@ -719,6 +884,11 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "harness:process_verify_result")
         if not runner_id:
             return
+        forwarded = await _route_worker_reply(
+            "harness:process_verify_result", data, runner_id
+        )
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         await sync_to_async(service.handle_process_reply)(
             "harness:process_verify_result", data, runner_id=runner_id
@@ -738,6 +908,11 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "workspace:stream_output")
         if not runner_id:
             return {"ok": False, "error": "unauthenticated"}
+        forwarded = await _route_worker_reply(
+            "workspace:stream_output", data, runner_id
+        )
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         accepted = await sync_to_async(service.handle_stream_reply)(
             "workspace:stream_output", data, runner_id=runner_id
@@ -750,6 +925,11 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "workspace:stream_closed")
         if not runner_id:
             return {"ok": False, "error": "unauthenticated"}
+        forwarded = await _route_worker_reply(
+            "workspace:stream_closed", data, runner_id
+        )
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         accepted = await sync_to_async(service.handle_stream_reply)(
             "workspace:stream_closed", data, runner_id=runner_id
@@ -762,6 +942,11 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "workspace:stream_close_result")
         if not runner_id:
             return {"ok": False, "error": "unauthenticated"}
+        forwarded = await _route_worker_reply(
+            "workspace:stream_close_result", data, runner_id
+        )
+        if forwarded is not None:
+            return {"ok": bool(forwarded)}
         service = get_runner_service()
         accepted = await sync_to_async(service.handle_stream_reply)(
             "workspace:stream_close_result", data, runner_id=runner_id
@@ -778,11 +963,15 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             return
         service = get_runner_service()
         await service.handle_terminal_started(
-            task_id=data["task_id"],
+            task_id=data.get("task_id"),
             workspace_id=data["workspace_id"],
             terminal_id=data["terminal_id"],
             runner_id=runner_id,
+            replayed=bool(data.get("replayed")),
+            output_sequence=data.get("output_sequence"),
+            confirmed_input_ids=data.get("confirmed_input_ids"),
         )
+        return {"ok": True}
 
     @sio.on("terminal:output")
     async def on_terminal_output(sid: str, data: dict):
@@ -796,7 +985,9 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             terminal_id=data["terminal_id"],
             data=data["data"],
             runner_id=runner_id,
+            sequence=data.get("sequence"),
         )
+        return {"ok": True}
 
     @sio.on("terminal:closed")
     async def on_terminal_closed(sid: str, data: dict):
@@ -1352,6 +1543,9 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         ):
             return
 
+        await sio.enter_room(
+            sid, _frontend_workspace_room(workspace_id), namespace="/frontend"
+        )
         _frontend_subscriptions[workspace_id].add(sid)
         _frontend_sid_workspaces[sid].add(workspace_id)
         logger.debug("Frontend %s subscribed to workspace %s", sid, workspace_id)
@@ -1366,11 +1560,28 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         if not await _ensure_frontend_workspace_access(sio, sid, workspace_id):
             return
 
+        await sio.leave_room(
+            sid, _frontend_workspace_room(workspace_id), namespace="/frontend"
+        )
         _frontend_subscriptions[workspace_id].discard(sid)
         if not _frontend_subscriptions[workspace_id]:
             del _frontend_subscriptions[workspace_id]
         _frontend_sid_workspaces[sid].discard(workspace_id)
         logger.debug("Frontend %s unsubscribed from workspace %s", sid, workspace_id)
+
+    @sio.on("frontend:terminal_attach", namespace="/frontend")
+    async def frontend_terminal_attach(sid: str, data: dict):
+        """Rebind an existing PTY after authenticated workspace subscription."""
+        if not await _ensure_frontend_workspace_access(
+            sio, sid, data.get("workspace_id")
+        ):
+            return {"ok": False}
+        await get_runner_service().start_terminal(
+            uuid.UUID(data["workspace_id"]),
+            terminal_id=data.get("terminal_id"),
+            after_seq=data.get("after_seq", 0),
+        )
+        return {"ok": True}
 
     # --- Terminal events from frontend ---
 
@@ -1388,6 +1599,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
             workspace_id=data["workspace_id"],
             terminal_id=data["terminal_id"],
             data=data["data"],
+            input_id=data.get("input_id"),
         )
 
     @sio.on("frontend:terminal_resize", namespace="/frontend")
@@ -1594,12 +1806,6 @@ async def emit_to_frontend(
     to forward real-time updates to the frontend.
     """
     sio = get_sio_server()
-    sids = _frontend_subscriptions.get(workspace_id, set())
-    if not sids:
-        return
-
-    for sid in sids.copy():
-        try:
-            await sio.emit(event, data, to=sid, namespace="/frontend")
-        except Exception:
-            logger.warning("Failed to emit %s to frontend sid %s", event, sid)
+    await sio.emit(
+        event, data, to=_frontend_workspace_room(workspace_id), namespace="/frontend"
+    )

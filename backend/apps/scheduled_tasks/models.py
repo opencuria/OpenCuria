@@ -56,6 +56,8 @@ class ScheduledTaskSchedulerLease(models.Model):
     key = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
     owner_token = models.UUIDField(null=True, blank=True)
     expires_at = models.DateTimeField(db_index=True)
+    deployment_version = models.CharField(max_length=255, blank=True, default="")
+    owner_id = models.CharField(max_length=128, blank=True, default="local")
 
     class Meta:
         db_table = "scheduled_tasks_scheduler_lease"

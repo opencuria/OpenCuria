@@ -1,11 +1,7 @@
 """Interactive sessions: terminal PTY + desktop (Phase 3 domain mixin).
 
-Byte-identical method bodies extracted from the former monolithic
-``apps/runners/services/__init__.py``. No logic changes. The backing dicts
-``_active_terminals`` / ``_terminal_workspace_runner`` /
-``_active_desktops`` / ``_desktop_workspace_runner`` intentionally remain
-class attributes on the ``RunnerService`` facade (tests read and write them
-directly); this mixin only accesses them via ``self``. The mixin further
+The terminal routing registry is durable in PostgreSQL; desktop state retains
+its current process-local cache. The mixin further
 relies on the facade providing ``self.tasks`` / ``self.workspaces``,
 ``_emit_to_runner`` / ``_call_runner`` (``RunnerTransportMixin``),
 ``_forward_*`` (``FrontendBusMixin``), ``_desktop_event_owned_by_runner``
@@ -26,7 +22,7 @@ from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 from common.exceptions import ConflictError
 
-from ...enums import TaskType, WorkspaceStatus
+from ...enums import TaskStatus, TaskType, WorkspaceStatus
 from ...exceptions import (
     RunnerOfflineError,
     WorkspaceNotFoundError,
@@ -42,95 +38,241 @@ logger = logging.getLogger(__name__)
 class InteractiveSessionsMixin:
     """Terminal and desktop session flows shared by RunnerService."""
 
+    async def _active_terminal_for_workspace(
+        self, workspace_id: str, terminal_id: str, runner_id: str
+    ):
+        """Resolve an active terminal route and verify its workspace runner."""
+        from ...terminal_registry import TerminalSessionRepository
+
+        try:
+            session = await sync_to_async(TerminalSessionRepository.get_active)(
+                uuid.UUID(workspace_id), terminal_id
+            )
+        except (ValueError, TypeError):
+            return None
+        if session is None or str(session.runner_id) != runner_id:
+            return None
+        return session
+
+    async def validate_terminal_owner(
+        self, workspace_id: str, terminal_id: str, runner_id: str
+    ) -> bool:
+        """Return whether an authenticated runner owns this active terminal."""
+        return (
+            await self._active_terminal_for_workspace(
+                workspace_id, terminal_id, runner_id
+            )
+            is not None
+        )
+
     async def start_terminal(
         self,
         workspace_id: uuid.UUID,
         cols: int = 80,
         rows: int = 24,
-    ) -> Task:
-        """Dispatch a start_terminal task to the runner.
+        *,
+        terminal_id: uuid.UUID | str | None = None,
+        after_seq: int = 0,
+    ) -> Task | None:
+        """Start a PTY only if absent, otherwise reattach to its stable ID.
 
-        Returns the Task record.
+        ``after_seq`` is the latest output sequence already rendered by a
+        reconnecting client; the runner replays retained output after it.
         """
+        from ...terminal_registry import TerminalSessionRepository
+
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
 
         self._ensure_workspace_available(workspace)
-
+        if type(cols) is not int or not 2 <= cols <= 500:
+            raise ValueError("cols must be between 2 and 500")
+        if type(rows) is not int or not 1 <= rows <= 300:
+            raise ValueError("rows must be between 1 and 300")
+        if type(after_seq) is not int or after_seq < 0:
+            raise ValueError("after_seq must be a non-negative integer")
         if workspace.status != WorkspaceStatus.RUNNING:
             raise WorkspaceStateError(
                 f"Workspace '{workspace_id}' is '{workspace.status}', "
                 f"must be '{WorkspaceStatus.RUNNING}' to start a terminal"
             )
-
         runner = workspace.runner
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))
 
-        from common.utils import generate_uuid
+        if terminal_id is not None:
+            try:
+                terminal_id = uuid.UUID(str(terminal_id))
+            except (ValueError, TypeError):
+                raise ValueError("terminal_id must be a valid UUID") from None
 
-        task_id = generate_uuid()
-        task = await sync_to_async(self.tasks.create)(
-            task_id=task_id,
-            runner=runner,
-            task_type=TaskType.START_TERMINAL,
-            workspace=workspace,
+        existing = await sync_to_async(TerminalSessionRepository.get_active)(
+            workspace_id, terminal_id
         )
-
-        await self._emit_to_runner(
-            runner,
-            "task:start_terminal",
-            {
-                "task_id": str(task_id),
+        if terminal_id is not None and existing is None:
+            raise ConflictError("Terminal session is no longer available")
+        if existing is not None:
+            task = (
+                await sync_to_async(self.tasks.get_by_id)(existing.task_id)
+                if existing.task_id
+                else None
+            )
+            if existing.status == "starting":
+                if task is None:
+                    raise ConflictError("Terminal start task is no longer available")
+                # Same stable terminal UUID makes a repeated command idempotent
+                # at runner level, including recovery from a lost ACK.
+                await self._emit_to_runner(
+                    runner,
+                    "task:start_terminal",
+                    {
+                        "task_id": str(task.id),
+                        "workspace_id": str(workspace_id),
+                        "terminal_id": str(existing.terminal_id),
+                        "cols": cols,
+                        "rows": rows,
+                    },
+                )
+                return task
+            payload = {
                 "workspace_id": str(workspace_id),
-                "cols": cols,
-                "rows": rows,
-            },
-        )
+                "terminal_id": str(existing.terminal_id),
+                "after_seq": max(0, after_seq),
+            }
+            await self._emit_to_runner(runner, "terminal:attach", payload)
+            return task
+
+        session, task, created = await sync_to_async(
+            TerminalSessionRepository.claim
+        )(workspace)
+        if not created:
+            payload = {
+                "workspace_id": str(workspace_id),
+                "terminal_id": str(session.terminal_id),
+                "after_seq": max(0, after_seq),
+            }
+            await self._emit_to_runner(runner, "terminal:attach", payload)
+            return task
+
+        try:
+            await self._emit_to_runner(
+                runner,
+                "task:start_terminal",
+                {
+                    "task_id": str(task.id),
+                    "workspace_id": str(workspace_id),
+                    "terminal_id": str(session.terminal_id),
+                    "cols": cols,
+                    "rows": rows,
+                },
+            )
+        except Exception:
+            await sync_to_async(task.delete)()
+            await sync_to_async(session.delete)()
+            raise
 
         await sync_to_async(self.tasks.mark_in_progress)(task)
         logger.info(
-            "Dispatched start_terminal to runner %s (workspace=%s, task=%s)",
+            "Dispatched start_terminal to runner %s (workspace=%s, terminal=%s)",
             runner.id,
             workspace_id,
-            task_id,
+            session.terminal_id,
         )
         await sync_to_async(self.workspaces.touch_activity)(workspace)
         return task
 
     async def handle_terminal_started(
         self,
-        task_id: str,
+        task_id: str | None,
         workspace_id: str,
         terminal_id: str,
         runner_id: str | None = None,
+        *,
+        replayed: bool = False,
+        output_sequence: int | None = None,
+        confirmed_input_ids: list[str] | None = None,
     ) -> None:
-        """Handle terminal:started event from a runner."""
+        """Handle a terminal start/reattach announcement from its runner."""
         from ...sio_server import emit_to_frontend
+        from ...terminal_registry import TerminalSessionRepository
 
-        task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(task_id))
-        if task:
-            if not self._validate_task_runner(task, runner_id):
+        try:
+            workspace_uuid = uuid.UUID(workspace_id)
+            terminal_uuid = uuid.UUID(terminal_id)
+        except (ValueError, TypeError):
+            return
+        workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_uuid)
+        if (
+            workspace is None
+            or runner_id is None
+            or str(workspace.runner_id) != runner_id
+            or not await sync_to_async(TerminalSessionRepository.mark_started)(
+                workspace_id=workspace_id,
+                terminal_id=terminal_uuid,
+                runner_id=runner_id,
+            )
+        ):
+            logger.warning(
+                "terminal:started rejected for unknown or foreign terminal %s",
+                terminal_id,
+            )
+            return
+
+        if task_id and not replayed:
+            try:
+                task_uuid = uuid.UUID(task_id)
+            except (ValueError, TypeError):
+                logger.warning("Invalid task id on terminal start: %s", task_id)
                 return
-            await sync_to_async(self.tasks.complete)(task)
+            task = await sync_to_async(self.tasks.get_by_id)(task_uuid)
+            if task:
+                if not self._validate_task_runner(task, runner_id):
+                    return
+                if task.status != TaskStatus.COMPLETED:
+                    await sync_to_async(self.tasks.complete)(task)
 
-        self._active_terminals[workspace_id] = terminal_id
-        # Cache runner ownership so terminal:output validation is O(1)
-        if runner_id:
-            self._terminal_workspace_runner[workspace_id] = runner_id
+        payload = {
+            "workspace_id": workspace_id,
+            "terminal_id": terminal_id,
+            "task_id": task_id,
+            "replayed": replayed,
+            **({"recovery": True} if task_id and replayed else {}),
+        }
+        if output_sequence is not None:
+            payload["output_sequence"] = output_sequence
+        if confirmed_input_ids is not None:
+            payload["confirmed_input_ids"] = confirmed_input_ids
         logger.info(
-            "Terminal started: workspace=%s, terminal=%s",
+            "Terminal attached: workspace=%s, terminal=%s, replayed=%s",
             workspace_id,
             terminal_id,
+            replayed,
         )
+        await emit_to_frontend("terminal:started", payload, workspace_id)
 
+    async def handle_terminal_attach_error(
+        self,
+        workspace_id: str,
+        terminal_id: str,
+        error: str,
+        runner_id: str | None = None,
+    ) -> None:
+        """Forward an explicit replay failure without replacing a live PTY."""
+        from ...sio_server import emit_to_frontend
+
+        session = await self._active_terminal_for_workspace(
+            workspace_id, terminal_id, runner_id or ""
+        )
+        if session is None:
+            return
         await emit_to_frontend(
-            "terminal:started",
+            "terminal:error",
             {
                 "workspace_id": workspace_id,
                 "terminal_id": terminal_id,
-                "task_id": task_id,
+                "error": error,
+                "code": "terminal_replay_unavailable",
             },
             workspace_id,
         )
@@ -141,32 +283,47 @@ class InteractiveSessionsMixin:
         terminal_id: str,
         data: str,
         runner_id: str | None = None,
+        *,
+        sequence: int | None = None,
     ) -> None:
-        """Handle terminal:output from runner — forward to frontend (no DB).
-
-        Runner ownership is validated against the in-memory cache populated
-        when the terminal session was started, so no DB lookup is required
-        on the hot path.
-        """
-        if runner_id:
-            cached = self._terminal_workspace_runner.get(workspace_id)
-            if cached is not None and cached != runner_id:
-                logger.warning(
-                    "terminal:output rejected: workspace %s is owned by "
-                    "runner %s, not %s",
-                    workspace_id,
-                    cached,
-                    runner_id,
-                )
-                return
-
+        """Validate, sequence and forward PTY output to workspace viewers."""
         from ...sio_server import emit_to_frontend
+        from ...terminal_registry import TerminalSessionRepository
 
+        if runner_id is None or sequence is None:
+            logger.warning("Unsequenced terminal output rejected: %s", terminal_id)
+            return
+        accepted = await sync_to_async(TerminalSessionRepository.record_output)(
+            workspace_id=workspace_id,
+            terminal_id=terminal_id,
+            runner_id=runner_id,
+            sequence=sequence,
+        )
+        if accepted in {"gap", "unknown", "invalid"}:
+            logger.warning(
+                "Terminal output %s for session %s (sequence=%s)",
+                accepted,
+                terminal_id,
+                sequence,
+            )
+            if accepted == "gap":
+                await emit_to_frontend(
+                    "terminal:error",
+                    {
+                        "workspace_id": workspace_id,
+                        "terminal_id": terminal_id,
+                        "error": "Terminal output sequence gap detected",
+                        "code": "terminal_output_gap",
+                    },
+                    workspace_id,
+                )
+            return
         await emit_to_frontend(
             "terminal:output",
             {
                 "workspace_id": workspace_id,
                 "terminal_id": terminal_id,
+                "sequence": sequence,
                 "data": data,
             },
             workspace_id,
@@ -178,34 +335,21 @@ class InteractiveSessionsMixin:
         terminal_id: str,
         runner_id: str | None = None,
     ) -> None:
-        """Handle terminal:closed from runner."""
-        if runner_id:
-            cached = self._terminal_workspace_runner.get(workspace_id)
-            if cached is not None and cached != runner_id:
-                logger.warning(
-                    "terminal:closed rejected: workspace %s is owned by "
-                    "runner %s, not %s",
-                    workspace_id,
-                    cached,
-                    runner_id,
-                )
-                return
-
+        """Handle terminal:closed from its owning runner."""
         from ...sio_server import emit_to_frontend
+        from ...terminal_registry import TerminalSessionRepository
 
-        self._active_terminals.pop(workspace_id, None)
-        self._terminal_workspace_runner.pop(workspace_id, None)
-        logger.info(
-            "Terminal closed: workspace=%s, terminal=%s",
-            workspace_id,
-            terminal_id,
-        )
+        if runner_id is None or not await sync_to_async(TerminalSessionRepository.close)(
+            workspace_id=workspace_id,
+            terminal_id=terminal_id,
+            runner_id=runner_id,
+        ):
+            logger.warning("Terminal close rejected for unknown session: %s", terminal_id)
+            return
+        logger.info("Terminal closed: workspace=%s, terminal=%s", workspace_id, terminal_id)
         await emit_to_frontend(
             "terminal:closed",
-            {
-                "workspace_id": workspace_id,
-                "terminal_id": terminal_id,
-            },
+            {"workspace_id": workspace_id, "terminal_id": terminal_id},
             workspace_id,
         )
 
@@ -214,28 +358,45 @@ class InteractiveSessionsMixin:
         workspace_id: str,
         terminal_id: str,
         data: str,
+        *,
+        input_id: str | None = None,
     ) -> None:
         """Forward terminal input from frontend to the runner."""
+        from ...terminal_registry import TerminalSessionRepository
+
         workspace = await sync_to_async(self.workspaces.get_by_id)(
             uuid.UUID(workspace_id)
         )
         if workspace is None:
             return
-
         self._ensure_workspace_available(workspace)
+        try:
+            terminal_uuid = uuid.UUID(str(terminal_id))
+        except (ValueError, TypeError):
+            terminal_uuid = None
+        active = (
+            await sync_to_async(TerminalSessionRepository.get_active)(
+                uuid.UUID(workspace_id), terminal_uuid
+            )
+            if terminal_uuid is not None
+            else None
+        )
+        if active is None and terminal_uuid is not None:
+            raise ConflictError("Terminal session is not active in this workspace")
+        if active is not None and active.runner_id != workspace.runner_id:
+            raise ConflictError("Terminal session is not active in this workspace")
+
         runner = workspace.runner
         if not runner.is_online:
             return
 
-        await self._emit_to_runner(
-            runner,
-            "terminal:input",
-            {
-                "workspace_id": workspace_id,
-                "terminal_id": terminal_id,
-                "data": data,
-            },
-        )
+        payload = {
+            "workspace_id": workspace_id,
+            "terminal_id": terminal_id,
+            "data": data,
+            "input_id": input_id,
+        }
+        await self._emit_to_runner(runner, "terminal:input", payload)
         await sync_to_async(self.workspaces.touch_activity)(workspace)
 
     async def forward_terminal_resize(
@@ -246,27 +407,38 @@ class InteractiveSessionsMixin:
         rows: int,
     ) -> None:
         """Forward terminal resize from frontend to the runner."""
+        from ...terminal_registry import TerminalSessionRepository
+
         workspace = await sync_to_async(self.workspaces.get_by_id)(
             uuid.UUID(workspace_id)
         )
         if workspace is None:
             return
-
         self._ensure_workspace_available(workspace)
+        try:
+            terminal_uuid = uuid.UUID(str(terminal_id))
+        except (ValueError, TypeError):
+            raise ConflictError("Terminal identity is invalid") from None
+        active = await sync_to_async(TerminalSessionRepository.get_active)(
+            uuid.UUID(workspace_id), terminal_uuid
+        )
+        if active is None or active.runner_id != workspace.runner_id:
+            raise ConflictError("Terminal session is not active in this workspace")
+
         runner = workspace.runner
         if not runner.is_online:
             return
 
-        await self._emit_to_runner(
-            runner,
-            "terminal:resize",
-            {
-                "workspace_id": workspace_id,
-                "terminal_id": terminal_id,
-                "cols": cols,
-                "rows": rows,
-            },
-        )
+        payload = {
+            "workspace_id": workspace_id,
+            "terminal_id": terminal_id,
+            "cols": cols,
+            "rows": rows,
+        }
+        if getattr(getattr(self, "sio", None), "supervised_owner", False):
+            await self.sio.emit("terminal:resize", payload, to=runner.sid)
+        else:
+            await self._emit_to_runner(runner, "terminal:resize", payload)
 
     async def forward_terminal_close(
         self,
@@ -274,25 +446,33 @@ class InteractiveSessionsMixin:
         terminal_id: str,
     ) -> None:
         """Forward terminal close request from frontend to the runner."""
+        from ...terminal_registry import TerminalSessionRepository
+
         workspace = await sync_to_async(self.workspaces.get_by_id)(
             uuid.UUID(workspace_id)
         )
         if workspace is None:
             return
-
         self._ensure_workspace_available(workspace)
+        try:
+            terminal_uuid = uuid.UUID(str(terminal_id))
+        except (ValueError, TypeError):
+            raise ConflictError("Terminal identity is invalid") from None
+        active = await sync_to_async(TerminalSessionRepository.get_active)(
+            uuid.UUID(workspace_id), terminal_uuid
+        )
+        if active is None or active.runner_id != workspace.runner_id:
+            raise ConflictError("Terminal session is not active in this workspace")
+
         runner = workspace.runner
         if not runner.is_online:
             return
 
-        await self._emit_to_runner(
-            runner,
-            "terminal:close",
-            {
-                "workspace_id": workspace_id,
-                "terminal_id": terminal_id,
-            },
-        )
+        payload = {"workspace_id": workspace_id, "terminal_id": terminal_id}
+        if getattr(getattr(self, "sio", None), "supervised_owner", False):
+            await self.sio.emit("terminal:close", payload, to=runner.sid)
+        else:
+            await self._emit_to_runner(runner, "terminal:close", payload)
 
     @staticmethod
     def viewer_identity(

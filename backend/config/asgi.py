@@ -25,23 +25,53 @@ sio_asgi = create_sio_app()
 mcp_asgi = get_mcp_app()
 
 
-async def application(scope, receive, send):
-    """Route requests and run the scheduler in the ASGI server's event loop."""
-    if scope["type"] == "lifespan":
-        from apps.scheduled_tasks.services import ScheduledTaskScheduler
+def _scheduler_enabled() -> bool:
+    """Preserve legacy ASGI scheduling but disable it for managed web gateways."""
+    configured = os.environ.get("OPENCURIA_SCHEDULER_ENABLED")
+    if configured is None:
+        return os.environ.get("OPENCURIA_MANAGED_DEPLOYMENT", "0") != "1"
+    return configured.strip().lower() in {"1", "true", "yes", "on"}
 
-        scheduler = ScheduledTaskScheduler()
+
+async def application(scope, receive, send):
+    """Route requests and optionally run the legacy single-process scheduler."""
+    if scope["type"] == "lifespan":
+        scheduler = None
+        if _scheduler_enabled():
+            from apps.scheduled_tasks.services import ScheduledTaskScheduler
+
+            scheduler = ScheduledTaskScheduler()
         while True:
             message = await receive()
             if message["type"] == "lifespan.startup":
-                try:
-                    await scheduler.start()
-                except Exception as exc:
-                    await send({"type": "lifespan.startup.failed", "message": str(exc)})
-                    return
+                if os.environ.get("OPENCURIA_HARNESS_MODE") == "gateway":
+                    from apps.harness.runner_rpc import get_gateway_broker
+                    from apps.runners.sio_server import (
+                        get_runner_service,
+                        get_sio_server,
+                    )
+
+                    service = get_runner_service()
+                    await get_gateway_broker().start(get_sio_server())
+                    client = getattr(service, "_harness_runner_rpc_client", None)
+                    if client is not None:
+                        await client.start()
+                if scheduler is not None:
+                    try:
+                        await scheduler.start()
+                    except Exception as exc:
+                        await send(
+                            {"type": "lifespan.startup.failed", "message": str(exc)}
+                        )
+                        return
                 await send({"type": "lifespan.startup.complete"})
             elif message["type"] == "lifespan.shutdown":
-                await scheduler.stop()
+                if scheduler is not None:
+                    await scheduler.stop()
+                if os.environ.get("OPENCURIA_HARNESS_MODE") == "gateway":
+                    from apps.harness.runner_rpc import get_gateway_broker
+
+                    await get_gateway_broker().close()
                 await send({"type": "lifespan.shutdown.complete"})
                 return
         return

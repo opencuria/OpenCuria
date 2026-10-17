@@ -11,10 +11,12 @@ Extraction owner: Step 2 (leaf cluster: terminals + images).
 
 from __future__ import annotations
 
+import asyncio
 import shlex
 import uuid
+from collections import deque
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import structlog
 
@@ -27,11 +29,24 @@ logger = structlog.get_logger(__name__)
 
 @dataclass
 class TerminalSession:
-    """Runtime PTY handle for an interactive terminal session."""
+    """Runtime PTY handle plus bounded output replay state."""
 
     handle: PtyHandle
     runtime: RuntimeBackend
     workspace_id: uuid.UUID | None = None
+    sequence: int = 0
+    output: deque[tuple[int, bytes]] = field(default_factory=deque)
+    output_bytes: int = 0
+    output_overflow_before: int = 0
+    attached: bool = True
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    input_ids: set[str] = field(default_factory=set)
+    recent_input_ids: deque[str] = field(default_factory=deque)
+
+
+class TerminalReplayError(ValueError):
+    """A terminal output cursor predates retained bounded replay history."""
 
 
 class TerminalManager:
@@ -58,6 +73,9 @@ class TerminalManager:
       constant; the default matches it.
     """
 
+    OUTPUT_BUFFER_BYTES = 1024 * 1024
+    OUTPUT_BUFFER_CHUNKS = 4096
+
     def __init__(
         self,
         runtimes: dict[str, RuntimeBackend] | None = None,
@@ -73,6 +91,8 @@ class TerminalManager:
         self._evict_workspace = evict_workspace
         self._credential_env_file = credential_env_file
         self._terminals: dict[str, TerminalSession] = {}
+        self._workspace_terminals: dict[uuid.UUID, str] = {}
+        self._workspace_start_locks: dict[uuid.UUID, asyncio.Lock] = {}
 
     @live_interaction
     async def start_terminal(
@@ -80,12 +100,40 @@ class TerminalManager:
         workspace_id: uuid.UUID,
         cols: int = 80,
         rows: int = 24,
+        *,
+        terminal_id: str | None = None,
     ) -> str:
         """Open an interactive PTY shell in the workspace.
 
         Returns a ``terminal_id`` that identifies this PTY session.
         Persistent workspace credentials are sourced via a login shell.
         """
+        lock = self._workspace_start_locks.setdefault(workspace_id, asyncio.Lock())
+        async with lock:
+            return await self._start_terminal_locked(
+                workspace_id, cols, rows, terminal_id=terminal_id
+            )
+
+    async def _start_terminal_locked(
+        self,
+        workspace_id: uuid.UUID,
+        cols: int,
+        rows: int,
+        *,
+        terminal_id: str | None = None,
+    ) -> str:
+        """Create no more than one live PTY per workspace.
+
+        A supplied UUID restores a known runner PTY identity; PTY handles stay
+        in this stable manager while frontend/API sockets are reattached.
+        """
+        existing_id = self._workspace_terminals.get(workspace_id)
+        if existing_id in self._terminals:
+            if terminal_id is not None and existing_id != terminal_id:
+                raise ValueError("Terminal id does not match active workspace PTY")
+            return existing_id
+        if terminal_id is not None and terminal_id in self._terminals:
+            raise ValueError("Terminal id is already attached to another workspace")
         get_cached = self._get_cached
         get_runtime = self._get_runtime
         if get_cached is None or get_runtime is None:
@@ -119,41 +167,143 @@ class TerminalManager:
             command=terminal_command,
         )
 
-        terminal_id = str(uuid.uuid4())
+        terminal_id = terminal_id or str(uuid.uuid4())
         self._terminals[terminal_id] = TerminalSession(
             handle=handle,
             runtime=runtime,
             workspace_id=workspace_id,
         )
+        self._workspace_terminals[workspace_id] = terminal_id
         log.info("terminal_started", terminal_id=terminal_id)
         return terminal_id
 
+    def has_terminal(self, terminal_id: str) -> bool:
+        """Return whether this manager still owns the PTY identity."""
+        return terminal_id in self._terminals
+
+    def output_cursor(self, terminal_id: str) -> int:
+        """Return the latest PTY output sequence assigned to this terminal."""
+        entry = self._terminals.get(terminal_id)
+        if entry is None:
+            raise ValueError(f"Terminal {terminal_id} not found")
+        return entry.sequence
+
+    def confirmed_inputs(self, terminal_id: str) -> list[str]:
+        """Return recently acknowledged input ids for reconnect UI recovery."""
+        entry = self._terminals.get(terminal_id)
+        if entry is None:
+            raise ValueError(f"Terminal {terminal_id} not found")
+        return list(entry.recent_input_ids)
+
+    async def set_attached(self, terminal_id: str, attached: bool) -> None:
+        """Toggle live network delivery while preserving PTY reads and buffers."""
+        entry = self._terminals.get(terminal_id)
+        if entry is None:
+            return
+        async with entry.lock:
+            entry.attached = attached
+
+    async def detach_all(self) -> None:
+        """Continue draining every PTY into bounded buffers during disconnection."""
+        for terminal_id in list(self._terminals):
+            await self.set_attached(terminal_id, False)
+
+    async def reattach_terminal(
+        self,
+        terminal_id: str,
+        after_seq: int = 0,
+        *,
+        deliver: Callable[[int, bytes], object] | None = None,
+    ) -> list[tuple[int, bytes]]:
+        """Replay sequenced output after a cursor with overflow/gap detection."""
+        entry = self._terminals.get(terminal_id)
+        if entry is None:
+            raise ValueError(f"Terminal {terminal_id} not found")
+        async with entry.lock:
+            first = entry.output[0][0] if entry.output else entry.sequence + 1
+            if type(after_seq) is not int or after_seq < 0:
+                raise ValueError("Invalid terminal output cursor")
+            if after_seq > entry.sequence:
+                raise ValueError("Terminal output cursor is ahead of the PTY")
+            if after_seq < first - 1:
+                raise TerminalReplayError("Terminal output buffer overflowed")
+            cursor = after_seq
+            while True:
+                if entry.output and cursor < entry.output[0][0] - 1:
+                    raise TerminalReplayError("Terminal output buffer overflowed")
+                pending = [(seq, chunk) for seq, chunk in entry.output if seq > cursor]
+                if not pending:
+                    if deliver is not None:
+                        entry.attached = True
+                    return []
+                if deliver is None:
+                    return pending
+                for sequence, chunk in pending:
+                    result = deliver(sequence, chunk)
+                    if asyncio.iscoroutine(result):
+                        try:
+                            await result
+                        except Exception:
+                            entry.attached = False
+                            raise
+                    cursor = sequence
+
+    async def read_terminal_events(
+        self, terminal_id: str
+    ) -> AsyncIterator[tuple[int, bytes]]:
+        """Yield sequenced output, maintaining the bounded attach replay buffer."""
+        entry = self._terminals.get(terminal_id)
+        if entry is None:
+            raise ValueError(f"Terminal {terminal_id} not found")
+        while not entry.handle.closed:
+            data = await entry.runtime.pty_read(entry.handle)
+            if not data:
+                return
+            async with entry.lock:
+                entry.sequence += 1
+                sequence = entry.sequence
+                entry.output.append((sequence, data))
+                entry.output_bytes += len(data)
+                while entry.output and (
+                    entry.output_bytes > self.OUTPUT_BUFFER_BYTES
+                    or len(entry.output) > self.OUTPUT_BUFFER_CHUNKS
+                ):
+                    removed_seq, removed = entry.output.popleft()
+                    entry.output_bytes -= len(removed)
+                    entry.output_overflow_before = removed_seq
+                attached = entry.attached
+            if attached:
+                yield sequence, data
+
     async def read_terminal(self, terminal_id: str) -> AsyncIterator[bytes]:
-        """Yield raw bytes from the PTY as they arrive.
+        """Yield raw PTY output bytes for existing facade callers.
 
         Stops when the PTY is closed or returns empty data (EOF).
         """
         entry = self._terminals.get(terminal_id)
         if entry is None:
             raise ValueError(f"Terminal {terminal_id} not found")
-        handle = entry.handle
-        runtime = entry.runtime
-
-        while not handle.closed:
-            data = await runtime.pty_read(handle)
-            if not data:
-                break
-            yield data
+        async for _, chunk in self.read_terminal_events(terminal_id):
+            yield chunk
 
     @live_interaction
-    async def write_terminal(self, terminal_id: str, data: bytes) -> None:
-        """Write raw bytes (user input) to the PTY stdin."""
+    async def write_terminal(
+        self, terminal_id: str, data: bytes, *, input_id: str | None = None
+    ) -> bool:
+        """Write PTY stdin once per idempotency key and explicitly acknowledge."""
         entry = self._terminals.get(terminal_id)
         if entry is None:
             raise ValueError(f"Terminal {terminal_id} not found")
-        handle = entry.handle
-        runtime = entry.runtime
-        await runtime.pty_write(handle, data)
+        async with entry.write_lock:
+            if input_id and input_id in entry.input_ids:
+                return False
+            await entry.runtime.pty_write(entry.handle, data)
+            if input_id:
+                entry.input_ids.add(input_id)
+                entry.recent_input_ids.append(input_id)
+                while len(entry.recent_input_ids) > 4096:
+                    entry.input_ids.discard(entry.recent_input_ids.popleft())
+        return True
 
     @live_interaction
     async def resize_terminal(self, terminal_id: str, cols: int, rows: int) -> None:
@@ -170,5 +320,7 @@ class TerminalManager:
         entry = self._terminals.pop(terminal_id, None)
         if entry is None:
             return
+        if entry.workspace_id is not None:
+            self._workspace_terminals.pop(entry.workspace_id, None)
         await entry.runtime.pty_close(entry.handle)
         logger.info("terminal_closed", terminal_id=terminal_id)

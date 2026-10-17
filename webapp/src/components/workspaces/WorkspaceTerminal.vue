@@ -17,7 +17,7 @@ import {
   onReconnect,
   sendTerminalInput,
   sendTerminalResize,
-  sendTerminalClose,
+  type TerminalInputAckEvent,
 } from '@/services/socket'
 import { Button } from '@/components/ui/button'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
@@ -144,11 +144,12 @@ function initTerminal(): void {
   // Send user input to backend
   terminal.onData((data: string) => {
     if (terminalStore.terminalId) {
-      sendTerminalInput(
+      const inputId = sendTerminalInput(
         props.workspaceId,
         terminalStore.terminalId,
         base64Encode(data),
       )
+      if (inputId) terminalStore.addPendingInput(inputId)
     }
   })
 
@@ -169,11 +170,18 @@ async function connectTerminal(): Promise<void> {
   error.value = null
 
   try {
-    await fitTerminal(true)
+    await fitTerminal(false)
     const cols = terminal?.cols ?? 80
     const rows = terminal?.rows ?? 24
-    await workspacesApi.startTerminal(props.workspaceId, cols, rows)
-    // The terminal:started event will arrive via Socket.IO
+    const response = await workspacesApi.startTerminal(props.workspaceId, cols, rows, {
+      ...(terminalStore.terminalId ? { terminalId: terminalStore.terminalId } : {}),
+      afterSeq: terminalStore.outputSequence,
+    })
+    if (response.terminal_id && !terminalStore.terminalId) {
+      terminalStore.setDisconnected(true)
+      terminalStore.setConnected(response.terminal_id, props.workspaceId)
+    }
+    // The start/reattach confirmation and any replay arrive over Socket.IO.
   } catch (err: unknown) {
     error.value = err instanceof Error ? err.message : 'Failed to start terminal'
     connecting.value = false
@@ -184,7 +192,11 @@ function setupSocketListeners(): void {
   cleanupFns.push(
     onEvent('terminal:started', (data) => {
       if (data.workspace_id === props.workspaceId) {
+        if (terminalStore.terminalId && terminalStore.terminalId !== data.terminal_id) return
         terminalStore.setConnected(data.terminal_id, props.workspaceId)
+        if (data.confirmed_input_ids) {
+          terminalStore.confirmPendingInputs(data.confirmed_input_ids)
+        }
         hadConnection.value = true
         flushPendingResize()
         void fitTerminal(true)
@@ -200,9 +212,49 @@ function setupSocketListeners(): void {
         data.workspace_id === props.workspaceId &&
         data.terminal_id === terminalStore.terminalId
       ) {
+        if (data.sequence <= terminalStore.outputSequence) return
+        if (data.sequence !== terminalStore.outputSequence + 1) {
+          error.value = 'Terminal output was lost; refusing to display a corrupted session.'
+          connecting.value = false
+          terminal?.writeln(
+            '\r\n\x1b[31m[Output gap detected; reconnect to recover retained output]\x1b[0m',
+          )
+          return
+        }
+        terminalStore.recordOutput(data.sequence)
         const bytes = base64Decode(data.data)
         terminal?.write(bytes)
       }
+    }),
+  )
+
+  cleanupFns.push(
+    onEvent('terminal:input_ack', (data: TerminalInputAckEvent) => {
+      if (
+        data.workspace_id === props.workspaceId &&
+        data.terminal_id === terminalStore.terminalId
+      ) {
+        terminalStore.settlePendingInput(data.input_id)
+        if (!data.ok) {
+          terminal?.writeln(
+            `\r\n\x1b[33m[Input was not acknowledged: ${data.error ?? 'unknown error'}]\x1b[0m`,
+          )
+        }
+      }
+    }),
+  )
+
+  cleanupFns.push(
+    onEvent('terminal:error', (data) => {
+      if (
+        data.workspace_id !== props.workspaceId ||
+        (terminalStore.terminalId && data.terminal_id !== terminalStore.terminalId)
+      ) {
+        return
+      }
+      error.value = data.error
+      connecting.value = false
+      terminal?.writeln(`\r\n\x1b[33m[Terminal reconnect failed: ${data.error}]\x1b[0m`)
     }),
   )
 
@@ -218,13 +270,18 @@ function setupSocketListeners(): void {
     }),
   )
 
-  // Auto-reconnect terminal when the WebSocket drops and comes back up.
-  // The backend-side PTY session is gone after a reconnect, so we start a fresh one.
+  // Reattach the same terminal_id and replay only output not already rendered.
   cleanupFns.push(
     onReconnect(() => {
-      if ((terminalStore.isConnected || connecting.value) && !connecting.value) {
-        terminalStore.setDisconnected()
-        terminal?.writeln('\r\n\x1b[33m[WebSocket reconnected — reconnecting terminal…]\x1b[0m')
+      if (terminalStore.terminalId && !connecting.value) {
+        for (const inputId of terminalStore.unconfirmedInputs) {
+          terminalStore.settlePendingInput(inputId)
+        }
+        terminal?.writeln(
+          '\r\n\x1b[33m[Unconfirmed input was not replayed; review and resend if needed.]\x1b[0m',
+        )
+        terminalStore.setDisconnected(true)
+        terminal?.writeln('\r\n\x1b[33m[WebSocket reconnected — reattaching terminal…]\x1b[0m')
         connectTerminal()
       }
     }),
@@ -236,11 +293,9 @@ function cleanup(): void {
   cleanupFns.forEach((fn) => fn())
   cleanupFns.length = 0
 
-  // Close terminal on backend if connected
-  if (terminalStore.terminalId) {
-    sendTerminalClose(props.workspaceId, terminalStore.terminalId)
-    terminalStore.setDisconnected()
-  }
+  // Keep the remote PTY alive across panel remounts/navigation. Explicit
+  // close semantics belong to the user-visible workspace lifecycle action.
+  if (terminalStore.terminalId) terminalStore.setDisconnected(true)
 
   // Dispose resize observer
   resizeObserver?.disconnect()
@@ -294,15 +349,10 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- Error overlay -->
-    <div
-      v-else-if="error"
-      class="absolute inset-0 flex items-center justify-center bg-card/80"
-    >
+    <div v-else-if="error" class="absolute inset-0 flex items-center justify-center bg-card/80">
       <div class="text-center">
         <p class="mb-2 text-sm text-destructive">{{ error }}</p>
-        <Button size="sm" variant="outline" @click="connectTerminal">
-          Retry
-        </Button>
+        <Button size="sm" variant="outline" @click="connectTerminal"> Retry </Button>
       </div>
     </div>
   </div>

@@ -652,8 +652,24 @@ async def start_terminal(
 
         cols = payload.cols if payload else 80
         rows = payload.rows if payload else 24
-        task = await service.start_terminal(workspace_id, cols=cols, rows=rows)
-        return 202, TerminalStartOut(task_id=task.id)
+        terminal_id = payload.terminal_id if payload else None
+        after_seq = payload.after_seq if payload else 0
+        task = await service.start_terminal(
+            workspace_id,
+            cols=cols,
+            rows=rows,
+            terminal_id=terminal_id,
+            after_seq=after_seq,
+        )
+        from .terminal_registry import TerminalSessionRepository
+
+        session = await sync_to_async(TerminalSessionRepository.get_active)(
+            workspace_id, terminal_id
+        )
+        return 202, TerminalStartOut(
+            task_id=task.id if task is not None else None,
+            terminal_id=session.terminal_id if session is not None else terminal_id,
+        )
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:

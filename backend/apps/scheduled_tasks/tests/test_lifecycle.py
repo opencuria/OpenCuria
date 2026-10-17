@@ -4,6 +4,7 @@ from datetime import datetime, time, timezone
 from types import SimpleNamespace
 
 import pytest
+from django.test import override_settings
 from apps.organizations.models import Organization
 from apps.scheduled_tasks.models import ScheduledTaskRun
 from apps.scheduled_tasks.services import ScheduledTaskScheduler, ScheduledTaskService
@@ -33,6 +34,12 @@ async def test_scheduler_fails_duplicate_start_before_recovery(monkeypatch):
     events = []
 
     class FakeLease:
+        recovered_previous_owner = False
+        _clean_handoff = True
+
+        def __init__(self, *, deployment_version="", owner_id="local"):
+            events.append(("init", deployment_version, owner_id))
+
         async def acquire(self):
             events.append("acquire")
             return False
@@ -42,12 +49,75 @@ async def test_scheduler_fails_duplicate_start_before_recovery(monkeypatch):
 
     monkeypatch.setattr("apps.scheduled_tasks.lease.ScheduledTaskLease", FakeLease)
     scheduler = ScheduledTaskScheduler(
-        service=ScheduledTaskService(repository=FakeRepository())
+        service=ScheduledTaskService(repository=FakeRepository()),
+        deployment_version="release-a",
     )
     with pytest.raises(RuntimeError, match="Another backend process"):
         await scheduler.start()
-    assert events == ["acquire", "release"]
+    assert events == [("init", "release-a", "local"), "acquire", "release"]
     assert scheduler._task is None
+
+
+@pytest.mark.asyncio
+async def test_managed_scheduler_does_not_recover_runs_after_clean_handoff(monkeypatch):
+    events = []
+
+    class FakeLease:
+        recovered_previous_owner = False
+        _clean_handoff = True
+
+        def __init__(self, *, deployment_version="", owner_id="local"):
+            events.append(("init", deployment_version, owner_id))
+
+        async def acquire(self):
+            return True
+
+        async def release(self):
+            events.append("release")
+
+        async def renew(self):
+            return True
+
+    class Service:
+        repository = FakeRepository()
+
+        async def skip_due_on_startup(self):
+            events.append("skip-due")
+
+    monkeypatch.setattr("apps.scheduled_tasks.lease.ScheduledTaskLease", FakeLease)
+    scheduler = ScheduledTaskScheduler(Service(), deployment_version="release-b")
+    import apps.deployments.services as deployments
+    from apps.deployments.services import ReleaseManifest
+
+    manifest = ReleaseManifest(
+        version="release-b",
+        protocol_min=1,
+        protocol_max=1,
+        database_schema=1,
+        database_schema_min=1,
+        database_schema_max=1,
+    )
+    monkeypatch.setattr(deployments, "live_generation_manifests", lambda: (manifest,))
+    monkeypatch.setattr(deployments, "require_compatible_releases", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "django.conf.settings.DEPLOYMENT_RELEASE",
+        {
+            "version": "release-b",
+            "protocol_min": 1,
+            "protocol_max": 1,
+            "database_schema": 1,
+            "database_schema_min": 1,
+            "database_schema_max": 1,
+        },
+    )
+    from django.test import override_settings
+
+    with override_settings(
+        DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3"}}
+    ):
+        await scheduler.start()
+        await scheduler.stop()
+    assert events == [("init", "release-b", "local"), "skip-due", "release"]
 
 
 @pytest.mark.asyncio

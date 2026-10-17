@@ -26,6 +26,9 @@ class RunnerSettings(BaseSettings):
     )
 
     state_dir: str = str(Path.home() / ".local/share/opencuria/runner")
+    # Opt-in: stable Socket.IO/Journal supervisor with isolated code generations.
+    # Legacy in-process runner remains the default until an operator enables it.
+    supervised_mode: bool = False
 
     # Backend connection
     backend_url: str = "wss://api.opencuria.example.com"

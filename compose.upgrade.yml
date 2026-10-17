@@ -1,0 +1,158 @@
+# Immutable API/UI/worker release project. Stable socket/scheduler/recovery live separately.
+name: opencuria
+services:
+  migrate:
+    image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:?Use immutable tag or digest}
+    restart: 'no'
+    profiles:
+    - upgrade
+    env_file:
+    - .env
+    environment:
+      DJANGO_ENV: production
+      OPENCURIA_MANAGED_DEPLOYMENT: '1'
+      OPENCURIA_SCHEDULER_ENABLED: 'false'
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost}
+      DB_NAME: ${DB_NAME:-opencuria}
+      DB_USER: ${DB_USER:-opencuria}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      DB_HOST: ${OPENCURIA_DB_HOST:-opencuria-infra-db-1}
+      DB_PORT: '5432'
+      REDIS_URL: ${OPENCURIA_REDIS_URL:-redis://opencuria-infra-redis-1:6379/0}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
+      MCP_OAUTH_CALLBACK_URL: ${MCP_OAUTH_CALLBACK_URL:?MCP OAuth callback required}
+      MCP_OAUTH_FRONTEND_RETURN_URL: ${MCP_OAUTH_FRONTEND_RETURN_URL:?MCP frontend return URL required}
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:?CSRF trusted origins required}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS origins required}
+      SIO_CORS_ALLOWED_ORIGINS: ${SIO_CORS_ALLOWED_ORIGINS:?Socket.IO CORS origins required}
+      OPENCURIA_DEPLOYMENT_VERSION: ${OPENCURIA_DEPLOYMENT_VERSION:?Deployment version required}
+      OPENCURIA_PROTOCOL_MIN: ${OPENCURIA_PROTOCOL_MIN:?Protocol range required}
+      OPENCURIA_PROTOCOL_MAX: ${OPENCURIA_PROTOCOL_MAX:?Protocol range required}
+      OPENCURIA_DATABASE_SCHEMA: ${OPENCURIA_DATABASE_SCHEMA:?Schema version required}
+      OPENCURIA_DATABASE_SCHEMA_MIN: ${OPENCURIA_DATABASE_SCHEMA_MIN:?Schema range required}
+      OPENCURIA_DATABASE_SCHEMA_MAX: ${OPENCURIA_DATABASE_SCHEMA_MAX:?Schema range required}
+      OPENCURIA_UPGRADE_ARGS: ${OPENCURIA_UPGRADE_ARGS:-}
+      OPENCURIA_ADOPT_MANIFEST: ${OPENCURIA_ADOPT_MANIFEST:-}
+    command:
+    - /bin/sh
+    - -c
+    - exec python manage.py upgrade_database --manifest /deploy/release.json $${OPENCURIA_UPGRADE_ARGS:-} $${OPENCURIA_ADOPT_MANIFEST:+--adopt-existing-release-manifest
+      /deploy/legacy-release.json}
+    volumes:
+    - ${OPENCURIA_RELEASE_MANIFEST:-./release.json}:/deploy/release.json:ro
+    - ${OPENCURIA_LEGACY_RELEASE_MANIFEST:-${OPENCURIA_RELEASE_MANIFEST:-./release.json}}:/deploy/legacy-release.json:ro
+    networks:
+    - upgrade
+  gateway:
+    image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:?Use immutable tag or digest}
+    restart: unless-stopped
+    profiles:
+    - app
+    env_file:
+    - .env
+    environment:
+      DJANGO_ENV: production
+      OPENCURIA_MANAGED_DEPLOYMENT: '1'
+      OPENCURIA_SCHEDULER_ENABLED: 'false'
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost}
+      DB_NAME: ${DB_NAME:-opencuria}
+      DB_USER: ${DB_USER:-opencuria}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      DB_HOST: ${OPENCURIA_DB_HOST:-opencuria-infra-db-1}
+      DB_PORT: '5432'
+      REDIS_URL: ${OPENCURIA_REDIS_URL:-redis://opencuria-infra-redis-1:6379/0}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
+      MCP_OAUTH_CALLBACK_URL: ${MCP_OAUTH_CALLBACK_URL:?MCP OAuth callback required}
+      MCP_OAUTH_FRONTEND_RETURN_URL: ${MCP_OAUTH_FRONTEND_RETURN_URL:?MCP frontend return URL required}
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:?CSRF trusted origins required}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS origins required}
+      SIO_CORS_ALLOWED_ORIGINS: ${SIO_CORS_ALLOWED_ORIGINS:?Socket.IO CORS origins required}
+      OPENCURIA_DEPLOYMENT_VERSION: ${OPENCURIA_DEPLOYMENT_VERSION:?Deployment version required}
+      OPENCURIA_PROTOCOL_MIN: ${OPENCURIA_PROTOCOL_MIN:?Protocol range required}
+      OPENCURIA_PROTOCOL_MAX: ${OPENCURIA_PROTOCOL_MAX:?Protocol range required}
+      OPENCURIA_DATABASE_SCHEMA: ${OPENCURIA_DATABASE_SCHEMA:?Schema version required}
+      OPENCURIA_DATABASE_SCHEMA_MIN: ${OPENCURIA_DATABASE_SCHEMA_MIN:?Schema range required}
+      OPENCURIA_DATABASE_SCHEMA_MAX: ${OPENCURIA_DATABASE_SCHEMA_MAX:?Schema range required}
+      OPENCURIA_UPGRADE_ARGS: ${OPENCURIA_UPGRADE_ARGS:-}
+      OPENCURIA_ADOPT_MANIFEST: ${OPENCURIA_ADOPT_MANIFEST:-}
+      OPENCURIA_HARNESS_MODE: gateway
+      OPENCURIA_GATEWAY_ROLE: api
+      OPENCURIA_GATEWAY_WORKER_VERSIONS: ${OPENCURIA_GATEWAY_WORKER_VERSIONS:?List compatible worker versions}
+      OPENCURIA_WORKER_ID: ${OPENCURIA_WORKER_ID:?Unique worker process identity required}
+    volumes:
+    - ${OPENCURIA_RELEASE_MANIFEST:-./release.json}:/deploy/release.json:ro
+    - ${OPENCURIA_LEGACY_RELEASE_MANIFEST:-${OPENCURIA_RELEASE_MANIFEST:-./release.json}}:/deploy/legacy-release.json:ro
+    expose:
+    - 8000
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - python manage.py check_deployment --release-version "$OPENCURIA_DEPLOYMENT_VERSION" --worker-id "$OPENCURIA_WORKER_ID"
+        && python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/')"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+    - upgrade
+  webapp:
+    image: ghcr.io/opencuria/webapp:${OPENCURIA_TAG:?Use immutable tag or digest}
+    restart: unless-stopped
+    profiles:
+    - app
+    environment:
+      VITE_API_BASE_URL: /api/v1
+      VITE_WS_BASE_URL: ''
+    expose:
+    - 80
+    networks:
+    - upgrade
+  worker:
+    image: ghcr.io/opencuria/backend:${OPENCURIA_TAG:?Use immutable tag}
+    init: true
+    restart: 'no'
+    profiles:
+    - app
+    env_file:
+    - .env
+    environment:
+      DJANGO_ENV: production
+      OPENCURIA_MANAGED_DEPLOYMENT: '1'
+      OPENCURIA_SCHEDULER_ENABLED: 'false'
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost}
+      DB_NAME: ${DB_NAME:-opencuria}
+      DB_USER: ${DB_USER:-opencuria}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      DB_HOST: ${OPENCURIA_DB_HOST:-opencuria-infra-db-1}
+      DB_PORT: '5432'
+      REDIS_URL: ${OPENCURIA_REDIS_URL:-redis://opencuria-infra-redis-1:6379/0}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?CREDENTIAL_ENCRYPTION_KEY is required}
+      MCP_OAUTH_CALLBACK_URL: ${MCP_OAUTH_CALLBACK_URL:?MCP OAuth callback required}
+      MCP_OAUTH_FRONTEND_RETURN_URL: ${MCP_OAUTH_FRONTEND_RETURN_URL:?MCP frontend return URL required}
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:?CSRF trusted origins required}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?CORS origins required}
+      SIO_CORS_ALLOWED_ORIGINS: ${SIO_CORS_ALLOWED_ORIGINS:?Socket.IO CORS origins required}
+      OPENCURIA_DEPLOYMENT_VERSION: ${OPENCURIA_DEPLOYMENT_VERSION:?Deployment version required}
+      OPENCURIA_PROTOCOL_MIN: ${OPENCURIA_PROTOCOL_MIN:?Protocol range required}
+      OPENCURIA_PROTOCOL_MAX: ${OPENCURIA_PROTOCOL_MAX:?Protocol range required}
+      OPENCURIA_DATABASE_SCHEMA: ${OPENCURIA_DATABASE_SCHEMA:?Schema version required}
+      OPENCURIA_DATABASE_SCHEMA_MIN: ${OPENCURIA_DATABASE_SCHEMA_MIN:?Schema range required}
+      OPENCURIA_DATABASE_SCHEMA_MAX: ${OPENCURIA_DATABASE_SCHEMA_MAX:?Schema range required}
+      OPENCURIA_UPGRADE_ARGS: ${OPENCURIA_UPGRADE_ARGS:-}
+      OPENCURIA_ADOPT_MANIFEST: ${OPENCURIA_ADOPT_MANIFEST:-}
+      OPENCURIA_HARNESS_MODE: worker
+      OPENCURIA_WORKER_ID: ${OPENCURIA_WORKER_ID:?Unique worker process identity required}
+    command:
+    - python
+    - manage.py
+    - run_harness_worker
+    stop_grace_period: 24h
+    networks:
+    - upgrade
+networks:
+  upgrade:
+    name: opencuria-upgrade
+    external: true

@@ -285,6 +285,49 @@ class Task(models.Model):
         return f"Task({str(self.id)[:8]}, {self.type}, {self.status})"
 
 
+class TerminalSession(models.Model):
+    """Durable backend routing identity for one runner-owned PTY."""
+
+    class Status(models.TextChoices):
+        STARTING = "starting", "Starting"
+        ACTIVE = "active", "Active"
+        CLOSED = "closed", "Closed"
+
+    terminal_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        Workspace, on_delete=models.CASCADE, related_name="terminal_sessions"
+    )
+    runner = models.ForeignKey(
+        Runner, on_delete=models.CASCADE, related_name="terminal_sessions"
+    )
+    task = models.ForeignKey(
+        Task,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="terminal_session",
+    )
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.STARTING)
+    last_sequence = models.PositiveBigIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "runners_terminal_session"
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace"],
+                condition=models.Q(status__in=["starting", "active"]),
+                name="runners_one_live_terminal_per_workspace",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "status"]),
+            models.Index(fields=["runner", "status"]),
+        ]
+
+
 class WorkspaceProcess(models.Model):
     """
     A backend-tracked background process running inside a workspace.

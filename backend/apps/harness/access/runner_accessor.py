@@ -641,6 +641,9 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             completed = True
             return result
         except TimeoutError as exc:
+            from ..runtime_authority import mark_current_run_uncertain
+
+            mark_current_run_uncertain()
             raise TimeoutError(
                 f"Harness request '{event}' timed out "
                 f"after {timeout_s:.1f}s"
@@ -698,6 +701,9 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 try:
                     item = await asyncio.wait_for(queue.get(), remaining)
                 except TimeoutError as exc:
+                    from ..runtime_authority import mark_current_run_uncertain
+
+                    mark_current_run_uncertain()
                     raise TimeoutError(
                         "Harness request 'harness:exec_stream' timed out "
                         f"after {timeout_s:.1f}s"

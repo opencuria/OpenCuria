@@ -24,6 +24,22 @@ MCP_OAUTH_FRONTEND_RETURN_URL = os.getenv(
     "MCP_OAUTH_FRONTEND_RETURN_URL", ""
 ).strip()
 
+# Release compatibility metadata is explicit in production manifests.
+OPENCURIA_DEPLOYMENT_VERSION = os.getenv("OPENCURIA_DEPLOYMENT_VERSION", "development")
+OPENCURIA_PROTOCOL_MIN = int(os.getenv("OPENCURIA_PROTOCOL_MIN", "1"))
+OPENCURIA_PROTOCOL_MAX = int(os.getenv("OPENCURIA_PROTOCOL_MAX", "1"))
+OPENCURIA_DATABASE_SCHEMA = int(os.getenv("OPENCURIA_DATABASE_SCHEMA", "1"))
+OPENCURIA_DATABASE_SCHEMA_MIN = int(os.getenv("OPENCURIA_DATABASE_SCHEMA_MIN", "1"))
+OPENCURIA_DATABASE_SCHEMA_MAX = int(os.getenv("OPENCURIA_DATABASE_SCHEMA_MAX", "1"))
+DEPLOYMENT_RELEASE = {
+    "version": OPENCURIA_DEPLOYMENT_VERSION,
+    "protocol_min": OPENCURIA_PROTOCOL_MIN,
+    "protocol_max": OPENCURIA_PROTOCOL_MAX,
+    "database_schema": OPENCURIA_DATABASE_SCHEMA,
+    "database_schema_min": OPENCURIA_DATABASE_SCHEMA_MIN,
+    "database_schema_max": OPENCURIA_DATABASE_SCHEMA_MAX,
+}
+
 DEBUG = False
 
 ALLOWED_HOSTS: list[str] = []
@@ -52,6 +68,7 @@ INSTALLED_APPS = [
     "apps.scheduled_tasks",
     "apps.plugins",
     "apps.skills",
+    "apps.deployments",
 ]
 
 MIDDLEWARE = [

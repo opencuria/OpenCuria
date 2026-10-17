@@ -1,0 +1,59 @@
+name: opencuria-infra
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    volumes:
+    - pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${DB_NAME:-opencuria}
+      POSTGRES_USER: ${DB_USER:-opencuria}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+    - upgrade
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+    - redisdata:/data
+    healthcheck:
+      test:
+      - CMD
+      - redis-cli
+      - ping
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+    - upgrade
+  proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+    - ${WEBAPP_PORT:-8080}:80
+    volumes:
+    - ./deploy:/etc/nginx/opencuria:ro
+    networks:
+    - upgrade
+    command:
+    - nginx
+    - -c
+    - /etc/nginx/opencuria/nginx.conf
+    - -g
+    - daemon off;
+networks:
+  upgrade:
+    name: opencuria-upgrade
+    driver: bridge
+volumes:
+  pgdata:
+    name: opencuria-pgdata
+  redisdata:
+    name: opencuria-redisdata

@@ -4,6 +4,7 @@
 .env.local
 .env.*.local
 !.env.example
+!.env.upgrade.example
 *.sqlite3
 
 # Docker volumes (created by docker compose on dev machines)
@@ -26,3 +27,10 @@ dist/
 .idea/
 # Local verification artifacts
 /.opencuria/
+
+# Local deployment state and immutable operator manifests
+/deploy/releases/
+/.deployment.lock
+/.env.operations
+
+/release.json

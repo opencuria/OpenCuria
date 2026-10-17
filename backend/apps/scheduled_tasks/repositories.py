@@ -77,31 +77,41 @@ class ScheduledTaskRepository:
         from apps.runners.locking import lock_runner
         from apps.runners.models import Workspace
 
-        runner_id = Workspace.objects.filter(pk=workspace_id).values_list(
-            "runner_id", flat=True
-        ).first()
+        runner_id = (
+            Workspace.objects.filter(pk=workspace_id)
+            .values_list("runner_id", flat=True)
+            .first()
+        )
         if runner_id is None:
             return False
         with transaction.atomic():
             lock_runner(runner_id)
             Workspace.objects.select_for_update().get(pk=workspace_id)
-            session = HarnessSession.objects.select_for_update().filter(
-                pk=session_id,
-                workspace_id=workspace_id,
-                organization_id=organization_id,
-                parent__isnull=True,
-                status=HarnessSessionStatus.IDLE,
-            ).first()
+            session = (
+                HarnessSession.objects.select_for_update()
+                .filter(
+                    pk=session_id,
+                    workspace_id=workspace_id,
+                    organization_id=organization_id,
+                    parent__isnull=True,
+                    status=HarnessSessionStatus.IDLE,
+                )
+                .first()
+            )
             if session is None:
                 return False
-            claim = ScheduledTaskRun.objects.select_for_update().filter(
-                pk=run_id,
-                scheduled_task_id=task_id,
-                session_id=session_id,
-                status=ScheduledTaskRun.Status.CLAIMED,
-                started_at__isnull=True,
-                assistant_message__isnull=True,
-            ).first()
+            claim = (
+                ScheduledTaskRun.objects.select_for_update()
+                .filter(
+                    pk=run_id,
+                    scheduled_task_id=task_id,
+                    session_id=session_id,
+                    status=ScheduledTaskRun.Status.CLAIMED,
+                    started_at__isnull=True,
+                    assistant_message__isnull=True,
+                )
+                .first()
+            )
             if claim is None or session.messages.exists() or session.children.exists():
                 return False
             if session.scheduled_task_runs.exclude(pk=run_id).exists():
@@ -124,11 +134,9 @@ class ScheduledTaskRepository:
     @staticmethod
     def list_runs(task: ScheduledTask, *, limit: int = 100) -> list[ScheduledTaskRun]:
         return list(
-            ScheduledTaskRun.objects.filter(
-                scheduled_task_id=task.id
-            ).select_related("session", "assistant_message").order_by(
-                "-scheduled_for"
-            )[:limit]
+            ScheduledTaskRun.objects.filter(scheduled_task_id=task.id)
+            .select_related("session", "assistant_message")
+            .order_by("-scheduled_for")[:limit]
         )
 
     @staticmethod
@@ -136,9 +144,7 @@ class ScheduledTaskRepository:
         return list(
             ScheduledTask.objects.filter(
                 enabled=True, is_deleted=False, next_run_at__lte=now
-            ).order_by(
-                "next_run_at"
-            )[:100]
+            ).order_by("next_run_at")[:100]
         )
 
     @staticmethod
@@ -220,10 +226,10 @@ class ScheduledTaskRepository:
     def workspace_is_owned(
         workspace_id: uuid.UUID, *, organization_id: uuid.UUID, owner_id: int
     ) -> bool:
+        from django.contrib.auth import get_user_model
+
         from apps.organizations.models import Membership
         from apps.runners.models import Workspace
-
-        from django.contrib.auth import get_user_model
 
         return (
             Workspace.objects.filter(
@@ -313,7 +319,9 @@ class ScheduledTaskRepository:
                     finished_at=timezone.now() if active else None,
                     reason="task_already_active" if active else "",
                     error=(
-                        "This scheduled task already has an active run" if active else ""
+                        "This scheduled task already has an active run"
+                        if active
+                        else ""
                     ),
                 )
                 locked.next_run_at = next_run_at
@@ -392,7 +400,9 @@ class ScheduledTaskRepository:
             rows = rows.filter(scheduled_task_id=task_id)
         if message_id is not None:
             rows = rows.filter(assistant_message_id=message_id)
-        return list(rows.select_related("assistant_message", "scheduled_task", "session"))
+        return list(
+            rows.select_related("assistant_message", "scheduled_task", "session")
+        )
 
     @staticmethod
     def finish_run(
@@ -419,18 +429,28 @@ class ScheduledTaskRepository:
     def pending_completion_checks() -> list[ScheduledTaskRun]:
         """Keep completion-triggered auto-stop checks durable after eager settlement."""
         return list(
-            ScheduledTaskRun.objects.filter(completion_check_pending=True)
-            .select_related("scheduled_task", "session")
+            ScheduledTaskRun.objects.filter(
+                completion_check_pending=True
+            ).select_related("scheduled_task", "session")
         )
 
     @staticmethod
     def clear_completion_check(run_id: uuid.UUID) -> None:
         """Consume a successful completion check, including a policy no-op."""
-        ScheduledTaskRun.objects.filter(id=run_id).update(completion_check_pending=False)
+        ScheduledTaskRun.objects.filter(id=run_id).update(
+            completion_check_pending=False
+        )
 
     @staticmethod
-    def recover_backend_restart() -> int:
-        """Recover lost scheduled turns without changing unrelated chat turns."""
+    def recover_backend_restart(
+        *, owner_id: str = "", all_generations: bool = True
+    ) -> int:
+        """Recover interrupted scheduled dispatches for one fenced owner.
+
+        A clean lease handoff does not invoke this. On an unclean managed
+        scheduler owner, finalize only occurrences linked to that scheduler
+        identity. Legacy mode retains its pre-generation all-run behavior.
+        """
         from apps.harness.models import (
             HarnessMessage,
             HarnessPart,
@@ -443,17 +463,27 @@ class ScheduledTaskRepository:
         error = "Backend restarted before the run completed"
         recovered = 0
         with transaction.atomic():
-            runs = list(
-                ScheduledTaskRun.objects.select_for_update(of=("self",))
-                .filter(
-                    status__in=[
-                        ScheduledTaskRun.Status.CLAIMED,
-                        ScheduledTaskRun.Status.RUNNING,
-                    ]
-                )
-                .select_related("assistant_message")
+            run_query = ScheduledTaskRun.objects.select_for_update(of=("self",)).filter(
+                status__in=[
+                    ScheduledTaskRun.Status.CLAIMED,
+                    ScheduledTaskRun.Status.RUNNING,
+                ]
             )
+            if not all_generations:
+                run_query = run_query.filter(
+                    configuration_snapshot__scheduler_owner_id=owner_id
+                )
+            runs = list(run_query.select_related("assistant_message"))
             for run in runs:
+                # Scheduler death is not harness-worker death. Durable admitted
+                # attempts remain owned even when this dispatcher disappears.
+                from apps.harness.models import HarnessRun
+
+                if not all_generations and run.session_id and HarnessRun.objects.filter(
+                    session_id=run.session_id,
+                    status__in=("starting", "running", "closing"),
+                ).exists():
+                    continue
                 assistant = run.assistant_message
                 if assistant is None and run.session_id is not None:
                     assistant = (
@@ -502,19 +532,22 @@ class ScheduledTaskRepository:
                     frontier = {uuid.UUID(str(child_id)) for child_id in child_ids}
                     while frontier:
                         descendants = set(
-                            HarnessSession.objects.filter(
-                                id__in=frontier
-                            ).values_list("id", flat=True)
+                            HarnessSession.objects.filter(id__in=frontier).values_list(
+                                "id", flat=True
+                            )
                         )
                         descendants -= session_ids
                         if not descendants:
                             break
                         session_ids.update(descendants)
-                        frontier = set(
-                            HarnessSession.objects.filter(
-                                parent_id__in=descendants
-                            ).values_list("id", flat=True)
-                        ) - session_ids
+                        frontier = (
+                            set(
+                                HarnessSession.objects.filter(
+                                    parent_id__in=descendants
+                                ).values_list("id", flat=True)
+                            )
+                            - session_ids
+                        )
                     if session_ids:
                         HarnessMessage.objects.filter(
                             session_id__in=session_ids,

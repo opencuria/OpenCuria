@@ -179,11 +179,11 @@ class RunnerTransportMixin:
                     event,
                     workspace_id,
                 )
-                return True
+                return False
             if not self._validate_harness_workspace_runner(
                 workspace_id_uuid, runner_id
             ):
-                return True
+                return False
         if event == "harness:read_file_chunk" and not self._validate_runner_file_chunk(
             event, data if isinstance(data, dict) else {}
         ):
@@ -192,16 +192,14 @@ class RunnerTransportMixin:
                 event,
                 workspace_id,
             )
-            return True
+            return False
         if event == "harness:exec_chunk":
-            route_harness_chunk(data)
-        elif event == "harness:exec_done":
-            route_harness_done(data)
-        elif event == "harness:read_file_chunk":
-            route_harness_file_chunk(data)
-        else:
-            route_harness_result(data)
-        return True
+            return route_harness_chunk(data)
+        if event == "harness:exec_done":
+            return route_harness_done(data)
+        if event == "harness:read_file_chunk":
+            return route_harness_file_chunk(data)
+        return route_harness_result(data)
 
     def _route_harness_reply_via_router(
         self,
@@ -228,11 +226,11 @@ class RunnerTransportMixin:
                     event,
                     workspace_id,
                 )
-                return True
+                return False
             if not self._validate_harness_workspace_runner(
                 workspace_id_uuid, runner_id
             ):
-                return True
+                return False
         if event == "harness:read_file_chunk" and not self._validate_runner_file_chunk(
             event, data if isinstance(data, dict) else {}
         ):
@@ -241,16 +239,14 @@ class RunnerTransportMixin:
                 event,
                 workspace_id,
             )
-            return True
+            return False
         if event == "harness:exec_chunk":
-            reply_router.route_harness_chunk(data)
-        elif event == "harness:exec_done":
-            reply_router.route_harness_done(data)
-        elif event == "harness:read_file_chunk":
-            reply_router.route_harness_file_chunk(data)
-        else:
-            reply_router.route_harness_result(data)
-        return True
+            return bool(reply_router.route_harness_chunk(data))
+        if event == "harness:exec_done":
+            return bool(reply_router.route_harness_done(data))
+        if event == "harness:read_file_chunk":
+            return bool(reply_router.route_harness_file_chunk(data))
+        return bool(reply_router.route_harness_result(data))
 
     async def emit_harness_event(
         self,
@@ -266,10 +262,11 @@ class RunnerTransportMixin:
         event: str,
         data: dict,
         runner_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Route a harness reply from a runner to its accessor (sync).
 
         Called from Socket.IO handlers via ``sync_to_async``. Harness
         operations never touch the frontend event bus.
         """
-        self._route_harness_reply(event, data, runner_id=runner_id)
+        routed = self._route_harness_reply(event, data, runner_id=runner_id)
+        return bool(routed)

@@ -33,6 +33,8 @@ __all__ = [
     "HarnessPart",
     "HarnessRun",
     "HarnessRunStatus",
+    "HarnessRunCommand",
+    "HarnessWorkerRegistration",
     "HarnessSession",
     "HarnessTranscriptBatch",
     "PermissionAllowlist",
@@ -243,17 +245,13 @@ class AgentSConfig(models.Model):
         "organizations.Organization",
         on_delete=models.CASCADE,
         related_name="harness_agent_s_config",
-        help_text=(
-            "Owning organization (exactly one Agent-S config per org)."
-        ),
+        help_text=("Owning organization (exactly one Agent-S config per org)."),
     )
     grounding_model = models.CharField(
         max_length=255,
         default="",
         blank=True,
-        help_text=(
-            "Grounding model ref; empty falls back to the run's main model."
-        ),
+        help_text=("Grounding model ref; empty falls back to the run's main model."),
     )
     grounding_width = models.PositiveIntegerField(default=1920)
     grounding_height = models.PositiveIntegerField(default=1080)
@@ -410,8 +408,7 @@ class HarnessSession(models.Model):
         default=timezone.now,
         db_index=True,
         help_text=(
-            "Last completed user or assistant message "
-            "(not tools, not last open)."
+            "Last completed user or assistant message (not tools, not last open)."
         ),
     )
     created_at = models.DateTimeField(auto_now_add=True)
@@ -520,11 +517,10 @@ class HarnessMessage(models.Model):
 
 
 class HarnessRun(models.Model):
-    """Durable attempt ownership for an engine-backed assistant turn.
+    """Durable attempt ownership for one assistant turn on every engine.
 
-    The owner token fences writes from a worker after its lease has been
-    superseded. Lease identity is metadata only; credentials and prompt data
-    must never be stored here.
+    The owner token fences writes after recovery. Lease identity is metadata
+    only; credentials and prompt data must never be stored here.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -556,6 +552,14 @@ class HarnessRun(models.Model):
         db_index=True,
     )
     owner_token = models.UUIDField(default=uuid.uuid4, editable=False)
+    owner_worker_id = models.CharField(max_length=128, blank=True, default="")
+    deployment_version = models.CharField(max_length=128, blank=True, default="")
+    root_run_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text="Root owner UUID for worker-pinned subagent runs.",
+    )
+    abort_requested_at = models.DateTimeField(null=True, blank=True)
     heartbeat_at = models.DateTimeField(default=timezone.now, db_index=True)
     lease_id = models.UUIDField(null=True, blank=True)
     lease_epoch = models.CharField(max_length=128, blank=True, default="")
@@ -589,6 +593,80 @@ class HarnessRun(models.Model):
     def __str__(self) -> str:
         """Return an operationally useful but secret-free description."""
         return f"HarnessRun({str(self.id)[:8]}, {self.status})"
+
+
+class HarnessRunCommand(models.Model):
+    """Durable start/control outbox; payloads never contain prompt or secrets."""
+
+    class Type(models.TextChoices):
+        START = "start", "Start"
+        ABORT = "abort", "Abort"
+        PERMISSION = "permission", "Permission resolved"
+        QUESTION = "question", "Question resolved"
+
+    class State(models.TextChoices):
+        PENDING = "pending", "Pending"
+        CLAIMED = "claimed", "Claimed"
+        DONE = "done", "Done"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    run = models.ForeignKey(
+        HarnessRun, on_delete=models.CASCADE, related_name="commands"
+    )
+    command_type = models.CharField(max_length=16, choices=Type.choices)
+    state = models.CharField(
+        max_length=16, choices=State.choices, default=State.PENDING, db_index=True
+    )
+    deployment_version = models.CharField(max_length=128)
+    payload = models.JSONField(default=dict, blank=True)
+    dedupe_key = models.CharField(max_length=128, blank=True, default="")
+    target_worker_id = models.CharField(max_length=128, blank=True, default="")
+    claimed_by = models.CharField(max_length=128, blank=True, default="")
+    claimed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "harness_run_command"
+        ordering = ["created_at", "id"]
+        indexes = [
+            models.Index(
+                fields=["state", "deployment_version", "command_type"],
+                name="harness_cmd_claim_idx",
+            ),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["run", "command_type", "dedupe_key"],
+                name="harness_run_command_dedupe_uniq",
+            ),
+        ]
+
+
+class HarnessWorkerRegistration(models.Model):
+    """Heartbeat/readiness record for one execution worker process."""
+
+    from datetime import timedelta as _timedelta
+
+    HEARTBEAT_TIMEOUT = _timedelta(seconds=90)
+
+    class State(models.TextChoices):
+        READY = "ready", "Ready"
+        DRAINING = "draining", "Draining"
+        STOPPED = "stopped", "Stopped"
+        FAILED = "failed", "Failed"
+
+    worker_id = models.CharField(max_length=128, primary_key=True)
+    deployment_version = models.CharField(max_length=128, db_index=True)
+    pid = models.PositiveIntegerField()
+    state = models.CharField(max_length=16, choices=State.choices, db_index=True)
+    heartbeat_at = models.DateTimeField(default=timezone.now, db_index=True)
+    started_at = models.DateTimeField(default=timezone.now)
+    draining_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "harness_worker_registration"
+        ordering = ["worker_id"]
 
 
 class HarnessPartType(models.TextChoices):

@@ -284,9 +284,17 @@ def test_history_and_missing_org_header_are_mapped(schedule_api_setup, monkeypat
     assert created.status_code == 201
     task_id = created.json()["id"]
     assert client.get(f"/api/v1/scheduled-tasks/{task_id}/runs/").status_code == 200
-    assert client.get("/api/v1/scheduled-tasks/", **{"HTTP_X_ORGANIZATION_ID": ""}).status_code == 400
-    assert client.patch(
-        f"/api/v1/scheduled-tasks/{uuid.uuid4()}/",
-        data={"enabled": False},
-        content_type="application/json",
-    ).status_code == 404
+    assert (
+        client.get(
+            "/api/v1/scheduled-tasks/", **{"HTTP_X_ORGANIZATION_ID": ""}
+        ).status_code
+        == 400
+    )
+    assert (
+        client.patch(
+            f"/api/v1/scheduled-tasks/{uuid.uuid4()}/",
+            data={"enabled": False},
+            content_type="application/json",
+        ).status_code
+        == 404
+    )
