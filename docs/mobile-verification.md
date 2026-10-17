@@ -83,3 +83,14 @@ Workspace-local raw artifacts: `/workspace/.opencuria/playwright/mobile/`. Priva
 - No physical Android handset, app-store distribution, production signing or external LLM/Docker/QEMU run is claimed. The isolated fixture intentionally uses a deterministic local provider and confined runtime/file stand-ins.
 - A development APK requires Metro. No standalone signed release package or cloud build was requested.
 - The first GitHub Actions run passed Webapp, Mobile and Security Audit but failed its Backend and Runner jobs despite the complete local gate being green. Detailed hosted logs were unavailable with the current repository rights. A clean local runner installation also passed all 794 tests; the clean backend installation also passed all 2,913 tests. CI now retains JUnit reports and emits failing test identities as annotations, so hosted failures are inspectable without weakening tests or adding retries.
+
+### Hosted CI environment follow-up
+
+The retained annotations identified pre-existing portability assumptions exposed
+by the new feature-branch CI: QEMU fixture tests require `qemu-img`, the recovery
+installer-preview test expects `backend/.venv/bin/python`, and one real-subprocess
+stream test assumed the host has `/workspace`. CI now installs `qemu-utils` and
+creates the expected backend virtualenv; the stream test uses its pytest scratch
+directory. The unborn-repository Git fallback now tests whether HEAD exists
+instead of matching a version-/locale-specific English stderr string; its
+regression verifies worktree content is retained. These checks are not skipped.

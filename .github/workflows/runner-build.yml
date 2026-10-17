@@ -64,9 +64,11 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements*.txt
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
       - name: Run tests
-        run: pytest -q --junitxml=test-results.xml
+        run: .venv/bin/pytest -q --junitxml=test-results.xml
       - name: Annotate Python test failures
         if: always()
         run: python ../scripts/report_python_tests.py test-results.xml
@@ -88,7 +90,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libvirt-dev
+          sudo apt-get install -y libvirt-dev qemu-utils
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
