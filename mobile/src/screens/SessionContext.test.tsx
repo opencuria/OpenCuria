@@ -37,12 +37,10 @@ const profile = {
 function makeClient(overrides: Record<string, unknown> = {}) {
   const client = {
     auth: {
-      login: jest
-        .fn()
-        .mockResolvedValue({
-          access_token: "access",
-          refresh_token: "refresh",
-        }),
+      login: jest.fn().mockResolvedValue({
+        access_token: "access",
+        refresh_token: "refresh",
+      }),
       me: jest.fn().mockResolvedValue(profile),
       ...(overrides.auth as object | undefined),
     },

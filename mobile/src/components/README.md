@@ -17,13 +17,13 @@ Wrap the chat root in `<ThemeProvider initialMode="system" | "light" | "dark">`;
   todos={todos}
   busy={session.status === 'busy'}
   streamingMessageId={streamingMessageId}
-  resolveMedia={(path) => nativeMediaCache.resolve(path)}
+  resolveMedia={(path) => nativeMediaCache.resolvePinned(path)}
   onRequestPartDetail={(sessionId, partId) => api.getPart(sessionId, partId)}
   onOpenFile={(path) => navigation.openFile(path)}
   onOpenAttachment={navigation.openAttachment}
   onOpenSubtask={(childSessionId) => navigation.openSession(childSessionId)}
-  onEdit={(messageId, text) => controller.editMessage(messageId, text)}
-  onFork={(messageId) => controller.forkFrom(messageId)}
+  onEdit={(messageId, text) => controller.edit(messageId, text)}
+  onFork={(messageId) => controller.fork(messageId)}
 />
 ```
 

@@ -118,14 +118,12 @@ jest.mock("../components", () => {
   };
 });
 jest.mock("../platform", () => ({
-  MediaCache: jest
-    .fn()
-    .mockImplementation(() => ({
-      dispose: jest.fn(),
-      resolve: jest.fn(),
-      openFile: jest.fn(),
-      saveAttachment: jest.fn(),
-    })),
+  MediaCache: jest.fn().mockImplementation(() => ({
+    dispose: jest.fn(),
+    resolve: jest.fn(),
+    openFile: jest.fn(),
+    saveAttachment: jest.fn(),
+  })),
   clearPickedPhotoCache: jest.fn(),
   pickDocuments: jest.fn().mockResolvedValue([]),
   pickPhoto: jest.fn().mockResolvedValue([]),
@@ -157,38 +155,32 @@ const nativeModel: ProviderModel = {
 
 function mockClient() {
   const harness = {
-    listEngines: jest
-      .fn()
-      .mockResolvedValue([
-        {
-          id: "native",
-          name: "OpenCuria",
-          connected: true,
-          modes: ["build", "plan"],
-        },
-      ]),
+    listEngines: jest.fn().mockResolvedValue([
+      {
+        id: "native",
+        name: "OpenCuria",
+        connected: true,
+        modes: ["build", "plan"],
+      },
+    ]),
     listProviderModels: jest.fn().mockResolvedValue([nativeModel]),
     listClaudeModels: jest
       .fn()
       .mockRejectedValue(new Error("Claude catalog unavailable")),
-    listAgentConfigs: jest
-      .fn()
-      .mockResolvedValue([
-        {
-          agent: "build",
-          mode: "build",
-          model: "unavailable-default",
-          effort: "high",
-        },
-      ]),
+    listAgentConfigs: jest.fn().mockResolvedValue([
+      {
+        agent: "build",
+        mode: "build",
+        model: "unavailable-default",
+        effort: "high",
+      },
+    ]),
     listRecentModels: jest.fn().mockResolvedValue([]),
-    saveRecentModel: jest
-      .fn()
-      .mockResolvedValue({
-        model: "native-model",
-        effort: "medium",
-        last_used_at: "now",
-      }),
+    saveRecentModel: jest.fn().mockResolvedValue({
+      model: "native-model",
+      effort: "medium",
+      last_used_at: "now",
+    }),
     markRead: jest.fn().mockResolvedValue(undefined),
     markUnread: jest.fn().mockResolvedValue(undefined),
     deleteSession: jest.fn().mockResolvedValue(undefined),

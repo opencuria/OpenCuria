@@ -66,7 +66,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Run tests
-        run: pytest -q
+        run: pytest -q --junitxml=test-results.xml
+      - name: Annotate Python test failures
+        if: always()
+        run: python ../scripts/report_python_tests.py test-results.xml
+      - name: Preserve Python test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-${{ github.job }}-results
+          path: ${{ github.job == 'test-backend' && 'backend' || 'runner' }}/test-results.xml
 
   test-runner:
     name: Test runner
@@ -88,7 +97,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt -r requirements-qemu.txt
       - name: Run tests
-        run: pytest -q
+        run: pytest -q --junitxml=test-results.xml
+      - name: Annotate Python test failures
+        if: always()
+        run: python ../scripts/report_python_tests.py test-results.xml
+      - name: Preserve Python test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-${{ github.job }}-results
+          path: ${{ github.job == 'test-backend' && 'backend' || 'runner' }}/test-results.xml
 
   test-webapp:
     name: Test webapp

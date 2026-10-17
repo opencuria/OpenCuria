@@ -102,13 +102,11 @@ const part = (
 
 describe("ChatMessages", () => {
   it("renders ordered work details and fetches omitted heavy detail only when expanded", async () => {
-    const onRequestPartDetail = jest
-      .fn()
-      .mockResolvedValue({
-        ...part("tool-1", "tool", "Full output", 0),
-        input: { tool: "read" },
-        detail_loaded: true,
-      });
+    const onRequestPartDetail = jest.fn().mockResolvedValue({
+      ...part("tool-1", "tool", "Full output", 0),
+      input: { tool: "read" },
+      detail_loaded: true,
+    });
     const transcript = message([
       part("text-1", "text", "Before", 0),
       {

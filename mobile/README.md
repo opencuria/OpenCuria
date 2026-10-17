@@ -56,4 +56,4 @@ npm run test
 npm run export -w mobile
 ```
 
-`npm run test` covers the shared packages, mobile logic/UI tests and webapp tests. `export` checks an Expo JS bundle for both platforms; it is **not** a signed native release build. The optional device/backend fixture and its limitations are in [`e2e/mobile/README.md`](../e2e/mobile/README.md). An Android debug APK has been built in this workspace; native UI testing is described in the acceptance report. This is not a claim of iOS, production-signing or store acceptance.
+`npm run test` covers the shared packages, mobile logic/UI tests and webapp tests. `export` checks an Expo JS bundle for both platforms; it is **not** a signed native release build. The optional device/backend fixture and its limitations are in [`e2e/mobile/README.md`](../e2e/mobile/README.md). An Android debug APK and native acceptance have passed. See the [verification report](../docs/mobile-verification.md) for results, real native screenshots and limitations. This is not a claim of iOS native build, production-signing or store acceptance.
