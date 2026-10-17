@@ -272,13 +272,22 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         interface._sio.emit = AsyncMock(side_effect=emit)
         interface._operations.replay = AsyncMock()
         observation = asyncio.create_task(interface._observation_loop())
-        await asyncio.wait_for(entered.wait(), 1)
-        heartbeat = asyncio.create_task(interface._heartbeat_loop())
-        await asyncio.wait_for(emitted.wait(), 1)
-        interface._operations.replay.assert_any_await(recover=False)
-        heartbeat.cancel()
-        observation.cancel()
-        await asyncio.gather(heartbeat, observation)
+        heartbeat = None
+        try:
+            # Disk/host initialization on a shared CI runner is not a one-second
+            # performance contract. Prove independence while the scan remains
+            # blocked, rather than racing that unrelated initialization.
+            await asyncio.wait_for(entered.wait(), 10)
+            heartbeat = asyncio.create_task(interface._heartbeat_loop())
+            await asyncio.wait_for(emitted.wait(), 10)
+            interface._operations.replay.assert_any_await(recover=False)
+            assert not blocked.is_set()
+            assert not observation.done()
+        finally:
+            tasks = [task for task in (heartbeat, observation) if task is not None]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def test_start_desktop_emits_qemu_proxy_metadata(self) -> None:
         service = DummyService()

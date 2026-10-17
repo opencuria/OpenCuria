@@ -94,3 +94,9 @@ creates the expected backend virtualenv; the stream test uses its pytest scratch
 directory. The unborn-repository Git fallback now tests whether HEAD exists
 instead of matching a version-/locale-specific English stderr string; its
 regression verifies worktree content is retained. These checks are not skipped.
+
+A subsequent hosted run exposed an existing one-second initialization race in
+the inventory/heartbeat independence test. Its event waits now have a bounded
+ten-second CI budget and tasks are always cancelled in `finally`; assertions
+still prove heartbeat/replay runs while the inventory scan is blocked. No
+production heartbeat timeout or interval was changed.
