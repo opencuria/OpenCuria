@@ -1066,6 +1066,12 @@ export const useHarnessStore = defineStore('harness', () => {
     trimInactiveTranscripts()
   }
 
+  function handleSessionSummary(sessionId: string, summary: string): void {
+    const session = sessions.value.find((s) => s.id === sessionId)
+    // A newer run already started: its own summary will follow when it settles.
+    if (session && session.status === 'idle') session.summary = summary
+  }
+
   function handleSubtaskStarted(
     sessionId: string,
     event: {
@@ -1166,6 +1172,8 @@ export const useHarnessStore = defineStore('harness', () => {
     const session = sessions.value.find((s) => s.id === sessionId)
     if (session) {
       session.status = status
+      // The summary describes the finished run; the backend clears it too.
+      if (status === 'busy') session.summary = ''
       // Busy sessions remain protected; account for streamed growth once the
       // run settles instead of recalculating its size on every delta.
       if (extras?.model) session.model = extras.model
@@ -1444,6 +1452,7 @@ export const useHarnessStore = defineStore('harness', () => {
     messagesFor,
     handlePartUpdated,
     handleTodoUpdated,
+    handleSessionSummary,
     handleSubtaskStarted,
     handleSubtaskFinished,
     handleSessionStatus,

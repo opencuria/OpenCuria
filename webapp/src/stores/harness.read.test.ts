@@ -199,4 +199,20 @@ describe('harness store read tracking', () => {
       Date.parse('2026-03-29T10:00:00.000Z'),
     )
   })
+
+  it('keeps the summary of a settled run and drops it when the next run starts', () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'idle', summary: 'Old sentence.' })]
+
+    store.handleSessionStatus('session-1', 'busy')
+    expect(store.sessions[0]?.summary).toBe('')
+
+    // A late sentence of the previous run must not reappear while busy.
+    store.handleSessionSummary('session-1', 'Late sentence.')
+    expect(store.sessions[0]?.summary).toBe('')
+
+    store.handleSessionStatus('session-1', 'idle')
+    store.handleSessionSummary('session-1', 'New sentence.')
+    expect(store.sessions[0]?.summary).toBe('New sentence.')
+  })
 })

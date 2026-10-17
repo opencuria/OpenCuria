@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { pinHarnessMessageKey } from '@/lib/harnessMessagePin'
-import { BookText } from '@lucide/vue'
+import { BookText, CornerDownRight } from '@lucide/vue'
 import type { HarnessMessage } from '@/types/harness'
 import type { ComposerFileToken } from '@/lib/composerTokens'
 import { buildMessageBlocks, type MessageRenderBlock, type RenderBlock } from '@/lib/harnessBlocks'
@@ -31,6 +31,8 @@ const props = defineProps<{
   streaming?: boolean
   childSessionIds?: Record<string, string>
   models?: ProviderModel[]
+  /** One sentence: state + next step, shown quietly under the final answer. */
+  summary?: string
   /** Hide edit/fork actions (busy run or subagent session). */
   disabled?: boolean
 }>()
@@ -463,6 +465,16 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
         </template>
       </div>
       <HarnessThinking v-if="showThinking" :class="blocks.length ? 'mt-2' : ''" />
+      <Transition enter-active-class="transition-opacity duration-700" enter-from-class="opacity-0">
+        <p
+          v-if="summary && finished"
+          data-testid="message-summary"
+          class="mt-2.5 flex items-start gap-1.5 text-[13px] leading-snug text-muted-foreground"
+        >
+          <CornerDownRight class="mt-px size-3.5 shrink-0 opacity-60" aria-hidden="true" />
+          <span><span class="sr-only">Status and next step: </span>{{ summary }}</span>
+        </p>
+      </Transition>
       <HarnessMessageFooter
         v-if="copyText || isForkableMessage || usageLine || streamingModelLine"
         :copy-text="copyText"

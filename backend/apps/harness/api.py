@@ -214,6 +214,7 @@ class HarnessSessionOut(Schema):
     workspace_id: uuid.UUID
     parent_id: uuid.UUID | None = None
     title: str
+    summary: str = ""
     mode: str
     agent_name: str
     harness_id: str = "native"
@@ -960,6 +961,7 @@ def _session_to_out(
         parent_id=session.parent_id,
         harness_id=getattr(session, "harness_id", "native"),
         title=session.title or "",
+        summary=session.summary or "",
         mode=session.mode,
         agent_name=session.agent_name,
         model=session.model or "",

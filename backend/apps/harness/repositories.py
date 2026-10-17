@@ -10,7 +10,17 @@ import uuid
 from datetime import datetime
 
 from django.db import IntegrityError, transaction
-from django.db.models import Case, Exists, F, Max, OuterRef, TextField, Value, When
+from django.db.models import (
+    Case,
+    Exists,
+    F,
+    Max,
+    OuterRef,
+    Subquery,
+    TextField,
+    Value,
+    When,
+)
 from django.db.utils import NotSupportedError
 from django.utils import timezone
 
@@ -654,6 +664,40 @@ class HarnessSessionRepository:
         return session
 
     @staticmethod
+    def clear_summary(session_id: uuid.UUID) -> None:
+        """Drop the status sentence once a new run of the session starts."""
+        HarnessSession.objects.filter(id=session_id).exclude(summary="").update(
+            summary=""
+        )
+
+    @staticmethod
+    def set_summary_for_turn(
+        session_id: uuid.UUID, assistant_message_id: uuid.UUID, summary: str
+    ) -> bool:
+        """Store the status sentence of a settled turn; False when outdated.
+
+        Only applies while the session is idle and *assistant_message_id* is
+        still its latest assistant message, so a slow generation cannot
+        overwrite the state of a newer run.
+        """
+        latest_assistant_id = (
+            HarnessMessage.objects.filter(
+                session_id=OuterRef("pk"), role=HarnessMessageRole.ASSISTANT
+            )
+            .order_by("-position")
+            .values("id")[:1]
+        )
+        return (
+            HarnessSession.objects.filter(
+                id=session_id, status=HarnessSessionStatus.IDLE
+            )
+            .annotate(latest_assistant_id=Subquery(latest_assistant_id))
+            .filter(latest_assistant_id=assistant_message_id)
+            .update(summary=(summary or "").strip()[:200])
+            == 1
+        )
+
+    @staticmethod
     def set_skill_ids(session: HarnessSession, skill_ids: list[str]) -> HarnessSession:
         """Persist selected skill IDs for subsequent runs."""
         session.skill_ids = list(skill_ids or [])
@@ -957,6 +1001,21 @@ class HarnessMessageRepository:
     def get_by_id(message_id: uuid.UUID) -> HarnessMessage | None:
         """Fetch a single message by ID."""
         return HarnessMessage.objects.filter(id=message_id).first()
+
+    @staticmethod
+    def user_content_before(session_id: uuid.UUID, position: int) -> str:
+        """Return the content of the closest user message before *position*."""
+        return (
+            HarnessMessage.objects.filter(
+                session_id=session_id,
+                role=HarnessMessageRole.USER,
+                position__lt=position,
+            )
+            .order_by("-position")
+            .values_list("content", flat=True)
+            .first()
+            or ""
+        )
 
     @staticmethod
     def list_ids_for_session(session_id: uuid.UUID) -> list[uuid.UUID]:

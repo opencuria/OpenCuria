@@ -114,6 +114,7 @@ FRONTEND_EVENT_PERMISSION = "harness.permission_required"
 FRONTEND_EVENT_QUESTION = "harness.question_required"
 FRONTEND_EVENT_STATUS = "harness.session_status"
 FRONTEND_EVENT_TODO = "harness.todo_updated"
+FRONTEND_EVENT_SUMMARY = "harness.session_summary"
 FRONTEND_EVENT_SUBTASK_STARTED = "harness.subtask_started"
 FRONTEND_EVENT_SUBTASK_FINISHED = "harness.subtask_finished"
 FRONTEND_EVENT_CONVERSATIONS_CHANGED = "harness.conversations_changed"
@@ -257,7 +258,7 @@ class HarnessService:
         requested = (agent_name or "").strip().lower()
         if engine_id == "claude" and requested == "computeruse":
             raise ValueError("Claude engine does not support Agent-S computeruse")
-        if engine_id == "claude" and requested in {"title", "compaction"}:
+        if engine_id == "claude" and requested in {"title", "summary", "compaction"}:
             raise ValueError("Claude engine cannot use hidden harness agents")
         # Root sessions: agent_name follows mode (plan|build). Child sessions
         # honor subagent agent_name while keeping parent plan|build mode.
@@ -1355,6 +1356,9 @@ class HarnessService:
                 session, HarnessSessionStatus.BUSY
             )
             session.status = HarnessSessionStatus.BUSY
+            if session.parent_id is None:
+                # The old status sentence describes the finished run, not this one.
+                await sync_to_async(self.sessions.clear_summary)(session.id)
             history = await self._build_history(
                 session,
                 exclude_message_id=assistant.id,
@@ -2246,7 +2250,7 @@ class HarnessService:
             # configuration or registering/calling any harness tools.
             mcp_snapshot = None
             agent_key = (session.agent_name or "").strip().lower()
-            if agent_key not in {"computeruse", "title", "compaction"}:
+            if agent_key not in {"computeruse", "title", "summary", "compaction"}:
                 mcp_snapshot = await sync_to_async(self._prepare_mcp_snapshot_for_run)(
                     session, organization_id, None
                 )
@@ -2346,6 +2350,7 @@ class HarnessService:
             ).strip().lower() not in (
                 "computeruse",
                 "title",
+                "summary",
                 "compaction",
             )
             if mcp_enabled:
@@ -2559,6 +2564,7 @@ class HarnessService:
                 )
                 if session.parent_id is None:
                     await self._emit_conversations_changed(session.workspace_id)
+                    self._spawn_summary(session, assistant)
         finally:
             self._drop_run_tracking(key)
 
@@ -2847,6 +2853,7 @@ class HarnessService:
                 )
                 if session.parent_id is None:
                     await self._emit_conversations_changed(session.workspace_id)
+                    self._spawn_summary(session, assistant)
         finally:
             self._runs.pop(key, None)
             self._event_locks.pop(key, None)
@@ -4271,6 +4278,56 @@ class HarnessService:
         except Exception:  # pragma: no cover - forwarding is best-effort
             log.warning("harness_frontend_emit_failed", event_name=event)
 
+    def _spawn_summary(
+        self, session: HarnessSession, assistant: HarnessMessage
+    ) -> None:
+        """Refresh the status sentence of a root session whose run just settled."""
+        self._spawn_background(
+            self._generate_summary(
+                session_id=session.id,
+                assistant_id=assistant.id,
+                workspace_id=session.workspace_id,
+                organization_id=session.organization_id,
+            )
+        )
+
+    async def _small_model_runner(
+        self, organization_id: uuid.UUID
+    ) -> tuple[HarnessRunner, str] | None:
+        """Build a text-only runner on the org's small model (None if unset)."""
+        from .providers.resolver import StaticModelResolver
+        from .services import ProviderConfigService
+
+        config_service = ProviderConfigService()
+        config = None
+        try:
+            config = await sync_to_async(config_service.get_config)(organization_id)
+        except NotFoundError:
+            config = None
+        small_model = ((config.small_model if config else "") or "").strip()
+        if not small_model:
+            return None
+        small_effort = normalize_reasoning_effort(
+            (config.small_effort if config else "") or ""
+        )
+        if self._provider_factory is not None:
+            model_resolver = StaticModelResolver(
+                self._provider_factory(organization_id)
+            ).resolve
+        else:
+            resolver = await sync_to_async(config_service.build_resolver)(
+                organization_id
+            )
+            model_resolver = resolver.resolve
+        runner = HarnessRunner(
+            model_resolver=model_resolver,
+            tools=default_tool_registry(),
+            chat_options=(
+                ChatOptions(reasoning_effort=small_effort) if small_effort else None
+            ),
+        )
+        return runner, small_model
+
     async def _generate_title(
         self,
         *,
@@ -4283,37 +4340,10 @@ class HarnessService:
             session = await sync_to_async(self.sessions.get_by_id)(session_id)
             if session is None or getattr(session, "harness_id", "native") != "native":
                 return
-            from .providers.resolver import StaticModelResolver
-            from .services import ProviderConfigService
-
-            config_service = ProviderConfigService()
-            config = None
-            try:
-                config = await sync_to_async(config_service.get_config)(organization_id)
-            except NotFoundError:
-                config = None
-            small_model = ((config.small_model if config else "") or "").strip()
-            if not small_model:
+            small = await self._small_model_runner(organization_id)
+            if small is None:
                 return
-            small_effort = normalize_reasoning_effort(
-                (config.small_effort if config else "") or ""
-            )
-            if self._provider_factory is not None:
-                model_resolver = StaticModelResolver(
-                    self._provider_factory(organization_id)
-                ).resolve
-            else:
-                resolver = await sync_to_async(config_service.build_resolver)(
-                    organization_id
-                )
-                model_resolver = resolver.resolve
-            runner = HarnessRunner(
-                model_resolver=model_resolver,
-                tools=default_tool_registry(),
-                chat_options=(
-                    ChatOptions(reasoning_effort=small_effort) if small_effort else None
-                ),
-            )
+            runner, small_model = small
             result = await runner.run(
                 prompt,
                 "title",
@@ -4335,6 +4365,88 @@ class HarnessService:
                 await self._emit_conversations_changed(session.workspace_id)
         except Exception:  # pragma: no cover - title must never break runs
             log.warning("harness_title_generation_failed", session_id=str(session_id))
+
+    def _summary_material(
+        self, session_id: uuid.UUID, assistant_id: uuid.UUID
+    ) -> str:
+        """Collect what the summary agent needs; "" when there is nothing to say."""
+        message = self.messages.get_by_id(assistant_id)
+        if message is None or message.session_id != session_id:
+            return ""
+        answer = (message.content or "").strip()
+        error = (message.error or "").strip()
+        if not answer and not error:
+            return ""
+        session = self.sessions.get_by_id(session_id)
+        request = self.messages.user_content_before(session_id, message.position)
+        open_todos = [
+            todo.content
+            for todo in TodoRepository.list_for_session(session_id)
+            if todo.status in ("pending", "in_progress")
+        ]
+        sections = [
+            f"Conversation: {(session.title if session else '') or '-'}",
+            f"User request:\n{_clip_head(request, 1500)}",
+            f"Agent's last answer:\n{_clip_tail(answer, 3000) or '-'}",
+        ]
+        if open_todos:
+            sections.append(
+                "Open todos:\n" + "\n".join(f"- {todo}" for todo in open_todos[:8])
+            )
+        if message.finish == "aborted":
+            sections.append("The user stopped the run before it was done.")
+        elif message.finish == "error" or error:
+            sections.append(f"The run failed: {_clip_head(error, 300) or 'unknown'}")
+        return "\n\n".join(sections)
+
+    async def _generate_summary(
+        self,
+        *,
+        session_id: uuid.UUID,
+        assistant_id: uuid.UUID,
+        workspace_id: uuid.UUID,
+        organization_id: uuid.UUID,
+    ) -> None:
+        """Store the one-sentence "state + next step" of a settled run.
+
+        Runs for every engine (the small model comes from the org's provider
+        config, not from the session's engine) and never raises.
+        """
+        try:
+            small = await self._small_model_runner(organization_id)
+            if small is None:
+                return
+            runner, small_model = small
+            material = await sync_to_async(self._summary_material)(
+                session_id, assistant_id
+            )
+            if not material:
+                return
+            result = await runner.run(
+                material,
+                "summary",
+                small_model,
+                "build",
+                RunOptions(auto_approve=True),
+            )
+            summary = _normalize_generated_summary(result.output or "")
+            if not summary:
+                return
+            stored = await sync_to_async(self.sessions.set_summary_for_turn)(
+                session_id, assistant_id, summary
+            )
+            if stored:
+                await self._emit_frontend(
+                    FRONTEND_EVENT_SUMMARY,
+                    {
+                        "workspace_id": str(workspace_id),
+                        "session_id": str(session_id),
+                        "summary": summary,
+                    },
+                    str(workspace_id),
+                )
+        except Exception:  # pragma: no cover - summary must never break runs
+            log.warning("harness_summary_generation_failed", session_id=str(session_id))
 
     @staticmethod
     def _resolve_agent_s_run_config(organization_id: uuid.UUID, model: str):  # type: ignore[no-untyped-def]
@@ -4817,6 +4929,28 @@ def _normalize_generated_title(text: str) -> str:
     if len(words) > 8:
         title = " ".join(words[:8])
     return title[:255]
+
+
+def _normalize_generated_summary(text: str) -> str:
+    """Reduce model output to one plain line of at most 100 chars."""
+    lines = [line for line in (text or "").splitlines() if line.strip()]
+    summary = " ".join(lines[0].split()) if lines else ""
+    summary = summary.replace("*", "").replace("`", "").strip("\"'“”„ ")
+    if len(summary) > 100:
+        summary = summary[:100].rsplit(" ", 1)[0].rstrip(",;:- ") + "…"
+    return summary
+
+
+def _clip_head(text: str, limit: int) -> str:
+    """Keep the first *limit* chars of *text*."""
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit].rstrip() + " …"
+
+
+def _clip_tail(text: str, limit: int) -> str:
+    """Keep the last *limit* chars of *text* (the end of an answer matters most)."""
+    text = (text or "").strip()
+    return text if len(text) <= limit else "… " + text[-limit:].lstrip()
 
 
 def _title_from_prompt(prompt: str) -> str:

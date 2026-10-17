@@ -19,10 +19,11 @@ Permission design (OpenCode-like defaults):
   ``mcp_*`` tools are denied. Bash is subject to a strict read-only command
   allowlist at the Claude hook boundary; web research remains available.
   ``question`` is ``deny``.
-- ``title`` / ``compaction`` (hidden): ``{"*": "deny"}`` so the loop
-  offers no tools at all and answers text-only. ``title`` uses the
-  ``"small"`` sentinel resolved to ``ProviderConfig.small_model`` at
-  runtime; ``compaction`` uses the session model (see ``runner``).
+- ``title`` / ``summary`` / ``compaction`` (hidden): ``{"*": "deny"}`` so
+  the loop offers no tools at all and answers text-only. ``title`` and
+  ``summary`` use the ``"small"`` sentinel resolved to
+  ``ProviderConfig.small_model`` at runtime; ``compaction`` uses the
+  session model (see ``runner``).
 - ``computeruse`` (subagent): ``{"*": "allow"}`` plus ``question: deny``
   (same rationale as ``general``; ``ask_user`` still pauses via its
   own desktop flow, not the ``question`` tool).
@@ -198,6 +199,24 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
         system_prompt=(
             "Generate a short title (at most 8 words) for the conversation. "
             "Reply with the title only, no tools, no extra text."
+        ),
+        permissions={"*": "deny", **QUESTION_DENY},
+        model_override=SMALL_MODEL,
+        color="gray",
+    ),
+    "summary": AgentDefinition(
+        name="summary",
+        mode="hidden",
+        description="Hidden: one-sentence session status (small model).",
+        system_prompt=(
+            "You write the status line of a coding conversation for a busy "
+            "user who is keeping an eye on several agents at once. Reply with "
+            "exactly one plain sentence of at most 10 words: where things "
+            "stand now and the next step, either what the user should do or "
+            "what is still open. Use simple everyday words and name the "
+            "concrete thing, not the process. Write in the language the user "
+            "wrote in. No markdown, no quotes, no lists, no file paths, no "
+            "preamble, no tools."
         ),
         permissions={"*": "deny", **QUESTION_DENY},
         model_override=SMALL_MODEL,

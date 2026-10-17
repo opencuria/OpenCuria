@@ -22,6 +22,7 @@ def test_all_agents_defined() -> None:
         "explore",
         "computeruse",
         "title",
+        "summary",
         "compaction",
     }
     assert get_agent("build").mode == "primary"
@@ -36,6 +37,7 @@ def test_all_agents_defined() -> None:
         "question": "deny",
     }
     assert get_agent("title").mode == "hidden"
+    assert get_agent("summary").mode == "hidden"
     assert get_agent("compaction").mode == "hidden"
 
 

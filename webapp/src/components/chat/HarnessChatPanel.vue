@@ -424,6 +424,14 @@ function setupSocketListeners(): void {
   )
 
   cleanupFns.push(
+    onEvent('harness.session_summary', (data) => {
+      if (data.workspace_id === props.workspaceId) {
+        harness.handleSessionSummary(data.session_id, data.summary)
+      }
+    }),
+  )
+
+  cleanupFns.push(
     onEvent('harness.permission_required', (data) => {
       if (data.workspace_id === props.workspaceId) {
         if (!data.request_id) return
@@ -711,6 +719,7 @@ async function handleForkMessage(messageId: string): Promise<void> {
       :streaming-message-id="streamingMessageId"
       :streaming-session-id="streamingSessionId"
       :child-session-ids="childSessionIds"
+      :summary="activeSession?.status === 'idle' ? activeSession.summary : ''"
       :disabled="messageActionsDisabled"
       class="min-h-0 flex-1"
       :class="entering ? 'chat-content-enter' : ''"

@@ -14,6 +14,8 @@ const props = defineProps<{
   /** @deprecated Prefer `streamingMessageId`; kept for compat. */
   streamingSessionId?: string | null
   childSessionIds?: Record<string, string>
+  /** State + next step of the finished run; shown under the last answer. */
+  summary?: string
   disabled?: boolean
 }>()
 
@@ -142,6 +144,12 @@ const lastMessageLength = computed(() => {
   const last = sortedMessages.value[sortedMessages.value.length - 1]
   if (!last) return 0
   return last.content.length + last.parts.reduce((total, part) => total + part.output.length, 0)
+})
+
+/** The summary belongs to the final answer of the session, nowhere else. */
+const lastMessageId = computed(() => {
+  const last = sortedMessages.value[sortedMessages.value.length - 1]
+  return last?.role === 'assistant' ? last.id : null
 })
 
 const resolvedStreamingId = computed(() => {
@@ -376,6 +384,13 @@ watch(lastMessageLength, () => {
   void scrollToBottom()
 })
 watch(
+  () => props.summary,
+  (summary) => {
+    // The sentence arrives after the answer; keep it in view when following the tail.
+    if (summary && stickToBottom.value) void scrollToBottom()
+  },
+)
+watch(
   () => props.messages[0]?.session_id ?? null,
   () => {
     stickToBottom.value = true
@@ -432,6 +447,7 @@ watch(
           :message="entry.message"
           :streaming="entry.message.id === resolvedStreamingId"
           :child-session-ids="childSessionIds"
+          :summary="entry.message.id === lastMessageId ? summary : ''"
           :disabled="disabled"
           @open-subtask="emit('openSubtask', $event)"
           @edit="(messageId, text) => emit('edit', messageId, text)"
