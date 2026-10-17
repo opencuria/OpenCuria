@@ -81,6 +81,7 @@ class RunOwnership:
         session_usage: dict | None = None,
         session_cost: float = 0.0,
         tail_remainder: str = "",
+        engine_state_updates: dict | None = None,
     ) -> bool:
         """Atomically commit this attempt and its assistant/session state."""
         from .repositories import HarnessEngineRepository
@@ -99,6 +100,7 @@ class RunOwnership:
             session_usage=session_usage,
             session_cost=session_cost,
             tail_remainder=tail_remainder,
+            engine_state_updates=engine_state_updates,
         )
 
     async def touch(self) -> bool:

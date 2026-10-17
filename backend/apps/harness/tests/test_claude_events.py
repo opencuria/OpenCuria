@@ -646,6 +646,111 @@ async def test_stream_usage_and_max_turns_result_are_attributed_once() -> None:
         ClaudeEventNormalizer.message_types = original
 
 
+def test_result_usage_ignores_resumed_cumulative_model_usage() -> None:
+    # After ``--resume`` the CLI restores ``modelUsage`` for the whole
+    # conversation while ``usage`` still covers only the current run.
+    result = {
+        "usage": {
+            "input_tokens": 10,
+            "cache_read_input_tokens": 1000,
+            "cache_creation_input_tokens": 5,
+            "output_tokens": 5,
+        },
+        "modelUsage": {
+            "claude-sonnet-4-5": {
+                "inputTokens": 30,
+                "cacheReadInputTokens": 3000,
+                "cacheCreationInputTokens": 15,
+                "outputTokens": 15,
+            }
+        },
+        "total_cost_usd": 0.5,
+    }
+    assert ClaudeEventNormalizer.result_usage(result) == Usage(
+        prompt_tokens=1015, completion_tokens=5, total_tokens=1020, cost=0.5
+    )
+
+
+def test_result_usage_falls_back_to_model_usage_without_run_usage() -> None:
+    result = {
+        "usage": {},
+        "modelUsage": {
+            "a": {"inputTokens": 3, "cacheReadInputTokens": 4, "outputTokens": 2},
+            "b": {"inputTokens": 1, "cacheCreationInputTokens": 1, "outputTokens": 1},
+        },
+    }
+    assert ClaudeEventNormalizer.result_usage(result) == Usage(
+        prompt_tokens=9, completion_tokens=3, total_tokens=12
+    )
+
+
+def _cost_engine(state: dict[str, Any] | None, external_id: str = "ext-1"):
+    return ClaudeEngine(
+        tools=ToolRegistry(),
+        accessor=FakeAccessor(),
+        external_session_id=external_id,
+        engine_state=state,
+    )
+
+
+@pytest.mark.parametrize(
+    ("baseline", "total", "expected"),
+    [
+        (1.0, 1.5, 0.5),  # resumed: CLI total includes earlier turns
+        (1.0, 1.0, 0.0),  # resumed run that cost nothing
+        (0.0, 0.4, 0.4),  # first turn
+        (5.0, 0.3, 0.3),  # CLI state lost: total restarted below the baseline
+    ],
+)
+def test_per_run_usage_subtracts_restored_cli_cost(
+    baseline: float, total: float, expected: float
+) -> None:
+    engine = _cost_engine({"cli_total_cost_usd": baseline} if baseline else {})
+    usage = Usage(prompt_tokens=7, completion_tokens=3, total_tokens=10, cost=total)
+    result = engine._per_run_usage(usage)
+    assert result.cost == pytest.approx(expected)
+    assert (result.prompt_tokens, result.completion_tokens) == (7, 3)
+
+
+@pytest.mark.parametrize(
+    "stored", ["2.0", None, True, -1.0, float("nan"), float("inf"), [1.0]]
+)
+def test_cost_baseline_ignores_malformed_state(stored: Any) -> None:
+    engine = _cost_engine({"cli_total_cost_usd": stored})
+    assert engine._cost_baseline == 0.0
+
+
+def test_cost_baseline_requires_a_bound_external_session() -> None:
+    engine = _cost_engine({"cli_total_cost_usd": 3.0}, external_id="")
+    assert engine._cost_baseline == 0.0
+
+
+@pytest.mark.asyncio
+async def test_binding_carries_cost_baseline_into_replaced_engine_state() -> None:
+    bound: list[dict[str, Any]] = []
+
+    async def on_binding(_external_id: str, state: dict[str, Any]) -> None:
+        bound.append(state)
+
+    session_id = "11111111-2222-4333-8444-555555555555"
+    engine = ClaudeEngine(
+        tools=ToolRegistry(),
+        accessor=FakeAccessor(),
+        external_session_id=session_id,
+        engine_state={"cli_total_cost_usd": 2.5},
+        on_binding=on_binding,
+    )
+    await engine._bind_external_session(session_id)
+    assert bound[0]["cli_total_cost_usd"] == 2.5
+
+    bound.clear()
+    fresh = ClaudeEngine(
+        tools=ToolRegistry(), accessor=FakeAccessor(), on_binding=on_binding
+    )
+    await fresh._bind_external_session(session_id)
+    assert "cli_total_cost_usd" not in bound[0]
+
+
 @pytest.mark.asyncio
 async def test_stream_block_order_tracks_reasoning_text_and_tool_indices(
     engine_events,

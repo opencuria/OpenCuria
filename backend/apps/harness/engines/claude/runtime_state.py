@@ -19,6 +19,8 @@ AUTH_ENV_KEYS = frozenset({"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"})
 MAX_SKILL_COUNT = 128
 MAX_SKILL_BODY_BYTES = 64 * 1024
 MAX_MANAGED_FILE_BYTES = 10 * 1024 * 1024
+# ``engine_state`` key holding the CLI's cumulative cost after the last turn.
+CLI_TOTAL_COST_KEY = "cli_total_cost_usd"
 
 # Keep content off argv, environment variables, and runner logs. Paths and this
 # constant script are the only command arguments; file bytes travel on stdin.
@@ -462,6 +464,7 @@ class ClaudeRuntimeState:
 
 __all__ = [
     "AUTH_ENV_KEYS",
+    "CLI_TOTAL_COST_KEY",
     "MAX_SKILL_BODY_BYTES",
     "MAX_SKILL_COUNT",
     "MANAGED_STATE_PREFIX",

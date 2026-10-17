@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +21,19 @@ if TYPE_CHECKING:
     from ..models import HarnessMessage, HarnessSession
 
 log = structlog.get_logger("apps.harness.harness_service")
+
+
+def _cli_total_cost_update(result: Any) -> dict[str, float] | None:
+    """Return the cumulative CLI cost to persist as the next run's baseline."""
+    from .claude.runtime_state import CLI_TOTAL_COST_KEY
+
+    metadata = getattr(result, "metadata", None)
+    value = metadata.get(CLI_TOTAL_COST_KEY) if isinstance(metadata, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return {CLI_TOTAL_COST_KEY: float(value)}
 
 
 def _safe_transcript_recovery_message(error: object) -> str:
@@ -192,6 +206,7 @@ async def execute_external_run(
             emit=emit,
             auth_env=auth.secret_env,
             external_session_id=session.external_session_id or "",
+            engine_state=dict(session.engine_state or {}),
             session_store=session_store,
             on_binding=on_binding,
             on_child_event=on_child_event,
@@ -365,6 +380,12 @@ async def execute_external_run(
                             if result is not None
                             and status == HarnessRunStatus.COMPLETED
                             else 0.0
+                        ),
+                        engine_state_updates=(
+                            _cli_total_cost_update(result)
+                            if result is not None
+                            and status == HarnessRunStatus.COMPLETED
+                            else None
                         ),
                         tail_remainder=(
                             remainder

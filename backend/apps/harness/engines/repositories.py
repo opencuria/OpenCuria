@@ -210,6 +210,7 @@ class HarnessEngineRepository:
         session_usage: dict[str, int] | None = None,
         session_cost: float = 0.0,
         tail_remainder: str = "",
+        engine_state_updates: dict[str, Any] | None = None,
         now=None,
     ) -> bool:
         """Atomically finish an owned attempt, assistant turn and busy session."""
@@ -283,6 +284,11 @@ class HarnessEngineRepository:
                 session_updates["cost"] = float(session.cost or 0.0) + float(
                     session_cost or 0.0
                 )
+            if engine_state_updates:
+                session_updates["engine_state"] = {
+                    **dict(attempt.session.engine_state or {}),
+                    **engine_state_updates,
+                }
             HarnessSession.objects.filter(id=attempt.session_id).update(
                 **session_updates
             )
