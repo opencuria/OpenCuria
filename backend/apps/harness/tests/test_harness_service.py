@@ -904,7 +904,7 @@ async def test_failed_run_persists_error_without_task_exception(
 
 @pytest.mark.django_db(transaction=True)
 async def test_execute_run_loads_org_provider_without_sync_orm(
-    harness_workspace, monkeypatch
+    harness_workspace, provider_account_factory, monkeypatch
 ) -> None:
     """Production path (no provider_factory) must not hit ORM from asyncio."""
     from apps.harness.providers.models_catalog import ProviderModel
@@ -912,10 +912,9 @@ async def test_execute_run_loads_org_provider_without_sync_orm(
     from apps.harness.services import ProviderConfigService
 
     org_id = harness_workspace.runner.organization_id
+    provider_account_factory("openrouter")
     ProviderConfigService().save_config(
         organization_id=org_id,
-        api_key="sk-test",
-        base_url="https://example.com/v1",
         default_model="org-default-model",
         small_model="",
     )
@@ -982,7 +981,7 @@ async def test_execute_run_loads_org_provider_without_sync_orm(
 
 @pytest.mark.django_db(transaction=True)
 async def test_execute_run_passes_catalog_limits_and_last_step_tokens(
-    harness_workspace, monkeypatch
+    harness_workspace, provider_account_factory, monkeypatch
 ) -> None:
     """_execute_run always resolves model limits and prior step tokens."""
     from apps.harness.providers.models_catalog import ProviderModel
@@ -991,10 +990,9 @@ async def test_execute_run_passes_catalog_limits_and_last_step_tokens(
     from apps.harness.services import ProviderConfigService
 
     org_id = harness_workspace.runner.organization_id
+    provider_account_factory("openrouter")
     ProviderConfigService().save_config(
         organization_id=org_id,
-        api_key="sk-test",
-        base_url="https://example.com/v1",
         default_model="org-default-model",
         small_model="",
     )
@@ -1206,7 +1204,7 @@ async def test_execute_run_with_skills_without_sync_orm(
 
 @pytest.mark.django_db(transaction=True)
 async def test_generate_title_loads_org_provider_without_sync_orm(
-    harness_workspace, monkeypatch
+    harness_workspace, provider_account_factory, monkeypatch
 ) -> None:
     """Title agent without provider_factory must not hit ORM from asyncio."""
     from apps.harness.harness_service import _title_from_prompt
@@ -1214,11 +1212,10 @@ async def test_generate_title_loads_org_provider_without_sync_orm(
     from apps.harness.services import ProviderConfigService
 
     org_id = harness_workspace.runner.organization_id
+    provider_account_factory("openrouter")
     prompt = "Please help me build a feature"
     ProviderConfigService().save_config(
         organization_id=org_id,
-        api_key="sk-test",
-        base_url="https://example.com/v1",
         default_model="big-model",
         small_model="small-model",
     )
@@ -1937,7 +1934,7 @@ async def test_start_run_snapshots_reasoning_effort_on_assistant(
 
 @pytest.mark.django_db(transaction=True)
 async def test_start_run_snapshots_org_default_when_session_model_empty(
-    harness_workspace, monkeypatch
+    harness_workspace, provider_account_factory, monkeypatch
 ) -> None:
     """Auto (empty session.model) snapshots org default onto the assistant."""
     from apps.harness.providers.models_catalog import ProviderModel
@@ -1945,10 +1942,9 @@ async def test_start_run_snapshots_org_default_when_session_model_empty(
     from apps.harness.services import ProviderConfigService
 
     org_id = harness_workspace.runner.organization_id
+    provider_account_factory("openrouter")
     ProviderConfigService().save_config(
         organization_id=org_id,
-        api_key="sk-test",
-        base_url="https://example.com/v1",
         default_model="org-default-model",
         small_model="",
     )
@@ -2019,7 +2015,7 @@ async def test_start_run_snapshots_org_default_when_session_model_empty(
 
 @pytest.mark.django_db(transaction=True)
 async def test_start_run_applies_config_default_effort_to_snapshot(
-    harness_workspace, monkeypatch
+    harness_workspace, provider_account_factory, monkeypatch
 ) -> None:
     """Leerer Session-Effort (Altsession) snapshottet den Org-Default."""
     from apps.harness.providers.models_catalog import ProviderModel
@@ -2027,10 +2023,9 @@ async def test_start_run_applies_config_default_effort_to_snapshot(
     from apps.harness.services import ProviderConfigService
 
     org_id = harness_workspace.runner.organization_id
+    provider_account_factory("openrouter")
     ProviderConfigService().save_config(
         organization_id=org_id,
-        api_key="sk-test",
-        base_url="https://example.com/v1",
         default_model="org-default-model",
         default_effort="high",
         small_model="",

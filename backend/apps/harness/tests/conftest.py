@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import pytest
@@ -19,6 +19,7 @@ from apps.harness.access.base import (
     WorkspaceAccessor,
 )
 from apps.harness.access.runner_accessor import RunnerAccessorError
+from apps.harness.models import ProviderConnection
 from apps.organizations.models import Organization
 
 # Allow sync ORM calls from async test functions (Django safety check).
@@ -75,6 +76,38 @@ def organization(db) -> Organization:
         name=f"Harness Org {uuid.uuid4().hex[:6]}",
         slug=f"harness-org-{uuid.uuid4().hex[:10]}",
     )
+
+
+@pytest.fixture
+def provider_account_factory(
+    organization: Organization,
+) -> Callable[..., ProviderConnection]:
+    """Create shared provider accounts through the current admin-owned API."""
+    from django.contrib.auth import get_user_model
+
+    from apps.harness.provider_accounts import ProviderAccountService
+    from apps.organizations.models import Membership, MembershipRole
+
+    admin = get_user_model().objects.create_user(
+        email=f"provider-admin-{uuid.uuid4().hex[:8]}@example.com", password="secret"
+    )
+    Membership.objects.create(
+        user=admin, organization=organization, role=MembershipRole.ADMIN
+    )
+    service = ProviderAccountService()
+
+    def create(
+        provider: str = "openrouter", **payload: Any
+    ) -> ProviderConnection:
+        defaults = {"api_key": "sk-test"} if provider == "openrouter" else {}
+        return service.save_account(
+            organization_id=organization.id,
+            user=admin,
+            provider=provider,
+            payload={**defaults, **payload, "shared": True},
+        )
+
+    return create
 
 
 class FakeAccessor(WorkspaceAccessor):

@@ -13,7 +13,6 @@ from apps.harness.providers.models_catalog import (
     clear_models_cache,
     list_merged_provider_models,
 )
-from apps.harness.services import ProviderConfigService
 
 
 def test_parse_model_ref_namespaced_and_legacy() -> None:
@@ -107,16 +106,16 @@ def test_bedrock_models_region_prefixing() -> None:
 
 
 @pytest.mark.django_db
-def test_list_merged_provider_models_only_connected(organization) -> None:
-    """Merged catalog includes only providers with stored connections."""
+def test_list_merged_provider_models_only_connected(
+    organization, provider_account_factory
+) -> None:
+    """Merged catalog includes only providers with stored accounts."""
     clear_models_cache()
-    service = ProviderConfigService()
-    service.save_config(organization_id=organization.id, default_model="m")
-    service.save_connection(
-        organization_id=organization.id,
-        provider="chatgpt",
-        credentials={"access": "a", "refresh": "r", "expires": 1},
-        config={},
+    provider_account_factory(
+        "chatgpt",
+        access="a",
+        refresh="r",
+        expires=1,
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -139,21 +138,17 @@ def test_list_merged_provider_models_only_connected(organization) -> None:
 
 @pytest.mark.django_db
 def test_list_merged_provider_models_openrouter_and_bedrock(
-    organization,
+    organization, provider_account_factory
 ) -> None:
     """OpenRouter live fetch and Bedrock static catalogs merge together."""
     clear_models_cache()
-    service = ProviderConfigService()
-    service.save_config(
-        organization_id=organization.id,
-        api_key="sk-live",
-        default_model="openrouter/acme/fast",
-    )
-    service.save_connection(
-        organization_id=organization.id,
-        provider="amazon-bedrock",
-        credentials={"access_key_id": "a", "secret_access_key": "b"},
-        config={"region": "us-west-2"},
+    provider_account_factory("openrouter", api_key="sk-live")
+    provider_account_factory(
+        "amazon-bedrock",
+        access_key_id="a",
+        secret_access_key="b",
+        region="us-west-2",
+        auth_method="access_keys",
     )
 
     def handler(request: httpx.Request) -> httpx.Response:

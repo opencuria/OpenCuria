@@ -259,13 +259,6 @@ class ProviderConnectionRepository:
             )
         return rows
 
-    @staticmethod
-    def delete_by_org_and_provider(organization_id: uuid.UUID, provider: str) -> bool:
-        """Compatibility deletion with the same revocation fence as account CRUD."""
-        from .provider_accounts import ProviderAccountService
-
-        return ProviderAccountService().delete_legacy_account(organization_id, provider)
-
 
 class RecentModelRepository:
     """Data access for per-user recent composer models (LRU, org-scoped)."""

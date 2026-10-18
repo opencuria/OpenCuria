@@ -242,7 +242,7 @@ async def test_runner_computeruse_default_max_steps_without_persisted(
 
 @pytest.mark.django_db(transaction=True)
 def test_validate_provider_for_run_grounding_connected_and_missing(
-    harness_workspace,
+    harness_workspace, provider_account_factory
 ) -> None:
     """Explicit grounding models need a connection; empty falls back to main."""
     from apps.harness.harness_service import HarnessService
@@ -254,11 +254,10 @@ def test_validate_provider_for_run_grounding_connected_and_missing(
         organization_id=org_id,
         default_model="openrouter/acme/main",
     )
-    ProviderConfigService().save_connection(
-        organization_id=org_id,
-        provider="openrouter",
-        credentials={"api_key": "sk-main"},
-        config={"base_url": "https://openrouter.ai/api/v1"},
+    provider_account_factory(
+        "openrouter",
+        api_key="sk-main",
+        base_url="https://openrouter.ai/api/v1",
     )
     service = HarnessService()
     session = HarnessSessionRepository.create(
@@ -278,14 +277,11 @@ def test_validate_provider_for_run_grounding_connected_and_missing(
     with pytest.raises(ValueError, match="openai-compatible"):
         service.validate_provider_for_run(org_id, session)
 
-    ProviderConfigService().save_connection(
-        organization_id=org_id,
-        provider="openai-compatible",
-        credentials={"api_key": ""},
-        config={
-            "base_url": "https://grounding.example/v1",
-            "models": ["uitars"],
-        },
+    provider_account_factory(
+        "openai-compatible",
+        api_key="",
+        base_url="https://grounding.example/v1",
+        models=["uitars"],
     )
     assert service.validate_provider_for_run(org_id, session) == "openrouter/acme/main"
 

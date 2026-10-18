@@ -66,8 +66,6 @@ def _service(provider: ProviderAdapter, emit=_drop_emit) -> HarnessService:
 def _configure_small_model(workspace) -> None:
     ProviderConfigService().save_config(
         organization_id=workspace.runner.organization_id,
-        api_key="test-key",
-        base_url="https://example.com",
         default_model="big-model",
         small_model="small-model",
     )
@@ -438,8 +436,6 @@ async def test_run_writes_summary_and_next_run_clears_it(harness_workspace) -> N
     # No small model for the next run: the old sentence must not linger.
     ProviderConfigService().save_config(
         organization_id=org_id,
-        api_key="test-key",
-        base_url="https://example.com",
         default_model="big-model",
         small_model="",
     )

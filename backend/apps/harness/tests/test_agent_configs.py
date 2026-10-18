@@ -68,8 +68,9 @@ async def test_run_subagent_inherit_uses_parent_model(harness_workspace, monkeyp
 
     org_id = harness_workspace.runner.organization_id
     ProviderConfigService().save_config(
-        organization_id=org_id, api_key="k", base_url="https://example.com",
-        default_model="big-model", small_model="small-model",
+        organization_id=org_id,
+        default_model="big-model",
+        small_model="small-model",
     )
     AgentConfigService().save_configs(org_id, [
         {"agent": "build", "model": "big-model", "effort": "high",

@@ -107,31 +107,6 @@ class ProviderAccountRepository:
         return account
 
     @staticmethod
-    def list_for_legacy_org_provider(
-        organization_id: uuid.UUID, provider: str
-    ) -> list[ProviderConnection]:
-        """Return live org-shared accounts for legacy provider helpers."""
-        return list(
-            ProviderConnection.objects.filter(
-                organization_id=organization_id,
-                user__isnull=True,
-                provider=provider,
-                deleted_at__isnull=True,
-            ).select_related("credential", "credential__service")
-        )
-
-    @staticmethod
-    def list_for_legacy_org(organization_id: uuid.UUID) -> list[ProviderConnection]:
-        """Return live org-shared accounts for legacy provider helpers."""
-        return list(
-            ProviderConnection.objects.filter(
-                organization_id=organization_id,
-                user__isnull=True,
-                deleted_at__isnull=True,
-            ).select_related("credential", "credential__service")
-        )
-
-    @staticmethod
     def clear_selections(account_id: uuid.UUID) -> None:
         """Explicitly revoke current selections without deleting their rows."""
         ProviderSelection.objects.filter(account_id=account_id).update(

@@ -12,6 +12,7 @@ from django.test import Client
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessMessage, HarnessSession
+from apps.harness.provider_accounts import ProviderAccountService
 from apps.harness.providers.base import Delta, ProviderAdapter, Usage
 from apps.harness.services import ProviderConfigService
 from apps.organizations.models import Membership, MembershipRole, Organization
@@ -75,11 +76,11 @@ def scheduled_run_setup(db):
         default_model="openrouter/openai/gpt-default",
         default_effort="medium",
     )
-    provider_config.save_connection(
+    ProviderAccountService().save_account(
+        user=owner,
         organization_id=org.id,
         provider="openrouter",
-        credentials={"api_key": "sk-test"},
-        config={"base_url": "https://example.com/v1"},
+        payload={"api_key": "sk-test", "base_url": "https://example.com/v1"},
     )
     return org, owner, outsider, workspace, task
 
@@ -161,12 +162,6 @@ def test_rest_run_now_default_model_and_effort_and_unauthorized_actions(
         organization_id=org.id,
         default_model="openrouter/openai/gpt-default",
         default_effort="medium",
-    )
-    provider_config.save_connection(
-        organization_id=org.id,
-        provider="openrouter",
-        credentials={"api_key": "sk-test"},
-        config={"base_url": "https://example.com/v1"},
     )
     from apps.harness.models import AgentConfig
 

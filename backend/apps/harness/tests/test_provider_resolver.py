@@ -6,52 +6,55 @@ import asyncio
 
 import pytest
 
+from apps.harness.provider_accounts import ProviderAccountService
 from apps.harness.providers.bedrock import BedrockAdapter
 from apps.harness.providers.chatgpt import ChatGPTAdapter
 from apps.harness.providers.openrouter import OpenRouterAdapter
-from apps.harness.providers.resolver import ProviderResolver, StaticModelResolver
+from apps.harness.providers.resolver import StaticModelResolver
 from apps.harness.runner import HarnessRunner, RunOptions
 from apps.harness.services import ProviderConfigService
 from apps.harness.tests.test_runner_loop import FakeProvider, _text_step
 
 
 @pytest.mark.django_db
-def test_provider_resolver_openrouter_adapter(organization) -> None:
-    """OpenRouter connections build OpenRouterAdapter with stored secrets."""
-    service = ProviderConfigService()
-    service.save_config(
-        organization_id=organization.id,
-        api_key="sk-live",
+def test_provider_resolver_openrouter_adapter(
+    organization, provider_account_factory
+) -> None:
+    """OpenRouter accounts build OpenRouterAdapter with stored secrets."""
+    provider_account_factory(
+        "openrouter",
         base_url="https://example.com/v1",
-        default_model="openai/gpt-5",
     )
+    service = ProviderConfigService()
     resolver = service.build_resolver(organization.id)
     resolved = resolver.resolve("openai/gpt-5")
     assert isinstance(resolved.adapter, OpenRouterAdapter)
     assert resolved.model_id == "openai/gpt-5"
     assert resolved.provider == "openrouter"
+    assert resolved.adapter._base_url == "https://example.com/v1"
 
 
 @pytest.mark.django_db
 def test_provider_resolver_missing_connection_raises(organization) -> None:
     """Missing provider connections raise a clear ValueError."""
     service = ProviderConfigService()
-    service.save_config(organization_id=organization.id, default_model="m")
     resolver = service.build_resolver(organization.id)
     with pytest.raises(ValueError, match="Provider 'chatgpt' is not connected"):
         resolver.resolve("chatgpt/gpt-5.5")
 
 
 @pytest.mark.django_db
-def test_provider_resolver_bedrock_region_model_id(organization) -> None:
+def test_provider_resolver_bedrock_region_model_id(
+    organization, provider_account_factory
+) -> None:
     """Bedrock resolves bare catalog ids with the stored region."""
     service = ProviderConfigService()
-    service.save_config(organization_id=organization.id, default_model="m")
-    service.save_connection(
-        organization_id=organization.id,
-        provider="amazon-bedrock",
-        credentials={"access_key_id": "a", "secret_access_key": "b"},
-        config={"region": "us-east-1"},
+    provider_account_factory(
+        "amazon-bedrock",
+        access_key_id="a",
+        secret_access_key="b",
+        region="us-east-1",
+        auth_method="access_keys",
     )
     resolver = service.build_resolver(organization.id)
     resolved = resolver.resolve(
@@ -63,26 +66,21 @@ def test_provider_resolver_bedrock_region_model_id(organization) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-def test_provider_resolver_chatgpt_token_refresh_persists(organization) -> None:
+def test_provider_resolver_chatgpt_token_refresh_persists(
+    organization, provider_account_factory
+) -> None:
     """ChatGPT on_tokens_refreshed re-encrypts and stores updated credentials."""
     service = ProviderConfigService()
-    service.save_config(organization_id=organization.id, default_model="m")
-    service.save_connection(
-        organization_id=organization.id,
-        provider="chatgpt",
-        credentials={
-            "access": "old",
-            "refresh": "refresh-token",
-            "expires": 1,
-            "account_id": "acct",
-        },
-        config={},
+    account = provider_account_factory(
+        "chatgpt",
+        access="old",
+        refresh="refresh-token",
+        expires=1,
+        account_id="acct",
     )
     resolver = service.build_resolver(organization.id)
     resolved = resolver.resolve("chatgpt/gpt-5.5")
     assert isinstance(resolved.adapter, ChatGPTAdapter)
-    connection = service.get_connection(organization.id, "chatgpt")
-    assert connection is not None
 
     refreshed = {
         "access": "new-access",
@@ -91,9 +89,8 @@ def test_provider_resolver_chatgpt_token_refresh_persists(organization) -> None:
         "account_id": "acct",
     }
     asyncio.run(resolver._chatgpt_tokens_refreshed(refreshed))
-    connection.refresh_from_db()
-    assert connection is not None
-    stored = ProviderConfigService.get_connection_credentials(connection)
+    account.refresh_from_db()
+    stored = ProviderAccountService().get_credentials(account)
     assert stored["access"] == "new-access"
     assert stored["expires"] == 999
 

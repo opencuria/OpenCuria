@@ -1,7 +1,7 @@
 """
 Service layer for the harness provider configuration.
 
-Handles org-wide default models, per-provider connections, and builds
+Handles org-wide default models and resolves account-bound
 provider adapters via :class:`~apps.harness.providers.resolver.ProviderResolver`.
 """
 
@@ -13,13 +13,12 @@ from typing import Any
 import structlog
 
 from apps.organizations.repositories import OrganizationRepository
-from common.exceptions import ConflictError, NotFoundError
+from common.exceptions import NotFoundError
 
 from .agent_s.config import AgentSRunConfig
 from .agents.definitions import AGENT_DEFINITIONS
 from .constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
-from .models import AgentSConfig, ProviderConfig, ProviderConnection
-from .providers.base import ProviderAdapter
+from .models import AgentSConfig, ProviderConfig
 from .providers.bedrock import BedrockAdapter
 from .providers.chatgpt import ChatGPTAdapter
 from .providers.model_ref import parse_model_ref
@@ -30,7 +29,7 @@ from .providers.models_catalog import (
     normalize_reasoning_effort,
 )
 from .providers.openai_compatible import OpenAICompatibleAdapter
-from .providers.openrouter import DEFAULT_BASE_URL, OpenRouterAdapter
+from .providers.openrouter import OpenRouterAdapter
 from .providers.registry import ProviderRegistry, default_registry
 from .providers.resolver import ProviderResolver
 from .repositories import (
@@ -394,8 +393,6 @@ class ProviderConfigService:
         self,
         *,
         organization_id: uuid.UUID,
-        api_key: str = "",
-        base_url: str = DEFAULT_BASE_URL,
         default_model: str = "",
         small_model: str = "",
         computer_use_model: str = "",
@@ -403,14 +400,8 @@ class ProviderConfigService:
         small_effort: str = "",
         computer_use_effort: str = "",
     ) -> ProviderConfig:
-        """Create or update org-wide default models and reasoning efforts.
-
-        ``api_key`` and ``base_url`` are accepted for backward compatibility
-        and routed to the OpenRouter :class:`ProviderConnection` when provided.
-        """
-        normalized_url = (base_url or DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
+        """Create or update org-wide default models and reasoning efforts."""
         existing = self.repository.get_by_org(organization_id)
-        key_provided = bool(api_key and api_key.strip())
 
         if existing is None:
             config = self.repository.create(
@@ -435,26 +426,6 @@ class ProviderConfigService:
             )
             log.info("provider_config_updated", organization_id=str(organization_id))
 
-        if key_provided:
-            self.save_connection(
-                organization_id=organization_id,
-                provider="openrouter",
-                credentials={"api_key": api_key.strip()},
-                config={"base_url": normalized_url},
-            )
-        elif existing is not None and normalized_url != DEFAULT_BASE_URL:
-            connection = self.connections.get_by_org_and_provider(
-                organization_id,
-                "openrouter",
-            )
-            if connection is not None and normalized_url != DEFAULT_BASE_URL:
-                self.save_connection(
-                    organization_id=organization_id,
-                    provider="openrouter",
-                    credentials=self.get_connection_credentials(connection),
-                    config={"base_url": normalized_url},
-                )
-
         clear_models_cache(str(organization_id))
         return config
 
@@ -465,17 +436,6 @@ class ProviderConfigService:
             raise NotFoundError("ProviderConfig", str(organization_id))
         return config
 
-    def get_decrypted_api_key(self, organization_id: uuid.UUID) -> str:
-        """Decrypt and return the OpenRouter API key (never log it)."""
-        connection = self.connections.get_by_org_and_provider(
-            organization_id,
-            "openrouter",
-        )
-        if connection is None:
-            raise NotFoundError("ProviderConnection", "openrouter")
-        credentials = self.get_connection_credentials(connection)
-        return str(credentials.get("api_key", "") or "")
-
     def delete_config(self, organization_id: uuid.UUID) -> None:
         """Delete the provider config for an organization."""
         deleted = self.repository.delete_by_org(organization_id)
@@ -483,60 +443,6 @@ class ProviderConfigService:
             raise NotFoundError("ProviderConfig", str(organization_id))
         clear_models_cache(str(organization_id))
         log.info("provider_config_deleted", organization_id=str(organization_id))
-
-    def get_connection(
-        self,
-        organization_id: uuid.UUID,
-        provider: str,
-    ) -> ProviderConnection | None:
-        """Return one provider connection for an organization."""
-        return self.connections.get_by_org_and_provider(organization_id, provider)
-
-    def list_connections(self, organization_id: uuid.UUID) -> list[ProviderConnection]:
-        """Return all provider connections for an organization."""
-        return self.connections.list_by_org(organization_id)
-
-    @staticmethod
-    def get_connection_credentials(connection: ProviderConnection) -> dict[str, Any]:
-        """Decrypt stored provider credentials as a JSON object."""
-        from .provider_accounts import ProviderAccountService
-
-        return ProviderAccountService().get_credentials(connection)
-
-    def save_connection(
-        self,
-        *,
-        organization_id: uuid.UUID,
-        provider: str,
-        credentials: dict[str, Any],
-        config: dict[str, Any] | None = None,
-    ) -> ProviderConnection:
-        """Compatibility helper for internal org-shared setup through the vault."""
-        from .provider_accounts import ProviderAccountService
-
-        account = ProviderAccountService()._save_legacy_account(
-            organization_id=organization_id,
-            provider=provider,
-            payload={**dict(config or {}), **dict(credentials or {})},
-        )
-        clear_models_cache(str(organization_id))
-        return account
-
-    def delete_connection(
-        self,
-        organization_id: uuid.UUID,
-        provider: str,
-    ) -> None:
-        """Delete a provider connection when present."""
-        deleted = self.connections.delete_by_org_and_provider(organization_id, provider)
-        if not deleted:
-            raise NotFoundError("ProviderConnection", provider)
-        clear_models_cache(str(organization_id))
-        log.info(
-            "provider_connection_deleted",
-            organization_id=str(organization_id),
-            provider=provider,
-        )
 
     def build_resolver(
         self,
@@ -555,74 +461,6 @@ class ProviderConfigService:
             account_ids=account_ids,
             on_account_used=on_account_used,
         )
-
-    def adapter_from_config(
-        self,
-        config: ProviderConfig,
-        provider_name: str = "openrouter",
-    ) -> ProviderAdapter:
-        """Build a provider adapter from stored org connections.
-
-        Legacy helper kept for tests; production runs should use
-        :meth:`build_resolver`.
-        """
-        return self.build_adapter(config.organization_id, provider_name=provider_name)
-
-    def build_adapter(
-        self,
-        organization_id: uuid.UUID,
-        provider_name: str = "openrouter",
-    ) -> ProviderAdapter:
-        """Build a provider adapter from stored org connections.
-
-        Only the ``ProviderConnection`` row is required; the legacy
-        ``ProviderConfig`` defaults row is optional and ignored here.
-
-        Raises:
-            KeyError: If the provider name is not registered.
-            NotFoundError: If no connection exists for the organization.
-        """
-        connection = self.connections.get_by_org_and_provider(
-            organization_id,
-            provider_name,
-        )
-        if connection is None:
-            raise NotFoundError("ProviderConnection", provider_name)
-        credentials = self.get_connection_credentials(connection)
-        config = dict(connection.config or {})
-        if provider_name == "openrouter":
-            adapter = OpenRouterAdapter(
-                api_key=str(credentials.get("api_key", "") or ""),
-                base_url=str(config.get("base_url") or DEFAULT_BASE_URL),
-            )
-        elif provider_name == "chatgpt":
-            adapter = ChatGPTAdapter(credentials=credentials)
-        elif provider_name == "amazon-bedrock":
-            if config.get("auth_method") == "access_keys":
-                credentials.pop("bearer_token", None)
-            elif config.get("auth_method") == "bearer":
-                credentials = {"bearer_token": credentials.get("bearer_token", "")}
-            adapter = BedrockAdapter(
-                credentials=credentials,
-                region=str(config.get("region") or "us-east-1"),
-            )
-        elif provider_name == "openai-compatible":
-            base_url = str(config.get("base_url", "") or "").strip()
-            if not base_url:
-                raise ValueError(
-                    "Provider 'openai-compatible' requires base_url "
-                    "in connection config"
-                )
-            adapter = OpenAICompatibleAdapter(
-                base_url=base_url,
-                api_key=str(credentials.get("api_key", "") or ""),
-            )
-        else:
-            factory = self.registry.get(provider_name)
-            adapter = factory(credentials=credentials, config=config)
-        if not isinstance(adapter, ProviderAdapter):
-            raise ConflictError(f"Provider {provider_name!r} did not build an adapter")
-        return adapter
 
     def list_models(
         self,
@@ -679,7 +517,7 @@ class ProviderConfigService:
         return provider_id
 
     # ------------------------------------------------------------------
-    # OpenAI-compatible connection upsert (shared REST/MCP business logic)
+    # OpenAI-compatible account validation
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -708,59 +546,3 @@ class ProviderConfigService:
         from .providers.openai_compatible import validate_base_url
 
         return validate_base_url(base_url)
-
-    def upsert_openai_compatible_connection(
-        self,
-        organization_id: uuid.UUID,
-        *,
-        api_key: str = "",
-        base_url: str = "",
-        models: list[str] | None = None,
-        models_provided: bool = False,
-    ) -> ProviderConnection:
-        """Create or update the generic OpenAI-compatible connection.
-
-        Create requires ``base_url``; on update an empty/missing base URL
-        keeps the stored value. ``models=None`` (or ``models_provided``
-        False on update) keeps stored models; an explicit list — including
-        ``[]`` — replaces them. Empty ids after trim raise; an empty total
-        list is allowed. Empty ``api_key`` keeps the stored secret.
-        """
-        from .enums import ProviderType
-
-        existing = self.get_connection(organization_id, ProviderType.OPENAI_COMPATIBLE)
-        credentials = (
-            self.get_connection_credentials(existing) if existing is not None else {}
-        )
-        stored_key = str(credentials.get("api_key", "") or "")
-        if (api_key or "").strip():
-            stored_key = api_key.strip()
-
-        raw_url = (base_url or "").strip()
-        if raw_url:
-            resolved_base_url = self.validate_openai_compatible_base_url(raw_url)
-        elif existing is not None:
-            resolved_base_url = str(
-                (existing.config or {}).get("base_url") or ""
-            ).strip()
-            if not resolved_base_url:
-                raise ValueError("base_url is required")
-        else:
-            raise ValueError("base_url is required")
-
-        if models_provided or models is not None:
-            resolved_models = self.normalize_openai_compatible_models(
-                list(models or [])
-            )
-        elif existing is not None:
-            stored = (existing.config or {}).get("models", [])
-            resolved_models = self.normalize_openai_compatible_models(stored)
-        else:
-            resolved_models = []
-
-        return self.save_connection(
-            organization_id=organization_id,
-            provider=ProviderType.OPENAI_COMPATIBLE,
-            credentials={"api_key": stored_key},
-            config={"base_url": resolved_base_url, "models": resolved_models},
-        )

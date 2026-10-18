@@ -376,8 +376,6 @@ async def test_title_agent_updates_session_title(
 
     ProviderConfigService().save_config(
         organization_id=harness_workspace.runner.organization_id,
-        api_key="test-key",
-        base_url="https://example.com",
         default_model="big-model",
         small_model="small-model",
     )
@@ -426,8 +424,6 @@ async def test_title_agent_does_not_overwrite_user_rename(harness_workspace) -> 
 
     ProviderConfigService().save_config(
         organization_id=harness_workspace.runner.organization_id,
-        api_key="test-key",
-        base_url="https://example.com",
         default_model="big-model",
         small_model="small-model",
     )
@@ -468,8 +464,6 @@ async def test_child_session_created_for_task_tool(harness_workspace) -> None:
 
     ProviderConfigService().save_config(
         organization_id=harness_workspace.runner.organization_id,
-        api_key="test-key",
-        base_url="https://example.com",
         default_model="big-model",
         small_model="small-model",
     )
