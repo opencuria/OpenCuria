@@ -12,7 +12,7 @@ from apps.credentials.models import CredentialService
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.organizations.services import OrganizationService
 from apps.runners.enums import RuntimeType
-from apps.runners.models import ImageDefinition, Runner, ImageBuildJob
+from apps.runners.models import ImageBuildJob, ImageDefinition, Runner
 from common.utils import hash_token
 
 # Default packages installed in the workspace image.
@@ -37,10 +37,15 @@ DEFAULT_WORKSPACE_PACKAGES = [
     "tini",
 ]
 
+# Bump this when the default local workspace image recipe changes so
+# bootstrap_local_deploy will requeue an existing active build.
+LOCAL_WORKSPACE_IMAGE_REVISION = 2
+
 # Custom Dockerfile fragment appended after package installation.
 # Installs Node.js 22.x, GitHub CLI, sets up /workspace with default
 # agent instruction files, and configures tini as entrypoint.
 DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE = textwrap.dedent("""\
+    # OpenCuria local workspace image revision: 2
     # Node.js 22.x
     RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \\
         && apt-get install -y nodejs \\
@@ -50,7 +55,9 @@ DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE = textwrap.dedent("""\
     RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \\
           | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \\
         && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \\
-        && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \\
+        && echo "deb [arch=$(dpkg --print-architecture) \
+signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
+https://cli.github.com/packages stable main" \\
           | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \\
         && apt-get update && apt-get install -y gh \\
         && rm -rf /var/lib/apt/lists/*
@@ -72,7 +79,8 @@ DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE = textwrap.dedent("""\
           '# Critical Instructions for Claude / AI Agent' \\
           '' \\
           '## Mandatory Initialization' \\
-          'Before performing any task, read the AGENTS.md file in the root directory.' \\
+          'Before performing any task, read the AGENTS.md file in the root' \\
+          'directory.' \\
         > /workspace/CLAUDE.md
 
     ENTRYPOINT ["/usr/bin/tini", "--"]
@@ -88,6 +96,9 @@ class Command(BaseCommand):
     help = (
         "Ensure that a local admin user, organization, runner, and default "
         "workspace image definition exist for the all-in-one compose stack."
+    )
+    _DEFAULT_IMAGE_DESCRIPTION = (
+        "Default workspace image for the local all-in-one stack."
     )
 
     def add_arguments(self, parser) -> None:
@@ -261,7 +272,7 @@ class Command(BaseCommand):
             name=definition_name,
             defaults={
                 "created_by": user,
-                "description": "Default workspace image for the local all-in-one stack.",
+                "description": self._DEFAULT_IMAGE_DESCRIPTION,
                 "runtime_type": RuntimeType.DOCKER,
                 "base_distro": "ubuntu:22.04",
                 "packages": DEFAULT_WORKSPACE_PACKAGES,
@@ -288,10 +299,8 @@ class Command(BaseCommand):
         if definition.env_vars != _DEFAULT_ENV_VARS:
             definition.env_vars = _DEFAULT_ENV_VARS
             definition_updates.append("env_vars")
-        if definition.description != "Default workspace image for the local all-in-one stack.":
-            definition.description = (
-                "Default workspace image for the local all-in-one stack."
-            )
+        if definition.description != self._DEFAULT_IMAGE_DESCRIPTION:
+            definition.description = self._DEFAULT_IMAGE_DESCRIPTION
             definition_updates.append("description")
         if definition_updates:
             definition.save(update_fields=definition_updates)
@@ -304,22 +313,34 @@ class Command(BaseCommand):
             },
         )
 
+        recipe_changed = bool(definition_updates)
+
         # If the build already exists and is active (from a previous
-        # successful run), leave it alone so workspaces keep working.
-        if not created and build.status == ImageBuildJob.Status.ACTIVE:
+        # successful run), leave it alone so workspaces keep working unless
+        # the default local image recipe changed and needs a rebuild.
+        if (
+            not created
+            and build.status == ImageBuildJob.Status.ACTIVE
+            and not recipe_changed
+        ):
             return build
 
         # For new or non-active builds, ensure they are in pending state
-        # so the runner will pick them up.
-        if not created and build.status != ImageBuildJob.Status.PENDING:
+        # so the runner will pick them up. Also do this when the image
+        # definition changed, even if the current build is active.
+        if not created and (
+            build.status != ImageBuildJob.Status.PENDING or recipe_changed
+        ):
             build.status = ImageBuildJob.Status.PENDING
             build.build_task = None
             build.built_at = None
+            build.build_log = ""
             build.save(
                 update_fields=[
                     "status",
                     "build_task",
                     "built_at",
+                    "build_log",
                     "updated_at",
                 ]
             )
