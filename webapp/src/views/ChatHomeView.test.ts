@@ -82,15 +82,12 @@ vi.mock('@/services/harness.api', async () => {
   return {
     ...actual,
     getProviderConfig: vi.fn().mockResolvedValue({
-      base_url: '',
       default_model: '',
       small_model: '',
       computer_use_model: '',
       default_effort: '',
       small_effort: '',
       computer_use_effort: '',
-      has_api_key: true,
-      api_key_hint: '',
     }),
   }
 })

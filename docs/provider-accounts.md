@@ -37,6 +37,10 @@ acting admin becomes the account's personal owner; the UI requires confirmation.
 - MCP tools `list_provider_accounts`, `save_provider_account`,
   `delete_provider_account`, `select_provider_account` use the same service.
 
+`GET` / `PUT /api/v1/provider-config/` only read/write model and reasoning-effort
+defaults; credentials and connection metadata belong to the account APIs above.
+The old provider-wide connection REST endpoints and MCP tools are removed.
+
 ChatGPT device flows return a `flow_id`; status/cancel must address that flow.
 Flows are durable, user/org-scoped, expire after ten minutes, and use fenced
 polling claims so concurrent tabs cannot consume each other's authorizations.

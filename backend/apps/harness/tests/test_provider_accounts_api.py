@@ -14,15 +14,17 @@ from apps.harness.provider_accounts import ProviderAccountService
 from apps.organizations.models import Membership, MembershipRole
 from common.utils import generate_api_token, hash_token
 
+ACCOUNTS = "/api/v1/provider-config/accounts/"
 
-def _client(user, org):
+
+def _client(user, org, permissions=None):
     token = generate_api_token()
     APIKey.objects.create(
         user=user,
         name=f"accounts-{uuid.uuid4().hex[:8]}",
         key_hash=hash_token(token),
         key_prefix=token[:12],
-        permissions=[APIKeyPermission.HARNESS_PROVIDERS.value],
+        permissions=permissions or [APIKeyPermission.HARNESS_PROVIDERS.value],
     )
     return Client(HTTP_X_API_KEY=token, HTTP_X_ORGANIZATION_ID=str(org.id))
 
@@ -48,115 +50,258 @@ def accounts_setup(organization):
     return organization, admin, member, outsider
 
 
+def _post(client, provider, values):
+    return client.post(
+        f"{ACCOUNTS}{provider}/",
+        data=json.dumps(values),
+        content_type="application/json",
+    )
+
+
+def _put(client, provider, account_id, values):
+    return client.put(
+        f"{ACCOUNTS}{provider}/{account_id}/",
+        data=json.dumps(values),
+        content_type="application/json",
+    )
+
+
 @pytest.mark.django_db(transaction=True)
-def test_account_api_visibility_admin_and_provider_mismatch(accounts_setup):
+def test_account_create_visibility_shared_write_acl_and_secret_masking(accounts_setup):
     org, admin, member, _outsider = accounts_setup
     member_client = _client(member, org)
     admin_client = _client(admin, org)
-    create = member_client.post(
-        "/api/v1/provider-config/accounts/openrouter/",
-        data=json.dumps({"label": "Personal", "api_key": "sk-private-1234"}),
-        content_type="application/json",
-    )
-    assert create.status_code == 201, create.content[:500]
-    personal_id = create.json()["id"]
-    assert create.json()["is_active"] is True
-    assert create.json()["api_key_hint"] == "••••1234"
-    assert "sk-private-1234" not in create.content.decode()
-    assert admin_client.get("/api/v1/provider-config/accounts/").json() == []
 
-    shared = admin_client.post(
-        "/api/v1/provider-config/accounts/openrouter/",
-        data=json.dumps({"label": "Org", "shared": True, "api_key": "sk-org-5678"}),
-        content_type="application/json",
+    personal = _post(
+        member_client,
+        "openrouter",
+        {"label": "Personal", "api_key": "sk-private-1234"},
     )
-    assert shared.status_code == 201
+    assert personal.status_code == 201, personal.content[:500]
+    personal_body = personal.json()
+    assert personal_body["is_active"] is True
+    assert personal_body["scope"] == "personal"
+    assert personal_body["api_key_hint"] == "••••1234"
+    assert "sk-private-1234" not in personal.content.decode()
+    personal_id = personal_body["id"]
+    assert admin_client.get(ACCOUNTS).json() == []
+
+    shared = _post(
+        admin_client,
+        "openrouter",
+        {"label": "Org", "shared": True, "api_key": "sk-org-5678"},
+    )
+    assert shared.status_code == 201, shared.content[:500]
     assert shared.json()["scope"] == "organization"
     assert "sk-org-5678" not in shared.content.decode()
-    visible_ids = {
-        row["id"]
-        for row in member_client.get("/api/v1/provider-config/accounts/").json()
+    assert {row["id"] for row in member_client.get(ACCOUNTS).json()} == {
+        personal_id,
+        shared.json()["id"],
     }
-    assert visible_ids == {personal_id, shared.json()["id"]}
 
-    foreign_update = admin_client.put(
-        f"/api/v1/provider-config/accounts/openrouter/{personal_id}/",
-        data=json.dumps({"api_key": "sk-admin-must-not-see"}),
-        content_type="application/json",
+    denied_write = _put(
+        member_client,
+        "openrouter",
+        shared.json()["id"],
+        {"api_key": "sk-member-must-not-change"},
     )
-    assert foreign_update.status_code == 404
-    mismatch = member_client.put(
-        f"/api/v1/provider-config/accounts/chatgpt/{personal_id}/",
-        data=json.dumps({"label": "mismatch"}),
-        content_type="application/json",
+    assert denied_write.status_code == 403
+    shared_account = ProviderAccountService().get_account(
+        org.id, member.id, shared.json()["id"]
     )
-    assert mismatch.status_code == 404
+    assert (
+        ProviderAccountService().get_credentials(shared_account)["api_key"]
+        == "sk-org-5678"
+    )
 
-    selected_shared = member_client.put(
+    selected = member_client.put(
         "/api/v1/provider-config/selection/openrouter/",
         data=json.dumps({"account_id": shared.json()["id"]}),
         content_type="application/json",
     )
-    assert selected_shared.status_code == 204
-    explicit_none = member_client.put(
+    assert selected.status_code == 204
+    none = member_client.put(
         "/api/v1/provider-config/selection/openrouter/",
         data=json.dumps({"account_id": None}),
         content_type="application/json",
     )
-    assert explicit_none.status_code == 204
-    assert all(
-        not item["is_active"]
-        for item in member_client.get("/api/v1/provider-config/accounts/").json()
-    )
+    assert none.status_code == 204
+    assert not any(row["is_active"] for row in member_client.get(ACCOUNTS).json())
 
 
 @pytest.mark.django_db(transaction=True)
-def test_legacy_provider_upsert_never_changes_shared_account(accounts_setup):
-    org, admin, member, _outsider = accounts_setup
-    accounts = ProviderAccountService()
-    shared = accounts.save_account(
-        organization_id=org.id,
-        user=admin,
-        provider="openrouter",
-        payload={"label": "Shared", "shared": True, "api_key": "sk-shared"},
-    )
+def test_account_update_preserves_omitted_secrets_and_normalizes_models(accounts_setup):
+    org, _admin, member, _outsider = accounts_setup
     client = _client(member, org)
-    response = client.put(
-        "/api/v1/provider-config/providers/openrouter/",
-        data=json.dumps({"api_key": "sk-member-creates"}),
-        content_type="application/json",
-    )
-    # The member's first provider selection is shared, so legacy writes fail
-    # closed rather than modifying the org-wide account.
-    assert response.status_code == 403
-    shared.refresh_from_db()
-    assert accounts.get_credentials(shared)["api_key"] == "sk-shared"
-    assert accounts.list_accounts(org.id, member.id, "openrouter")[0]["id"] == str(
-        shared.id
-    )
-
-
-@pytest.mark.django_db(transaction=True)
-def test_list_provider_accounts_omits_disconnected_and_hides_other_personal(
-    accounts_setup,
-):
-    org, admin, member, _outsider = accounts_setup
-    personal = ProviderAccountService().save_account(
-        organization_id=org.id,
-        user=member,
-        provider="openai-compatible",
-        payload={
-            "label": "Optional key endpoint",
-            "base_url": "https://local.example/v1",
+    created = _post(
+        client,
+        "openai-compatible",
+        {
+            "label": "Local endpoint",
+            "base_url": "https://local.example/v1/",
+            "api_key": "sk-initial-secret",
+            "models": [" a ", "a", "b"],
         },
     )
-    disconnected = ProviderAccountService().save_account(
-        organization_id=org.id,
-        user=admin,
-        provider="openrouter",
-        payload={"label": "Org account", "shared": True, "api_key": "sk-org"},
+    assert created.status_code == 201, created.content[:500]
+    account_id = created.json()["id"]
+    assert created.json()["base_url"] == "https://local.example/v1"
+    assert created.json()["models"] == ["a", "b"]
+    assert created.json()["api_key_hint"] == "••••cret"
+    assert "sk-initial-secret" not in created.content.decode()
+
+    omitted_models = _put(
+        client,
+        "openai-compatible",
+        account_id,
+        {"base_url": "https://local.example/v1", "label": "Renamed"},
     )
-    ProviderAccountService().delete_account(org.id, admin.id, disconnected.id)
-    rows = _client(member, org).get("/api/v1/provider-config/accounts/").json()
-    assert [row["id"] for row in rows] == [str(personal.id)]
-    assert rows[0]["connected"] is True
+    assert omitted_models.status_code == 200, omitted_models.content[:500]
+    assert omitted_models.json()["models"] == ["a", "b"]
+    assert omitted_models.json()["api_key_hint"] == "••••cret"
+
+    cleared_models = _put(
+        client,
+        "openai-compatible",
+        account_id,
+        {"base_url": "https://local.example/v1", "models": [], "api_key": ""},
+    )
+    assert cleared_models.status_code == 200
+    assert cleared_models.json()["models"] == []
+    assert cleared_models.json()["api_key_hint"] == "••••cret"
+    credentials = ProviderAccountService().get_credentials(
+        ProviderAccountService().get_account(org.id, member.id, account_id)
+    )
+    assert credentials["api_key"] == "sk-initial-secret"
+
+    invalid_models = _put(
+        client,
+        "openai-compatible",
+        account_id,
+        {"models": ["valid", "  "]},
+    )
+    assert invalid_models.status_code == 400
+
+
+@pytest.mark.django_db(transaction=True)
+def test_account_mutation_rejects_foreign_account_and_provider_mismatch(accounts_setup):
+    org, admin, member, _outsider = accounts_setup
+    member_client = _client(member, org)
+    admin_client = _client(admin, org)
+    personal = _post(
+        member_client,
+        "openrouter",
+        {"label": "Personal", "api_key": "private-key"},
+    )
+    assert personal.status_code == 201
+    account_id = personal.json()["id"]
+
+    assert (
+        _put(admin_client, "openrouter", account_id, {"label": "not mine"}).status_code
+        == 404
+    )
+    assert (
+        _put(
+            member_client, "chatgpt", account_id, {"label": "wrong provider"}
+        ).status_code
+        == 404
+    )
+    deleted = member_client.delete(f"{ACCOUNTS}openrouter/{account_id}/")
+    assert deleted.status_code == 204
+    assert member_client.get(ACCOUNTS).json() == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_account_validation_and_bedrock_auth_credentials(accounts_setup):
+    org, _admin, member, _outsider = accounts_setup
+    client = _client(member, org)
+
+    for base_url in ("https://", "http:///x", "ftp://host.example/v1"):
+        bad = _post(
+            client,
+            "openai-compatible",
+            {"label": "Bad endpoint", "base_url": base_url},
+        )
+        assert bad.status_code == 400
+
+    bad_bedrock = _post(
+        client,
+        "amazon-bedrock",
+        {"label": "AWS", "auth_method": "invalid"},
+    )
+    assert bad_bedrock.status_code == 400
+    missing_bedrock_credentials = _post(
+        client,
+        "amazon-bedrock",
+        {"label": "AWS", "auth_method": "access_keys"},
+    )
+    assert missing_bedrock_credentials.status_code == 400
+
+    access_keys = _post(
+        client,
+        "amazon-bedrock",
+        {
+            "label": "AWS keys",
+            "auth_method": "access_keys",
+            "region": "eu-central-1",
+            "access_key_id": "AKIA123",
+            "secret_access_key": "aws-secret-value",
+        },
+    )
+    assert access_keys.status_code == 201, access_keys.content[:500]
+    assert access_keys.json()["auth_method"] == "access_keys"
+    assert access_keys.json()["region"] == "eu-central-1"
+    assert "aws-secret-value" not in access_keys.content.decode()
+    access_account = ProviderAccountService().get_account(
+        org.id, member.id, access_keys.json()["id"]
+    )
+    assert (
+        ProviderAccountService().get_credentials(access_account)["secret_access_key"]
+        == "aws-secret-value"
+    )
+
+    bearer = _post(
+        client,
+        "amazon-bedrock",
+        {
+            "label": "AWS bearer",
+            "auth_method": "bearer",
+            "bearer_token": "bearer-secret",
+        },
+    )
+    assert bearer.status_code == 201, bearer.content[:500]
+    assert bearer.json()["auth_method"] == "bearer"
+    assert bearer.json()["api_key_hint"] == "••••cret"
+    bearer_account = ProviderAccountService().get_account(
+        org.id, member.id, bearer.json()["id"]
+    )
+    assert (
+        ProviderAccountService().get_credentials(bearer_account)["bearer_token"]
+        == "bearer-secret"
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_removed_provider_connection_routes_are_not_found(accounts_setup):
+    org, _admin, member, _outsider = accounts_setup
+    client = _client(member, org)
+    assert client.get("/api/v1/provider-config/providers/").status_code == 404
+    url = "/api/v1/provider-config/providers/openrouter/"
+    assert (
+        client.put(url, data="{}", content_type="application/json").status_code == 404
+    )
+    assert client.delete(url).status_code == 404
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "method,path", [("get", ACCOUNTS), ("post", f"{ACCOUNTS}openrouter/")]
+)
+def test_account_api_requires_provider_permission(accounts_setup, method, path):
+    org, _admin, member, outsider = accounts_setup
+    denied = _client(member, org, [APIKeyPermission.HARNESS_READ.value])
+    kwargs = (
+        {"data": "{}", "content_type": "application/json"} if method == "post" else {}
+    )
+    assert getattr(denied, method)(path, **kwargs).status_code == 403
+    assert getattr(_client(outsider, org), method)(path, **kwargs).status_code == 404

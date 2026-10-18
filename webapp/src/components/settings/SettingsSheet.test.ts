@@ -17,7 +17,6 @@ vi.mock('@/services/harness.api', async () => {
     getSubagentConfig: vi.fn(async () => ({ max_depth: 2 })),
     saveProviderConfig: vi.fn(),
     deleteProviderConfig: vi.fn(),
-    listProviderConnections: vi.fn(),
   }
 })
 
@@ -153,7 +152,6 @@ vi.mock('@/lib/runtimeSupport', () => ({
 }))
 
 const getProviderConfigMock = vi.mocked(harnessApi.getProviderConfig)
-const listProviderConnectionsMock = vi.mocked(harnessApi.listProviderConnections)
 
 function mountSheet() {
   setActivePinia(createPinia())
@@ -206,22 +204,13 @@ describe('SettingsSheet', () => {
     authMock.isAdmin = true
     vi.spyOn(providerCatalog, 'loadProviderModelsCached').mockResolvedValue([])
     getProviderConfigMock.mockResolvedValue({
-      base_url: 'https://openrouter.ai/api/v1',
       default_model: 'model-big',
       small_model: 'model-small',
       computer_use_model: 'model-cu',
       default_effort: '',
       small_effort: '',
       computer_use_effort: '',
-      has_api_key: true,
-      api_key_hint: '••••cdef',
     })
-    listProviderConnectionsMock.mockResolvedValue([
-      { provider: 'openrouter', connected: true, api_key_hint: '••••cdef' },
-      { provider: 'chatgpt', connected: false },
-      { provider: 'amazon-bedrock', connected: false },
-      { provider: 'openai-compatible', connected: false },
-    ])
   })
 
   it('loads only the active settings panel and retains the global event listener', async () => {

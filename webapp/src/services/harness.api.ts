@@ -40,26 +40,15 @@ export interface AgentConfigIn {
 }
 
 export interface HarnessProviderConfig {
-  base_url: string
-  /** @deprecated Replaced by GET /agent-configs/ (agent model/effort settings). */
   default_model: string
-  /** @deprecated Replaced by GET /agent-configs/ (agent model/effort settings). */
   small_model: string
-  /** @deprecated Replaced by GET /agent-configs/ (agent model/effort settings). */
   computer_use_model: string
-  /** @deprecated Replaced by GET /agent-configs/ (agent model/effort settings). */
   default_effort: string
-  /** @deprecated Replaced by GET /agent-configs/ (agent model/effort settings). */
   small_effort: string
-  /** @deprecated Replaced by GET /agent-configs/ (agent model/effort settings). */
   computer_use_effort: string
-  has_api_key: boolean
-  api_key_hint: string
 }
 
 export interface HarnessProviderConfigIn {
-  api_key?: string
-  base_url?: string
   default_model?: string
   small_model?: string
   computer_use_model?: string
@@ -92,9 +81,19 @@ export interface ProviderAccount {
   auth_type?: 'api_token' | 'subscription_token' | string
 }
 
-export type ProviderAccountPayload = ProviderConnectionUpsertIn & {
+export interface ProviderAccountPayload {
   label: string
   shared: boolean
+  api_key?: string
+  base_url?: string
+  /** Manual model ids (openai-compatible only; explicit [] clears the list). */
+  models?: string[]
+  auth_method?: string
+  region?: string
+  access_key_id?: string
+  secret_access_key?: string
+  session_token?: string
+  bearer_token?: string
   token?: string
   auth_type?: 'api_token' | 'subscription_token'
 }
@@ -128,31 +127,6 @@ export interface ClaudeConnectionUpsertIn {
   auth_type: 'api_token' | 'subscription_token'
   token: string
   label?: string
-}
-
-export interface ProviderConnection {
-  provider: ProviderId
-  connected: boolean
-  base_url?: string
-  api_key_hint?: string
-  account_id?: string
-  region?: string
-  auth_method?: 'access_keys' | 'bearer' | ''
-  /** Manual model catalog for openai-compatible endpoints without /models. */
-  models?: string[]
-}
-
-export interface ProviderConnectionUpsertIn {
-  api_key?: string
-  base_url?: string
-  /** Manual model ids (openai-compatible only; explicit [] clears the list). */
-  models?: string[]
-  auth_method?: string
-  region?: string
-  access_key_id?: string
-  secret_access_key?: string
-  session_token?: string
-  bearer_token?: string
 }
 
 /**
@@ -442,8 +416,6 @@ export function getProviderConfig(): Promise<HarnessProviderConfig> {
 
 export function saveProviderConfig(data: HarnessProviderConfigIn): Promise<HarnessProviderConfig> {
   return put<HarnessProviderConfig>('/provider-config/', {
-    api_key: data.api_key ?? '',
-    base_url: data.base_url ?? '',
     default_model: data.default_model ?? '',
     small_model: data.small_model ?? '',
     computer_use_model: data.computer_use_model ?? '',
@@ -455,10 +427,6 @@ export function saveProviderConfig(data: HarnessProviderConfigIn): Promise<Harne
 
 export function deleteProviderConfig(): Promise<void> {
   return del<void>('/provider-config/')
-}
-
-export function listProviderConnections(): Promise<ProviderConnection[]> {
-  return get<ProviderConnection[]>('/provider-config/providers/')
 }
 
 /** List accounts visible in the current user's active organization context. */
@@ -535,17 +503,6 @@ export function getAgentSConfig(): Promise<AgentSConfig> {
  */
 export function saveAgentSConfig(data: AgentSConfigIn): Promise<AgentSConfig> {
   return put<AgentSConfig>('/agent-s-config/', data)
-}
-
-export function saveProviderConnection(
-  provider: ProviderId,
-  payload: ProviderConnectionUpsertIn,
-): Promise<ProviderConnection> {
-  return put<ProviderConnection>(`/provider-config/providers/${provider}/`, payload)
-}
-
-export function deleteProviderConnection(provider: ProviderId): Promise<void> {
-  return del<void>(`/provider-config/providers/${provider}/`)
 }
 
 export function startChatGptOAuth(payload?: ChatGptOAuthStartIn): Promise<ChatGptOAuthStart> {

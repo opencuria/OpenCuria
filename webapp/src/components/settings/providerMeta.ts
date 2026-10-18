@@ -5,7 +5,6 @@
 
 import { Bot, Cloud, Globe, Plug } from '@lucide/vue'
 import type { ProviderId } from '@/lib/harnessModels'
-import type { ProviderConnection } from '@/services/harness.api'
 
 /** Settings-only Claude connection row, not a native catalog ProviderId. */
 export type SettingsProviderId = ProviderId | 'claude-agent'
@@ -74,32 +73,4 @@ export const PROVIDER_META: ProviderMeta[] = [
 /** Look up presentation metadata for a provider id. */
 export function providerMeta(id: SettingsProviderId | null): ProviderMeta | undefined {
   return PROVIDER_META.find((meta) => meta.id === id)
-}
-
-/** Short human summary of a connection (key hint, account, region). */
-export function connectionDetail(connection: ProviderConnection): string {
-  if (!connection.connected) return ''
-  switch (connection.provider) {
-    case 'openrouter':
-      return [connection.api_key_hint, connection.base_url].filter(Boolean).join(' · ')
-    case 'chatgpt':
-      return connection.account_id ? `Account ${connection.account_id}` : 'Connected'
-    case 'amazon-bedrock': {
-      const auth =
-        connection.auth_method === 'bearer'
-          ? 'Bearer token'
-          : connection.auth_method === 'access_keys'
-            ? 'Access keys'
-            : ''
-      return [connection.region, auth].filter(Boolean).join(' · ')
-    }
-    case 'openai-compatible': {
-      const parts: string[] = []
-      if (connection.base_url) parts.push(connection.base_url)
-      const count = connection.models?.length ?? 0
-      if (count > 0) parts.push(`${count} model${count === 1 ? '' : 's'}`)
-      else if (parts.length === 0) return 'Connected'
-      return parts.join(' · ')
-    }
-  }
 }

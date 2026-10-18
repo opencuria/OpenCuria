@@ -55,9 +55,6 @@ Tools and their required permissions
   delete_claude_connection → harness:providers
 - save_provider_config → harness:run
 - delete_provider_config → harness:run
-- list_provider_connections → harness:providers
-- save_provider_connection → harness:providers
-- delete_provider_connection → harness:providers
 - get_subagent_config → harness:read
 - save_subagent_config → harness:run
 - get_agent_s_config → harness:read
@@ -663,7 +660,7 @@ _TOOLS: list[Tool] = [
     ),
     Tool(
         name="get_provider_config",
-        description="Get the org-wide harness provider config (no API key secret).",
+        description="Get the org-wide model and reasoning-effort defaults.",
         inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
@@ -718,15 +715,16 @@ _TOOLS: list[Tool] = [
     ),
     Tool(
         name="save_provider_config",
-        description="Save (upsert) the org-wide harness provider config.",
+        description="Save the org-wide model and reasoning-effort defaults.",
         inputSchema={
             "type": "object",
             "properties": {
-                "api_key": {"type": "string"},
-                "base_url": {"type": "string"},
                 "default_model": {"type": "string"},
                 "small_model": {"type": "string"},
                 "computer_use_model": {"type": "string"},
+                "default_effort": {"type": "string"},
+                "small_effort": {"type": "string"},
+                "computer_use_effort": {"type": "string"},
             },
         },
     ),
@@ -734,52 +732,6 @@ _TOOLS: list[Tool] = [
         name="delete_provider_config",
         description="Delete the org-wide harness provider config.",
         inputSchema={"type": "object", "properties": {}},
-    ),
-    Tool(
-        name="list_provider_connections",
-        description=(
-            "List connection status for all org providers "
-            "(openrouter, chatgpt, amazon-bedrock, openai-compatible)."
-        ),
-        inputSchema={"type": "object", "properties": {}},
-    ),
-    Tool(
-        name="save_provider_connection",
-        description=(
-            "Upsert credentials for openrouter, openai-compatible, or "
-            "amazon-bedrock. ChatGPT uses chatgpt_oauth_start instead."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "provider": {
-                    "type": "string",
-                    "description": (
-                        "Provider id: openrouter, openai-compatible, or amazon-bedrock."
-                    ),
-                },
-                "api_key": {"type": "string"},
-                "base_url": {"type": "string"},
-                "models": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "OpenAI-compatible only: manual model ids for "
-                        "endpoints without /models."
-                    ),
-                },
-                "auth_method": {
-                    "type": "string",
-                    "description": "Bedrock only: access_keys or bearer.",
-                },
-                "region": {"type": "string"},
-                "access_key_id": {"type": "string"},
-                "secret_access_key": {"type": "string"},
-                "session_token": {"type": "string"},
-                "bearer_token": {"type": "string"},
-            },
-            "required": ["provider"],
-        },
     ),
     Tool(
         name="list_provider_accounts",
@@ -841,20 +793,6 @@ _TOOLS: list[Tool] = [
             },
             "required": ["provider", "account_id"],
             "additionalProperties": False,
-        },
-    ),
-    Tool(
-        name="delete_provider_connection",
-        description="Delete one active provider account (legacy compatibility).",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "provider": {
-                    "type": "string",
-                    "description": "Provider id to disconnect.",
-                }
-            },
-            "required": ["provider"],
         },
     ),
     Tool(
@@ -1758,13 +1696,10 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "list_claude_engine_models": APIKeyPermission.HARNESS_READ,
     "save_provider_config": APIKeyPermission.HARNESS_RUN,
     "delete_provider_config": APIKeyPermission.HARNESS_RUN,
-    "list_provider_connections": APIKeyPermission.HARNESS_PROVIDERS,
     "list_provider_accounts": APIKeyPermission.HARNESS_PROVIDERS,
     "save_provider_account": APIKeyPermission.HARNESS_PROVIDERS,
     "delete_provider_account": APIKeyPermission.HARNESS_PROVIDERS,
     "select_provider_account": APIKeyPermission.HARNESS_PROVIDERS,
-    "save_provider_connection": APIKeyPermission.HARNESS_PROVIDERS,
-    "delete_provider_connection": APIKeyPermission.HARNESS_PROVIDERS,
     "get_subagent_config": APIKeyPermission.HARNESS_READ,
     "save_subagent_config": APIKeyPermission.HARNESS_RUN,
     "get_agent_s_config": APIKeyPermission.HARNESS_READ,
@@ -3766,7 +3701,7 @@ def _call_get_provider_config(api_key, org_id, args: dict) -> list[TextContent]:
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
     return _text(
-        _fetch_org_provider_config(org_id, int(api_key.user.id)).model_dump(mode="json")
+        _fetch_org_provider_config(org_id).model_dump(mode="json")
     )
 
 
@@ -3788,7 +3723,7 @@ def _call_save_provider_config(api_key, org_id, args: dict) -> list[TextContent]
     org_service.require_membership(api_key.user, org_id)
     payload = ProviderConfigIn(**args)
     return _text(
-        _save_org_provider_config(org_id, api_key.user, payload).model_dump(mode="json")
+        _save_org_provider_config(org_id, payload).model_dump(mode="json")
     )
 
 
@@ -3800,43 +3735,6 @@ def _call_delete_provider_config(api_key, org_id, args: dict) -> list[TextConten
     org_service.require_membership(api_key.user, org_id)
     _delete_org_provider_config(org_id)
     return _text({"deleted": True})
-
-
-def _call_list_provider_connections(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.harness.api import _list_org_provider_connections
-    from apps.organizations.services import OrganizationService
-
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    connections = _list_org_provider_connections(org_id, int(api_key.user.id))
-    return _text([row.model_dump(mode="json") for row in connections])
-
-
-def _call_save_provider_connection(api_key, org_id, args: dict) -> list[TextContent]:
-    """Legacy upsert limited to the caller's active account or new private one."""
-    from apps.harness.api import _parse_provider_param, _save_legacy_provider_account
-    from apps.organizations.services import OrganizationService
-
-    provider = args.get("provider")
-    if not provider:
-        return _error("provider is required")
-    try:
-        OrganizationService().require_membership(api_key.user, org_id)
-        provider_id = _parse_provider_param(str(provider))
-        if provider_id == "chatgpt":
-            return _error("ChatGPT uses OAuth connect; use chatgpt_oauth_start")
-        values = {key: value for key, value in args.items() if key != "provider"}
-        _save_legacy_provider_account(org_id, api_key.user, provider_id, values)
-        from apps.harness.api import _list_org_provider_connections
-
-        row = next(
-            item.model_dump(mode="json")
-            for item in _list_org_provider_connections(org_id, int(api_key.user.id))
-            if item.provider == provider_id
-        )
-        return _text(row)
-    except Exception as exc:
-        return _error(str(exc))
 
 
 def _call_get_subagent_config(api_key, org_id, args: dict) -> list[TextContent]:
@@ -3884,29 +3782,6 @@ def _call_save_agent_s_config(api_key, org_id, args: dict) -> list[TextContent]:
         )
     except (ValueError, KeyError, TypeError) as exc:
         return _error(str(exc))
-
-
-def _call_delete_provider_connection(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.harness.api import _delete_org_provider_connection, _parse_provider_param
-    from apps.organizations.services import OrganizationService
-    from common.exceptions import NotFoundError
-
-    provider = args.get("provider")
-    if not provider:
-        return _error("provider is required")
-
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-
-    try:
-        provider_id = _parse_provider_param(str(provider))
-        _delete_org_provider_connection(org_id, int(api_key.user.id), provider_id)
-    except ValueError as exc:
-        return _error(str(exc))
-    except NotFoundError as exc:
-        return _error(exc.message)
-
-    return _text({"deleted": True, "provider": provider_id})
 
 
 async def _call_chatgpt_oauth_start(api_key, org_id, args: dict) -> list[TextContent]:
@@ -6022,13 +5897,10 @@ _TOOL_HANDLERS = {
     "list_claude_engine_models": _call_list_claude_engine_models,
     "save_provider_config": _call_save_provider_config,
     "delete_provider_config": _call_delete_provider_config,
-    "list_provider_connections": _call_list_provider_connections,
     "list_provider_accounts": _call_list_provider_accounts,
     "save_provider_account": _call_save_provider_account,
     "delete_provider_account": _call_delete_provider_account,
     "select_provider_account": _call_select_provider_account,
-    "save_provider_connection": _call_save_provider_connection,
-    "delete_provider_connection": _call_delete_provider_connection,
     "get_subagent_config": _call_get_subagent_config,
     "save_subagent_config": _call_save_subagent_config,
     "get_agent_s_config": _call_get_agent_s_config,

@@ -94,22 +94,15 @@ export interface AgentConfigInput {
 }
 
 export interface ProviderConfig {
-  base_url: string;
   default_model: string;
   small_model: string;
   computer_use_model: string;
   default_effort: string;
   small_effort: string;
   computer_use_effort: string;
-  has_api_key: boolean;
-  api_key_hint: string;
 }
 
-export interface ProviderConfigInput extends Partial<
-  Omit<ProviderConfig, "has_api_key" | "api_key_hint">
-> {
-  api_key?: string;
-}
+export type ProviderConfigInput = Partial<ProviderConfig>;
 
 export interface RecentModelUsage {
   model: string;

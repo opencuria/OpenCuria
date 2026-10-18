@@ -13,8 +13,7 @@ existing keys — see ``APIKeyPermission``)::
 - ``harness:run`` — create sessions, send follow-up prompts, abort,
   switch session mode, rename/delete sessions, save/delete provider config
 - ``harness:permissions`` — resolve permission and question requests
-- ``harness:providers`` — manage per-provider connections (OpenRouter,
-  ChatGPT OAuth, Amazon Bedrock, generic OpenAI-compatible)
+- ``harness:providers`` — manage named provider accounts and ChatGPT OAuth
 
 All old ``session:*`` socket events and runners REST endpoints stay
 untouched (M8 removes them).
@@ -33,9 +32,6 @@ from pydantic import Field
 
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
-from apps.harness.enums import ProviderType
-from apps.harness.provider_accounts import SUPPORTED_PROVIDERS as _SUPPORTED_PROVIDERS
-from apps.harness.providers.openrouter import DEFAULT_BASE_URL
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
@@ -305,13 +301,8 @@ class HarnessPermissionOut(Schema):
 
 
 class ProviderConfigIn(Schema):
-    """Request schema for saving the org-wide provider config.
+    """Org-wide model and reasoning-effort defaults; accounts hold credentials."""
 
-    deprecated: use agent-configs. Fields below remain for backward compat.
-    """
-
-    api_key: str = ""
-    base_url: str = ""
     default_model: str = ""
     small_model: str = ""
     computer_use_model: str = ""
@@ -320,21 +311,8 @@ class ProviderConfigIn(Schema):
     computer_use_effort: str = ""
 
 
-class ProviderConfigOut(Schema):
-    """Response schema for the org-wide provider config (no secret).
-
-    deprecated: use agent-configs. Fields remain for backward compat.
-    """
-
-    base_url: str
-    default_model: str
-    small_model: str
-    computer_use_model: str
-    default_effort: str
-    small_effort: str
-    computer_use_effort: str
-    has_api_key: bool
-    api_key_hint: str
+class ProviderConfigOut(ProviderConfigIn):
+    """Saved org-wide model and reasoning-effort defaults."""
 
 
 class AgentConfigIn(Schema):
@@ -443,59 +421,6 @@ class ProviderModelOut(Schema):
     max_output_tokens: int = 0
 
 
-class ProviderConnectionOut(Schema):
-    """Public view of one provider connection (no secrets)."""
-
-    provider: str
-    connected: bool
-    base_url: str = ""
-    api_key_hint: str = ""
-    account_id: str = ""
-    region: str = ""
-    auth_method: str = ""
-    models: list[str] = []
-
-
-class OpenRouterConnectionIn(Schema):
-    """Upsert payload for an OpenRouter connection."""
-
-    api_key: str = ""
-    base_url: str = ""
-
-
-class OpenAICompatibleConnectionIn(Schema):
-    """Upsert payload for a generic OpenAI-compatible connection."""
-
-    api_key: str = ""
-    base_url: str = ""
-    models: list[str] = []
-
-
-class BedrockConnectionIn(Schema):
-    """Upsert payload for an Amazon Bedrock connection."""
-
-    auth_method: str = ""
-    region: str = "us-east-1"
-    access_key_id: str = ""
-    secret_access_key: str = ""
-    session_token: str = ""
-    bearer_token: str = ""
-
-
-class ProviderConnectionUpsertIn(Schema):
-    """Combined upsert payload; validated per provider in the handler."""
-
-    api_key: str = ""
-    base_url: str = ""
-    models: list[str] = []
-    auth_method: str = ""
-    region: str = "us-east-1"
-    access_key_id: str = ""
-    secret_access_key: str = ""
-    session_token: str = ""
-    bearer_token: str = ""
-
-
 class ProviderAccountOut(Schema):
     """Safe metadata for one provider account."""
 
@@ -570,201 +495,11 @@ class ChatGPTOAuthStatusOut(Schema):
     account_id: str = ""
 
 
-_VALID_PROVIDERS = set(_SUPPORTED_PROVIDERS)
-
-
-def _secret_hint(secret: str) -> str:
-    """Return a masked hint (last four chars) for a stored secret."""
-    if not secret:
-        return ""
-    return f"••••{secret[-4:]}" if len(secret) > 4 else "••••"
-
-
-def _openrouter_connection_view(
-    org_id: uuid.UUID, user_id: int
-) -> tuple[bool, str, str]:
-    """Return active user's OpenRouter status without exposing other accounts."""
-    from apps.harness.provider_accounts import ProviderAccountService
-
-    account = (
-        ProviderAccountService()
-        .selected_accounts(org_id, user_id)
-        .get(ProviderType.OPENROUTER)
-    )
-    if account is None:
-        return False, "", DEFAULT_BASE_URL
-    credentials = ProviderAccountService().get_credentials(account)
-    api_key = str(credentials.get("api_key", "") or "")
-    has_key = bool(api_key.strip())
-    base_url = str((account.config or {}).get("base_url") or DEFAULT_BASE_URL)
-    return has_key, _secret_hint(api_key) if has_key else "", base_url
-
-
-def _provider_config_to_out(
-    config, org_id: uuid.UUID, user_id: int
-) -> ProviderConfigOut:  # type: ignore[no-untyped-def]
-    """Map a ProviderConfig ORM row to ProviderConfigOut (never plaintext)."""
-    has_key, hint, base_url = _openrouter_connection_view(org_id, user_id)
+def _provider_config_to_out(config) -> ProviderConfigOut:  # type: ignore[no-untyped-def]
+    """Map stored model/effort defaults to the public config response."""
     return ProviderConfigOut(
-        base_url=base_url,
-        default_model=config.default_model or "",
-        small_model=config.small_model or "",
-        computer_use_model=config.computer_use_model or "",
-        default_effort=config.default_effort or "",
-        small_effort=config.small_effort or "",
-        computer_use_effort=config.computer_use_effort or "",
-        has_api_key=has_key,
-        api_key_hint=hint,
+        **{name: getattr(config, name) or "" for name in ProviderConfigOut.model_fields}
     )
-
-
-def _parse_provider_param(provider: str) -> str:
-    """Validate a provider path segment."""
-    if provider not in _VALID_PROVIDERS:
-        raise ValueError(f"Unknown provider: {provider}")
-    return provider
-
-
-def _list_org_provider_connections(
-    org_id: uuid.UUID, user_id: int
-) -> list[ProviderConnectionOut]:
-    """Return status for each provider based on this user's active account."""
-    from apps.harness.provider_accounts import (
-        SUPPORTED_PROVIDERS,
-        ProviderAccountService,
-    )
-
-    accounts = ProviderAccountService()
-    selected = accounts.selected_accounts(org_id, user_id)
-    rows: list[ProviderConnectionOut] = []
-    for provider in SUPPORTED_PROVIDERS:
-        account = selected.get(provider)
-        if account is None:
-            rows.append(ProviderConnectionOut(provider=provider, connected=False))
-        else:
-            view = next(
-                row
-                for row in accounts.list_accounts(org_id, user_id, provider)
-                if row["id"] == str(account.id)
-            )
-            rows.append(
-                ProviderConnectionOut(
-                    provider=provider,
-                    connected=bool(view["connected"]),
-                    base_url=view["base_url"],
-                    api_key_hint=view["api_key_hint"],
-                    account_id=view["account_id"],
-                    region=view["region"],
-                    auth_method=view["auth_method"],
-                    models=(
-                        _safe_manual_models(view["models"])
-                        if provider == ProviderType.OPENAI_COMPATIBLE
-                        else view["models"]
-                    ),
-                )
-            )
-    return rows
-
-
-def _safe_manual_models(raw_models: list[str]) -> list[str]:
-    """Normalize old dirty model lists without failing status reads."""
-    seen: set[str] = set()
-    result: list[str] = []
-    for raw in raw_models:
-        model = str(raw or "").strip()
-        if model and model not in seen:
-            seen.add(model)
-            result.append(model)
-    return result
-
-
-def _active_account(org_id: uuid.UUID, user_id: int, provider: str):
-    """Return only the current user's explicitly active visible provider account."""
-    from apps.harness.provider_accounts import ProviderAccountService
-
-    return ProviderAccountService().selected_accounts(org_id, user_id).get(provider)
-
-
-def _save_legacy_provider_account(
-    org_id: uuid.UUID, user, provider: str, payload: dict[str, Any]
-):
-    """Compatibility upsert: active account only, else create private."""
-    from apps.harness.provider_accounts import ProviderAccountService
-    from apps.harness.providers.models_catalog import clear_models_cache
-
-    accounts = ProviderAccountService()
-    user_id = int(user.id)
-    account = _active_account(org_id, user_id, provider)
-    if account is not None and account.user_id is None:
-        membership = accounts._membership(org_id, user_id)
-        if membership.role != "admin":
-            raise AuthenticationError(
-                "Only org admins can manage shared provider accounts"
-            )
-    if account is None:
-        existing_labels = {
-            row["label"].casefold()
-            for row in accounts.list_accounts(org_id, user_id, provider)
-        }
-        base_label = provider.replace("-", " ").title()
-        label = base_label
-        suffix = 2
-        while label.casefold() in existing_labels:
-            label = f"{base_label} {suffix}"
-            suffix += 1
-        payload = {**payload, "label": label, "shared": False}
-    else:
-        payload = {
-            **payload,
-            "label": account.label,
-            "shared": account.user_id is None,
-        }
-    updated = accounts.save_account(
-        organization_id=org_id,
-        user=user,
-        provider=provider,
-        payload=payload,
-        account_id=account.id if account is not None else None,
-    )
-    clear_models_cache(str(org_id))
-    return updated
-
-
-def _delete_org_provider_connection(
-    org_id: uuid.UUID, user_id: int, provider: str
-) -> None:
-    """Delete only the caller's active account, never an arbitrary org row."""
-    from apps.harness.provider_accounts import ProviderAccountService
-    from apps.harness.providers.models_catalog import clear_models_cache
-
-    account = _active_account(org_id, user_id, provider)
-    if account is None:
-        raise NotFoundError("ProviderAccount", provider)
-    ProviderAccountService().delete_account(org_id, user_id, account.id)
-    clear_models_cache(str(org_id))
-
-
-def _validate_openai_compatible_models(models: list[str]) -> list[str]:
-    """Validate and deduplicate manual model ids (deprecated shim).
-
-    Prefer :meth:`ProviderConfigService.normalize_openai_compatible_models`;
-    kept for backward-compatible imports. Empty ids after trim raise;
-    an empty total list is allowed.
-    """
-    from apps.harness.services import ProviderConfigService
-
-    return ProviderConfigService.normalize_openai_compatible_models(list(models or []))
-
-
-def _validate_base_url(base_url: str) -> str:
-    """Validate an http/https base URL (deprecated shim).
-
-    Prefer :meth:`ProviderConfigService.validate_openai_compatible_base_url`;
-    kept for backward-compatible imports.
-    """
-    from apps.harness.services import ProviderConfigService
-
-    return ProviderConfigService.validate_openai_compatible_base_url(base_url)
 
 
 def _agent_s_config_to_out(row: dict) -> AgentSConfigOut:
@@ -828,31 +563,15 @@ def _agent_config_to_out(row: dict) -> AgentConfigOut:
     )
 
 
-def _fetch_org_provider_config(org_id: uuid.UUID, user_id: int) -> ProviderConfigOut:
-    """Load the org provider config and map to the public response.
-
-    Missing legacy rows are normal (defaults were never saved): return
-    an empty config shape instead of 404 so old frontend calls and
-    gating fetches stop spamming ``Not Found`` warnings.
-    """
+def _fetch_org_provider_config(org_id: uuid.UUID) -> ProviderConfigOut:
+    """Return the organization's model defaults, empty if not configured."""
     from apps.harness.services import ProviderConfigService
 
-    service = ProviderConfigService()
     try:
-        config = service.get_config(org_id)
+        config = ProviderConfigService().get_config(org_id)
     except NotFoundError:
-        return ProviderConfigOut(
-            base_url=_openrouter_connection_view(org_id, user_id)[2],
-            default_model="",
-            small_model="",
-            computer_use_model="",
-            default_effort="",
-            small_effort="",
-            computer_use_effort="",
-            has_api_key=_openrouter_connection_view(org_id, user_id)[0],
-            api_key_hint=_openrouter_connection_view(org_id, user_id)[1],
-        )
-    return _provider_config_to_out(config, org_id, user_id)
+        return ProviderConfigOut()
+    return _provider_config_to_out(config)
 
 
 def _list_org_provider_models(
@@ -878,48 +597,19 @@ def _list_org_provider_models(
 
 
 def _save_org_provider_config(
-    org_id: uuid.UUID, user, payload: ProviderConfigIn
+    org_id: uuid.UUID, payload: ProviderConfigIn
 ) -> ProviderConfigOut:
-    """Save org-wide defaults and route compatibility keys to active/private account."""
-    from apps.harness.provider_accounts import ProviderAccountService
+    """Save model defaults without modifying provider accounts."""
     from apps.harness.services import ProviderConfigService
 
-    account_service = ProviderAccountService()
-    active = account_service.selected_accounts(org_id, user.id).get("openrouter")
-    base_url = (payload.base_url or "").strip() or str(
-        ((active.config if active else {}) or {}).get("base_url") or DEFAULT_BASE_URL
-    )
-    if (payload.api_key or "").strip() or (
-        active is not None
-        and "base_url" in payload.model_fields_set
-        and (payload.base_url or "").strip()
-    ):
-        _save_legacy_provider_account(
-            org_id,
-            user,
-            "openrouter",
-            {"api_key": payload.api_key, "base_url": base_url},
-        )
     config = ProviderConfigService().save_config(
-        organization_id=org_id,
-        api_key="",
-        base_url=DEFAULT_BASE_URL,
-        default_model=payload.default_model or "",
-        small_model=payload.small_model or "",
-        computer_use_model=payload.computer_use_model or "",
-        default_effort=payload.default_effort or "",
-        small_effort=payload.small_effort or "",
-        computer_use_effort=payload.computer_use_effort or "",
+        organization_id=org_id, **payload.model_dump()
     )
-    return _provider_config_to_out(config, org_id, int(user.id))
+    return _provider_config_to_out(config)
 
 
 def _delete_org_provider_config(org_id: uuid.UUID) -> None:
-    """Delete the org default-model config only (connections are kept).
-
-    Provider credentials in ``ProviderConnection`` rows are intentionally
-    left intact so deleting model defaults does not disconnect providers.
-    """
+    """Delete model defaults without disconnecting provider accounts."""
     from apps.harness.services import ProviderConfigService
 
     ProviderConfigService().delete_config(org_id)
@@ -1843,7 +1533,7 @@ async def resolve_harness_question(
 
 
 # ---------------------------------------------------------------------------
-# Provider config endpoints (org-scoped; workspace paths are aliases)
+# Provider config endpoints (org-scoped)
 # ---------------------------------------------------------------------------
 
 
@@ -2053,16 +1743,16 @@ def save_org_agent_s_config(request: HttpRequest, payload: AgentSConfigIn):
 @harness_router.get(
     "/provider-config/",
     response={200: ProviderConfigOut, 401: dict, 403: dict, 404: dict},
-    summary="Get the org-wide provider config (api key never returned)",
+    summary="Get the org-wide model defaults",
 )
 def get_org_provider_config(request: HttpRequest):
-    """Return the org provider config (base_url/models only)."""
+    """Return the organization's model and reasoning-effort defaults."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        return 200, _fetch_org_provider_config(org_id, int(request.user.id))
+        return 200, _fetch_org_provider_config(org_id)
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -2103,16 +1793,16 @@ def list_org_provider_models(request: HttpRequest):
 @harness_router.put(
     "/provider-config/",
     response={200: ProviderConfigOut, 400: dict, 401: dict, 403: dict, 404: dict},
-    summary="Save (upsert) the org-wide provider config",
+    summary="Save the org-wide model defaults",
 )
 def save_org_provider_config(request: HttpRequest, payload: ProviderConfigIn):
-    """Upsert the org provider config via Fernet encryption."""
+    """Save model defaults; provider credentials belong to named accounts."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        return 200, _save_org_provider_config(org_id, request.user, payload)
+        return 200, _save_org_provider_config(org_id, payload)
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -2139,98 +1829,6 @@ def delete_org_provider_config(request: HttpRequest):
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
-
-
-@harness_router.get(
-    "/provider-config/providers/",
-    response={200: list[ProviderConnectionOut], 401: dict, 403: dict, 404: dict},
-    summary="List all provider connection statuses for the org",
-)
-def list_org_provider_connections(request: HttpRequest):
-    """Return connection status for every supported provider."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
-        return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
-    try:
-        org_id = _get_org_id(request)
-        OrganizationService().require_membership(request.user, org_id)
-        return 200, _list_org_provider_connections(org_id, int(request.user.id))
-    except AuthenticationError as exc:
-        return 401, {"detail": exc.message, "code": exc.code}
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-
-
-@harness_router.put(
-    "/provider-config/providers/{provider}/",
-    response={200: ProviderConnectionOut, 400: dict, 401: dict, 403: dict, 404: dict},
-    summary="Compatibility upsert for the active provider account",
-)
-def upsert_org_provider_connection(
-    request: HttpRequest,
-    provider: str,
-    payload: ProviderConnectionUpsertIn,
-):
-    """Upsert only the active visible account or create a private account."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
-        return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
-    try:
-        org_id = _get_org_id(request)
-        OrganizationService().require_membership(request.user, org_id)
-        provider_id = _parse_provider_param(provider)
-        if provider_id == ProviderType.CHATGPT:
-            return 400, {
-                "detail": "ChatGPT uses OAuth connect; use the OAuth endpoints",
-                "code": "validation_error",
-            }
-        values = payload.model_dump(exclude_unset=True)
-        if (
-            provider_id == ProviderType.OPENAI_COMPATIBLE
-            and "models" not in payload.model_fields_set
-        ):
-            values.pop("models", None)
-        if (
-            provider_id == ProviderType.OPENAI_COMPATIBLE
-            and not values.get("base_url", "").strip()
-        ):
-            active = _active_account(org_id, int(request.user.id), provider_id)
-            if active is not None:
-                values["base_url"] = str((active.config or {}).get("base_url") or "")
-                if "models" not in values:
-                    values["models"] = list(
-                        (active.config or {}).get("models", []) or []
-                    )
-        _save_legacy_provider_account(org_id, request.user, provider_id, values)
-        rows = _list_org_provider_connections(org_id, int(request.user.id))
-        return 200, next(row for row in rows if row.provider == provider_id)
-    except AuthenticationError as exc:
-        return 403, {"detail": exc.message, "code": exc.code}
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-    except (ValueError, KeyError, TypeError) as exc:
-        return 400, {"detail": str(exc), "code": "validation_error"}
-
-
-@harness_router.delete(
-    "/provider-config/providers/{provider}/",
-    response={204: None, 400: dict, 401: dict, 403: dict, 404: dict},
-    summary="Delete a provider connection for the org",
-)
-def delete_org_provider_connection(request: HttpRequest, provider: str):
-    """Remove one provider connection and invalidate the models cache."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
-        return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
-    try:
-        org_id = _get_org_id(request)
-        OrganizationService().require_membership(request.user, org_id)
-        provider_id = _parse_provider_param(provider)
-        _delete_org_provider_connection(org_id, int(request.user.id), provider_id)
-        return 204, None
-    except AuthenticationError as exc:
-        return 403, {"detail": exc.message, "code": exc.code}
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-    except ValueError as exc:
-        return 400, {"detail": str(exc), "code": "validation_error"}
 
 
 @harness_router.get(

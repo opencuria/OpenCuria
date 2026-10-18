@@ -1,11 +1,4 @@
-"""Tests for ProviderConfig REST endpoints (org-scoped).
-
-Covers: GET/PUT/DELETE happy paths, empty api_key on create (no connection),
-update without api_key keeps existing key, canonical endpoint auth and failure
-responses, removed workspace aliases (404), api_key_hint when key saved,
-multi-provider connection endpoints, ChatGPT OAuth flow, and never leaking
-plaintext keys.
-"""
+"""REST tests for org-wide provider model defaults and ChatGPT OAuth."""
 
 from __future__ import annotations
 
@@ -19,428 +12,188 @@ from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.models import ProviderConfig
+from apps.harness.provider_accounts import ProviderAccountService
 from apps.harness.providers.chatgpt_oauth import DeviceFlowStart, OAuthTokens
 from apps.harness.services import ProviderConfigService
 from apps.organizations.models import Membership, MembershipRole, Organization
-from apps.runners.enums import RunnerStatus, WorkspaceStatus
-from apps.runners.models import Runner, Workspace
 from common.utils import generate_api_token, hash_token
 
 
 @pytest.fixture
 def provider_setup(db):
-    """Org + owner/stranger + runner + owned/foreign workspaces."""
-    user_model = get_user_model()
+    """Create one org member and one outsider; no workspace is needed here."""
+    users = get_user_model()
     org = Organization.objects.create(
-        name=f"Prov API {uuid.uuid4().hex[:6]}",
-        slug=f"prov-api-{uuid.uuid4().hex[:10]}",
+        name=f"Provider API {uuid.uuid4().hex[:6]}",
+        slug=f"provider-api-{uuid.uuid4().hex[:10]}",
     )
-    owner = user_model.objects.create_user(
-        email=f"p-owner-{uuid.uuid4().hex[:6]}@example.com", password="secret"
+    owner = users.objects.create_user(
+        email=f"provider-owner-{uuid.uuid4().hex[:8]}@example.com", password="secret"
     )
-    stranger = user_model.objects.create_user(
-        email=f"p-stranger-{uuid.uuid4().hex[:6]}@example.com", password="secret"
-    )
-    outsider = user_model.objects.create_user(
-        email=f"p-outsider-{uuid.uuid4().hex[:6]}@example.com", password="secret"
+    outsider = users.objects.create_user(
+        email=f"provider-outsider-{uuid.uuid4().hex[:8]}@example.com", password="secret"
     )
     Membership.objects.create(user=owner, organization=org, role=MembershipRole.MEMBER)
-    Membership.objects.create(
-        user=stranger, organization=org, role=MembershipRole.MEMBER
-    )
-    runner = Runner.objects.create(
-        name="prov-api-runner",
-        api_token_hash=hash_token(f"prov-api-{uuid.uuid4().hex}"),
-        status=RunnerStatus.ONLINE,
-        sid=f"prov-api-{uuid.uuid4().hex[:8]}",
-        organization=org,
-        available_runtimes=["docker"],
-    )
-    owned = Workspace.objects.create(
-        runner=runner,
-        name="Owned",
-        status=WorkspaceStatus.RUNNING,
-        created_by=owner,
-    )
-    foreign = Workspace.objects.create(
-        runner=runner,
-        name="Foreign",
-        status=WorkspaceStatus.RUNNING,
-        created_by=stranger,
-    )
-    return {
-        "org": org,
-        "owner": owner,
-        "stranger": stranger,
-        "outsider": outsider,
-        "owned": owned,
-        "foreign": foreign,
-    }
+    return {"org": org, "owner": owner, "outsider": outsider}
 
 
 def _client(*, user, org, permissions: list[str]) -> Client:
     token = generate_api_token()
     APIKey.objects.create(
         user=user,
-        name=f"prov-{uuid.uuid4().hex[:6]}",
+        name=f"provider-{uuid.uuid4().hex[:8]}",
         key_hash=hash_token(token),
         key_prefix=token[:12],
         permissions=permissions,
     )
-    return Client(
-        HTTP_X_API_KEY=token,
-        HTTP_X_ORGANIZATION_ID=str(org.id),
-    )
+    return Client(HTTP_X_API_KEY=token, HTTP_X_ORGANIZATION_ID=str(org.id))
 
 
 READ = [APIKeyPermission.HARNESS_READ.value]
 RUN = [APIKeyPermission.HARNESS_RUN.value]
 PROVIDERS = [APIKeyPermission.HARNESS_PROVIDERS.value]
 BOTH = READ + RUN
-
 ORG_URL = "/api/v1/provider-config/"
-PROVIDERS_URL = "/api/v1/provider-config/providers/"
-WS_URL = "/api/v1/workspaces/{ws}/provider-config/"
-
-
-def _json_body_for(method: str) -> dict[str, str]:
-    """Return JSON request kwargs for mutating endpoint test cases."""
-    if method == "put":
-        return {"data": json.dumps({}), "content_type": "application/json"}
-    return {}
+DEFAULT_FIELDS = {
+    "default_model",
+    "small_model",
+    "computer_use_model",
+    "default_effort",
+    "small_effort",
+    "computer_use_effort",
+}
 
 
 @pytest.mark.django_db(transaction=True)
-def test_org_provider_config_crud_roundtrip(provider_setup):
-    """PUT creates, GET returns masked config with hint, DELETE removes."""
+def test_provider_defaults_roundtrip_has_only_six_fields(provider_setup):
     client = _client(
         user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
     )
+
+    missing = client.get(ORG_URL)
+    assert missing.status_code == 200
+    assert set(missing.json()) == DEFAULT_FIELDS
+    assert all(value == "" for value in missing.json().values())
 
     put = client.put(
         ORG_URL,
         data=json.dumps(
             {
-                "api_key": "sk-live-1234",
-                "base_url": "https://openrouter.ai/api/v1",
                 "default_model": "model-a",
                 "small_model": "model-b",
                 "computer_use_model": "model-cu",
+                "default_effort": "high",
+                "small_effort": "low",
+                "computer_use_effort": "medium",
             }
         ),
         content_type="application/json",
     )
     assert put.status_code == 200, put.content[:500]
-    body = put.json()
-    assert body["base_url"] == "https://openrouter.ai/api/v1"
-    assert body["default_model"] == "model-a"
-    assert body["small_model"] == "model-b"
-    assert body["computer_use_model"] == "model-cu"
-    assert body["has_api_key"] is True
-    assert body["api_key_hint"] == "••••1234"
-    assert "sk-live-1234" not in put.content.decode()
+    assert set(put.json()) == DEFAULT_FIELDS
+    assert put.json() == {
+        "default_model": "model-a",
+        "small_model": "model-b",
+        "computer_use_model": "model-cu",
+        "default_effort": "high",
+        "small_effort": "low",
+        "computer_use_effort": "medium",
+    }
+    assert client.get(ORG_URL).json() == put.json()
+    assert ProviderConfig.objects.filter(organization=provider_setup["org"]).exists()
 
-    get = client.get(ORG_URL)
-    assert get.status_code == 200, get.content[:500]
-    assert get.json()["default_model"] == "model-a"
-    assert get.json()["api_key_hint"] == "••••1234"
-    assert "sk-live-1234" not in get.content.decode()
 
-    deleted = client.delete(ORG_URL)
-    assert deleted.status_code == 204
+def test_provider_config_schema_has_no_connection_fields():
+    """Defaults schemas cannot accept or expose provider credentials/status."""
+    from apps.harness.api import ProviderConfigIn, ProviderConfigOut
 
-    gone = client.get(ORG_URL)
-    # Missing legacy rows return an empty config shape (200) instead of
-    # 404 so legacy callers stop spamming Not Found warnings.
-    assert gone.status_code == 200
-    assert gone.json()["default_model"] == ""
-
-    assert (
-        ProviderConfig.objects.filter(organization_id=provider_setup["org"].id).count()
-        == 0
-    )
+    assert set(ProviderConfigIn.model_fields) == DEFAULT_FIELDS
+    assert set(ProviderConfigOut.model_fields) == DEFAULT_FIELDS
 
 
 @pytest.mark.django_db(transaction=True)
-def test_org_provider_config_update_without_key_keeps_existing(provider_setup):
-    """PUT without api_key on an existing config preserves the stored key."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
+def test_saving_defaults_does_not_mutate_or_delete_provider_accounts(provider_setup):
+    org, owner = provider_setup["org"], provider_setup["owner"]
+    accounts = ProviderAccountService()
+    account = accounts.save_account(
+        organization_id=org.id,
+        user=owner,
+        provider="openrouter",
+        payload={
+            "label": "Personal OpenRouter",
+            "api_key": "sk-account-secret",
+            "base_url": "https://router.example/v1",
+        },
     )
-    created = client.put(
-        ORG_URL,
-        data=json.dumps(
-            {
-                "api_key": "sk-keep-me-99",
-                "default_model": "model-a",
-            }
-        ),
-        content_type="application/json",
-    )
-    assert created.status_code == 200
+    original_config = dict(account.config)
 
-    updated = client.put(
-        ORG_URL,
-        data=json.dumps(
-            {
-                "api_key": "",
-                "default_model": "model-updated",
-                "small_model": "model-small",
-            }
-        ),
-        content_type="application/json",
-    )
-    assert updated.status_code == 200, updated.content[:500]
-    body = updated.json()
-    assert body["default_model"] == "model-updated"
-    assert body["small_model"] == "model-small"
-    assert body["has_api_key"] is True
-    assert body["api_key_hint"] == "••••e-99"
-
-    from apps.harness.provider_accounts import ProviderAccountService
-
-    account = ProviderAccountService().selected_accounts(
-        provider_setup["org"].id, provider_setup["owner"].id
-    )["openrouter"]
-    assert (
-        ProviderAccountService().get_credentials(account)["api_key"] == "sk-keep-me-99"
-    )
-
-
-@pytest.mark.django_db(transaction=True)
-def test_org_provider_config_empty_api_key_on_create_succeeds(provider_setup):
-    """Empty api_key on first PUT saves defaults without a connection."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
-    )
+    client = _client(user=owner, org=org, permissions=BOTH)
     response = client.put(
         ORG_URL,
-        data=json.dumps({"api_key": "   ", "default_model": "model-only"}),
+        data=json.dumps(
+            {
+                "default_model": "new-model",
+                "small_model": "small",
+                "api_key": "sk-ignored",
+                "base_url": "https://ignored.example/v1",
+            }
+        ),
         content_type="application/json",
     )
+
     assert response.status_code == 200, response.content[:500]
-    body = response.json()
-    assert body["default_model"] == "model-only"
-    assert body["has_api_key"] is False
-    assert body["api_key_hint"] == ""
+    account.refresh_from_db()
+    assert account.id == accounts.selected_accounts(org.id, owner.id)["openrouter"].id
+    assert account.config == original_config
+    assert accounts.get_credentials(account)["api_key"] == "sk-account-secret"
+    assert ProviderConfig.objects.filter(organization=org).exists()
+
+    deleted_defaults = client.delete(ORG_URL)
+    assert deleted_defaults.status_code == 204
+    account.refresh_from_db()
+    assert account.config == original_config
+    assert accounts.get_credentials(account)["api_key"] == "sk-account-secret"
+    assert not ProviderConfig.objects.filter(organization=org).exists()
 
 
 @pytest.mark.django_db(transaction=True)
-def test_org_provider_config_get_missing_returns_empty_config(provider_setup):
-    """GET without a stored config yields an empty config shape (200)."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=READ
+def test_provider_config_permissions_and_membership(provider_setup):
+    org, owner, outsider = (
+        provider_setup["org"],
+        provider_setup["owner"],
+        provider_setup["outsider"],
     )
-    response = client.get(ORG_URL)
-    assert response.status_code == 200
-    assert response.json()["default_model"] == ""
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("method", ["get", "put", "delete"])
-def test_org_provider_config_missing_org_header_is_401(provider_setup, method):
-    """All canonical CRUD methods require X-Organization-Id."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
-    )
-    unaffiliated = Client(HTTP_X_API_KEY=client.defaults["HTTP_X_API_KEY"])
-    response = getattr(unaffiliated, method)(ORG_URL, **_json_body_for(method))
-    assert response.status_code == 401
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("method", ["get", "put", "delete"])
-def test_org_provider_config_no_membership_is_404(provider_setup, method):
-    """Every canonical CRUD method enforces org membership."""
-    other_org = Organization.objects.create(
-        name=f"Other {uuid.uuid4().hex[:6]}",
-        slug=f"other-{uuid.uuid4().hex[:10]}",
-    )
-    client = _client(user=provider_setup["outsider"], org=other_org, permissions=BOTH)
-    response = getattr(client, method)(ORG_URL, **_json_body_for(method))
-    assert response.status_code == 404
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("method", ["get", "put", "delete"])
-def test_org_provider_config_unknown_org_is_404(provider_setup, method):
-    """Every canonical CRUD method rejects unknown organization ids."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
-    )
-    unknown_org = Client(
-        HTTP_X_API_KEY=client.defaults["HTTP_X_API_KEY"],
-        HTTP_X_ORGANIZATION_ID=str(uuid.uuid4()),
-    )
-    response = getattr(unknown_org, method)(ORG_URL, **_json_body_for(method))
-    assert response.status_code == 404
-
-
-@pytest.mark.django_db(transaction=True)
-def test_org_provider_config_permissions(provider_setup):
-    """GET needs harness:read; PUT/DELETE need harness:run."""
-    read_client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=READ
-    )
+    read_client = _client(user=owner, org=org, permissions=READ)
+    run_client = _client(user=owner, org=org, permissions=RUN)
     denied_put = read_client.put(
         ORG_URL,
-        data=json.dumps({"api_key": "sk-x"}),
+        data=json.dumps({"default_model": "x"}),
         content_type="application/json",
     )
     assert denied_put.status_code == 403
     assert denied_put.json()["code"] == "permission_denied"
+    assert run_client.get(ORG_URL).status_code == 403
 
-    denied_delete = read_client.delete(ORG_URL)
-    assert denied_delete.status_code == 403
-
-    run_client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=RUN
-    )
-    denied_get = run_client.get(ORG_URL)
-    assert denied_get.status_code == 403
+    outsider_client = _client(user=outsider, org=org, permissions=BOTH)
+    assert outsider_client.get(ORG_URL).status_code == 404
+    assert Client().get(ORG_URL).status_code == 401
 
 
 @pytest.mark.django_db(transaction=True)
-def test_org_provider_config_unauthenticated_is_401(provider_setup):
-    """No credentials yields 401 on provider-config endpoints."""
-    client = Client(HTTP_X_ORGANIZATION_ID=str(provider_setup["org"].id))
-    response = client.get(ORG_URL)
-    assert response.status_code == 401
-
-
-@pytest.mark.django_db(transaction=True)
-def test_workspace_provider_config_aliases_are_not_found(provider_setup):
-    """Legacy workspace paths are removed, regardless of HTTP method."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
-    )
-    url = WS_URL.format(ws=provider_setup["owned"].id)
-
-    assert client.get(url).status_code == 404
-    assert (
-        client.put(
-            url,
-            data=json.dumps({"api_key": "sk-alias-key"}),
-            content_type="application/json",
-        ).status_code
-        == 404
-    )
-    assert client.delete(url).status_code == 404
-    assert (
-        ProviderConfig.objects.filter(organization=provider_setup["org"]).count() == 0
-    )
-
-
-@pytest.mark.django_db(transaction=True)
-def test_org_provider_config_canonical_endpoints_work_without_workspace(provider_setup):
-    """The canonical org CRUD remains usable without workspace scoping."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
-    )
-    put = client.put(
-        ORG_URL,
-        data=json.dumps({"default_model": "org-model"}),
-        content_type="application/json",
-    )
-    assert put.status_code == 200, put.content[:500]
-    assert client.get(ORG_URL).json()["default_model"] == "org-model"
-    assert client.delete(ORG_URL).status_code == 204
-
-
-@pytest.mark.django_db(transaction=True)
-def test_save_config_service_keeps_key_when_omitted(organization) -> None:
-    """Service-level: update without api_key preserves the connection secret."""
-    service = ProviderConfigService()
-    service.save_config(
-        organization_id=organization.id,
-        api_key="sk-service-keep",
-        default_model="m1",
-    )
-    connection = service.get_connection(organization.id, "openrouter")
-    assert connection is not None
-    encrypted_before = connection.credential.encrypted_value
-
-    second = service.save_config(
-        organization_id=organization.id,
-        api_key="",
-        default_model="m2",
-    )
-    assert second.default_model == "m2"
-    refreshed = service.get_connection(organization.id, "openrouter")
-    assert refreshed is not None
-    assert refreshed.credential.encrypted_value == encrypted_before
-    assert service.get_decrypted_api_key(organization.id) == "sk-service-keep"
-    stored = ProviderConfigService.get_connection_credentials(refreshed)
-    assert stored["api_key"] == "sk-service-keep"
-
-
-@pytest.mark.django_db(transaction=True)
-def test_org_provider_models_lists_catalog(provider_setup, monkeypatch):
-    """GET /provider-config/models/ returns the normalized OpenRouter catalog."""
+def test_provider_models_use_the_callers_selected_account(provider_setup, monkeypatch):
     from apps.harness.providers.models_catalog import ProviderModel
 
-    ProviderConfigService().save_config(
-        organization_id=provider_setup["org"].id,
-        api_key="sk-models-key",
-        default_model="acme/fast",
-    )
-
-    def _fake_list(self, organization_id, **kwargs):  # type: ignore[no-untyped-def]
-        assert organization_id == provider_setup["org"].id
-        return [
-            ProviderModel(
-                id="openrouter/acme/fast",
-                name="Fast",
-                provider="openrouter",
-                reasoning_efforts=("high",),
-                default_effort="high",
-                supports_tools=True,
-                context_length=128000,
-                max_output_tokens=16384,
-            )
-        ]
-
-    monkeypatch.setattr(ProviderConfigService, "list_models", _fake_list)
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=READ
-    )
-    response = client.get("/api/v1/provider-config/models/")
-    assert response.status_code == 200, response.content[:500]
-    body = response.json()
-    assert body[0]["id"] == "openrouter/acme/fast"
-    assert body[0]["provider"] == "openrouter"
-    assert body[0]["reasoning_efforts"] == ["high"]
-    assert body[0]["supports_tools"] is True
-    assert body[0]["context_length"] == 128000
-    assert body[0]["max_output_tokens"] == 16384
-
-
-@pytest.mark.django_db(transaction=True)
-def test_org_provider_models_missing_config_is_404(provider_setup):
-    """GET models without any connection yields 404."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=READ
-    )
-    response = client.get("/api/v1/provider-config/models/")
-    assert response.status_code == 404
-
-
-@pytest.mark.django_db(transaction=True)
-def test_org_provider_models_lists_catalog_without_config_row(
-    provider_setup, monkeypatch
-):
-    """GET models works with only a connection (no ProviderConfig row)."""
-    from apps.harness.providers.models_catalog import ProviderModel
-
-    ProviderConfigService().save_connection(
-        organization_id=provider_setup["org"].id,
+    org, owner = provider_setup["org"], provider_setup["owner"]
+    ProviderAccountService().save_account(
+        organization_id=org.id,
+        user=owner,
         provider="openrouter",
-        credentials={"api_key": "sk-models-key"},
-        config={"base_url": "https://openrouter.ai/api/v1"},
+        payload={"label": "Router", "api_key": "sk-models"},
     )
 
-    def _fake_list(self, organization_id, **kwargs):  # type: ignore[no-untyped-def]
-        assert organization_id == provider_setup["org"].id
+    def fake_list(self, organization_id, **kwargs):  # type: ignore[no-untyped-def]
+        assert organization_id == org.id
+        assert kwargs["user_id"] == owner.id
         return [
             ProviderModel(
                 id="openrouter/acme/fast",
@@ -454,266 +207,22 @@ def test_org_provider_models_lists_catalog_without_config_row(
             )
         ]
 
-    monkeypatch.setattr(ProviderConfigService, "list_models", _fake_list)
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=READ
-    )
+    monkeypatch.setattr(ProviderConfigService, "list_models", fake_list)
+    client = _client(user=owner, org=org, permissions=READ)
     response = client.get("/api/v1/provider-config/models/")
     assert response.status_code == 200, response.content[:500]
-    body = response.json()
-    assert body[0]["id"] == "openrouter/acme/fast"
-    assert body[0]["provider"] == "openrouter"
-
-
-@pytest.mark.django_db(transaction=True)
-def test_org_provider_models_requires_harness_read(provider_setup):
-    """GET models is denied without harness:read."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=RUN
-    )
-    response = client.get("/api/v1/provider-config/models/")
-    assert response.status_code == 403
-
-
-@pytest.mark.django_db(transaction=True)
-def test_list_providers_returns_all_three(provider_setup):
-    """GET /provider-config/providers/ lists every provider with status."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=PROVIDERS
-    )
-    response = client.get(PROVIDERS_URL)
-    assert response.status_code == 200, response.content[:500]
-    body = response.json()
-    providers = {row["provider"]: row for row in body}
-    assert set(providers) == {
-        "openrouter",
-        "chatgpt",
-        "amazon-bedrock",
-        "openai-compatible",
-        "claude-agent",
-    }
-    assert all(not row["connected"] for row in body)
-
-    put = client.put(
-        f"{PROVIDERS_URL}openrouter/",
-        data=json.dumps(
-            {
-                "api_key": "sk-openrouter-9999",
-                "base_url": "https://openrouter.ai/api/v1",
-            }
-        ),
-        content_type="application/json",
-    )
-    assert put.status_code == 200, put.content[:500]
-    assert put.json()["connected"] is True
-    assert put.json()["api_key_hint"] == "••••9999"
-
-    listed = client.get(PROVIDERS_URL).json()
-    openrouter = next(row for row in listed if row["provider"] == "openrouter")
-    assert openrouter["connected"] is True
-    assert openrouter["base_url"] == "https://openrouter.ai/api/v1"
-    assert openrouter["api_key_hint"] == "••••9999"
-
-
-@pytest.mark.django_db(transaction=True)
-def test_short_openrouter_keys_are_not_revealed_in_compatibility_hint(provider_setup):
-    """The legacy OpenRouter status masks keys shorter than four chars."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=PROVIDERS
-    )
-    response = client.put(
-        f"{PROVIDERS_URL}openrouter/",
-        data=json.dumps({"api_key": "abc"}),
-        content_type="application/json",
-    )
-
-    assert response.status_code == 200, response.content[:500]
-    assert response.json()["api_key_hint"] == "••••"
-    assert "abc" not in response.content.decode()
-
-
-@pytest.mark.django_db(transaction=True)
-def test_put_openrouter_via_providers_keeps_existing_key(provider_setup):
-    """PUT openrouter without api_key preserves the stored key."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=PROVIDERS
-    )
-    created = client.put(
-        f"{PROVIDERS_URL}openrouter/",
-        data=json.dumps({"api_key": "sk-keep-providers"}),
-        content_type="application/json",
-    )
-    assert created.status_code == 200
-
-    updated = client.put(
-        f"{PROVIDERS_URL}openrouter/",
-        data=json.dumps({"api_key": "", "base_url": "https://custom.example/v1"}),
-        content_type="application/json",
-    )
-    assert updated.status_code == 200, updated.content[:500]
-    body = updated.json()
-    assert body["api_key_hint"] == "••••ders"
-    assert body["base_url"] == "https://custom.example/v1"
-
-
-@pytest.mark.django_db(transaction=True)
-def test_put_openai_compatible_rejects_hostless_base_url(provider_setup):
-    """Hostless base URLs (``https://``/``http:///x``) are 400, localhost ok."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=PROVIDERS
-    )
-    for bad in ("https://", "http:///x"):
-        response = client.put(
-            f"{PROVIDERS_URL}openai-compatible/",
-            data=json.dumps({"base_url": bad}),
-            content_type="application/json",
-        )
-        assert response.status_code == 400, response.content[:500]
-    ok = client.put(
-        f"{PROVIDERS_URL}openai-compatible/",
-        data=json.dumps({"base_url": "http://localhost:8080/v1"}),
-        content_type="application/json",
-    )
-    assert ok.status_code == 200, ok.content[:500]
-
-
-@pytest.mark.django_db(transaction=True)
-def test_put_bedrock_access_keys_and_delete(provider_setup):
-    """Bedrock access_keys upsert and DELETE remove the connection."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=PROVIDERS
-    )
-    put = client.put(
-        f"{PROVIDERS_URL}amazon-bedrock/",
-        data=json.dumps(
-            {
-                "auth_method": "access_keys",
-                "region": "eu-central-1",
-                "access_key_id": "AKIA123",
-                "secret_access_key": "secret-value",
-            }
-        ),
-        content_type="application/json",
-    )
-    assert put.status_code == 200, put.content[:500]
-    body = put.json()
-    assert body["connected"] is True
-    assert body["region"] == "eu-central-1"
-    assert body["auth_method"] == "access_keys"
-
-    deleted = client.delete(f"{PROVIDERS_URL}amazon-bedrock/")
-    assert deleted.status_code == 204
-
-    listed = client.get(PROVIDERS_URL).json()
-    bedrock = next(row for row in listed if row["provider"] == "amazon-bedrock")
-    assert bedrock["connected"] is False
-
-
-@pytest.mark.django_db(transaction=True)
-def test_put_bedrock_validation_errors(provider_setup):
-    """Bedrock PUT validates auth_method and required credential fields."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=PROVIDERS
-    )
-    bad_method = client.put(
-        f"{PROVIDERS_URL}amazon-bedrock/",
-        data=json.dumps({"auth_method": "invalid"}),
-        content_type="application/json",
-    )
-    assert bad_method.status_code == 400
-
-    missing_keys = client.put(
-        f"{PROVIDERS_URL}amazon-bedrock/",
-        data=json.dumps({"auth_method": "access_keys"}),
-        content_type="application/json",
-    )
-    assert missing_keys.status_code == 400
-
-    missing_bearer = client.put(
-        f"{PROVIDERS_URL}amazon-bedrock/",
-        data=json.dumps({"auth_method": "bearer"}),
-        content_type="application/json",
-    )
-    assert missing_bearer.status_code == 400
-
-
-@pytest.mark.django_db(transaction=True)
-def test_put_chatgpt_via_providers_is_400(provider_setup):
-    """ChatGPT credentials must use OAuth, not PUT."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=PROVIDERS
-    )
-    response = client.put(
-        f"{PROVIDERS_URL}chatgpt/",
-        data=json.dumps({}),
-        content_type="application/json",
-    )
-    assert response.status_code == 400
-    assert "OAuth" in response.json()["detail"]
-
-
-@pytest.mark.django_db(transaction=True)
-def test_unknown_provider_returns_400(provider_setup):
-    """Unknown provider path segment is rejected."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=PROVIDERS
-    )
-    response = client.put(
-        f"{PROVIDERS_URL}unknown-provider/",
-        data=json.dumps({"api_key": "x"}),
-        content_type="application/json",
-    )
-    assert response.status_code == 400
-
-
-@pytest.mark.django_db(transaction=True)
-def test_provider_endpoints_require_harness_providers(provider_setup):
-    """harness:read alone is denied on provider connection endpoints."""
-    read_client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=READ
-    )
-    denied = read_client.get(PROVIDERS_URL)
-    assert denied.status_code == 403
-    assert denied.json()["code"] == "permission_denied"
-
-    allowed = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=PROVIDERS
-    )
-    assert allowed.get(PROVIDERS_URL).status_code == 200
-
-
-@pytest.mark.django_db(transaction=True)
-def test_delete_provider_config_keeps_connections(provider_setup):
-    """DELETE /provider-config/ removes defaults but keeps connections."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
-    )
-    client.put(
-        ORG_URL,
-        data=json.dumps({"api_key": "sk-persist", "default_model": "m1"}),
-        content_type="application/json",
-    )
-    assert client.delete(ORG_URL).status_code == 204
-
-    from apps.harness.provider_accounts import ProviderAccountService
-
-    assert (
-        ProviderAccountService().selected_accounts(
-            provider_setup["org"].id, provider_setup["owner"].id
-        )["openrouter"]
-        is not None
-    )
+    assert response.json()[0]["id"] == "openrouter/acme/fast"
+    assert response.json()[0]["provider"] == "openrouter"
+    assert response.json()[0]["reasoning_efforts"] == ["high"]
 
 
 @pytest.mark.django_db(transaction=True)
 def test_chatgpt_oauth_start_status_and_cancel(provider_setup):
-    """OAuth start stores pending state; status completes; cancel clears it."""
+    """OAuth flow IDs survive polling/cancel, and returned account metadata is safe."""
     client = _client(
         user=provider_setup["owner"], org=provider_setup["org"], permissions=PROVIDERS
     )
-    start_url = "/api/v1/provider-config/providers/chatgpt/oauth/start/"
-    status_url = "/api/v1/provider-config/providers/chatgpt/oauth/status/"
-    cancel_url = "/api/v1/provider-config/providers/chatgpt/oauth/cancel/"
+    base = "/api/v1/provider-config/providers/chatgpt/oauth/"
 
     with patch(
         "apps.harness.providers.chatgpt_oauth.start_device_flow",
@@ -725,14 +234,12 @@ def test_chatgpt_oauth_start_status_and_cancel(provider_setup):
             verification_url="https://auth.openai.com/codex/device",
             interval=5,
         )
-        start = client.post(start_url)
+        start = client.post(f"{base}start/")
     assert start.status_code == 200, start.content[:500]
     body = start.json()
     assert body["user_code"] == "ABCD-1234"
-    assert body["interval"] == 5
     assert body["expires_in"] == 600
     flow_id = body["flow_id"]
-    status_url = f"{status_url}?flow_id={flow_id}"
 
     with patch(
         "apps.harness.providers.chatgpt_oauth.poll_device_flow_once",
@@ -741,7 +248,7 @@ def test_chatgpt_oauth_start_status_and_cancel(provider_setup):
         from apps.harness.providers.chatgpt_oauth import DeviceFlowPollResult
 
         mock_poll.return_value = DeviceFlowPollResult(status="pending")
-        pending = client.get(status_url)
+        pending = client.get(f"{base}status/?flow_id={flow_id}")
     assert pending.status_code == 200
     assert pending.json()["status"] == "pending"
 
@@ -761,22 +268,16 @@ def test_chatgpt_oauth_start_status_and_cancel(provider_setup):
                 residency=None,
             ),
         )
-        complete = client.get(status_url)
-    assert complete.status_code == 200, complete.content[:500]
+        complete = client.get(f"{base}status/?flow_id={flow_id}")
+    assert complete.status_code == 200
     assert complete.json() == {"status": "connected", "account_id": "acc-42"}
 
-    from apps.harness.provider_accounts import ProviderAccountService
-
-    accounts = ProviderAccountService().list_accounts(
+    rows = ProviderAccountService().list_accounts(
         provider_setup["org"].id, provider_setup["owner"].id, "chatgpt"
     )
-    assert len(accounts) == 1
-    assert accounts[0]["account_id"] == "acc-42"
-    assert "access-token" not in repr(accounts)
-
-    no_flow = client.get(f"{status_url.split('?')[0]}")
-    assert no_flow.status_code == 404
-    assert no_flow.json()["code"] == "no_flow"
+    assert len(rows) == 1
+    assert rows[0]["account_id"] == "acc-42"
+    assert "access-token" not in repr(rows)
 
     with patch(
         "apps.harness.providers.chatgpt_oauth.start_device_flow",
@@ -788,70 +289,13 @@ def test_chatgpt_oauth_start_status_and_cancel(provider_setup):
             verification_url="https://auth.openai.com/codex/device",
             interval=5,
         )
-        restarted = client.post(start_url)
-    cancel_id = restarted.json()["flow_id"]
+        cancel_flow_id = client.post(f"{base}start/").json()["flow_id"]
     cancelled = client.post(
-        cancel_url,
-        data=json.dumps({"flow_id": cancel_id}),
+        f"{base}cancel/",
+        data=json.dumps({"flow_id": cancel_flow_id}),
         content_type="application/json",
     )
     assert cancelled.status_code == 204
-    assert (
-        client.get(f"{status_url.split('?')[0]}?flow_id={cancel_id}").json()["status"]
-        == "cancelled"
-    )
-
-
-@pytest.mark.django_db(transaction=True)
-def test_org_provider_config_efforts_roundtrip(provider_setup):
-    """PUT/GET persist the reasoning-effort defaults."""
-    client = _client(
-        user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
-    )
-    put = client.put(
-        ORG_URL,
-        data=json.dumps(
-            {
-                "default_model": "model-a",
-                "default_effort": "high",
-                "small_effort": "low",
-                "computer_use_effort": "medium",
-            }
-        ),
-        content_type="application/json",
-    )
-    assert put.status_code == 200, put.content[:500]
-    body = put.json()
-    assert body["default_effort"] == "high"
-    assert body["small_effort"] == "low"
-    assert body["computer_use_effort"] == "medium"
-
-    get = client.get(ORG_URL)
-    assert get.status_code == 200, get.content[:500]
-    stored = get.json()
-    assert stored["default_effort"] == "high"
-    assert stored["small_effort"] == "low"
-    assert stored["computer_use_effort"] == "medium"
-
-
-@pytest.mark.django_db(transaction=True)
-def test_provider_list_tolerates_dirty_openai_compatible_models(provider_setup):
-    """GET /providers/ survives dirty legacy model rows (read-path tolerant)."""
-    from apps.harness.api import _list_org_provider_connections
-
-    service = ProviderConfigService()
-    service.save_connection(
-        organization_id=provider_setup["org"].id,
-        provider="openai-compatible",
-        credentials={"api_key": "k"},
-        config={
-            "base_url": "https://example.test/v1",
-            "models": ["  good  ", "", "good", "other"],
-        },
-    )
-    rows = _list_org_provider_connections(
-        provider_setup["org"].id, provider_setup["owner"].id
-    )
-    compat = next(row for row in rows if row.provider == "openai-compatible")
-    assert compat.connected is True
-    assert compat.models == ["good", "other"]
+    status = client.get(f"{base}status/?flow_id={cancel_flow_id}")
+    assert status.json()["status"] == "cancelled"
+    assert client.get(f"{base}status/").json()["code"] == "no_flow"

@@ -71,15 +71,12 @@ function mountTab(admin = false) {
 }
 
 const config = {
-  base_url: '',
   default_model: '',
   small_model: 'openrouter/model-big',
   computer_use_model: '',
   default_effort: '',
   small_effort: '',
   computer_use_effort: '',
-  has_api_key: false,
-  api_key_hint: '',
 }
 
 describe('ProviderConfigTab', () => {
