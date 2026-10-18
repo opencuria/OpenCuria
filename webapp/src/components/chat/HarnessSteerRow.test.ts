@@ -60,7 +60,7 @@ describe('HarnessSteerRow', () => {
     const steerBubble = steer.get('[data-testid="harness-user-bubble"]')
     const userBubble = message.get('[data-testid="harness-user-bubble"]')
     expect(steerBubble.classes()).toEqual(userBubble.classes())
-    expect(steerBubble.classes()).toContain('bg-primary')
+    expect(steerBubble.classes()).toContain('bg-muted/60')
   })
 
   it('offers no edit, fork or copy actions', () => {

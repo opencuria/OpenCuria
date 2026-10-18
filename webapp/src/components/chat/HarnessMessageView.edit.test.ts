@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { nextTick } from 'vue'
 
 import HarnessMessageView from './HarnessMessageView.vue'
 import type { HarnessMessage } from '@/types/harness'
@@ -175,15 +176,55 @@ describe('HarnessMessageView edit/fork', () => {
     expect(wrapper.emitted('fork')).toEqual([['assistant-1']])
   })
 
-  it('renders the user bubble without an avatar and with on-primary markdown', () => {
+  it('renders the user bubble as a neutral surface without an avatar', () => {
     const wrapper = mount(HarnessMessageView, {
       props: { message: makeUser() },
     })
 
     expect(wrapper.find('.bg-primary\\/10').exists()).toBe(false)
-    expect(wrapper.find('.markdown-stub').attributes('data-on-primary')).toBe('true')
-    expect(wrapper.html()).toContain('px-3')
-    expect(wrapper.html()).toContain('py-2')
+    expect(wrapper.find('.markdown-stub').attributes('data-on-primary')).toBe('false')
+    const bubble = wrapper.get('[data-testid="harness-user-bubble"]')
+    expect(bubble.classes()).toContain('bg-muted/60')
+    expect(bubble.classes()).not.toContain('bg-primary')
+  })
+
+  it('turns the bubble into an inline editor card with a focused input', async () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: { message: makeUser() },
+      attachTo: document.body,
+    })
+
+    expect(wrapper.find('[data-testid="message-edit-card"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="message-edit"]').trigger('click')
+    await nextTick()
+
+    const card = wrapper.get('[data-testid="message-edit-card"]')
+    expect(card.find('[data-testid="message-edit-input"]').exists()).toBe(true)
+    expect(card.find('[data-testid="message-edit-cancel"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="harness-user-bubble"]').exists()).toBe(false)
+    const input = wrapper.get('[data-testid="message-edit-input"]').element as HTMLTextAreaElement
+    expect(document.activeElement).toBe(input)
+    expect(input.selectionStart).toBe(input.value.length)
+    wrapper.unmount()
+  })
+
+  it('saves on Enter but not on Shift+Enter or during IME composition', async () => {
+    const wrapper = mount(HarnessMessageView, {
+      props: { message: makeUser() },
+    })
+
+    await wrapper.get('[data-testid="message-edit"]').trigger('click')
+    const input = wrapper.get('[data-testid="message-edit-input"]')
+    await input.setValue('edited prompt')
+
+    await input.trigger('keydown', { key: 'Enter', shiftKey: true })
+    expect(wrapper.emitted('edit')).toBeUndefined()
+
+    await input.trigger('keydown', { key: 'Enter', isComposing: true })
+    expect(wrapper.emitted('edit')).toBeUndefined()
+
+    await input.trigger('keydown', { key: 'Enter' })
+    expect(wrapper.emitted('edit')).toEqual([['user-1', 'edited prompt']])
   })
 
   it('shows no skill pills without skill_ids', () => {

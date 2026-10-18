@@ -72,6 +72,19 @@ describe('HarnessSubtaskCard', () => {
     expect(logo.attributes('aria-hidden')).toBe('true')
     expect(wrapper.find('[data-testid="harness-subtask-activity"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('Completed')
+    expect(wrapper.get('[data-testid="harness-subtask-title"]').classes()).toContain(
+      'harness-shimmer',
+    )
+  })
+
+  it('stops shimmering the title once the subtask is done', () => {
+    const wrapper = mount(HarnessSubtaskCard, {
+      props: { part: makeSubtaskPart({ state: 'completed' }) },
+    })
+
+    const title = wrapper.get('[data-testid="harness-subtask-title"]')
+    expect(title.classes()).not.toContain('harness-shimmer')
+    expect(title.classes()).toContain('text-foreground')
   })
 
   it('shows the running child tool title as activity', () => {

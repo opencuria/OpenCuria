@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { pinHarnessMessageKey } from '@/lib/harnessMessagePin'
-import { BookText, CornerDownRight } from '@lucide/vue'
+import { BookText, CornerDownRight, CornerDownLeft } from '@lucide/vue'
 import type { HarnessMessage } from '@/types/harness'
 import { buildMessageBlocks, type MessageRenderBlock, type RenderBlock } from '@/lib/harnessBlocks'
 import { getMessageCopyText } from '@/lib/harnessMessageCopy'
@@ -267,9 +267,24 @@ watch(
   },
 )
 
+const editInput = ref<{ $el: HTMLTextAreaElement } | null>(null)
+
 function startEdit(): void {
   editDraft.value = props.message.content
   editing.value = true
+  void nextTick(() => {
+    const el = editInput.value?.$el
+    if (!el) return
+    el.focus()
+    el.setSelectionRange(el.value.length, el.value.length)
+  })
+}
+
+/** Enter saves, Shift+Enter breaks the line; never steal Enter from IME composition. */
+function onEditEnter(event: KeyboardEvent): void {
+  if (event.isComposing) return
+  event.preventDefault()
+  saveEdit()
 }
 
 function cancelEdit(): void {
@@ -317,35 +332,47 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
     @focusin="onMessageFocusIn"
     @focusout="onMessageFocusOut"
   >
-    <div class="min-w-0 max-w-3xl">
+    <div class="min-w-0" :class="editing ? 'w-full max-w-3xl' : 'max-w-[85%]'">
       <HarnessUserBubble v-if="!editing" :text="message.content" />
-      <div v-else class="flex flex-col gap-2">
+      <div
+        v-else
+        data-testid="message-edit-card"
+        class="flex flex-col rounded-2xl border border-border bg-card shadow-xs transition-[border-color,box-shadow] focus-within:border-primary/50 focus-within:ring-3 focus-within:ring-primary/15"
+      >
         <Textarea
+          ref="editInput"
           v-model="editDraft"
-          class="min-h-20 text-sm"
+          aria-label="Edit message"
+          class="max-h-[50vh] min-h-12 overflow-y-auto rounded-none border-0 bg-transparent px-3.5 pb-1 pt-3 text-sm leading-relaxed shadow-none focus-visible:ring-0 dark:bg-transparent"
           data-testid="message-edit-input"
           @keydown.escape="cancelEdit"
-          @keydown.enter.exact.prevent="saveEdit"
+          @keydown.enter.exact="onEditEnter"
         />
-        <div class="flex items-center justify-end gap-2">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            data-testid="message-edit-cancel"
-            @click="cancelEdit"
-          >
-            Cancel
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            data-testid="message-edit-save"
-            :disabled="!editDraft.trim() || editDraft.trim() === message.content"
-            @click="saveEdit"
-          >
-            Save
-          </Button>
+        <div class="flex items-center justify-between gap-2 py-2 pl-3.5 pr-2">
+          <span class="truncate text-[11px] text-muted-foreground">Reruns from here</span>
+          <div class="flex shrink-0 items-center gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              class="h-7 px-2.5 text-xs text-muted-foreground hover:text-foreground"
+              data-testid="message-edit-cancel"
+              @click="cancelEdit"
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              class="h-7 gap-1.5 px-2.5 text-xs"
+              data-testid="message-edit-save"
+              :disabled="!editDraft.trim() || editDraft.trim() === message.content"
+              @click="saveEdit"
+            >
+              Rerun
+              <CornerDownLeft :size="12" aria-hidden="true" class="opacity-70" />
+            </Button>
+          </div>
         </div>
       </div>
       <div
@@ -363,14 +390,16 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
           {{ skill.name }}
         </span>
       </div>
-      <HarnessMessageFooter
-        v-if="!editing"
-        align="end"
-        :copy-text="message.content"
-        copy-label="message"
-        :editable="isEditableMessage"
-        @edit="startEdit"
-      />
+      <!-- Zero-height slot: actions float in the turn gap instead of widening it. -->
+      <div v-if="!editing" class="relative z-10 h-0">
+        <HarnessMessageFooter
+          align="end"
+          :copy-text="message.content"
+          copy-label="message"
+          :editable="isEditableMessage"
+          @edit="startEdit"
+        />
+      </div>
     </div>
   </div>
 
@@ -382,7 +411,7 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
     @focusin="onMessageFocusIn"
     @focusout="onMessageFocusOut"
   >
-    <div class="min-w-0 flex-1 max-w-3xl py-2 text-sm text-foreground">
+    <div class="min-w-0 flex-1 max-w-3xl pb-2 pt-3 text-sm text-foreground">
       <div v-if="blocks.length" class="flex flex-col gap-2 [&>[data-block-kind=workedFor]]:-mb-0.5">
         <HarnessPageControls
           :page="blockPage"

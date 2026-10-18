@@ -82,7 +82,10 @@ describe('HarnessWorkedGroup', () => {
 
     expect(wrapper.findAll('[data-testid="harness-work-row"]')).toHaveLength(0)
     expect(wrapper.get('[data-testid="harness-worked-live"]').text()).toBe('Grep foo')
-    expect(wrapper.find('.loading-stub').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="harness-worked-live"]').classes()).toContain(
+      'harness-shimmer',
+    )
+    expect(wrapper.get('[data-slot="collapsible-trigger"]').attributes('aria-busy')).toBe('true')
   })
 
   it('shows a running count when several parts run at once', () => {

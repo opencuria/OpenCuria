@@ -90,25 +90,24 @@ describe('HarnessMessageView mentions', () => {
   })
 
   it('renders mention badges and image thumbnails in user history without a remove affordance', async () => {
-    useWorkspaceImageStore().imageCache['/workspace/cat.png'] =
-      'data:image/png;base64,abc'
+    useWorkspaceImageStore().imageCache['/workspace/cat.png'] = 'data:image/png;base64,abc'
     const wrapper = mountView(
       makeUser('Fix @file:/workspace/src/a.ts with @agent:build, see @file:/workspace/cat.png'),
     )
     await flush()
 
-    expect(wrapper.findAll('[data-testid="mention-badge-file"]').length).toBeGreaterThanOrEqual(
-      1,
-    )
+    expect(wrapper.findAll('[data-testid="mention-badge-file"]').length).toBeGreaterThanOrEqual(1)
     expect(wrapper.find('[data-testid="mention-badge-agent"]').text()).toBe('@agent:build')
     expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="mention-image"]').attributes('src')).toBe(
       'data:image/png;base64,abc',
     )
     expect(wrapper.find('[data-testid="mention-image-remove"]').exists()).toBe(false)
-    const bubble = wrapper.get('.bg-primary')
+    const bubble = wrapper.get('[data-testid="harness-user-bubble"]')
     const strip = wrapper.get('[data-testid="mention-images"]')
-    expect(bubble.element.compareDocumentPosition(strip.element)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(bubble.element.compareDocumentPosition(strip.element)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
     expect(bubble.element.contains(strip.element)).toBe(false)
     expect(strip.classes()).toContain('justify-end')
     expect(wrapper.get('[data-testid="mention-badge-file"]').classes()).toContain('h-5')

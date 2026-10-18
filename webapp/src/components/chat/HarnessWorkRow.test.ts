@@ -154,14 +154,45 @@ describe('HarnessWorkRow', () => {
     expect(wrapper.get('[data-testid="harness-work-row-label"]').text()).toContain('$ missing')
   })
 
-  it('shows a spinner while a tool is running', () => {
+  it('shimmers the label while a tool is running', () => {
     const wrapper = mount(HarnessWorkRow, {
       props: {
         part: makePart({ state: 'running', output: '' }),
       },
     })
 
-    expect(wrapper.find('.loading-stub').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="harness-work-row-label"]').classes()).toContain(
+      'harness-shimmer',
+    )
+    expect(wrapper.get('[data-slot="collapsible-trigger"]').attributes('aria-busy')).toBe('true')
+    expect(wrapper.get('[data-testid="harness-work-row"]').attributes('data-state')).toBe('running')
+  })
+
+  it('stops shimmering once the tool is done', () => {
+    const wrapper = mount(HarnessWorkRow, {
+      props: {
+        part: makePart({ state: 'completed' }),
+      },
+    })
+
+    expect(wrapper.get('[data-testid="harness-work-row-label"]').classes()).not.toContain(
+      'harness-shimmer',
+    )
+    expect(wrapper.get('[data-slot="collapsible-trigger"]').attributes('aria-busy')).toBeUndefined()
+  })
+
+  it('splits file tools into verb, file name and directory hint', () => {
+    const wrapper = mount(HarnessWorkRow, {
+      props: {
+        part: makePart({ tool: 'read', title: 'Read src/components/App.vue' }),
+      },
+    })
+
+    expect(wrapper.get('[data-testid="harness-work-row-label"]').text()).toBe('Read App.vue')
+    expect(wrapper.get('[data-testid="harness-work-row-hint"]').text()).toBe('src/components')
+    expect(wrapper.get('[data-slot="collapsible-trigger"]').attributes('title')).toBe(
+      'Read src/components/App.vue',
+    )
   })
 
   it('uses Monitor for computer-use view tools', () => {

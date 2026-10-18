@@ -23,7 +23,7 @@ const lightbox = ref<{ src: string; alt: string } | null>(null)
     </code>
     <pre
       v-if="preview"
-      class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px]"
+      class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border/60 bg-muted/40 px-2.5 py-2 font-mono text-[11px]"
       :class="part.state === 'error' ? 'text-destructive' : 'text-muted-foreground'"
       >{{ preview }}</pre
     >

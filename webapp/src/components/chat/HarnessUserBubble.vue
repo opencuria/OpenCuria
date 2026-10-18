@@ -21,16 +21,10 @@ const mentionImages = ref<ComposerFileToken[]>([])
 
 <template>
   <div
-    class="overflow-x-auto rounded-[var(--radius-md)] rounded-br-sm bg-primary text-primary-foreground px-3 py-2 text-sm break-words"
+    class="overflow-x-auto rounded-2xl rounded-br-md border border-border/70 bg-muted/60 px-3.5 py-2.5 text-sm text-foreground break-words"
     data-testid="harness-user-bubble"
   >
-    <HarnessMarkdown
-      :text="text"
-      compact
-      :on-primary="true"
-      mentions
-      @mention-images="mentionImages = $event"
-    />
+    <HarnessMarkdown :text="text" compact mentions @mention-images="mentionImages = $event" />
   </div>
   <HarnessMentionImages
     v-if="mentionImages.length"

@@ -44,7 +44,7 @@ const preview = computed(() => truncatePreview(props.part.output || ''))
     </div>
     <pre
       v-if="preview"
-      class="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/80 px-2 py-1.5 font-mono text-[11px]"
+      class="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border/60 bg-muted/40 px-2.5 py-2 font-mono text-[11px]"
       :class="failed ? 'text-destructive' : 'text-muted-foreground'"
     >{{ preview }}</pre>
     <p v-else-if="part.state === 'running'" class="text-[11px] text-muted-foreground">Running…</p>
