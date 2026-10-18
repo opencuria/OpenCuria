@@ -161,13 +161,3 @@ filesystem fake—not a Docker or QEMU guest. Backend local-SSE contract tests r
 the real pinned CLI against scripted responses and cover native schemas, prompt
 refresh on resume, child context/tool scopes, direct image/PDF input, permission
 hooks, MCP correlation, and turn-limit completion without real provider calls.
-
-The opt-in browser E2E runs the actual pinned SDK and CLI through tool-use and
-continuation turns against a local canned Messages fixture and synthetic
-workspace accessor. It covers chat, root agent, SDK subagent, OpenCuria question
-gate, settings UI, and persistence using dummy tokens. The CLI protocol is real;
-model replies are scripted, with no real inference or Anthropic account call. It
-does not use a native runner, Docker workspace, or QEMU guest. See the [local E2E
-guide](../e2e/integration/README.claude-agent-live.md) for prerequisites and
-commands; it requires Linux namespace setup and a separately started test
-frontend.

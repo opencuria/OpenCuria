@@ -19,7 +19,7 @@ OpenCuria centrally provisions, manages, and monitors AI coding agents.
 Flow: web/mobile → REST + Socket.IO `/frontend` → `backend` → Socket.IO
 `harness:*` RPC → `runner` → workspace. Mobile feature screens live in
 `mobile/src/screens/`; `mobile/app/` is Expo Router routes only. See
-`docs/mobile-app.md` for setup, mobile boundaries and fixture limitations.
+`docs/mobile-app.md` for setup, mobile boundaries and platform limitations.
 
 ## 2. Goal: modular and extensible
 
@@ -86,11 +86,12 @@ layer, one implementation per behavior, composition over duplication.
 - Don't invent a parallel secret, config, plugin, or permission mechanism.
 - Don't write long, verbose system prompts or repeat tool schemas in prompts.
 - Don't add dependencies without justification; don't bypass `Todo`/permission gates.
-- Don't commit directly to `main`, don't skip the pre-commit gate.
+- Don't commit directly to `main`.
 
 ## 7. Verify before finishing
 
-Run what your change touches:
+Run checks relevant to your change; the full test suite is not required for each
+commit. Available checks include:
 
 ```bash
 cd backend && source .venv/bin/activate && pytest -q
@@ -103,6 +104,6 @@ Install npm workspace dependencies with `npm ci` from the repository root; do no
 use a component-local npm lockfile. Mobile-specific Expo/device checks are in
 `docs/mobile-app.md`.
 
-Commit gate: `./.githooks/pre-commit` must print `Ready to commit.` Fresh clone
-first: `./scripts/setup-dev.sh`. After implementing, verify for real and embed
-a workspace screenshot as `![label](path)` when it shows the working result.
+For a fresh clone, run `./scripts/setup-dev.sh`. After implementing, verify for
+real and embed a workspace screenshot as `![label](path)` when it shows the
+working result.

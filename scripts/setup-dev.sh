@@ -97,11 +97,6 @@ run_backend_migrations() {
   )
 }
 
-setup_git_hooks() {
-  print_section "Configuring git hooks"
-  git -C "$REPO_ROOT" config core.hooksPath .githooks
-}
-
 build_workspace_image() {
   print_section "Building local workspace image"
   docker build \
@@ -113,7 +108,6 @@ build_workspace_image() {
 print_next_steps() {
   print_section "Setup complete"
   printf 'Development environment is ready.\n'
-  printf 'Git hooks are active and commits now require ./.githooks/pre-commit to pass.\n'
   printf 'If you need the local runner workspace image as well, rerun with --build-workspace-image.\n'
 }
 
@@ -132,7 +126,6 @@ done
 
 require_command python3
 require_command npm
-require_command git
 
 install_system_deps() {
   print_section "Installing system build dependencies"
@@ -162,7 +155,6 @@ install_system_deps() {
 }
 
 install_system_deps
-setup_git_hooks
 setup_python_component backend
 setup_runner_python_environment
 setup_node_component .

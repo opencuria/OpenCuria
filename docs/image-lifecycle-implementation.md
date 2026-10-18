@@ -366,32 +366,8 @@ The PostgreSQL async-focused suite can leave sessions preventing test DB teardow
 standalone concurrency runs close cleanly. Existing staticfiles/deprecation and
 frontend chunk-size warnings are separate from correctness assertions.
 
-Parent-completed live verification (isolated integration environment):
-
-- PostgreSQL preserving migration/repository/recovery suites: **80 passed**,
-  including four independent-connection concurrency tests. Subsequent
-  cancellation/completion verification: **55 passed**. SQLite does not substitute
-  for these observed PostgreSQL lock-contention tests.
-- Real tiny Docker HTTP build/rebuild preserved old workspace pins. Deferred
-  deletion/cancellation and approved force completed; all fixture containers and
-  three image generations were physically absent, with every child journal ACK
-  confirmed.
-- Backend outage during the real 12-second Docker build preserved the exact task's
-  terminal `image:built` with ACK=0 before restart, then ACK=1 after reconnect,
-  with exactly one runtime generation. This was lost-outcome replay, not rerunning
-  a new task; no running container was stopped for the outage test.
-- Canonical Docker volume smoke passed: actual data volume, shared-consumer
-  preflight refusal, inventory size/identity and complete cleanup.
-- Real libvirt stopped blank-disk standalone capture and dependency checks passed.
-  This does **not** establish boot, SSH, guest credential scrub or provisioning.
-
-Commands and private evidence filenames are documented in
-`e2e/integration/README.md`; `outage-before.json` retains pre-reconnect ACK=0 proof.
-The optional `guest_smoke.py` uses normal runtime + WorkspaceService + real journal
-checkpoint hooks but is **not HTTP or backend capture-pipeline coverage**. It is
-now verified by parent execution producing guest-result.json (direct-service only).
 Host-crash/ENOSPC/Redis-outage production scenarios still require deliberate live
-evidence, not mocked tests. No unrelated libvirt domain is modified by this harness.
+evidence, not mocked tests.
 
 For this focused volume cleanup, test paths are
 `runner/tests/test_docker_workspace_storage.py`, `test_docker_runtime.py`,
@@ -399,25 +375,6 @@ For this focused volume cleanup, test paths are
 belong in the completion report/run artifacts rather than cumulative phase notes.
 No automatic pruning, generic garbage collector, journal reset, or broad foreign
 resource deletion exists. For uncertain ownership preserve resources and inspect.
-
-
-Booted Ubuntu direct-service verification subsequently passed in the isolated
-parent run (`.opencuria/integration/booted-guest.log`,
-`.opencuria/integration/live/guest-result.json`). This proves boot/SSH, injected
-disposable credential scrub, standalone capture, reinjection and external-stop
-proof refusal. The full real HTTP/backend-worker stop/capture/resume pipeline
-subsequently passed parent verification (`live/guest-http-parent-result.json`):
-completed CaptureRequest without diagnostic, running/unfenced workspace, ready
-standalone QCOW2 checked clean, and ACKed terminal children. Registry-race and
-resume credential acknowledgement fixes are covered by regression tests. The
-opt-in `guest-http-poll` command rechecks that exact staged invocation without
-issuing lifecycle actions; the corrected harness passed parent execution
-(`live/guest-http-parent-result.json`). Capture resume resource regression
-coverage confirms TaskRepository's existing eager preparation persists QEMU
-1/1024/20 correctly; no production payload fix was necessary. Image-artifact GET
-and MCP list no longer invoke legacy timeout mutation (independent recovery owns
-progression).
-
 
 ### Liveness cache and heartbeat isolation
 

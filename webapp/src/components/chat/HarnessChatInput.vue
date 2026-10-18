@@ -395,10 +395,9 @@ const harnessLabel = computed(() =>
 const modeMenuLabel = computed(() => `${harnessLabel.value} ${modeLabel.value}`)
 
 /**
- * Öffnet das Provider-Tab direkt per Window-Event — bewusst OHNE Router-Navigation:
- * Der Host hängt global in AppLayout, der `/?settings=`-Deep-Link bleibt für
- * Redirects/e2e erhalten. So kann der Banner-Klick keine Navigation abbrechen
- * oder eine Replace-Schleife auslösen (gemeldeter "Page Unresponsive"-Hänger).
+ * Open provider settings via a window event, without router navigation.
+ * AppLayout hosts the dialog globally; the `/?settings=` deep link still supports
+ * redirects. Banner clicks cannot interrupt navigation or trigger a replace loop.
  */
 function openProviderSettings(): void {
   window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'provider' } }))

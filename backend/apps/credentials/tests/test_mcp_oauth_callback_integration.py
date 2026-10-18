@@ -1,4 +1,4 @@
-"""End-to-end API connect and public callback redirect contract."""
+"""API connect and public callback redirect integration contract."""
 
 from __future__ import annotations
 
