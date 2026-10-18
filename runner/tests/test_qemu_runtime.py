@@ -1,12 +1,154 @@
+import asyncio
+import shutil
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import libvirt
-
+from src.runtime.base import WorkspaceConfig
 from src.runtime.qemu_runtime import QemuRuntime
+
+
+class QemuRuntimeCloudInitTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.runtime = object.__new__(QemuRuntime)
+        self.runtime._disk_dir = Path(self.directory.name)
+        self.runtime._ssh_states = {}
+        self.runtime._get_ssh_public_key = MagicMock(
+            return_value="ssh-ed25519 test-runner-key"
+        )
+        self.workspace_id = str(uuid.uuid4())
+
+    async def test_recreation_refreshes_identity_even_when_network_is_unchanged(
+        self,
+    ) -> None:
+        """Reset must invalidate both legacy and newly captured cloud-init caches."""
+        seeds: list[tuple[str, str]] = []
+
+        async def create_iso(*args: str, **kwargs: object) -> SimpleNamespace:
+            files = {Path(arg).name: Path(arg) for arg in args[-3:]}
+            seeds.append(
+                (files["meta-data"].read_text(), files["network-config"].read_text())
+            )
+            Path(args[2]).touch()
+            return SimpleNamespace(
+                returncode=0, communicate=AsyncMock(return_value=(b"", b""))
+            )
+
+        with patch("src.runtime.qemu_runtime.shutil.which", return_value="tool"), patch(
+            "src.runtime.qemu_runtime.asyncio.create_subprocess_exec",
+            side_effect=create_iso,
+        ):
+            for ip, gateway in (
+                ("10.100.0.14", "10.100.0.13"),
+                ("10.100.0.2", "10.100.0.1"),
+                ("10.100.0.2", "10.100.0.1"),
+            ):
+                iso = await self.runtime._create_cloud_init_iso(
+                    self.workspace_id, vm_ip=ip, gateway=gateway
+                )
+                self.assertEqual(
+                    iso, self.runtime._cloud_init_iso_path(self.workspace_id)
+                )
+                self.assertEqual(iso.stat().st_mode & 0o777, 0o644)
+                self.assertIn(f"{ip}/30", seeds[-1][1])
+                self.assertIn(f"via: {gateway}", seeds[-1][1])
+
+        identities = [
+            metadata.splitlines()[0].split(": ", 1)[1] for metadata, _ in seeds
+        ]
+        self.assertEqual(len(set(identities + [self.workspace_id])), 4)
+        for identity in identities:
+            self.assertEqual(uuid.UUID(identity).version, 4)
+
+    async def test_start_reuses_the_existing_seed(self) -> None:
+        """A normal start must not rerun first-boot provisioning."""
+        iso = self.runtime._cloud_init_iso_path(self.workspace_id)
+        iso.write_bytes(b"existing cloud-init seed")
+        domain = MagicMock()
+        domain.state.return_value = (libvirt.VIR_DOMAIN_SHUTOFF, 0)
+        self.runtime._get_domain = MagicMock(return_value=domain)
+        self.runtime._wait_for_ssh = AsyncMock()
+        self.runtime._create_cloud_init_iso = AsyncMock(
+            side_effect=AssertionError("Start must reuse the existing seed")
+        )
+
+        await self.runtime.start_workspace(self.workspace_id)
+
+        domain.create.assert_called_once_with()
+        self.runtime._wait_for_ssh.assert_awaited_once_with(self.workspace_id)
+        self.assertEqual(iso.read_bytes(), b"existing cloud-init seed")
+
+    async def test_seed_failure_prevents_booting_an_unconfigured_vm(self) -> None:
+        """An ISO failure must stop creation before defining or starting a VM."""
+        self.runtime._settings = SimpleNamespace(
+            qemu_vcpus=2, qemu_memory_mb=4096, qemu_disk_size_gb=50
+        )
+        self.runtime._create_workspace_network = AsyncMock(
+            return_value=("10.100.0.1", "10.100.0.2")
+        )
+        self.runtime._create_overlay_disk = AsyncMock(
+            return_value=self.runtime._disk_path(self.workspace_id)
+        )
+        self.runtime._libvirt_conn = MagicMock()
+        self.runtime._wait_for_ssh = AsyncMock()
+        process = SimpleNamespace(
+            returncode=1,
+            communicate=AsyncMock(return_value=(b"", b"ISO creation failed")),
+        )
+
+        with patch("src.runtime.qemu_runtime.shutil.which", return_value="tool"), patch(
+            "src.runtime.qemu_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ), self.assertRaisesRegex(RuntimeError, "ISO creation failed"):
+            await self.runtime.create_workspace(
+                WorkspaceConfig(
+                    workspace_id=self.workspace_id, image="base.qcow2", env_vars={}
+                )
+            )
+
+        self.runtime._libvirt_conn.assert_not_called()
+        self.runtime._wait_for_ssh.assert_not_awaited()
+
+    @unittest.skipUnless(
+        shutil.which("genisoimage") and shutil.which("isoinfo"),
+        "requires genisoimage and isoinfo",
+    )
+    async def test_real_iso_contains_the_new_identity_and_network(self) -> None:
+        """Verify the generated NoCloud ISO, including the permissions QEMU needs."""
+        identities: list[str] = []
+        for _ in range(2):
+            iso = await self.runtime._create_cloud_init_iso(
+                self.workspace_id, vm_ip="10.100.0.2", gateway="10.100.0.1"
+            )
+            for name in ("meta-data", "network-config", "user-data"):
+                process = await asyncio.create_subprocess_exec(
+                    "isoinfo", "-R", "-i", str(iso), "-x", f"/{name}",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await process.communicate()
+                self.assertEqual(process.returncode, 0, stderr.decode())
+                text = stdout.decode()
+                if name == "meta-data":
+                    identity = text.splitlines()[0].split(": ", 1)[1]
+                    self.assertNotEqual(identity, self.workspace_id)
+                    self.assertIn("local-hostname: opencuria-workspace", text)
+                    identities.append(identity)
+                elif name == "network-config":
+                    self.assertIn("10.100.0.2/30", text)
+                    self.assertIn("via: 10.100.0.1", text)
+                else:
+                    self.assertIn("ssh-ed25519 test-runner-key", text)
+            self.assertEqual(iso.stat().st_mode & 0o777, 0o644)
+            work_dir = self.runtime._disk_dir / f"{self.workspace_id}-cloud-init"
+            self.assertFalse(work_dir.exists())
+        self.assertNotEqual(identities[0], identities[1])
 
 
 class QemuRuntimeHostDirectoryTests(unittest.TestCase):
