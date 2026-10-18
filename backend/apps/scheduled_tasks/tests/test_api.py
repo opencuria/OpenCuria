@@ -104,6 +104,60 @@ def test_create_list_and_pause_schedule_owner_scoped(schedule_api_setup, monkeyp
     assert paused.json()["enabled"] is False
 
 
+def test_patch_moves_schedule_to_another_owned_workspace(
+    schedule_api_setup, monkeypatch
+):
+    from apps.harness.harness_service import HarnessService
+
+    monkeypatch.setattr(
+        HarnessService,
+        "validate_provider_for_run",
+        lambda self, organization_id, session, provider=None: "openrouter/test",
+    )
+    org, owner, stranger, workspace = schedule_api_setup
+    other = Workspace.objects.create(
+        runner=workspace.runner,
+        created_by=owner,
+        name="second workspace",
+        status=WorkspaceStatus.RUNNING,
+    )
+    foreign = Workspace.objects.create(
+        runner=workspace.runner,
+        created_by=stranger,
+        name="foreign workspace",
+        status=WorkspaceStatus.RUNNING,
+    )
+    client = schedule_client(
+        owner,
+        org,
+        [APIKeyPermission.HARNESS_READ.value, APIKeyPermission.HARNESS_RUN.value],
+    )
+    created = client.post(
+        "/api/v1/scheduled-tasks/",
+        data={
+            "name": "Daily review",
+            "workspace_id": str(workspace.id),
+            "prompt": "Review changes",
+        },
+        content_type="application/json",
+    )
+    assert created.status_code == 201, created.content
+    url = f"/api/v1/scheduled-tasks/{created.json()['id']}/"
+
+    moved = client.patch(
+        url, data={"workspace_id": str(other.id)}, content_type="application/json"
+    )
+    assert moved.status_code == 200, moved.content
+    assert moved.json()["workspace_id"] == str(other.id)
+    assert client.get(url).json()["workspace_id"] == str(other.id)
+
+    denied = client.patch(
+        url, data={"workspace_id": str(foreign.id)}, content_type="application/json"
+    )
+    assert denied.status_code == 404, denied.content
+    assert client.get(url).json()["workspace_id"] == str(other.id)
+
+
 def test_local_time_stays_hhmm_across_task_endpoints(schedule_api_setup, monkeypatch):
     from django.utils import timezone
 

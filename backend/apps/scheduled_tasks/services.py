@@ -208,7 +208,14 @@ class ScheduledTaskService:
             next_run_at=next_at,
         )
 
-    def update(self, task: ScheduledTask, values: dict[str, Any]) -> ScheduledTask:
+    def update(
+        self,
+        task: ScheduledTask,
+        values: dict[str, Any],
+        *,
+        workspace: Any | None = None,
+    ) -> ScheduledTask:
+        """Update a task; ``workspace`` is an already-authorized new target."""
         allowed = {
             "name",
             "prompt",
@@ -224,6 +231,10 @@ class ScheduledTaskService:
             "enabled",
         }
         changes = {key: value for key, value in values.items() if key in allowed}
+        workspace_changed = workspace is not None and workspace.id != task.workspace_id
+        if workspace_changed:
+            changes["workspace"] = workspace
+        target_workspace_id = workspace.id if workspace_changed else task.workspace_id
         combined = {
             key: getattr(task, key, "native" if key == "harness_id" else None)
             for key in allowed
@@ -288,14 +299,16 @@ class ScheduledTaskService:
                     user_id=task.owner_id,
                     organization_id=task.organization_id,
                 )
-        validate_engine = bool(
-            {"mode", "model", "reasoning_effort", "harness_id"} & changes.keys()
-        ) or ("skill_ids" in changes and combined["harness_id"] == "claude")
+        validate_engine = (
+            workspace_changed
+            or bool({"mode", "model", "reasoning_effort", "harness_id"} & changes.keys())
+            or ("skill_ids" in changes and combined["harness_id"] == "claude")
+        )
         if validate_engine:
             harness_id, model, effort, skills = self._validate_engine_config(
                 organization_id=task.organization_id,
                 owner_id=task.owner_id,
-                workspace_id=task.workspace_id,
+                workspace_id=target_workspace_id,
                 mode=combined.get("mode", task.mode),
                 harness_id=combined.get("harness_id", getattr(task, "harness_id", "native")),
                 model=combined.get("model", task.model) or "",

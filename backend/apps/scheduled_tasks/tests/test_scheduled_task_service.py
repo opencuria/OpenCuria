@@ -411,6 +411,42 @@ async def test_editing_task_does_not_move_imminent_occurrence():
     assert updated.next_run_at == due
 
 
+def test_update_can_move_task_to_another_workspace(monkeypatch):
+    repo = FakeRepository()
+    old_workspace_id = uuid.uuid4()
+    task = SimpleNamespace(
+        name="Daily review",
+        prompt="Prompt",
+        mode="build",
+        model="",
+        reasoning_effort="",
+        harness_id="native",
+        skill_ids=[],
+        recurrence="daily",
+        weekdays=[],
+        local_time=time(9),
+        timezone_name="UTC",
+        enabled=True,
+        next_run_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        workspace_id=old_workspace_id,
+        organization_id=uuid.uuid4(),
+        owner_id=1,
+    )
+    new_workspace = SimpleNamespace(id=uuid.uuid4())
+    validated = []
+    service = ScheduledTaskService(repository=repo)
+
+    def fake_validate(**kwargs):
+        validated.append(kwargs["workspace_id"])
+        return "native", "", "", []
+
+    monkeypatch.setattr(service, "_validate_engine_config", fake_validate)
+    updated = service.update(task, {}, workspace=new_workspace)
+
+    assert updated.workspace is new_workspace
+    assert validated == [new_workspace.id]
+
+
 @pytest.mark.asyncio
 async def test_started_run_survives_activity_touch_failure():
     repo = FakeRepository()

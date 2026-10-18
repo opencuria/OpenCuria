@@ -979,6 +979,7 @@ _TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "task_id": {"type": "string"},
+                "workspace_id": {"type": "string"},
                 "name": {"type": "string"},
                 "prompt": {"type": "string"},
                 "harness_id": {"type": "string", "enum": ["native", "claude"]},
@@ -4107,8 +4108,19 @@ async def _call_update_scheduled_task(api_key, org_id, args: dict) -> list[TextC
             organization_id=org_id,
             owner_id=api_key.user.id,
         )
-        values = {key: value for key, value in args.items() if key != "task_id"}
-        task = await sync_to_async(service.update)(task, values)
+        values = {
+            key: value
+            for key, value in args.items()
+            if key not in {"task_id", "workspace_id"}
+        }
+        workspace = None
+        if args.get("workspace_id"):
+            workspace, error = await sync_to_async(_get_owned_workspace_or_error)(
+                api_key, org_id, _uuid.UUID(str(args["workspace_id"]))
+            )
+            if error:
+                return error
+        task = await sync_to_async(service.update)(task, values, workspace=workspace)
         return _text(_scheduled_task_dict(task))
     except (ValueError, NotFoundError) as exc:
         return _error(str(exc))

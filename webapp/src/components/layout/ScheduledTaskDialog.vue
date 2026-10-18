@@ -672,7 +672,7 @@ onMounted(async () => {
                   ><span class="block text-xs font-medium">Workspace</span>
                   <Select
                     :model-value="form.workspace_id || undefined"
-                    :disabled="!isNew || busy"
+                    :disabled="busy"
                     @update:model-value="updateForm('workspace_id', String($event))"
                   >
                     <SelectTrigger class="h-9 w-full rounded-lg" data-testid="task-workspace"

@@ -38,7 +38,7 @@ export interface ScheduledTaskInput {
   enabled: boolean
 }
 
-export type ScheduledTaskPatch = Partial<Omit<ScheduledTaskInput, 'workspace_id'>>
+export type ScheduledTaskPatch = Partial<ScheduledTaskInput>
 
 export interface ScheduledTaskRun {
   id: string

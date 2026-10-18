@@ -71,6 +71,7 @@ class ScheduledTaskIn(Schema):
 
 class ScheduledTaskPatchIn(Schema):
     name: str | None = None
+    workspace_id: uuid.UUID | None = None
     prompt: str | None = None
     mode: str | None = None
     model: str | None = None
@@ -262,8 +263,17 @@ async def patch_scheduled_task(
         task = await sync_to_async(_service().get)(
             task_id, organization_id=org_id, owner_id=request.user.id
         )
+        workspace = (
+            await _owned_workspace(request, org_id, payload.workspace_id)
+            if payload.workspace_id is not None
+            else None
+        )
         updated = await sync_to_async(_service().update)(
-            task, payload.model_dump(exclude_unset=True, exclude_none=True)
+            task,
+            payload.model_dump(
+                exclude_unset=True, exclude_none=True, exclude={"workspace_id"}
+            ),
+            workspace=workspace,
         )
         return 200, _task_out(updated)
     except NotFoundError as exc:
