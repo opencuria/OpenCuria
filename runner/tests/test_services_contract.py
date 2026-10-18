@@ -7,9 +7,9 @@ the ``src.services`` extraction (Steps 1-8) must preserve:
   "not found", ``_get_runtime`` raises ``RuntimeError`` for an unknown
   runtime, and lifecycle entry points raise ``RuntimeError`` when the
   cached workspace has no ``instance_id`` assigned.
-- keyed lock maps (``_background_start_locks`` / ``_git_locks`` /
-  ``_desktop_locks``) use never-evict semantics: repeated lookups for
-  the same key return the identical lock object.
+- keyed lock maps (``_background_start_locks`` / ``_desktop_locks``) use
+  never-evict semantics: repeated lookups for the same key return the identical
+  lock object.
 - Step 1 parity: pure/stateless helpers extracted into ``src.services``
   (``exec_kernel``, ``files``, ``sessions.xdotool``,
   ``sessions.streams``) agree exactly with the ``src.service``
@@ -81,10 +81,6 @@ async def test_keyed_lock_map_never_evict_semantics() -> None:
 
     first = await svc._background_start_lock(workspace_id, "proc")
     second = await svc._background_start_lock(workspace_id, "proc")
-    assert first is second
-
-    first = await svc._git_lock(workspace_id, "/workspace/repo")
-    second = await svc._git_lock(workspace_id, "/workspace/repo")
     assert first is second
 
     first = await svc._desktop_lock(workspace_id)
@@ -789,7 +785,7 @@ async def test_step5_keyed_lock_map_identity() -> None:
 
     Pins the never-evict get-or-create semantics for the canonical map
     plus every factory now delegating to it (background manager map,
-    service git/desktop maps, and the service background factory).
+    service desktop map, and the service background factory).
     """
     from src.services.exec_kernel import KeyedLockMap
 
@@ -818,17 +814,6 @@ async def test_step5_keyed_lock_map_identity() -> None:
     assert await svc._background_start_lock(
         workspace_id, "other"
     ) is not via_service_bg_first
-
-    via_service_git_first = await svc._git_lock(workspace_id, "/workspace/repo")
-    assert await svc._git_lock(workspace_id, "/workspace/repo") is (
-        via_service_git_first
-    )
-    assert svc._git_locks[(workspace_id, "/workspace/repo")] is (
-        via_service_git_first
-    )
-    assert await svc._git_lock(workspace_id, "/other") is not (
-        via_service_git_first
-    )
 
     via_service_desk_first = await svc._desktop_lock(workspace_id)
     assert await svc._desktop_lock(workspace_id) is via_service_desk_first
@@ -1284,101 +1269,15 @@ def test_step6b_websocket_desktop_handlers_use_manager() -> None:
         assert legacy_snippet not in source, legacy_snippet
 
 
-# -- Step 7: git manager (verbatim move) ---------------------------------------
-
-
-async def test_step7_git_lock_never_evict_via_facade_and_manager() -> None:
-    """``_git_lock`` never-evict semantics agree via facade + manager.
-
-    Pins the Step 5 ``KeyedLockMap`` guarantee through the Step 7 move:
-    repeated lookups for the same workspace/repo return the identical
-    lock object, different repos get different locks, and
-    ``service._git_locks`` is a live alias onto the manager-owned map.
-    """
-    svc = _make_service()
+async def test_git_locks_are_retained_per_workspace_and_repository() -> None:
+    """Repeated lookups share a lock; different workspaces or repos do not."""
+    git = _make_service().git
     workspace_id = uuid.uuid4()
 
-    assert svc.git is svc._git
-    assert svc._git_lock_map is svc.git._git_lock_map
-    assert svc._git_locks is svc.git._git_locks
-    assert svc._git_locks_guard is svc.git._git_locks_guard
-
-    via_facade = await svc._git_lock(workspace_id, "/workspace/repo")
-    assert await svc._git_lock(workspace_id, "/workspace/repo") is via_facade
-    assert await svc.git._git_lock(workspace_id, "/workspace/repo") is via_facade
-    assert svc._git_locks[(workspace_id, "/workspace/repo")] is via_facade
-    assert svc.git._git_locks[(workspace_id, "/workspace/repo")] is via_facade
-    assert await svc._git_lock(workspace_id, "/other") is not via_facade
-    assert await svc.git._git_lock(workspace_id, "/other") is not via_facade
-
-
-async def test_step7_git_unknown_operation_parity_facade_and_manager() -> None:
-    """Facade-vs-manager parity for a structured error (unknown_operation)."""
-    svc = _make_service()
-    workspace_id = uuid.uuid4()
-
-    via_facade = await svc.execute_git_operation(
-        workspace_id, "nope", None, {}
-    )
-    via_manager = await svc.git.execute_git_operation(
-        workspace_id, "nope", None, {}
-    )
-    expected = {
-        "ok": False,
-        "code": "unknown_operation",
-        "message": "Unknown git operation: nope",
-        "stderr": "",
-        "exit_code": None,
-    }
-    assert via_facade == via_manager == expected
-
-
-def test_step7_git_helpers_delegate_to_manager() -> None:
-    """Pure git helpers agree via facade and manager (same results/errors)."""
-    import src.service as service_module
-    from src.services import git_service as git_module
-
-    assert service_module.GitService is git_module.GitService
-
-    svc = _make_service()
-    assert svc.git is svc._git
-    assert isinstance(svc.git, git_module.GitService)
-
-    assert svc._git_join_diff_parts({}, ({}, {})) == (
-        svc.git._git_join_diff_parts({}, ({}, {}))
-    ) == []
-    assert svc._git_mutation_result({"a": 1}, repo_path="/r") == (
-        svc.git._git_mutation_result({"a": 1}, repo_path="/r")
-    ) == {"ok": True, "snapshot": {"a": 1}, "repo_path": "/r"}
-    assert svc._git_require_paths({"paths": ["a.txt"]}, "stage") == (
-        git_module.GitService._git_require_paths({"paths": ["a.txt"]}, "stage")
-    ) == ["a.txt"]
-    with pytest.raises(ValueError) as exc_facade:
-        svc._git_require_paths({}, "stage")
-    with pytest.raises(ValueError) as exc_manager:
-        git_module.GitService._git_require_paths({}, "stage")
-    assert str(exc_facade.value) == str(exc_manager.value)
-    assert svc._git_remote_arg({"remote": "origin"}) == (
-        svc.git._git_remote_arg({"remote": "origin"})
-    ) == "origin"
-    assert svc._git_remote_arg({}) == svc.git._git_remote_arg({}) is None
-    assert svc._git_merge_msg({}, "dflt") == svc.git._git_merge_msg(
-        {}, "dflt"
-    ) == []
-    assert svc._git_merge_msg({"message": "hi"}, "dflt") == (
-        svc.git._git_merge_msg({"message": "hi"}, "dflt")
-    ) == ["-m", "hi"]
-
-
-def test_step7_websocket_git_handler_uses_manager() -> None:
-    """Websocket git:operation handler calls the git manager directly."""
-    import inspect
-
-    from src.interfaces import websocket as websocket_module
-
-    source = inspect.getsource(websocket_module.WebSocketInterface)
-    assert "self._service.git.execute_git_operation" in source
-    assert "self._service.execute_git_operation(" not in source
+    first = await git._git_lock(workspace_id, "/workspace/repo")
+    assert await git._git_lock(workspace_id, "/workspace/repo") is first
+    assert await git._git_lock(workspace_id, "/workspace/other") is not first
+    assert await git._git_lock(uuid.uuid4(), "/workspace/repo") is not first
 
 
 # -- Step 8: registry + lifecycle (final extraction) ---------------------------
