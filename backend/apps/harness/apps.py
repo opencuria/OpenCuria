@@ -10,3 +10,7 @@ class HarnessConfig(AppConfig):
 
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.harness"
+
+    def ready(self) -> None:
+        """Register account-owner deletion revocation signals."""
+        from . import signals  # noqa: F401

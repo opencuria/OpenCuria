@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 from django.db import IntegrityError
 
@@ -11,7 +9,6 @@ from apps.harness.models import ProviderConfig
 from apps.harness.providers.openrouter import OpenRouterAdapter
 from apps.harness.services import ProviderConfigService
 from common.exceptions import NotFoundError
-from common.utils import decrypt_value
 
 
 @pytest.mark.django_db
@@ -26,8 +23,9 @@ def test_save_config_routes_openrouter_credentials(organization) -> None:
     )
     connection = service.get_connection(organization.id, "openrouter")
     assert connection is not None
-    assert connection.credentials_encrypted != "sk-secret-123"
-    stored = json.loads(decrypt_value(connection.credentials_encrypted))
+    assert connection.credential is not None
+    assert connection.credential.encrypted_value != "sk-secret-123"
+    stored = ProviderConfigService.get_connection_credentials(connection)
     assert stored["api_key"] == "sk-secret-123"
     assert service.get_decrypted_api_key(organization.id) == "sk-secret-123"
     assert not hasattr(config, "api_key_encrypted")

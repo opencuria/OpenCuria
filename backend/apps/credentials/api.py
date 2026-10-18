@@ -73,6 +73,8 @@ def _oauth_safe_status(cred) -> dict:
 def _credential_to_out(cred) -> CredentialOut:
     """Map a Credential model instance to its output schema."""
     svc = cred.service
+    if svc.credential_type == "provider_secret":
+        raise NotFoundError("Credential", str(cred.id))
     scope = "personal" if cred.user_id is not None else "organization"
     oauth_status = _oauth_safe_status(cred)
     return CredentialOut(

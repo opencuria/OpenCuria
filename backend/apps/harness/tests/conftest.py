@@ -487,6 +487,11 @@ def harness_workspace(db, organization):
         email=f"harness-{_uuid.uuid4().hex[:8]}@example.com",
         password="secret",
     )
+    from apps.organizations.models import Membership, MembershipRole
+
+    Membership.objects.create(
+        user=user, organization=organization, role=MembershipRole.MEMBER
+    )
     runner = Runner.objects.create(
         name="harness-runner",
         api_token_hash=hash_token(f"harness-{_uuid.uuid4().hex}"),

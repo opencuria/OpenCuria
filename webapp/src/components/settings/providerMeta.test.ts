@@ -12,7 +12,7 @@ describe('providerMeta', () => {
     ])
     const claude = providerMeta('claude-agent')
     expect(claude?.name).toBe('Claude Agent')
-    expect(claude?.description).toContain('personal Anthropic connection')
+    expect(claude?.description).toContain('Anthropic account')
     const compat = providerMeta('openai-compatible')
     expect(compat?.name).toBe('OpenAI Compatible')
     expect(compat?.description).toContain('UI-TARS')

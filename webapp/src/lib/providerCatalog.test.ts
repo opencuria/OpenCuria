@@ -64,4 +64,17 @@ describe('loadProviderModelsCached', () => {
     await loadProviderModelsCached()
     expect(listProviderModelsMock).toHaveBeenCalledTimes(2)
   })
+
+  it('does not reuse cached catalog data after logout or when the active user changes', async () => {
+    localStorage.setItem('kern_user', JSON.stringify({ id: 1 }))
+    localStorage.setItem('kern_active_org_id', 'org-a')
+    listProviderModelsMock.mockResolvedValue(catalog)
+    await loadProviderModelsCached()
+    localStorage.setItem('kern_user', JSON.stringify({ id: 2 }))
+    await loadProviderModelsCached()
+    resetProviderCatalogCache()
+    localStorage.removeItem('kern_user')
+    await loadProviderModelsCached()
+    expect(listProviderModelsMock).toHaveBeenCalledTimes(3)
+  })
 })

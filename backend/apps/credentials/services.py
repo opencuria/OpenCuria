@@ -18,6 +18,7 @@ from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.utils import decrypt_value, encrypt_value, generate_ssh_keypair
 
 from .enums import CredentialType
+from .models import Credential
 from .repositories import CredentialRepository, CredentialServiceRepository
 
 logger = structlog.get_logger(__name__)
@@ -103,7 +104,10 @@ class CredentialServiceSvc:
                 "in this organization"
             )
 
-        if credential_type not in CredentialType.values:
+        if (
+            credential_type not in CredentialType.values
+            or credential_type == CredentialType.PROVIDER_SECRET
+        ):
             raise ValueError("Invalid credential type")
         if credential_type == CredentialType.MCP_OAUTH:
             cleaned_server_url = self._validate_oauth_server_url(oauth_server_url)
@@ -383,7 +387,11 @@ class CredentialSvc:
         - Org credential: only org admins may edit.
         """
         cred = self.credentials.get_by_id(credential_id)
-        if cred is None or not self._is_visible(cred, user=user, org_id=org_id):
+        if (
+            cred is None
+            or cred.service.credential_type == CredentialType.PROVIDER_SECRET
+            or not self._is_visible(cred, user=user, org_id=org_id)
+        ):
             raise NotFoundError("Credential", str(credential_id))
 
         self._assert_can_edit(cred, user=user, org_id=org_id, is_admin=is_admin)
@@ -394,6 +402,11 @@ class CredentialSvc:
         ):
             raise ValueError("MCP OAuth tokens can only be updated via OAuth connect")
         encrypted = encrypt_value(value) if value else None
+        if (
+            encrypted is not None
+            and cred.service.credential_type == CredentialType.PROVIDER_SECRET
+        ):
+            raise NotFoundError("Credential", str(credential_id))
         return self.credentials.update(cred, name=name, encrypted_value=encrypted)
 
     # -- Delete -------------------------------------------------------------
@@ -422,7 +435,11 @@ class CredentialSvc:
         from apps.plugins.services import PluginService as _PluginService
 
         cred = self.credentials.get_by_id(credential_id)
-        if cred is None or not self._is_visible(cred, user=user, org_id=org_id):
+        if (
+            cred is None
+            or cred.service.credential_type == CredentialType.PROVIDER_SECRET
+            or not self._is_visible(cred, user=user, org_id=org_id)
+        ):
             raise NotFoundError("Credential", str(credential_id))
 
         self._assert_can_edit(cred, user=user, org_id=org_id, is_admin=is_admin)
@@ -463,6 +480,11 @@ class CredentialSvc:
         if not credential_ids:
             return ResolvedCredentials()
 
+        if self.credentials.get_many_internal_provider_secrets(credential_ids):
+            raise NotFoundError(
+                "Credential", ", ".join(str(value) for value in credential_ids)
+            )
+
         credentials = self.credentials.get_many_by_ids(
             credential_ids,
             org_id=org_id,
@@ -501,8 +523,15 @@ class CredentialSvc:
         return resolved
 
     def resolve_workspace_credentials(self, workspace) -> ResolvedCredentials:
-        """Resolve the credentials explicitly attached to a workspace."""
+        """Resolve ordinary credentials; reject any internal account attachment."""
         credentials = list(workspace.credentials.all().select_related("service"))
+        if any(
+            credential.service.credential_type == CredentialType.PROVIDER_SECRET
+            for credential in credentials
+        ):
+            raise ConflictError(
+                "Internal provider secrets cannot be attached to workspaces"
+            )
         if not credentials:
             return ResolvedCredentials()
         self._validate_credential_ownership(
@@ -604,6 +633,120 @@ class CredentialSvc:
                 result.env_vars[svc.env_var_name] = plaintext
 
         return result
+
+    # -- Provider account secret storage -----------------------------------
+
+    def create_provider_secret(
+        self,
+        *,
+        organization_id: uuid.UUID,
+        user_id: int | None,
+        provider: str,
+        name: str,
+        value: dict,
+        created_by=None,
+    ) -> Credential:
+        """Persist internal JSON through the encrypted credential vault."""
+        import json
+
+        service = self.service_repo.create_internal_provider_secret_service(
+            organization_id=organization_id, provider=provider
+        )
+        return self.credentials.create_internal_provider_secret(
+            organization_id=organization_id,
+            user_id=user_id,
+            service=service,
+            name=name,
+            encrypted_value=encrypt_value(json.dumps(value)),
+            created_by=created_by,
+        )
+
+    def get_provider_secret(
+        self,
+        credential_id: uuid.UUID,
+        *,
+        organization_id: uuid.UUID,
+        user_id: int | None,
+        provider: str,
+        account_id: uuid.UUID,
+    ) -> dict:
+        """Decrypt a secret only after validating its account/scope binding."""
+        import json
+
+        credential = self.credentials.get_internal_provider_secret(
+            credential_id,
+            organization_id=organization_id,
+            user_id=user_id,
+            provider=provider,
+            account_id=account_id,
+        )
+        if credential is None:
+            raise NotFoundError("Credential", str(credential_id))
+        try:
+            value = json.loads(decrypt_value(credential.encrypted_value))
+        except (TypeError, ValueError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def reassign_provider_secret(
+        self,
+        credential_id: uuid.UUID,
+        *,
+        organization_id: uuid.UUID,
+        previous_user_id: int | None,
+        user_id: int | None,
+        provider: str,
+        account_id: uuid.UUID,
+    ) -> bool:
+        """Move secret ownership to match a provider account's updated scope."""
+        return self.credentials.reassign_internal_provider_secret(
+            credential_id,
+            organization_id=organization_id,
+            previous_user_id=previous_user_id,
+            user_id=user_id,
+            provider=provider,
+            account_id=account_id,
+        )
+
+    def update_provider_secret(
+        self,
+        credential_id: uuid.UUID,
+        value: dict,
+        *,
+        organization_id: uuid.UUID,
+        user_id: int | None,
+        provider: str,
+        account_id: uuid.UUID,
+    ) -> bool:
+        """Replace encrypted data only for its live account/scope binding."""
+        import json
+
+        return self.credentials.update_internal_provider_secret(
+            credential_id,
+            encrypt_value(json.dumps(value)),
+            organization_id=organization_id,
+            user_id=user_id,
+            provider=provider,
+            account_id=account_id,
+        )
+
+    def delete_provider_secret(
+        self,
+        credential_id: uuid.UUID,
+        *,
+        organization_id: uuid.UUID,
+        user_id: int | None,
+        provider: str,
+        account_id: uuid.UUID,
+    ) -> None:
+        """Remove one internal secret through its live account binding."""
+        self.credentials.delete_internal_provider_secret(
+            credential_id,
+            organization_id=organization_id,
+            user_id=user_id,
+            provider=provider,
+            account_id=account_id,
+        )
 
     # -- Internal helpers ---------------------------------------------------
 

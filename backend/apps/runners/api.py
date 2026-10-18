@@ -100,8 +100,12 @@ def _perm_denied(permission: APIKeyPermission):
 
 
 def _workspace_credential_ids(workspace) -> list[uuid.UUID]:
-    """Return attached credential IDs for a workspace."""
-    return [credential.id for credential in workspace.credentials.all()]
+    """Return ordinary credential IDs for API display."""
+    return [
+        credential.id
+        for credential in workspace.credentials.all().select_related("service")
+        if credential.service.credential_type != "provider_secret"
+    ]
 
 
 def _workspace_plugin_ids(workspace) -> list[uuid.UUID]:
@@ -123,7 +127,7 @@ def _workspace_base_image_name(workspace) -> str | None:
 
 
 def _workspace_to_out(workspace) -> WorkspaceOut:
-    """Map a Workspace ORM instance to WorkspaceOut."""
+    """Map workspace metadata and hide internal provider account credentials."""
     from .services.image_versions import ImageVersionService
 
     versions = ImageVersionService()
@@ -191,7 +195,9 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
         ),
         credentials_present=bool(getattr(workspace, "credentials_present", False)),
         base_image_name=_workspace_base_image_name(workspace),
-        base_image=versions.version_ref(getattr(workspace, "base_image_instance", None)),
+        base_image=versions.version_ref(
+            getattr(workspace, "base_image_instance", None)
+        ),
         pending_base_image=versions.version_ref(
             getattr(workspace, "pending_base_image_instance", None)
         ),
@@ -957,6 +963,7 @@ async def update_workspace(
             organization_id=org_id,
         )
         persisted_plugin_ids = await sync_to_async(_workspace_plugin_ids)(workspace)
+        credential_ids = await sync_to_async(_workspace_credential_ids)(workspace)
         return 200, WorkspaceUpdateOut(
             id=workspace.id,
             name=workspace.name,
@@ -964,7 +971,7 @@ async def update_workspace(
             active_operation=workspace.active_operation,
             intervention_required=workspace.intervention_required,
             lifecycle_diagnostic=workspace.lifecycle_diagnostic,
-            credential_ids=_workspace_credential_ids(workspace),
+            credential_ids=credential_ids,
             plugin_ids=persisted_plugin_ids,
             credential_sync_status=getattr(
                 workspace, "credential_sync_status", "not_required"
@@ -2912,7 +2919,8 @@ def get_image_definition_runner_build_log(
 
 
 @runner_router.get(
-    "/{runner_id}/storage/", response={200: RunnerStorageOut, 403: ErrorOut, 404: ErrorOut}
+    "/{runner_id}/storage/",
+    response={200: RunnerStorageOut, 403: ErrorOut, 404: ErrorOut},
 )
 def runner_storage(request: HttpRequest, runner_id: uuid.UUID):
     """Actual cached runner storage graph, including freshness and unknown sizes."""

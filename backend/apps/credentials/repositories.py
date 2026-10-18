@@ -7,8 +7,11 @@ import hmac
 import re
 import uuid
 
-from django.db import connection, transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.models import Q, QuerySet
+from django.utils import timezone
+
+from common.exceptions import ConflictError
 
 from .models import (
     Credential,
@@ -30,21 +33,31 @@ class CredentialServiceRepository:
 
     @staticmethod
     def list_all() -> QuerySet[CredentialService]:
-        return CredentialService.objects.all()
+        return CredentialService.objects.exclude(credential_type="provider_secret")
 
     @staticmethod
     def list_visible_to_org(org_id: uuid.UUID) -> QuerySet[CredentialService]:
-        return CredentialService.objects.filter(
-            Q(organization__isnull=True) | Q(organization_id=org_id)
-        ).order_by("name")
+        return (
+            CredentialService.objects.filter(
+                Q(organization__isnull=True) | Q(organization_id=org_id)
+            )
+            .exclude(credential_type="provider_secret")
+            .order_by("name")
+        )
 
     @staticmethod
     def list_org_owned(org_id: uuid.UUID) -> QuerySet[CredentialService]:
-        return CredentialService.objects.filter(organization_id=org_id)
+        return CredentialService.objects.filter(organization_id=org_id).exclude(
+            credential_type="provider_secret"
+        )
 
     @staticmethod
     def get_by_id(service_id: uuid.UUID) -> CredentialService | None:
-        return CredentialService.objects.filter(id=service_id).first()
+        return (
+            CredentialService.objects.filter(id=service_id)
+            .exclude(credential_type="provider_secret")
+            .first()
+        )
 
     @staticmethod
     def get_visible_by_id(
@@ -58,19 +71,55 @@ class CredentialServiceRepository:
 
     @staticmethod
     def get_by_slug(slug: str) -> CredentialService | None:
-        return CredentialService.objects.filter(slug=slug).first()
+        return (
+            CredentialService.objects.exclude(credential_type="provider_secret")
+            .filter(slug=slug)
+            .first()
+        )
 
     @staticmethod
     def get_global_by_slug(slug: str) -> CredentialService | None:
-        return CredentialService.objects.filter(
-            slug=slug, organization__isnull=True
-        ).first()
+        return (
+            CredentialService.objects.exclude(credential_type="provider_secret")
+            .filter(slug=slug, organization__isnull=True)
+            .first()
+        )
 
     @staticmethod
     def get_org_by_slug(slug: str, org_id: uuid.UUID) -> CredentialService | None:
-        return CredentialService.objects.filter(
-            slug=slug, organization_id=org_id
-        ).first()
+        return (
+            CredentialService.objects.exclude(credential_type="provider_secret")
+            .filter(slug=slug, organization_id=org_id)
+            .first()
+        )
+
+    @staticmethod
+    def create_internal_provider_secret_service(
+        *, organization_id: uuid.UUID, provider: str
+    ) -> CredentialService:
+        """Create/get the internal provider service without adopting a collision."""
+        slug = f"provider-account-{provider}"
+        try:
+            with transaction.atomic():
+                service, _created = CredentialService.objects.get_or_create(
+                    organization_id=organization_id,
+                    slug=slug,
+                    defaults={
+                        "name": f"Provider account ({provider})",
+                        "description": "Internal provider-account secret storage.",
+                        "credential_type": "provider_secret",
+                        "env_var_name": "",
+                        "target_path": "",
+                        "label": "Provider account",
+                    },
+                )
+        except IntegrityError:
+            service = CredentialService.objects.get(
+                organization_id=organization_id, slug=slug
+            )
+        if service.credential_type != "provider_secret":
+            raise ConflictError("Reserved provider-account service slug is occupied")
+        return service
 
     @staticmethod
     def create(
@@ -105,16 +154,29 @@ class CredentialRepository:
     def list_for_user_in_org(user_id: int, org_id: uuid.UUID) -> QuerySet[Credential]:
         return (
             Credential.objects.filter(Q(user_id=user_id) | Q(organization_id=org_id))
-            .filter(Q(service__organization__isnull=True) | Q(service__organization_id=org_id))
+            .filter(
+                Q(service__organization__isnull=True)
+                | Q(service__organization_id=org_id)
+            )
+            .exclude(service__credential_type="provider_secret")
             .select_related("service", "user", "organization", "oauth_registration")
         )
 
     @staticmethod
     def ids_for_workspace(workspace_id: uuid.UUID) -> list[uuid.UUID]:
-        """Return IDs attached to one workspace, without loading secret fields."""
+        """Return ordinary credential IDs attached to one workspace."""
         return list(
-            Credential.objects.filter(workspaces__id=workspace_id).values_list(
-                "id", flat=True
+            Credential.objects.filter(workspaces__id=workspace_id)
+            .exclude(service__credential_type="provider_secret")
+            .values_list("id", flat=True)
+        )
+
+    @staticmethod
+    def list_all_for_workspace_internal(workspace_id: uuid.UUID) -> list[Credential]:
+        """List attached rows for server-side audits, including internal secrets."""
+        return list(
+            Credential.objects.filter(workspaces__id=workspace_id).select_related(
+                "service", "user", "organization"
             )
         )
 
@@ -123,6 +185,7 @@ class CredentialRepository:
         """Return workspace attachments with service and OAuth metadata loaded."""
         return list(
             Credential.objects.filter(workspaces__id=workspace_id)
+            .exclude(service__credential_type="provider_secret")
             .select_related("service", "oauth_registration", "user", "organization")
             .order_by("-created_at")
         )
@@ -131,8 +194,152 @@ class CredentialRepository:
     def get_by_id(credential_id: uuid.UUID) -> Credential | None:
         return (
             Credential.objects.filter(id=credential_id)
+            .exclude(service__credential_type="provider_secret")
             .select_related("service", "user", "organization", "oauth_registration")
             .first()
+        )
+
+    @staticmethod
+    def create_internal_provider_secret(
+        *,
+        organization_id: uuid.UUID,
+        user_id: int | None,
+        service: CredentialService,
+        name: str,
+        encrypted_value: str,
+        created_by,
+    ) -> Credential:
+        """Create a hidden, scope-matched provider secret."""
+        return Credential.objects.create(
+            organization_id=organization_id if user_id is None else None,
+            user_id=user_id,
+            service=service,
+            name=name,
+            encrypted_value=encrypted_value,
+            created_by=created_by,
+        )
+
+    @staticmethod
+    def get_internal_provider_secret(
+        credential_id: uuid.UUID,
+        *,
+        organization_id: uuid.UUID,
+        user_id: int | None,
+        provider: str,
+        account_id: uuid.UUID,
+    ) -> Credential | None:
+        """Fetch only a secret bound to the exact provider account and scope."""
+        return (
+            Credential.objects.filter(
+                id=credential_id,
+                service__credential_type="provider_secret",
+                service__slug=f"provider-account-{provider}",
+                service__organization_id=organization_id,
+                organization_id=organization_id if user_id is None else None,
+                user_id=user_id,
+                provider_accounts__id=account_id,
+                provider_accounts__organization_id=organization_id,
+                provider_accounts__user_id=user_id,
+                provider_accounts__provider=provider,
+                provider_accounts__deleted_at__isnull=True,
+            )
+            .select_related("service")
+            .first()
+        )
+
+    @staticmethod
+    def reassign_internal_provider_secret(
+        credential_id: uuid.UUID,
+        *,
+        organization_id: uuid.UUID,
+        previous_user_id: int | None,
+        user_id: int | None,
+        provider: str,
+        account_id: uuid.UUID,
+    ) -> bool:
+        """Move a bound provider secret to match an account's new scope."""
+        credential = Credential.objects.filter(
+            id=credential_id,
+            service__credential_type="provider_secret",
+            service__slug=f"provider-account-{provider}",
+            service__organization_id=organization_id,
+            organization_id=organization_id if previous_user_id is None else None,
+            user_id=previous_user_id,
+            provider_accounts__id=account_id,
+            provider_accounts__organization_id=organization_id,
+            provider_accounts__user_id=previous_user_id,
+            provider_accounts__provider=provider,
+            provider_accounts__deleted_at__isnull=True,
+        ).first()
+        if credential is None:
+            return False
+        credential.organization_id = organization_id if user_id is None else None
+        credential.user_id = user_id
+        credential.save(update_fields=["organization_id", "user_id", "updated_at"])
+        return True
+
+    @staticmethod
+    def update_internal_provider_secret(
+        credential_id: uuid.UUID,
+        encrypted_value: str,
+        *,
+        organization_id: uuid.UUID,
+        user_id: int | None,
+        provider: str,
+        account_id: uuid.UUID,
+    ) -> bool:
+        """Replace encrypted JSON only for a correctly bound provider secret."""
+        return (
+            Credential.objects.filter(
+                id=credential_id,
+                service__credential_type="provider_secret",
+                service__slug=f"provider-account-{provider}",
+                service__organization_id=organization_id,
+                organization_id=organization_id if user_id is None else None,
+                user_id=user_id,
+                provider_accounts__id=account_id,
+                provider_accounts__organization_id=organization_id,
+                provider_accounts__user_id=user_id,
+                provider_accounts__provider=provider,
+                provider_accounts__deleted_at__isnull=True,
+            ).update(encrypted_value=encrypted_value, updated_at=timezone.now())
+            == 1
+        )
+
+    @staticmethod
+    def delete_internal_provider_secret(
+        credential_id: uuid.UUID,
+        *,
+        organization_id: uuid.UUID,
+        user_id: int | None,
+        provider: str,
+        account_id: uuid.UUID,
+    ) -> None:
+        """Delete one internal secret only through its live owning account."""
+        Credential.objects.filter(
+            id=credential_id,
+            service__credential_type="provider_secret",
+            service__slug=f"provider-account-{provider}",
+            service__organization_id=organization_id,
+            organization_id=organization_id if user_id is None else None,
+            user_id=user_id,
+            provider_accounts__id=account_id,
+            provider_accounts__organization_id=organization_id,
+            provider_accounts__user_id=user_id,
+            provider_accounts__provider=provider,
+            provider_accounts__deleted_at__isnull=True,
+        ).delete()
+
+    @staticmethod
+    def get_many_internal_provider_secrets(
+        credential_ids: list[uuid.UUID],
+    ) -> list[Credential]:
+        """Detect server-only provider secrets in untrusted public ID input."""
+        return list(
+            Credential.objects.filter(
+                id__in=credential_ids,
+                service__credential_type="provider_secret",
+            ).only("id")
         )
 
     @staticmethod
@@ -218,7 +425,12 @@ class CredentialRepository:
 
     @staticmethod
     def delete(credential_id: uuid.UUID) -> int:
-        count, _ = Credential.objects.filter(id=credential_id).delete()
+        """Delete an ordinary credential; internal provider secrets stay server-only."""
+        count, _ = (
+            Credential.objects.filter(id=credential_id)
+            .exclude(service__credential_type="provider_secret")
+            .delete()
+        )
         return count
 
     @staticmethod
@@ -228,6 +440,7 @@ class CredentialRepository:
         return list(
             Credential.objects.filter(id__in=credential_ids)
             .filter(Q(organization_id=org_id) | Q(user_id=user_id))
+            .exclude(service__credential_type="provider_secret")
             .select_related("service", "oauth_registration")
         )
 
@@ -235,7 +448,9 @@ class CredentialRepository:
     def exists_for_service_ids(service_ids: list[uuid.UUID]) -> bool:
         return (
             bool(service_ids)
-            and Credential.objects.filter(service_id__in=service_ids).exists()
+            and Credential.objects.filter(service_id__in=service_ids)
+            .exclude(service__credential_type="provider_secret")
+            .exists()
         )
 
     @staticmethod
@@ -243,9 +458,9 @@ class CredentialRepository:
         if not service_ids:
             return set()
         return set(
-            Credential.objects.filter(service_id__in=service_ids).values_list(
-                "service_id", flat=True
-            )
+            Credential.objects.filter(service_id__in=service_ids)
+            .exclude(service__credential_type="provider_secret")
+            .values_list("service_id", flat=True)
         )
 
     @staticmethod
@@ -253,9 +468,9 @@ class CredentialRepository:
         if not service_ids:
             return set()
         return set(
-            Credential.objects.filter(service_id__in=service_ids).values_list(
-                "id", flat=True
-            )
+            Credential.objects.filter(service_id__in=service_ids)
+            .exclude(service__credential_type="provider_secret")
+            .values_list("id", flat=True)
         )
 
     @staticmethod
@@ -267,7 +482,9 @@ class CredentialRepository:
         return set(
             Credential.objects.filter(
                 organization_id=org_id, service_id__in=service_ids
-            ).values_list("service_id", flat=True)
+            )
+            .exclude(service__credential_type="provider_secret")
+            .values_list("service_id", flat=True)
         )
 
     @staticmethod
@@ -292,6 +509,7 @@ class CredentialRepository:
                 | Q(service__organization_id=org_id)
             )
             .filter(Q(user_id=owner_id) | Q(organization_id=org_id))
+            .exclude(service__credential_type="provider_secret")
             .select_related("service", "oauth_registration", "created_by")
         )
 

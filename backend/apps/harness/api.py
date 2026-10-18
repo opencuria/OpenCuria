@@ -22,10 +22,8 @@ untouched (M8 removes them).
 
 from __future__ import annotations
 
-import asyncio
-import time
+import json
 import uuid
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -36,6 +34,7 @@ from pydantic import Field
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.harness.enums import ProviderType
+from apps.harness.provider_accounts import SUPPORTED_PROVIDERS as _SUPPORTED_PROVIDERS
 from apps.harness.providers.openrouter import DEFAULT_BASE_URL
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
@@ -479,9 +478,67 @@ class ProviderConnectionUpsertIn(Schema):
     bearer_token: str = ""
 
 
+class ProviderAccountOut(Schema):
+    """Safe metadata for one provider account."""
+
+    id: str
+    provider: str
+    label: str
+    scope: str
+    connected: bool
+    is_active: bool
+    can_manage: bool
+    base_url: str = ""
+    api_key_hint: str = ""
+    account_id: str = ""
+    region: str = ""
+    auth_method: str = ""
+    models: list[str] = []
+    auth_type: str = ""
+
+
+class ProviderAccountIn(Schema):
+    """Create/update payload for a named provider account."""
+
+    label: str = ""
+    shared: bool = False
+    api_key: str = ""
+    base_url: str = ""
+    models: list[str] = []
+    auth_method: str = ""
+    region: str = "us-east-1"
+    access_key_id: str = ""
+    secret_access_key: str = ""
+    session_token: str = ""
+    bearer_token: str = ""
+    token: str = ""
+    auth_type: str = "api_token"
+
+
+class ProviderSelectionIn(Schema):
+    """Explicit active-account choice, including an empty selection."""
+
+    account_id: uuid.UUID | None = Field(...)
+
+
+class ChatGPTOAuthStartIn(Schema):
+    """Optional account identity for a new or reconnecting ChatGPT flow."""
+
+    label: str = ""
+    shared: bool | None = None
+    account_id: uuid.UUID | None = None
+
+
+class ChatGPTOAuthCancelIn(Schema):
+    """Optional pending OAuth flow identifier for cancellation."""
+
+    flow_id: uuid.UUID | None = None
+
+
 class ChatGPTOAuthStartOut(Schema):
     """Response for starting the ChatGPT device OAuth flow."""
 
+    flow_id: str
     user_code: str
     verification_url: str
     interval: int
@@ -495,55 +552,41 @@ class ChatGPTOAuthStatusOut(Schema):
     account_id: str = ""
 
 
-CHATGPT_OAUTH_FLOW_EXPIRES_SECONDS = 600
-
-
-# Single-process in-memory store for pending ChatGPT OAuth flows. State is
-# lost on process restart and is not shared across multiple workers.
-@dataclass
-class _PendingChatGPTOAuth:
-    """Server-side state for an in-progress ChatGPT device flow."""
-
-    device_auth_id: str
-    user_code: str
-    interval: int
-    created_at: float
-
-
-_chatgpt_oauth_pending: dict[uuid.UUID, _PendingChatGPTOAuth] = {}
-_chatgpt_oauth_lock = asyncio.Lock()
-
-_VALID_PROVIDERS = {choice.value for choice in ProviderType}
+_VALID_PROVIDERS = set(_SUPPORTED_PROVIDERS)
 
 
 def _secret_hint(secret: str) -> str:
     """Return a masked hint (last four chars) for a stored secret."""
     if not secret:
         return ""
-    suffix = secret[-4:] if len(secret) >= 4 else secret
-    return f"••••{suffix}"
+    return f"••••{secret[-4:]}" if len(secret) > 4 else "••••"
 
 
 def _openrouter_connection_view(
-    org_id: uuid.UUID,
+    org_id: uuid.UUID, user_id: int
 ) -> tuple[bool, str, str]:
-    """Return ``(has_api_key, api_key_hint, base_url)`` for OpenRouter."""
-    from apps.harness.services import ProviderConfigService
+    """Return active user's OpenRouter status without exposing other accounts."""
+    from apps.harness.provider_accounts import ProviderAccountService
 
-    service = ProviderConfigService()
-    connection = service.get_connection(org_id, ProviderType.OPENROUTER)
-    if connection is None:
+    account = (
+        ProviderAccountService()
+        .selected_accounts(org_id, user_id)
+        .get(ProviderType.OPENROUTER)
+    )
+    if account is None:
         return False, "", DEFAULT_BASE_URL
-    credentials = service.get_connection_credentials(connection)
+    credentials = ProviderAccountService().get_credentials(account)
     api_key = str(credentials.get("api_key", "") or "")
     has_key = bool(api_key.strip())
-    base_url = str((connection.config or {}).get("base_url") or DEFAULT_BASE_URL)
+    base_url = str((account.config or {}).get("base_url") or DEFAULT_BASE_URL)
     return has_key, _secret_hint(api_key) if has_key else "", base_url
 
 
-def _provider_config_to_out(config, org_id: uuid.UUID) -> ProviderConfigOut:  # type: ignore[no-untyped-def]
+def _provider_config_to_out(
+    config, org_id: uuid.UUID, user_id: int
+) -> ProviderConfigOut:  # type: ignore[no-untyped-def]
     """Map a ProviderConfig ORM row to ProviderConfigOut (never plaintext)."""
-    has_key, hint, base_url = _openrouter_connection_view(org_id)
+    has_key, hint, base_url = _openrouter_connection_view(org_id, user_id)
     return ProviderConfigOut(
         base_url=base_url,
         default_model=config.default_model or "",
@@ -564,192 +607,123 @@ def _parse_provider_param(provider: str) -> str:
     return provider
 
 
-def _connection_to_out(
-    service,  # type: ignore[no-untyped-def]
-    connection,
-) -> ProviderConnectionOut:
-    """Map a stored connection to the public list/detail shape."""
-    provider = connection.provider
-    credentials = service.get_connection_credentials(connection)
-    config = dict(connection.config or {})
-    if provider == ProviderType.OPENROUTER:
-        api_key = str(credentials.get("api_key", "") or "")
-        return ProviderConnectionOut(
-            provider=provider,
-            connected=True,
-            base_url=str(config.get("base_url") or DEFAULT_BASE_URL),
-            api_key_hint=_secret_hint(api_key),
-        )
-    if provider == ProviderType.CHATGPT:
-        return ProviderConnectionOut(
-            provider=provider,
-            connected=True,
-            account_id=str(credentials.get("account_id", "") or ""),
-        )
-    if provider == ProviderType.AMAZON_BEDROCK:
-        auth_method = str(config.get("auth_method") or "")
-        if not auth_method:
-            auth_method = (
-                "bearer"
-                if str(credentials.get("bearer_token", "") or "").strip()
-                else "access_keys"
-            )
-        return ProviderConnectionOut(
-            provider=provider,
-            connected=True,
-            region=str(config.get("region") or "us-east-1"),
-            auth_method=auth_method,
-        )
-    if provider == ProviderType.OPENAI_COMPATIBLE:
-        from apps.harness import services as harness_services
+def _list_org_provider_connections(
+    org_id: uuid.UUID, user_id: int
+) -> list[ProviderConnectionOut]:
+    """Return status for each provider based on this user's active account."""
+    from apps.harness.provider_accounts import (
+        SUPPORTED_PROVIDERS,
+        ProviderAccountService,
+    )
 
-        api_key = str(credentials.get("api_key", "") or "")
-        stored = config.get("models", [])
-        raw_ids = stored if isinstance(stored, list) else []
-        try:
-            normalize = harness_services.ProviderConfigService.normalize_openai_compatible_models
-            models = normalize([str(item) for item in raw_ids])
-        except ValueError:
-            # Tolerate dirty legacy rows on the read path (validation
-            # still rejects them on save): drop empty ids, dedupe, trim.
-            seen: set[str] = set()
-            models = []
-            for entry in raw_ids:
-                item = str(entry or "").strip()
-                if not item or item in seen:
-                    continue
-                seen.add(item)
-                models.append(item)
-
-        return ProviderConnectionOut(
-            provider=provider,
-            connected=True,
-            base_url=str(config.get("base_url") or ""),
-            api_key_hint=_secret_hint(api_key) if api_key.strip() else "",
-            models=models,
-        )
-    return ProviderConnectionOut(provider=provider, connected=True)
-
-
-def _list_org_provider_connections(org_id: uuid.UUID) -> list[ProviderConnectionOut]:
-    """Return connection status for every supported provider."""
-    from apps.harness.services import ProviderConfigService
-
-    service = ProviderConfigService()
-    by_provider = {
-        connection.provider: connection
-        for connection in service.list_connections(org_id)
-    }
+    accounts = ProviderAccountService()
+    selected = accounts.selected_accounts(org_id, user_id)
     rows: list[ProviderConnectionOut] = []
-    for provider_type in ProviderType:
-        provider = provider_type.value
-        connection = by_provider.get(provider)
-        if connection is None:
+    for provider in SUPPORTED_PROVIDERS:
+        account = selected.get(provider)
+        if account is None:
             rows.append(ProviderConnectionOut(provider=provider, connected=False))
-            continue
-        rows.append(_connection_to_out(service, connection))
+        else:
+            view = next(
+                row
+                for row in accounts.list_accounts(org_id, user_id, provider)
+                if row["id"] == str(account.id)
+            )
+            rows.append(
+                ProviderConnectionOut(
+                    provider=provider,
+                    connected=bool(view["connected"]),
+                    base_url=view["base_url"],
+                    api_key_hint=view["api_key_hint"],
+                    account_id=view["account_id"],
+                    region=view["region"],
+                    auth_method=view["auth_method"],
+                    models=(
+                        _safe_manual_models(view["models"])
+                        if provider == ProviderType.OPENAI_COMPATIBLE
+                        else view["models"]
+                    ),
+                )
+            )
     return rows
 
 
-def _upsert_openrouter_connection(
-    org_id: uuid.UUID,
-    payload: OpenRouterConnectionIn,
-) -> ProviderConnectionOut:
-    """Create or update the OpenRouter connection for an organization."""
-    from apps.harness.services import ProviderConfigService
-
-    service = ProviderConfigService()
-    existing = service.get_connection(org_id, ProviderType.OPENROUTER)
-    credentials = (
-        service.get_connection_credentials(existing) if existing is not None else {}
-    )
-    api_key = str(credentials.get("api_key", "") or "")
-    if payload.api_key and payload.api_key.strip():
-        api_key = payload.api_key.strip()
-    elif existing is None and not api_key:
-        raise ValueError("api_key is required when creating an OpenRouter connection")
-
-    base_url = (payload.base_url or DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
-    if existing is not None and not (payload.base_url or "").strip():
-        base_url = str((existing.config or {}).get("base_url") or DEFAULT_BASE_URL)
-
-    connection = service.save_connection(
-        organization_id=org_id,
-        provider=ProviderType.OPENROUTER,
-        credentials={"api_key": api_key},
-        config={"base_url": base_url},
-    )
-    return _connection_to_out(service, connection)
+def _safe_manual_models(raw_models: list[str]) -> list[str]:
+    """Normalize old dirty model lists without failing status reads."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in raw_models:
+        model = str(raw or "").strip()
+        if model and model not in seen:
+            seen.add(model)
+            result.append(model)
+    return result
 
 
-def _upsert_bedrock_connection(
-    org_id: uuid.UUID,
-    payload: BedrockConnectionIn,
-) -> ProviderConnectionOut:
-    """Create or update the Amazon Bedrock connection for an organization."""
-    from apps.harness.services import ProviderConfigService
+def _active_account(org_id: uuid.UUID, user_id: int, provider: str):
+    """Return only the current user's explicitly active visible provider account."""
+    from apps.harness.provider_accounts import ProviderAccountService
 
-    auth_method = (payload.auth_method or "").strip()
-    if auth_method not in ("access_keys", "bearer"):
-        raise ValueError("auth_method must be 'access_keys' or 'bearer'")
+    return ProviderAccountService().selected_accounts(org_id, user_id).get(provider)
 
-    service = ProviderConfigService()
-    existing = service.get_connection(org_id, ProviderType.AMAZON_BEDROCK)
-    credentials = (
-        service.get_connection_credentials(existing) if existing is not None else {}
-    )
-    region = (payload.region or "us-east-1").strip() or "us-east-1"
 
-    if auth_method == "access_keys":
-        access_key_id = (
-            payload.access_key_id.strip()
-            if payload.access_key_id and payload.access_key_id.strip()
-            else str(credentials.get("access_key_id", "") or "")
-        )
-        secret_access_key = (
-            payload.secret_access_key.strip()
-            if payload.secret_access_key and payload.secret_access_key.strip()
-            else str(credentials.get("secret_access_key", "") or "")
-        )
-        session_token = (
-            payload.session_token.strip()
-            if payload.session_token and payload.session_token.strip()
-            else str(credentials.get("session_token", "") or "")
-        )
-        if not access_key_id or not secret_access_key:
-            raise ValueError(
-                "access_key_id and secret_access_key are required for access_keys auth"
+def _save_legacy_provider_account(
+    org_id: uuid.UUID, user, provider: str, payload: dict[str, Any]
+):
+    """Compatibility upsert: active account only, else create private."""
+    from apps.harness.provider_accounts import ProviderAccountService
+    from apps.harness.providers.models_catalog import clear_models_cache
+
+    accounts = ProviderAccountService()
+    user_id = int(user.id)
+    account = _active_account(org_id, user_id, provider)
+    if account is not None and account.user_id is None:
+        membership = accounts._membership(org_id, user_id)
+        if membership.role != "admin":
+            raise AuthenticationError(
+                "Only org admins can manage shared provider accounts"
             )
-        new_credentials = {
-            "access_key_id": access_key_id,
-            "secret_access_key": secret_access_key,
+    if account is None:
+        existing_labels = {
+            row["label"].casefold()
+            for row in accounts.list_accounts(org_id, user_id, provider)
         }
-        if session_token:
-            new_credentials["session_token"] = session_token
+        base_label = provider.replace("-", " ").title()
+        label = base_label
+        suffix = 2
+        while label.casefold() in existing_labels:
+            label = f"{base_label} {suffix}"
+            suffix += 1
+        payload = {**payload, "label": label, "shared": False}
     else:
-        bearer_token = (
-            payload.bearer_token.strip()
-            if payload.bearer_token and payload.bearer_token.strip()
-            else str(credentials.get("bearer_token", "") or "")
-        )
-        if not bearer_token:
-            raise ValueError("bearer_token is required for bearer auth")
-        new_credentials = {"bearer_token": bearer_token}
-
-    connection = service.save_connection(
+        payload = {
+            **payload,
+            "label": account.label,
+            "shared": account.user_id is None,
+        }
+    updated = accounts.save_account(
         organization_id=org_id,
-        provider=ProviderType.AMAZON_BEDROCK,
-        credentials=new_credentials,
-        config={"region": region, "auth_method": auth_method},
+        user=user,
+        provider=provider,
+        payload=payload,
+        account_id=account.id if account is not None else None,
     )
-    return _connection_to_out(service, connection)
+    clear_models_cache(str(org_id))
+    return updated
 
 
-def _delete_org_provider_connection(org_id: uuid.UUID, provider: str) -> None:
-    """Delete one provider connection for an organization."""
-    from apps.harness.services import ProviderConfigService
+def _delete_org_provider_connection(
+    org_id: uuid.UUID, user_id: int, provider: str
+) -> None:
+    """Delete only the caller's active account, never an arbitrary org row."""
+    from apps.harness.provider_accounts import ProviderAccountService
+    from apps.harness.providers.models_catalog import clear_models_cache
 
-    ProviderConfigService().delete_connection(org_id, provider)
+    account = _active_account(org_id, user_id, provider)
+    if account is None:
+        raise NotFoundError("ProviderAccount", provider)
+    ProviderAccountService().delete_account(org_id, user_id, account.id)
+    clear_models_cache(str(org_id))
 
 
 def _validate_openai_compatible_models(models: list[str]) -> list[str]:
@@ -773,29 +747,6 @@ def _validate_base_url(base_url: str) -> str:
     from apps.harness.services import ProviderConfigService
 
     return ProviderConfigService.validate_openai_compatible_base_url(base_url)
-
-
-def _upsert_openai_compatible_connection(
-    org_id: uuid.UUID,
-    payload: OpenAICompatibleConnectionIn,
-) -> ProviderConnectionOut:
-    """Create or update the generic OpenAI-compatible connection.
-
-    ``models`` presence comes from ``payload.model_fields_set`` so an
-    omitted list keeps stored models while an explicit ``[]`` clears them.
-    """
-    from apps.harness.services import ProviderConfigService
-
-    service = ProviderConfigService()
-    models_provided = "models" in payload.model_fields_set
-    connection = service.upsert_openai_compatible_connection(
-        org_id,
-        api_key=payload.api_key or "",
-        base_url=payload.base_url or "",
-        models=list(payload.models or []) if models_provided else None,
-        models_provided=models_provided,
-    )
-    return _connection_to_out(service, connection)
 
 
 def _agent_s_config_to_out(row: dict) -> AgentSConfigOut:
@@ -859,7 +810,7 @@ def _agent_config_to_out(row: dict) -> AgentConfigOut:
     )
 
 
-def _fetch_org_provider_config(org_id: uuid.UUID) -> ProviderConfigOut:
+def _fetch_org_provider_config(org_id: uuid.UUID, user_id: int) -> ProviderConfigOut:
     """Load the org provider config and map to the public response.
 
     Missing legacy rows are normal (defaults were never saved): return
@@ -873,24 +824,26 @@ def _fetch_org_provider_config(org_id: uuid.UUID) -> ProviderConfigOut:
         config = service.get_config(org_id)
     except NotFoundError:
         return ProviderConfigOut(
-            base_url=DEFAULT_BASE_URL,
+            base_url=_openrouter_connection_view(org_id, user_id)[2],
             default_model="",
             small_model="",
             computer_use_model="",
             default_effort="",
             small_effort="",
             computer_use_effort="",
-            has_api_key=_openrouter_connection_view(org_id)[0],
-            api_key_hint=_openrouter_connection_view(org_id)[1],
+            has_api_key=_openrouter_connection_view(org_id, user_id)[0],
+            api_key_hint=_openrouter_connection_view(org_id, user_id)[1],
         )
-    return _provider_config_to_out(config, org_id)
+    return _provider_config_to_out(config, org_id, user_id)
 
 
-def _list_org_provider_models(org_id: uuid.UUID) -> list[ProviderModelOut]:
-    """Fetch the merged provider catalog for an organization."""
+def _list_org_provider_models(
+    org_id: uuid.UUID, user_id: int
+) -> list[ProviderModelOut]:
+    """Fetch the caller-scoped merged provider catalog."""
     from apps.harness.services import ProviderConfigService
 
-    models = ProviderConfigService().list_models(org_id)
+    models = ProviderConfigService().list_models(org_id, user_id=user_id)
     return [
         ProviderModelOut(
             id=model.id,
@@ -907,15 +860,32 @@ def _list_org_provider_models(org_id: uuid.UUID) -> list[ProviderModelOut]:
 
 
 def _save_org_provider_config(
-    org_id: uuid.UUID, payload: ProviderConfigIn
+    org_id: uuid.UUID, user, payload: ProviderConfigIn
 ) -> ProviderConfigOut:
-    """Upsert the org provider config and map to the public response."""
+    """Save org-wide defaults and route compatibility keys to active/private account."""
+    from apps.harness.provider_accounts import ProviderAccountService
     from apps.harness.services import ProviderConfigService
 
+    account_service = ProviderAccountService()
+    active = account_service.selected_accounts(org_id, user.id).get("openrouter")
+    base_url = (payload.base_url or "").strip() or str(
+        ((active.config if active else {}) or {}).get("base_url") or DEFAULT_BASE_URL
+    )
+    if (payload.api_key or "").strip() or (
+        active is not None
+        and "base_url" in payload.model_fields_set
+        and (payload.base_url or "").strip()
+    ):
+        _save_legacy_provider_account(
+            org_id,
+            user,
+            "openrouter",
+            {"api_key": payload.api_key, "base_url": base_url},
+        )
     config = ProviderConfigService().save_config(
         organization_id=org_id,
-        api_key=payload.api_key or "",
-        base_url=payload.base_url or "",
+        api_key="",
+        base_url=DEFAULT_BASE_URL,
         default_model=payload.default_model or "",
         small_model=payload.small_model or "",
         computer_use_model=payload.computer_use_model or "",
@@ -923,7 +893,7 @@ def _save_org_provider_config(
         small_effort=payload.small_effort or "",
         computer_use_effort=payload.computer_use_effort or "",
     )
-    return _provider_config_to_out(config, org_id)
+    return _provider_config_to_out(config, org_id, int(user.id))
 
 
 def _delete_org_provider_config(org_id: uuid.UUID) -> None:
@@ -1080,7 +1050,8 @@ async def create_harness_session(
         fresh = await sync_to_async(service.get_session)(session.id)
         return 201, await sync_to_async(_session_to_out_with_unread)(service, fresh)
     except AuthenticationError as exc:
-        return 403, {"detail": exc.message, "code": exc.code}
+        status = 403 if exc.code == "authentication_error" else 401
+        return status, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
     except ConflictError as exc:
@@ -1091,7 +1062,14 @@ async def create_harness_session(
 
 @harness_router.post(
     "/harness/sessions/{session_id}/message",
-    response={202: HarnessSessionOut, 400: dict, 403: dict, 404: dict, 409: dict},
+    response={
+        202: HarnessSessionOut,
+        400: dict,
+        401: dict,
+        403: dict,
+        404: dict,
+        409: dict,
+    },
     summary="Send a follow-up prompt to a harness session",
 )
 async def send_harness_message(
@@ -1109,7 +1087,10 @@ async def send_harness_message(
         service = _resolve_harness_service()
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
-        _require_claude_session_owner(session, request.user.id)
+        try:
+            _require_claude_session_owner(session, request.user.id)
+        except AuthenticationError as exc:
+            return 403, {"detail": exc.message, "code": "permission_denied"}
         await sync_to_async(service.ensure_user_promptable)(session)
         if not service.is_running(session.id):
             if payload.mode and payload.mode.strip():
@@ -1179,7 +1160,14 @@ async def fork_harness_session(
 
 @harness_router.post(
     "/harness/sessions/{session_id}/messages/{message_id}/edit",
-    response={202: HarnessSessionOut, 400: dict, 403: dict, 404: dict, 409: dict},
+    response={
+        202: HarnessSessionOut,
+        400: dict,
+        401: dict,
+        403: dict,
+        404: dict,
+        409: dict,
+    },
     summary="Edit a user message and rerun the session from there",
 )
 async def edit_harness_message(
@@ -1200,7 +1188,10 @@ async def edit_harness_message(
         service = _resolve_harness_service()
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
-        _require_claude_session_owner(session, request.user.id)
+        try:
+            _require_claude_session_owner(session, request.user.id)
+        except AuthenticationError as exc:
+            return 403, {"detail": exc.message, "code": "permission_denied"}
         await service.edit_user_message(
             session.id,
             message_id=message_id,
@@ -1667,7 +1658,7 @@ def list_harness_todos(request: HttpRequest, session_id: uuid.UUID):
 
 @harness_router.post(
     "/harness/sessions/{session_id}/permissions/{request_id}",
-    response={200: HarnessPermissionOut, 400: dict, 403: dict, 404: dict},
+    response={200: HarnessPermissionOut, 400: dict, 401: dict, 403: dict, 404: dict},
     summary="Resolve a harness permission request",
 )
 async def resolve_harness_permission(
@@ -1688,7 +1679,10 @@ async def resolve_harness_permission(
         service = _resolve_harness_service()
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
-        _require_claude_session_owner(session, request.user.id)
+        try:
+            _require_claude_session_owner(session, request.user.id)
+        except AuthenticationError as exc:
+            return 403, {"detail": exc.message, "code": "permission_denied"}
         outcome = await service.resolve_permission(
             session=session,
             request_id=request_id,
@@ -1709,7 +1703,7 @@ async def resolve_harness_permission(
 
 @harness_router.post(
     "/harness/sessions/{session_id}/questions/{question_id}",
-    response={200: HarnessQuestionOut, 400: dict, 403: dict, 404: dict},
+    response={200: HarnessQuestionOut, 400: dict, 401: dict, 403: dict, 404: dict},
     summary="Answer a harness question request",
 )
 async def resolve_harness_question(
@@ -1730,7 +1724,10 @@ async def resolve_harness_question(
         service = _resolve_harness_service()
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
-        _require_claude_session_owner(session, request.user.id)
+        try:
+            _require_claude_session_owner(session, request.user.id)
+        except AuthenticationError as exc:
+            return 403, {"detail": exc.message, "code": "permission_denied"}
         outcome = await service.resolve_question(
             session=session,
             question_id=question_id,
@@ -1970,7 +1967,7 @@ def get_org_provider_config(request: HttpRequest):
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        return 200, _fetch_org_provider_config(org_id)
+        return 200, _fetch_org_provider_config(org_id, int(request.user.id))
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -1989,7 +1986,7 @@ def list_org_provider_models(request: HttpRequest):
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        return 200, _list_org_provider_models(org_id)
+        return 200, _list_org_provider_models(org_id, int(request.user.id))
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -2020,7 +2017,7 @@ def save_org_provider_config(request: HttpRequest, payload: ProviderConfigIn):
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        return 200, _save_org_provider_config(org_id, payload)
+        return 200, _save_org_provider_config(org_id, request.user, payload)
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -2061,7 +2058,7 @@ def list_org_provider_connections(request: HttpRequest):
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        return 200, _list_org_provider_connections(org_id)
+        return 200, _list_org_provider_connections(org_id, int(request.user.id))
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -2071,14 +2068,14 @@ def list_org_provider_connections(request: HttpRequest):
 @harness_router.put(
     "/provider-config/providers/{provider}/",
     response={200: ProviderConnectionOut, 400: dict, 401: dict, 403: dict, 404: dict},
-    summary="Upsert a provider connection for the org",
+    summary="Compatibility upsert for the active provider account",
 )
 def upsert_org_provider_connection(
     request: HttpRequest,
     provider: str,
     payload: ProviderConnectionUpsertIn,
 ):
-    """Create or update credentials for one provider (ChatGPT uses OAuth)."""
+    """Upsert only the active visible account or create a private account."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
         return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
     try:
@@ -2090,34 +2087,28 @@ def upsert_org_provider_connection(
                 "detail": "ChatGPT uses OAuth connect; use the OAuth endpoints",
                 "code": "validation_error",
             }
-        if provider_id == ProviderType.OPENROUTER:
-            body = OpenRouterConnectionIn(
-                api_key=payload.api_key,
-                base_url=payload.base_url,
-            )
-            return 200, _upsert_openrouter_connection(org_id, body)
-        if provider_id == ProviderType.OPENAI_COMPATIBLE:
-            compat_body = OpenAICompatibleConnectionIn(
-                api_key=payload.api_key,
-                base_url=payload.base_url,
-                **(
-                    {"models": list(payload.models or [])}
-                    if "models" in payload.model_fields_set
-                    else {}
-                ),
-            )
-            return 200, _upsert_openai_compatible_connection(org_id, compat_body)
-        body = BedrockConnectionIn(
-            auth_method=payload.auth_method,
-            region=payload.region,
-            access_key_id=payload.access_key_id,
-            secret_access_key=payload.secret_access_key,
-            session_token=payload.session_token,
-            bearer_token=payload.bearer_token,
-        )
-        return 200, _upsert_bedrock_connection(org_id, body)
+        values = payload.model_dump(exclude_unset=True)
+        if (
+            provider_id == ProviderType.OPENAI_COMPATIBLE
+            and "models" not in payload.model_fields_set
+        ):
+            values.pop("models", None)
+        if (
+            provider_id == ProviderType.OPENAI_COMPATIBLE
+            and not values.get("base_url", "").strip()
+        ):
+            active = _active_account(org_id, int(request.user.id), provider_id)
+            if active is not None:
+                values["base_url"] = str((active.config or {}).get("base_url") or "")
+                if "models" not in values:
+                    values["models"] = list(
+                        (active.config or {}).get("models", []) or []
+                    )
+        _save_legacy_provider_account(org_id, request.user, provider_id, values)
+        rows = _list_org_provider_connections(org_id, int(request.user.id))
+        return 200, next(row for row in rows if row.provider == provider_id)
     except AuthenticationError as exc:
-        return 401, {"detail": exc.message, "code": exc.code}
+        return 403, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
     except (ValueError, KeyError, TypeError) as exc:
@@ -2137,10 +2128,182 @@ def delete_org_provider_connection(request: HttpRequest, provider: str):
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
         provider_id = _parse_provider_param(provider)
-        _delete_org_provider_connection(org_id, provider_id)
+        _delete_org_provider_connection(org_id, int(request.user.id), provider_id)
         return 204, None
     except AuthenticationError as exc:
-        return 401, {"detail": exc.message, "code": exc.code}
+        return 403, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except ValueError as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+@harness_router.get(
+    "/provider-config/accounts/",
+    response={200: list[ProviderAccountOut], 401: dict, 403: dict, 404: dict},
+    summary="List visible connected provider accounts",
+)
+def list_provider_accounts(request: HttpRequest):
+    """List connected private/shared accounts visible to the current user."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
+        return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
+    try:
+        org_id = _get_org_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        from apps.harness.provider_accounts import ProviderAccountService
+
+        rows = ProviderAccountService().list_accounts(org_id, int(request.user.id))
+        return 200, [ProviderAccountOut(**row) for row in rows if row["connected"]]
+    except AuthenticationError as exc:
+        return 403, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+
+
+@harness_router.post(
+    "/provider-config/accounts/{provider}/",
+    response={201: ProviderAccountOut, 400: dict, 401: dict, 403: dict, 404: dict},
+    summary="Create a named provider account",
+)
+def create_provider_account(
+    request: HttpRequest, provider: str, payload: ProviderAccountIn
+):
+    """Create one private account or an admin-created org-shared account."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
+        return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
+    try:
+        org_id = _get_org_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        from apps.harness.provider_accounts import ProviderAccountService
+        from apps.harness.providers.models_catalog import clear_models_cache
+
+        if provider == "chatgpt":
+            raise ValueError("ChatGPT accounts must be connected using OAuth")
+        account = ProviderAccountService().save_account(
+            organization_id=org_id,
+            user=request.user,
+            provider=provider,
+            payload=payload.model_dump(exclude_unset=True),
+        )
+        clear_models_cache(str(org_id))
+        row = next(
+            item
+            for item in ProviderAccountService().list_accounts(
+                org_id, int(request.user.id), provider
+            )
+            if item["id"] == str(account.id)
+        )
+        return 201, ProviderAccountOut(**row)
+    except AuthenticationError as exc:
+        return 403, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except (ValueError, TypeError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+@harness_router.put(
+    "/provider-config/accounts/{provider}/{account_id}/",
+    response={200: ProviderAccountOut, 400: dict, 401: dict, 403: dict, 404: dict},
+    summary="Update a named provider account",
+)
+def update_provider_account(
+    request: HttpRequest,
+    provider: str,
+    account_id: uuid.UUID,
+    payload: ProviderAccountIn,
+):
+    """Update an exact visible account after verifying its provider."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
+        return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
+    try:
+        org_id = _get_org_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        from apps.harness.provider_accounts import ProviderAccountService
+        from apps.harness.providers.models_catalog import clear_models_cache
+
+        service = ProviderAccountService()
+        account = service.get_account(
+            org_id, int(request.user.id), account_id, manage=True
+        )
+        if account.provider != provider:
+            raise NotFoundError("ProviderAccount", str(account_id))
+        updated = service.save_account(
+            organization_id=org_id,
+            user=request.user,
+            provider=provider,
+            payload=payload.model_dump(exclude_unset=True),
+            account_id=account_id,
+        )
+        clear_models_cache(str(org_id))
+        row = next(
+            item
+            for item in service.list_accounts(org_id, int(request.user.id), provider)
+            if item["id"] == str(updated.id)
+        )
+        return 200, ProviderAccountOut(**row)
+    except AuthenticationError as exc:
+        return 403, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except (ValueError, TypeError, KeyError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+@harness_router.delete(
+    "/provider-config/accounts/{provider}/{account_id}/",
+    response={204: None, 400: dict, 401: dict, 403: dict, 404: dict},
+    summary="Delete a named provider account",
+)
+def delete_provider_account(request: HttpRequest, provider: str, account_id: uuid.UUID):
+    """Delete only the exact account when visible and manageable."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
+        return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
+    try:
+        org_id = _get_org_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        from apps.harness.provider_accounts import ProviderAccountService
+        from apps.harness.providers.models_catalog import clear_models_cache
+
+        service = ProviderAccountService()
+        account = service.get_account(
+            org_id, int(request.user.id), account_id, manage=True
+        )
+        if account.provider != provider:
+            raise NotFoundError("ProviderAccount", str(account_id))
+        service.delete_account(org_id, int(request.user.id), account_id)
+        clear_models_cache(str(org_id))
+        return 204, None
+    except AuthenticationError as exc:
+        return 403, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except ValueError as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+
+
+@harness_router.put(
+    "/provider-config/selection/{provider}/",
+    response={204: None, 400: dict, 401: dict, 403: dict, 404: dict},
+    summary="Select the active provider account for this user and organization",
+)
+def select_provider_account(
+    request: HttpRequest, provider: str, payload: ProviderSelectionIn
+):
+    """Select one visible account or explicitly select no account."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
+        return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
+    try:
+        org_id = _get_org_id(request)
+        OrganizationService().require_membership(request.user, org_id)
+        from apps.harness.provider_accounts import ProviderAccountService
+
+        ProviderAccountService().select_account(
+            org_id, int(request.user.id), provider, payload.account_id
+        )
+        return 204, None
+    except AuthenticationError as exc:
+        return 403, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
     except ValueError as exc:
@@ -2149,49 +2312,55 @@ def delete_org_provider_connection(request: HttpRequest, provider: str):
 
 @harness_router.post(
     "/provider-config/providers/chatgpt/oauth/start/",
-    response={200: ChatGPTOAuthStartOut, 401: dict, 403: dict, 404: dict, 502: dict},
+    response={
+        200: ChatGPTOAuthStartOut,
+        400: dict,
+        401: dict,
+        403: dict,
+        404: dict,
+        502: dict,
+    },
     summary="Start ChatGPT device OAuth flow",
 )
 async def start_chatgpt_oauth(request: HttpRequest):
-    """Begin the ChatGPT device authorization flow for the org."""
+    """Start an isolated durable ChatGPT flow for the current user."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
         return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
-    from asgiref.sync import sync_to_async
-
+    from apps.harness.provider_oauth import ProviderOAuthService
     from apps.harness.providers.base import ProviderError
 
     try:
+        body = request.body
+        is_json = (request.content_type or "").lower().startswith("application/json")
+        raw = json.loads(body.decode("utf-8")) if is_json and body.strip() else {}
+        payload = ChatGPTOAuthStartIn(**raw)
         org_id = _get_org_id(request)
-        org_service = OrganizationService()
-        await sync_to_async(org_service.require_membership)(request.user, org_id)
-        from apps.harness.providers.chatgpt_oauth import start_device_flow
-
-        flow = await start_device_flow()
-        async with _chatgpt_oauth_lock:
-            _chatgpt_oauth_pending[org_id] = _PendingChatGPTOAuth(
-                device_auth_id=flow.device_auth_id,
-                user_code=flow.user_code,
-                interval=flow.interval,
-                created_at=time.monotonic(),
-            )
-        return 200, ChatGPTOAuthStartOut(
-            user_code=flow.user_code,
-            verification_url=flow.verification_url,
-            interval=flow.interval,
-            expires_in=CHATGPT_OAUTH_FLOW_EXPIRES_SECONDS,
+        result = await ProviderOAuthService().start(
+            organization_id=org_id,
+            user=request.user,
+            label=payload.label,
+            shared=payload.shared,
+            account_id=payload.account_id,
         )
+        return 200, ChatGPTOAuthStartOut(**result)
     except AuthenticationError as exc:
-        return 401, {"detail": exc.message, "code": exc.code}
+        return 403, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
-    except ProviderError as exc:
-        return 502, {"detail": str(exc), "code": "provider_error"}
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+    except ProviderError:
+        return 502, {
+            "detail": "ChatGPT OAuth provider request failed",
+            "code": "provider_error",
+        }
 
 
 @harness_router.get(
     "/provider-config/providers/chatgpt/oauth/status/",
     response={
         200: ChatGPTOAuthStatusOut,
+        400: dict,
         401: dict,
         403: dict,
         404: dict,
@@ -2200,101 +2369,69 @@ async def start_chatgpt_oauth(request: HttpRequest):
     },
     summary="Poll ChatGPT device OAuth status (single attempt)",
 )
-async def poll_chatgpt_oauth_status(request: HttpRequest):
-    """Poll once for ChatGPT OAuth completion and persist tokens on success."""
+async def poll_chatgpt_oauth_status(
+    request: HttpRequest, flow_id: uuid.UUID | None = None
+):
+    """Poll one user's flow once; flow IDs are private to their creator."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
         return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
-    from asgiref.sync import sync_to_async
-
+    from apps.harness.provider_oauth import ProviderOAuthService
     from apps.harness.providers.base import ProviderError
-    from apps.harness.providers.chatgpt_oauth import poll_device_flow_once
 
     try:
-        org_id = _get_org_id(request)
-        org_service = OrganizationService()
-        await sync_to_async(org_service.require_membership)(request.user, org_id)
-        async with _chatgpt_oauth_lock:
-            pending = _chatgpt_oauth_pending.get(org_id)
-        if pending is None:
+        result = await ProviderOAuthService().status(
+            organization_id=_get_org_id(request), user=request.user, flow_id=flow_id
+        )
+        if result["status"] == "no_flow":
             return 404, {
-                "status": "no_flow",
-                "detail": "No pending ChatGPT OAuth flow for this organization",
+                **result,
+                "detail": "No pending ChatGPT OAuth flow",
                 "code": "no_flow",
             }
-        if time.monotonic() - pending.created_at > CHATGPT_OAUTH_FLOW_EXPIRES_SECONDS:
-            async with _chatgpt_oauth_lock:
-                _chatgpt_oauth_pending.pop(org_id, None)
-            return 410, ChatGPTOAuthStatusOut(status="expired")
-
-        result = await poll_device_flow_once(
-            pending.device_auth_id,
-            pending.user_code,
-        )
-        if result.status == "pending":
-            return 200, ChatGPTOAuthStatusOut(status="pending")
-        if result.status == "expired":
-            async with _chatgpt_oauth_lock:
-                _chatgpt_oauth_pending.pop(org_id, None)
-            return 410, ChatGPTOAuthStatusOut(status="expired")
-        if result.status == "denied":
-            async with _chatgpt_oauth_lock:
-                _chatgpt_oauth_pending.pop(org_id, None)
-            return 410, ChatGPTOAuthStatusOut(status="denied")
-        if result.tokens is None:
-            return 502, {
-                "detail": "OAuth completed without tokens",
-                "code": "provider_error",
-            }
-
-        from apps.harness.services import ProviderConfigService
-
-        credentials = {
-            "access": result.tokens.access,
-            "refresh": result.tokens.refresh,
-            "expires": result.tokens.expires,
-            "account_id": result.tokens.account_id or "",
-            "residency": result.tokens.residency or "",
-        }
-        service = ProviderConfigService()
-        await sync_to_async(service.save_connection)(
-            organization_id=org_id,
-            provider=ProviderType.CHATGPT,
-            credentials=credentials,
-            config={},
-        )
-        async with _chatgpt_oauth_lock:
-            _chatgpt_oauth_pending.pop(org_id, None)
-        return 200, ChatGPTOAuthStatusOut(
-            status="connected",
-            account_id=result.tokens.account_id or "",
-        )
+        if result["status"] == "expired":
+            return 410, result
+        return 200, ChatGPTOAuthStatusOut(**result)
     except AuthenticationError as exc:
-        return 401, {"detail": exc.message, "code": exc.code}
+        return 403, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
-    except ProviderError as exc:
-        return 502, {"detail": str(exc), "code": "provider_error"}
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+    except ProviderError:
+        return 502, {
+            "detail": "ChatGPT OAuth provider request failed",
+            "code": "provider_error",
+        }
 
 
 @harness_router.post(
     "/provider-config/providers/chatgpt/oauth/cancel/",
-    response={204: None, 401: dict, 403: dict, 404: dict},
-    summary="Cancel a pending ChatGPT OAuth flow",
+    response={204: None, 400: dict, 401: dict, 403: dict, 404: dict},
+    summary="Cancel one pending ChatGPT OAuth flow",
 )
 async def cancel_chatgpt_oauth(request: HttpRequest):
-    """Drop any in-memory pending ChatGPT OAuth state for the org."""
+    """Cancel one owned flow; no flow ID is accepted only when unambiguous."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
         return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
-    from asgiref.sync import sync_to_async
+    from apps.harness.provider_oauth import ProviderOAuthService
 
     try:
-        org_id = _get_org_id(request)
-        org_service = OrganizationService()
-        await sync_to_async(org_service.require_membership)(request.user, org_id)
-        async with _chatgpt_oauth_lock:
-            _chatgpt_oauth_pending.pop(org_id, None)
+        body = request.body
+        is_json = (request.content_type or "").lower().startswith("application/json")
+        raw = json.loads(body.decode("utf-8")) if is_json and body.strip() else {}
+        payload = ChatGPTOAuthCancelIn(**raw)
+        raw_id = payload.flow_id
+        from asgiref.sync import sync_to_async
+
+        cancelled = await sync_to_async(ProviderOAuthService().cancel)(
+            organization_id=_get_org_id(request), user=request.user, flow_id=raw_id
+        )
+        if not cancelled:
+            return 404, {"detail": "No pending OAuth flow", "code": "no_flow"}
         return 204, None
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
     except AuthenticationError as exc:
-        return 401, {"detail": exc.message, "code": exc.code}
+        return 403, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}

@@ -108,10 +108,14 @@ async def execute_external_run(
                     session_id=key,
                     skipped=mcp_runtime.skipped,
                 )
+        account_id = (context.get("account_ids") or {}).get("claude-agent")
+        await service._register_provider_use(
+            context.get("provider_turn_id"), account_id
+        )
         auth = await sync_to_async(service._resolve_engine_auth, thread_sensitive=True)(
             organization_id,
             context.get("initiated_by_id"),
-            getattr(session, "connection_id", None),
+            account_id,
         )
         session_store = HarnessClaudeSessionStore(
             session_id=session.id,
@@ -200,13 +204,22 @@ async def execute_external_run(
             effort=session.reasoning_effort or "high",
         )
         await ensure_current()
-        result = await engine.run(
-            prompt,
-            session.agent_name or session.mode or "build",
-            session.model or "sonnet",
-            session.mode or "build",
-            run_options,
-        )
+        try:
+            result = await engine.run(
+                prompt,
+                session.agent_name or session.mode or "build",
+                session.model or "sonnet",
+                session.mode or "build",
+                run_options,
+            )
+        except Exception:
+            revocation_message = await service._provider_turn_revocation_message(
+                session
+            )
+            if revocation_message:
+                context["provider_revocation_message"] = revocation_message
+                raise asyncio.CancelledError() from None
+            raise
         await sync_to_async(assistant.refresh_from_db, thread_sensitive=True)()
         remainder = _tail_remainder(assistant.content or "", result.output or "")
         usage = result.usage or Usage()
@@ -231,8 +244,14 @@ async def execute_external_run(
             if result.finish_reason == "aborted"
             else HarnessRunStatus.COMPLETED
         )
+        revocation_message = await service._provider_turn_revocation_message(session)
+        if revocation_message:
+            status = HarnessRunStatus.INTERRUPTED
+            context["provider_revocation_message"] = revocation_message
         safe_error = (
-            "aborted by user"
+            str(context.get("provider_revocation_message"))
+            if context.get("provider_revocation_message")
+            else "aborted by user"
             if status == HarnessRunStatus.INTERRUPTED
             and service._user_abort_requested(session)
             else "Claude run was aborted"
@@ -241,9 +260,17 @@ async def execute_external_run(
         )
     except asyncio.CancelledError:
         status = HarnessRunStatus.INTERRUPTED
-        user_abort = service._user_abort_requested(session)
-        safe_error = "aborted by user" if user_abort else "Run interrupted unexpectedly"
-        public_error = safe_error
+        revocation_message = await service._provider_turn_revocation_message(session)
+        if revocation_message:
+            context["provider_revocation_message"] = revocation_message
+            safe_error = revocation_message
+            public_error = revocation_message
+        else:
+            user_abort = service._user_abort_requested(session)
+            safe_error = (
+                "aborted by user" if user_abort else "Run interrupted unexpectedly"
+            )
+            public_error = safe_error
         if ownership is not None and await ownership.is_owner_for_finalization():
             await sync_to_async(assistant.refresh_from_db, thread_sensitive=True)()
             context["pending_assistant_content"] = assistant.content or ""
@@ -257,8 +284,14 @@ async def execute_external_run(
             safe_error = service._redact_claude_error(exc, auth)
         except Exception:
             safe_error = "Claude run failed"
+        revocation_message = await service._provider_turn_revocation_message(session)
+        if revocation_message:
+            context["provider_revocation_message"] = revocation_message
+            status = HarnessRunStatus.INTERRUPTED
+            safe_error = revocation_message
+            public_error = revocation_message
         public_recovery_error = _safe_transcript_recovery_message(exc)
-        if public_recovery_error:
+        if public_recovery_error and not revocation_message:
             public_error = public_recovery_error
         current_owner = (
             ownership is not None and await ownership.is_owner_for_finalization()
@@ -332,7 +365,9 @@ async def execute_external_run(
                         else str(getattr(result, "finish_reason", "stop") or "stop")
                     )
                     public_error = (
-                        "aborted by user"
+                        str(context.get("provider_revocation_message"))
+                        if context.get("provider_revocation_message")
+                        else "aborted by user"
                         if status == HarnessRunStatus.INTERRUPTED
                         and service._user_abort_requested(session)
                         else "Run interrupted unexpectedly"

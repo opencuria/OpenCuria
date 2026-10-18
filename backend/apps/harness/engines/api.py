@@ -80,11 +80,12 @@ class EngineConnectionOut(Schema):
 
 
 class EngineConnectionIn(Schema):
-    """Personal Claude auth upsert payload; blank token preserves same mode."""
+    """Claude-account compatibility upsert; id targets only an owned account."""
 
     auth_type: str
     token: str = ""
     label: str = "Claude"
+    connection_id: uuid.UUID | None = None
 
 
 class ClaudeModelOut(Schema):
@@ -188,6 +189,7 @@ def save_claude_connection(request: HttpRequest, payload: EngineConnectionIn):
             auth_type=payload.auth_type,
             token=payload.token,
             label=payload.label,
+            connection_id=payload.connection_id,
         )
         return 200, EngineConnectionOut(
             id=str(connection.id),
@@ -208,13 +210,17 @@ def save_claude_connection(request: HttpRequest, payload: EngineConnectionIn):
     response={204: None, 401: dict, 403: dict, 404: dict, 409: dict},
     summary="Delete the current user's Claude connection",
 )
-def delete_claude_connection(request: HttpRequest):
-    """Delete the caller's personal Claude authorization and stored token."""
+def delete_claude_connection(
+    request: HttpRequest, connection_id: uuid.UUID | None = None
+):
+    """Delete an explicitly scoped Claude account or the active compatibility one."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
         return _permission_denied(APIKeyPermission.HARNESS_PROVIDERS)
     try:
         organization_id = _require_membership(request)
-        EngineConnectionService().delete_connection(organization_id, request.user.id)
+        EngineConnectionService().delete_connection(
+            organization_id, request.user.id, connection_id
+        )
         return 204, None
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}

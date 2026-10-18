@@ -153,7 +153,7 @@ def test_engine_api_lists_catalog_and_safe_connection(engine_api_setup) -> None:
     assert token not in connection.content.decode()
 
     credential = Credential.objects.get(
-        user=data["owner"], service__slug="claude-agent-api-token"
+        user=data["owner"], service__slug="provider-account-claude-agent"
     )
     assert (
         EngineConnectionService()
@@ -218,3 +218,49 @@ def test_engine_api_permissions_and_ownership_are_scoped(engine_api_setup) -> No
         HTTP_X_ORGANIZATION_ID="not-a-uuid",
     )
     assert bad_model_endpoint.status_code == 401
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("select_none", [False, True])
+def test_engine_api_exact_account_save_does_not_change_selection(
+    engine_api_setup, select_none
+) -> None:
+    """The compatibility endpoint updates IDs without overriding an opt-out."""
+    from apps.harness.provider_accounts import ProviderAccountService
+
+    data = engine_api_setup
+    org = data["organization"]
+    user = data["owner"]
+    accounts = ProviderAccountService()
+    first = accounts.save_account(
+        organization_id=org.id,
+        user=user,
+        provider="claude-agent",
+        payload={"label": "First", "token": "first-token"},
+    )
+    second = accounts.save_account(
+        organization_id=org.id,
+        user=user,
+        provider="claude-agent",
+        payload={"label": "Second", "token": "second-token"},
+    )
+    if select_none:
+        accounts.select_account(org.id, user.id, "claude-agent", None)
+    response = data["providers_client"].put(
+        "/api/v1/harness/engines/claude/connection/",
+        data=json.dumps(
+            {
+                "connection_id": str(second.id),
+                "auth_type": "api_token",
+                "label": "Updated second",
+                "token": "updated-token",
+            }
+        ),
+        content_type="application/json",
+    )
+    assert response.status_code == 200, response.content
+    assert response.json()["id"] == str(second.id)
+    selected = accounts.selected_accounts(org.id, user.id)
+    assert {key: row.id for key, row in selected.items()} == (
+        {} if select_none else {"claude-agent": first.id}
+    )

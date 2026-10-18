@@ -1,41 +1,47 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
-import { createPinia, setActivePinia } from 'pinia'
 
-import { useNotificationStore } from '@/stores/notifications'
 import ProviderConnectionDialog from './ProviderConnectionDialog.vue'
 import * as harnessApi from '@/services/harness.api'
-import type { ProviderId } from '@/lib/harnessModels'
-import type { ProviderConnection } from '@/services/harness.api'
+import type { ProviderAccount } from '@/services/harness.api'
 
 vi.mock('@/services/harness.api', async () => {
   const actual =
     await vi.importActual<typeof import('@/services/harness.api')>('@/services/harness.api')
   return {
     ...actual,
-    saveProviderConnection: vi.fn(),
-    deleteProviderConnection: vi.fn(),
-    saveClaudeConnection: vi.fn(),
-    deleteClaudeConnection: vi.fn(),
+    createProviderAccount: vi.fn(),
+    updateProviderAccount: vi.fn(),
+    deleteProviderAccount: vi.fn(),
+    selectProviderAccount: vi.fn(),
     startChatGptOAuth: vi.fn(),
     getChatGptOAuthStatus: vi.fn(),
     cancelChatGptOAuth: vi.fn(),
   }
 })
 
-const saveProviderConnectionMock = vi.mocked(harnessApi.saveProviderConnection)
-const deleteProviderConnectionMock = vi.mocked(harnessApi.deleteProviderConnection)
-const saveClaudeConnectionMock = vi.mocked(harnessApi.saveClaudeConnection)
-const deleteClaudeConnectionMock = vi.mocked(harnessApi.deleteClaudeConnection)
-const startChatGptOAuthMock = vi.mocked(harnessApi.startChatGptOAuth)
-const getChatGptOAuthStatusMock = vi.mocked(harnessApi.getChatGptOAuthStatus)
-const cancelChatGptOAuthMock = vi.mocked(harnessApi.cancelChatGptOAuth)
-
-const dialogStubs = {
-  Dialog: {
-    template: '<div><slot /></div>',
-    props: ['open'],
-  },
+const personal: ProviderAccount = {
+  id: 'private-uuid',
+  provider: 'openrouter',
+  label: 'Personal',
+  scope: 'personal',
+  connected: true,
+  is_active: true,
+  can_manage: true,
+  api_key_hint: '••••cdef',
+  base_url: 'https://openrouter.ai/api/v1',
+}
+const shared: ProviderAccount = {
+  id: 'shared-uuid',
+  provider: 'openrouter',
+  label: 'Org key',
+  scope: 'organization',
+  connected: true,
+  is_active: false,
+  can_manage: false,
+}
+const stubs = {
+  Dialog: { template: '<div><slot /></div>', props: ['open'] },
   DialogContent: { template: '<div><slot /></div>' },
   DialogHeader: { template: '<div><slot /></div>' },
   DialogTitle: { template: '<div><slot /></div>' },
@@ -43,421 +49,242 @@ const dialogStubs = {
   DialogBody: { template: '<div><slot /></div>' },
   DialogFooter: { template: '<div><slot /></div>' },
 }
-
 function mountDialog(
-  provider: ProviderId | 'claude-agent',
-  connection?: ProviderConnection,
-  claudeConnection?: import('@/services/harness.api').ClaudeConnection | null,
+  provider: ProviderAccount['provider'],
+  accounts: ProviderAccount[] = [],
+  isAdmin = false,
 ) {
   return mount(ProviderConnectionDialog, {
-    props: { open: true, provider, connection, claudeConnection },
-    global: { stubs: dialogStubs },
+    props: { open: true, provider, accounts, isAdmin },
+    global: { stubs },
   })
 }
 
-describe('ProviderConnectionDialog', () => {
+describe('ProviderConnectionDialog account management', () => {
   beforeEach(() => {
-    setActivePinia(createPinia())
     vi.clearAllMocks()
-    saveProviderConnectionMock.mockResolvedValue({
-      provider: 'openrouter',
-      connected: true,
-      base_url: 'https://openrouter.ai/api/v1',
-      api_key_hint: '••••wxyz',
-    })
-    deleteProviderConnectionMock.mockResolvedValue(undefined)
-    saveClaudeConnectionMock.mockResolvedValue({
-      id: 'personal-1',
-      auth_type: 'api_token',
-      label: 'Personal',
-      connected: true,
-      created_at: '2026-10-08T00:00:00Z',
-      updated_at: '2026-10-08T00:00:00Z',
-    })
-    deleteClaudeConnectionMock.mockResolvedValue(undefined)
-    startChatGptOAuthMock.mockResolvedValue({
+    vi.mocked(harnessApi.createProviderAccount).mockResolvedValue(personal)
+    vi.mocked(harnessApi.updateProviderAccount).mockResolvedValue(personal)
+    vi.mocked(harnessApi.deleteProviderAccount).mockResolvedValue(undefined)
+    vi.mocked(harnessApi.selectProviderAccount).mockResolvedValue(undefined)
+    vi.mocked(harnessApi.startChatGptOAuth).mockResolvedValue({
+      flow_id: 'flow-current',
       user_code: 'ABCD-1234',
-      verification_url: 'https://auth.openai.com/codex/device',
+      verification_url: 'https://openai.test/device',
       interval: 1,
       expires_in: 600,
     })
-    getChatGptOAuthStatusMock.mockResolvedValue({ status: 'pending' })
-    cancelChatGptOAuthMock.mockResolvedValue(undefined)
+    vi.mocked(harnessApi.getChatGptOAuthStatus).mockResolvedValue({ status: 'pending' })
+    vi.mocked(harnessApi.cancelChatGptOAuth).mockResolvedValue(undefined)
   })
 
-  it('copies the ChatGPT login code through the shared copy control', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined)
-    Object.assign(navigator, { clipboard: { writeText } })
-    const notificationInfo = vi.spyOn(useNotificationStore(), 'info')
-    const wrapper = mountDialog('chatgpt', { provider: 'chatgpt', connected: false })
+  it('lists multiple accounts, lets a member select a shared account, and supports explicit none', async () => {
+    const wrapper = mountDialog('openrouter', [personal, shared])
+    expect(wrapper.text()).toContain('Personal')
+    expect(wrapper.text()).toContain('Org key')
+    expect(wrapper.find('[data-testid="edit-account-shared-uuid"]').exists()).toBe(false)
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === 'Use')!
+      .trigger('click')
     await flushPromises()
+    expect(harnessApi.selectProviderAccount).toHaveBeenCalledWith('openrouter', 'shared-uuid')
 
-    await wrapper.find('[data-testid="chatgpt-connect"]').trigger('click')
+    await wrapper.find('[data-testid="select-no-account"]').trigger('click')
     await flushPromises()
-    const copyCode = wrapper.find('[data-testid="chatgpt-copy-code"]')
-    expect(copyCode.attributes('title')).toBe('Copy login code')
-    await copyCode.trigger('click')
-    await flushPromises()
-
-    expect(writeText).toHaveBeenCalledWith('ABCD-1234')
-    expect(wrapper.find('[data-testid="chatgpt-copy-code"]').attributes('aria-label')).toBe('Copied')
-    expect(wrapper.find('[data-testid="chatgpt-copy-code"]').attributes('title')).toBe('Copied')
-    expect(wrapper.find('[data-testid="chatgpt-copy-code"]').text()).toBe('Copy code')
-    expect(notificationInfo).not.toHaveBeenCalled()
+    expect(harnessApi.selectProviderAccount).toHaveBeenLastCalledWith('openrouter', null)
   })
 
-  it('shows a unified status summary for a connected provider', async () => {
-    const wrapper = mountDialog('openrouter', {
-      provider: 'openrouter',
-      connected: true,
-      base_url: 'https://openrouter.ai/api/v1',
-      api_key_hint: '••••cdef',
-    })
+  it('creates named personal accounts and leaves blank secrets blank to preserve them', async () => {
+    const wrapper = mountDialog('openrouter')
+    await wrapper.find('[data-testid="add-provider-account"]').trigger('click')
+    await wrapper.find('#account-label').setValue('Home')
+    await wrapper.find('#openrouter-api-key').setValue('')
+    await wrapper.find('[data-testid="save-provider-account"]').trigger('click')
     await flushPromises()
-
-    const status = wrapper.find('[data-testid="connection-status"]')
-    expect(status.exists()).toBe(true)
-    expect(status.text()).toContain('Connected')
-    expect(status.text()).toContain('••••cdef')
-  })
-
-  it('saves the OpenRouter connection and emits changed', async () => {
-    const wrapper = mountDialog('openrouter', {
-      provider: 'openrouter',
-      connected: true,
-      base_url: 'https://openrouter.ai/api/v1',
-      api_key_hint: '••••cdef',
-    })
-    await flushPromises()
-
-    await wrapper.find('#openrouter-api-key').setValue('sk-or-new')
-    await wrapper.find('[data-testid="save-openrouter"]').trigger('click')
-    await flushPromises()
-
-    expect(saveProviderConnectionMock).toHaveBeenCalledWith('openrouter', {
-      api_key: 'sk-or-new',
+    expect(harnessApi.createProviderAccount).toHaveBeenCalledWith('openrouter', {
+      label: 'Home',
+      shared: false,
+      api_key: '',
       base_url: 'https://openrouter.ai/api/v1',
     })
-    expect(wrapper.emitted('changed')).toHaveLength(1)
   })
 
-  it('saves a personal Claude API token without echoing it back', async () => {
-    const wrapper = mountDialog('claude-agent')
-    await wrapper.find('#claude-token').setValue('anthropic-secret')
-    await wrapper.find('#claude-label').setValue('Work account')
-    await wrapper.find('[data-testid="save-claude-agent"]').trigger('click')
+  it('allows admins to create shared accounts and edits exactly one selected UUID', async () => {
+    const wrapper = mountDialog('openrouter', [personal], true)
+    await wrapper.find('[data-testid="edit-account-private-uuid"]').trigger('click')
+    await wrapper.find('#account-label').setValue('Personal 2')
+    await wrapper.find('[data-testid="save-provider-account"]').trigger('click')
+    await flushPromises()
+    expect(harnessApi.updateProviderAccount).toHaveBeenCalledWith('openrouter', 'private-uuid', {
+      label: 'Personal 2',
+      shared: false,
+      api_key: '',
+      base_url: 'https://openrouter.ai/api/v1',
+    })
+
+    wrapper.unmount()
+    const createWrapper = mountDialog('openrouter', [], true)
+    await createWrapper.find('[data-testid="add-provider-account"]').trigger('click')
+    await createWrapper.find('#account-label').setValue('Org Production')
+    createWrapper.findComponent({ name: 'Checkbox' }).vm.$emit('update:modelValue', true)
+    await createWrapper.find('[data-testid="save-provider-account"]').trigger('click')
+    await flushPromises()
+    expect(harnessApi.createProviderAccount).toHaveBeenLastCalledWith(
+      'openrouter',
+      expect.objectContaining({
+        label: 'Org Production',
+        shared: true,
+      }),
+    )
+  })
+
+  it('keeps shared accounts read-only for members while allowing selection', async () => {
+    const wrapper = mountDialog('openrouter', [shared])
+
+    expect(wrapper.find('[data-testid="edit-account-shared-uuid"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="delete-account"]').exists()).toBe(false)
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === 'Use')!
+      .trigger('click')
     await flushPromises()
 
-    expect(saveClaudeConnectionMock).toHaveBeenCalledWith({
-      auth_type: 'api_token',
-      token: 'anthropic-secret',
-      label: 'Work account',
-    })
-    expect(wrapper.emitted('changed')).toHaveLength(1)
-    expect(wrapper.find('#claude-token').element.getAttribute('type')).toBe('password')
-    expect(wrapper.text()).toContain('no OAuth or browser authorization flow')
-    expect(wrapper.text()).toContain('only workspaces you trust')
-    expect(wrapper.text()).toContain('personal')
+    expect(harnessApi.selectProviderAccount).toHaveBeenCalledWith('openrouter', 'shared-uuid')
+    expect(harnessApi.updateProviderAccount).not.toHaveBeenCalled()
+    expect(harnessApi.deleteProviderAccount).not.toHaveBeenCalled()
   })
 
-  it('keeps a blank token for the same authentication type and requires a token to switch type', async () => {
-    const connection = {
-      id: 'personal-1',
-      auth_type: 'api_token' as const,
-      label: 'Personal',
-      connected: true,
-      created_at: '2026-10-08T00:00:00Z',
-      updated_at: '2026-10-08T00:00:00Z',
+  it('normalizes compatible model lists while retaining a blank saved API key', async () => {
+    const compatible: ProviderAccount = {
+      ...personal,
+      id: 'compatible-uuid',
+      provider: 'openai-compatible',
+      base_url: 'https://local.example/v1',
+      models: ['old-model'],
     }
-    const wrapper = mountDialog('claude-agent', undefined, connection)
-    await wrapper.find('[data-testid="save-claude-agent"]').trigger('click')
+    const wrapper = mountDialog('openai-compatible', [compatible])
+    await wrapper.find('[data-testid="edit-account-compatible-uuid"]').trigger('click')
+    await wrapper.find('#compat-models').setValue(' model-a  \nmodel-a\nmodel-b \n')
+    await wrapper.find('[data-testid="save-provider-account"]').trigger('click')
     await flushPromises()
-    expect(saveClaudeConnectionMock).toHaveBeenCalledWith({
+
+    expect(harnessApi.updateProviderAccount).toHaveBeenCalledWith(
+      'openai-compatible',
+      'compatible-uuid',
+      {
+        label: 'Personal',
+        shared: false,
+        api_key: '',
+        base_url: 'https://local.example/v1',
+        models: ['model-a', 'model-b'],
+      },
+    )
+  })
+
+  it('requires account labels and base URLs and never submits on invalid form', async () => {
+    const wrapper = mountDialog('openai-compatible')
+    await wrapper.find('[data-testid="add-provider-account"]').trigger('click')
+    await wrapper.find('#account-label').setValue('Local')
+    await wrapper.find('[data-testid="save-provider-account"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Base URL is required')
+    expect(harnessApi.createProviderAccount).not.toHaveBeenCalled()
+  })
+
+  it('confirms deletion with explicit no-fallback interruption warning', async () => {
+    const wrapper = mountDialog('openrouter', [personal])
+    await wrapper.find('[data-testid="edit-account-private-uuid"]').trigger('click')
+    await wrapper.find('[data-testid="delete-account"]').trigger('click')
+    expect(wrapper.find('[data-testid="account-confirm"]').text()).toContain(
+      'They will not switch to another account',
+    )
+    await wrapper.find('[data-testid="confirm-account-action"]').trigger('click')
+    await flushPromises()
+    expect(harnessApi.deleteProviderAccount).toHaveBeenCalledWith('openrouter', 'private-uuid')
+  })
+
+  it('requires admin confirmation before unsharing and transfers the exact account to personal scope', async () => {
+    const organizationAccount = { ...personal, scope: 'organization' as const }
+    const wrapper = mountDialog('openrouter', [organizationAccount], true)
+    await wrapper.find('[data-testid="edit-account-private-uuid"]').trigger('click')
+    await wrapper.find('[data-testid="unshare-account"]').trigger('click')
+    expect(wrapper.find('[data-testid="account-confirm"]').text()).toContain(
+      'transfers this account to you',
+    )
+    await wrapper.find('[data-testid="confirm-account-action"]').trigger('click')
+    await flushPromises()
+    expect(harnessApi.updateProviderAccount).toHaveBeenCalledWith(
+      'openrouter',
+      'private-uuid',
+      expect.objectContaining({
+        label: 'Personal',
+        shared: false,
+      }),
+    )
+  })
+
+  it('creates Claude accounts through account API and preserves blank auth secrets', async () => {
+    const claude: ProviderAccount = {
+      ...personal,
+      id: 'claude-uuid',
+      provider: 'claude-agent',
+      auth_type: 'api_token',
+    }
+    vi.mocked(harnessApi.updateProviderAccount).mockResolvedValue(claude)
+    const wrapper = mountDialog('claude-agent', [claude])
+    await wrapper.find('[data-testid="edit-account-claude-uuid"]').trigger('click')
+    await wrapper.find('[data-testid="save-provider-account"]').trigger('click')
+    await flushPromises()
+    expect(harnessApi.updateProviderAccount).toHaveBeenCalledWith('claude-agent', 'claude-uuid', {
+      label: 'Personal',
+      shared: false,
       auth_type: 'api_token',
       token: '',
-      label: 'Personal',
     })
-
-    wrapper.findComponent({ name: 'Tabs' }).vm.$emit('update:modelValue', 'subscription_token')
-    await wrapper.find('[data-testid="save-claude-agent"]').trigger('click')
-    expect(saveClaudeConnectionMock).toHaveBeenCalledTimes(1)
-    expect(wrapper.text()).toContain('Enter a token to connect or change the authentication type.')
   })
 
-  it('disconnects Claude using its personal connection endpoint', async () => {
-    const connection = {
-      id: 'personal-1',
-      auth_type: 'subscription_token' as const,
-      label: 'Personal',
-      connected: true,
-      created_at: '2026-10-08T00:00:00Z',
-      updated_at: '2026-10-08T00:00:00Z',
-    }
-    const wrapper = mountDialog('claude-agent', undefined, connection)
-    await wrapper.find('[data-testid="disconnect-claude-agent"]').trigger('click')
-    await wrapper.find('[data-testid="confirm-disconnect-claude-agent"]').trigger('click')
-    await flushPromises()
-    expect(deleteClaudeConnectionMock).toHaveBeenCalledOnce()
-  })
-
-  it('runs ChatGPT OAuth polling until connected', async () => {
+  it('treats a cancelled OAuth flow as idle rather than expired', async () => {
     vi.useFakeTimers()
-    getChatGptOAuthStatusMock
-      .mockResolvedValueOnce({ status: 'pending' })
-      .mockResolvedValueOnce({ status: 'connected', account_id: 'acct-42' })
+    vi.mocked(harnessApi.getChatGptOAuthStatus).mockResolvedValue({ status: 'cancelled' })
+    const wrapper = mountDialog('chatgpt')
+    try {
+      await wrapper.find('[data-testid="add-provider-account"]').trigger('click')
+      await wrapper.find('#account-label').setValue('Login')
+      await wrapper.find('[data-testid="chatgpt-connect"]').trigger('click')
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(1000)
+      await flushPromises()
 
-    const wrapper = mountDialog('chatgpt', { provider: 'chatgpt', connected: false })
-    await flushPromises()
-
-    await wrapper.find('[data-testid="chatgpt-connect"]').trigger('click')
-    await flushPromises()
-
-    expect(startChatGptOAuthMock).toHaveBeenCalled()
-    expect(wrapper.find('[data-testid="chatgpt-user-code"]').text()).toBe('ABCD-1234')
-    expect(wrapper.text()).toContain('Waiting for authorization')
-
-    await vi.advanceTimersByTimeAsync(1000)
-    await flushPromises()
-    await vi.advanceTimersByTimeAsync(1000)
-    await flushPromises()
-
-    expect(getChatGptOAuthStatusMock).toHaveBeenCalled()
-    expect(wrapper.emitted('connected')).toHaveLength(1)
-    expect(wrapper.find('[data-testid="connection-status"]').text()).toContain('acct-42')
-    vi.useRealTimers()
+      expect(harnessApi.getChatGptOAuthStatus).toHaveBeenCalledWith('flow-current')
+      expect(wrapper.text()).not.toContain('authorization code expired')
+      expect(wrapper.text()).not.toContain('Authorization was denied')
+      expect(wrapper.find('[data-testid="chatgpt-connect"]').exists()).toBe(true)
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
   })
 
-  it('cancels a pending ChatGPT OAuth flow when the dialog closes', async () => {
-    const wrapper = mountDialog('chatgpt', { provider: 'chatgpt', connected: false })
-    await flushPromises()
-
+  it('scopes OAuth start, polling and cancellation to this dialog flow and target account', async () => {
+    const chatAccount: ProviderAccount = {
+      ...personal,
+      id: 'chat-account-uuid',
+      provider: 'chatgpt',
+    }
+    const wrapper = mountDialog('chatgpt', [chatAccount])
+    await wrapper.find('[data-testid="edit-account-chat-account-uuid"]').trigger('click')
+    await wrapper.find('#account-label').setValue('ChatGPT Work')
     await wrapper.find('[data-testid="chatgpt-connect"]').trigger('click')
     await flushPromises()
-    expect(wrapper.find('[data-testid="chatgpt-user-code"]').exists()).toBe(true)
-
+    expect(harnessApi.startChatGptOAuth).toHaveBeenCalledWith({
+      label: 'ChatGPT Work',
+      shared: false,
+      account_id: 'chat-account-uuid',
+    })
+    expect(wrapper.find('[data-testid="chatgpt-user-code"]').text()).toBe('ABCD-1234')
     await wrapper.setProps({ open: false })
     await flushPromises()
-
-    expect(cancelChatGptOAuthMock).toHaveBeenCalled()
-  })
-
-  it('shows ChatGPT OAuth error state on denied status', async () => {
-    vi.useFakeTimers()
-    getChatGptOAuthStatusMock.mockResolvedValue({ status: 'denied' })
-
-    const wrapper = mountDialog('chatgpt', { provider: 'chatgpt', connected: false })
-    await flushPromises()
-
-    await wrapper.find('[data-testid="chatgpt-connect"]').trigger('click')
-    await flushPromises()
-    await vi.advanceTimersByTimeAsync(1000)
-    await flushPromises()
-
-    expect(wrapper.text()).toContain('denied')
-    vi.useRealTimers()
-  })
-
-  it('switches Bedrock auth method tabs and saves bearer payload', async () => {
-    saveProviderConnectionMock.mockResolvedValue({
-      provider: 'amazon-bedrock',
-      connected: true,
-      region: 'us-west-2',
-      auth_method: 'bearer',
-    })
-
-    const wrapper = mountDialog('amazon-bedrock', {
-      provider: 'amazon-bedrock',
-      connected: true,
-      region: 'us-east-1',
-      auth_method: 'bearer',
-    })
-    await flushPromises()
-
-    expect(wrapper.find('[data-testid="bedrock-tab-access-keys"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="bedrock-tab-bearer"]').exists()).toBe(true)
-    const bearerInput = wrapper.find('#bedrock-bearer-token')
-    expect(bearerInput.exists()).toBe(true)
-    await bearerInput.setValue('token-abc')
-    await wrapper.find('#bedrock-region').setValue('us-west-2')
-    await wrapper.find('[data-testid="save-bedrock"]').trigger('click')
-    await flushPromises()
-
-    expect(saveProviderConnectionMock).toHaveBeenCalledWith('amazon-bedrock', {
-      auth_method: 'bearer',
-      region: 'us-west-2',
-      bearer_token: 'token-abc',
-    })
-    expect(wrapper.emitted('changed')).toHaveLength(1)
-  })
-
-  it('disconnects a provider after confirmation', async () => {
-    const wrapper = mountDialog('openrouter', {
-      provider: 'openrouter',
-      connected: true,
-      base_url: 'https://openrouter.ai/api/v1',
-      api_key_hint: '••••cdef',
-    })
-    await flushPromises()
-
-    await wrapper.find('[data-testid="disconnect-openrouter"]').trigger('click')
-    expect(wrapper.find('[data-testid="disconnect-confirm"]').text()).toContain(
-      'Disconnect OpenRouter?',
-    )
-    await wrapper.find('[data-testid="confirm-disconnect-openrouter"]').trigger('click')
-    await flushPromises()
-
-    expect(deleteProviderConnectionMock).toHaveBeenCalledWith('openrouter')
-    expect(wrapper.emitted('changed')).toHaveLength(1)
-  })
-
-  it('loads an existing compatible connection without showing secrets', async () => {
-    const wrapper = mountDialog('openai-compatible', {
-      provider: 'openai-compatible',
-      connected: true,
-      base_url: 'https://my-host:8000/v1',
-      api_key_hint: '••••abcd',
-      models: ['ui-tars-1.5-7b', 'grounding-model'],
-    })
-    await flushPromises()
-
-    expect(wrapper.find('[data-testid="connection-status"]').text()).toContain(
-      'https://my-host:8000/v1',
-    )
-    expect(wrapper.find('[data-testid="connection-status"]').text()).toContain('2 models')
-    const baseUrl = wrapper.find('#compat-base-url')
-    expect((baseUrl.element as HTMLInputElement).value).toBe('https://my-host:8000/v1')
-    const apiKey = wrapper.find('#compat-api-key')
-    expect((apiKey.element as HTMLInputElement).value).toBe('')
-    expect(apiKey.attributes('placeholder')).toContain('••••abcd')
-    const models = wrapper.find('[data-testid="compat-models"]')
-    expect((models.element as HTMLTextAreaElement).value).toBe('ui-tars-1.5-7b\ngrounding-model')
-  })
-
-  it('saves the compatible connection with trimmed/deduped models', async () => {
-    saveProviderConnectionMock.mockResolvedValue({
-      provider: 'openai-compatible',
-      connected: true,
-      base_url: 'https://my-host:8000/v1',
-      models: ['a', 'b'],
-    })
-    const wrapper = mountDialog('openai-compatible', {
-      provider: 'openai-compatible',
-      connected: false,
-    })
-    await flushPromises()
-
-    await wrapper.find('#compat-base-url').setValue('https://my-host:8000/v1/')
-    await wrapper.find('#compat-api-key').setValue('secret-123')
-    await wrapper
-      .find('[data-testid="compat-models"]')
-      .setValue('  b \n\na\nb\n  \nui-tars-1.5-7b  ')
-    await wrapper.find('[data-testid="save-compatible"]').trigger('click')
-    await flushPromises()
-
-    expect(saveProviderConnectionMock).toHaveBeenCalledWith('openai-compatible', {
-      api_key: 'secret-123',
-      base_url: 'https://my-host:8000/v1/',
-      models: ['b', 'a', 'ui-tars-1.5-7b'],
-    })
-    expect(wrapper.emitted('changed')).toHaveLength(1)
-  })
-
-  it('saves an explicit empty model list for the compatible provider', async () => {
-    saveProviderConnectionMock.mockResolvedValue({
-      provider: 'openai-compatible',
-      connected: true,
-      base_url: 'https://my-host:8000/v1',
-      models: [],
-    })
-    const wrapper = mountDialog('openai-compatible', {
-      provider: 'openai-compatible',
-      connected: true,
-      base_url: 'https://my-host:8000/v1',
-      models: ['old-model'],
-    })
-    await flushPromises()
-
-    await wrapper.find('[data-testid="compat-models"]').setValue('   \n  ')
-    await wrapper.find('[data-testid="save-compatible"]').trigger('click')
-    await flushPromises()
-
-    expect(saveProviderConnectionMock).toHaveBeenCalledWith('openai-compatible', {
-      api_key: '',
-      base_url: 'https://my-host:8000/v1',
-      models: [],
-    })
-    expect(wrapper.emitted('changed')).toHaveLength(1)
-  })
-
-  it('keeps the stored key when the compatible API key stays blank', async () => {
-    const wrapper = mountDialog('openai-compatible', {
-      provider: 'openai-compatible',
-      connected: true,
-      base_url: 'https://my-host:8000/v1',
-      api_key_hint: '••••abcd',
-      models: [],
-    })
-    await flushPromises()
-
-    await wrapper.find('[data-testid="save-compatible"]').trigger('click')
-    await flushPromises()
-
-    expect(saveProviderConnectionMock).toHaveBeenCalledWith('openai-compatible', {
-      api_key: '',
-      base_url: 'https://my-host:8000/v1',
-      models: [],
-    })
-  })
-
-  it('requires a base URL for the compatible provider', async () => {
-    const wrapper = mountDialog('openai-compatible', {
-      provider: 'openai-compatible',
-      connected: false,
-    })
-    await flushPromises()
-
-    await wrapper.find('[data-testid="compat-models"]').setValue('model-a')
-    await wrapper.find('[data-testid="save-compatible"]').trigger('click')
-    await flushPromises()
-
-    expect(saveProviderConnectionMock).not.toHaveBeenCalled()
-    expect(wrapper.text()).toContain('Base URL is required')
-    expect(wrapper.emitted('changed')).toBeUndefined()
-  })
-
-  it('shows backend save errors for the compatible provider', async () => {
-    saveProviderConnectionMock.mockRejectedValueOnce(new Error('bad gateway'))
-    const wrapper = mountDialog('openai-compatible', {
-      provider: 'openai-compatible',
-      connected: false,
-    })
-    await flushPromises()
-
-    await wrapper.find('#compat-base-url').setValue('https://my-host:8000/v1')
-    await wrapper.find('[data-testid="save-compatible"]').trigger('click')
-    await flushPromises()
-
-    expect(wrapper.text()).toContain('bad gateway')
-    expect(wrapper.emitted('changed')).toBeUndefined()
-  })
-
-  it('disconnects the compatible provider after confirmation', async () => {
-    const wrapper = mountDialog('openai-compatible', {
-      provider: 'openai-compatible',
-      connected: true,
-      base_url: 'https://my-host:8000/v1',
-      models: ['a'],
-    })
-    await flushPromises()
-
-    await wrapper.find('[data-testid="disconnect-openai-compatible"]').trigger('click')
-    expect(wrapper.find('[data-testid="disconnect-confirm"]').text()).toContain(
-      'Disconnect this endpoint?',
-    )
-    await wrapper.find('[data-testid="confirm-disconnect-openai-compatible"]').trigger('click')
-    await flushPromises()
-
-    expect(deleteProviderConnectionMock).toHaveBeenCalledWith('openai-compatible')
-    expect(wrapper.emitted('changed')).toHaveLength(1)
+    expect(harnessApi.cancelChatGptOAuth).toHaveBeenCalledWith('flow-current')
   })
 })

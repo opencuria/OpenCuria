@@ -172,6 +172,8 @@ class HarnessService:
         self._engine_registry = engine_registry
         self._engine_connections = engine_connections
         self._run_service = run_service
+        self._provider_turns = None
+        self._provider_turn_roots: dict[str, dict[str, Any]] = {}
         self._claude_child_contexts: dict[str, dict[str, Any]] = {}
 
     def _engine_registry_for_run(self) -> Any:
@@ -206,6 +208,226 @@ class HarnessService:
         return self._engine_connection_service().resolve(
             organization_id, user_id, connection_id
         )
+
+    @property
+    def _provider_turn_service(self):
+        """Lazily construct and cache the per-answer domain service."""
+        if self._provider_turns is None:
+            from .provider_turns import ProviderTurnService
+
+            self._provider_turns = ProviderTurnService()
+        return self._provider_turns
+
+    def _capture_provider_account_ids(
+        self, organization_id: uuid.UUID, user_id: int
+    ) -> dict[str, str]:
+        """Capture active selections for the authenticated initiating user."""
+        return self._provider_turn_service.capture_account_ids(organization_id, user_id)
+
+    def _provider_turn_context(self, session: HarnessSession) -> dict[str, Any]:
+        """Find the snapshot context at this session or its live ancestor."""
+        key = str(session.id)
+        seen: set[str] = set()
+        parent = str(session.parent_id) if session.parent_id else None
+        while key and key not in seen:
+            seen.add(key)
+            context = self._runs.get(key, {})
+            if context.get("provider_turn_id"):
+                return context
+            parent = self._run_parents.get(key, parent)
+            if parent is None:
+                return {}
+            key, parent = parent, self._run_parents.get(parent)
+        return {}
+
+    async def _register_provider_use(
+        self, turn_id: uuid.UUID | str | None, account_id: uuid.UUID | str | None
+    ) -> None:
+        """Fence a provider request just before its async network operation."""
+        if turn_id is not None and account_id is not None:
+            await sync_to_async(self._provider_turn_service.register_use)(
+                turn_id, account_id
+            )
+
+    async def _provider_turn_revocation_message(self, session: HarnessSession) -> str:
+        """Read durable revocation only at run control/terminal boundaries."""
+        with anyio.CancelScope(shield=True):
+            context = self._provider_turn_context(session)
+            if context.get("provider_revocation_message"):
+                return str(context["provider_revocation_message"])
+            turn_id = context.get("provider_turn_id")
+            if turn_id and await sync_to_async(
+                self._provider_turn_service.cancellation_reason
+            )(turn_id):
+                return (
+                    "This response was stopped because its selected provider account "
+                    "was removed or is no longer shared."
+                )
+            return ""
+
+    async def _finish_provider_turn(self, context: dict[str, Any]) -> None:
+        """Idempotently release this run's named answer holder."""
+        turn_id = context.get("provider_turn_id")
+        holder = context.get("provider_turn_holder")
+        if turn_id and context.get("provider_revocation_message"):
+            root = self._provider_turn_roots.get(str(turn_id), context)
+            followers = tuple(root.get("provider_followup_tasks", {}).items())
+            for _, task in followers:
+                if not task.done() and task is not asyncio.current_task():
+                    task.cancel()
+            for token, task in followers:
+                if task is asyncio.current_task():
+                    continue
+                try:
+                    await asyncio.shield(task)
+                except (asyncio.CancelledError, Exception):
+                    pass
+                await sync_to_async(self._provider_turn_service.finish_once)(
+                    turn_id, token
+                )
+        if turn_id and holder and not context.get("provider_turn_finished"):
+            context["provider_turn_finished"] = True
+            await sync_to_async(self._provider_turn_service.finish_once)(
+                turn_id, holder
+            )
+
+    async def _finish_provider_hold(
+        self, turn_id: uuid.UUID | str, holder: str
+    ) -> None:
+        """Idempotently release a named title/summary holder."""
+        await sync_to_async(self._provider_turn_service.finish_once)(turn_id, holder)
+        root = self._provider_turn_roots.get(str(turn_id))
+        if root is not None:
+            root.setdefault("provider_followup_tasks", {}).pop(holder, None)
+            await self._maybe_finish_provider_monitor(root)
+
+    async def _maybe_finish_provider_monitor(self, root: dict[str, Any]) -> None:
+        """Stop the root monitor only after the durable answer has no holders."""
+        turn_id = root.get("provider_turn_id")
+        if not turn_id:
+            return
+        state = await sync_to_async(self._provider_turn_service.get)(turn_id)
+        if (
+            state is None
+            or not state.active
+            or (not state.monitor_required and not state.holds)
+        ):
+            monitor = root.get("provider_monitor_task")
+            if (
+                monitor is not None
+                and not monitor.done()
+                and monitor is not asyncio.current_task()
+            ):
+                monitor.cancel()
+            watched = root.get("provider_revocation_accounts")
+            event = root.get("provider_revocation_event")
+            if watched and event is not None:
+                from .provider_turns import unregister_revocation_listener
+
+                unregister_revocation_listener(watched, event=event)
+            self._provider_turn_roots.pop(str(turn_id), None)
+
+    def _watch_provider_followup(
+        self, context: dict[str, Any], task: asyncio.Task, holder: str
+    ) -> None:
+        """Keep follow-up tasks visible to revocation after root cleanup."""
+        tasks = context.setdefault("provider_followup_tasks", {})
+        tasks[holder] = task
+
+    async def _monitor_provider_turn(
+        self,
+        *,
+        session: HarnessSession,
+        context: dict[str, Any],
+        event: asyncio.Event,
+        watched_accounts: set[uuid.UUID],
+    ) -> None:
+        """Poll revocation and abort the root tree, then cancel its followers."""
+        from .provider_turns import unregister_revocation_listener
+
+        turn_id = context.get("provider_turn_id")
+        try:
+            while turn_id:
+                state = await sync_to_async(self._provider_turn_service.get)(turn_id)
+                if state is None or not state.active:
+                    return
+                if await sync_to_async(self._provider_turn_service.cancellation_reason)(
+                    turn_id
+                ):
+                    message = (
+                        "This response was stopped because its selected provider "
+                        "account was removed or is no longer shared."
+                    )
+                    context["provider_revocation_message"] = message
+                    await sync_to_async(
+                        self._provider_turn_service.set_monitor_required
+                    )(turn_id)
+                    for key in self._descendant_keys(str(session.id)):
+                        child = self._runs.get(key)
+                        if child is None or child.get("provider_turn_id") != turn_id:
+                            continue
+                        if child is not None:
+                            child["provider_revocation_message"] = message
+                        task = self._owned_run_task(key)
+                        if (
+                            task is not None
+                            and not task.done()
+                            and not task.cancelling()
+                        ):
+                            task.cancel()
+                    await self._reject_tree_gates(
+                        {
+                            key
+                            for key in self._descendant_keys(str(session.id))
+                            if self._runs.get(key, {}).get("provider_turn_id")
+                            == turn_id
+                        }
+                    )
+                    root = self._provider_turn_roots.get(str(turn_id), context)
+                    root["provider_revocation_message"] = message
+                    await sync_to_async(
+                        self._provider_turn_service.set_monitor_required
+                    )(turn_id)
+                    followers = tuple(root.get("provider_followup_tasks", {}).values())
+                    for task in followers:
+                        if not task.done() and not task.cancelling():
+                            task.cancel()
+                    for task in followers:
+                        if task is asyncio.current_task() or task.done():
+                            continue
+                        try:
+                            await asyncio.shield(task)
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                    while True:
+                        state = await sync_to_async(self._provider_turn_service.get)(
+                            turn_id
+                        )
+                        if state is None or not state.active or not state.holds:
+                            await sync_to_async(
+                                self._provider_turn_service.clear_monitor_required
+                            )(turn_id)
+                            return
+                        await asyncio.sleep(0.1)
+                event.clear()
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("provider_turn_monitor_failed", session_id=str(session.id))
+            for key, live in tuple(self._runs.items()):
+                if live.get("provider_turn_id") == turn_id:
+                    self._cancel_owned_task(key)
+        finally:
+            unregister_revocation_listener(watched_accounts, event=event)
+            if turn_id:
+                await self._maybe_finish_provider_monitor(context)
+                state = await sync_to_async(self._provider_turn_service.get)(turn_id)
+                if state is None or not state.active:
+                    self._provider_turn_roots.pop(str(turn_id), None)
 
     # -- session lifecycle ------------------------------------------------
 
@@ -326,15 +548,29 @@ class HarnessService:
         }
         if engine_id != "native":
             if user_id is None:
-                raise AuthenticationError("A personal Claude connection is required")
-            auth = self._resolve_engine_auth(organization_id, user_id, connection_id)
+                raise AuthenticationError("A Claude Agent account is required")
+            from .provider_accounts import ProviderAccountService
+
+            accounts = ProviderAccountService()
+            if connection_id is not None:
+                account = accounts.get_account(organization_id, user_id, connection_id)
+                if account.provider != "claude-agent":
+                    raise NotFoundError("ProviderAccount", str(connection_id))
+            else:
+                account = accounts.selected_accounts(organization_id, user_id).get(
+                    "claude-agent"
+                )
+            if account is None:
+                raise NotFoundError("ProviderAccount", str(user_id))
             session_kwargs.update(
                 harness_id=engine_id,
-                connection_id=auth.connection_id,
+                connection_id=None,
                 created_by_id=user_id,
                 external_session_id="",
                 engine_state={},
             )
+        if user_id is not None:
+            session_kwargs["created_by_id"] = user_id
         session = self.sessions.create(**session_kwargs)
         log.info("harness_session_created", session_id=str(session.id))
         if session.parent_id is None:
@@ -502,9 +738,7 @@ class HarnessService:
         snapshot is performed here.
         """
         if include_message and message_id is None:
-            raise ValueError(
-                "message_id is required when include_message is true"
-            )
+            raise ValueError("message_id is required when include_message is true")
         session = await sync_to_async(self.get_session)(session_id)
         await sync_to_async(self.sessions.ensure_interactions_available)(
             session.workspace_id
@@ -530,7 +764,7 @@ class HarnessService:
         if getattr(session, "harness_id", "native") != "native":
             fork_kwargs.update(
                 harness_id=session.harness_id,
-                connection_id=getattr(session, "connection_id", None),
+                connection_id=None,
                 created_by_id=getattr(session, "created_by_id", None),
                 external_session_id="",
                 engine_state={},
@@ -607,7 +841,7 @@ class HarnessService:
             await sync_to_async(self._resolve_engine_auth)(
                 session.organization_id,
                 owner_id,
-                getattr(session, "connection_id", None),
+                None,
             )
         effective_skill_ids = (
             _normalize_skill_ids(skill_ids)
@@ -952,6 +1186,8 @@ class HarnessService:
         session: HarnessSession,
         *,
         provider: ProviderAdapter | None = None,
+        user_id: int | None = None,
+        account_ids: dict[str, str] | None = None,
     ) -> str:
         """Ensure provider config and model are present before starting a run.
 
@@ -995,7 +1231,13 @@ class HarnessService:
         model = session_model or agent_model or legacy_default
         if not model:
             raise NotFoundError("ProviderConnection", str(organization_id))
-        config_service.provider_connected_for_model(organization_id, model)
+        account_user_id = user_id or getattr(session, "created_by_id", None)
+        if account_user_id is None:
+            config_service.provider_connected_for_model(organization_id, model)
+        else:
+            config_service.provider_connected_for_model(
+                organization_id, model, user_id=account_user_id, account_ids=account_ids
+            )
         if (session.agent_name or "").strip().lower() == "computeruse":
             # Explicit grounding models must resolve to a connected
             # provider; empty grounding falls back to the main model
@@ -1009,7 +1251,17 @@ class HarnessService:
                 or ""
             ).strip()
             if grounding and grounding.strip() != model.strip():
-                config_service.provider_connected_for_model(organization_id, grounding)
+                if account_user_id is None:
+                    config_service.provider_connected_for_model(
+                        organization_id, grounding
+                    )
+                else:
+                    config_service.provider_connected_for_model(
+                        organization_id,
+                        grounding,
+                        user_id=account_user_id,
+                        account_ids=account_ids,
+                    )
         if not (session.reasoning_effort or "").strip():
             # Legacy fallback so the assistant snapshot carries the default
             # Old sessions otherwise ran with the default but snapshotted "".
@@ -1154,6 +1406,7 @@ class HarnessService:
         user_id: int | None = None,
         skill_ids: list[str] | None = None,
         scheduled: bool = False,
+        account_ids: dict[str, str] | None = None,
         max_depth: int | None = None,
     ) -> HarnessMessage:
         """Persist user+assistant messages and start the runner task.
@@ -1168,6 +1421,18 @@ class HarnessService:
             raise ValueError("prompt must not be empty")
         engine_id = (getattr(session, "harness_id", "native") or "native").strip()
         run_user_id = user_id
+        inherited_context = self._provider_turn_context(session)
+        if inherited_context.get("provider_turn_id"):
+            snapshot_owner = inherited_context.get("initiated_by_id")
+            if (
+                run_user_id is not None
+                and snapshot_owner is not None
+                and str(run_user_id) != str(snapshot_owner)
+            ):
+                raise AuthenticationError(
+                    "Subagent provider accounts inherit their owner's snapshot"
+                )
+            run_user_id = snapshot_owner
         if engine_id == "claude":
             owner_id = getattr(session, "created_by_id", None)
             if (
@@ -1178,34 +1443,6 @@ class HarnessService:
                 raise AuthenticationError(
                     "Only the session owner may use its Claude connection"
                 )
-            # Fail closed before admission; the resolved secret is intentionally
-            # discarded here and resolved again only inside the run coroutine.
-            await sync_to_async(self._resolve_engine_auth)(
-                session.organization_id,
-                owner_id,
-                getattr(session, "connection_id", None),
-            )
-        org_id = organization_id or session.organization_id
-        effective_skill_ids = (
-            _normalize_skill_ids(skill_ids)
-            if skill_ids is not None
-            else _normalize_skill_ids(list(session.skill_ids or []))
-        )
-        skill_bodies: list[str] = []
-        if engine_id == "claude":
-            if effective_skill_ids and run_user_id is None:
-                raise AuthenticationError(
-                    "A user is required to validate selected skills"
-                )
-            if run_user_id is not None:
-                skill_bodies = await sync_to_async(resolve_skill_bodies)(
-                    effective_skill_ids,
-                    user_id=run_user_id,
-                    organization_id=org_id,
-                )
-            from .engines.claude.runtime_state import validate_claude_skills
-
-            skill_bodies = validate_claude_skills(skill_bodies)
         self._remember_run(session)
         # Parent stop already covers this session: do not spawn another run.
         if self._user_abort_requested(session):
@@ -1253,6 +1490,43 @@ class HarnessService:
                 session, HarnessSessionStatus.IDLE
             )
             session.status = HarnessSessionStatus.IDLE
+        org_id = organization_id or session.organization_id
+        if account_ids is None:
+            inherited_ids = inherited_context.get("account_ids")
+            account_ids = dict(inherited_ids) if inherited_ids is not None else None
+        if account_ids is None and run_user_id is not None:
+            account_ids = await sync_to_async(self._capture_provider_account_ids)(
+                org_id, run_user_id
+            )
+        if account_ids is None:
+            account_ids = {}
+        if engine_id == "claude":
+            selected_claude = account_ids.get("claude-agent")
+            if not selected_claude:
+                raise AuthenticationError(
+                    "No Claude Agent account is selected for this organization"
+                )
+            await sync_to_async(self._resolve_engine_auth)(
+                org_id, run_user_id, selected_claude
+            )
+        if engine_id == "claude":
+            effective_skill_ids = (
+                _normalize_skill_ids(skill_ids)
+                if skill_ids is not None
+                else _normalize_skill_ids(list(session.skill_ids or []))
+            )
+            from .engines.claude.runtime_state import validate_claude_skills
+
+            bodies = (
+                await sync_to_async(resolve_skill_bodies)(
+                    effective_skill_ids,
+                    user_id=run_user_id,
+                    organization_id=org_id,
+                )
+                if effective_skill_ids
+                else []
+            )
+            validate_claude_skills(bodies)
         from .services import SubagentConfigService
 
         depth = await sync_to_async(self.sessions.get_depth)(session.id)
@@ -1261,47 +1535,23 @@ class HarnessService:
             max_depth = config["max_depth"]
         if depth > max_depth:
             raise ValueError(f"depth {depth} exceeds max_depth {max_depth}")
-        effective_skill_ids = (
-            _normalize_skill_ids(skill_ids)
-            if skill_ids is not None
-            else _normalize_skill_ids(list(session.skill_ids or []))
-        )
-        skill_bodies: list[str] = []
-        if engine_id == "claude":
-            if effective_skill_ids and user_id is None:
-                raise AuthenticationError(
-                    "A user is required to validate selected skills"
-                )
-            skill_bodies = (
-                await sync_to_async(resolve_skill_bodies)(
-                    effective_skill_ids,
-                    user_id=user_id,
-                    organization_id=org_id,
-                )
-                if user_id is not None
-                else []
-            )
-            from .engines.claude.runtime_state import validate_claude_skills
-
-            skill_bodies = validate_claude_skills(skill_bodies)
         if skill_ids is not None:
-            if engine_id != "claude" and user_id is None:
+            if user_id is None:
                 raise AuthenticationError(
                     "A user is required to validate selected skills"
                 )
-            if engine_id == "claude":
-                session = await sync_to_async(self.sessions.set_skill_ids)(
-                    session, effective_skill_ids
-                )
-            else:
-                session = await sync_to_async(self.update_skill_ids)(
-                    session.id,
-                    effective_skill_ids,
-                    user_id=user_id,
-                    organization_id=org_id,
-                )
+            session = await sync_to_async(self.update_skill_ids)(
+                session.id,
+                skill_ids,
+                user_id=user_id,
+                organization_id=org_id,
+            )
         resolved_model = await sync_to_async(self.validate_provider_for_run)(
-            org_id, session, provider=provider
+            org_id,
+            session,
+            provider=provider,
+            user_id=run_user_id,
+            account_ids=account_ids,
         )
         resolved_provider = ""
         if provider is not None:
@@ -1322,6 +1572,9 @@ class HarnessService:
 
         assistant: HarnessMessage | None = None
         spawned_task: asyncio.Task | None = None
+        provider_turn_id: uuid.UUID | None = None
+        provider_turn_holder: str | None = None
+        inherited_turn_hold = False
         owner = asyncio.current_task()
         if owner is not None:
             self._admissions[key] = owner
@@ -1347,6 +1600,8 @@ class HarnessService:
                 provider=("claude" if engine_id == "claude" else resolved_provider),
                 harness_id=engine_id,
             )
+            if session.parent_id is None:
+                await sync_to_async(self.sessions.clear_summary)(session.id)
             # A new send clears older stopped/failed notices of the session;
             # the fresh run gets its own notice only when it stops or fails.
             await sync_to_async(self.messages.dismiss_prior_notices)(
@@ -1356,21 +1611,19 @@ class HarnessService:
                 session, HarnessSessionStatus.BUSY
             )
             session.status = HarnessSessionStatus.BUSY
-            if session.parent_id is None:
-                # The old status sentence describes the finished run, not this one.
-                await sync_to_async(self.sessions.clear_summary)(session.id)
             history = await self._build_history(
                 session,
                 exclude_message_id=assistant.id,
                 exclude_user_message_id=user_message.id,
             )
-            if engine_id != "claude" and session.skill_ids:
+            skill_bodies: list[str] = []
+            if session.skill_ids:
                 if user_id is None:
                     raise AuthenticationError(
                         "A user is required to validate selected skills"
                     )
                 skill_bodies = await sync_to_async(resolve_skill_bodies)(
-                    list(session.skill_ids),
+                    list(session.skill_ids or []),
                     user_id=user_id,
                     organization_id=org_id,
                 )
@@ -1386,8 +1639,69 @@ class HarnessService:
                 "step_parts": {},
                 "subtask_parts": {},
                 "skill_bodies": skill_bodies,
+                "initiated_by_id": run_user_id,
+                "account_ids": dict(account_ids),
             }
             self._runs[key] = run_context
+            inherited_turn_id = inherited_context.get("provider_turn_id")
+            if inherited_turn_id:
+                turn = await sync_to_async(self._provider_turn_service.get)(
+                    inherited_turn_id
+                )
+                if turn is None or not turn.active or turn.cancel_requested:
+                    raise ValueError(
+                        "The provider account for this answer is no longer available"
+                    )
+                provider_turn_id = inherited_turn_id
+                provider_turn_holder = str(uuid.uuid4())
+                inherited_turn_hold = await sync_to_async(
+                    self._provider_turn_service.add_hold
+                )(provider_turn_id, provider_turn_holder)
+                if not inherited_turn_hold:
+                    raise ValueError(
+                        "The provider account for this answer is no longer available"
+                    )
+                account_ids = dict(inherited_context.get("account_ids") or {})
+                run_context["account_ids"] = account_ids
+                run_context["provider_turn_id"] = provider_turn_id
+                run_context["provider_turn_holder"] = provider_turn_holder
+                # Root monitor already watches the complete answer tree.
+                run_context["provider_monitor_task"] = None
+            elif run_user_id is not None:
+                sidecar = await sync_to_async(self._provider_turn_service.admit)(
+                    assistant_message_id=assistant.id,
+                    organization_id=org_id,
+                    user_id=run_user_id,
+                    account_ids=account_ids,
+                )
+                provider_turn_id = sidecar.id
+                provider_turn_holder = str(sidecar.holder_tokens[0])
+                from .provider_turns import register_revocation_listener
+
+                revocation_event = asyncio.Event()
+                watched_accounts = register_revocation_listener(
+                    account_ids.values(),
+                    loop=asyncio.get_running_loop(),
+                    event=revocation_event,
+                )
+                run_context.update(
+                    provider_turn_id=provider_turn_id,
+                    provider_turn_holder=provider_turn_holder,
+                    provider_revocation_event=revocation_event,
+                    provider_revocation_accounts=watched_accounts,
+                    provider_session=session,
+                    provider_followup_tasks={},
+                )
+                self._provider_turn_roots[str(provider_turn_id)] = run_context
+                monitor_task = self._spawn_background(
+                    self._monitor_provider_turn(
+                        session=session,
+                        context=run_context,
+                        event=revocation_event,
+                        watched_accounts=watched_accounts,
+                    )
+                )
+                run_context["provider_monitor_task"] = monitor_task
             if engine_id != "native":
                 run_context["initiated_by_id"] = run_user_id
                 run_context["engine_id"] = engine_id
@@ -1449,14 +1763,30 @@ class HarnessService:
                 engine_id == "native"
                 and session.parent_id is None
                 and prior_user_messages == 0
+                and provider_turn_id
             ):
-                self._spawn_background(
-                    self._generate_title(
-                        session_id=session.id,
-                        prompt=prompt.strip(),
-                        organization_id=org_id,
+                title_holder = f"title:{uuid.uuid4()}"
+                if await sync_to_async(self._provider_turn_service.add_hold)(
+                    provider_turn_id, title_holder
+                ):
+                    title_task = self._spawn_background(
+                        self._generate_title(
+                            session_id=session.id,
+                            prompt=prompt.strip(),
+                            organization_id=org_id,
+                            provider_turn_id=provider_turn_id,
+                            account_ids=dict(account_ids),
+                            initiated_by_id=run_user_id,
+                        )
                     )
-                )
+                    self._watch_provider_followup(run_context, title_task, title_holder)
+                    title_task.add_done_callback(
+                        lambda _task, turn_id=provider_turn_id, holder=title_holder: (
+                            self._spawn_background(
+                                self._finish_provider_hold(turn_id, holder)
+                            )
+                        )
+                    )
             await self._emit_frontend(
                 FRONTEND_EVENT_STATUS,
                 self._session_status_payload(
@@ -1513,6 +1843,19 @@ class HarnessService:
                     except asyncio.CancelledError:
                         continue
             run_context = self._runs.get(key, {})
+            if provider_turn_id and provider_turn_holder and spawned_task is None:
+                await sync_to_async(self._provider_turn_service.finish_once)(
+                    provider_turn_id, provider_turn_holder
+                )
+            monitor_task = run_context.get("provider_monitor_task")
+            if monitor_task is not None and not monitor_task.done():
+                monitor_task.cancel()
+                watched = run_context.get("provider_revocation_accounts")
+                event = run_context.get("provider_revocation_event")
+                if watched and event is not None:
+                    from .provider_turns import unregister_revocation_listener
+
+                    unregister_revocation_listener(watched, event=event)
             durable_owner = run_context.get("ownership")
             if durable_owner is not None:
                 try:
@@ -2106,13 +2449,27 @@ class HarnessService:
 
     @staticmethod
     def _resolve_run_model_limits(
-        organization_id: uuid.UUID, model_id: str
+        organization_id: uuid.UUID,
+        model_id: str,
+        user_id: int | None = None,
+        account_ids: dict[str, str] | None = None,
     ) -> tuple[int, int]:
         """Return ``(context_length, max_output_tokens)`` from the org catalog."""
         from .services import ProviderConfigService
 
+        service = ProviderConfigService()
         try:
-            models = ProviderConfigService().list_models(organization_id)
+            if user_id is None:
+                models = service.list_models(organization_id)
+            else:
+                try:
+                    models = service.list_models(
+                        organization_id, user_id=user_id, account_ids=account_ids
+                    )
+                except TypeError:
+                    # Compatibility for existing test/service overrides with the
+                    # pre-account signature; runtime uses the scoped service API.
+                    models = service.list_models(organization_id)
         except Exception:
             return 0, 0
         namespaced = namespaced_model_id(model_id)
@@ -2170,10 +2527,21 @@ class HarnessService:
         context plus ``ThreadSensitiveContext`` gives the task its own
         ORM thread for the rest of the run.
         """
-        return asyncio.create_task(
-            self._await_in_thread_sensitive_context(coro),
-            context=contextvars.Context(),
-        )
+        entered = False
+
+        async def owned() -> None:
+            nonlocal entered
+            entered = True
+            await self._await_in_thread_sensitive_context(coro)
+
+        task = asyncio.create_task(owned(), context=contextvars.Context())
+
+        def close_unstarted(done: asyncio.Task) -> None:
+            if done.cancelled() and not entered and hasattr(coro, "close"):
+                coro.close()
+
+        task.add_done_callback(close_unstarted)
+        return task
 
     def _on_run_task_done(self, task: asyncio.Task[None], key: str) -> None:
         """Drop the run task and retrieve any leftover exception."""
@@ -2272,9 +2640,24 @@ class HarnessService:
                     )
                 except NotFoundError:
                     config = None
+                run_context = self._runs.get(key, {})
+                turn_id = run_context.get("provider_turn_id")
+
+                def register_used(account_id: str) -> None:
+                    if turn_id:
+                        self._provider_turn_service.register_use(turn_id, account_id)
+
                 resolver = await sync_to_async(config_service.build_resolver)(
-                    organization_id
+                    organization_id,
+                    user_id=run_context.get("initiated_by_id"),
+                    account_ids=(
+                        dict(run_context.get("account_ids") or {})
+                        if run_context.get("initiated_by_id") is not None
+                        else None
+                    ),
+                    on_account_used=register_used if turn_id else None,
                 )
+                await sync_to_async(resolver.prepare_adapters)()
                 model_resolver = resolver.resolve
                 small_model = ((config.small_model if config else "") or "").strip()
                 agent_configs = await sync_to_async(HarnessService._agent_configs_map)(
@@ -2320,7 +2703,12 @@ class HarnessService:
             last_step_total_tokens = 0
             context_length, model_max_output_tokens = await sync_to_async(
                 self._resolve_run_model_limits
-            )(organization_id, model)
+            )(
+                organization_id,
+                model,
+                run_context.get("initiated_by_id"),
+                dict(run_context.get("account_ids") or {}),
+            )
             (
                 last_step_prompt_tokens,
                 last_step_completion_tokens,
@@ -2462,18 +2850,34 @@ class HarnessService:
             )
             await self._settle_open_stream_parts(assistant)
         except asyncio.CancelledError:
-            await self._record_run_interruption(session, assistant, phase=phase)
+            revocation = await self._provider_turn_revocation_message(session)
+            if revocation:
+                run_context["provider_revocation_message"] = revocation
+                with anyio.CancelScope(shield=True):
+                    await sync_to_async(self.messages.complete)(
+                        assistant, finish="aborted", error=revocation
+                    )
+                    await self._fail_open_parts(
+                        assistant, state="error", output=revocation, session=session
+                    )
+            else:
+                await self._record_run_interruption(session, assistant, phase=phase)
             raise
         except Exception as exc:
             # SDK cancellation is level-triggered until its scopes are closed.
+            revocation = await self._provider_turn_revocation_message(session)
+            public_error = revocation or str(exc)
             with anyio.CancelScope(shield=True):
                 await sync_to_async(self.messages.complete)(
-                    assistant, finish="error", error=str(exc)
+                    assistant,
+                    finish="aborted" if revocation else "error",
+                    error=public_error,
                 )
                 await self._fail_open_parts(
-                    assistant, state="error", output=str(exc), session=session
+                    assistant, state="error", output=public_error, session=session
                 )
-            log.exception("harness_run_failed", session_id=key)
+            if not revocation:
+                log.exception("harness_run_failed", session_id=key)
         finally:
             self._runs.get(key, {})["finalizing"] = True
             # MCP scopes belong to this task and must close here, in LIFO order.
@@ -2547,9 +2951,9 @@ class HarnessService:
                 from apps.scheduled_tasks.services import ScheduledTaskService
 
                 try:
-                    await sync_to_async(
-                        ScheduledTaskService().complete_assistant_run
-                    )(assistant.id)
+                    await sync_to_async(ScheduledTaskService().complete_assistant_run)(
+                        assistant.id
+                    )
                 except Exception:
                     log.exception("scheduled_task_completion_failed", session_id=key)
                 await self._emit_frontend(
@@ -2564,8 +2968,14 @@ class HarnessService:
                 )
                 if session.parent_id is None:
                     await self._emit_conversations_changed(session.workspace_id)
-                    self._spawn_summary(session, assistant)
+                    await self._schedule_summary(session, assistant)
         finally:
+            context = self._runs.get(key, {})
+            await self._finish_provider_turn(context)
+            root = self._provider_turn_roots.get(
+                str(context.get("provider_turn_id")), context
+            )
+            await self._maybe_finish_provider_monitor(root)
             self._drop_run_tracking(key)
 
     async def _on_claude_root_event(
@@ -2586,7 +2996,7 @@ class HarnessService:
                 parent_id=session.id,
                 skill_ids=list(session.skill_ids or []),
                 harness_id="claude",
-                connection_id=getattr(session, "connection_id", None),
+                connection_id=None,
                 created_by_id=getattr(session, "created_by_id", None),
             )
             child_user = await sync_to_async(
@@ -2800,9 +3210,7 @@ class HarnessService:
                 status=HarnessRunStatus.INTERRUPTED,
                 finish="aborted" if user_abort else "error",
                 error=(
-                    "aborted by user"
-                    if user_abort
-                    else "Run interrupted unexpectedly"
+                    "aborted by user" if user_abort else "Run interrupted unexpectedly"
                 ),
                 assistant_content=assistant.content or "",
             )
@@ -2832,15 +3240,37 @@ class HarnessService:
                 from apps.scheduled_tasks.services import ScheduledTaskService
 
                 try:
-                    await sync_to_async(
-                        ScheduledTaskService().complete_assistant_run
-                    )(assistant.id)
+                    await sync_to_async(ScheduledTaskService().complete_assistant_run)(
+                        assistant.id
+                    )
                 except Exception:
                     # The scheduler/history read can repair a failed projection;
                     # it must never prevent idle emission or tracking cleanup.
-                    log.exception(
-                        "scheduled_task_completion_failed", session_id=key
+                    log.exception("scheduled_task_completion_failed", session_id=key)
+                if session.parent_id is None:
+                    await self._schedule_summary(session, assistant)
+                context = self._runs.get(key, {})
+                await self._finish_provider_turn(context)
+                turn_id = context.get("provider_turn_id")
+                if turn_id:
+                    state = await sync_to_async(self._provider_turn_service.get)(
+                        turn_id
                     )
+                    if (
+                        state is not None
+                        and state.active
+                        and state.cancel_requested
+                        and not state.holds
+                    ):
+                        await sync_to_async(
+                            self._provider_turn_service.clear_monitor_required
+                        )(turn_id)
+                        state = await sync_to_async(self._provider_turn_service.get)(
+                            turn_id
+                        )
+                    if state is None or not state.active:
+                        root = self._provider_turn_roots.get(str(turn_id), context)
+                        await self._maybe_finish_provider_monitor(root)
                 await self._emit_frontend(
                     FRONTEND_EVENT_STATUS,
                     self._session_status_payload(
@@ -2853,7 +3283,6 @@ class HarnessService:
                 )
                 if session.parent_id is None:
                     await self._emit_conversations_changed(session.workspace_id)
-                    self._spawn_summary(session, assistant)
         finally:
             self._runs.pop(key, None)
             self._event_locks.pop(key, None)
@@ -3276,7 +3705,12 @@ class HarnessService:
         assistant: HarnessMessage,
         event: dict[str, Any],
     ) -> None:
-        """Persist a runner streaming event and forward it to frontend."""
+        """Persist a runner event; preflight and monitor own account revocation."""
+        context = self._provider_turn_context(session)
+        if context.get("provider_revocation_message"):
+            from .provider_turns import ProviderAccountRevokedError
+
+            raise ProviderAccountRevokedError()
         async with self._event_lock(str(session.id)):
             await self._persist_runner_event(session, assistant, event)
 
@@ -4278,21 +4712,76 @@ class HarnessService:
         except Exception:  # pragma: no cover - forwarding is best-effort
             log.warning("harness_frontend_emit_failed", event_name=event)
 
-    def _spawn_summary(
+    async def _schedule_summary(
         self, session: HarnessSession, assistant: HarnessMessage
     ) -> None:
-        """Refresh the status sentence of a root session whose run just settled."""
-        self._spawn_background(
-            self._generate_summary(
+        """Reserve the answer snapshot before spawning its summary follower."""
+        context = self._runs.get(str(session.id), {})
+        turn_id = context.get("provider_turn_id")
+        if context.get("provider_revocation_message"):
+            return
+        from .services import ProviderConfigService
+
+        try:
+            config = await sync_to_async(ProviderConfigService().get_config)(
+                session.organization_id
+            )
+        except NotFoundError:
+            return
+        if not (config.small_model or "").strip():
+            return
+        holder = f"summary:{uuid.uuid4()}"
+        if turn_id and not await sync_to_async(self._provider_turn_service.add_hold)(
+            turn_id, holder
+        ):
+            return
+        self._spawn_summary(session, assistant, holder=holder)
+
+    def _spawn_summary(
+        self,
+        session: HarnessSession,
+        assistant: HarnessMessage,
+        *,
+        holder: str | None = None,
+    ) -> None:
+        """Generate the status sentence with the completed answer's accounts."""
+        context = self._runs.get(str(session.id), {})
+        turn_id = context.get("provider_turn_id")
+        reserved = holder is not None
+        holder = holder or f"summary:{uuid.uuid4()}"
+
+        async def generate() -> None:
+            if turn_id and not reserved:
+                if not await sync_to_async(self._provider_turn_service.add_hold)(
+                    turn_id, holder
+                ):
+                    return
+            await self._generate_summary(
                 session_id=session.id,
                 assistant_id=assistant.id,
                 workspace_id=session.workspace_id,
                 organization_id=session.organization_id,
+                provider_turn_id=turn_id,
+                account_ids=dict(context.get("account_ids") or {}),
+                initiated_by_id=context.get("initiated_by_id"),
             )
-        )
+
+        task = self._spawn_background(generate())
+        if turn_id:
+            self._watch_provider_followup(context, task, holder)
+            task.add_done_callback(
+                lambda _task: self._spawn_background(
+                    self._finish_provider_hold(turn_id, holder)
+                )
+            )
 
     async def _small_model_runner(
-        self, organization_id: uuid.UUID
+        self,
+        organization_id: uuid.UUID,
+        *,
+        user_id: int | None = None,
+        account_ids: dict[str, str] | None = None,
+        provider_turn_id: uuid.UUID | str | None = None,
     ) -> tuple[HarnessRunner, str] | None:
         """Build a text-only runner on the org's small model (None if unset)."""
         from .providers.resolver import StaticModelResolver
@@ -4315,9 +4804,20 @@ class HarnessService:
                 self._provider_factory(organization_id)
             ).resolve
         else:
+
+            def register_used(account_id: str) -> None:
+                if provider_turn_id:
+                    self._provider_turn_service.register_use(
+                        provider_turn_id, account_id
+                    )
+
             resolver = await sync_to_async(config_service.build_resolver)(
-                organization_id
+                organization_id,
+                user_id=user_id,
+                account_ids=account_ids if user_id is not None else None,
+                on_account_used=register_used if provider_turn_id else None,
             )
+            await sync_to_async(resolver.prepare_adapters)()
             model_resolver = resolver.resolve
         runner = HarnessRunner(
             model_resolver=model_resolver,
@@ -4328,47 +4828,7 @@ class HarnessService:
         )
         return runner, small_model
 
-    async def _generate_title(
-        self,
-        *,
-        session_id: uuid.UUID,
-        prompt: str,
-        organization_id: uuid.UUID,
-    ) -> None:
-        """Run the hidden title agent asynchronously (never raises)."""
-        try:
-            session = await sync_to_async(self.sessions.get_by_id)(session_id)
-            if session is None or getattr(session, "harness_id", "native") != "native":
-                return
-            small = await self._small_model_runner(organization_id)
-            if small is None:
-                return
-            runner, small_model = small
-            result = await runner.run(
-                prompt,
-                "title",
-                small_model,
-                "build",
-                RunOptions(auto_approve=True),
-            )
-            title = _normalize_generated_title(result.output or "")
-            if not title:
-                return
-            session = await sync_to_async(self.sessions.get_by_id)(session_id)
-            if session is None:
-                return
-            auto_title = _title_from_prompt(prompt)
-            if (session.title or "").strip() != auto_title:
-                return
-            await sync_to_async(self.sessions.set_title)(session, title)
-            if session.parent_id is None:
-                await self._emit_conversations_changed(session.workspace_id)
-        except Exception:  # pragma: no cover - title must never break runs
-            log.warning("harness_title_generation_failed", session_id=str(session_id))
-
-    def _summary_material(
-        self, session_id: uuid.UUID, assistant_id: uuid.UUID
-    ) -> str:
+    def _summary_material(self, session_id: uuid.UUID, assistant_id: uuid.UUID) -> str:
         """Collect what the summary agent needs; "" when there is nothing to say."""
         message = self.messages.get_by_id(assistant_id)
         if message is None or message.session_id != session_id:
@@ -4406,6 +4866,9 @@ class HarnessService:
         assistant_id: uuid.UUID,
         workspace_id: uuid.UUID,
         organization_id: uuid.UUID,
+        provider_turn_id: uuid.UUID | str | None = None,
+        account_ids: dict[str, str] | None = None,
+        initiated_by_id: int | None = None,
     ) -> None:
         """Store the one-sentence "state + next step" of a settled run.
 
@@ -4413,7 +4876,16 @@ class HarnessService:
         config, not from the session's engine) and never raises.
         """
         try:
-            small = await self._small_model_runner(organization_id)
+            if provider_turn_id and await sync_to_async(
+                self._provider_turn_service.cancellation_reason
+            )(provider_turn_id):
+                return
+            small = await self._small_model_runner(
+                organization_id,
+                user_id=initiated_by_id,
+                account_ids=account_ids,
+                provider_turn_id=provider_turn_id,
+            )
             if small is None:
                 return
             runner, small_model = small
@@ -4429,6 +4901,10 @@ class HarnessService:
                 "build",
                 RunOptions(auto_approve=True),
             )
+            if provider_turn_id and await sync_to_async(
+                self._provider_turn_service.cancellation_reason
+            )(provider_turn_id):
+                return
             summary = _normalize_generated_summary(result.output or "")
             if not summary:
                 return
@@ -4448,6 +4924,64 @@ class HarnessService:
         except Exception:  # pragma: no cover - summary must never break runs
             log.warning("harness_summary_generation_failed", session_id=str(session_id))
 
+    async def _generate_title(
+        self,
+        *,
+        session_id: uuid.UUID,
+        prompt: str,
+        organization_id: uuid.UUID,
+        provider_turn_id: uuid.UUID | str | None = None,
+        account_ids: dict[str, str] | None = None,
+        initiated_by_id: int | None = None,
+    ) -> None:
+        """Run the hidden title agent on the initiating answer's snapshot."""
+        try:
+            session = await sync_to_async(self.sessions.get_by_id)(session_id)
+            if session is None or getattr(session, "harness_id", "native") != "native":
+                return
+            if provider_turn_id and await sync_to_async(
+                self._provider_turn_service.cancellation_reason
+            )(provider_turn_id):
+                return
+            small = await self._small_model_runner(
+                organization_id,
+                user_id=initiated_by_id,
+                account_ids=account_ids,
+                provider_turn_id=provider_turn_id,
+            )
+            if small is None:
+                return
+            runner, small_model = small
+            result = await runner.run(
+                prompt,
+                "title",
+                small_model,
+                "build",
+                RunOptions(auto_approve=True),
+            )
+            if provider_turn_id and await sync_to_async(
+                self._provider_turn_service.cancellation_reason
+            )(provider_turn_id):
+                return
+            title = _normalize_generated_title(result.output or "")
+            if not title:
+                return
+            session = await sync_to_async(self.sessions.get_by_id)(session_id)
+            if session is None:
+                return
+            if provider_turn_id and await sync_to_async(
+                self._provider_turn_service.cancellation_reason
+            )(provider_turn_id):
+                return
+            auto_title = _title_from_prompt(prompt)
+            if (session.title or "").strip() != auto_title:
+                return
+            await sync_to_async(self.sessions.set_title)(session, title)
+            if session.parent_id is None:
+                await self._emit_conversations_changed(session.workspace_id)
+        except Exception:  # pragma: no cover - title must never break runs
+            log.warning("harness_title_generation_failed", session_id=str(session_id))
+
     @staticmethod
     def _resolve_agent_s_run_config(organization_id: uuid.UUID, model: str):  # type: ignore[no-untyped-def]
         """Build the persisted Agent-S run config for a computeruse run.
@@ -4462,13 +4996,23 @@ class HarnessService:
 
     @staticmethod
     def _catalog_efforts_for_model(
-        organization_id: uuid.UUID, model_id: str
+        organization_id: uuid.UUID,
+        model_id: str,
+        user_id: int | None = None,
+        account_ids: dict[str, str] | None = None,
     ) -> list[str]:
         """Return catalog reasoning efforts for *model_id* (best-effort)."""
         try:
             from .services import ProviderConfigService
 
-            models = ProviderConfigService().list_models(organization_id)
+            service = ProviderConfigService()
+            models = (
+                service.list_models(organization_id)
+                if user_id is None
+                else service.list_models(
+                    organization_id, user_id=user_id, account_ids=account_ids
+                )
+            )
         except Exception:
             return []
         target = (model_id or "").strip()
@@ -4589,7 +5133,10 @@ class HarnessService:
         if inherit:
             if strategy in ("lowest", "medium", "highest"):
                 catalog_efforts = self._catalog_efforts_for_model(
-                    organization_id, model
+                    organization_id,
+                    model,
+                    self._provider_turn_context(parent).get("initiated_by_id"),
+                    dict(self._provider_turn_context(parent).get("account_ids") or {}),
                 )
                 from .agents.effort_strategy import resolve_strategy_effort
 
@@ -4931,6 +5478,13 @@ def _normalize_generated_title(text: str) -> str:
     return title[:255]
 
 
+def _title_from_prompt(prompt: str) -> str:
+    """Derive a short session title from the first prompt line."""
+    first_line = (prompt or "").strip().splitlines()[0] if prompt.strip() else ""
+    title = first_line.strip()[:80]
+    return title or "Harness session"
+
+
 def _normalize_generated_summary(text: str) -> str:
     """Reduce model output to one plain line of at most 100 chars."""
     lines = [line for line in (text or "").splitlines() if line.strip()]
@@ -4951,13 +5505,6 @@ def _clip_tail(text: str, limit: int) -> str:
     """Keep the last *limit* chars of *text* (the end of an answer matters most)."""
     text = (text or "").strip()
     return text if len(text) <= limit else "… " + text[-limit:].lstrip()
-
-
-def _title_from_prompt(prompt: str) -> str:
-    """Derive a short session title from the first prompt line."""
-    first_line = (prompt or "").strip().splitlines()[0] if prompt.strip() else ""
-    title = first_line.strip()[:80]
-    return title or "Harness session"
 
 
 def _tail_remainder(existing: str, tail: str) -> str:

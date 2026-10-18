@@ -108,7 +108,7 @@ def test_run_now_links_provider_backed_chat_and_terminal_outcome(
     monkeypatch.setattr(
         HarnessService,
         "validate_provider_for_run",
-        lambda self, organization_id, session, provider=None: (
+        lambda self, organization_id, session, provider=None, **_context: (
             session.model or "openrouter/openai/gpt-test"
         ),
     )
@@ -185,7 +185,7 @@ def test_rest_run_now_default_model_and_effort_and_unauthorized_actions(
     monkeypatch.setattr(
         HarnessService,
         "validate_provider_for_run",
-        lambda self, organization_id, session, provider=None: (
+        lambda self, organization_id, session, provider=None, **_context: (
             session.model
             or HarnessService._agent_defaults(organization_id, "build")["model"]
         ),
@@ -308,7 +308,7 @@ async def test_mcp_run_now_requires_permission_and_owner_scope(
     monkeypatch.setattr(
         HarnessService,
         "validate_provider_for_run",
-        lambda self, organization_id, session, provider=None: (
+        lambda self, organization_id, session, provider=None, **_context: (
             session.model or "openrouter/openai/gpt-default"
         ),
     )
@@ -423,7 +423,7 @@ def test_real_harness_failure_and_abort_settle_before_idle(
     monkeypatch.setattr(
         HarnessService,
         "validate_provider_for_run",
-        lambda self, organization_id, session, provider=None: session.model,
+        lambda self, organization_id, session, provider=None, **_context: session.model,
     )
     harness._on_run_task_done = lambda task, key: None
 
@@ -536,7 +536,7 @@ def test_projection_failure_preserves_live_run_and_idle_cleanup_then_history_rep
     monkeypatch.setattr(
         HarnessService,
         "validate_provider_for_run",
-        lambda self, organization_id, session, provider=None: session.model,
+        lambda self, organization_id, session, provider=None, **_context: session.model,
     )
 
     async def complete():

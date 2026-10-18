@@ -72,7 +72,7 @@ class CredentialOut(Schema):
     env_var_name: str
     target_path: str
     has_public_key: bool
-    created_by_id: int
+    created_by_id: int | None = None
     created_at: datetime
     updated_at: datetime
     oauth_connected: bool = False

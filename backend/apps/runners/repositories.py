@@ -346,7 +346,7 @@ class WorkspaceRepository:
         credential_model = apps.get_model("credentials", "Credential")
         return set(
             credential_model.objects.filter(workspaces__id=workspace_id)
-            .exclude(service__credential_type="mcp_oauth")
+            .exclude(service__credential_type__in=("mcp_oauth", "provider_secret"))
             .values_list("id", flat=True)
         )
 

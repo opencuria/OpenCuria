@@ -277,6 +277,21 @@ describe('HarnessChatInput', () => {
     expect(wrapper.find('[data-testid="claude-provider-settings"]').exists()).toBe(true)
   })
 
+  it('invalidates cached native models when provider account selection changes', async () => {
+    const wrapper = mountInput()
+    await vi.waitFor(() => expect(listProviderModelsMock).toHaveBeenCalledTimes(1))
+    listProviderModelsMock.mockResolvedValueOnce([
+      { ...catalog[0]!, id: 'openrouter/new-account-model', name: 'New account model' },
+    ])
+    window.dispatchEvent(new Event(harnessApi.PROVIDER_ACCOUNTS_CHANGED_EVENT))
+    await vi.waitFor(() => expect(listProviderModelsMock).toHaveBeenCalledTimes(2))
+    await flushPromises()
+    expect(
+      wrapper.find('[data-testid="composer-model-openrouter/new-account-model"]').exists(),
+    ).toBe(true)
+    wrapper.unmount()
+  })
+
   it('refreshes Claude availability when a personal connection changes', async () => {
     const wrapper = mountInput()
     await vi.waitFor(() => expect(listHarnessEnginesMock).toHaveBeenCalledTimes(1))

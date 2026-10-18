@@ -3,3 +3,6 @@ test-results/focused-db/
 test-results/claude-agent-live/
 playwright-report-focused/
 playwright-report/claude-agent-live/
+
+test-results/provider-accounts/
+test-results/provider-accounts-playwright/

@@ -1,19 +1,9 @@
-<!--
-  ProviderConnectionDialog — connect/manage/disconnect a single provider.
-
-  Owns the OpenRouter form, the generic OpenAI-compatible endpoint form
-  (base URL + optional API key + manual model list, one id per line),
-  the ChatGPT device-code OAuth flow (polling) and the Bedrock credential
-  form. Secrets are never echoed back: key inputs stay blank and a blank
-  value keeps the stored secret on save. Emits `changed` after
-  save/disconnect (parent refreshes and closes) and `connected` when the
-  ChatGPT OAuth flow completes (parent refreshes, dialog stays open).
-  Backend errors surface inline via `dialogError`.
--->
+<!-- Account picker and provider-specific account editor. -->
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ExternalLink, Loader2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   Dialog,
   DialogBody,
@@ -29,49 +19,47 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import CopyButton from '@/components/common/CopyButton.vue'
-import { connectionDetail, providerMeta, type SettingsProviderId } from './providerMeta'
+import { providerMeta, type SettingsProviderId } from './providerMeta'
 import {
   cancelChatGptOAuth,
-  deleteProviderConnection,
+  createProviderAccount,
+  deleteProviderAccount,
   getChatGptOAuthStatus,
-  saveProviderConnection,
+  notifyProviderAccountsChanged,
+  selectProviderAccount,
   startChatGptOAuth,
-  saveClaudeConnection,
-  deleteClaudeConnection,
-  HARNESS_ENGINE_CONNECTION_CHANGED_EVENT,
-  type ClaudeConnection,
-  type ProviderConnection,
+  updateProviderAccount,
+  type ProviderAccount,
+  type ProviderAccountPayload,
 } from '@/services/harness.api'
 
 const DEFAULT_OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 const DEFAULT_BEDROCK_REGION = 'us-east-1'
 
-const props = defineProps<{
-  provider: SettingsProviderId | null
-  connection?: ProviderConnection
-  claudeConnection?: ClaudeConnection | null
-}>()
-
+const props = withDefaults(
+  defineProps<{
+    provider: SettingsProviderId | null
+    accounts?: ProviderAccount[]
+    isAdmin?: boolean
+  }>(),
+  { accounts: () => [], isAdmin: false },
+)
 const open = defineModel<boolean>('open', { default: false })
-
-const emit = defineEmits<{
-  changed: []
-  connected: []
-}>()
+const emit = defineEmits<{ changed: [] }>()
 
 const meta = computed(() => providerMeta(props.provider))
-
+const selectedAccount = ref<ProviderAccount | null>(null)
+const creating = ref(false)
 const saving = ref(false)
 const dialogError = ref<string | null>(null)
-const disconnectConfirm = ref(false)
-
+const confirmAction = ref<'delete' | 'unshare' | null>(null)
+const label = ref('')
+const shared = ref(false)
 const openRouterApiKey = ref('')
 const openRouterBaseUrl = ref(DEFAULT_OPENROUTER_BASE_URL)
-
 const compatApiKey = ref('')
 const compatBaseUrl = ref('')
 const compatModelsText = ref('')
-
 const bedrockAuthMethod = ref<'access_keys' | 'bearer'>('access_keys')
 const bedrockRegion = ref(DEFAULT_BEDROCK_REGION)
 const bedrockAccessKeyId = ref('')
@@ -80,630 +68,689 @@ const bedrockSessionToken = ref('')
 const bedrockBearerToken = ref('')
 const claudeAuthType = ref<'api_token' | 'subscription_token'>('api_token')
 const claudeToken = ref('')
-const claudeLabel = ref('')
+type OAuthPhase = 'idle' | 'pending' | 'connected' | 'expired' | 'denied' | 'error'
+const oauthPhase = ref<OAuthPhase>('idle')
+const oauthFlowId = ref<string | null>(null)
+const oauthUserCode = ref('')
+const oauthVerificationUrl = ref('')
+const oauthAccountId = ref('')
+const oauthError = ref<string | null>(null)
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+let pollIntervalSec = 5
+let dialogGeneration = 0
 
-type ChatGptOAuthPhase = 'idle' | 'pending' | 'connected' | 'expired' | 'denied' | 'error'
+const isEditing = computed(() => creating.value || selectedAccount.value !== null)
+const canEdit = computed(() => creating.value || Boolean(selectedAccount.value?.can_manage))
+const secretHint = computed(() => selectedAccount.value?.api_key_hint || '')
 
-const chatGptOAuthPhase = ref<ChatGptOAuthPhase>('idle')
-const chatGptUserCode = ref('')
-const chatGptVerificationUrl = ref('')
-const chatGptAccountId = ref('')
-const chatGptOAuthError = ref<string | null>(null)
-let chatGptPollTimer: ReturnType<typeof setTimeout> | null = null
-let chatGptPollIntervalSec = 5
-
-const isConnected = computed(() => {
-  if (props.provider === 'chatgpt')
-    return Boolean(props.connection?.connected) || chatGptOAuthPhase.value === 'connected'
-  if (props.provider === 'claude-agent') return Boolean(props.claudeConnection?.connected)
-  return Boolean(props.connection?.connected)
-})
-
-const statusDetail = computed(() => {
-  if (props.provider === 'chatgpt' && chatGptAccountId.value) {
-    return `Account ${chatGptAccountId.value}`
-  }
-  if (props.provider === 'claude-agent' && props.claudeConnection?.connected) {
-    const auth =
-      props.claudeConnection.auth_type === 'api_token' ? 'API token' : 'Subscription token'
-    return [props.claudeConnection.label, auth].filter(Boolean).join(' · ')
-  }
-  return props.connection ? connectionDetail(props.connection) : ''
-})
-
-const openRouterApiKeyPlaceholder = computed(() => {
-  const hint = props.connection?.api_key_hint
-  if (hint) return `Saved key (${hint})`
-  return 'sk-or-…'
-})
-
-const compatApiKeyPlaceholder = computed(() => {
-  const hint = props.connection?.api_key_hint
-  if (hint) return `Saved key (${hint})`
-  return 'Optional API key'
-})
-
-/** Trim, drop empties, dedupe (order-preserving); empty list stays empty. */
-function parseCompatModels(text: string): string[] {
-  const seen = new Set<string>()
-  const out: string[] = []
-  for (const line of text.split('\n')) {
-    const item = line.trim()
-    if (!item || seen.has(item)) continue
-    seen.add(item)
-    out.push(item)
-  }
-  return out
-}
-
-function resetForms(): void {
+function resetForm(account: ProviderAccount | null = null, isCreating = false): void {
+  stopPolling()
+  void cancelOAuth()
+  dialogGeneration += 1
+  selectedAccount.value = account
+  creating.value = isCreating
   dialogError.value = null
-  disconnectConfirm.value = false
+  confirmAction.value = null
+  label.value = account?.label ?? ''
+  shared.value = account?.scope === 'organization'
   openRouterApiKey.value = ''
-  openRouterBaseUrl.value = props.connection?.base_url || DEFAULT_OPENROUTER_BASE_URL
+  openRouterBaseUrl.value = account?.base_url || DEFAULT_OPENROUTER_BASE_URL
   compatApiKey.value = ''
-  compatBaseUrl.value = props.connection?.base_url || ''
-  compatModelsText.value = (props.connection?.models ?? []).join('\n')
-  bedrockAuthMethod.value = props.connection?.auth_method === 'bearer' ? 'bearer' : 'access_keys'
-  bedrockRegion.value = props.connection?.region || DEFAULT_BEDROCK_REGION
+  compatBaseUrl.value = account?.base_url || ''
+  compatModelsText.value = (account?.models ?? []).join('\n')
+  bedrockAuthMethod.value = account?.auth_method === 'bearer' ? 'bearer' : 'access_keys'
+  bedrockRegion.value = account?.region || DEFAULT_BEDROCK_REGION
   bedrockAccessKeyId.value = ''
   bedrockSecretAccessKey.value = ''
   bedrockSessionToken.value = ''
   bedrockBearerToken.value = ''
-  claudeAuthType.value = props.claudeConnection?.auth_type ?? 'api_token'
+  claudeAuthType.value =
+    account?.auth_type === 'subscription_token' ? 'subscription_token' : 'api_token'
   claudeToken.value = ''
-  claudeLabel.value = props.claudeConnection?.label ?? ''
-  chatGptOAuthError.value = null
-  if (props.connection?.connected) {
-    chatGptOAuthPhase.value = 'connected'
-    chatGptAccountId.value = props.connection.account_id || ''
-  } else {
-    chatGptOAuthPhase.value = 'idle'
-    chatGptUserCode.value = ''
-    chatGptVerificationUrl.value = ''
-    chatGptAccountId.value = ''
+  oauthPhase.value = 'idle'
+  oauthFlowId.value = null
+  oauthUserCode.value = ''
+  oauthVerificationUrl.value = ''
+  oauthAccountId.value = ''
+  oauthError.value = null
+}
+
+function openCreateForm(): void {
+  resetForm(null, true)
+}
+
+function openEditForm(account: ProviderAccount): void {
+  resetForm(account)
+}
+
+function parseModels(text: string): string[] {
+  return [
+    ...new Set(
+      text
+        .split('\n')
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  ]
+}
+
+function payloadForAccount(): ProviderAccountPayload | null {
+  if (!props.provider) return null
+  const base: ProviderAccountPayload = {
+    label: label.value.trim(),
+    shared: props.isAdmin && shared.value,
   }
-}
-
-function stopChatGptPolling(): void {
-  if (chatGptPollTimer) {
-    clearTimeout(chatGptPollTimer)
-    chatGptPollTimer = null
+  if (!base.label) {
+    dialogError.value = 'Account name is required.'
+    return null
   }
-}
-
-async function pollChatGptOAuthOnce(): Promise<void> {
-  try {
-    const status = await getChatGptOAuthStatus()
-    if (status.status === 'pending') {
-      scheduleChatGptPoll()
-      return
-    }
-    stopChatGptPolling()
-    if (status.status === 'connected') {
-      chatGptOAuthPhase.value = 'connected'
-      chatGptAccountId.value = status.account_id || ''
-      emit('connected')
-      return
-    }
-    if (status.status === 'denied') {
-      chatGptOAuthPhase.value = 'denied'
-      chatGptOAuthError.value = 'Authorization was denied. Try again when ready.'
-      return
-    }
-    if (status.status === 'expired' || status.status === 'no_flow') {
-      chatGptOAuthPhase.value = 'expired'
-      chatGptOAuthError.value = 'The authorization code expired. Start a new connection.'
-    }
-  } catch (e: unknown) {
-    stopChatGptPolling()
-    chatGptOAuthPhase.value = 'error'
-    chatGptOAuthError.value = e instanceof Error ? e.message : 'OAuth polling failed'
-  }
-}
-
-function scheduleChatGptPoll(): void {
-  stopChatGptPolling()
-  chatGptPollTimer = setTimeout(() => {
-    void pollChatGptOAuthOnce()
-  }, chatGptPollIntervalSec * 1000)
-}
-
-async function startChatGptConnect(): Promise<void> {
-  dialogError.value = null
-  chatGptOAuthError.value = null
-  saving.value = true
-  try {
-    const flow = await startChatGptOAuth()
-    chatGptUserCode.value = flow.user_code
-    chatGptVerificationUrl.value = flow.verification_url
-    chatGptPollIntervalSec = Math.max(1, flow.interval)
-    chatGptOAuthPhase.value = 'pending'
-    scheduleChatGptPoll()
-  } catch (e: unknown) {
-    chatGptOAuthPhase.value = 'error'
-    chatGptOAuthError.value = e instanceof Error ? e.message : 'Failed to start OAuth'
-  } finally {
-    saving.value = false
-  }
-}
-
-async function saveOpenRouter(): Promise<void> {
-  saving.value = true
-  dialogError.value = null
-  try {
-    await saveProviderConnection('openrouter', {
-      api_key: openRouterApiKey.value,
-      base_url: openRouterBaseUrl.value.trim() || DEFAULT_OPENROUTER_BASE_URL,
-    })
-    emit('changed')
-  } catch (e: unknown) {
-    dialogError.value = e instanceof Error ? e.message : 'Failed to save OpenRouter connection'
-  } finally {
-    saving.value = false
-  }
-}
-
-async function saveCompat(): Promise<void> {
-  saving.value = true
-  dialogError.value = null
-  try {
-    const baseUrl = compatBaseUrl.value.trim()
-    if (!baseUrl) {
-      dialogError.value = 'Base URL is required.'
-      return
-    }
-    await saveProviderConnection('openai-compatible', {
-      api_key: compatApiKey.value,
-      base_url: baseUrl,
-      models: parseCompatModels(compatModelsText.value),
-    })
-    emit('changed')
-  } catch (e: unknown) {
-    dialogError.value =
-      e instanceof Error ? e.message : 'Failed to save OpenAI Compatible connection'
-  } finally {
-    saving.value = false
-  }
-}
-
-async function saveBedrock(): Promise<void> {
-  saving.value = true
-  dialogError.value = null
-  try {
-    const payload =
-      bedrockAuthMethod.value === 'bearer'
+  switch (props.provider) {
+    case 'openrouter':
+      return {
+        ...base,
+        api_key: openRouterApiKey.value,
+        base_url: openRouterBaseUrl.value.trim() || DEFAULT_OPENROUTER_BASE_URL,
+      }
+    case 'openai-compatible':
+      if (!compatBaseUrl.value.trim()) {
+        dialogError.value = 'Base URL is required.'
+        return null
+      }
+      return {
+        ...base,
+        api_key: compatApiKey.value,
+        base_url: compatBaseUrl.value.trim(),
+        models: parseModels(compatModelsText.value),
+      }
+    case 'amazon-bedrock':
+      return bedrockAuthMethod.value === 'bearer'
         ? {
+            ...base,
             auth_method: 'bearer',
             region: bedrockRegion.value.trim() || DEFAULT_BEDROCK_REGION,
             bearer_token: bedrockBearerToken.value,
           }
         : {
+            ...base,
             auth_method: 'access_keys',
             region: bedrockRegion.value.trim() || DEFAULT_BEDROCK_REGION,
             access_key_id: bedrockAccessKeyId.value,
             secret_access_key: bedrockSecretAccessKey.value,
             session_token: bedrockSessionToken.value,
           }
-    await saveProviderConnection('amazon-bedrock', payload)
-    emit('changed')
-  } catch (e: unknown) {
-    dialogError.value = e instanceof Error ? e.message : 'Failed to save Bedrock connection'
-  } finally {
-    saving.value = false
+    case 'claude-agent': {
+      const token = claudeToken.value.trim()
+      if (!selectedAccount.value?.connected && !token) {
+        dialogError.value = 'Enter an Anthropic token to connect this account.'
+        return null
+      }
+      if (
+        selectedAccount.value?.connected &&
+        selectedAccount.value.auth_type !== claudeAuthType.value &&
+        !token
+      ) {
+        dialogError.value = 'Enter a token when changing the authentication type.'
+        return null
+      }
+      return { ...base, auth_type: claudeAuthType.value, token }
+    }
+    case 'chatgpt':
+      return base
   }
 }
 
-async function saveClaude(): Promise<void> {
-  const existing = props.claudeConnection
-  const token = claudeToken.value.trim()
-  if (existing?.connected && existing.auth_type === claudeAuthType.value && !token) {
-    // Blank is an intentional preserve operation for the currently stored auth type.
-  } else if (!token) {
-    dialogError.value = 'Enter a token to connect or change the authentication type.'
+async function saveAccount(): Promise<void> {
+  if (!props.provider || !canEdit.value) return
+  dialogError.value = null
+  if (selectedAccount.value?.scope === 'organization' && props.isAdmin && !shared.value) {
+    confirmAction.value = 'unshare'
     return
   }
+  const payload = payloadForAccount()
+  if (!payload) return
   saving.value = true
-  dialogError.value = null
   try {
-    await saveClaudeConnection({
-      auth_type: claudeAuthType.value,
-      token,
-      ...(claudeLabel.value.trim() ? { label: claudeLabel.value.trim() } : {}),
-    })
-    window.dispatchEvent(new Event(HARNESS_ENGINE_CONNECTION_CHANGED_EVENT))
+    if (selectedAccount.value) {
+      await updateProviderAccount(props.provider, selectedAccount.value.id, payload)
+    } else if (props.provider !== 'chatgpt') {
+      await createProviderAccount(props.provider, payload)
+    } else {
+      await startChatGptAuthorization()
+      return
+    }
+    resetForm()
+    notifyProviderAccountsChanged()
     emit('changed')
-  } catch (e: unknown) {
-    dialogError.value = e instanceof Error ? e.message : 'Failed to save Claude Agent connection'
+  } catch (error: unknown) {
+    dialogError.value = error instanceof Error ? error.message : 'Failed to save account'
   } finally {
     saving.value = false
   }
 }
 
-async function disconnectProvider(): Promise<void> {
+async function selectAccount(accountId: string | null): Promise<void> {
   if (!props.provider) return
   saving.value = true
   dialogError.value = null
   try {
-    if (props.provider === 'claude-agent') {
-      await deleteClaudeConnection()
-      window.dispatchEvent(new Event(HARNESS_ENGINE_CONNECTION_CHANGED_EVENT))
-    } else await deleteProviderConnection(props.provider)
+    await selectProviderAccount(props.provider, accountId)
+    notifyProviderAccountsChanged()
     emit('changed')
-  } catch (e: unknown) {
-    dialogError.value = e instanceof Error ? e.message : 'Failed to disconnect provider'
+  } catch (error: unknown) {
+    dialogError.value = error instanceof Error ? error.message : 'Failed to change active account'
   } finally {
     saving.value = false
-    disconnectConfirm.value = false
+  }
+}
+
+async function deleteAccount(): Promise<void> {
+  if (!props.provider || !selectedAccount.value?.can_manage) return
+  saving.value = true
+  dialogError.value = null
+  try {
+    await deleteProviderAccount(props.provider, selectedAccount.value.id)
+    notifyProviderAccountsChanged()
+    emit('changed')
+    resetForm()
+  } catch (error: unknown) {
+    dialogError.value = error instanceof Error ? error.message : 'Failed to delete account'
+  } finally {
+    saving.value = false
+    confirmAction.value = null
+  }
+}
+
+function askToUnshare(): void {
+  if (!props.isAdmin || !selectedAccount.value?.can_manage) return
+  confirmAction.value = 'unshare'
+}
+
+async function confirmUnshare(): Promise<void> {
+  const account = selectedAccount.value
+  if (!props.provider || !account) return
+  saving.value = true
+  dialogError.value = null
+  try {
+    const payload = payloadForAccount()
+    if (!payload) return
+    if (props.provider === 'openrouter') payload.api_key = ''
+    if (props.provider === 'openai-compatible') payload.api_key = ''
+    if (props.provider === 'amazon-bedrock') {
+      delete payload.access_key_id
+      delete payload.secret_access_key
+      delete payload.session_token
+      delete payload.bearer_token
+    }
+    if (props.provider === 'claude-agent') payload.token = ''
+    payload.shared = false
+    await updateProviderAccount(props.provider, account.id, payload)
+    notifyProviderAccountsChanged()
+    emit('changed')
+    resetForm()
+  } catch (error: unknown) {
+    dialogError.value = error instanceof Error ? error.message : 'Failed to unshare account'
+  } finally {
+    saving.value = false
+    confirmAction.value = null
+  }
+}
+
+function stopPolling(): void {
+  if (pollTimer) clearTimeout(pollTimer)
+  pollTimer = null
+}
+
+async function pollOAuth(): Promise<void> {
+  const flowId = oauthFlowId.value
+  if (!flowId) return
+  const generation = dialogGeneration
+  try {
+    const status = await getChatGptOAuthStatus(flowId)
+    if (generation !== dialogGeneration || flowId !== oauthFlowId.value) return
+    if (status.status === 'pending') {
+      stopPolling()
+      pollTimer = setTimeout(() => void pollOAuth(), pollIntervalSec * 1000)
+      return
+    }
+    stopPolling()
+    if (status.status === 'connected') {
+      oauthPhase.value = 'connected'
+      oauthAccountId.value = status.account_id || ''
+      notifyProviderAccountsChanged()
+      emit('changed')
+      resetForm()
+      return
+    }
+    oauthPhase.value =
+      status.status === 'denied' ? 'denied' : status.status === 'cancelled' ? 'idle' : 'expired'
+    oauthError.value =
+      status.status === 'denied'
+        ? 'Authorization was denied. Try again when ready.'
+        : status.status === 'cancelled'
+          ? null
+          : 'The authorization code expired. Start a new connection.'
+  } catch (error: unknown) {
+    if (generation !== dialogGeneration || flowId !== oauthFlowId.value) return
+    stopPolling()
+    oauthPhase.value = 'error'
+    oauthError.value = error instanceof Error ? error.message : 'OAuth polling failed'
+  }
+}
+
+async function startChatGptAuthorization(): Promise<void> {
+  if (!props.provider || props.provider !== 'chatgpt') return
+  oauthError.value = null
+  const generation = dialogGeneration
+  await cancelOAuth()
+  stopPolling()
+  saving.value = true
+  try {
+    const result = await startChatGptOAuth({
+      label: label.value.trim(),
+      shared: props.isAdmin && shared.value,
+      ...(selectedAccount.value ? { account_id: selectedAccount.value.id } : {}),
+    })
+    if (!result.flow_id) throw new Error('OAuth flow could not be scoped to this account.')
+    if (generation !== dialogGeneration || !open.value) {
+      await cancelChatGptOAuth(result.flow_id).catch(() => undefined)
+      return
+    }
+    oauthFlowId.value = result.flow_id
+    oauthUserCode.value = result.user_code
+    oauthVerificationUrl.value = result.verification_url
+    pollIntervalSec = Math.max(1, result.interval)
+    oauthPhase.value = 'pending'
+    stopPolling()
+    pollTimer = setTimeout(() => void pollOAuth(), pollIntervalSec * 1000)
+  } catch (error: unknown) {
+    oauthPhase.value = 'error'
+    oauthError.value = error instanceof Error ? error.message : 'Failed to start OAuth'
+  } finally {
+    saving.value = false
+  }
+}
+
+async function cancelOAuth(): Promise<void> {
+  const flowId = oauthFlowId.value
+  oauthFlowId.value = null
+  if (flowId) await cancelChatGptOAuth(flowId).catch(() => undefined)
+}
+
+async function closeDialog(nextOpen: boolean): Promise<void> {
+  open.value = nextOpen
+  if (!nextOpen) {
+    stopPolling()
+    await cancelOAuth()
+    resetForm()
   }
 }
 
 watch(
   () => [open.value, props.provider] as const,
   ([isOpen], previous) => {
-    if (isOpen) {
-      resetForms()
-      return
-    }
-    // previous is undefined on the immediate run.
-    if (previous?.[0]) {
-      // Best-effort cancel when the dialog closes mid-OAuth-flow.
-      if (props.provider === 'chatgpt' && chatGptOAuthPhase.value === 'pending') {
-        void cancelChatGptOAuth().catch(() => {})
-      }
-      stopChatGptPolling()
-      disconnectConfirm.value = false
+    if (isOpen && !previous?.[0]) resetForm()
+    if (!isOpen && previous?.[0]) {
+      stopPolling()
+      void cancelOAuth()
+      resetForm()
     }
   },
   { immediate: true },
 )
 
 onBeforeUnmount(() => {
-  stopChatGptPolling()
+  stopPolling()
+  void cancelOAuth()
 })
 </script>
 
 <template>
-  <Dialog v-model:open="open">
-    <DialogContent class="sm:max-w-md">
+  <Dialog :open="open" @update:open="closeDialog">
+    <DialogContent class="sm:max-w-lg">
       <DialogHeader v-if="meta">
-        <div class="flex items-center gap-3">
-          <div
-            class="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"
-          >
-            <component :is="meta.icon" :size="16" aria-hidden="true" />
-          </div>
-          <div class="min-w-0 space-y-1">
-            <DialogTitle>{{ meta.name }}</DialogTitle>
-            <DialogDescription>{{ meta.dialogDescription }}</DialogDescription>
-          </div>
-        </div>
+        <DialogTitle>{{ meta.name }} accounts</DialogTitle>
+        <DialogDescription
+          >Choose which account new responses use, or manage an account.</DialogDescription
+        >
       </DialogHeader>
 
-      <DialogBody v-if="meta" class="space-y-4">
+      <DialogBody v-if="meta" class="max-h-[70vh] space-y-4 overflow-y-auto">
         <p v-if="dialogError" class="text-sm text-destructive">{{ dialogError }}</p>
 
-        <div
-          v-if="isConnected"
-          class="flex items-start gap-3 rounded-md border border-border bg-muted/40 p-4"
-          data-testid="connection-status"
-        >
-          <span class="mt-1.5 size-2 shrink-0 rounded-full bg-success" aria-hidden="true" />
-          <div class="min-w-0 space-y-0.5">
-            <p class="text-sm font-medium text-foreground">Connected</p>
-            <p v-if="statusDetail" class="text-sm break-all text-muted-foreground">
-              {{ statusDetail }}
-            </p>
+        <template v-if="!isEditing">
+          <div
+            class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
+          >
+            <div
+              v-for="account in accounts"
+              :key="account.id"
+              class="flex items-center gap-3 px-3 py-3"
+            >
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-sm font-medium">{{ account.label }}</p>
+                <p class="text-xs text-muted-foreground">
+                  {{ account.scope === 'organization' ? 'Organization shared' : 'Personal' }}
+                  <span v-if="!account.connected"> · Not connected</span>
+                </p>
+              </div>
+              <span v-if="account.is_active" class="text-xs font-medium text-success">Active</span>
+              <Button
+                v-else
+                size="sm"
+                variant="outline"
+                :disabled="saving || !account.connected"
+                @click="selectAccount(account.id)"
+                >Use</Button
+              >
+              <Button
+                v-if="account.can_manage"
+                size="sm"
+                variant="ghost"
+                :data-testid="`edit-account-${account.id}`"
+                @click="openEditForm(account)"
+                >Edit</Button
+              >
+            </div>
+            <div
+              v-if="!accounts.length"
+              class="px-3 py-5 text-center text-sm text-muted-foreground"
+            >
+              No accounts yet.
+            </div>
           </div>
-        </div>
-
-        <template v-if="provider === 'openrouter'">
-          <div class="space-y-2">
-            <Label for="openrouter-api-key">API Key</Label>
-            <Input
-              id="openrouter-api-key"
-              v-model="openRouterApiKey"
-              type="password"
-              autocomplete="off"
-              :placeholder="openRouterApiKeyPlaceholder"
-            />
-            <p class="text-xs text-muted-foreground">Leave blank to keep the existing key.</p>
-          </div>
-          <div class="space-y-2">
-            <Label for="openrouter-base-url">Base URL</Label>
-            <Input
-              id="openrouter-base-url"
-              v-model="openRouterBaseUrl"
-              type="url"
-              placeholder="https://openrouter.ai/api/v1"
-            />
-          </div>
+          <Button
+            v-if="accounts.length"
+            size="sm"
+            variant="ghost"
+            class="w-full"
+            :disabled="saving || !accounts.some((account) => account.is_active)"
+            data-testid="select-no-account"
+            @click="selectAccount(null)"
+            >Use no account</Button
+          >
+          <Button
+            class="w-full"
+            :disabled="saving"
+            data-testid="add-provider-account"
+            @click="openCreateForm"
+            >Add account</Button
+          >
         </template>
 
-        <template v-else-if="provider === 'chatgpt' && !isConnected">
-          <template v-if="chatGptOAuthPhase === 'pending'">
-            <div class="space-y-3 text-center">
-              <p class="text-sm text-muted-foreground">Enter this code at OpenAI:</p>
-              <p
-                class="font-mono text-3xl font-semibold tracking-widest"
-                data-testid="chatgpt-user-code"
-              >
-                {{ chatGptUserCode }}
-              </p>
-              <div class="flex justify-center gap-2">
-                <CopyButton
-                  :text="chatGptUserCode"
-                  label="login code"
-                  size="sm"
-                  variant="outline"
-                  data-testid="chatgpt-copy-code"
-                >
-                  Copy code
-                </CopyButton>
-                <Button size="sm" variant="outline" as-child>
-                  <a
-                    :href="chatGptVerificationUrl"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    data-testid="chatgpt-verification-link"
-                  >
-                    <ExternalLink class="size-4" />
-                    Open authorization page
-                  </a>
-                </Button>
-              </div>
-              <p class="flex items-center justify-center gap-2 text-sm text-muted-foreground">
-                <Loader2 class="size-4 animate-spin" />
-                Waiting for authorization…
-              </p>
+        <template v-else>
+          <Button size="sm" variant="ghost" class="-ml-2" @click="resetForm()">← Accounts</Button>
+          <div class="space-y-2">
+            <Label for="account-label">Account name</Label>
+            <Input
+              id="account-label"
+              v-model="label"
+              autocomplete="off"
+              placeholder="e.g. Personal or Production"
+            />
+          </div>
+          <label v-if="isAdmin" class="flex items-center gap-2 text-sm">
+            <Checkbox
+              v-model="shared"
+              :disabled="Boolean(selectedAccount && !selectedAccount.can_manage)"
+              data-testid="account-shared"
+            />
+            Share with this organization
+          </label>
+          <p
+            v-if="!isAdmin && selectedAccount?.scope === 'personal'"
+            class="text-xs text-muted-foreground"
+          >
+            Only you can use this account.
+          </p>
+
+          <template v-if="provider === 'openrouter'">
+            <div class="space-y-2">
+              <Label for="openrouter-api-key">API key</Label
+              ><Input
+                id="openrouter-api-key"
+                v-model="openRouterApiKey"
+                type="password"
+                autocomplete="off"
+                :placeholder="secretHint ? `Saved key (${secretHint})` : 'sk-or-…'"
+              />
+              <p class="text-xs text-muted-foreground">Leave blank to keep the saved key.</p>
+            </div>
+            <div class="space-y-2">
+              <Label for="openrouter-base-url">Base URL</Label
+              ><Input
+                id="openrouter-base-url"
+                v-model="openRouterBaseUrl"
+                type="url"
+                placeholder="https://openrouter.ai/api/v1"
+              />
             </div>
           </template>
-          <template v-else>
-            <p v-if="chatGptOAuthError" class="text-sm text-destructive">{{ chatGptOAuthError }}</p>
-            <Button
-              class="w-full"
-              :disabled="saving"
-              data-testid="chatgpt-connect"
-              @click="startChatGptConnect"
-            >
-              <LoadingSpinner v-if="saving" :size="12" />
-              <span v-else>Connect with ChatGPT</span>
-            </Button>
+
+          <template v-else-if="provider === 'chatgpt'">
+            <template v-if="oauthPhase === 'pending'">
+              <div class="space-y-3 text-center">
+                <p class="text-sm text-muted-foreground">Enter this code at OpenAI:</p>
+                <p
+                  class="font-mono text-3xl font-semibold tracking-widest"
+                  data-testid="chatgpt-user-code"
+                >
+                  {{ oauthUserCode }}
+                </p>
+                <div class="flex justify-center gap-2">
+                  <CopyButton :text="oauthUserCode" label="login code" size="sm" variant="outline"
+                    >Copy code</CopyButton
+                  ><Button size="sm" variant="outline" as-child
+                    ><a :href="oauthVerificationUrl" target="_blank" rel="noopener noreferrer"
+                      ><ExternalLink class="size-4" /> Open authorization page</a
+                    ></Button
+                  >
+                </div>
+                <p class="flex items-center justify-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 class="size-4 animate-spin" />Waiting for authorization…
+                </p>
+              </div>
+            </template>
+            <template v-else>
+              <p v-if="oauthError" class="text-sm text-destructive">{{ oauthError }}</p>
+              <Button
+                class="w-full"
+                :disabled="saving || !label.trim()"
+                data-testid="chatgpt-connect"
+                @click="startChatGptAuthorization"
+                ><LoadingSpinner v-if="saving" :size="12" /><span v-else>{{
+                  selectedAccount ? 'Reconnect with ChatGPT' : 'Connect with ChatGPT'
+                }}</span></Button
+              >
+            </template>
           </template>
-        </template>
 
-        <template v-else-if="provider === 'openai-compatible'">
-          <div class="space-y-2">
-            <Label for="compat-base-url">Base URL</Label>
-            <Input
-              id="compat-base-url"
-              v-model="compatBaseUrl"
-              type="url"
-              autocomplete="off"
-              placeholder="https://my-host:8000/v1"
-            />
-            <p class="text-xs text-muted-foreground">
-              OpenAI-compatible endpoint (self-hosted or HuggingFace UI-TARS). Required.
-            </p>
-          </div>
-          <div class="space-y-2">
-            <Label for="compat-api-key">API Key (optional)</Label>
-            <Input
-              id="compat-api-key"
-              v-model="compatApiKey"
-              type="password"
-              autocomplete="off"
-              :placeholder="compatApiKeyPlaceholder"
-            />
-            <p class="text-xs text-muted-foreground">Leave blank to keep the existing key.</p>
-          </div>
-          <div class="space-y-2">
-            <Label for="compat-models">Models (one per line)</Label>
-            <Textarea
-              id="compat-models"
-              v-model="compatModelsText"
-              rows="4"
-              placeholder="ui-tars-1.5-7b&#10;my-grounding-model"
-              data-testid="compat-models"
-            />
-            <p class="text-xs text-muted-foreground">
-              Endpoints without /models are listed by hand. Empty list allowed; entries are trimmed
-              and deduplicated on save.
-            </p>
-          </div>
-        </template>
+          <template v-else-if="provider === 'openai-compatible'">
+            <div class="space-y-2">
+              <Label for="compat-base-url">Base URL</Label
+              ><Input
+                id="compat-base-url"
+                v-model="compatBaseUrl"
+                type="url"
+                autocomplete="off"
+                placeholder="https://my-host:8000/v1"
+              />
+            </div>
+            <div class="space-y-2">
+              <Label for="compat-api-key">API key (optional)</Label
+              ><Input
+                id="compat-api-key"
+                v-model="compatApiKey"
+                type="password"
+                autocomplete="off"
+                :placeholder="secretHint ? `Saved key (${secretHint})` : 'Optional API key'"
+              />
+              <p class="text-xs text-muted-foreground">Leave blank to keep the saved key.</p>
+            </div>
+            <div class="space-y-2">
+              <Label for="compat-models">Models (one per line)</Label
+              ><Textarea
+                id="compat-models"
+                v-model="compatModelsText"
+                rows="4"
+                placeholder="ui-tars-1.5-7b&#10;my-grounding-model"
+              />
+            </div>
+          </template>
 
-        <template v-else-if="provider === 'claude-agent'">
-          <div class="space-y-2">
-            <Label for="claude-auth-type">Anthropic authentication</Label>
-            <Tabs v-model="claudeAuthType" class="w-full">
-              <TabsList class="grid w-full grid-cols-2">
-                <TabsTrigger value="api_token" data-testid="claude-tab-api-token">
-                  API token
-                </TabsTrigger>
-                <TabsTrigger value="subscription_token" data-testid="claude-tab-subscription-token">
-                  Subscription token
-                </TabsTrigger>
-              </TabsList>
-            </Tabs>
-            <p class="text-xs text-muted-foreground">
-              Paste a token Anthropic issued or authorized for your own account. There is no OAuth
-              or browser authorization flow.
-            </p>
-          </div>
-          <div class="space-y-2">
-            <Label for="claude-token">
-              {{
+          <template v-else-if="provider === 'claude-agent'">
+            <div class="space-y-2">
+              <Label for="claude-auth-type">Anthropic authentication</Label
+              ><Tabs v-model="claudeAuthType"
+                ><TabsList class="grid w-full grid-cols-2"
+                  ><TabsTrigger value="api_token">API token</TabsTrigger
+                  ><TabsTrigger value="subscription_token"
+                    >Subscription token</TabsTrigger
+                  ></TabsList
+                ></Tabs
+              >
+            </div>
+            <div class="space-y-2">
+              <Label for="claude-token">{{
                 claudeAuthType === 'api_token'
                   ? 'Anthropic API token'
                   : 'Anthropic subscription token'
-              }}
-            </Label>
-            <Input
-              id="claude-token"
-              v-model="claudeToken"
-              type="password"
-              autocomplete="off"
-              :placeholder="
-                claudeConnection?.connected && claudeConnection.auth_type === claudeAuthType
-                  ? 'Leave blank to keep existing token'
-                  : 'Paste your Anthropic token'
-              "
-              data-testid="claude-token"
-            />
-            <p class="text-xs text-muted-foreground">
-              Runs in this workspace; use only workspaces you trust. API usage or subscription
-              access is personal and follows Anthropic's terms.
+              }}</Label
+              ><Input
+                id="claude-token"
+                v-model="claudeToken"
+                type="password"
+                autocomplete="off"
+                :placeholder="
+                  selectedAccount?.connected && selectedAccount.auth_type === claudeAuthType
+                    ? 'Leave blank to keep existing token'
+                    : 'Paste your Anthropic token'
+                "
+              />
+              <p class="text-xs text-muted-foreground">Token usage follows Anthropic's terms.</p>
+            </div>
+          </template>
+
+          <template v-else-if="provider === 'amazon-bedrock'">
+            <Tabs v-model="bedrockAuthMethod"
+              ><TabsList class="grid w-full grid-cols-2"
+                ><TabsTrigger value="access_keys">Access keys</TabsTrigger
+                ><TabsTrigger value="bearer">Bearer token</TabsTrigger></TabsList
+              ><TabsContent value="access_keys" class="mt-4 space-y-3"
+                ><div class="space-y-2">
+                  <Label for="bedrock-access-key-id">Access key ID</Label
+                  ><Input
+                    id="bedrock-access-key-id"
+                    v-model="bedrockAccessKeyId"
+                    autocomplete="off"
+                    placeholder="AKIA…"
+                  />
+                </div>
+                <div class="space-y-2">
+                  <Label for="bedrock-secret-access-key">Secret access key</Label
+                  ><Input
+                    id="bedrock-secret-access-key"
+                    v-model="bedrockSecretAccessKey"
+                    type="password"
+                    autocomplete="off"
+                    placeholder="Leave blank to keep existing"
+                  />
+                </div>
+                <div class="space-y-2">
+                  <Label for="bedrock-session-token">Session token (optional)</Label
+                  ><Input
+                    id="bedrock-session-token"
+                    v-model="bedrockSessionToken"
+                    type="password"
+                    autocomplete="off"
+                    placeholder="Leave blank to keep existing"
+                  /></div></TabsContent
+              ><TabsContent value="bearer" class="mt-4 space-y-3"
+                ><div class="space-y-2">
+                  <Label for="bedrock-bearer-token">Bearer token</Label
+                  ><Input
+                    id="bedrock-bearer-token"
+                    v-model="bedrockBearerToken"
+                    type="password"
+                    autocomplete="off"
+                    placeholder="Leave blank to keep existing"
+                  /></div></TabsContent
+            ></Tabs>
+            <div class="space-y-2">
+              <Label for="bedrock-region">Region</Label
+              ><Input id="bedrock-region" v-model="bedrockRegion" placeholder="us-east-1" />
+            </div>
+          </template>
+
+          <div
+            v-if="confirmAction"
+            class="space-y-2 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm"
+            data-testid="account-confirm"
+          >
+            <p v-if="confirmAction === 'delete'">
+              Deleting this account immediately interrupts responses using it. They will not switch
+              to another account.
             </p>
-          </div>
-          <div class="space-y-2">
-            <Label for="claude-label">Label (optional)</Label>
-            <Input
-              id="claude-label"
-              v-model="claudeLabel"
-              autocomplete="off"
-              placeholder="Personal Anthropic account"
-            />
-          </div>
-        </template>
-
-        <template v-else-if="provider === 'amazon-bedrock'">
-          <Tabs v-model="bedrockAuthMethod" class="w-full">
-            <TabsList class="grid w-full grid-cols-2">
-              <TabsTrigger value="access_keys" data-testid="bedrock-tab-access-keys">
-                Access keys
-              </TabsTrigger>
-              <TabsTrigger value="bearer" data-testid="bedrock-tab-bearer">
-                Bearer token
-              </TabsTrigger>
-            </TabsList>
-            <TabsContent value="access_keys" class="mt-4 space-y-3">
-              <div class="space-y-2">
-                <Label for="bedrock-access-key-id">Access key ID</Label>
-                <Input
-                  id="bedrock-access-key-id"
-                  v-model="bedrockAccessKeyId"
-                  autocomplete="off"
-                  placeholder="AKIA…"
-                />
-              </div>
-              <div class="space-y-2">
-                <Label for="bedrock-secret-access-key">Secret access key</Label>
-                <Input
-                  id="bedrock-secret-access-key"
-                  v-model="bedrockSecretAccessKey"
-                  type="password"
-                  autocomplete="off"
-                  placeholder="Leave blank to keep existing"
-                />
-              </div>
-              <div class="space-y-2">
-                <Label for="bedrock-session-token">Session token (optional)</Label>
-                <Input
-                  id="bedrock-session-token"
-                  v-model="bedrockSessionToken"
-                  type="password"
-                  autocomplete="off"
-                  placeholder="Leave blank to keep existing"
-                />
-              </div>
-            </TabsContent>
-            <TabsContent value="bearer" class="mt-4 space-y-3">
-              <div class="space-y-2">
-                <Label for="bedrock-bearer-token">Bearer token</Label>
-                <Input
-                  id="bedrock-bearer-token"
-                  v-model="bedrockBearerToken"
-                  type="password"
-                  autocomplete="off"
-                  placeholder="Leave blank to keep existing"
-                />
-              </div>
-            </TabsContent>
-          </Tabs>
-          <div class="space-y-2">
-            <Label for="bedrock-region">Region</Label>
-            <Input id="bedrock-region" v-model="bedrockRegion" placeholder="us-east-1" />
+            <p v-else>
+              Unsharing transfers this account to you and immediately interrupts other members'
+              responses using it. They will not switch to another account.
+            </p>
+            <div class="flex gap-2">
+              <Button
+                size="sm"
+                variant="destructive"
+                :disabled="saving"
+                data-testid="confirm-account-action"
+                @click="confirmAction === 'delete' ? deleteAccount() : confirmUnshare()"
+                >Confirm</Button
+              ><Button size="sm" variant="outline" @click="confirmAction = null">Cancel</Button>
+            </div>
           </div>
         </template>
-
-        <div
-          v-if="disconnectConfirm"
-          class="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm"
-          data-testid="disconnect-confirm"
-        >
-          <p class="mb-2">{{ meta.disconnectConfirm }}</p>
-          <div class="flex gap-2">
-            <Button
-              size="sm"
-              variant="destructive"
-              :disabled="saving"
-              :data-testid="`confirm-disconnect-${provider}`"
-              @click="disconnectProvider"
-            >
-              Confirm disconnect
-            </Button>
-            <Button size="sm" variant="outline" @click="disconnectConfirm = false"> Cancel </Button>
-          </div>
-        </div>
       </DialogBody>
 
       <DialogFooter v-if="meta" class="gap-2 sm:justify-between">
-        <div>
+        <div class="flex gap-2">
           <Button
-            v-if="isConnected && !disconnectConfirm"
+            v-if="isEditing && selectedAccount?.can_manage && !confirmAction"
             type="button"
             variant="ghost"
             class="text-destructive hover:text-destructive"
-            :disabled="saving"
-            :data-testid="`disconnect-${provider}`"
-            @click="disconnectConfirm = true"
+            data-testid="delete-account"
+            @click="confirmAction = 'delete'"
+            >Delete</Button
           >
-            Disconnect
-          </Button>
+          <Button
+            v-if="
+              isEditing &&
+              selectedAccount?.scope === 'organization' &&
+              selectedAccount.can_manage &&
+              isAdmin &&
+              !confirmAction
+            "
+            type="button"
+            variant="ghost"
+            data-testid="unshare-account"
+            @click="askToUnshare"
+            >Unshare</Button
+          >
         </div>
         <div class="flex gap-2">
-          <Button type="button" variant="outline" @click="open = false">Close</Button>
           <Button
-            v-if="provider === 'openrouter'"
+            type="button"
+            variant="outline"
+            @click="isEditing ? resetForm() : closeDialog(false)"
+            >{{ isEditing ? 'Back' : 'Close' }}</Button
+          >
+          <Button
+            v-if="isEditing && canEdit && provider !== 'chatgpt'"
             type="button"
             :disabled="saving"
-            data-testid="save-openrouter"
-            @click="saveOpenRouter"
+            data-testid="save-provider-account"
+            @click="saveAccount"
+            ><LoadingSpinner v-if="saving" :size="12" /><span v-else>{{
+              selectedAccount ? 'Save changes' : 'Add account'
+            }}</span></Button
           >
-            <LoadingSpinner v-if="saving" :size="12" />
-            <span v-else>Save</span>
-          </Button>
-          <Button
-            v-else-if="provider === 'openai-compatible'"
-            type="button"
-            :disabled="saving"
-            data-testid="save-compatible"
-            @click="saveCompat"
-          >
-            <LoadingSpinner v-if="saving" :size="12" />
-            <span v-else>Save</span>
-          </Button>
-          <Button
-            v-else-if="provider === 'claude-agent'"
-            type="button"
-            :disabled="saving"
-            data-testid="save-claude-agent"
-            @click="saveClaude"
-          >
-            <LoadingSpinner v-if="saving" :size="12" />
-            <span v-else>Save</span>
-          </Button>
-          <Button
-            v-else-if="provider === 'amazon-bedrock'"
-            type="button"
-            :disabled="saving"
-            data-testid="save-bedrock"
-            @click="saveBedrock"
-          >
-            <LoadingSpinner v-if="saving" :size="12" />
-            <span v-else>Save</span>
-          </Button>
         </div>
       </DialogFooter>
     </DialogContent>

@@ -8,7 +8,6 @@ ChatGPT and Amazon Bedrock catalogs for connected providers.
 
 from __future__ import annotations
 
-import json
 import time
 import uuid
 from dataclasses import dataclass, replace
@@ -17,8 +16,7 @@ from typing import Any
 import httpx
 import structlog
 
-from common.utils import decrypt_value
-
+from ..provider_accounts import ProviderAccountService
 from ..repositories import ProviderConnectionRepository
 from .base import ProviderAuthError, ProviderResponseError, ProviderTimeoutError
 from .bedrock import DEFAULT_REGION, resolve_bedrock_model_id
@@ -108,7 +106,9 @@ class ModelsCatalogCache:
         if key is None:
             self._entries.clear()
             return
-        self._entries.pop(key, None)
+        for entry in tuple(self._entries):
+            if entry == key or entry.startswith(key + ":"):
+                self._entries.pop(entry, None)
 
 
 _catalog_cache = ModelsCatalogCache()
@@ -570,7 +570,7 @@ def _fetch_openrouter_catalog_for_connection(
     *,
     client: httpx.Client | None = None,
 ) -> list[ProviderModel]:
-    credentials = json.loads(decrypt_value(connection.credentials_encrypted))
+    credentials = ProviderAccountService().get_credentials(connection)
     api_key = str(credentials.get("api_key", "") or "")
     if not api_key.strip():
         return []
@@ -579,22 +579,66 @@ def _fetch_openrouter_catalog_for_connection(
     return [_namespace_openrouter_model(model) for model in models]
 
 
+def selected_catalog_connections(
+    organization_id: uuid.UUID,
+    user_id: int | None,
+    account_ids: dict[str, str] | None,
+    repository: type[ProviderConnectionRepository] = ProviderConnectionRepository,
+) -> list[Any]:
+    """Resolve and authorize account identities before consulting a model cache."""
+    if user_id is None:
+        if account_ids:
+            raise ValueError("A user is required for provider account resolution")
+        return repository.list_by_org(organization_id)
+    service = ProviderAccountService()
+    if account_ids is None:
+        return list(service.selected_accounts(organization_id, user_id).values())
+    connections = []
+    for provider, account_id in account_ids.items():
+        account = service.get_account(organization_id, user_id, account_id)
+        if account.provider != provider:
+            raise ValueError("Provider account does not match the requested provider")
+        connections.append(account)
+    return connections
+
+
+def catalog_cache_key(organization_id: uuid.UUID, connections: list[Any]) -> str:
+    """Include account/config revision so other workers cannot serve stale data."""
+    identities = sorted(
+        f"{row.provider}={row.id}@{row.updated_at.isoformat()}" for row in connections
+    )
+    return f"{organization_id}:accounts:" + ",".join(identities)
+
+
+def get_cached_account_catalog(
+    organization_id: uuid.UUID, connections: list[Any]
+) -> list[ProviderModel] | None:
+    """Read model limits without doing provider network I/O during resolution."""
+    return _catalog_cache.get(catalog_cache_key(organization_id, connections))
+
+
 def list_merged_provider_models(
     *,
     organization_id: uuid.UUID,
     connection_repository: type[ProviderConnectionRepository] | None = None,
     client: httpx.Client | None = None,
     force_refresh: bool = False,
+    user_id: int | None = None,
+    account_ids: dict[str, str] | None = None,
 ) -> list[ProviderModel]:
-    """Return the merged catalog across all connected providers for an org."""
-    cache_key = str(organization_id)
+    """Merge only selected, currently authorized provider accounts."""
+    connections = selected_catalog_connections(
+        organization_id,
+        user_id,
+        account_ids,
+        connection_repository or ProviderConnectionRepository,
+    )
+    cache_key = catalog_cache_key(organization_id, connections)
     if not force_refresh:
         cached = _catalog_cache.get(cache_key)
         if cached is not None:
             return cached
 
-    repository = connection_repository or ProviderConnectionRepository
-    connections = repository.list_by_org(organization_id)
     merged: list[ProviderModel] = []
     for connection in connections:
         if connection.provider == "openrouter":

@@ -68,6 +68,41 @@ export interface HarnessProviderConfigIn {
 }
 
 export const HARNESS_ENGINE_CONNECTION_CHANGED_EVENT = 'harness:engine-connection-changed'
+/** Shared model-catalog and engine-availability refresh signal. */
+export const PROVIDER_ACCOUNTS_CHANGED_EVENT = HARNESS_ENGINE_CONNECTION_CHANGED_EVENT
+
+export type AccountProviderId = ProviderId | 'claude-agent'
+
+/** Safe, caller-visible provider account metadata. Secrets are never included. */
+export interface ProviderAccount {
+  id: string
+  provider: AccountProviderId
+  label: string
+  scope: 'personal' | 'organization'
+  connected: boolean
+  is_active: boolean
+  can_manage: boolean
+  base_url?: string
+  api_key_hint?: string
+  account_id?: string
+  region?: string
+  auth_method?: string
+  models?: string[]
+  auth_type?: 'api_token' | 'subscription_token' | string
+}
+
+export type ProviderAccountPayload = ProviderConnectionUpsertIn & {
+  label: string
+  shared: boolean
+  token?: string
+  auth_type?: 'api_token' | 'subscription_token'
+}
+
+/** Notify mounted chat surfaces after an account or selection mutation. */
+export function notifyProviderAccountsChanged(): void {
+  if (typeof window === 'undefined') return
+  window.dispatchEvent(new Event(PROVIDER_ACCOUNTS_CHANGED_EVENT))
+}
 
 export interface HarnessEngine {
   id: HarnessId
@@ -156,6 +191,7 @@ export interface AgentSConfig {
 export type AgentSConfigIn = Partial<AgentSConfig>
 
 export interface ChatGptOAuthStart {
+  flow_id?: string
   user_code: string
   verification_url: string
   interval: number
@@ -163,7 +199,14 @@ export interface ChatGptOAuthStart {
 }
 
 export interface ChatGptOAuthStatus {
-  status: 'pending' | 'connected' | 'expired' | 'denied' | 'no_flow'
+  status: 'pending' | 'connected' | 'expired' | 'denied' | 'cancelled' | 'no_flow'
+  account_id?: string
+  connection_id?: string
+}
+
+export interface ChatGptOAuthStartIn {
+  label?: string
+  shared?: boolean
   account_id?: string
 }
 
@@ -397,6 +440,47 @@ export function listProviderConnections(): Promise<ProviderConnection[]> {
   return get<ProviderConnection[]>('/provider-config/providers/')
 }
 
+/** List accounts visible in the current user's active organization context. */
+export function listProviderAccounts(): Promise<ProviderAccount[]> {
+  return get<ProviderAccount[]>('/provider-config/accounts/')
+}
+
+/** Create one named personal or admin-shared provider account. */
+export function createProviderAccount(
+  provider: AccountProviderId,
+  payload: ProviderAccountPayload,
+): Promise<ProviderAccount> {
+  return post<ProviderAccount>(`/provider-config/accounts/${provider}/`, payload)
+}
+
+/** Update an account by its opaque account UUID. */
+export function updateProviderAccount(
+  provider: AccountProviderId,
+  accountId: string,
+  payload: ProviderAccountPayload,
+): Promise<ProviderAccount> {
+  return put<ProviderAccount>(
+    `/provider-config/accounts/${provider}/${encodeURIComponent(accountId)}/`,
+    payload,
+  )
+}
+
+/** Delete one account by its opaque account UUID. */
+export function deleteProviderAccount(
+  provider: AccountProviderId,
+  accountId: string,
+): Promise<void> {
+  return del<void>(`/provider-config/accounts/${provider}/${encodeURIComponent(accountId)}/`)
+}
+
+/** Select one visible account for this user/provider, or explicitly select none. */
+export function selectProviderAccount(
+  provider: AccountProviderId,
+  accountId: string | null,
+): Promise<void> {
+  return put<void>(`/provider-config/selection/${provider}/`, { account_id: accountId })
+}
+
 /** Org-wide nesting limit, applied to new runs (default 2). */
 export interface SubagentConfig {
   max_depth: number
@@ -443,14 +527,15 @@ export function deleteProviderConnection(provider: ProviderId): Promise<void> {
   return del<void>(`/provider-config/providers/${provider}/`)
 }
 
-export function startChatGptOAuth(): Promise<ChatGptOAuthStart> {
-  return post<ChatGptOAuthStart>('/provider-config/providers/chatgpt/oauth/start/')
+export function startChatGptOAuth(payload?: ChatGptOAuthStartIn): Promise<ChatGptOAuthStart> {
+  return post<ChatGptOAuthStart>('/provider-config/providers/chatgpt/oauth/start/', payload)
 }
 
-export async function getChatGptOAuthStatus(): Promise<ChatGptOAuthStatus> {
+export async function getChatGptOAuthStatus(flowId?: string): Promise<ChatGptOAuthStatus> {
+  const query = flowId ? `?flow_id=${encodeURIComponent(flowId)}` : ''
   const result = await requestWithStatus<ChatGptOAuthStatus>(
     'GET',
-    '/provider-config/providers/chatgpt/oauth/status/',
+    `/provider-config/providers/chatgpt/oauth/status/${query}`,
   )
   if (result.status === 404) {
     return { status: 'no_flow', account_id: result.data.account_id ?? '' }
@@ -475,8 +560,11 @@ export async function getChatGptOAuthStatus(): Promise<ChatGptOAuthStatus> {
   return result.data
 }
 
-export function cancelChatGptOAuth(): Promise<void> {
-  return post<void>('/provider-config/providers/chatgpt/oauth/cancel/')
+export function cancelChatGptOAuth(flowId?: string): Promise<void> {
+  return post<void>(
+    '/provider-config/providers/chatgpt/oauth/cancel/',
+    flowId ? { flow_id: flowId } : undefined,
+  )
 }
 
 export function listHarnessConversations(): Promise<HarnessConversation[]> {

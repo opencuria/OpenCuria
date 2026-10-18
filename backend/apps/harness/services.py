@@ -7,7 +7,6 @@ provider adapters via :class:`~apps.harness.providers.resolver.ProviderResolver`
 
 from __future__ import annotations
 
-import json
 import uuid
 from typing import Any
 
@@ -15,7 +14,6 @@ import structlog
 
 from apps.organizations.repositories import OrganizationRepository
 from common.exceptions import ConflictError, NotFoundError
-from common.utils import decrypt_value, encrypt_value
 
 from .agent_s.config import AgentSRunConfig
 from .agents.definitions import AGENT_DEFINITIONS
@@ -444,7 +442,7 @@ class ProviderConfigService:
                 credentials={"api_key": api_key.strip()},
                 config={"base_url": normalized_url},
             )
-        elif existing is not None:
+        elif existing is not None and normalized_url != DEFAULT_BASE_URL:
             connection = self.connections.get_by_org_and_provider(
                 organization_id,
                 "openrouter",
@@ -501,11 +499,9 @@ class ProviderConfigService:
     @staticmethod
     def get_connection_credentials(connection: ProviderConnection) -> dict[str, Any]:
         """Decrypt stored provider credentials as a JSON object."""
-        if not (connection.credentials_encrypted or "").strip():
-            return {}
-        payload = decrypt_value(connection.credentials_encrypted)
-        parsed = json.loads(payload)
-        return parsed if isinstance(parsed, dict) else {}
+        from .provider_accounts import ProviderAccountService
+
+        return ProviderAccountService().get_credentials(connection)
 
     def save_connection(
         self,
@@ -515,21 +511,16 @@ class ProviderConfigService:
         credentials: dict[str, Any],
         config: dict[str, Any] | None = None,
     ) -> ProviderConnection:
-        """Create or update a provider connection and invalidate the catalog."""
-        encrypted = encrypt_value(json.dumps(credentials))
-        connection = self.connections.upsert(
+        """Compatibility helper for internal org-shared setup through the vault."""
+        from .provider_accounts import ProviderAccountService
+
+        account = ProviderAccountService()._save_legacy_account(
             organization_id=organization_id,
             provider=provider,
-            credentials_encrypted=encrypted,
-            config=dict(config or {}),
+            payload={**dict(config or {}), **dict(credentials or {})},
         )
         clear_models_cache(str(organization_id))
-        log.info(
-            "provider_connection_saved",
-            organization_id=str(organization_id),
-            provider=provider,
-        )
-        return connection
+        return account
 
     def delete_connection(
         self,
@@ -547,12 +538,22 @@ class ProviderConfigService:
             provider=provider,
         )
 
-    def build_resolver(self, organization_id: uuid.UUID) -> ProviderResolver:
-        """Build a per-run resolver for the organization's connections."""
+    def build_resolver(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        user_id: int | None = None,
+        account_ids: dict[str, str] | None = None,
+        on_account_used: Any | None = None,
+    ) -> ProviderResolver:
+        """Build a resolver for the user's active or answer-frozen accounts."""
         return ProviderResolver(
             organization_id,
             registry=self.registry,
             connection_repository=self.connections,
+            user_id=user_id,
+            account_ids=account_ids,
+            on_account_used=on_account_used,
         )
 
     def adapter_from_config(
@@ -597,6 +598,10 @@ class ProviderConfigService:
         elif provider_name == "chatgpt":
             adapter = ChatGPTAdapter(credentials=credentials)
         elif provider_name == "amazon-bedrock":
+            if config.get("auth_method") == "access_keys":
+                credentials.pop("bearer_token", None)
+            elif config.get("auth_method") == "bearer":
+                credentials = {"bearer_token": credentials.get("bearer_token", "")}
             adapter = BedrockAdapter(
                 credentials=credentials,
                 region=str(config.get("region") or "us-east-1"),
@@ -619,30 +624,57 @@ class ProviderConfigService:
             raise ConflictError(f"Provider {provider_name!r} did not build an adapter")
         return adapter
 
-    def list_models(self, organization_id: uuid.UUID) -> list[ProviderModel]:
-        """Return the merged catalog for all connected providers.
+    def list_models(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        user_id: int | None = None,
+        account_ids: dict[str, str] | None = None,
+    ) -> list[ProviderModel]:
+        """List models offered by precisely the selected accounts."""
+        from .providers.models_catalog import selected_catalog_connections
 
-        Only ``ProviderConnection`` rows are required; the legacy
-        ``ProviderConfig`` defaults row is optional and ignored here.
-
-        Raises:
-            NotFoundError: If no provider connection exists for the org.
-        """
-        connections = self.connections.list_by_org(organization_id)
-        if not connections:
+        if not selected_catalog_connections(
+            organization_id, user_id, account_ids, self.connections
+        ):
             raise NotFoundError("ProviderConnection", str(organization_id))
-        return list_merged_provider_models(organization_id=organization_id)
+        return list_merged_provider_models(
+            organization_id=organization_id,
+            user_id=user_id,
+            account_ids=account_ids,
+            connection_repository=self.connections,
+        )
 
     def provider_connected_for_model(
-        self, organization_id: uuid.UUID, model: str
+        self,
+        organization_id: uuid.UUID,
+        model: str,
+        *,
+        user_id: int | None = None,
+        account_ids: dict[str, str] | None = None,
     ) -> str:
-        """Return the provider id for *model* when a connection exists."""
+        """Validate a provider against the caller's selected/frozen account."""
         provider_id, _ = parse_model_ref(model)
-        connection = self.connections.get_by_org_and_provider(
-            organization_id,
-            provider_id,
-        )
-        if connection is None:
+        if user_id is None:
+            connection = self.connections.get_by_org_and_provider(
+                organization_id, provider_id
+            )
+        else:
+            from .provider_accounts import ProviderAccountService
+
+            account_service = ProviderAccountService()
+            account_id = (account_ids or {}).get(provider_id)
+            if account_ids is not None:
+                connection = (
+                    account_service.get_account(organization_id, user_id, account_id)
+                    if account_id is not None
+                    else None
+                )
+            else:
+                connection = account_service.selected_accounts(
+                    organization_id, user_id
+                ).get(provider_id)
+        if connection is None or connection.provider != provider_id:
             raise ValueError(f"Provider '{provider_id}' is not connected")
         return provider_id
 
@@ -696,13 +728,9 @@ class ProviderConfigService:
         """
         from .enums import ProviderType
 
-        existing = self.get_connection(
-            organization_id, ProviderType.OPENAI_COMPATIBLE
-        )
+        existing = self.get_connection(organization_id, ProviderType.OPENAI_COMPATIBLE)
         credentials = (
-            self.get_connection_credentials(existing)
-            if existing is not None
-            else {}
+            self.get_connection_credentials(existing) if existing is not None else {}
         )
         stored_key = str(credentials.get("api_key", "") or "")
         if (api_key or "").strip():

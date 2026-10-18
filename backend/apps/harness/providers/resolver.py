@@ -4,23 +4,26 @@ Per-model provider resolution for harness runs.
 
 from __future__ import annotations
 
-import json
+import inspect
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
 
 import structlog
 from asgiref.sync import sync_to_async
 
-from common.utils import decrypt_value, encrypt_value
-
+from ..provider_accounts import ProviderAccountService
 from ..repositories import ProviderConnectionRepository
-from .base import ProviderAdapter
+from .base import ChatOptions, Delta, LLMMessage, ProviderAdapter, ToolSchema
 from .bedrock import DEFAULT_REGION, BedrockAdapter, resolve_bedrock_model_id
 from .chatgpt import ChatGPTAdapter
 from .model_ref import namespaced_model_id, parse_model_ref
-from .models_catalog import ProviderModel, get_cached_org_catalog
+from .models_catalog import (
+    ProviderModel,
+    get_cached_account_catalog,
+    selected_catalog_connections,
+)
 from .openai_compatible import OpenAICompatibleAdapter
 from .openrouter import DEFAULT_BASE_URL, OpenRouterAdapter
 from .registry import ProviderRegistry, default_registry
@@ -66,6 +69,38 @@ class StaticModelResolver:
         )
 
 
+class AccountBoundAdapter(ProviderAdapter):
+    """Authorize answer dependencies asynchronously before every provider call."""
+
+    def __init__(
+        self, adapter: ProviderAdapter, account_id: str, callback: Callable
+    ) -> None:
+        self.adapter = adapter
+        self.name = adapter.name
+        self.account_id = account_id
+        self.callback = callback
+
+    async def chat_stream(
+        self,
+        model: str,
+        messages: list[LLMMessage],
+        tools: list[ToolSchema],
+        opts: ChatOptions | None = None,
+    ) -> AsyncIterator[Delta]:
+        if inspect.iscoroutinefunction(self.callback):
+            await self.callback(self.account_id)
+        else:
+            result = await sync_to_async(self.callback)(self.account_id)
+            if inspect.isawaitable(result):
+                await result
+        stream = self.adapter.chat_stream(model, messages, tools, opts)
+        try:
+            async for delta in stream:
+                yield delta
+        finally:
+            await stream.aclose()
+
+
 class ProviderResolver:
     """Resolve model refs to connected provider adapters for an organization."""
 
@@ -75,16 +110,31 @@ class ProviderResolver:
         *,
         registry: ProviderRegistry | None = None,
         connection_repository: type[ProviderConnectionRepository] | None = None,
+        user_id: int | None = None,
+        account_ids: dict[str, str] | None = None,
+        on_account_used: Callable | None = None,
     ) -> None:
         self._organization_id = organization_id
         self._registry = registry or default_registry
         self._connections = connection_repository or ProviderConnectionRepository
+        connections = selected_catalog_connections(
+            organization_id,
+            user_id,
+            account_ids,
+            self._connections,
+        )
         self._connection_by_provider = {
-            connection.provider: connection
-            for connection in self._connections.list_by_org(organization_id)
+            row.provider: row for row in connections if row.provider != "claude-agent"
         }
+        self._on_account_used = on_account_used
         self._adapters: dict[str, ProviderAdapter] = {}
-        self._catalog_by_id: dict[str, ProviderModel] | None = None
+        cached = get_cached_account_catalog(organization_id, connections) or []
+        self._catalog_by_id = {model.id: model for model in cached}
+
+    def prepare_adapters(self) -> None:
+        """Read vault credentials off the event loop before sync model routing."""
+        for provider, connection in self._connection_by_provider.items():
+            self._get_adapter(provider, connection)
 
     def resolve(self, model_ref: str) -> ResolvedModel:
         """Build or reuse an adapter for the provider implied by *model_ref*."""
@@ -111,11 +161,6 @@ class ProviderResolver:
         )
 
     def _catalog_entry(self, model_ref: str) -> ProviderModel | None:
-        cached = get_cached_org_catalog(self._organization_id)
-        if cached is None:
-            return None
-        if self._catalog_by_id is None:
-            self._catalog_by_id = {model.id: model for model in cached}
         namespaced = namespaced_model_id(model_ref)
         if namespaced in self._catalog_by_id:
             return self._catalog_by_id[namespaced]
@@ -127,11 +172,15 @@ class ProviderResolver:
         if cached is not None:
             return cached
         adapter = self._build_adapter(provider_id, connection)
+        if self._on_account_used is not None:
+            adapter = AccountBoundAdapter(
+                adapter, str(connection.id), self._on_account_used
+            )
         self._adapters[provider_id] = adapter
         return adapter
 
     def _build_adapter(self, provider_id: str, connection: Any) -> ProviderAdapter:
-        credentials = self._decrypt_credentials(connection.credentials_encrypted)
+        credentials = ProviderAccountService().get_credentials(connection)
         config = dict(connection.config or {})
         if provider_id == "openrouter":
             api_key = str(credentials.get("api_key", "") or "")
@@ -143,6 +192,10 @@ class ProviderResolver:
                 on_tokens_refreshed=self._chatgpt_tokens_refreshed,
             )
         elif provider_id == "amazon-bedrock":
+            if config.get("auth_method") == "access_keys":
+                credentials.pop("bearer_token", None)
+            elif config.get("auth_method") == "bearer":
+                credentials = {"bearer_token": credentials.get("bearer_token", "")}
             region = str(config.get("region") or DEFAULT_REGION)
             adapter = BedrockAdapter(credentials=credentials, region=region)
         elif provider_id == "openai-compatible":
@@ -161,30 +214,13 @@ class ProviderResolver:
         return adapter
 
     async def _chatgpt_tokens_refreshed(self, credentials: dict[str, Any]) -> None:
-        encrypted = encrypt_value(json.dumps(credentials))
         connection = self._connection_by_provider.get("chatgpt")
         if connection is None:
-            log.warning(
-                "chatgpt_token_refresh_missing_connection",
-                organization_id=str(self._organization_id),
-            )
             return
-        connection.credentials_encrypted = encrypted
-
-        def _persist() -> None:
-            connection.save(
-                update_fields=["credentials_encrypted", "updated_at"],
-            )
-
-        await sync_to_async(_persist)()
-
-    @staticmethod
-    def _decrypt_credentials(credentials_encrypted: str) -> dict[str, Any]:
-        if not (credentials_encrypted or "").strip():
-            return {}
-        payload = decrypt_value(credentials_encrypted)
-        parsed = json.loads(payload)
-        return parsed if isinstance(parsed, dict) else {}
+        await sync_to_async(ProviderAccountService().update_credentials)(
+            connection.id,
+            credentials,
+        )
 
 
 def wrap_provider_adapter(provider: ProviderAdapter) -> Callable[[str], ResolvedModel]:
