@@ -28,7 +28,7 @@ const props = defineProps<{
   streaming?: boolean
   childSessionIds?: Record<string, string>
   models?: ProviderModel[]
-  /** One sentence: state + next step, shown quietly under the final answer. */
+  /** Brief user-goal recap, shown quietly under the final answer. */
   summary?: string
   /** Hide edit/fork actions (busy run or subagent session). */
   disabled?: boolean
@@ -450,7 +450,7 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
           class="mt-2.5 flex items-start gap-1.5 text-[13px] leading-snug text-muted-foreground"
         >
           <CornerDownRight class="mt-px size-3.5 shrink-0 opacity-60" aria-hidden="true" />
-          <span><span class="sr-only">Status and next step: </span>{{ summary }}</span>
+          <span><span class="sr-only">Conversation summary: </span>{{ summary }}</span>
         </p>
       </Transition>
       <HarnessMessageFooter

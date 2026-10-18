@@ -156,7 +156,7 @@ async def test_composer_encourages_local_testing_with_boundaries(
     assert "take initiative: start/restart development servers" in composed.system
     assert "install missing packages" in composed.system
     assert "run migrations on workspace-local test data" in composed.system
-    assert "test relevant flows in the running app end-to-end" in composed.system
+    assert "test relevant flows in the running app" in composed.system
     assert "without unnecessary confirmation" in composed.system
     assert "Investigate failures yourself" in composed.system
     assert "preserve existing user work" in composed.system

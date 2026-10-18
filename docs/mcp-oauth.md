@@ -39,7 +39,7 @@ shims. Use the credential-service OAuth flows and workspace create/update
 selection APIs instead. Older migration files remain in the repository as
 migration history; do not manually rerun or edit them.
 
-The OAuth server endpoints and dynamic client registration must use HTTPS and public DNS addresses. OpenCuria requires PKCE S256 and dynamic client registration. A provider that does not support these capabilities cannot connect. The focused browser end-to-end tests exercise the application OAuth handshake and callback against a deterministic test provider; they do not authorize against Notion or verify a live Notion account. A live external-provider test has not been performed.
+The OAuth server endpoints and dynamic client registration must use HTTPS and public DNS addresses. OpenCuria requires PKCE S256 and dynamic client registration. A provider that does not support these capabilities cannot connect. No live Notion authorization has been performed.
 
 ## Connect and use
 

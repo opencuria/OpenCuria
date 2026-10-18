@@ -13,7 +13,7 @@ Covers, against fakes (no sockets, no runner):
 - ``parse_mcp_http_url`` rejects userinfo/fragments and validates hosts;
   header validation rejects CRLF; TLS ``start_tls`` writes no plaintext
   before the workspace TLS relay is opened;
-- SSE end-to-end initialize + list_tools over separate GET stream and
+- SSE initialize + list_tools over separate GET stream and
   POST endpoint via workspace streams (no backend socket);
 - stdio split multibyte chars reassemble; oversize/invalid fail the
   server without logging payload content;
@@ -739,7 +739,7 @@ async def test_tls_upgrade_writes_no_plaintext_before_relay():
         await stream2.start_tls(None, server_hostname="evil.example")
 
 
-# -- SSE end-to-end over workspace streams ------------------------------------
+# -- SSE protocol over workspace streams --------------------------------------
 
 
 class _TcpStream:
@@ -830,7 +830,7 @@ def _http_chunked_stream(body: bytes, *, content_type: str) -> list[bytes]:
 
 
 @pytest.mark.asyncio
-async def test_sse_end_to_end_over_workspace_streams():
+async def test_sse_protocol_over_workspace_streams():
     """GET event stream + POST endpoint via workspace TCP (no backend net).
 
     The fake MCP server speaks real SSE semantics: the GET ``/sse``
@@ -1290,8 +1290,8 @@ class _NestedScopeSession:
     nested cancel scope (task group) like the SDK session does.
 
     ``_ScriptedSession`` below intentionally has no cancel scope; this
-    one reproduces the production nesting that masked the E2E success
-    path (``RuntimeError: ... cancel scope`` at timeout-scope exit).
+    one reproduces the production nesting that masked the successful startup
+    (``RuntimeError: ... cancel scope`` at timeout-scope exit).
     The parked child waits on an event (not ``sleep_forever``) so the
     teardown exit is prompt and cannot stall the suite.
     """
@@ -1364,7 +1364,7 @@ async def test_stdio_open_uses_configured_startup_budget():
 
 @pytest.mark.asyncio
 async def test_open_success_with_real_nested_session_scope():
-    """End-to-end shape of the production bug: healthy open where the
+    """Reproduce the production bug: healthy open where the
     SDK session keeps a real nested cancel scope open for the
     connection's lifetime must *not* blow up at timeout-scope exit."""
     conn = _connection(server="pw", transport="stdio")
@@ -1440,7 +1440,7 @@ class _ScriptedSession:
 @pytest.mark.asyncio
 async def test_open_success_exits_timeout_scope_despite_nested_session_scope():
     """Regression: a *healthy* server must not raise the cancel-scope
-    RuntimeError on the success path (E2E masking 17.09., 18:26 run).
+    RuntimeError on the success path.
 
     The SDK ``ClientSession`` enters a task group (own cancel scope)
     *inside* the startup timeout scope. It stays open for the

@@ -1162,12 +1162,13 @@ describe('HarnessMessageView', () => {
     const wrapper = mount(HarnessMessageView, {
       props: {
         message: makeAssistant([makePart({ id: 't1', type: 'text', output: 'Fixed it.' })]),
-        summary: 'Login fixed, review the change next.',
+        summary: 'Fix the login bug and add regression tests.',
       },
     })
 
     const summary = wrapper.get('[data-testid="message-summary"]')
-    expect(summary.text()).toContain('Login fixed, review the change next.')
+    expect(summary.text()).toContain('Fix the login bug and add regression tests.')
+    expect(summary.find('.sr-only').text()).toBe('Conversation summary:')
     const html = wrapper.html()
     expect(html.indexOf('Fixed it.')).toBeLessThan(html.indexOf('message-summary'))
     expect(html.indexOf('message-summary')).toBeLessThan(html.indexOf('message-footer'))

@@ -240,7 +240,7 @@ async def test_http_session_headers_and_cookies_round_trip():
 
 
 @pytest.mark.asyncio
-async def test_streamable_http_client_end_to_end_over_workspace():
+async def test_streamable_http_client_round_trip_over_workspace():
     """Full SDK round-trip (initialize + list_tools) over fake streams."""
     from mcp.client.session import ClientSession
     from mcp.client.streamable_http import streamable_http_client

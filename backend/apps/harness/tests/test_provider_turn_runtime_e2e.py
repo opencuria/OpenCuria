@@ -459,10 +459,11 @@ async def test_unshare_aborts_members_live_response_and_keeps_admin_account(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_title_inherits_answer_snapshot_and_remains_revocable_after_root_finishes(
-    harness_workspace, provider_member, local_openrouter, monkeypatch
+@pytest.mark.parametrize("follower", ["title", "summary"])
+async def test_follower_inherits_snapshot_and_remains_revocable_after_root_finishes(
+    harness_workspace, provider_member, local_openrouter, monkeypatch, follower
 ):
-    """A background title cannot switch accounts or escape account revocation."""
+    """Background titles/recaps retain the answer's accounts and revocation."""
     from apps.harness.models import ProviderTurn
     from apps.harness.providers.base import Delta, ProviderAdapter
     from apps.harness.services import ProviderConfigService
@@ -482,7 +483,7 @@ async def test_title_inherits_answer_snapshot_and_remains_revocable_after_root_f
     observed = {}
     service = HarnessService()
 
-    async def generate_title(**kwargs):
+    async def generate_follower(**kwargs):
         observed.update(kwargs)
         await service._register_provider_use(
             kwargs["provider_turn_id"], kwargs["account_ids"]["openrouter"]
@@ -490,14 +491,16 @@ async def test_title_inherits_answer_snapshot_and_remains_revocable_after_root_f
         entered.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(service, "_generate_title", generate_title)
-    monkeypatch.setattr(service, "_spawn_summary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service, f"_generate_{follower}", generate_follower)
 
-    # Omit summary scheduling, so the only follower is the title's held snapshot.
-    async def no_summary(*_args):
+    # Isolate the follower under test so it is the only remaining snapshot holder.
+    async def no_follower(*_args, **_kwargs):
         pass
 
-    monkeypatch.setattr(service, "_schedule_summary", no_summary)
+    if follower == "title":
+        monkeypatch.setattr(service, "_schedule_summary", no_follower)
+    else:
+        monkeypatch.setattr(service, "_generate_title", no_follower)
 
     class Provider(ProviderAdapter):
         name = "local"

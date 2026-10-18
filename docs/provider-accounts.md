@@ -56,7 +56,7 @@ secrets requires the same configured encryption key as the old installation.
 
 ## Verification
 
-`e2e/run-provider-accounts.sh` starts a disposable database and loopback-only model
-server and tests the real API/settings/chat flows with member/admin browsers.
-It never contacts a production provider or needs real credentials. See
-[focused E2E instructions](../e2e/README.focused.md).
+Backend tests cover account permissions, API/MCP integration, legacy migrations,
+and snapshot/revocation flows against a loopback-only HTTP/SSE provider. Run them
+from `backend/` with `.venv/bin/pytest -q apps/harness/tests/test_provider*.py`.
+They use disposable test databases and do not need real provider credentials.

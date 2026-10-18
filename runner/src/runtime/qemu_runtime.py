@@ -73,7 +73,7 @@ class _SSHState:
 
 # Cloud-init template for initial VM network config
 _CLOUD_INIT_META = """\
-instance-id: {instance_id}
+instance-id: {bootstrap_id}
 local-hostname: opencuria-workspace
 """
 
@@ -472,12 +472,17 @@ class QemuRuntime(RuntimeBackend):
         When ``vm_ip`` and ``gateway`` are provided a ``network-config``
         (cloud-init v2 format) is embedded in the ISO so the guest
         configures a static IP at first boot — no DHCP server required.
+
+        Each new seed has its own cloud-init identity, independent of the
+        stable workspace ID. This invalidates cached bootstrap state in
+        captured images, including same-workspace resets. Normal starts
+        reuse the existing ISO and therefore keep their cloud-init identity.
         """
         iso_path = self._cloud_init_iso_path(instance_id)
         work_dir = self._disk_dir / f"{instance_id}-cloud-init"
         work_dir.mkdir(parents=True, exist_ok=True)
 
-        meta = _CLOUD_INIT_META.format(instance_id=instance_id)
+        meta = _CLOUD_INIT_META.format(bootstrap_id=str(uuid.uuid4()))
         user = _CLOUD_INIT_USER.format(ssh_public_key=self._get_ssh_public_key())
 
         (work_dir / "meta-data").write_text(meta)

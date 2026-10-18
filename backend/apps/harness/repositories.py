@@ -16,6 +16,7 @@ from django.db.models import (
     F,
     Max,
     OuterRef,
+    Prefetch,
     Subquery,
     TextField,
     Value,
@@ -988,18 +989,31 @@ class HarnessMessageRepository:
         return HarnessMessage.objects.filter(id=message_id).first()
 
     @staticmethod
-    def user_content_before(session_id: uuid.UUID, position: int) -> str:
-        """Return the content of the closest user message before *position*."""
-        return (
-            HarnessMessage.objects.filter(
-                session_id=session_id,
-                role=HarnessMessageRole.USER,
-                position__lt=position,
+    def list_for_summary(
+        session_id: uuid.UUID, through_position: int
+    ) -> list[HarnessMessage]:
+        """Load a conversation prefix with text/steer output, not work payloads."""
+        parts = (
+            HarnessPart.objects.annotate(
+                summary_text=Case(
+                    When(type__in=TIMELINE_TEXT_PART_TYPES, then=F("output")),
+                    default=Value(""),
+                    output_field=TextField(),
+                ),
             )
-            .order_by("-position")
-            .values_list("content", flat=True)
-            .first()
-            or ""
+            .only(
+                "message_id", "type", "state", "call_id", "title", "display", "position"
+            )
+            .order_by("position", "created_at", "id")
+        )
+        return list(
+            HarnessMessage.objects.filter(
+                session_id=session_id, position__lte=through_position
+            )
+            .prefetch_related(
+                Prefetch("parts", queryset=parts, to_attr="summary_parts")
+            )
+            .order_by("position", "created_at", "id")
         )
 
     @staticmethod

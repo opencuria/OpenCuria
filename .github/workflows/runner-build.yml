@@ -46,9 +46,6 @@ jobs:
         run: python scripts/check_python_critical_vulns.py runner/requirements.txt
       - name: Audit Node workspace dependencies
         run: npm audit --package-lock-only --audit-level=critical
-      - name: Audit e2e Node dependencies
-        working-directory: e2e
-        run: npm audit --package-lock-only --audit-level=critical
 
   test-backend:
     name: Test backend

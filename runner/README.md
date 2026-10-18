@@ -13,6 +13,15 @@ for local development.
   process-group cleanup limits, epoch recovery, and coordinated rollout.
 - [Lifecycle recovery](../docs/image-lifecycle-implementation.md#recovery-hardening-operator-workflow).
 
+## QEMU image bootstrap
+
+Each newly provisioned VM gets a fresh
+[cloud-init instance ID](https://docs.cloud-init.io/en/26.1/reference/datasources/nocloud.html#example-creating-a-disk)
+in its seed ISO, independent of the stable workspace ID. This makes reset, update, and cloning
+apply the new network and SSH configuration even when the image contains cached
+cloud-init state from the same workspace. Start, stop, and restart reuse that ISO;
+they do not generate another bootstrap identity.
+
 ## QEMU SSH resilience
 
 Open process/terminal channels share a cached SSH transport. Acquiring it never

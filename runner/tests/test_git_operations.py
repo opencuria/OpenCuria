@@ -11,7 +11,7 @@ non-interactive env, operation serialisation, and the websocket
 
 No real networks are used: a ``FakeGitRuntime`` emulates ``git`` argv
 inside a workspace, backed by real temporary git repositories on the test
-host where end-to-end behaviour matters (status/list/snapshot/history/diff/mutations).
+host for status/list/snapshot/history/diff/mutation behaviour.
 The service talks to the runtime only via ``exec_command_wait`` argv, so
 the fake translates argv into local ``git -C <repo>`` subprocess calls.
 External-path tests use a sibling temp dir (``tmp/ext-*``) that the fake
@@ -53,7 +53,7 @@ from src.service import WorkspaceService
 # worktree/submodule setup with ``fatal: .git/index: index file open
 # failed: Not a directory``, and ``GIT_AUTHOR_*``/``GIT_COMMITTER_*`` (or a
 # global ``user.name``) overrides the commit-identity expectations.  The
-# full suite (or a ``bash -lc`` pre-commit hook) can export such variables,
+# surrounding test process or login shell can export such variables,
 # while the single file run stays green — classic test pollution.
 # Scrub them here for the whole module and restore afterwards.
 

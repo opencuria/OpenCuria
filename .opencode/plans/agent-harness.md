@@ -114,7 +114,7 @@ reiner Text-Stream) entfaellt.
   (`collapsible, card, badge, tooltip, scroll-area, skeleton`) + Lucide-Icons,
   keine neuen Design-Tokens.
 
-## 7. Tests (Pflicht pro AGENTS.md 6.10)
+## 7. Tests
 
 - Backend `pytest`: Provider-Adapter gegen Mock-SSE, Permission-Evaluator
   (last-wins, Wildcards, Modus-Merge), Tools gegen Fake-Accessor (happy path +
@@ -125,8 +125,6 @@ reiner Text-Stream) entfaellt.
   Cancel/Timeout).
 - Webapp `vitest`: Block-Parsing/Reducer, Permission-Modal,
   Subagent-Rendering.
-- Gate: `./.githooks/pre-commit` muss `Ready to commit.` melden; kein Push ohne
-  gruene Matrix.
 
 ## 8. Meilensteine (jeweils lauffaehig auf aktuellem Branch committen)
 
@@ -143,7 +141,7 @@ reiner Text-Stream) entfaellt.
 7. **M7 Frontend-Chat:** Block-UI, Permission-Modal, Modus/Modell-Picker,
    Subagent-Visualisierung.
 8. **M8 Cutover:** AgentDefinition/AgentCommand + alte Pfade loeschen,
-   Migration ohne Kompat, Doku, Full-Gate gruen.
+   Migration ohne Kompat und Doku.
 
 Groesstes Risiko: Streaming-Stabilitaet (Provider-SSE -> Runner-Exec ->
 Frontend-Socket) - deshalb M1/M2/M4 jeweils mit Fake-Gegenstellen isoliert

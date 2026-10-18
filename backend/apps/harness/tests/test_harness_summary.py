@@ -1,12 +1,14 @@
-"""Tests for the one-sentence session status ("state + next step")."""
+"""Tests for brief session recaps focused on the user's requests."""
 
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 import pytest
 
 import apps.harness.api as harness_api
+from apps.harness.agents.definitions import get_agent
 from apps.harness.harness_service import (
     HarnessService,
     _normalize_generated_summary,
@@ -17,13 +19,14 @@ from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import Delta, ProviderAdapter, Usage
 from apps.harness.repositories import (
     HarnessMessageRepository,
+    HarnessPartRepository,
     HarnessSessionRepository,
     TodoRepositoryDjango,
 )
 from apps.harness.services import ProviderConfigService
 from apps.harness.tools.todos import TodoItem
 
-SENTENCE = "Login-Fehler behoben, als Nächstes die Änderung prüfen."
+SENTENCE = "Login-Fehler und zugehörige Tests korrigieren."
 
 
 class RoleProvider(ProviderAdapter):
@@ -37,7 +40,7 @@ class RoleProvider(ProviderAdapter):
     async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
         """Pick the answer by the agent's system prompt."""
         system = str(messages[0].content or "")
-        if "status line" in system:
+        if "Summarize what the user wanted" in system:
             self.summary_inputs.append(str(messages[-1].content or ""))
             yield Delta(text=SENTENCE, usage=Usage(1, 1, 2))
         elif "short title" in system:
@@ -151,33 +154,184 @@ def test_clear_summary(harness_workspace):
     assert HarnessSession.objects.get(id=session.id).summary == ""
 
 
+def test_summary_agent_focuses_on_user_intent_without_tools() -> None:
+    """The hidden agent describes the request, not execution status or next steps."""
+    agent = get_agent("summary")
+    assert "at most 10 words" in agent.system_prompt
+    assert "user's requests and latest clarifications" in agent.system_prompt
+    assert "not progress, results, or next steps" in agent.system_prompt
+    assert "user's language" in agent.system_prompt
+    assert agent.permissions == {"*": "deny", "question": "deny"}
+    assert agent.model_override == "small"
+
+
 @pytest.mark.django_db
-def test_summary_material_carries_request_answer_todos_and_failure(harness_workspace):
-    """The summary agent sees the goal, the end of the answer and what is open."""
-    session, assistant = _session_with_answer(
-        harness_workspace, content="Done with step one.", finish="error", error="boom"
+def test_summary_material_carries_all_requests_and_closing_replies(
+    harness_workspace, django_assert_num_queries
+):
+    """The whole conversation stays ordered, without Worked or status material."""
+    session, first = _session_with_answer(
+        harness_workspace, content="aggregate content must not leak"
     )
+    HarnessPartRepository.create(
+        message_id=first.id, type="text", output="I will inspect the login."
+    )
+    HarnessPartRepository.create(
+        message_id=first.id, type="tool", output="private tool output"
+    )
+    HarnessPartRepository.create(
+        message_id=first.id, type="text", output="Fixed the login bug."
+    )
+    HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="Also cover logout with tests."
+    )
+    second = HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content="more aggregate content"
+    )
+    for part_type, text in [
+        ("text", "Working on tests"),
+        ("reasoning", "private reasoning"),
+        ("steer", "Only regression tests, please."),
+        ("text", "Tests cover both cases."),
+        ("step-finish", ""),
+    ]:
+        HarnessPartRepository.create(
+            message_id=second.id, type=part_type, output=text, state="completed"
+        )
+    HarnessMessageRepository.complete(second, finish="error", error="private error")
     TodoRepositoryDjango().save(
-        str(session.id),
-        [
-            TodoItem(content="write tests", status="pending"),
-            TodoItem(content="fix bug", status="completed"),
-        ],
+        str(session.id), [TodoItem(content="unrelated next step", status="pending")]
     )
+    # A slow recap may not include a newer turn or another session.
+    HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="Future request"
+    )
+    _session_with_answer(harness_workspace, content="Other session answer")
 
-    material = _service(RoleProvider())._summary_material(session.id, assistant.id)
+    with django_assert_num_queries(3):
+        material = _service(RoleProvider())._summary_material(session.id, second.id)
 
-    assert "Fix the login" in material
-    assert "Done with step one." in material
-    assert "- write tests" in material
-    assert "fix bug" not in material
-    assert "The run failed: boom" in material
+    assert material == (
+        "User:\nFix the login\n\n"
+        "Agent's final reply:\nFixed the login bug.\n\n"
+        "User:\nAlso cover logout with tests.\n\n"
+        "User:\nOnly regression tests, please.\n\n"
+        "Agent's final reply:\nTests cover both cases."
+    )
 
 
 @pytest.mark.django_db
-def test_summary_material_is_empty_without_answer_or_error(harness_workspace):
-    """Nothing to say means no model call."""
-    session, assistant = _session_with_answer(harness_workspace, content="")
+@pytest.mark.parametrize(
+    ("parts", "expected"),
+    [
+        ([], "legacy answer"),
+        ([("text", "Final "), ("text", "answer")], "Final answer"),
+        ([("text", "Working"), ("tool", "private result")], ""),
+        ([("text", "Working"), ("tool", "private"), ("text", "")], ""),
+        ([("reasoning", "private thoughts")], ""),
+        ([("compaction", "private checkpoint")], ""),
+        ([("tool", "private"), ("compaction", "private"), ("text", "Final")], "Final"),
+        ([("text", "Old prose"), ("compaction", "private")], ""),
+        ([("text", "Old prose"), ("steer", "Use pnpm")], ""),
+        (
+            [
+                ("text", "Earlier response"),
+                ("agent", "private plan"),
+                ("tool", "private result"),
+                ("text", "Intermediate note"),
+                ("agent", "private plan"),
+                ("reasoning", "private thoughts"),
+                ("text", "Final "),
+                ("text", "answer"),
+                ("step-finish", ""),
+            ],
+            "Final answer",
+        ),
+    ],
+)
+def test_summary_material_only_uses_final_prose(harness_workspace, parts, expected):
+    """Mirror the final-answer selection used by the chat's copy action."""
+    session, assistant = _session_with_answer(
+        harness_workspace, content="legacy answer"
+    )
+    for part_type, output in parts:
+        HarnessPartRepository.create(
+            message_id=assistant.id, type=part_type, output=output, state="completed"
+        )
+    material = _service(RoleProvider())._summary_material(session.id, assistant.id)
+    user = "User:\nFix the login"
+    if any(part_type == "steer" for part_type, _ in parts):
+        user += "\n\nUser:\nUse pnpm"
+    assert material == user + (
+        f"\n\nAgent's final reply:\n{expected}" if expected else ""
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("hidden_tool", ["question", "task", "write"])
+def test_summary_ignores_tools_hidden_by_the_timeline(harness_workspace, hidden_tool):
+    """Invisible tool parts after the answer must not erase the closing prose."""
+    session, assistant = _session_with_answer(harness_workspace)
+    part_type = {"question": "tool", "task": "subtask", "write": "patch"}[hidden_tool]
+    HarnessPartRepository.create(
+        message_id=assistant.id, type=part_type, call_id="call", state="completed"
+    )
+    HarnessPartRepository.create(message_id=assistant.id, type="text", output="Final")
+    HarnessPartRepository.create(
+        message_id=assistant.id,
+        type="tool",
+        call_id="call",
+        state="pending" if hidden_tool == "question" else "completed",
+        input={"tool": hidden_tool},
+    )
+    assert _service(RoleProvider())._summary_material(session.id, assistant.id) == (
+        "User:\nFix the login\n\nAgent's final reply:\nFinal"
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("finish", ["stop", "aborted", "error"])
+def test_summary_can_describe_request_without_answer(harness_workspace, finish):
+    """The user's goal remains known even when the agent has not replied."""
+    session, assistant = _session_with_answer(
+        harness_workspace, content="", finish=finish, error="private error"
+    )
+    assert _service(RoleProvider())._summary_material(session.id, assistant.id) == (
+        "User:\nFix the login"
+    )
+
+
+@pytest.mark.django_db
+def test_summary_material_does_not_clip_user_requests(harness_workspace):
+    """Keep clarifications at the end of long prompts, not only their prefix."""
+    session, _ = _session_with_answer(harness_workspace)
+    prompt = "Details " * 500 + "Keep the existing login API unchanged."
+    HarnessMessageRepository.create(session_id=session.id, role="user", content=prompt)
+    last = HarnessMessageRepository.create(session_id=session.id, role="assistant")
+    material = _service(RoleProvider())._summary_material(session.id, last.id)
+    assert prompt in material
+    assert "Fixed the login bug in auth.py." in material
+
+
+@pytest.mark.django_db
+def test_summary_material_rejects_foreign_missing_or_user_message(harness_workspace):
+    """Only an assistant in the requested session can anchor the recap."""
+    session, assistant = _session_with_answer(harness_workspace)
+    other, _ = _session_with_answer(harness_workspace)
+    service = _service(RoleProvider())
+    assert service._summary_material(other.id, assistant.id) == ""
+    assert service._summary_material(session.id, uuid.uuid4()) == ""
+    user = HarnessMessageRepository.list_for_session(session.id)[0]
+    assert service._summary_material(session.id, user.id) == ""
+
+
+@pytest.mark.django_db
+def test_summary_material_is_empty_without_requests(harness_workspace):
+    """Do not invent a user goal for an empty transcript."""
+    session, assistant = _session_with_answer(harness_workspace)
+    user = HarnessMessageRepository.list_for_session(session.id)[0]
+    user.content = ""
+    user.save(update_fields=["content"])
     assert _service(RoleProvider())._summary_material(session.id, assistant.id) == ""
 
 

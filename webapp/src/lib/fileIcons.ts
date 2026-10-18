@@ -214,7 +214,6 @@ const FOLDER_NAME_ICONS: Record<string, string> = {
   specs: 'folder-test',
   cypress: 'folder-cypress',
   coverage: 'folder-coverage',
-  e2e: 'folder-coverage',
   '.nyc_output': 'folder-coverage',
   node_modules: 'folder-node',
   '.git': 'folder-git',

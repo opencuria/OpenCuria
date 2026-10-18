@@ -234,7 +234,7 @@ async def compose_system_prompt(
                 "In this disposable environment, take initiative: start/restart "
                 "development servers, install missing packages, run migrations "
                 "on workspace-local test data, and test relevant flows in the "
-                "running app end-to-end. "
+                "running app. "
                 "Do routine local setup and testing yourself, without "
                 "unnecessary confirmation. Investigate failures yourself; "
                 "preserve existing user work."
