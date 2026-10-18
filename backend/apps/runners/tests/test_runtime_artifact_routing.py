@@ -1,4 +1,4 @@
-"""End-to-end in-process routing for trusted runtime artifact RPCs."""
+"""In-process routing for trusted runtime artifact RPCs."""
 
 from __future__ import annotations
 

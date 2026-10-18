@@ -27,7 +27,7 @@ PLAYWRIGHT_SKILL_BODY = """\
 # Playwright Browser Automation
 
 Use the Playwright MCP server to drive a headless Chromium browser for
-end-to-end testing and web inspection.
+browser automation and web inspection.
 
 - Prefer isolated browser contexts for reproducible runs.
 - Take screenshots or snapshots to verify page state before acting.

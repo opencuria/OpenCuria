@@ -1,6 +1,6 @@
 """Tests for the MCP stdio adapter over fake WorkspaceByteStreams.
 
-End-to-end initialize/list_tools/call_tool against a minimal fake
+Protocol initialize/list_tools/call_tool against a minimal fake
 JSON-RPC MCP server, plus fragmented lines, invalid/oversize JSON,
 and cancellation/close semantics.
 """
@@ -117,7 +117,7 @@ async def _fake_mcp_server(stream: FakeByteStream, tools: list[dict] | None = No
 
 
 @pytest.mark.asyncio
-async def test_stdio_end_to_end_initialize_list_call():
+async def test_stdio_protocol_initialize_list_call():
     stream = FakeByteStream()
     accessor = FakeAccessor(stream)
     async with anyio.create_task_group() as task_group:

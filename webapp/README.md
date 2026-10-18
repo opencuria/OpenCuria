@@ -48,7 +48,7 @@ npm run lint
 ```
 
 
-## Clipboard behavior and checks
+## Clipboard behavior
 
 Use `CopyButton` for button actions and `copyToClipboard` for menu actions.
 Call the helper directly in the click/key handler, before unrelated awaits.
@@ -66,23 +66,6 @@ after the browser has received their payload; aborts suppress stale feedback.
 Message copy preserves original Markdown. Assistant copy is offered after a
 turn completes and contains only the trailing answer text after work/agent
 blocks, matching the timeline layout. Code-block copy contains only code.
-
-Run the isolated browser regressions (no backend/authentication needed):
-
-```sh
-cd ../e2e
-npm ci
-npx playwright install --with-deps chromium webkit
-npx playwright test --config=playwright.clipboard.config.ts
-```
-
-The tests serve real Vue components on non-local HTTP and HTTPS origins and
-verify native copy/paste in Chromium and WebKit, including menu/dialog focus
-traps, deferred loading, failures, Markdown, and touch/keyboard controls.
-`CLIPBOARD_VITE_URL` selects the Vite server; `CLIPBOARD_CHROMIUM_PATH` optionally
-selects a system Chromium executable. WebKit coverage does not replace a final
-Safari/macOS smoke test.
-
 
 ### Desktop clipboard
 
@@ -119,13 +102,3 @@ workspace ownership (or organization admin). Selection copy also respects
 capture/computer-use fencing. The matching MCP tool is `read_desktop_clipboard`.
 Text is the supported shared clipboard format; image/file pastes are not sent
 as stale text. Desktop shortcuts never open the Copy dialog.
-
-```sh
-cd ../e2e
-npx playwright test --config=playwright.desktop-clipboard.config.ts
-```
-
-This isolated suite uses native host copy/paste in Chromium and WebKit on HTTP
-and HTTPS, with delayed/failed writes, repeated large Unicode text, guest key
-normalization, read-only computer-use, and stale iframe remounts. Real macOS
-Safari still requires a platform smoke test; Linux WebKit is not Safari on Mac.

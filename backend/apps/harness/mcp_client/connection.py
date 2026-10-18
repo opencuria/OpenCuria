@@ -497,7 +497,7 @@ class McpServerConnection:
         closed (LIFO, at ``aclose``) the timeout scope is therefore not
         the task's current scope, and exiting its ``with`` block in the
         success path would raise ``RuntimeError: ... cancel scope`` —
-        exactly the E2E masking seen in production. The stack closes in
+        exactly the error masking seen in production. The stack closes in
         reverse entry order, so closing restores a strictly nested
         unwind (session task group, then transport, then timeout).
         """
