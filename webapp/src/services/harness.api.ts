@@ -20,6 +20,7 @@ import type {
   HarnessSessionCreateIn,
   HarnessSessionMode,
   HarnessSessionPatchIn,
+  HarnessSteer,
   HarnessId,
   HarnessTodo,
 } from '@/types/harness'
@@ -174,6 +175,8 @@ export interface HarnessPartsResponse {
   messages: HarnessMessage[]
   permissions?: HarnessPermissionRequest[]
   questions?: HarnessQuestionRequest[]
+  /** Queued (not yet delivered) steers, FIFO. Absent on older backends. */
+  steers?: HarnessSteer[]
 }
 
 export interface HarnessPermissionOut {
@@ -299,6 +302,24 @@ export function setSessionMode(
 
 export function abortHarnessSession(sessionId: string): Promise<HarnessSession> {
   return post<HarnessSession>(`/harness/sessions/${sessionId}/abort`)
+}
+
+/**
+ * Queue a message for the running turn of a session ("steering").
+ * Mirrors `POST /harness/sessions/{id}/steer` (202 queued entry); a run that
+ * already ended answers 409 `no_active_run`.
+ */
+export function steerHarnessSession(sessionId: string, prompt: string): Promise<HarnessSteer> {
+  return post<HarnessSteer>(`/harness/sessions/${sessionId}/steer`, { prompt })
+}
+
+/**
+ * Withdraw a queued steer before it is delivered; returns the withdrawn entry.
+ * Mirrors `DELETE /harness/sessions/{id}/steer/{steerId}` (404 `steer_not_found`
+ * when it was already delivered).
+ */
+export function withdrawHarnessSteer(sessionId: string, steerId: string): Promise<HarnessSteer> {
+  return del<HarnessSteer>(`/harness/sessions/${sessionId}/steer/${steerId}`)
 }
 
 /** Load the all-messages, lightweight timeline envelope. */

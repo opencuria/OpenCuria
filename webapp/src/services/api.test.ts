@@ -160,10 +160,13 @@ it('clears question drafts on confirmed authentication expiry', async () => {
   vi.stubGlobal('window', { location, sessionStorage: storage })
   sessionStorage.setItem('question-input:test', 'private draft')
   sessionStorage.setItem('chat-input-test', 'unrelated draft')
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ status: 401 }))
+  localStorage.setItem('kern_refresh_token', 'expired-refresh-token')
+  const fetchMock = vi.fn().mockResolvedValue({ status: 401 })
+  vi.stubGlobal('fetch', fetchMock)
 
   await expect(get('/ordinary/')).rejects.toMatchObject({ status: 401 })
 
+  expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/v1/auth/refresh/', expect.any(Object))
   expect(sessionStorage.getItem('question-input:test')).toBeNull()
   expect(sessionStorage.getItem('chat-input-test')).toBe('unrelated draft')
   expect(location.href).toBe('/login')

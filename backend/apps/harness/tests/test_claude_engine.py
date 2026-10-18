@@ -679,6 +679,8 @@ async def _run_local_cli_fixture(
     history: list[LLMMessage] | None = None,
     fixture_files: dict[str, bytes] | None = None,
     permission_response: str = "once",
+    steering: Any | None = None,
+    question_hook: Any | None = None,
 ) -> tuple[
     Any,
     list[dict[str, Any]],
@@ -750,6 +752,8 @@ async def _run_local_cli_fixture(
 
     async def on_question(**kwargs: Any) -> list[str]:
         questions.append(str(kwargs.get("call_id") or ""))
+        if question_hook is not None:
+            await question_hook()
         return ["fixture answer"]
 
     async def on_permission(**kwargs: Any) -> str:
@@ -782,6 +786,7 @@ async def _run_local_cli_fixture(
         history=history or [],
         on_question=on_question,
         on_permission=on_permission,
+        steering=steering,
     )
     try:
         result = await asyncio.wait_for(
@@ -1032,3 +1037,65 @@ async def test_real_sdk_cli_mcp_ask_is_approved_once_before_dispatch(
     assert [event["type"] for event in events].count("tool_completed") == 1
     assert len(permissions) == 1 and permissions[0]["call_id"] == queued["call_id"]
     assert permissions[0]["action"] == ""
+
+
+@pytest.mark.asyncio
+async def test_real_sdk_cli_folds_steer_into_the_running_turn(tmp_path: Path) -> None:
+    """A message queued while a tool runs reaches the model with the tool result."""
+    if claude_agent_sdk.__version__ != "0.2.164" or not BUNDLED_CLAUDE.is_file():
+        pytest.skip("Pinned SDK CLI is unavailable")
+    from apps.harness.steering import SteeringChannel
+
+    delivered: list[str] = []
+
+    async def deliver(entries: list[Any]) -> None:
+        delivered.extend(entry.content for entry in entries)
+
+    channel = SteeringChannel(deliver=deliver)
+
+    async def steer_while_tool_waits() -> None:
+        channel.submit("Please call the file steered.txt instead")
+        # Give the input feed time to hand the message to the CLI.
+        await asyncio.sleep(1)
+
+    (
+        result,
+        _events,
+        questions,
+        requests,
+        _perm,
+        _store,
+        _acc,
+    ) = await _run_local_cli_fixture(
+        tmp_path,
+        tool_name="mcp__opencuria__question",
+        tool_arguments={
+            "questions": [
+                {
+                    "question": "Continue?",
+                    "header": "Fixture",
+                    "options": [{"label": "Yes", "description": "Continue"}],
+                    "multiple": False,
+                }
+            ]
+        },
+        tools=default_tool_registry(),
+        steering=channel,
+        question_hook=steer_while_tool_waits,
+    )
+    assert len(questions) == 1
+    assert delivered == ["Please call the file steered.txt instead"]
+    assert result.output == "fixture answer"
+    # Title generation also sees the text; only the agent conversation counts.
+    conversation = [request for request in requests if request.get("tools")]
+    # One request per model turn: the steer joined the tool-result turn instead
+    # of starting a separate turn after the answer.
+    assert len(conversation) == 2
+    folded = [
+        message
+        for message in conversation[-1]["messages"]
+        if message["role"] == "user" and "tool_result" in json.dumps(message["content"])
+    ]
+    assert len(folded) == 1
+    assert "steered.txt" in json.dumps(folded[0]["content"])
+    assert channel.pending() == []

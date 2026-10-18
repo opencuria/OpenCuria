@@ -29,6 +29,8 @@ from apps.mcp_app.server import (
     _call_create_harness_session,
     _call_list_harness_parts,
     _call_send_harness_message,
+    _call_steer_harness_session,
+    _call_withdraw_harness_steer,
 )
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
@@ -365,3 +367,77 @@ async def test_mcp_list_harness_parts_includes_descendant_gates(
     assert body["permissions"][0]["agent_name"] == "explore"
     assert [item["request_id"] for item in body["questions"]] == [str(question.id)]
     assert body["questions"][0]["agent_name"] == "explore"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_mcp_steer_and_withdraw_without_sync_orm(monkeypatch) -> None:
+    """Steer/withdraw handlers queue into the live run and stay ORM-safe."""
+    import asyncio
+
+    from apps.harness.steering import SteeringChannel
+
+    org, user, workspace = await sync_to_async(_setup_owned_workspace)()
+    service = _service()
+    session = await sync_to_async(service.create_session)(
+        workspace_id=workspace.id,
+        organization_id=org.id,
+        prompt="seed",
+        agent_name="build",
+        mode="build",
+        model="fake-model",
+        user_id=user.id,
+    )
+    monkeypatch.setattr(
+        "apps.mcp_app.server._get_harness_service", lambda: service
+    )
+    api_key = SimpleNamespace(user=user)
+    args = {"session_id": str(session.id), "prompt": "also add tests"}
+
+    idle = await _call_steer_harness_session(api_key, org.id, args)
+    assert idle[0].text.startswith("Error:") and "no active run" in idle[0].text
+
+    async def _deliver(_entries: list[Any]) -> None:
+        return None
+
+    key = str(session.id)
+    service._tasks[key] = asyncio.ensure_future(asyncio.Event().wait())
+    service._runs[key] = {"steering": SteeringChannel(deliver=_deliver)}
+    monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+    try:
+        queued = _parse(await _call_steer_harness_session(api_key, org.id, args))
+        listed = _parse(
+            await sync_to_async(_call_list_harness_parts)(
+                api_key, org.id, {"session_id": key}
+            )
+        )
+        withdrawn = _parse(
+            await _call_withdraw_harness_steer(
+                api_key,
+                org.id,
+                {"session_id": key, "steer_id": queued["id"]},
+            )
+        )
+    except SynchronousOnlyOperation:
+        pytest.fail("MCP steer handlers called ORM from an async context")
+    finally:
+        os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+        service._tasks.pop(key).cancel()
+    assert queued["content"] == "also add tests"
+    assert [item["id"] for item in listed["steers"]] == [queued["id"]]
+    assert withdrawn["id"] == queued["id"]
+    assert service.list_pending_steers(session.id) == []
+    gone = await _call_withdraw_harness_steer(
+        api_key, org.id, {"session_id": key, "steer_id": queued["id"]}
+    )
+    assert gone[0].text.startswith("Error:")
+
+
+def test_mcp_steer_tools_are_registered_with_run_permission() -> None:
+    from apps.accounts.models import APIKeyPermission
+    from apps.mcp_app.server import _TOOL_HANDLERS, _TOOL_PERMISSIONS, _TOOLS
+
+    names = {tool.name for tool in _TOOLS}
+    for name in ("steer_harness_session", "withdraw_harness_steer"):
+        assert name in names
+        assert _TOOL_PERMISSIONS[name] == APIKeyPermission.HARNESS_RUN
+        assert name in _TOOL_HANDLERS

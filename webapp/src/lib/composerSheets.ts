@@ -1,13 +1,19 @@
-import type { HarnessPermissionRequest, HarnessQuestionRequest, HarnessTodo } from '@/types/harness'
+import type {
+  HarnessPermissionRequest,
+  HarnessQuestionRequest,
+  HarnessSteer,
+  HarnessTodo,
+} from '@/types/harness'
 import type { MentionCandidate } from '@/lib/harnessMentions'
 
 /**
  * One entry of the composer sheet stack.
  *
  * Sheets are ordered by interaction priority (highest first): `mention` >
- * `processes` > `question` > `permission` > `notice` > `context` > `todos`.
- * User-opened inputs (mention suggestions, processes panel) stay on top;
- * agent gates (questions, permissions) follow; passive notices come last.
+ * `processes` > `question` > `permission` > `queue` > `notice` > `context` >
+ * `todos`. User-opened inputs (mention suggestions, processes panel) stay on
+ * top; agent gates (questions, permissions) follow; the ambient queue of
+ * messages steering the running turn comes next; passive notices come last.
  * Only the topmost sheet is interactive; lower sheets render as
  * non-interactive peek edges, iOS sheet-stack style.
  */
@@ -15,6 +21,7 @@ export type ComposerSheetKind =
   | 'mention'
   | 'question'
   | 'permission'
+  | 'queue'
   | 'notice'
   | 'processes'
   | 'context'
@@ -48,6 +55,8 @@ export interface ComposerSheet {
   permission?: HarnessPermissionRequest
   /** All pending permission requests (for the `i of N` pager). */
   permissions?: HarnessPermissionRequest[]
+  /** Messages queued for the running turn (FIFO). */
+  queue?: HarnessSteer[]
   notice?: NoticeSheetState
   todos?: HarnessTodo[]
   context?: ContextSheetState
@@ -57,6 +66,7 @@ export interface ComposerSheetInput {
   mention?: MentionSheetState | null
   questions?: HarnessQuestionRequest[]
   permissions?: HarnessPermissionRequest[]
+  queue?: HarnessSteer[]
   notice?: NoticeSheetState | null
   todos?: HarnessTodo[]
   processesOpen?: boolean
@@ -70,9 +80,10 @@ const SHEET_ORDER: Record<ComposerSheetKind, number> = {
   processes: 1,
   question: 2,
   permission: 3,
-  notice: 4,
-  context: 5,
-  todos: 6,
+  queue: 4,
+  notice: 5,
+  context: 6,
+  todos: 7,
 }
 
 /**
@@ -91,6 +102,9 @@ export function buildComposerSheets(input: ComposerSheetInput): ComposerSheet[] 
   const permissions = input.permissions ?? []
   if (permissions.length > 0 && permissions[0]) {
     sheets.push({ kind: 'permission', permission: permissions[0], permissions })
+  }
+  if ((input.queue ?? []).length > 0) {
+    sheets.push({ kind: 'queue', queue: input.queue })
   }
   if (input.notice) {
     sheets.push({ kind: 'notice', notice: input.notice })

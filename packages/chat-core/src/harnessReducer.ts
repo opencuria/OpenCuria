@@ -202,6 +202,23 @@ function findToolPart(
   return message.parts.find((p) => p.type === "tool" && p.call_id === callId);
 }
 
+/** Queue entry id of a delivered `steer` part (`meta` live, `display` in timelines). */
+export function steerPartId(part: HarnessPart): string {
+  if (part.type !== "steer") return "";
+  const raw = part.meta?.["steer_id"] ?? part.display?.["steer_id"];
+  return typeof raw === "string" ? raw : "";
+}
+
+/** True when any message of the session already holds the delivered steer. */
+export function hasDeliveredSteer(
+  messages: HarnessMessage[],
+  steerId: string,
+): boolean {
+  return messages.some((message) =>
+    message.parts.some((part) => steerPartId(part) === steerId),
+  );
+}
+
 function ensureTextPart(
   message: HarnessMessage,
   sessionId: string,
@@ -729,6 +746,39 @@ export function applyPartDelta(
     }
   }
 
+  if (delta.steer !== undefined) {
+    // A user message injected into the running turn. The stream continues in
+    // a NEW text part afterwards, so open text/reasoning streams close first.
+    // Idempotent: a replayed event or a REST snapshot may already hold it.
+    closeRunningStreams(message);
+    const steerId = delta.steer_id ?? "";
+    const existing =
+      (opts.partId ? findPart(message, { partId: opts.partId }) : undefined) ??
+      (steerId
+        ? message.parts.find(
+            (part) => part.type === "steer" && steerPartId(part) === steerId,
+          )
+        : undefined);
+    if (existing) {
+      if (opts.partId && isLocalId(existing.id)) existing.id = opts.partId;
+      existing.type = "steer";
+      existing.state = "completed";
+      if (!existing.output) existing.output = delta.steer;
+      if (steerId) existing.meta = { ...existing.meta, steer_id: steerId };
+    } else {
+      message.parts.push({
+        id: opts.partId ?? nextLocalPartId(sessionId),
+        message_id: message.id,
+        session_id: sessionId,
+        type: "steer",
+        state: "completed",
+        title: "",
+        output: delta.steer,
+        meta: steerId ? { steer_id: steerId } : {},
+      });
+    }
+  }
+
   // The server assigns a position when the part is created. REST fetches
   // may race later socket events; applying that position to the live row
   // keeps newly merged snapshots in the same chronological order.
@@ -1089,6 +1139,11 @@ function findPlaceholderForServerPart(
       const serverSub = serverPart.meta?.["subtask_id"];
       if (typeof liveSub === "string" && liveSub && liveSub === serverSub)
         return live;
+      continue;
+    }
+    if (live.type === "steer") {
+      const liveSteer = steerPartId(live);
+      if (liveSteer && liveSteer === steerPartId(serverPart)) return live;
       continue;
     }
     if (live.type === "text") {

@@ -629,3 +629,81 @@ describe('work item helpers', () => {
     expect(countWorkItems(parts)).toBe(1)
   })
 })
+
+describe('steer blocks', () => {
+  it('renders delivered steers as their own blocks that break tool runs', () => {
+    const blocks = buildRenderBlocks([
+      makePart('tool', { id: 'tool-1', tool: 'read' }),
+      makePart('tool', { id: 'tool-2', tool: 'grep' }),
+      makePart('steer', { id: 'steer-1', output: 'Use pnpm', meta: { steer_id: 's1' } }),
+      makePart('tool', { id: 'tool-3', tool: 'bash' }),
+      makePart('tool', { id: 'tool-4', tool: 'edit' }),
+    ])
+
+    expect(blocks.map((block) => block.kind)).toEqual(['group', 'steer', 'group'])
+    expect(blocks[1]).toMatchObject({ kind: 'steer', part: { id: 'steer-1' } })
+  })
+
+  it('ignores steers without text', () => {
+    const blocks = buildRenderBlocks([
+      makePart('text', { id: 't1', output: 'Hi' }),
+      makePart('steer'),
+    ])
+    expect(blocks.map((block) => block.kind)).toEqual(['text'])
+  })
+
+  it('keeps the steer visible outside Worked for and splits the timeline chronologically', () => {
+    const wrapped = wrapFinishedWork(
+      buildRenderBlocks([
+        makePart('text', { id: 't1', output: 'Looking' }),
+        makePart('tool', { id: 'tool-1', tool: 'read' }),
+        makePart('steer', { id: 'steer-1', output: 'Use pnpm' }),
+        makePart('text', { id: 't2', output: 'Switching' }),
+        makePart('tool', { id: 'tool-2', tool: 'bash' }),
+        makePart('text', { id: 't3', output: 'Done' }),
+      ]),
+    )
+
+    expect(wrapped.map((block) => block.kind)).toEqual(['workedFor', 'steer', 'workedFor', 'text'])
+    const [first, , second] = wrapped
+    if (first?.kind !== 'workedFor' || second?.kind !== 'workedFor') {
+      throw new Error('expected workedFor shells')
+    }
+    expect(first.blocks.map((block) => block.kind)).toEqual(['text', 'single'])
+    expect(second.blocks.map((block) => block.kind)).toEqual(['text', 'single'])
+    // The user's steer is never nested inside any collapsed card.
+    for (const shell of [first, second]) {
+      expect(shell.blocks.some((block) => block.kind === 'steer')).toBe(false)
+    }
+  })
+
+  it('leaves a steer with no surrounding work flat', () => {
+    const wrapped = wrapFinishedWork(
+      buildRenderBlocks([
+        makePart('text', { id: 't1', output: 'Hello' }),
+        makePart('steer', { id: 'steer-1', output: 'Actually, stop' }),
+        makePart('text', { id: 't2', output: 'Okay' }),
+      ]),
+    )
+    expect(wrapped.map((block) => block.kind)).toEqual(['text', 'steer', 'text'])
+  })
+
+  it('keeps leading and trailing steers outside next to agent plans', () => {
+    const wrapped = wrapFinishedWork(
+      buildRenderBlocks([
+        makePart('steer', { id: 'steer-0', output: 'first' }),
+        makePart('tool', { id: 'tool-1', tool: 'read' }),
+        makePart('agent', { id: 'agent-1', output: 'plan' }),
+        makePart('tool', { id: 'tool-2', tool: 'grep' }),
+        makePart('steer', { id: 'steer-1', output: 'last' }),
+      ]),
+    )
+    expect(wrapped.map((block) => block.kind)).toEqual([
+      'steer',
+      'workedFor',
+      'agent',
+      'workedFor',
+      'steer',
+    ])
+  })
+})

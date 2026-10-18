@@ -561,6 +561,11 @@ class FakeClaudeEngine:
                         "summary": "found it",
                     }
                 )
+            if self.behavior == "steer":
+                # The real engine streams queued messages to the CLI; the fake
+                # just takes the next one like the engine's input feed does.
+                assert opts.steering is not None
+                assert await opts.steering.next() is not None
             if self.behavior == "error":
                 raise RuntimeError("ANTHROPIC_API_KEY=do-not-persist-this-token")
             if self.behavior == "transcript_missing":
@@ -1133,3 +1138,42 @@ async def test_claude_cancellation_sets_interrupted_attempt(harness_workspace):
     assert attempt.status == "interrupted"
     session.refresh_from_db()
     assert session.status == "idle"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_claude_run_hands_the_steering_channel_to_the_engine(
+    harness_workspace,
+):
+    """A message sent mid-run reaches the engine and lands between the texts."""
+    service, _registry, _connections, events = _service(
+        connection_id=uuid.uuid4(), behavior="steer"
+    )
+    session = await _new_session(service, harness_workspace)
+    await service.start_run(
+        session,
+        "start working",
+        organization_id=session.organization_id,
+        user_id=harness_workspace.created_by_id,
+    )
+    entry = await service.steer_run(
+        session, "also add tests", user_id=harness_workspace.created_by_id
+    )
+    await service._tasks[str(session.id)]
+
+    parts = list(
+        HarnessPart.objects.filter(message__session_id=session.id).order_by(
+            "message__position", "position"
+        )
+    )
+    kinds = [part.type for part in parts]
+    steer_index = kinds.index("steer")
+    assert "text" in kinds[:steer_index] and "text" in kinds[steer_index + 1 :]
+    assert parts[steer_index].output == "also add tests"
+    assert parts[steer_index].call_id == entry.id
+    assert service.list_pending_steers(session.id) == []
+    assert any(
+        name == FRONTEND_EVENT_PART and data["delta"].get("steer") == "also add tests"
+        for name, data in events
+    )
+    fresh = HarnessSession.objects.get(id=session.id)
+    assert fresh.status == "idle"

@@ -765,6 +765,26 @@ function BlockView({
   mediaScopeKey,
 }: BlockProps): React.JSX.Element {
   const { theme } = useTheme();
+  if (block.kind === "steer")
+    return (
+      <View testID={`chat-steer-${block.part.id}`} style={styles.steerRow}>
+        <View
+          style={[styles.userBubble, { backgroundColor: theme.surfaceMuted }]}
+        >
+          <UserMessageContent
+            markdown={block.part.output}
+            mediaScopeKey={mediaScopeKey}
+            mediaVisible={mediaVisible}
+            resolveMedia={resolveMedia}
+            onOpenFile={onOpenFile}
+            testID={`chat-steer-content-${block.part.id}`}
+          />
+        </View>
+        <Text style={[styles.steerCaption, { color: theme.subtleText }]}>
+          Sent while working
+        </Text>
+      </View>
+    );
   if (block.kind === "text")
     return (
       <View testID={`chat-part-${block.part.id}`} style={styles.textBlock}>
@@ -1767,6 +1787,8 @@ const styles = StyleSheet.create({
   mentionImagePreview: { width: "100%", height: 520 },
   mentionImagePlaceholder: { width: 36, height: 30, borderRadius: 8 },
   assistantBody: { width: "100%", gap: 10 },
+  steerRow: { alignSelf: "flex-end", alignItems: "flex-end", maxWidth: "94%" },
+  steerCaption: { fontSize: 11, lineHeight: 16, marginTop: 3 },
   textBlock: { width: "100%" },
   messageActions: {
     minHeight: 36,

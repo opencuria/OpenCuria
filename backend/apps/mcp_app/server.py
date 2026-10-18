@@ -71,6 +71,7 @@ Tools and their required permissions
 - create_scheduled_task / update_scheduled_task / delete_scheduled_task /
   run_scheduled_task_now → harness:run
 - send_harness_message → harness:run
+- steer_harness_session / withdraw_harness_steer → harness:run
 - fork_harness_session → harness:run
 - edit_harness_message → harness:run
 - abort_harness_session → harness:run
@@ -999,6 +1000,34 @@ _TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="steer_harness_session",
+        description=(
+            "Send a message into the running turn of a harness session. The "
+            "agent picks it up at its next step; if the turn ends first it "
+            "starts a follow-up run. Fails when no run is active."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "prompt": {"type": "string"},
+            },
+            "required": ["session_id", "prompt"],
+        },
+    ),
+    Tool(
+        name="withdraw_harness_steer",
+        description="Withdraw a queued steer message the agent has not picked up.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "steer_id": {"type": "string"},
+            },
+            "required": ["session_id", "steer_id"],
+        },
+    ),
+    Tool(
         name="fork_harness_session",
         description=(
             "Fork a harness session, copying messages before a message by "
@@ -1664,6 +1693,8 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "list_harness_sessions": APIKeyPermission.HARNESS_READ,
     "create_harness_session": APIKeyPermission.HARNESS_RUN,
     "send_harness_message": APIKeyPermission.HARNESS_RUN,
+    "steer_harness_session": APIKeyPermission.HARNESS_RUN,
+    "withdraw_harness_steer": APIKeyPermission.HARNESS_RUN,
     "fork_harness_session": APIKeyPermission.HARNESS_RUN,
     "edit_harness_message": APIKeyPermission.HARNESS_RUN,
     "abort_harness_session": APIKeyPermission.HARNESS_RUN,
@@ -4296,6 +4327,88 @@ async def _call_send_harness_message(api_key, org_id, args: dict) -> list[TextCo
         return _error(str(exc))
 
 
+async def _call_steer_harness_session(api_key, org_id, args: dict) -> list[TextContent]:
+    """Queue a message for the running turn of a session."""
+    import uuid as _uuid
+
+    from asgiref.sync import sync_to_async
+
+    from common.exceptions import AuthenticationError, ConflictError, NotFoundError
+
+    session_id_str = args.get("session_id")
+    prompt = (args.get("prompt") or "").strip()
+    if not session_id_str or not prompt:
+        return _error("session_id and prompt are required")
+    try:
+        session_id = _uuid.UUID(session_id_str)
+    except ValueError:
+        return _error("Invalid session_id UUID")
+
+    session, error = await sync_to_async(_owned_harness_session_or_error)(
+        api_key, org_id, session_id
+    )
+    if error is not None:
+        return error
+
+    service = _get_harness_service()
+    try:
+        current = await sync_to_async(service.get_session)(session.id)
+        if getattr(current, "harness_id", "native") == "claude" and str(
+            getattr(current, "created_by_id", "")
+        ) != str(api_key.user.id):
+            raise AuthenticationError(
+                "Only the session owner may use its Claude connection"
+            )
+        entry = await service.steer_run(current, prompt, user_id=api_key.user.id)
+        return _text(entry.to_payload())
+    except AuthenticationError as exc:
+        return _error(exc.message)
+    except (NotFoundError, ConflictError, ValueError, KeyError) as exc:
+        return _error(str(exc))
+
+
+async def _call_withdraw_harness_steer(
+    api_key, org_id, args: dict
+) -> list[TextContent]:
+    """Withdraw a queued steer message before the run consumed it."""
+    import uuid as _uuid
+
+    from asgiref.sync import sync_to_async
+
+    from common.exceptions import AuthenticationError, NotFoundError
+
+    session_id_str = args.get("session_id")
+    steer_id = (args.get("steer_id") or "").strip()
+    if not session_id_str or not steer_id:
+        return _error("session_id and steer_id are required")
+    try:
+        session_id = _uuid.UUID(session_id_str)
+    except ValueError:
+        return _error("Invalid session_id UUID")
+
+    session, error = await sync_to_async(_owned_harness_session_or_error)(
+        api_key, org_id, session_id
+    )
+    if error is not None:
+        return error
+
+    service = _get_harness_service()
+    try:
+        current = await sync_to_async(service.get_session)(session.id)
+        if getattr(current, "harness_id", "native") == "claude" and str(
+            getattr(current, "created_by_id", "")
+        ) != str(api_key.user.id):
+            raise AuthenticationError(
+                "Only the session owner may use its Claude connection"
+            )
+        entry = await service.withdraw_steer(current, steer_id)
+        return _text(entry.to_payload())
+    except AuthenticationError as exc:
+        return _error(exc.message)
+    except NotFoundError as exc:
+        return _error(str(exc))
+
+
 async def _call_fork_harness_session(api_key, org_id, args) -> list:  # type: ignore[no-untyped-def]
     """Fork a session, excluding the cutoff message unless requested."""
     import uuid as _uuid
@@ -4645,6 +4758,9 @@ def _call_list_harness_parts(api_key, org_id, args: dict) -> list[TextContent]:
             "questions": service.list_pending_questions(
                 session.id, include_descendants=True
             ),
+            "steers": [
+                entry.to_payload() for entry in service.list_pending_steers(session.id)
+            ],
         }
     )
 
@@ -5868,6 +5984,8 @@ _TOOL_HANDLERS = {
     "list_harness_sessions": _call_list_harness_sessions,
     "create_harness_session": _call_create_harness_session,
     "send_harness_message": _call_send_harness_message,
+    "steer_harness_session": _call_steer_harness_session,
+    "withdraw_harness_steer": _call_withdraw_harness_steer,
     "fork_harness_session": _call_fork_harness_session,
     "edit_harness_message": _call_edit_harness_message,
     "abort_harness_session": _call_abort_harness_session,

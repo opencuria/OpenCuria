@@ -73,7 +73,11 @@ class _FakeClaudeEngine:
                 usage=Usage(2, 2, 4, 0.01),
                 cost=0.01,
                 finish_reason="stop",
-                metadata={"harness_id": "claude", "external_session_id": external_id},
+                metadata={
+                    "harness_id": "claude",
+                    "external_session_id": external_id,
+                    "cli_total_cost_usd": 0.01,
+                },
             )
         finally:
             await self.kwargs["on_owner"](lease, "released")
@@ -225,6 +229,7 @@ def claude_mcp_setup(db, monkeypatch):
         session_usage=None,
         session_cost=0.0,
         tail_remainder="",
+        engine_state_updates=None,
     ):
         attempt = HarnessRunRepository.get_by_id(run_id)
         if attempt is None or attempt.owner_token != owner_token:
@@ -249,6 +254,13 @@ def claude_mcp_setup(db, monkeypatch):
         for field, value in updates.items():
             setattr(assistant, field, value)
         assistant.save(update_fields=list(updates))
+        if engine_state_updates:
+            session = attempt.session
+            session.engine_state = {
+                **dict(session.engine_state or {}),
+                **engine_state_updates,
+            }
+            session.save(update_fields=["engine_state"])
         if tail_remainder:
             HarnessMessageRepository.append_content(assistant, tail_remainder)
         return True
@@ -264,6 +276,7 @@ def claude_mcp_setup(db, monkeypatch):
         session_usage=None,
         session_cost=0.0,
         tail_remainder="",
+        engine_state_updates=None,
     ):
         return finalize_fake_turn(
             self.run_id,
@@ -276,6 +289,7 @@ def claude_mcp_setup(db, monkeypatch):
             session_usage=session_usage,
             session_cost=session_cost,
             tail_remainder=tail_remainder,
+            engine_state_updates=engine_state_updates,
         )
 
     monkeypatch.setattr(RunOwnership, "finalize_turn", finalize_fake_ownership)
@@ -401,6 +415,9 @@ async def test_mcp_claude_create_followup_list_and_timeline(claude_mcp_setup):
     assert "connection_id" not in created
     assert secret not in json.dumps(created)
     await _wait_for_messages(service, session_id)
+    persisted_session = await sync_to_async(HarnessSession.objects.get)(id=session_id)
+    assert persisted_session.engine_state["harness_id"] == "claude"
+    assert persisted_session.engine_state["cli_total_cost_usd"] == pytest.approx(0.01)
 
     listed = _json(
         _call_list_harness_sessions(

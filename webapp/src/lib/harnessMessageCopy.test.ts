@@ -110,4 +110,20 @@ describe('getMessageCopyText', () => {
 
     expect(getMessageCopyText(message)).toBe('Visible answer')
   })
+
+  it('never copies steer text and only the closing prose after it', () => {
+    const message = makeMessage([
+      makePart('text-1', 'text', 'Working on it'),
+      makePart('tool', 'tool', 'private result'),
+      makePart('steer-1', 'steer', 'Use pnpm instead', { meta: { steer_id: 's1' } }),
+      makePart('final', 'text', 'Switched to pnpm'),
+    ])
+    expect(getMessageCopyText(message)).toBe('Switched to pnpm')
+
+    const steerLast = makeMessage([
+      makePart('text-1', 'text', 'Working on it'),
+      makePart('steer-1', 'steer', 'Use pnpm instead'),
+    ])
+    expect(getMessageCopyText(steerLast)).toBeNull()
+  })
 })

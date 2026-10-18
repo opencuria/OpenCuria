@@ -137,6 +137,28 @@ describe("ChatMessages", () => {
     expect(onRequestPartDetail).toHaveBeenCalledTimes(1);
   });
 
+  it("renders delivered steer blocks in the native user bubble pattern", () => {
+    const transcript = message([
+      part("text-before", "text", "Working on it", 0),
+      {
+        ...part("steer-1", "steer", "Use pnpm instead", 1),
+        meta: { steer_id: "queued-1" },
+      },
+    ]);
+    transcript.completed_at = "2026-10-18T12:00:00Z";
+
+    render(
+      <ThemeProvider>
+        <ChatMessages messages={[transcript]} />
+      </ThemeProvider>,
+    );
+
+    expect(screen.getByTestId("chat-steer-steer-1")).toBeTruthy();
+    expect(screen.getByTestId("chat-steer-content-steer-1")).toBeTruthy();
+    expect(screen.getByText("Use pnpm instead")).toBeTruthy();
+    expect(screen.getByText("Sent while working")).toBeTruthy();
+  });
+
   it("shows all todos in an explicit task sheet", () => {
     const todos: HarnessTodo[] = [
       {

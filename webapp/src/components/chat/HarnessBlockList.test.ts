@@ -145,4 +145,32 @@ describe('HarnessBlockList', () => {
     expect(wrapper.findAll('[data-testid="harness-patch-card"]')).toHaveLength(2)
     expect(wrapper.find('[data-testid="harness-page-controls"]').exists()).toBe(false)
   })
+
+  it('renders steer blocks as read-only user rows', () => {
+    const part: HarnessPart = {
+      id: 'steer-1',
+      session_id: 'session-1',
+      type: 'steer',
+      state: 'completed',
+      title: '',
+      output: 'Use pnpm',
+      meta: { steer_id: 's1' },
+    }
+    const wrapper = mount(HarnessBlockList, {
+      props: {
+        blocks: [
+          { kind: 'text', part: makePart(0, 'text') },
+          { kind: 'steer', part },
+        ],
+      },
+      global: { stubs: { HarnessUserBubble: { template: '<div class="bubble-stub" />' } } },
+    })
+
+    expect(
+      wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind')),
+    ).toEqual(['text', 'steer'])
+    expect(wrapper.get('[data-block-kind="steer"]').attributes('data-part-id')).toBe('steer-1')
+    expect(wrapper.find('[data-testid="harness-steer-row"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="harness-steer-caption"]').exists()).toBe(true)
+  })
 })

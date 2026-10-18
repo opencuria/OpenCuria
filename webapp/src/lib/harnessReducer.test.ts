@@ -11,12 +11,14 @@ import {
   findPart,
   isLocalId,
   mergeBusyFetchedMessages,
+  hasDeliveredSteer,
   resetHarnessPartCounter,
   resolveQueuedToolState,
   routeAssistantMessage,
   settleOpenStreamParts,
   sortHarnessMessages,
   sortHarnessParts,
+  steerPartId,
 } from './harnessReducer'
 
 function makeMessages(): HarnessMessage[] {
@@ -1635,5 +1637,171 @@ describe('server live positions', () => {
       'msg-user-1',
       'assistant-live',
     ])
+  })
+})
+
+describe('harnessReducer steer delta', () => {
+  beforeEach(() => {
+    resetHarnessPartCounter()
+  })
+
+  const steerDelta = { steer: 'Use pnpm instead', steer_id: 'steer-1' }
+
+  it('creates a completed steer part at the server position', () => {
+    const messages = makeMessages()
+    applyPartDelta(
+      messages,
+      'session-1',
+      { text: 'Working on it' },
+      { messageId: 'assistant-1', partId: 'text-1', partPosition: 0 },
+    )
+
+    const assistant = applyPartDelta(messages, 'session-1', steerDelta, {
+      messageId: 'assistant-1',
+      partId: 'steer-part-1',
+      partPosition: 1,
+    })
+
+    const steer = assistant.parts.find((part) => part.type === 'steer')
+    expect(steer).toMatchObject({
+      id: 'steer-part-1',
+      message_id: 'assistant-1',
+      type: 'steer',
+      state: 'completed',
+      title: '',
+      output: 'Use pnpm instead',
+      meta: { steer_id: 'steer-1' },
+      position: 1,
+    })
+    expect(steerPartId(steer!)).toBe('steer-1')
+    // The steer is the user's message: it never leaks into the answer text.
+    expect(assistant.content).toBe('Working on it')
+  })
+
+  it('closes running text and reasoning streams and continues in a new text part', () => {
+    const messages = makeMessages()
+    applyPartDelta(messages, 'session-1', { text: 'Before ' }, { messageId: 'a1', partId: 't1' })
+    applyPartDelta(messages, 'session-1', { reasoning: 'hmm' }, { messageId: 'a1', partId: 'r1' })
+
+    applyPartDelta(messages, 'session-1', steerDelta, { messageId: 'a1', partId: 's1' })
+    const assistant = applyPartDelta(
+      messages,
+      'session-1',
+      { text: 'After' },
+      { messageId: 'a1', partId: 't2' },
+    )
+
+    const byId = Object.fromEntries(assistant.parts.map((part) => [part.id, part]))
+    expect(byId['t1']).toMatchObject({ type: 'text', state: 'completed', output: 'Before ' })
+    expect(byId['r1']).toMatchObject({ type: 'reasoning', state: 'completed' })
+    expect(byId['t2']).toMatchObject({ type: 'text', state: 'running', output: 'After' })
+    expect(assistant.parts.map((part) => part.id)).toEqual(['t1', 'r1', 's1', 't2'])
+  })
+
+  it('is idempotent for a replayed event and for a part already in the snapshot', () => {
+    const messages = makeMessages()
+    applyPartDelta(messages, 'session-1', steerDelta, { messageId: 'a1', partId: 's1' })
+    applyPartDelta(messages, 'session-1', steerDelta, { messageId: 'a1', partId: 's1' })
+    // Same queue entry under another part id (e.g. a snapshot-first row).
+    const assistant = applyPartDelta(messages, 'session-1', steerDelta, {
+      messageId: 'a1',
+      partId: 's1-replay',
+    })
+    expect(assistant.parts.filter((part) => part.type === 'steer')).toHaveLength(1)
+
+    const snapshot = makeMessages()
+    snapshot.push({
+      id: 'a2',
+      session_id: 'session-1',
+      role: 'assistant',
+      content: '',
+      parts: [
+        {
+          id: 'srv-steer',
+          session_id: 'session-1',
+          type: 'steer',
+          state: 'completed',
+          title: '',
+          output: 'Use pnpm instead',
+          meta: { steer_id: 'steer-1' },
+        },
+      ],
+    })
+    const replayed = applyPartDelta(snapshot, 'session-1', steerDelta, {
+      messageId: 'a2',
+      partId: 'srv-steer',
+    })
+    expect(replayed.parts).toHaveLength(1)
+    expect(replayed.parts[0]!.output).toBe('Use pnpm instead')
+  })
+
+  it('finds delivered steers across messages via meta or timeline display', () => {
+    const messages = makeMessages()
+    applyPartDelta(messages, 'session-1', steerDelta, { messageId: 'a1', partId: 's1' })
+    messages.push({
+      id: 'a2',
+      session_id: 'session-1',
+      role: 'assistant',
+      content: '',
+      parts: [
+        {
+          id: 'timeline-steer',
+          session_id: 'session-1',
+          type: 'steer',
+          state: 'completed',
+          title: '',
+          output: 'later',
+          display: { steer_id: 'steer-2' },
+        },
+      ],
+    })
+
+    expect(hasDeliveredSteer(messages, 'steer-1')).toBe(true)
+    expect(hasDeliveredSteer(messages, 'steer-2')).toBe(true)
+    expect(hasDeliveredSteer(messages, 'missing')).toBe(false)
+  })
+
+  it('keeps a live steer when a stale busy snapshot lacks it and folds a server twin', () => {
+    const messages = makeMessages()
+    applyPartDelta(messages, 'session-1', steerDelta, {
+      messageId: 'a1',
+      partId: 'live-steer',
+      partPosition: 2,
+    })
+    const stale: HarnessMessage[] = [
+      { ...messages[0]!, position: 0 },
+      { id: 'a1', session_id: 'session-1', role: 'assistant', content: '', position: 1, parts: [] },
+    ]
+    const kept = mergeBusyFetchedMessages(messages, stale)
+    expect(kept[1]!.parts.map((part) => part.id)).toEqual(['live-steer'])
+
+    // The same steer arrives from REST under the server id: no duplicate row.
+    const local = makeMessages()
+    applyPartDelta(local, 'session-1', steerDelta, { messageId: 'a1' })
+    expect(local[1]!.parts[0]!.id.startsWith('local-')).toBe(true)
+    const fresh: HarnessMessage[] = [
+      { ...local[0]!, position: 0 },
+      {
+        id: 'a1',
+        session_id: 'session-1',
+        role: 'assistant',
+        content: '',
+        position: 1,
+        parts: [
+          {
+            id: 'srv-steer',
+            session_id: 'session-1',
+            type: 'steer',
+            state: 'completed',
+            title: '',
+            output: 'Use pnpm instead',
+            meta: { steer_id: 'steer-1' },
+            position: 3,
+          },
+        ],
+      },
+    ]
+    const merged = mergeBusyFetchedMessages(local, fresh)
+    expect(merged[1]!.parts.map((part) => part.id)).toEqual(['srv-steer'])
   })
 })

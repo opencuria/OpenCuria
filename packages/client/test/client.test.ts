@@ -419,6 +419,8 @@ describe("REST endpoint wrappers", () => {
     );
     await client.harness.resolveQuestion("session-id", "question-id", ["yes"]);
     await client.harness.timeline("session-id");
+    await client.harness.steer("session-id", "Use pnpm");
+    await client.harness.withdraw("session-id", "steer-id");
     expect(
       calls.map(({ url, method }) => [
         url.replace("https://api.example/api/v1", ""),
@@ -431,12 +433,15 @@ describe("REST endpoint wrappers", () => {
       ["/harness/sessions/session-id/permissions/gate-id", "POST"],
       ["/harness/sessions/session-id/questions/question-id", "POST"],
       ["/harness/sessions/session-id/timeline", "GET"],
+      ["/harness/sessions/session-id/steer", "POST"],
+      ["/harness/sessions/session-id/steer/steer-id", "DELETE"],
     ]);
     expect(JSON.parse(calls[3].body!)).toEqual({ response: "once" });
     expect(JSON.parse(calls[4].body!)).toEqual({
       answers: ["yes"],
       reject: false,
     });
+    expect(JSON.parse(calls[6].body!)).toEqual({ prompt: "Use pnpm" });
   });
 });
 
@@ -455,8 +460,12 @@ describe("realtime and file transfers", () => {
       fetch,
     });
     let count = 0;
+    let queuedSteer = "";
     client.realtime.on("harness.part_updated", () => {
       count += 1;
+    });
+    client.realtime.on("harness.steer_queue", (event) => {
+      queuedSteer = event.steers[0]?.content ?? "";
     });
     client.realtime.connect();
     client.realtime.connect();
@@ -464,7 +473,13 @@ describe("realtime and file transfers", () => {
     const socket = sockets[0];
     socket.connect();
     socket.trigger("harness.part_updated", {});
+    socket.trigger("harness.steer_queue", {
+      workspace_id: "ws-1",
+      session_id: "session-1",
+      steers: [{ id: "steer-1", content: "Use pnpm", created_at: "now" }],
+    });
     expect(count).toBe(1);
+    expect(queuedSteer).toBe("Use pnpm");
     // Replace the instance's refresh implementation with a deterministic successful refresh.
     const realtime = client.realtime as any;
     realtime.options.refreshAccessToken = async () => {

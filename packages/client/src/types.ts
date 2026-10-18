@@ -5,6 +5,7 @@ import type {
   HarnessPermissionRequest,
   HarnessQuestionRequest,
   HarnessSession,
+  HarnessSteer,
   HarnessTodo,
 } from "@opencuria/chat-core/harness";
 import type { ProviderModel } from "@opencuria/chat-core/harnessModels";
@@ -121,6 +122,8 @@ export interface HarnessTimeline {
   messages: HarnessMessage[];
   permissions?: HarnessPermissionRequest[];
   questions?: HarnessQuestionRequest[];
+  /** Queued (not yet delivered) steers; absent on older backends. */
+  steers?: HarnessSteer[];
 }
 
 export interface Todo extends HarnessTodo {}
@@ -131,6 +134,7 @@ export type {
   HarnessPermissionRequest,
   HarnessQuestionRequest,
   HarnessSession,
+  HarnessSteer,
   HarnessTodo,
   ProviderModel,
 };

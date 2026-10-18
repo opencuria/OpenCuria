@@ -13,6 +13,7 @@ import type {
   HarnessPermissionRequest,
   HarnessQuestionRequest,
   HarnessSession,
+  HarnessSteer,
   HarnessTimeline,
   ProviderModel,
   ProviderConfig,
@@ -132,6 +133,16 @@ export interface OpenCuriaClient {
     deleteSession(sessionId: string, signal?: AbortSignal): Promise<void>;
     markRead(sessionId: string, signal?: AbortSignal): Promise<void>;
     markUnread(sessionId: string, signal?: AbortSignal): Promise<void>;
+    steer(
+      sessionId: string,
+      prompt: string,
+      signal?: AbortSignal,
+    ): Promise<HarnessSteer>;
+    withdraw(
+      sessionId: string,
+      steerId: string,
+      signal?: AbortSignal,
+    ): Promise<HarnessSteer>;
     dismissNotice(
       sessionId: string,
       messageId: string,
@@ -373,6 +384,17 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
         api.post<void>(
           `/harness/sessions/${segment(sessionId)}/unread`,
           undefined,
+          signal,
+        ),
+      steer: (sessionId, prompt, signal) =>
+        api.post<HarnessSteer>(
+          `/harness/sessions/${segment(sessionId)}/steer`,
+          { prompt },
+          signal,
+        ),
+      withdraw: (sessionId, steerId, signal) =>
+        api.delete<HarnessSteer>(
+          `/harness/sessions/${segment(sessionId)}/steer/${segment(steerId)}`,
           signal,
         ),
       dismissNotice: (sessionId, messageId, signal) =>

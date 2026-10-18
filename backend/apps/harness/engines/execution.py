@@ -148,6 +148,7 @@ async def execute_external_run(
             ),
             on_permission=lambda **kw: service._on_permission(session, assistant, **kw),
             on_question=lambda **kw: service._on_question(session, assistant, **kw),
+            steering=context.get("steering"),
         )
         run_options.authorize_file_read = lambda path: service._authorize_file_read(
             session, assistant, path

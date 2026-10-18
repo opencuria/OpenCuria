@@ -14,6 +14,8 @@ import json
 import re
 from typing import Any
 
+#: Part types whose full text travels with the lightweight timeline.
+TIMELINE_TEXT_PART_TYPES = ("text", "steer")
 DISPLAY_TEXT_LIMIT = 240
 QUESTION_TEXT_LIMIT = 500
 PATCH_PREVIEW_LINES = 4
@@ -301,6 +303,8 @@ def build_part_display(
         )
     elif part_type == "text":
         display["step"] = meta.get("step")
+    elif part_type == "steer":
+        display["steer_id"] = str(meta.get("steer_id") or call_id or "")
     else:
         display["summary"] = _short(title)
     return display
