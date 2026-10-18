@@ -24,7 +24,7 @@ from apps.harness.services import ProviderConfigService
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
-from common.utils import decrypt_value, generate_api_token, hash_token
+from common.utils import generate_api_token, hash_token
 
 
 @pytest.fixture
@@ -197,8 +197,14 @@ def test_org_provider_config_update_without_key_keeps_existing(provider_setup):
     assert body["has_api_key"] is True
     assert body["api_key_hint"] == "••••e-99"
 
-    service = ProviderConfigService()
-    assert service.get_decrypted_api_key(provider_setup["org"].id) == "sk-keep-me-99"
+    from apps.harness.provider_accounts import ProviderAccountService
+
+    account = ProviderAccountService().selected_accounts(
+        provider_setup["org"].id, provider_setup["owner"].id
+    )["openrouter"]
+    assert (
+        ProviderAccountService().get_credentials(account)["api_key"] == "sk-keep-me-99"
+    )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -311,13 +317,18 @@ def test_workspace_provider_config_aliases_are_not_found(provider_setup):
     url = WS_URL.format(ws=provider_setup["owned"].id)
 
     assert client.get(url).status_code == 404
-    assert client.put(
-        url,
-        data=json.dumps({"api_key": "sk-alias-key"}),
-        content_type="application/json",
-    ).status_code == 404
+    assert (
+        client.put(
+            url,
+            data=json.dumps({"api_key": "sk-alias-key"}),
+            content_type="application/json",
+        ).status_code
+        == 404
+    )
     assert client.delete(url).status_code == 404
-    assert ProviderConfig.objects.filter(organization=provider_setup["org"]).count() == 0
+    assert (
+        ProviderConfig.objects.filter(organization=provider_setup["org"]).count() == 0
+    )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -347,7 +358,7 @@ def test_save_config_service_keeps_key_when_omitted(organization) -> None:
     )
     connection = service.get_connection(organization.id, "openrouter")
     assert connection is not None
-    encrypted_before = connection.credentials_encrypted
+    encrypted_before = connection.credential.encrypted_value
 
     second = service.save_config(
         organization_id=organization.id,
@@ -357,9 +368,9 @@ def test_save_config_service_keeps_key_when_omitted(organization) -> None:
     assert second.default_model == "m2"
     refreshed = service.get_connection(organization.id, "openrouter")
     assert refreshed is not None
-    assert refreshed.credentials_encrypted == encrypted_before
+    assert refreshed.credential.encrypted_value == encrypted_before
     assert service.get_decrypted_api_key(organization.id) == "sk-service-keep"
-    stored = json.loads(decrypt_value(refreshed.credentials_encrypted))
+    stored = ProviderConfigService.get_connection_credentials(refreshed)
     assert stored["api_key"] == "sk-service-keep"
 
 
@@ -374,7 +385,7 @@ def test_org_provider_models_lists_catalog(provider_setup, monkeypatch):
         default_model="acme/fast",
     )
 
-    def _fake_list(self, organization_id):  # type: ignore[no-untyped-def]
+    def _fake_list(self, organization_id, **kwargs):  # type: ignore[no-untyped-def]
         assert organization_id == provider_setup["org"].id
         return [
             ProviderModel(
@@ -428,7 +439,7 @@ def test_org_provider_models_lists_catalog_without_config_row(
         config={"base_url": "https://openrouter.ai/api/v1"},
     )
 
-    def _fake_list(self, organization_id):  # type: ignore[no-untyped-def]
+    def _fake_list(self, organization_id, **kwargs):  # type: ignore[no-untyped-def]
         assert organization_id == provider_setup["org"].id
         return [
             ProviderModel(
@@ -479,6 +490,7 @@ def test_list_providers_returns_all_three(provider_setup):
         "chatgpt",
         "amazon-bedrock",
         "openai-compatible",
+        "claude-agent",
     }
     assert all(not row["connected"] for row in body)
 
@@ -501,6 +513,23 @@ def test_list_providers_returns_all_three(provider_setup):
     assert openrouter["connected"] is True
     assert openrouter["base_url"] == "https://openrouter.ai/api/v1"
     assert openrouter["api_key_hint"] == "••••9999"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_short_openrouter_keys_are_not_revealed_in_compatibility_hint(provider_setup):
+    """The legacy OpenRouter status masks keys shorter than four chars."""
+    client = _client(
+        user=provider_setup["owner"], org=provider_setup["org"], permissions=PROVIDERS
+    )
+    response = client.put(
+        f"{PROVIDERS_URL}openrouter/",
+        data=json.dumps({"api_key": "abc"}),
+        content_type="application/json",
+    )
+
+    assert response.status_code == 200, response.content[:500]
+    assert response.json()["api_key_hint"] == "••••"
+    assert "abc" not in response.content.decode()
 
 
 @pytest.mark.django_db(transaction=True)
@@ -666,8 +695,14 @@ def test_delete_provider_config_keeps_connections(provider_setup):
     )
     assert client.delete(ORG_URL).status_code == 204
 
-    service = ProviderConfigService()
-    assert service.get_connection(provider_setup["org"].id, "openrouter") is not None
+    from apps.harness.provider_accounts import ProviderAccountService
+
+    assert (
+        ProviderAccountService().selected_accounts(
+            provider_setup["org"].id, provider_setup["owner"].id
+        )["openrouter"]
+        is not None
+    )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -696,6 +731,8 @@ def test_chatgpt_oauth_start_status_and_cancel(provider_setup):
     assert body["user_code"] == "ABCD-1234"
     assert body["interval"] == 5
     assert body["expires_in"] == 600
+    flow_id = body["flow_id"]
+    status_url = f"{status_url}?flow_id={flow_id}"
 
     with patch(
         "apps.harness.providers.chatgpt_oauth.poll_device_flow_once",
@@ -728,14 +765,16 @@ def test_chatgpt_oauth_start_status_and_cancel(provider_setup):
     assert complete.status_code == 200, complete.content[:500]
     assert complete.json() == {"status": "connected", "account_id": "acc-42"}
 
-    service = ProviderConfigService()
-    connection = service.get_connection(provider_setup["org"].id, "chatgpt")
-    assert connection is not None
-    creds = service.get_connection_credentials(connection)
-    assert creds["access"] == "access-token"
-    assert creds["account_id"] == "acc-42"
+    from apps.harness.provider_accounts import ProviderAccountService
 
-    no_flow = client.get(status_url)
+    accounts = ProviderAccountService().list_accounts(
+        provider_setup["org"].id, provider_setup["owner"].id, "chatgpt"
+    )
+    assert len(accounts) == 1
+    assert accounts[0]["account_id"] == "acc-42"
+    assert "access-token" not in repr(accounts)
+
+    no_flow = client.get(f"{status_url.split('?')[0]}")
     assert no_flow.status_code == 404
     assert no_flow.json()["code"] == "no_flow"
 
@@ -749,9 +788,18 @@ def test_chatgpt_oauth_start_status_and_cancel(provider_setup):
             verification_url="https://auth.openai.com/codex/device",
             interval=5,
         )
-        client.post(start_url)
-    assert client.post(cancel_url).status_code == 204
-    assert client.get(status_url).status_code == 404
+        restarted = client.post(start_url)
+    cancel_id = restarted.json()["flow_id"]
+    cancelled = client.post(
+        cancel_url,
+        data=json.dumps({"flow_id": cancel_id}),
+        content_type="application/json",
+    )
+    assert cancelled.status_code == 204
+    assert (
+        client.get(f"{status_url.split('?')[0]}?flow_id={cancel_id}").json()["status"]
+        == "cancelled"
+    )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -801,9 +849,9 @@ def test_provider_list_tolerates_dirty_openai_compatible_models(provider_setup):
             "models": ["  good  ", "", "good", "other"],
         },
     )
-    rows = _list_org_provider_connections(provider_setup["org"].id)
-    compat = next(
-        row for row in rows if row.provider == "openai-compatible"
+    rows = _list_org_provider_connections(
+        provider_setup["org"].id, provider_setup["owner"].id
     )
+    compat = next(row for row in rows if row.provider == "openai-compatible")
     assert compat.connected is True
     assert compat.models == ["good", "other"]

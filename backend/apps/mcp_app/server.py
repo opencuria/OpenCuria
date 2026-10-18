@@ -695,6 +695,7 @@ _TOOLS: list[Tool] = [
                 },
                 "token": {"type": "string"},
                 "label": {"type": "string"},
+                "connection_id": {"type": "string", "format": "uuid"},
             },
             "required": ["auth_type"],
             "additionalProperties": False,
@@ -702,8 +703,13 @@ _TOOLS: list[Tool] = [
     ),
     Tool(
         name="delete_claude_connection",
-        description="Delete the current user's personal Claude connection.",
-        inputSchema={"type": "object", "properties": {}},
+        description="Delete the selected or explicitly addressed Claude account.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "connection_id": {"type": "string", "format": "uuid"},
+            },
+        },
     ),
     Tool(
         name="list_claude_engine_models",
@@ -776,8 +782,70 @@ _TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="list_provider_accounts",
+        description=(
+            "List connected personal and organization-shared "
+            "provider accounts visible to you."
+        ),
+        inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+    ),
+    Tool(
+        name="save_provider_account",
+        description=(
+            "Create or update a named provider account. "
+            "Shared accounts require an org admin."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "provider": {"type": "string"},
+                "account_id": {"type": "string", "format": "uuid"},
+                "label": {"type": "string"},
+                "shared": {"type": "boolean"},
+                "api_key": {"type": "string"},
+                "base_url": {"type": "string"},
+                "models": {"type": "array", "items": {"type": "string"}},
+                "auth_method": {"type": "string"},
+                "region": {"type": "string"},
+                "access_key_id": {"type": "string"},
+                "secret_access_key": {"type": "string"},
+                "session_token": {"type": "string"},
+                "bearer_token": {"type": "string"},
+                "token": {"type": "string"},
+                "auth_type": {"type": "string"},
+            },
+            "required": ["provider"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="delete_provider_account",
+        description="Delete one exact provider account you are allowed to manage.",
+        inputSchema={
+            "type": "object",
+            "properties": {"account_id": {"type": "string", "format": "uuid"}},
+            "required": ["account_id"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
+        name="select_provider_account",
+        description=(
+            "Select one visible provider account, or null for no active account."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "provider": {"type": "string"},
+                "account_id": {"type": ["string", "null"]},
+            },
+            "required": ["provider", "account_id"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
         name="delete_provider_connection",
-        description="Delete one org provider connection.",
+        description="Delete one active provider account (legacy compatibility).",
         inputSchema={
             "type": "object",
             "properties": {
@@ -838,8 +906,16 @@ _TOOLS: list[Tool] = [
     ),
     Tool(
         name="chatgpt_oauth_start",
-        description="Start the ChatGPT device OAuth flow for the org.",
-        inputSchema={"type": "object", "properties": {}},
+        description="Start an isolated ChatGPT device OAuth flow for this user.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "label": {"type": "string"},
+                "shared": {"type": "boolean"},
+                "account_id": {"type": "string", "format": "uuid"},
+            },
+            "additionalProperties": False,
+        },
     ),
     Tool(
         name="chatgpt_oauth_status",
@@ -847,12 +923,20 @@ _TOOLS: list[Tool] = [
             "Poll once for ChatGPT OAuth completion. Returns status: "
             "pending, connected, expired, denied, or no_flow."
         ),
-        inputSchema={"type": "object", "properties": {}},
+        inputSchema={
+            "type": "object",
+            "properties": {"flow_id": {"type": "string", "format": "uuid"}},
+            "additionalProperties": False,
+        },
     ),
     Tool(
         name="chatgpt_oauth_cancel",
-        description="Cancel a pending ChatGPT OAuth flow for the org.",
-        inputSchema={"type": "object", "properties": {}},
+        description="Cancel one of your pending ChatGPT OAuth flows.",
+        inputSchema={
+            "type": "object",
+            "properties": {"flow_id": {"type": "string", "format": "uuid"}},
+            "additionalProperties": False,
+        },
     ),
     Tool(
         name="list_scheduled_tasks",
@@ -1674,6 +1758,10 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "save_provider_config": APIKeyPermission.HARNESS_RUN,
     "delete_provider_config": APIKeyPermission.HARNESS_RUN,
     "list_provider_connections": APIKeyPermission.HARNESS_PROVIDERS,
+    "list_provider_accounts": APIKeyPermission.HARNESS_PROVIDERS,
+    "save_provider_account": APIKeyPermission.HARNESS_PROVIDERS,
+    "delete_provider_account": APIKeyPermission.HARNESS_PROVIDERS,
+    "select_provider_account": APIKeyPermission.HARNESS_PROVIDERS,
     "save_provider_connection": APIKeyPermission.HARNESS_PROVIDERS,
     "delete_provider_connection": APIKeyPermission.HARNESS_PROVIDERS,
     "get_subagent_config": APIKeyPermission.HARNESS_READ,
@@ -1863,7 +1951,11 @@ def _call_get_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         "runtime_type": str(workspace.runtime_type),
         "desktop_width": workspace.desktop_width,
         "desktop_height": workspace.desktop_height,
-        "credential_ids": [str(item.id) for item in workspace.credentials.all()],
+        "credential_ids": [
+            str(item.id)
+            for item in workspace.credentials.all().select_related("service")
+            if item.service.credential_type != "provider_secret"
+        ],
         "plugin_ids": [
             str(item.plugin_id) for item in workspace.plugin_activations.all()
         ],
@@ -3615,7 +3707,10 @@ def _call_save_claude_connection(api_key, org_id, args: dict) -> list[TextConten
             auth_type=auth_type,
             token=args.get("token", ""),
             label=args.get("label", "Claude"),
+            connection_id=args.get("connection_id"),
         )
+    except NotFoundError as exc:
+        return _error(exc.message)
     except (ValueError, TypeError) as exc:
         return _error(str(exc))
     return _text(
@@ -3636,7 +3731,9 @@ def _call_delete_claude_connection(api_key, org_id, args: dict) -> list[TextCont
 
     try:
         OrganizationService().require_membership(api_key.user, org_id)
-        EngineConnectionService().delete_connection(org_id, api_key.user.id)
+        EngineConnectionService().delete_connection(
+            org_id, api_key.user.id, args.get("connection_id")
+        )
     except NotFoundError as exc:
         return _error(exc.message)
     return _text({"deleted": True})
@@ -3667,7 +3764,9 @@ def _call_get_provider_config(api_key, org_id, args: dict) -> list[TextContent]:
 
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
-    return _text(_fetch_org_provider_config(org_id).model_dump(mode="json"))
+    return _text(
+        _fetch_org_provider_config(org_id, int(api_key.user.id)).model_dump(mode="json")
+    )
 
 
 def _call_list_provider_models(api_key, org_id, args: dict) -> list[TextContent]:
@@ -3676,7 +3775,7 @@ def _call_list_provider_models(api_key, org_id, args: dict) -> list[TextContent]
 
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
-    models = _list_org_provider_models(org_id)
+    models = _list_org_provider_models(org_id, int(api_key.user.id))
     return _text([model.model_dump(mode="json") for model in models])
 
 
@@ -3687,7 +3786,9 @@ def _call_save_provider_config(api_key, org_id, args: dict) -> list[TextContent]
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
     payload = ProviderConfigIn(**args)
-    return _text(_save_org_provider_config(org_id, payload).model_dump(mode="json"))
+    return _text(
+        _save_org_provider_config(org_id, api_key.user, payload).model_dump(mode="json")
+    )
 
 
 def _call_delete_provider_config(api_key, org_id, args: dict) -> list[TextContent]:
@@ -3706,80 +3807,35 @@ def _call_list_provider_connections(api_key, org_id, args: dict) -> list[TextCon
 
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
-    connections = _list_org_provider_connections(org_id)
+    connections = _list_org_provider_connections(org_id, int(api_key.user.id))
     return _text([row.model_dump(mode="json") for row in connections])
 
 
 def _call_save_provider_connection(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.harness.api import (
-        BedrockConnectionIn,
-        OpenAICompatibleConnectionIn,
-        OpenRouterConnectionIn,
-        ProviderConnectionUpsertIn,
-        _parse_provider_param,
-        _upsert_bedrock_connection,
-        _upsert_openai_compatible_connection,
-        _upsert_openrouter_connection,
-    )
-    from apps.harness.enums import ProviderType
+    """Legacy upsert limited to the caller's active account or new private one."""
+    from apps.harness.api import _parse_provider_param, _save_legacy_provider_account
     from apps.organizations.services import OrganizationService
 
     provider = args.get("provider")
     if not provider:
         return _error("provider is required")
-
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-
     try:
+        OrganizationService().require_membership(api_key.user, org_id)
         provider_id = _parse_provider_param(str(provider))
-    except ValueError as exc:
+        if provider_id == "chatgpt":
+            return _error("ChatGPT uses OAuth connect; use chatgpt_oauth_start")
+        values = {key: value for key, value in args.items() if key != "provider"}
+        _save_legacy_provider_account(org_id, api_key.user, provider_id, values)
+        from apps.harness.api import _list_org_provider_connections
+
+        row = next(
+            item.model_dump(mode="json")
+            for item in _list_org_provider_connections(org_id, int(api_key.user.id))
+            if item.provider == provider_id
+        )
+        return _text(row)
+    except Exception as exc:
         return _error(str(exc))
-
-    if provider_id == ProviderType.CHATGPT:
-        return _error("ChatGPT uses OAuth connect; use chatgpt_oauth_start")
-
-    payload = ProviderConnectionUpsertIn(
-        **{key: value for key, value in args.items() if key != "provider"}
-    )
-
-    try:
-        if provider_id == ProviderType.OPENROUTER:
-            body = OpenRouterConnectionIn(
-                api_key=payload.api_key,
-                base_url=payload.base_url,
-            )
-            connection = _upsert_openrouter_connection(org_id, body)
-        elif provider_id == ProviderType.OPENAI_COMPATIBLE:
-            # MCP dict args carry key presence: omitted "models" keeps
-            # stored models, explicit [] clears them (REST parity via
-            # model_fields_set is handled by the shared business helper).
-            raw = {key: value for key, value in args.items() if key != "provider"}
-            compat_kwargs: dict = {
-                "api_key": payload.api_key,
-                "base_url": payload.base_url,
-            }
-            if "models" in raw:
-                compat_kwargs["models"] = list(payload.models or [])
-                compat_body = OpenAICompatibleConnectionIn(**compat_kwargs)
-            else:
-                compat_body = OpenAICompatibleConnectionIn(**compat_kwargs)
-                compat_body.model_fields_set.discard("models")
-            connection = _upsert_openai_compatible_connection(org_id, compat_body)
-        else:
-            body = BedrockConnectionIn(
-                auth_method=payload.auth_method,
-                region=payload.region,
-                access_key_id=payload.access_key_id,
-                secret_access_key=payload.secret_access_key,
-                session_token=payload.session_token,
-                bearer_token=payload.bearer_token,
-            )
-            connection = _upsert_bedrock_connection(org_id, body)
-    except (ValueError, KeyError, TypeError) as exc:
-        return _error(str(exc))
-
-    return _text(connection.model_dump(mode="json"))
 
 
 def _call_get_subagent_config(api_key, org_id, args: dict) -> list[TextContent]:
@@ -3843,7 +3899,7 @@ def _call_delete_provider_connection(api_key, org_id, args: dict) -> list[TextCo
 
     try:
         provider_id = _parse_provider_param(str(provider))
-        _delete_org_provider_connection(org_id, provider_id)
+        _delete_org_provider_connection(org_id, int(api_key.user.id), provider_id)
     except ValueError as exc:
         return _error(str(exc))
     except NotFoundError as exc:
@@ -3853,132 +3909,122 @@ def _call_delete_provider_connection(api_key, org_id, args: dict) -> list[TextCo
 
 
 async def _call_chatgpt_oauth_start(api_key, org_id, args: dict) -> list[TextContent]:
-    import time
-
-    from asgiref.sync import sync_to_async
-
-    from apps.harness.api import (
-        CHATGPT_OAUTH_FLOW_EXPIRES_SECONDS,
-        _chatgpt_oauth_lock,
-        _chatgpt_oauth_pending,
-        _PendingChatGPTOAuth,
-    )
-    from apps.harness.providers.base import ProviderError
-    from apps.harness.providers.chatgpt_oauth import start_device_flow
-    from apps.organizations.services import OrganizationService
-
-    org_service = OrganizationService()
-    await sync_to_async(org_service.require_membership)(api_key.user, org_id)
+    from apps.harness.provider_oauth import ProviderOAuthService
 
     try:
-        flow = await start_device_flow()
-        async with _chatgpt_oauth_lock:
-            _chatgpt_oauth_pending[org_id] = _PendingChatGPTOAuth(
-                device_auth_id=flow.device_auth_id,
-                user_code=flow.user_code,
-                interval=flow.interval,
-                created_at=time.monotonic(),
-            )
-        return _text(
-            {
-                "user_code": flow.user_code,
-                "verification_url": flow.verification_url,
-                "interval": flow.interval,
-                "expires_in": CHATGPT_OAUTH_FLOW_EXPIRES_SECONDS,
-            }
+        result = await ProviderOAuthService().start(
+            organization_id=org_id,
+            user=api_key.user,
+            label=str(args.get("label") or ""),
+            shared=args.get("shared"),
+            account_id=args.get("account_id"),
         )
-    except ProviderError as exc:
-        return _error(str(exc))
+        return _text(result)
+    except Exception:
+        return _error("ChatGPT OAuth provider request failed")
 
 
 async def _call_chatgpt_oauth_status(api_key, org_id, args: dict) -> list[TextContent]:
-    import time
-
-    from asgiref.sync import sync_to_async
-
-    from apps.harness.api import (
-        CHATGPT_OAUTH_FLOW_EXPIRES_SECONDS,
-        _chatgpt_oauth_lock,
-        _chatgpt_oauth_pending,
-    )
-    from apps.harness.enums import ProviderType
-    from apps.harness.providers.base import ProviderError
-    from apps.harness.providers.chatgpt_oauth import poll_device_flow_once
-    from apps.harness.services import ProviderConfigService
-    from apps.organizations.services import OrganizationService
-
-    org_service = OrganizationService()
-    await sync_to_async(org_service.require_membership)(api_key.user, org_id)
+    from apps.harness.provider_oauth import ProviderOAuthService
 
     try:
-        async with _chatgpt_oauth_lock:
-            pending = _chatgpt_oauth_pending.get(org_id)
-        if pending is None:
-            return _text(
-                {
-                    "status": "no_flow",
-                    "detail": "No pending ChatGPT OAuth flow for this organization",
-                }
-            )
-        if time.monotonic() - pending.created_at > CHATGPT_OAUTH_FLOW_EXPIRES_SECONDS:
-            async with _chatgpt_oauth_lock:
-                _chatgpt_oauth_pending.pop(org_id, None)
-            return _text({"status": "expired"})
-
-        result = await poll_device_flow_once(
-            pending.device_auth_id,
-            pending.user_code,
+        result = await ProviderOAuthService().status(
+            organization_id=org_id, user=api_key.user, flow_id=args.get("flow_id")
         )
-        if result.status == "pending":
-            return _text({"status": "pending"})
-        if result.status == "expired":
-            async with _chatgpt_oauth_lock:
-                _chatgpt_oauth_pending.pop(org_id, None)
-            return _text({"status": "expired"})
-        if result.status == "denied":
-            async with _chatgpt_oauth_lock:
-                _chatgpt_oauth_pending.pop(org_id, None)
-            return _text({"status": "denied"})
-        if result.tokens is None:
-            return _error("OAuth completed without tokens")
-
-        credentials = {
-            "access": result.tokens.access,
-            "refresh": result.tokens.refresh,
-            "expires": result.tokens.expires,
-            "account_id": result.tokens.account_id or "",
-            "residency": result.tokens.residency or "",
-        }
-        service = ProviderConfigService()
-        await sync_to_async(service.save_connection)(
-            organization_id=org_id,
-            provider=ProviderType.CHATGPT,
-            credentials=credentials,
-            config={},
-        )
-        async with _chatgpt_oauth_lock:
-            _chatgpt_oauth_pending.pop(org_id, None)
-        return _text(
-            {
-                "status": "connected",
-                "account_id": result.tokens.account_id or "",
-            }
-        )
-    except ProviderError as exc:
-        return _error(str(exc))
+        return _text(result)
+    except Exception:
+        return _error("ChatGPT OAuth provider request failed")
 
 
 async def _call_chatgpt_oauth_cancel(api_key, org_id, args: dict) -> list[TextContent]:
     from asgiref.sync import sync_to_async
 
-    from apps.harness.api import _chatgpt_oauth_lock, _chatgpt_oauth_pending
-    from apps.organizations.services import OrganizationService
+    from apps.harness.provider_oauth import ProviderOAuthService
 
-    org_service = OrganizationService()
-    await sync_to_async(org_service.require_membership)(api_key.user, org_id)
-    async with _chatgpt_oauth_lock:
-        _chatgpt_oauth_pending.pop(org_id, None)
-    return _text({"cancelled": True})
+    try:
+        cancelled = await sync_to_async(ProviderOAuthService().cancel)(
+            organization_id=org_id,
+            user=api_key.user,
+            flow_id=args.get("flow_id"),
+        )
+        return _text({"cancelled": cancelled})
+    except Exception as exc:
+        return _error(str(exc))
+
+
+def _call_list_provider_accounts(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.harness.provider_accounts import ProviderAccountService
+
+    try:
+        rows = ProviderAccountService().list_accounts(org_id, int(api_key.user.id))
+        return _text([row for row in rows if row["connected"]])
+    except Exception as exc:
+        return _error(str(exc))
+
+
+def _call_save_provider_account(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.harness.provider_accounts import ProviderAccountService
+    from apps.harness.providers.models_catalog import clear_models_cache
+
+    try:
+        values = dict(args)
+        provider = values.pop("provider")
+        account_id = values.pop("account_id", None)
+        if provider == "chatgpt" and account_id is None:
+            return _error("ChatGPT accounts must be connected using OAuth")
+        account = ProviderAccountService().save_account(
+            organization_id=org_id,
+            user=api_key.user,
+            provider=provider,
+            payload=values,
+            account_id=account_id,
+        )
+        clear_models_cache(str(org_id))
+        row = next(
+            row
+            for row in ProviderAccountService().list_accounts(
+                org_id, int(api_key.user.id), provider
+            )
+            if row["id"] == str(account.id)
+        )
+        return _text(row)
+    except Exception as exc:
+        return _error(str(exc))
+
+
+def _call_delete_provider_account(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.harness.provider_accounts import ProviderAccountService
+    from apps.harness.providers.models_catalog import clear_models_cache
+
+    try:
+        account = ProviderAccountService().get_account(
+            org_id, int(api_key.user.id), args["account_id"], manage=True
+        )
+        ProviderAccountService().delete_account(
+            org_id, int(api_key.user.id), account.id
+        )
+        clear_models_cache(str(org_id))
+        return _text({"deleted": True, "account_id": str(account.id)})
+    except Exception as exc:
+        return _error(str(exc))
+
+
+def _call_select_provider_account(api_key, org_id, args: dict) -> list[TextContent]:
+    from apps.harness.provider_accounts import ProviderAccountService
+
+    try:
+        ProviderAccountService().select_account(
+            org_id, int(api_key.user.id), args["provider"], args.get("account_id")
+        )
+        return _text(
+            {
+                "selected": True,
+                "provider": args["provider"],
+                "account_id": args.get("account_id"),
+            }
+        )
+    except Exception as exc:
+        return _error(str(exc))
 
 
 def _call_list_scheduled_tasks(api_key, org_id, args: dict) -> list[TextContent]:
@@ -5965,6 +6011,10 @@ _TOOL_HANDLERS = {
     "save_provider_config": _call_save_provider_config,
     "delete_provider_config": _call_delete_provider_config,
     "list_provider_connections": _call_list_provider_connections,
+    "list_provider_accounts": _call_list_provider_accounts,
+    "save_provider_account": _call_save_provider_account,
+    "delete_provider_account": _call_delete_provider_account,
+    "select_provider_account": _call_select_provider_account,
     "save_provider_connection": _call_save_provider_connection,
     "delete_provider_connection": _call_delete_provider_connection,
     "get_subagent_config": _call_get_subagent_config,

@@ -290,7 +290,7 @@ async def _start(service: HarnessService, session, workspace) -> None:  # type: 
         "start the work",
         organization_id=workspace.runner.organization_id,
         workspace_id=str(workspace.id),
-        user_id=1,
+        user_id=workspace.created_by_id,
     )
 
 
@@ -314,7 +314,9 @@ async def test_steer_is_persisted_in_order_and_seen_by_the_model(
     await _start(service, session, harness_workspace)
     await asyncio.wait_for(started.wait(), timeout=2)
 
-    entry = await service.steer_run(session, "  prefer tabs  ", user_id=1)
+    entry = await service.steer_run(
+        session, "  prefer tabs  ", user_id=harness_workspace.created_by_id
+    )
     assert entry.content == "prefer tabs"
     assert [item.content for item in service.list_pending_steers(session.id)] == [
         "prefer tabs"
@@ -403,7 +405,9 @@ async def test_withdrawn_steer_never_reaches_the_model(harness_workspace) -> Non
     await _start(service, session, harness_workspace)
     await asyncio.wait_for(started.wait(), timeout=2)
 
-    entry = await service.steer_run(session, "never mind", user_id=1)
+    entry = await service.steer_run(
+        session, "never mind", user_id=harness_workspace.created_by_id
+    )
     withdrawn = await service.withdraw_steer(session, entry.id)
     assert withdrawn.content == "never mind"
     with pytest.raises(NotFoundError):
@@ -430,7 +434,9 @@ async def test_steer_that_arrives_too_late_starts_a_follow_up_run(
         if index == 0:
             # Simulates a message landing once the engine stopped reading.
             service._steering_channel(session.id).end_feed()
-            await service.steer_run(session, "after the fact", user_id=1)
+            await service.steer_run(
+                session, "after the fact", user_id=harness_workspace.created_by_id
+            )
 
     provider = ScriptedProvider(
         [_answer_step("first"), _answer_step("second")],
@@ -486,7 +492,7 @@ async def test_stop_discards_queued_steers_without_a_follow_up(
     session = _new_session(harness_workspace)
     await _start(service, session, harness_workspace)
     await asyncio.wait_for(started.wait(), timeout=2)
-    await service.steer_run(session, "queued", user_id=1)
+    await service.steer_run(session, "queued", user_id=harness_workspace.created_by_id)
 
     await service.abort_run(session.id)
     await asyncio.sleep(0.1)

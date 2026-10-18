@@ -18,7 +18,6 @@ from apps.harness.harness_service import (
     HarnessService,
 )
 from apps.harness.models import (
-    HarnessConnection,
     HarnessMessage,
     HarnessPart,
     HarnessSession,
@@ -257,9 +256,7 @@ async def test_claude_start_preflights_oversized_skill_before_messages(
     """Claude skill limits fail before a user or assistant shell is created."""
     from apps.skills.models import Skill
 
-    service, _registry, _connections, _events = _service(
-        connection_id=uuid.uuid4()
-    )
+    service, _registry, _connections, _events = _service(connection_id=uuid.uuid4())
     session = await _new_session(service, harness_workspace)
     skill = Skill.objects.create(
         name="Oversized",
@@ -290,9 +287,7 @@ async def test_claude_edit_preflights_inherited_skill_before_deleting_suffix(
     """An invalid inherited selection preserves Claude history and transcript ID."""
     from apps.skills.models import Skill
 
-    service, _registry, _connections, _events = _service(
-        connection_id=uuid.uuid4()
-    )
+    service, _registry, _connections, _events = _service(connection_id=uuid.uuid4())
     session = await _new_session(service, harness_workspace)
     for prompt in ("first turn", "second turn"):
         await service.start_run(
@@ -352,20 +347,35 @@ async def test_claude_async_run_works_without_async_unsafe_escape(
 
 def _new_session_sync(service, harness_workspace):
     """Create fixture-backed auth/session rows from an ORM worker thread."""
-    connection_id = service._engine_connections.connection_id
-    HarnessConnection.objects.create(
-        id=connection_id,
+    from django.contrib.auth import get_user_model
+
+    from apps.harness.provider_accounts import ProviderAccountService
+    from apps.organizations.models import Membership, MembershipRole
+
+    user = get_user_model().objects.get(id=harness_workspace.created_by_id)
+    Membership.objects.get_or_create(
         organization_id=harness_workspace.runner.organization_id,
-        user_id=harness_workspace.created_by_id,
-        auth_type="api_token",
-        label="Claude test",
+        user=user,
+        defaults={"role": MembershipRole.MEMBER},
     )
+    account = ProviderAccountService().save_account(
+        organization_id=harness_workspace.runner.organization_id,
+        user=user,
+        provider="claude-agent",
+        payload={
+            "label": "Claude test",
+            "auth_type": "api_token",
+            "token": "test-claude-token",
+        },
+    )
+    service._engine_connections.connection_id = account.id
     return service.create_session(
         workspace_id=harness_workspace.id,
         organization_id=harness_workspace.runner.organization_id,
         prompt="Summarize the repository",
         mode="build",
         harness_id="claude",
+        connection_id=account.id,
         user_id=harness_workspace.created_by_id,
     )
 
@@ -377,9 +387,7 @@ class FakeClaudeEngine:
         self.behavior = behavior
         self.kwargs = kwargs
 
-    async def _run_shell_task(
-        self, agent, model, mode, opts
-    ) -> None:  # type: ignore[no-untyped-def]
+    async def _run_shell_task(self, agent, model, mode, opts) -> None:  # type: ignore[no-untyped-def]
         """Exercise the real SDK message projector and Bash permission hooks."""
         from claude_agent_sdk._internal.message_parser import parse_message
 
@@ -491,9 +499,7 @@ class FakeClaudeEngine:
 
     async def run(self, prompt, agent, model, mode, opts):  # type: ignore[no-untyped-def]
         if self.behavior == "media_read":
-            allowed = await opts.authorize_file_read(
-                "/workspace/images/approved.png"
-            )
+            allowed = await opts.authorize_file_read("/workspace/images/approved.png")
             assert allowed is True
         if self.behavior in {"ask_permission", "ask_permission_other"}:
             action = (
@@ -584,9 +590,7 @@ class FakeClaudeEngine:
                 steps=1,
                 usage=Usage(3, 2, 5, 0.01),
                 cost=0.01,
-                finish_reason=(
-                    "max_steps" if self.behavior == "max_steps" else "stop"
-                ),
+                finish_reason=("max_steps" if self.behavior == "max_steps" else "stop"),
                 metadata={
                     "harness_id": "claude",
                     "external_session_id": external_id,
@@ -640,20 +644,35 @@ async def _fake_accessor(workspace_id: str) -> FakeAccessor:
 
 
 async def _new_session(service, harness_workspace, *, harness_id="claude"):
-    connection_id = service._engine_connections.connection_id
-    HarnessConnection.objects.create(
-        id=connection_id,
+    from django.contrib.auth import get_user_model
+
+    from apps.harness.provider_accounts import ProviderAccountService
+    from apps.organizations.models import Membership, MembershipRole
+
+    user = get_user_model().objects.get(id=harness_workspace.created_by_id)
+    Membership.objects.get_or_create(
         organization_id=harness_workspace.runner.organization_id,
-        user_id=harness_workspace.created_by_id,
-        auth_type="api_token",
-        label="Claude test",
+        user=user,
+        defaults={"role": MembershipRole.MEMBER},
     )
+    account = ProviderAccountService().save_account(
+        organization_id=harness_workspace.runner.organization_id,
+        user=user,
+        provider="claude-agent",
+        payload={
+            "label": "Claude test",
+            "auth_type": "api_token",
+            "token": "test-claude-token",
+        },
+    )
+    service._engine_connections.connection_id = account.id
     return service.create_session(
         workspace_id=harness_workspace.id,
         organization_id=harness_workspace.runner.organization_id,
         prompt="Summarize the repository",
         mode="build",
         harness_id=harness_id,
+        connection_id=account.id,
         user_id=harness_workspace.created_by_id,
     )
 
@@ -667,11 +686,12 @@ async def test_claude_run_persists_engine_binding_and_secret_free_result(
     session = await _new_session(service, harness_workspace)
 
     assert session.harness_id == "claude"
-    assert session.connection_id == connection_id
+    # The session stores no mutable account pin; each answer freezes selection.
+    assert session.connection_id is None
     assert session.created_by_id == harness_workspace.created_by_id
     assert session.model == "sonnet"
     assert session.reasoning_effort == "high"
-    assert connections.resolutions[0][1] == harness_workspace.created_by_id
+    assert connections.resolutions == []
 
     assistant = await service.start_run(
         session,
@@ -1177,3 +1197,173 @@ async def test_claude_run_hands_the_steering_channel_to_the_engine(
     )
     fresh = HarnessSession.objects.get(id=session.id)
     assert fresh.status == "idle"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_account_revocation_stops_claude_owner_and_releases_attempt(
+    harness_workspace,
+):
+    """A deleted Claude account cancels the engine through its lease cleanup."""
+    from apps.harness.models import ProviderTurn
+    from apps.harness.provider_accounts import ProviderAccountService
+
+    service, registry, _connections, _events = _service(
+        connection_id=uuid.uuid4(), behavior="cancel"
+    )
+    session = await _new_session(service, harness_workspace)
+    assistant = await service.start_run(
+        session, "wait", user_id=harness_workspace.created_by_id
+    )
+    owner = service._tasks[str(session.id)]
+    for _ in range(100):
+        if registry.created:
+            break
+        await asyncio.sleep(0.02)
+    assert registry.created
+    turn = ProviderTurn.objects.get(assistant_message_id=assistant.id)
+    account_id = turn.account_ids["claude-agent"]
+    from asgiref.sync import sync_to_async
+
+    await sync_to_async(ProviderAccountService().delete_account)(
+        session.organization_id, harness_workspace.created_by_id, account_id
+    )
+    try:
+        await asyncio.wait_for(asyncio.shield(owner), timeout=10)
+    except asyncio.CancelledError:
+        pass
+    assistant.refresh_from_db()
+    assert assistant.finish == "aborted"
+    assert "no longer shared" in assistant.error
+    assert (
+        HarnessRunRepository.model.objects.get(assistant_message_id=assistant.id).status
+        == "interrupted"
+    )
+    assert HarnessRunRepository.get_open_for_session(session.id) is None
+    for _ in range(50):
+        turn.refresh_from_db()
+        if not turn.active:
+            break
+        await asyncio.sleep(0.02)
+    assert not turn.active
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_claude_followup_resolves_new_active_account_without_losing_resume(
+    harness_workspace,
+):
+    """The run's auth changes between turns while its external transcript stays."""
+    from apps.harness.provider_accounts import ProviderAccountService
+
+    service, registry, _connections, _events = _service(connection_id=uuid.uuid4())
+    # Use the real account authorization resolver, the execution engine is local.
+    from apps.harness.engines.connections import EngineConnectionService
+
+    session = await _new_session(service, harness_workspace)
+    service._engine_connections = EngineConnectionService()
+    accounts = ProviderAccountService()
+    second = accounts.save_account(
+        organization_id=session.organization_id,
+        user=harness_workspace.created_by,
+        provider="claude-agent",
+        payload={"label": "Second", "auth_type": "api_token", "token": "second-token"},
+    )
+    await service.start_run(session, "first", user_id=harness_workspace.created_by_id)
+    await service._tasks[str(session.id)]
+    session.refresh_from_db()
+    resume = session.external_session_id
+    assert resume
+    accounts.select_account(
+        session.organization_id,
+        harness_workspace.created_by_id,
+        "claude-agent",
+        second.id,
+    )
+    await service.start_run(session, "second", user_id=harness_workspace.created_by_id)
+    await service._tasks[str(session.id)]
+    assert registry.created[0][1]["auth_env"] == {
+        "ANTHROPIC_API_KEY": "test-claude-token"
+    }
+    assert registry.created[1][1]["auth_env"] == {"ANTHROPIC_API_KEY": "second-token"}
+    assert registry.created[1][1]["external_session_id"] == resume
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("behavior", ["success", "error"])
+async def test_late_claude_steer_uses_a_new_provider_turn_after_settlement(
+    harness_workspace, monkeypatch, behavior
+):
+    """Late input survives success/error cleanup without inheriting old accounts."""
+    from apps.harness.engines.connections import EngineConnectionService
+    from apps.harness.models import ProviderTurn
+    from apps.harness.provider_accounts import ProviderAccountService
+
+    service, registry, _connections, _events = _service(
+        connection_id=uuid.uuid4(), behavior=behavior
+    )
+    session = await _new_session(service, harness_workspace)
+    service._engine_connections = EngineConnectionService()
+    accounts = ProviderAccountService()
+    second = accounts.save_account(
+        organization_id=session.organization_id,
+        user=harness_workspace.created_by,
+        provider="claude-agent",
+        payload={"label": "Second", "auth_type": "api_token", "token": "second-token"},
+    )
+    feed_ended = asyncio.Event()
+    release = asyncio.Event()
+    original_run = FakeClaudeEngine.run
+
+    async def hold_first_run(self, prompt, agent, model, mode, opts):
+        if prompt == "first":
+            assert opts.steering is not None
+            opts.steering.end_feed()
+            feed_ended.set()
+            await release.wait()
+        return await original_run(self, prompt, agent, model, mode, opts)
+
+    monkeypatch.setattr(FakeClaudeEngine, "run", hold_first_run)
+    first = await service.start_run(
+        session, "first", user_id=harness_workspace.created_by_id
+    )
+    owner = service._tasks[str(session.id)]
+    await asyncio.wait_for(feed_ended.wait(), timeout=10)
+    first_turn = ProviderTurn.objects.get(assistant_message_id=first.id)
+    accounts.select_account(
+        session.organization_id,
+        harness_workspace.created_by_id,
+        "claude-agent",
+        second.id,
+    )
+    await service.steer_run(
+        session, "after the fact", user_id=harness_workspace.created_by_id
+    )
+    registry.behavior = "success"
+    release.set()
+    await owner
+
+    async with asyncio.timeout(10):
+        while True:
+            messages = HarnessMessageRepository.list_for_session(session.id)
+            if len(messages) == 4 and not service.is_running(session.id):
+                break
+            await asyncio.sleep(0.02)
+
+    assert [message.content for message in messages if message.role == "user"] == [
+        "first",
+        "after the fact",
+    ]
+    first_turn.refresh_from_db()
+    second_turn = ProviderTurn.objects.get(assistant_message_id=messages[-1].id)
+    assert first_turn.id != second_turn.id
+    assert first_turn.account_ids["claude-agent"] != str(second.id)
+    assert second_turn.account_ids["claude-agent"] == str(second.id)
+    assert not first_turn.active and not second_turn.active
+    assert first_turn.holds == second_turn.holds == 0
+    assert registry.created[0][1]["auth_env"] == {
+        "ANTHROPIC_API_KEY": "test-claude-token"
+    }
+    assert registry.created[1][1]["auth_env"] == {"ANTHROPIC_API_KEY": "second-token"}
+    session.refresh_from_db()
+    assert registry.created[1][1]["external_session_id"] == session.external_session_id
+    assert service.list_pending_steers(session.id) == []
+    assert service._provider_turn_roots == {}

@@ -14,3 +14,12 @@ The script creates an empty SQLite database under `e2e/test-results/focused-db`,
 The test-only ASGI module answers only pinned metadata/registration/token requests for the fixture OAuth provider. Playwright intercepts the fixture authorization page and redirects the real API callback with its actual state/code and browser-binding cookie. No production provider or app REST API calls are mocked. Never deploy the fixture module.
 
 Artifacts default to `e2e/test-results/focused-<run-id>`; set `E2E_OUTPUT_DIR` to choose another directory. Review screenshots default to `/workspace/.opencuria/playwright`; set `E2E_SCREENSHOTS_DIR` to choose another directory.
+
+## Provider accounts
+
+Run `e2e/run-provider-accounts.sh` for an independent, disposable database and
+loopback-only LLM endpoint. Ports 8001, 5174 and 8099 must be free. The suite
+exercises the real REST API, account settings, selection, chat replies, deletion
+and organization-share revocation with admin/member browser contexts. Only the
+unused workspace-execution boundary is omitted; no external providers, real keys
+or runner are required. Screenshots are written to `/workspace/.opencuria/playwright`.

@@ -17,6 +17,7 @@ import re
 import uuid
 from dataclasses import replace
 
+from common.exceptions import ConflictError
 from common.utils import decrypt_value
 
 from .repositories import (
@@ -206,6 +207,8 @@ def _workspace_credentials_by_service(
     are ignored, so they surface as missing-required gaps.
     """
     attached = list(workspace.credentials.all().select_related("service"))
+    if any(row.service.credential_type == "provider_secret" for row in attached):
+        raise ConflictError("Internal provider secrets cannot be used by plugins")
     by_service: dict[uuid.UUID, object] = {}
     owner_id = getattr(workspace, "created_by_id", None)
     for credential in attached:

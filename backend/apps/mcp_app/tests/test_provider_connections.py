@@ -12,7 +12,6 @@ from django.contrib.auth import get_user_model
 
 from apps.accounts.models import APIKeyPermission
 from apps.harness.providers.chatgpt_oauth import DeviceFlowStart, OAuthTokens
-from apps.harness.services import ProviderConfigService
 from apps.mcp_app.server import (
     _TOOL_HANDLERS,
     _TOOL_PERMISSIONS,
@@ -20,10 +19,14 @@ from apps.mcp_app.server import (
     _call_chatgpt_oauth_cancel,
     _call_chatgpt_oauth_start,
     _call_chatgpt_oauth_status,
+    _call_delete_provider_account,
     _call_delete_provider_connection,
+    _call_list_provider_accounts,
     _call_list_provider_connections,
     _call_list_provider_models,
+    _call_save_provider_account,
     _call_save_provider_connection,
+    _call_select_provider_account,
 )
 from apps.organizations.models import Membership, MembershipRole, Organization
 
@@ -62,6 +65,10 @@ def test_mcp_provider_tools_registered_with_harness_providers_permission():
     tool_names = {tool.name for tool in _TOOLS}
     for name in [
         "list_provider_connections",
+        "list_provider_accounts",
+        "save_provider_account",
+        "delete_provider_account",
+        "select_provider_account",
         "save_provider_connection",
         "delete_provider_connection",
         "chatgpt_oauth_start",
@@ -88,6 +95,7 @@ def test_mcp_list_provider_connections(provider_mcp_setup):
         "chatgpt",
         "amazon-bedrock",
         "openai-compatible",
+        "claude-agent",
     }
     assert all(not row["connected"] for row in payload)
 
@@ -192,6 +200,7 @@ async def test_mcp_chatgpt_oauth_flow(provider_mcp_setup):
     assert start_body["user_code"] == "MCP-1234"
     assert start_body["interval"] == 5
     assert start_body["expires_in"] == 600
+    flow_id = start_body["flow_id"]
 
     with patch(
         "apps.harness.providers.chatgpt_oauth.poll_device_flow_once",
@@ -200,7 +209,9 @@ async def test_mcp_chatgpt_oauth_flow(provider_mcp_setup):
         from apps.harness.providers.chatgpt_oauth import DeviceFlowPollResult
 
         mock_poll.return_value = DeviceFlowPollResult(status="pending")
-        pending = await _call_chatgpt_oauth_status(api_key, org_id, {})
+        pending = await _call_chatgpt_oauth_status(
+            api_key, org_id, {"flow_id": flow_id}
+        )
     assert _parse_text(pending) == {"status": "pending"}
 
     with patch(
@@ -219,17 +230,22 @@ async def test_mcp_chatgpt_oauth_flow(provider_mcp_setup):
                 residency=None,
             ),
         )
-        connected = await _call_chatgpt_oauth_status(api_key, org_id, {})
+        connected = await _call_chatgpt_oauth_status(
+            api_key, org_id, {"flow_id": flow_id}
+        )
     assert _parse_text(connected) == {
         "status": "connected",
         "account_id": "acc-mcp",
     }
 
-    service = ProviderConfigService()
-    connection = service.get_connection(org_id, "chatgpt")
-    assert connection is not None
-    creds = service.get_connection_credentials(connection)
-    assert creds["access"] == "mcp-access"
+    from apps.harness.provider_accounts import ProviderAccountService
+
+    accounts = ProviderAccountService().list_accounts(
+        org_id, api_key.user.id, "chatgpt"
+    )
+    assert len(accounts) == 1
+    assert accounts[0]["account_id"] == "acc-mcp"
+    assert "mcp-access" not in repr(accounts)
 
     no_flow = await _call_chatgpt_oauth_status(api_key, org_id, {})
     assert _parse_text(no_flow)["status"] == "no_flow"
@@ -244,13 +260,21 @@ async def test_mcp_chatgpt_oauth_flow(provider_mcp_setup):
             verification_url="https://auth.openai.com/codex/device",
             interval=5,
         )
-        await _call_chatgpt_oauth_start(api_key, org_id, {})
+        cancel_start = await _call_chatgpt_oauth_start(api_key, org_id, {})
 
-    cancelled = await _call_chatgpt_oauth_cancel(api_key, org_id, {})
+    cancel_flow_id = _parse_text(cancel_start)["flow_id"]
+    cancelled = await _call_chatgpt_oauth_cancel(
+        api_key, org_id, {"flow_id": cancel_flow_id}
+    )
     assert _parse_text(cancelled) == {"cancelled": True}
-    assert _parse_text(await _call_chatgpt_oauth_status(api_key, org_id, {}))[
-        "status"
-    ] == "no_flow"
+    assert (
+        _parse_text(
+            await _call_chatgpt_oauth_status(
+                api_key, org_id, {"flow_id": cancel_flow_id}
+            )
+        )["status"]
+        == "cancelled"
+    )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -261,7 +285,7 @@ def test_mcp_list_provider_models_includes_provider_field(
     from apps.harness.providers.models_catalog import ProviderModel
 
     class _FakeService:
-        def list_models(self, _org_id):
+        def list_models(self, _org_id, **kwargs):
             return [
                 ProviderModel(
                     id="openrouter/model-a",
@@ -298,3 +322,42 @@ def test_mcp_list_provider_models_includes_provider_field(
     payload = _parse_text(result)
     providers = {row["provider"] for row in payload}
     assert providers == {"openrouter", "amazon-bedrock"}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_mcp_provider_account_tools_scope_and_select(provider_mcp_setup):
+    """MCP account handlers share REST ACLs and return only safe metadata."""
+    api_key = provider_mcp_setup["api_key"]
+    org_id = provider_mcp_setup["org"].id
+    saved = _parse_text(
+        _call_save_provider_account(
+            api_key,
+            org_id,
+            {
+                "provider": "openrouter",
+                "label": "Personal MCP",
+                "api_key": "sk-mcp-private-1234",
+            },
+        )
+    )
+    assert saved["scope"] == "personal"
+    assert saved["api_key_hint"] == "••••1234"
+    assert "sk-mcp-private-1234" not in repr(saved)
+    visible = _parse_text(_call_list_provider_accounts(api_key, org_id, {}))
+    assert [row["id"] for row in visible] == [saved["id"]]
+
+    assert (
+        _parse_text(
+            _call_select_provider_account(
+                api_key,
+                org_id,
+                {"provider": "openrouter", "account_id": None},
+            )
+        )["selected"]
+        is True
+    )
+    deleted = _parse_text(
+        _call_delete_provider_account(api_key, org_id, {"account_id": saved["id"]})
+    )
+    assert deleted["deleted"] is True
+    assert _parse_text(_call_list_provider_accounts(api_key, org_id, {})) == []

@@ -30,6 +30,8 @@ from .models import (
     HarnessMessage,
     HarnessMessageRole,
     HarnessPart,
+    HarnessRun,
+    HarnessRunStatus,
     HarnessSession,
     HarnessSessionStatus,
     ProviderConfig,
@@ -222,67 +224,46 @@ class ProviderConnectionRepository:
         organization_id: uuid.UUID,
         provider: str,
     ) -> ProviderConnection | None:
-        """Fetch a provider connection for an organization and provider."""
-        return ProviderConnection.objects.filter(
-            organization_id=organization_id,
-            provider=provider,
-        ).first()
+        """Return only an unambiguous live org-shared legacy connection."""
+        rows = list(
+            ProviderConnection.objects.filter(
+                organization_id=organization_id,
+                provider=provider,
+                user__isnull=True,
+                deleted_at__isnull=True,
+            ).select_related("credential", "credential__service")[:2]
+        )
+        if len(rows) > 1:
+            raise ValueError(
+                f"Multiple shared accounts exist for provider '{provider}'"
+            )
+        return rows[0] if rows else None
 
     @staticmethod
     def list_by_org(organization_id: uuid.UUID) -> list[ProviderConnection]:
-        """List all provider connections for an organization."""
-        return list(
+        """List org-shared native accounts only, rejecting ambiguous providers."""
+        rows = list(
             ProviderConnection.objects.filter(
                 organization_id=organization_id,
-            ).order_by("provider")
+                user__isnull=True,
+                deleted_at__isnull=True,
+            )
+            .exclude(provider="claude-agent")
+            .select_related("credential", "credential__service")
         )
+        providers = [row.provider for row in rows]
+        if len(providers) != len(set(providers)):
+            raise ValueError(
+                "Multiple shared accounts require an explicit user selection"
+            )
+        return rows
 
     @staticmethod
-    def upsert(
-        organization_id: uuid.UUID,
-        provider: str,
-        credentials_encrypted: str,
-        config: dict | None = None,
-    ) -> ProviderConnection:
-        """Create or update a provider connection for an organization."""
-        connection, _ = ProviderConnection.objects.update_or_create(
-            organization_id=organization_id,
-            provider=provider,
-            defaults={
-                "credentials_encrypted": credentials_encrypted,
-                "config": dict(config or {}),
-            },
-        )
-        return connection
+    def delete_by_org_and_provider(organization_id: uuid.UUID, provider: str) -> bool:
+        """Compatibility deletion with the same revocation fence as account CRUD."""
+        from .provider_accounts import ProviderAccountService
 
-    @staticmethod
-    def update_credentials(
-        organization_id: uuid.UUID,
-        provider: str,
-        credentials_encrypted: str,
-    ) -> ProviderConnection | None:
-        """Update stored credentials for a provider connection."""
-        connection = ProviderConnection.objects.filter(
-            organization_id=organization_id,
-            provider=provider,
-        ).first()
-        if connection is None:
-            return None
-        connection.credentials_encrypted = credentials_encrypted
-        connection.save(update_fields=["credentials_encrypted", "updated_at"])
-        return connection
-
-    @staticmethod
-    def delete_by_org_and_provider(
-        organization_id: uuid.UUID,
-        provider: str,
-    ) -> bool:
-        """Delete a provider connection; return whether a row was removed."""
-        deleted, _ = ProviderConnection.objects.filter(
-            organization_id=organization_id,
-            provider=provider,
-        ).delete()
-        return deleted > 0
+        return ProviderAccountService().delete_legacy_account(organization_id, provider)
 
 
 class RecentModelRepository:

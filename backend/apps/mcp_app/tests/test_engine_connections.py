@@ -128,7 +128,7 @@ def test_claude_mcp_connection_crud_is_personal_and_secret_free(
     assert saved["connected"] is True
     assert token not in json.dumps(saved)
     credential = Credential.objects.get(
-        user=api_key.user, service__slug="claude-agent-api-token"
+        user=api_key.user, service__slug="provider-account-claude-agent"
     )
     assert credential.organization_id is None
     assert EngineConnectionService().resolve(org_id, api_key.user.id).token == token
@@ -158,3 +158,63 @@ def test_claude_mcp_rejects_invalid_modes_and_foreign_organization(
     assert "auth_type" in _payload(response)
     foreign = _call_get_claude_connection(data["api_key"], uuid.uuid4(), {})
     assert "Organization" in _payload(foreign)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_claude_mcp_exact_account_mutations_preserve_active_selection(
+    engine_mcp_setup,
+) -> None:
+    """MCP forwards exact connection IDs just like the REST compatibility API."""
+    from apps.harness.provider_accounts import ProviderAccountService
+
+    data = engine_mcp_setup
+    org_id = data["organization"].id
+    api_key = data["api_key"]
+    accounts = ProviderAccountService()
+    first = accounts.save_account(
+        organization_id=org_id,
+        user=api_key.user,
+        provider="claude-agent",
+        payload={"label": "First", "token": "first-token"},
+    )
+    second = accounts.save_account(
+        organization_id=org_id,
+        user=api_key.user,
+        provider="claude-agent",
+        payload={"label": "Second", "token": "second-token"},
+    )
+    for name in ("save_claude_connection", "delete_claude_connection"):
+        schema = next(tool for tool in _TOOLS if tool.name == name).inputSchema
+        assert "connection_id" in schema["properties"]
+    updated = _payload(
+        _call_save_claude_connection(
+            api_key,
+            org_id,
+            {
+                "connection_id": str(second.id),
+                "auth_type": "api_token",
+                "label": "Updated second",
+                "token": "updated-token",
+            },
+        )
+    )
+    assert updated["id"] == str(second.id)
+    assert accounts.selected_accounts(org_id, api_key.user.id)["claude-agent"].id == (
+        first.id
+    )
+    deleted = _payload(
+        _call_delete_claude_connection(
+            api_key, org_id, {"connection_id": str(second.id)}
+        )
+    )
+    assert deleted == {"deleted": True}
+    assert accounts.selected_accounts(org_id, api_key.user.id)["claude-agent"].id == (
+        first.id
+    )
+    assert "Error:" in _payload(
+        _call_save_claude_connection(
+            api_key,
+            org_id,
+            {"connection_id": str(second.id), "auth_type": "api_token", "token": "x"},
+        )
+    )

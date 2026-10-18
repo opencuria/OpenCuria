@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import asyncio
 
 import pytest
@@ -14,7 +13,6 @@ from apps.harness.providers.resolver import ProviderResolver, StaticModelResolve
 from apps.harness.runner import HarnessRunner, RunOptions
 from apps.harness.services import ProviderConfigService
 from apps.harness.tests.test_runner_loop import FakeProvider, _text_step
-from common.utils import decrypt_value
 
 
 @pytest.mark.django_db
@@ -95,7 +93,7 @@ def test_provider_resolver_chatgpt_token_refresh_persists(organization) -> None:
     asyncio.run(resolver._chatgpt_tokens_refreshed(refreshed))
     connection.refresh_from_db()
     assert connection is not None
-    stored = json.loads(decrypt_value(connection.credentials_encrypted))
+    stored = ProviderConfigService.get_connection_credentials(connection)
     assert stored["access"] == "new-access"
     assert stored["expires"] == 999
 

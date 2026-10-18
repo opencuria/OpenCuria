@@ -573,6 +573,8 @@ class PluginService:
         valid_by_service: dict[uuid.UUID, list] = {}
         for credential in credentials:
             service = credential.service
+            if service.credential_type == "provider_secret":
+                continue
             if service.organization_id not in {None, org_id}:
                 continue
             if credential.user_id is not None:

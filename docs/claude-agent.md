@@ -6,10 +6,12 @@ the selected Linux workspace.
 
 ## Connect and chat
 
-In **Settings → Providers → Claude Agent**, choose **API token** or
-**Subscription token** and paste a token authorized for your own account. There
+In **Settings → Provider & Models → Claude Agent → Manage**, add a named
+account, choose **API token** or **Subscription token**, and paste an authorized
+token. You may keep multiple personal accounts; org admins may share accounts.
+Select the account that new responses should use. There
 is no Anthropic browser sign-in or managed OAuth flow. OpenCuria stores the
-personal token using its encrypted credential store; the UI and APIs return
+token using its encrypted credential store; the UI and APIs return
 connection metadata, not the token. OpenCuria does not refresh tokens or manage
 their expiry; to reconnect, paste a valid token.
 
@@ -32,10 +34,14 @@ sandbox: Plan permission gates do not prevent file changes made through an
 allowed shell command, process, or MCP tool.
 
 API tokens are passed as `ANTHROPIC_API_KEY`; subscription tokens as
-`CLAUDE_CODE_OAUTH_TOKEN`. Connections are personal to their owner within the
-active organization, not shared organization credentials. Scheduled tasks
-resolve the owner's current personal connection at each run and never copy its
-token into a schedule or occurrence snapshot. Existing schedules default to the
+`CLAUDE_CODE_OAUTH_TOKEN`. Accounts are personal within the active organization
+or shared by an org admin.
+The current selection is captured per answer; a follow-up can switch accounts
+without changing an answer already running. Deleting or unsharing a selected
+account cancels affected answers without falling back. See
+[provider accounts](provider-accounts.md) for scope, selection and API details.
+Scheduled tasks resolve the owner's current selected account at each run and
+never copy its token into a schedule or occurrence snapshot. Existing schedules default to the
 native harness. Usage and billing follow the account for the token you provide;
 CLI-reported cost is usage information, not an Anthropic invoice. See Anthropic's
 [Claude Code legal and compliance information](https://docs.anthropic.com/en/docs/claude-code/legal-and-compliance).
@@ -83,8 +89,8 @@ persistent across restarts; the artifact cache is under
 ## Workspace and data
 
 The runner launches the CLI with a minimal `HOME` and `PATH`, the explicit
-harness environment, and one personal credential. Ambient runner credentials
-are not forwarded. OpenCuria passes the credential through the CLI process
+harness environment, and the selected account credential. Ambient runner
+credentials are not forwarded. OpenCuria passes the credential through the CLI process
 environment, not its generated config files, and removes the isolated temporary
 home after confirmed process cleanup.
 

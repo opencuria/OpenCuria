@@ -86,6 +86,26 @@ describe('auth question input cache lifecycle', () => {
     expect(loadQuestionInputCache(otherUserDraft, 1)).toBeNull()
   })
 
+  it('notifies mounted provider catalogs after the new login context is stored', async () => {
+    const auth = useAuthStore()
+    auth.user = user
+    auth.organizations = [orgA]
+    auth.activeOrganizationId = orgA.id
+    localStorage.setItem('kern_user', JSON.stringify(user))
+    localStorage.setItem('kern_active_org_id', orgA.id)
+    getMeMock.mockResolvedValueOnce({ ...nextUser, organizations: [orgA] })
+    const contextAtNotification: string[] = []
+    const onAccountsChanged = () => {
+      contextAtNotification.push(localStorage.getItem('kern_user') ?? '')
+    }
+    window.addEventListener('harness:engine-connection-changed', onAccountsChanged)
+
+    await auth.fetchMe()
+
+    window.removeEventListener('harness:engine-connection-changed', onAccountsChanged)
+    expect(contextAtNotification).toEqual([JSON.stringify(nextUser)])
+  })
+
   it('keeps organization-scoped drafts when switching organizations', () => {
     const auth = useAuthStore()
     auth.user = user

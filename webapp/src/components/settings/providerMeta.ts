@@ -62,7 +62,7 @@ export const PROVIDER_META: ProviderMeta[] = [
   {
     id: 'claude-agent',
     name: 'Claude Agent',
-    description: 'Run the separate Claude Agent harness with your personal Anthropic connection.',
+    description: 'Run the separate Claude Agent harness with an Anthropic account.',
     dialogDescription:
       'Use your own Anthropic API token or subscription token. Usage is billed or governed by Anthropic.',
     disconnectConfirm:

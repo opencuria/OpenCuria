@@ -7,7 +7,6 @@ import json
 import uuid
 from typing import Any
 from unittest.mock import AsyncMock
-from unittest.mock import AsyncMock
 
 import pytest
 from asgiref.sync import sync_to_async
@@ -391,7 +390,7 @@ async def test_rest_create_followup_and_read_projections_keep_claude_engine(
     await _wait_for_completed_messages(service, session_id)
     session = await sync_to_async(HarnessSession.objects.get)(id=session_id)
     assert session.harness_id == "claude"
-    assert session.connection_id == data["connection"].id
+    assert session.connection_id is None
     assert session.created_by_id == data["owner"].id
 
     listed = await client.get(

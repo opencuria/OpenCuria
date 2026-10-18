@@ -15,6 +15,7 @@ import { ApiRequestError } from '@/services/api'
 import { useNotificationStore } from './notifications'
 import { clearWorkspaceDrafts } from '@/lib/workspaceDraft'
 import { clearQuestionInputCaches } from '@/lib/questionInputCache'
+import { notifyProviderCatalogContextChanged } from '@/lib/providerCatalog'
 
 const ACCESS_TOKEN_KEY = 'kern_access_token'
 const REFRESH_TOKEN_KEY = 'kern_refresh_token'
@@ -167,7 +168,8 @@ export const useAuthStore = defineStore('auth', () => {
   async function fetchMe(): Promise<void> {
     try {
       const data = await authApi.getMe()
-      if (user.value && user.value.id !== data.id) {
+      const userChanged = Boolean(user.value && user.value.id !== data.id)
+      if (userChanged) {
         clearWorkspaceDrafts()
         clearQuestionInputCaches()
       }
@@ -190,18 +192,23 @@ export const useAuthStore = defineStore('auth', () => {
       }
 
       // Set active org if not set or invalid
+      let organizationChanged = false
       if (
         !activeOrganizationId.value ||
         !data.organizations.find((o) => o.id === activeOrganizationId.value)
       ) {
         const firstOrganization = data.organizations[0]
         if (firstOrganization) {
-          setActiveOrganization(firstOrganization.id)
+          organizationChanged = activeOrganizationId.value !== firstOrganization.id
+          activeOrganizationId.value = firstOrganization.id
+          localStorage.setItem(ACTIVE_ORG_KEY, firstOrganization.id)
         } else {
+          organizationChanged = Boolean(activeOrganizationId.value)
           activeOrganizationId.value = null
           localStorage.removeItem(ACTIVE_ORG_KEY)
         }
       }
+      if (userChanged || organizationChanged) notifyProviderCatalogContextChanged()
     } catch (e) {
       // Only clear auth state on confirmed auth failures (401 after failed refresh).
       // api.ts already handles 401 by clearing localStorage and redirecting to /login.
@@ -214,9 +221,11 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function setActiveOrganization(orgId: string): void {
-    if (activeOrganizationId.value && activeOrganizationId.value !== orgId) clearWorkspaceDrafts()
+    const changed = Boolean(activeOrganizationId.value && activeOrganizationId.value !== orgId)
+    if (changed) clearWorkspaceDrafts()
     activeOrganizationId.value = orgId
     localStorage.setItem(ACTIVE_ORG_KEY, orgId)
+    if (changed) notifyProviderCatalogContextChanged()
   }
 
   async function createOrganization(name: string): Promise<boolean> {

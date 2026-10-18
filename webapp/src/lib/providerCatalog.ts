@@ -2,7 +2,7 @@
  * Shared provider catalog fetch so chat surfaces reuse one in-flight request.
  */
 
-import { listProviderModels } from '@/services/harness.api'
+import { HARNESS_ENGINE_CONNECTION_CHANGED_EVENT, listProviderModels } from '@/services/harness.api'
 import type { ProviderModel } from './harnessModels'
 
 interface CatalogCacheEntry {
@@ -13,7 +13,17 @@ interface CatalogCacheEntry {
 let cached: CatalogCacheEntry | null = null
 
 function currentContext(): string {
-  return localStorage.getItem('kern_active_org_id') ?? ''
+  const userId = (() => {
+    try {
+      const user = JSON.parse(localStorage.getItem('kern_user') ?? 'null') as {
+        id?: string | number
+      } | null
+      return user?.id == null ? '' : String(user.id)
+    } catch {
+      return ''
+    }
+  })()
+  return `${userId}:${localStorage.getItem('kern_active_org_id') ?? ''}`
 }
 
 /** Load provider models, coalescing concurrent and repeat callers per organization. */
@@ -38,7 +48,19 @@ export function invalidateProviderCatalog(): void {
   cached = null
 }
 
-/** Drop the cached promise (tests only). */
+if (typeof window !== 'undefined') {
+  window.addEventListener(HARNESS_ENGINE_CONNECTION_CHANGED_EVENT, invalidateProviderCatalog)
+}
+
+/** Clear user-context provider data when auth state is discarded. */
 export function resetProviderCatalogCache(): void {
   cached = null
+}
+
+/** Refresh mounted chat surfaces after user or organization context changes. */
+export function notifyProviderCatalogContextChanged(): void {
+  resetProviderCatalogCache()
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(HARNESS_ENGINE_CONNECTION_CHANGED_EVENT))
+  }
 }

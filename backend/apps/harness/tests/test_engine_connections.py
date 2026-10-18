@@ -56,9 +56,10 @@ def test_connection_uses_credential_store_and_safe_list_view(
     credential = Credential.objects.get(id=saved.credential_id)
     assert credential.user_id == connection_owner.id
     assert credential.organization_id is None
-    assert credential.service.slug == "claude-agent-api-token"
+    assert credential.service.slug == "provider-account-claude-agent"
+    assert credential.service.credential_type == "provider_secret"
     assert "secret-api-token" not in credential.encrypted_value
-    assert decrypt_value(credential.encrypted_value) == "secret-api-token"
+    assert decrypt_value(credential.encrypted_value) == '{"token": "secret-api-token"}'
 
     public = service.list_connections(organization.id, connection_owner.id)
     assert public == [
@@ -151,6 +152,41 @@ def test_connection_resolution_is_owner_and_organization_scoped(
 
 
 @pytest.mark.django_db
+def test_connection_resolution_accepts_selected_organization_shared_account(
+    organization, connection_owner
+) -> None:
+    """Shared Claude accounts are scoped by membership, not private owner id."""
+    from apps.harness.provider_accounts import ProviderAccountService
+    from apps.organizations.models import Membership, MembershipRole
+
+    admin = get_user_model().objects.create_user(
+        email=f"admin-{uuid.uuid4().hex[:10]}@example.com", password="secret"
+    )
+    Membership.objects.create(
+        user=admin, organization=organization, role=MembershipRole.ADMIN
+    )
+    accounts = ProviderAccountService()
+    shared = accounts.save_account(
+        organization_id=organization.id,
+        user=admin,
+        provider="claude-agent",
+        payload={
+            "shared": True,
+            "label": "Shared Claude",
+            "auth_type": "api_token",
+            "token": "shared-claude-token",
+        },
+    )
+    accounts.select_account(
+        organization.id, connection_owner.id, "claude-agent", shared.id
+    )
+
+    resolved = EngineConnectionService().resolve(organization.id, connection_owner.id)
+    assert resolved.connection_id == shared.id
+    assert resolved.token == "shared-claude-token"
+
+
+@pytest.mark.django_db
 def test_connection_delete_removes_personal_credential(
     organization, connection_owner
 ) -> None:
@@ -165,3 +201,101 @@ def test_connection_delete_removes_personal_credential(
     service.delete_connection(organization.id, connection_owner.id, connection.id)
     assert not Credential.objects.filter(id=credential_id).exists()
     assert service.list_connections(organization.id, connection_owner.id) == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("select_none", [False, True])
+def test_compatibility_save_preserves_selection_when_updating_inactive_account(
+    organization, connection_owner, select_none
+) -> None:
+    """Saving an exact account is not an implicit active-account selection."""
+    from apps.harness.provider_accounts import ProviderAccountService
+
+    accounts = ProviderAccountService()
+    first = accounts.save_account(
+        organization_id=organization.id,
+        user=connection_owner,
+        provider="claude-agent",
+        payload={"label": "First", "token": "first-secret"},
+    )
+    second = accounts.save_account(
+        organization_id=organization.id,
+        user=connection_owner,
+        provider="claude-agent",
+        payload={"label": "Second", "token": "second-secret"},
+    )
+    if select_none:
+        accounts.select_account(
+            organization.id, connection_owner.id, "claude-agent", None
+        )
+
+    updated = EngineConnectionService().save_connection(
+        organization_id=organization.id,
+        user=connection_owner,
+        connection_id=second.id,
+        auth_type="api_token",
+        token="updated-secret",
+        label="Updated second",
+    )
+
+    assert updated.id == second.id
+    assert accounts.get_credentials(updated)["token"] == "updated-secret"
+    selected = accounts.selected_accounts(organization.id, connection_owner.id)
+    assert {key: row.id for key, row in selected.items()} == (
+        {} if select_none else {"claude-agent": first.id}
+    )
+
+
+@pytest.mark.django_db
+def test_compatibility_create_preserves_explicit_none(
+    organization, connection_owner
+) -> None:
+    """Connecting after opting out must not silently reactivate a provider."""
+    from apps.harness.provider_accounts import ProviderAccountService
+
+    accounts = ProviderAccountService()
+    accounts.select_account(organization.id, connection_owner.id, "claude-agent", None)
+    saved = EngineConnectionService().save_connection(
+        organization_id=organization.id,
+        user=connection_owner,
+        auth_type="api_token",
+        token="new-secret",
+    )
+    assert saved.credential_id is not None
+    assert accounts.selected_accounts(organization.id, connection_owner.id) == {}
+
+
+@pytest.mark.django_db
+def test_compatibility_save_rejects_explicit_shared_account(
+    organization, connection_owner
+) -> None:
+    """An exact shared ID must not silently create a different private account."""
+    from apps.harness.provider_accounts import ProviderAccountService
+
+    membership = MembershipRepository.get_for_user_and_org(
+        connection_owner.id, organization.id
+    )
+    membership.role = MembershipRole.ADMIN
+    membership.save(update_fields=["role"])
+    accounts = ProviderAccountService()
+    shared = accounts.save_account(
+        organization_id=organization.id,
+        user=connection_owner,
+        provider="claude-agent",
+        payload={"label": "Shared", "shared": True, "token": "shared-secret"},
+    )
+
+    with pytest.raises(NotFoundError):
+        EngineConnectionService().save_connection(
+            organization_id=organization.id,
+            user=connection_owner,
+            connection_id=shared.id,
+            auth_type="api_token",
+            token="must-not-create-a-private-copy",
+        )
+
+    assert accounts.get_credentials(shared)["token"] == "shared-secret"
+    assert [
+        row["id"]
+        for row in accounts.list_accounts(organization.id, connection_owner.id)
+    ] == [str(shared.id)]
