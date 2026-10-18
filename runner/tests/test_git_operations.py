@@ -1730,7 +1730,9 @@ class GitDiscoverySecurityTests(unittest.IsolatedAsyncioTestCase):
             _make_repo(os.path.join(tmp, "repo-a"))
             _make_repo(os.path.join(tmp, "repo-b"))
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(ws_id, "list_repos", None, {})
+            result = await service.git.execute_git_operation(
+                ws_id, "list_repos", None, {}
+            )
             self.assertTrue(result["ok"])
             paths = sorted(r["path"] for r in result["repos"])
             self.assertEqual(paths, ["/workspace/repo-a", "/workspace/repo-b"])
@@ -1738,7 +1740,7 @@ class GitDiscoverySecurityTests(unittest.IsolatedAsyncioTestCase):
     async def test_repo_path_outside_workspace_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "working_diff", "/etc/passwd", {}
             )
             self.assertFalse(result["ok"])
@@ -1757,7 +1759,7 @@ class GitDiscoverySecurityTests(unittest.IsolatedAsyncioTestCase):
             _make_repo(os.path.join(tmp, "repo"))
             os.makedirs(os.path.join(tmp, "repo", "sub"), exist_ok=True)
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "working_diff", "/workspace/repo/sub", {}
             )
             self.assertFalse(result["ok"])
@@ -1767,7 +1769,7 @@ class GitDiscoverySecurityTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             os.makedirs(os.path.join(tmp, "plain"), exist_ok=True)
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "working_diff", "/workspace/plain", {}
             )
             self.assertFalse(result["ok"])
@@ -1776,7 +1778,7 @@ class GitDiscoverySecurityTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_operation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(ws_id, "rm -rf", None, {})
+            result = await service.git.execute_git_operation(ws_id, "rm -rf", None, {})
             self.assertFalse(result["ok"])
             self.assertEqual(result["code"], "unknown_operation")
 
@@ -1818,7 +1820,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
             _commit_all(evil_host, "i")
             service, runtime, ws_id = _service_for(tmp)
             before = len(runtime.calls)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "working_diff", "/workspace/evil", {}
             )
             self.assertFalse(result["ok"])
@@ -1826,14 +1828,16 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(_no_external_leak(result, ext, ext_git))
             self.assertIn("/workspace/evil", str(result.get("message", "")))
             self.assertFalse(_had_data_command(runtime, after=before))
-            snap = await service.execute_git_operation(ws_id, "list_repos", None, {})
+            snap = await service.git.execute_git_operation(
+                ws_id, "list_repos", None, {}
+            )
             self.assertTrue(snap["ok"])
             paths = sorted(r["path"] for r in snap["repos"])
             self.assertIn("/workspace/good", paths)
             self.assertNotIn("/workspace/evil", paths)
             # A mutation on the unsafe repo is rejected before any write.
             before_mut = len(runtime.calls)
-            staged = await service.execute_git_operation(
+            staged = await service.git.execute_git_operation(
                 ws_id, "stage", "/workspace/evil", {"paths": ["f.txt"]}
             )
             self.assertFalse(staged["ok"])
@@ -1853,11 +1857,13 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             service, _runtime, ws_id = _service_for(tmp)
             for repo_arg in ("/workspace/main", "/workspace/wt1"):
-                result = await service.execute_git_operation(
+                result = await service.git.execute_git_operation(
                     ws_id, "working_diff", repo_arg, {}
                 )
                 self.assertTrue(result["ok"], f"{repo_arg}: {result}")
-            snap = await service.execute_git_operation(ws_id, "list_repos", None, {})
+            snap = await service.git.execute_git_operation(
+                ws_id, "list_repos", None, {}
+            )
             self.assertTrue(snap["ok"])
             paths = sorted(r["path"] for r in snap["repos"])
             self.assertEqual(paths, ["/workspace/main", "/workspace/wt1"])
@@ -1890,14 +1896,16 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             service, runtime, ws_id = _service_for(tmp)
             before = len(runtime.calls)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "working_diff", "/workspace/linked", {}
             )
             self.assertFalse(result["ok"])
             self.assertEqual(result["code"], "unsafe_repository")
             self.assertTrue(_no_external_leak(result, ext, emain))
             self.assertFalse(_had_data_command(runtime, after=before))
-            snap = await service.execute_git_operation(ws_id, "list_repos", None, {})
+            snap = await service.git.execute_git_operation(
+                ws_id, "list_repos", None, {}
+            )
             self.assertTrue(snap["ok"])
             paths = sorted(r["path"] for r in snap["repos"])
             self.assertIn("/workspace/good", paths)
@@ -1933,14 +1941,16 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
             os.symlink(ext, gitdir_host)
             service, runtime, ws_id = _service_for(tmp)
             before = len(runtime.calls)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "working_diff", "/workspace/victim", {}
             )
             self.assertFalse(result["ok"])
             self.assertIn(result["code"], ("unsafe_repository", "not_a_repo"))
             self.assertTrue(_no_external_leak(result, ext))
             self.assertFalse(_had_data_command(runtime, after=before))
-            snap = await service.execute_git_operation(ws_id, "list_repos", None, {})
+            snap = await service.git.execute_git_operation(
+                ws_id, "list_repos", None, {}
+            )
             self.assertTrue(snap["ok"])
             paths = sorted(r["path"] for r in snap["repos"])
             self.assertIn("/workspace/good", paths)
@@ -1962,14 +1972,16 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
             os.symlink(realrepo, os.path.join(tmp, "linkrepo"))
             service, runtime, ws_id = _service_for(tmp)
             before = len(runtime.calls)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "working_diff", "/workspace/linkrepo", {}
             )
             self.assertFalse(result["ok"])
             self.assertEqual(result["code"], "unsafe_repository")
             self.assertTrue(_no_external_leak(result, ext, realrepo))
             self.assertFalse(_had_data_command(runtime, after=before))
-            snap = await service.execute_git_operation(ws_id, "list_repos", None, {})
+            snap = await service.git.execute_git_operation(
+                ws_id, "list_repos", None, {}
+            )
             self.assertTrue(snap["ok"])
             paths = sorted(r["path"] for r in snap["repos"])
             self.assertIn("/workspace/good", paths)
@@ -2001,7 +2013,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                         runtime_type="docker",
                     )
                     before = len(runtime.calls)
-                    result = await service.execute_git_operation(
+                    result = await service.git.execute_git_operation(
                         ws_id, "working_diff", "/workspace/repo", {}
                     )
                     self.assertFalse(result["ok"], kwargs)
@@ -2029,7 +2041,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                 runtime_type="docker",
             )
             before = len(runtime.calls)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "working_diff", "/workspace/repo", {}
             )
             self.assertFalse(result["ok"])
@@ -2050,7 +2062,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                 status="running",
                 runtime_type="docker",
             )
-            result2 = await service2.execute_git_operation(
+            result2 = await service2.git.execute_git_operation(
                 ws_id2, "working_diff", "/workspace/repo", {}
             )
             self.assertFalse(result2["ok"])
@@ -2072,7 +2084,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                 status="running",
                 runtime_type="docker",
             )
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "working_diff", "/workspace/repo", {}
             )
             self.assertTrue(result["ok"], result)
@@ -2096,7 +2108,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                         runtime_type="docker",
                     )
                     before = len(runtime_bad.calls)
-                    bad = await service_bad.execute_git_operation(
+                    bad = await service_bad.git.execute_git_operation(
                         ws_bad, "working_diff", "/workspace/repo", {}
                     )
                     self.assertFalse(bad["ok"])
@@ -2136,11 +2148,13 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
             _commit_all(main_host, "add sub")
             service, _runtime, ws_id = _service_for(tmp)
             for repo_arg in ("/workspace/main", "/workspace/main/sub"):
-                result = await service.execute_git_operation(
+                result = await service.git.execute_git_operation(
                     ws_id, "working_diff", repo_arg, {}
                 )
                 self.assertTrue(result["ok"], f"{repo_arg}: {result}")
-            snap = await service.execute_git_operation(ws_id, "list_repos", None, {})
+            snap = await service.git.execute_git_operation(
+                ws_id, "list_repos", None, {}
+            )
             self.assertTrue(snap["ok"])
             paths = sorted(r["path"] for r in snap["repos"])
             self.assertIn("/workspace/main", paths)
@@ -2207,7 +2221,9 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
             )
             service, runtime, ws_id = _service_for(tmp)
             before = len(runtime.calls)
-            result = await service.execute_git_operation(ws_id, "list_repos", None, {})
+            result = await service.git.execute_git_operation(
+                ws_id, "list_repos", None, {}
+            )
             self.assertTrue(result["ok"], result)
             self.assertEqual(len(result["repos"]), 1)
             entry = result["repos"][0]
@@ -2234,7 +2250,9 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
             _make_repo(os.path.join(tmp, "repo-a"))
             _make_repo(os.path.join(tmp, "repo-b"))
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(ws_id, "list_repos", None, {})
+            result = await service.git.execute_git_operation(
+                ws_id, "list_repos", None, {}
+            )
             self.assertTrue(result["ok"])
             paths = sorted(r["path"] for r in result["repos"])
             self.assertEqual(paths, ["/workspace/repo-a", "/workspace/repo-b"])
@@ -2256,7 +2274,7 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
             Path(repo, "untracked.txt").write_text("u\n")
 
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "repo_snapshot", _ws_repo(tmp, "repo"), {}
             )
             self.assertTrue(result["ok"], result)
@@ -2282,7 +2300,9 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _make_repo(os.path.join(tmp, "repo"))
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(ws_id, "repo_snapshot", None, {})
+            result = await service.git.execute_git_operation(
+                ws_id, "repo_snapshot", None, {}
+            )
             self.assertFalse(result["ok"])
             self.assertIn(result["code"], ("invalid_argument", "not_a_repo"))
 
@@ -2298,7 +2318,7 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
                     capture_output=True,
                 )
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id,
                 "repo_history",
                 _ws_repo(tmp, "repo"),
@@ -2346,14 +2366,14 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
             )
             service, _runtime, ws_id = _service_for(tmp)
             repo_arg = _ws_repo(tmp, "repo")
-            only_feature = await service.execute_git_operation(
+            only_feature = await service.git.execute_git_operation(
                 ws_id, "repo_history", repo_arg, {"branch": "feature"}
             )
             self.assertTrue(only_feature["ok"], only_feature)
             feature_hashes = {c["hash"] for c in only_feature["commits"]}
             self.assertIn(feature_tip, feature_hashes)
             # main-only page must not contain the feature tip.
-            only_main = await service.execute_git_operation(
+            only_main = await service.git.execute_git_operation(
                 ws_id, "repo_history", repo_arg, {"branch": "main"}
             )
             self.assertTrue(only_main["ok"], only_main)
@@ -2361,7 +2381,7 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
                 feature_tip, {c["hash"] for c in only_main["commits"]}
             )
             # Unknown branch filter is a structured error.
-            bad = await service.execute_git_operation(
+            bad = await service.git.execute_git_operation(
                 ws_id, "repo_history", repo_arg, {"branch": "nope-missing"}
             )
             self.assertFalse(bad["ok"])
@@ -2372,22 +2392,22 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
             repo = _make_repo(os.path.join(tmp, "repo"))
             service, _runtime, ws_id = _service_for(tmp)
             repo_arg = _ws_repo(tmp, "repo")
-            capped = await service.execute_git_operation(
+            capped = await service.git.execute_git_operation(
                 ws_id, "repo_history", repo_arg, {"history_limit": 9999}
             )
             self.assertTrue(capped["ok"], capped)
             self.assertEqual(capped["history_limit"], 500)
-            zero = await service.execute_git_operation(
+            zero = await service.git.execute_git_operation(
                 ws_id, "repo_history", repo_arg, {"history_limit": 0}
             )
             self.assertTrue(zero["ok"], zero)
             self.assertEqual(zero["history_limit"], 1)
-            neg = await service.execute_git_operation(
+            neg = await service.git.execute_git_operation(
                 ws_id, "repo_history", repo_arg, {"history_skip": -5}
             )
             self.assertTrue(neg["ok"], neg)
             self.assertEqual(neg["history_skip"], 0)
-            bad_type = await service.execute_git_operation(
+            bad_type = await service.git.execute_git_operation(
                 ws_id, "repo_history", repo_arg, {"history_limit": "many"}
             )
             self.assertFalse(bad_type["ok"])
@@ -2400,7 +2420,7 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
                 check=True,
                 capture_output=True,
             )
-            empty = await service.execute_git_operation(
+            empty = await service.git.execute_git_operation(
                 ws_id, "repo_history", "/workspace/fresh", {}
             )
             self.assertTrue(empty["ok"], empty)
@@ -2481,7 +2501,7 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
             ).stdout.strip()
 
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "repo_history", _ws_repo(tmp, "repo"), {}
             )
             self.assertTrue(result["ok"], result)
@@ -2513,7 +2533,7 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(entry["base_hash"], main_tip)
             self.assertIn("stash entry", entry["message"])
             # Remote refs still surface via repo_snapshot (not history).
-            snap = await service.execute_git_operation(
+            snap = await service.git.execute_git_operation(
                 ws_id, "repo_snapshot", _ws_repo(tmp, "repo"), {}
             )
             self.assertTrue(snap["ok"], snap)
@@ -2534,7 +2554,7 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
                 capture_output=True,
             )
             service, _runtime, ws_id = _service_for(tmp)
-            listed = await service.execute_git_operation(
+            listed = await service.git.execute_git_operation(
                 ws_id, "list_repos", None, {}
             )
             self.assertTrue(listed["ok"])
@@ -2543,7 +2563,7 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertIsNone(entry["current_branch"])
             self.assertIsNone(entry["head_hash"])
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "repo_snapshot", "/workspace/fresh", {}
             )
             self.assertTrue(result["ok"], result)
@@ -2567,11 +2587,11 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
                 capture_output=True,
             )
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "working_diff", _ws_repo(tmp, "repo"), {}
             )
             self.assertTrue(result["ok"])
-            snap_result = await service.execute_git_operation(
+            snap_result = await service.git.execute_git_operation(
                 ws_id, "list_repos", None, {}
             )
             entry = next(
@@ -2579,7 +2599,7 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertIsNone(entry["current_branch"])
             self.assertEqual(entry["head_hash"], head)
-            snap = await service.execute_git_operation(
+            snap = await service.git.execute_git_operation(
                 ws_id, "repo_snapshot", _ws_repo(tmp, "repo"), {}
             )
             self.assertTrue(snap["ok"], snap)
@@ -2601,7 +2621,7 @@ class GitStashTests(unittest.IsolatedAsyncioTestCase):
                 capture_output=True,
             )
             service, _runtime, ws_id = _service_for(tmp)
-            snap = await service.execute_git_operation(
+            snap = await service.git.execute_git_operation(
                 ws_id, "repo_snapshot", _ws_repo(tmp, "repo"), {}
             )
             self.assertTrue(snap["ok"], snap)
@@ -2612,7 +2632,7 @@ class GitStashTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("stash entry", entry["message"])
             self.assertTrue(entry["hash"])
             self.assertTrue(entry["base_hash"])
-            history = await service.execute_git_operation(
+            history = await service.git.execute_git_operation(
                 ws_id, "repo_history", _ws_repo(tmp, "repo"), {}
             )
             self.assertTrue(history["ok"], history)
@@ -2628,7 +2648,7 @@ class GitStashTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             # Later pages carry no stash copy (snapshot copy is reused).
-            page2 = await service.execute_git_operation(
+            page2 = await service.git.execute_git_operation(
                 ws_id, "repo_history", _ws_repo(tmp, "repo"),
                 {"history_skip": 1, "history_limit": 10},
             )
@@ -2639,7 +2659,7 @@ class GitStashTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(os.path.join(tmp, "repo"))
             service, _runtime, ws_id = _service_for(tmp)
-            snap = await service.execute_git_operation(
+            snap = await service.git.execute_git_operation(
                 ws_id, "repo_snapshot", _ws_repo(tmp, "repo"), {}
             )
             self.assertTrue(snap["ok"], snap)
@@ -2656,7 +2676,7 @@ class GitStashTests(unittest.IsolatedAsyncioTestCase):
                 capture_output=True,
             )
             service, _runtime, ws_id = _service_for(tmp)
-            applied = await service.execute_git_operation(
+            applied = await service.git.execute_git_operation(
                 ws_id, "stash_apply", _ws_repo(tmp, "repo"),
                 {"stash": "stash@{0}"},
             )
@@ -2670,7 +2690,7 @@ class GitStashTests(unittest.IsolatedAsyncioTestCase):
                 check=True,
                 capture_output=True,
             )
-            popped = await service.execute_git_operation(
+            popped = await service.git.execute_git_operation(
                 ws_id, "stash_pop", _ws_repo(tmp, "repo"),
                 {"stash": "stash@{0}"},
             )
@@ -2697,7 +2717,7 @@ class GitStashTests(unittest.IsolatedAsyncioTestCase):
                 capture_output=True,
             )
             service, _runtime, ws_id = _service_for(tmp)
-            dropped = await service.execute_git_operation(
+            dropped = await service.git.execute_git_operation(
                 ws_id, "stash_drop", _ws_repo(tmp, "repo"),
                 {"stash": "stash@{0}"},
             )
@@ -2706,7 +2726,7 @@ class GitStashTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(remaining), 1)
             self.assertEqual(remaining[0]["selector"], "stash@{0}")
             self.assertIn("entry one", remaining[0]["message"])
-            branched = await service.execute_git_operation(
+            branched = await service.git.execute_git_operation(
                 ws_id, "stash_branch", _ws_repo(tmp, "repo"),
                 {"stash": "stash@{0}", "branch": "from-stash"},
             )
@@ -2719,19 +2739,19 @@ class GitStashTests(unittest.IsolatedAsyncioTestCase):
             repo = _make_repo(os.path.join(tmp, "repo"))
             service, _runtime, ws_id = _service_for(tmp)
             for operation in ("stash_apply", "stash_pop", "stash_drop"):
-                result = await service.execute_git_operation(
+                result = await service.git.execute_git_operation(
                     ws_id, operation, _ws_repo(tmp, "repo"),
                     {"stash": "stash@{0}; rm -rf /"},
                 )
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["code"], "invalid_argument")
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "stash_branch", _ws_repo(tmp, "repo"),
                 {"stash": "stash@{0}", "branch": ""},
             )
             self.assertFalse(result["ok"])
             # Unknown operation-specific keys stay rejected (allow-list).
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "stash_drop", _ws_repo(tmp, "repo"),
                 {"stash": "stash@{0}", "env": {}},
             )
@@ -2762,7 +2782,7 @@ class GitStashTests(unittest.IsolatedAsyncioTestCase):
             )
             Path(repo, "README.md").write_text("# local\n")
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "stash_pop", _ws_repo(tmp, "repo"),
                 {"stash": "stash@{0}"},
             )
@@ -2788,7 +2808,7 @@ class GitStashTests(unittest.IsolatedAsyncioTestCase):
                 capture_output=True,
             )
             Path(repo, "README.md").write_text("# local change\n")
-            conflict = await service.execute_git_operation(
+            conflict = await service.git.execute_git_operation(
                 ws_id, "stash_pop", _ws_repo(tmp, "repo"),
                 {"stash": "stash@{0}"},
             )
@@ -2804,7 +2824,7 @@ class GitDiffTests(unittest.IsolatedAsyncioTestCase):
             subprocess.run(["git", "-C", repo, "add", "staged.txt"], check=True)
             Path(repo, "README.md").write_text("# changed\nline\n")
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "working_diff", _ws_repo(tmp, "repo"), {}
             )
             self.assertTrue(result["ok"])
@@ -2821,7 +2841,7 @@ class GitDiffTests(unittest.IsolatedAsyncioTestCase):
             repo = _make_repo(os.path.join(tmp, "repo"))
             Path(repo, "notes.txt").write_text("hello\nworld\n")
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "working_diff", _ws_repo(tmp, "repo"), {}
             )
             self.assertTrue(result["ok"])
@@ -2838,7 +2858,7 @@ class GitDiffTests(unittest.IsolatedAsyncioTestCase):
             Path(repo, "blob.bin").write_bytes(bytes(range(256)) * 64)
             subprocess.run(["git", "-C", repo, "add", "blob.bin"], check=True)
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "working_diff", _ws_repo(tmp, "repo"), {}
             )
             self.assertTrue(result["ok"])
@@ -2878,7 +2898,7 @@ class GitDiffTests(unittest.IsolatedAsyncioTestCase):
                 check=True,
             ).stdout.strip()
             service, _runtime, ws_id = _service_for(tmp)
-            details = await service.execute_git_operation(
+            details = await service.git.execute_git_operation(
                 ws_id,
                 "commit_details",
                 _ws_repo(tmp, "repo"),
@@ -2889,7 +2909,7 @@ class GitDiffTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(details["details"]["message"], "second subject")
             self.assertIn("body line", details["details"]["body"])
             self.assertTrue(details["details"]["file_changes"])
-            root_details = await service.execute_git_operation(
+            root_details = await service.git.execute_git_operation(
                 ws_id,
                 "commit_details",
                 _ws_repo(tmp, "repo"),
@@ -2902,7 +2922,7 @@ class GitDiffTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _make_repo(os.path.join(tmp, "repo"))
             service, runtime, ws_id = _service_for(tmp)
-            await service.execute_git_operation(
+            await service.git.execute_git_operation(
                 ws_id, "working_diff", _ws_repo(tmp, "repo"), {}
             )
             for argv, _workdir, _env in runtime.calls:
@@ -2934,7 +2954,7 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
             service, _runtime, ws_id = _service_for(tmp)
             repo_arg = _ws_repo(tmp, "repo")
 
-            staged = await service.execute_git_operation(
+            staged = await service.git.execute_git_operation(
                 ws_id, "stage", repo_arg, {"paths": ["work.txt"]}
             )
             self.assertTrue(staged["ok"])
@@ -2943,7 +2963,7 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
             entry = next(c for c in snap["changes"] if c["path"] == "work.txt")
             self.assertTrue(entry["staged"])
 
-            unstaged = await service.execute_git_operation(
+            unstaged = await service.git.execute_git_operation(
                 ws_id, "unstage", repo_arg, {"paths": ["work.txt"]}
             )
             self.assertTrue(unstaged["ok"])
@@ -2954,7 +2974,7 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
 
             # Discard a tracked modification.
             Path(repo, "README.md").write_text("# dirty\n")
-            discarded = await service.execute_git_operation(
+            discarded = await service.git.execute_git_operation(
                 ws_id, "discard", repo_arg, {"paths": ["README.md"]}
             )
             self.assertTrue(discarded["ok"])
@@ -2963,7 +2983,7 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
             # Discard an untracked file removes exactly that path.
             Path(repo, "trash.txt").write_text("x\n")
             Path(repo, "keep.txt").write_text("keep\n")
-            discarded2 = await service.execute_git_operation(
+            discarded2 = await service.git.execute_git_operation(
                 ws_id, "discard", repo_arg, {"paths": ["trash.txt"]}
             )
             self.assertTrue(discarded2["ok"])
@@ -2972,10 +2992,10 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
 
             # Commit only the index.
             Path(repo, "commit-me.txt").write_text("c\n")
-            await service.execute_git_operation(
+            await service.git.execute_git_operation(
                 ws_id, "stage", repo_arg, {"paths": ["commit-me.txt"]}
             )
-            committed = await service.execute_git_operation(
+            committed = await service.git.execute_git_operation(
                 ws_id,
                 "commit",
                 repo_arg,
@@ -2999,10 +3019,10 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
             repo = _make_repo(os.path.join(tmp, "repo"))
             Path(repo, "a.txt").write_text("a\n")
             service, runtime, ws_id = _service_for(tmp)
-            await service.execute_git_operation(
+            await service.git.execute_git_operation(
                 ws_id, "stage", _ws_repo(tmp, "repo"), {"paths": ["a.txt"]}
             )
-            await service.execute_git_operation(
+            await service.git.execute_git_operation(
                 ws_id, "commit", _ws_repo(tmp, "repo"), {"message": "m1"}
             )
             commit_argv = next(
@@ -3062,11 +3082,11 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
         Path(repo, "next.txt").write_text("next\n")
         service, runtime, ws_id = _service_for(tmpdir)
         repo_arg = _ws_repo(tmpdir, "repo")
-        staged = await service.execute_git_operation(
+        staged = await service.git.execute_git_operation(
             ws_id, "stage", repo_arg, {"paths": ["next.txt"]}
         )
         self.assertTrue(staged["ok"])
-        result = await service.execute_git_operation(
+        result = await service.git.execute_git_operation(
             ws_id,
             "commit",
             repo_arg,
@@ -3140,11 +3160,11 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
             repo = _make_repo(os.path.join(tmp, "repo"))
             Path(repo, "a.txt").write_text("a\n")
             service, _runtime, ws_id = _service_for(tmp)
-            await service.execute_git_operation(
+            await service.git.execute_git_operation(
                 ws_id, "stage", _ws_repo(tmp, "repo"), {"paths": ["a.txt"]}
             )
             evil = "fix '; rm -rf /; echo '"
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "commit", _ws_repo(tmp, "repo"), {"message": evil}
             )
             self.assertTrue(result["ok"])
@@ -3175,7 +3195,7 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
             )
             Path(repo_dir, "a.txt").write_text("a\n")
             service, _runtime, ws_id = _service_for(tmp)
-            staged = await service.execute_git_operation(
+            staged = await service.git.execute_git_operation(
                 ws_id, "stage", "/workspace/fresh", {"paths": ["a.txt"]}
             )
             self.assertTrue(staged["ok"])
@@ -3190,7 +3210,7 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
                 return await original_exec(instance_id, command, **kwargs)
 
             _runtime.exec_command_wait = changed_diagnostic
-            unstaged = await service.execute_git_operation(
+            unstaged = await service.git.execute_git_operation(
                 ws_id, "unstage", "/workspace/fresh", {"paths": ["a.txt"]}
             )
             self.assertTrue(unstaged["ok"], unstaged)
@@ -3203,7 +3223,7 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
             service, _runtime, ws_id = _service_for(tmp)
             repo_arg = _ws_repo(tmp, "repo")
 
-            created = await service.execute_git_operation(
+            created = await service.git.execute_git_operation(
                 ws_id, "create_branch", repo_arg, {"branch": "feature/a"}
             )
             self.assertTrue(created["ok"])
@@ -3211,23 +3231,23 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
                 any(b["name"] == "feature/a" for b in created["snapshot"]["branches"])
             )
 
-            checked = await service.execute_git_operation(
+            checked = await service.git.execute_git_operation(
                 ws_id, "checkout_branch", repo_arg, {"branch": "feature/a"}
             )
             self.assertTrue(checked["ok"])
             self.assertEqual(checked["snapshot"]["current_branch"], "feature/a")
 
-            renamed = await service.execute_git_operation(
+            renamed = await service.git.execute_git_operation(
                 ws_id, "rename_branch", repo_arg, {"new_branch": "feature/b"}
             )
             self.assertTrue(renamed["ok"])
             self.assertEqual(renamed["snapshot"]["current_branch"], "feature/b")
 
-            back = await service.execute_git_operation(
+            back = await service.git.execute_git_operation(
                 ws_id, "checkout_branch", repo_arg, {"branch": "main"}
             )
             self.assertTrue(back["ok"])
-            deleted = await service.execute_git_operation(
+            deleted = await service.git.execute_git_operation(
                 ws_id, "delete_branch", repo_arg, {"branch": "feature/b"}
             )
             self.assertTrue(deleted["ok"])
@@ -3240,7 +3260,7 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
             _make_repo(os.path.join(tmp, "repo"))
             service, runtime, ws_id = _service_for(tmp)
             before = len(runtime.calls)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id,
                 "create_branch",
                 _ws_repo(tmp, "repo"),
@@ -3260,7 +3280,7 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _make_repo(os.path.join(tmp, "repo"))
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "delete_branch", _ws_repo(tmp, "repo"), {"branch": "main"}
             )
             self.assertFalse(result["ok"])
@@ -3287,7 +3307,7 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
                 capture_output=True,
             )
             service, _runtime, ws_id = _service_for(tmp)
-            merged = await service.execute_git_operation(
+            merged = await service.git.execute_git_operation(
                 ws_id,
                 "merge_into_current",
                 _ws_repo(tmp, "repo"),
@@ -3324,14 +3344,14 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
             )
             service, _runtime, ws_id = _service_for(tmp)
             repo_arg = _ws_repo(tmp, "repo")
-            merged = await service.execute_git_operation(
+            merged = await service.git.execute_git_operation(
                 ws_id, "merge_into_current", repo_arg, {"branch": "side"}
             )
             self.assertFalse(merged["ok"])
             self.assertEqual(merged["code"], "conflict")
             self.assertTrue(merged.get("conflict"))
             self.assertIn("snapshot", merged)
-            aborted = await service.execute_git_operation(
+            aborted = await service.git.execute_git_operation(
                 ws_id, "merge_abort", repo_arg, {}
             )
             self.assertTrue(aborted["ok"])
@@ -3357,7 +3377,7 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
                 capture_output=True,
             )
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id,
                 "merge_current_into",
                 _ws_repo(tmp, "repo"),
@@ -3400,7 +3420,7 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
                 capture_output=True,
             )
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id,
                 "merge_current_into",
                 _ws_repo(tmp, "repo"),
@@ -3427,7 +3447,7 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
                 check=True,
             ).stdout.strip()
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id,
                 "checkout_commit",
                 _ws_repo(tmp, "repo"),
@@ -3457,7 +3477,9 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
             )
             service, _runtime, ws_id = _service_for(tmp)
             repo_arg = _ws_repo(tmp, "repo")
-            fetched = await service.execute_git_operation(ws_id, "fetch", repo_arg, {})
+            fetched = await service.git.execute_git_operation(
+                ws_id, "fetch", repo_arg, {}
+            )
             self.assertTrue(fetched["ok"])
             Path(repo, "more.txt").write_text("more\n")
             subprocess.run(["git", "-C", repo, "add", "more.txt"], check=True)
@@ -3466,11 +3488,17 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
                 check=True,
                 capture_output=True,
             )
-            pushed = await service.execute_git_operation(ws_id, "push", repo_arg, {})
+            pushed = await service.git.execute_git_operation(
+                ws_id, "push", repo_arg, {}
+            )
             self.assertTrue(pushed["ok"])
-            pulled = await service.execute_git_operation(ws_id, "pull", repo_arg, {})
+            pulled = await service.git.execute_git_operation(
+                ws_id, "pull", repo_arg, {}
+            )
             self.assertTrue(pulled["ok"])
-            synced = await service.execute_git_operation(ws_id, "sync", repo_arg, {})
+            synced = await service.git.execute_git_operation(
+                ws_id, "sync", repo_arg, {}
+            )
             self.assertTrue(synced["ok"])
 
     def _push_argv_calls(self, runtime: FakeGitRuntime) -> list[list[str]]:
@@ -3509,7 +3537,9 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
             )
             service, runtime, ws_id = _service_for(tmp)
             repo_arg = _ws_repo(tmp, "repo")
-            result = await service.execute_git_operation(ws_id, "push", repo_arg, {})
+            result = await service.git.execute_git_operation(
+                ws_id, "push", repo_arg, {}
+            )
             self.assertTrue(result["ok"], msg=str(result))
             push_calls = self._push_argv_calls(runtime)
             self.assertEqual(push_calls, [["git", "push"]])
@@ -3527,7 +3557,9 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
             )
             service, runtime, ws_id = _service_for(tmp)
             repo_arg = _ws_repo(tmp, "repo")
-            result = await service.execute_git_operation(ws_id, "push", repo_arg, {})
+            result = await service.git.execute_git_operation(
+                ws_id, "push", repo_arg, {}
+            )
             self.assertTrue(result["ok"], msg=str(result))
             push_calls = self._push_argv_calls(runtime)
             self.assertEqual(push_calls, [["git", "push", "-u", "origin", "main"]])
@@ -3573,7 +3605,7 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
             )
             service, runtime, ws_id = _service_for(tmp)
             repo_arg = _ws_repo(tmp, "repo")
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "push", repo_arg, {"remote": "fork"}
             )
             self.assertTrue(result["ok"], msg=str(result))
@@ -3606,7 +3638,7 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
             )
             service, runtime, ws_id = _service_for(tmp)
             repo_arg = _ws_repo(tmp, "repo")
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id,
                 "push",
                 repo_arg,
@@ -3646,7 +3678,7 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
                 capture_output=True,
             )
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "push", _ws_repo(tmp, "repo"), {}
             )
             self.assertFalse(result["ok"])
@@ -3661,7 +3693,7 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
                 capture_output=True,
             )
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "pull", _ws_repo(tmp, "repo"), {}
             )
             self.assertFalse(result["ok"])
@@ -3676,7 +3708,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
             _make_repo(os.path.join(tmp, "repo"))
             service, runtime, ws_id = _service_for(tmp)
             before = len(runtime.calls)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id,
                 "working_diff",
                 _ws_repo(tmp, "repo"),
@@ -3715,7 +3747,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
             ]
             for operation, repo, args in cases:
                 before = len(runtime.calls)
-                result = await service.execute_git_operation(
+                result = await service.git.execute_git_operation(
                     ws_id,
                     operation,
                     repo,
@@ -3733,10 +3765,10 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
             # Commit keeps backend-injected identity keys allowed.
             before_ok = len(runtime.calls)
             Path(os.path.join(tmp, "repo", "strict-ok.txt")).write_text("x\n")
-            await service.execute_git_operation(
+            await service.git.execute_git_operation(
                 ws_id, "stage", repo_arg, {"paths": ["strict-ok.txt"]}
             )
-            ok_result = await service.execute_git_operation(
+            ok_result = await service.git.execute_git_operation(
                 ws_id,
                 "commit",
                 repo_arg,
@@ -3766,7 +3798,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
             service, runtime, ws_id = _service_for(tmp)
             repo_arg = _ws_repo(tmp, "repo")
             Path(repo, "au.txt").write_text("a\n")
-            await service.execute_git_operation(
+            await service.git.execute_git_operation(
                 ws_id, "stage", repo_arg, {"paths": ["au.txt"]}
             )
             cases = [
@@ -3789,7 +3821,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
             ]
             for args in cases:
                 before = len(runtime.calls)
-                result = await service.execute_git_operation(
+                result = await service.git.execute_git_operation(
                     ws_id, "commit", repo_arg, dict(args)
                 )
                 self.assertFalse(result["ok"], msg=str(args))
@@ -3806,7 +3838,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _make_repo(os.path.join(tmp, "repo"))
             service, runtime, ws_id = _service_for(tmp)
-            await service.execute_git_operation(
+            await service.git.execute_git_operation(
                 ws_id,
                 "working_diff",
                 _ws_repo(tmp, "repo"),
@@ -3879,7 +3911,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
                 status="running",
                 runtime_type="docker",
             )
-            await service.execute_git_operation(
+            await service.git.execute_git_operation(
                 ws_id,
                 "working_diff",
                 _ws_repo(tmp, "repo"),
@@ -3938,7 +3970,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
                 status="running",
                 runtime_type="docker",
             )
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "working_diff", "/workspace/repo", {}
             )
             # Resolution itself needs git; any structured failure is fine.
@@ -3950,7 +3982,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
             _make_repo(os.path.join(tmp, "repo"))
             service, runtime, ws_id = _service_for(tmp)
             before = len(runtime.calls)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "pull", _ws_repo(tmp, "repo"), {"branch": "main"}
             )
             self.assertFalse(result["ok"])
@@ -3993,7 +4025,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
                 status="running",
                 runtime_type="docker",
             )
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "working_diff", "/workspace/repo", {}
             )
             # Exit 0 with "not found" text is a normal result, not missing_git.
@@ -4027,7 +4059,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
                 status="running",
                 runtime_type="docker",
             )
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "working_diff", "/workspace/repo", {}
             )
             # Exit 1 with "not found" text is a normal git failure, not missing_git.
@@ -4062,7 +4094,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
                 status="running",
                 runtime_type="docker",
             )
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id, "working_diff", "/workspace/repo", {}
             )
             self.assertFalse(result["ok"])
@@ -4077,11 +4109,11 @@ class GitSerialisationTests(unittest.IsolatedAsyncioTestCase):
             runtime.hold_release = asyncio.Event()
             repo_arg = _ws_repo(tmp, "repo")
             first = asyncio.create_task(
-                service.execute_git_operation(ws_id, "working_diff", repo_arg, {})
+                service.git.execute_git_operation(ws_id, "working_diff", repo_arg, {})
             )
             await asyncio.sleep(0.2)
             second = asyncio.create_task(
-                service.execute_git_operation(ws_id, "working_diff", repo_arg, {})
+                service.git.execute_git_operation(ws_id, "working_diff", repo_arg, {})
             )
             await asyncio.sleep(0.2)
             # The second op must wait behind the first's status call.
@@ -4171,11 +4203,13 @@ class GitWebsocketTests(unittest.IsolatedAsyncioTestCase):
     async def test_git_operation_cancel(self) -> None:
         service = WorkspaceService(runtimes={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
 
-        async def _slow(*args, **kwargs):
-            await asyncio.sleep(30)
-            return {"ok": True}  # pragma: no cover
+        started = asyncio.Event()
 
-        service.execute_git_operation = _slow  # type: ignore[assignment]
+        async def _slow(*args, **kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        service.git.execute_git_operation = _slow  # type: ignore[assignment]
         interface = _ws_interface(service)
         ws_id = uuid.uuid4()
         handler = interface._sio.handlers["/"]["git:operation"]
@@ -4188,16 +4222,14 @@ class GitWebsocketTests(unittest.IsolatedAsyncioTestCase):
                 "args": {},
             }
         )
-        self.assertIn("git:git-cancel", interface._running_tasks)
+        task = interface._running_tasks["git:git-cancel"]
+        await asyncio.wait_for(started.wait(), timeout=1)
         cancel = interface._sio.handlers["/"]["harness:cancel"]
         await cancel({"request_id": "git-cancel"})
-        task = interface._running_tasks.get("git:git-cancel")
-        if task is not None:  # pragma: no branch
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        with self.assertRaises(asyncio.CancelledError):
+            await task
         self.assertNotIn("git:git-cancel", interface._running_tasks)
+        interface._sio.emit.assert_not_awaited()
 
     async def test_git_operation_network_timeout_registered(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4260,7 +4292,7 @@ class GitCheckoutRemoteBranchTests(unittest.IsolatedAsyncioTestCase):
             )
             _git_config_identity(clone)
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id,
                 "checkout_remote_branch",
                 _ws_repo(tmp, "clone"),
@@ -4276,7 +4308,7 @@ class GitCheckoutRemoteBranchTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             # Idempotent: existing local branch just checks out.
-            again = await service.execute_git_operation(
+            again = await service.git.execute_git_operation(
                 ws_id,
                 "checkout_remote_branch",
                 _ws_repo(tmp, "clone"),
@@ -4285,7 +4317,7 @@ class GitCheckoutRemoteBranchTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(again["ok"], again)
             self.assertEqual(again["snapshot"]["current_branch"], "shared")
             # Explicit local_name override.
-            renamed = await service.execute_git_operation(
+            renamed = await service.git.execute_git_operation(
                 ws_id,
                 "checkout_remote_branch",
                 _ws_repo(tmp, "clone"),
@@ -4338,7 +4370,7 @@ class GitCheckoutRemoteBranchTests(unittest.IsolatedAsyncioTestCase):
             )
             _git_config_identity(clone)
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id,
                 "checkout_remote_branch",
                 _ws_repo(tmp, "clone"),
@@ -4364,7 +4396,7 @@ class GitCheckoutRemoteBranchTests(unittest.IsolatedAsyncioTestCase):
             )
             service, runtime, ws_id = _service_for(tmp)
             repo_arg = _ws_repo(tmp, "repo")
-            missing = await service.execute_git_operation(
+            missing = await service.git.execute_git_operation(
                 ws_id,
                 "checkout_remote_branch",
                 repo_arg,
@@ -4374,7 +4406,7 @@ class GitCheckoutRemoteBranchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(missing["code"], "unknown_branch")
             for bad in ("noslash", "-origin/x", "", "origin/"):
                 before = len(runtime.calls)
-                bad_result = await service.execute_git_operation(
+                bad_result = await service.git.execute_git_operation(
                     ws_id,
                     "checkout_remote_branch",
                     repo_arg,
@@ -4425,7 +4457,7 @@ class GitCheckoutRemoteBranchTests(unittest.IsolatedAsyncioTestCase):
             # Dirty tracked modification that checkout would overwrite.
             Path(clone, "README.md").write_text("# dirty-local\n")
             service, _runtime, ws_id = _service_for(tmp)
-            result = await service.execute_git_operation(
+            result = await service.git.execute_git_operation(
                 ws_id,
                 "checkout_remote_branch",
                 _ws_repo(tmp, "clone"),
@@ -4591,11 +4623,13 @@ class GitWebsocketValidationTests(unittest.IsolatedAsyncioTestCase):
     async def test_duplicate_request_id_rejected_conflict(self) -> None:
         service = WorkspaceService(runtimes={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
 
-        async def _slow(*args, **kwargs):
-            await asyncio.sleep(30)
-            return {"ok": True}  # pragma: no cover
+        started = asyncio.Event()
 
-        service.execute_git_operation = _slow  # type: ignore[assignment]
+        async def _slow(*args, **kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        service.git.execute_git_operation = _slow  # type: ignore[assignment]
         interface = _ws_interface(service)
         ws_id = uuid.uuid4()
         handler = interface._sio.handlers["/"]["git:operation"]
@@ -4608,8 +4642,8 @@ class GitWebsocketValidationTests(unittest.IsolatedAsyncioTestCase):
                 "args": {},
             }
         )
-        first = interface._running_tasks.get("git:git-dup")
-        self.assertIsNotNone(first)
+        first = interface._running_tasks["git:git-dup"]
+        await asyncio.wait_for(started.wait(), timeout=1)
         # Second request with the same ID must not overwrite the task
         # (cancel ambiguity) — it gets a structured conflict instead.
         await handler(
@@ -4631,13 +4665,10 @@ class GitWebsocketValidationTests(unittest.IsolatedAsyncioTestCase):
         # Cleanup: cancel still resolves to no leak and no final result.
         cancel = interface._sio.handlers["/"]["harness:cancel"]
         await cancel({"request_id": "git-dup"})
-        task = interface._running_tasks.get("git:git-dup")
-        if task is not None:  # pragma: no branch
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        with self.assertRaises(asyncio.CancelledError):
+            await first
         self.assertNotIn("git:git-dup", interface._running_tasks)
+        interface._sio.emit.assert_awaited_once()
 
     async def test_result_echo_keys_cannot_be_overridden(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4653,7 +4684,7 @@ class GitWebsocketValidationTests(unittest.IsolatedAsyncioTestCase):
                     "diff": {},
                 }
 
-            service.execute_git_operation = _evil  # type: ignore[assignment]
+            service.git.execute_git_operation = AsyncMock(side_effect=_evil)
             interface = _ws_interface(service)
             handler = interface._sio.handlers["/"]["git:operation"]
             await handler(
@@ -4673,6 +4704,9 @@ class GitWebsocketValidationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["request_id"], "git-echo")
             self.assertEqual(payload["workspace_id"], str(ws_id))
             self.assertEqual(payload["operation"], "working_diff")
+            service.git.execute_git_operation.assert_awaited_once_with(
+                ws_id, "working_diff", "/workspace/repo", {}
+            )
 
     async def test_harness_cancel_empty_request_id_no_touch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,47 +1,8 @@
-"""Full git orchestration (Step 7 services group).
+"""Workspace Git orchestration: discovery, reads, mutations, and repo locks.
 
-Canonical home for the git orchestration previously living on
-``WorkspaceService`` in :mod:`src.service`:
-
-- the ``_git_lock_map`` keyed lock map (never-evict semantics;
-  ``_git_locks`` / ``_git_locks_guard`` stay readable/writable as live
-  aliases onto the map's dict/guard so ``WorkspaceService`` property
-  aliases and tests poking ``service._git_locks[...]`` keep working),
-- ``_git_exec`` / ``_git_realpath_contained`` /
-  ``_git_verify_metadata_paths`` / ``_git_verify_repo_root`` /
-  ``_git_resolve_repo_root`` / ``_git_discover_repos`` /
-  ``list_git_repositories``,
-- snapshot / diff / history assembly (``_git_list_entry``,
-  ``_git_repo_snapshot_no_log``, ``_git_repo_history``,
-  ``_git_merge_state``, ``_git_working_diff``, ``_git_diff_paths``,
-  ``_git_diff_numstat_raw``, ``_git_join_diff_parts``,
-  ``_git_untracked_entry``, ``_git_untracked_fallback``,
-  ``_git_commit_details``),
-- the RPC entry point (``execute_git_operation`` /
-  ``_execute_git_operation_inner``) plus every ``_git_op_*`` mutation /
-  read / network / branch / merge helper.
-
-``src.git`` stays the pure lib (argv builders, wrappers, validation,
-parsing, env, askpass); all runtime interaction and serialisation
-lives here, imported as ``git_ops`` (same as ``src.service`` did).
-
-``WorkspaceService`` keeps thin delegates (same names/signatures/
-messages) plus a ``git`` property onto the manager and
-``_git_lock_map`` / ``_git_locks`` / ``_git_locks_guard`` aliases, so
-existing callers and tests keep working.
-
-Workspace resolution is injected so this module never imports
-``src.service`` (no dependency cycle):
-
-- ``runtimes``: runtime backends by type (kept for introspection;
-  resolution itself goes through the callables below).
-- ``get_cached``: ``(workspace_id) -> WorkspaceInfo``; raises
-  ``ValueError("... not found")`` for unknown ids.
-- ``get_runtime``: ``(workspace_id) -> RuntimeBackend``; raises
-  ``RuntimeError`` for unknown runtimes.
-
-Extraction owner: Step 7 (verbatim move; ``Step 5`` lock mechanics via
-the canonical ``src.services.exec_kernel.KeyedLockMap`` are preserved).
+``src.git`` provides pure argv builders, validation, parsing, and auth helpers.
+This service owns runtime interaction and serialisation; workspace and runtime
+lookups are injected by the runner composition.
 """
 
 from __future__ import annotations
@@ -67,10 +28,8 @@ logger = structlog.get_logger(__name__)
 class GitService:
     """Owns git orchestration for workspace repositories.
 
-    Injected dependencies (all mirror ``WorkspaceService`` helpers):
+    Injected workspace lookups:
 
-    - ``runtimes``: runtime backends by type (kept for introspection;
-      resolution itself goes through the callables below).
     - ``get_cached``: ``(workspace_id) -> WorkspaceInfo``; raises
       ``ValueError("... not found")`` for unknown ids.
     - ``get_runtime``: ``(workspace_id) -> RuntimeBackend``; raises
@@ -79,44 +38,14 @@ class GitService:
 
     def __init__(
         self,
-        runtimes: dict[str, RuntimeBackend] | None = None,
-        get_cached: Callable[[uuid.UUID], WorkspaceInfo] | None = None,
-        get_runtime: Callable[[uuid.UUID], RuntimeBackend] | None = None,
+        get_cached: Callable[[uuid.UUID], WorkspaceInfo],
+        get_runtime: Callable[[uuid.UUID], RuntimeBackend],
     ) -> None:
         self.capture_fence: CaptureFence | None = None
-        self._runtimes = runtimes if runtimes is not None else {}
         self._get_cached = get_cached
         self._get_runtime = get_runtime
-        # Serialises concurrent git snapshot + mutation requests per
-        # workspace/repo (same never-evict rationale as the background
-        # and desktop lock maps: dropping a lock object while a holder
-        # waits would hand the next caller a different lock). Step 5:
-        # the get-or-create never-evict mechanics live in the canonical
-        # ``KeyedLockMap`` (``src.services.exec_kernel``);
-        # ``_git_locks`` / ``_git_locks_guard`` stay readable/writable
-        # as live aliases onto the map's dict/guard so
-        # ``WorkspaceService`` property aliases and tests poking
-        # ``service._git_locks[...]`` keep working.
+        # Never evict locks: queued waiters must share the same lock object.
         self._git_lock_map: KeyedLockMap = KeyedLockMap()
-
-    @property
-    def _git_locks(self) -> dict[tuple[uuid.UUID, str], asyncio.Lock]:
-        """Alias onto the git lock map's underlying dict (live)."""
-        return self._git_lock_map.locks
-
-    @_git_locks.setter
-    def _git_locks(self, value: dict) -> None:
-        self._git_lock_map.locks.clear()
-        self._git_lock_map.locks.update(value)
-
-    @property
-    def _git_locks_guard(self) -> asyncio.Lock:
-        """Alias onto the git lock map's guard lock."""
-        return self._git_lock_map.guard
-
-    @_git_locks_guard.setter
-    def _git_locks_guard(self, value: asyncio.Lock) -> None:
-        self._git_lock_map.guard = value
 
     # ── Git operations (dumb-executor git service) ──────────────────────
 
@@ -135,10 +64,6 @@ class GitService:
         woken waiter still references the old one, silently breaking
         serialisation. One small in-memory ``asyncio.Lock`` per
         workspace/repo pair is the accepted trade-off for correctness.
-
-        Step 5: mechanics live in the canonical ``KeyedLockMap``
-        (``src.services.exec_kernel``); Step 7 moves full git
-        orchestration here (``src.services.git_service``).
         """
         return await self._git_lock_map.get((workspace_id, repo_root))
 
@@ -579,20 +504,6 @@ class GitService:
                 if len(roots) >= git_ops.GIT_DISCOVERY_MAX_REPOS:
                     break
         return sorted(set(roots))[: git_ops.GIT_DISCOVERY_MAX_REPOS]
-
-    @live_interaction
-    async def list_git_repositories(
-        self, workspace_id: uuid.UUID
-    ) -> list[str]:
-        """Return discovered repository roots for *workspace_id* (internal)."""
-        assert self._get_cached is not None and self._get_runtime is not None
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        async with git_ops.github_askpass_context(runtime, info.instance_id):
-            env = git_ops.build_git_env()
-            return await self._git_discover_repos(runtime, info.instance_id, env)
 
     # -- git snapshot helpers -------------------------------------------------
 
@@ -1401,7 +1312,6 @@ class GitService:
                 "exit_code": None,
             }
         try:
-            assert self._get_cached is not None and self._get_runtime is not None
             info = self._get_cached(workspace_id)
             runtime = self._get_runtime(workspace_id)
             if not info.instance_id:
