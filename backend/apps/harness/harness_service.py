@@ -4467,7 +4467,7 @@ class HarnessService:
     def _spawn_summary(
         self, session: HarnessSession, assistant: HarnessMessage
     ) -> None:
-        """Refresh the status sentence of a root session whose run just settled."""
+        """Refresh the brief user-goal recap after a root session run settles."""
         self._spawn_background(
             self._generate_summary(
                 session_id=session.id,
@@ -4552,38 +4552,32 @@ class HarnessService:
         except Exception:  # pragma: no cover - title must never break runs
             log.warning("harness_title_generation_failed", session_id=str(session_id))
 
-    def _summary_material(
-        self, session_id: uuid.UUID, assistant_id: uuid.UUID
-    ) -> str:
-        """Collect what the summary agent needs; "" when there is nothing to say."""
+    def _summary_material(self, session_id: uuid.UUID, assistant_id: uuid.UUID) -> str:
+        """Collect user requests and closing replies through the settled turn."""
         message = self.messages.get_by_id(assistant_id)
-        if message is None or message.session_id != session_id:
+        if (
+            message is None
+            or message.session_id != session_id
+            or message.role != "assistant"
+        ):
             return ""
-        answer = (message.content or "").strip()
-        error = (message.error or "").strip()
-        if not answer and not error:
-            return ""
-        session = self.sessions.get_by_id(session_id)
-        request = self.messages.user_content_before(session_id, message.position)
-        open_todos = [
-            todo.content
-            for todo in TodoRepository.list_for_session(session_id)
-            if todo.status in ("pending", "in_progress")
-        ]
-        sections = [
-            f"Conversation: {(session.title if session else '') or '-'}",
-            f"User request:\n{_clip_head(request, 1500)}",
-            f"Agent's last answer:\n{_clip_tail(answer, 3000) or '-'}",
-        ]
-        if open_todos:
-            sections.append(
-                "Open todos:\n" + "\n".join(f"- {todo}" for todo in open_todos[:8])
-            )
-        if message.finish == "aborted":
-            sections.append("The user stopped the run before it was done.")
-        elif message.finish == "error" or error:
-            sections.append(f"The run failed: {_clip_head(error, 300) or 'unknown'}")
-        return "\n\n".join(sections)
+        sections: list[str] = []
+        has_request = False
+        for row in self.messages.list_for_summary(session_id, message.position):
+            if row.role == "user":
+                if row.content.strip():
+                    sections.append(f"User:\n{row.content.strip()}")
+                    has_request = True
+                continue
+            parts = row.summary_parts
+            for part in parts:
+                if part.type == "steer" and part.summary_text.strip():
+                    sections.append(f"User:\n{part.summary_text.strip()}")
+                    has_request = True
+            answer = _assistant_summary_content(row, parts)
+            if answer:
+                sections.append(f"Agent's final reply:\n{answer}")
+        return "\n\n".join(sections) if has_request else ""
 
     async def _generate_summary(
         self,
@@ -4593,7 +4587,7 @@ class HarnessService:
         workspace_id: uuid.UUID,
         organization_id: uuid.UUID,
     ) -> None:
-        """Store the one-sentence "state + next step" of a settled run.
+        """Store a brief recap of the user's goal after a run settles.
 
         Runs for every engine (the small model comes from the org's provider
         config, not from the session's engine) and never raises.
@@ -5127,16 +5121,49 @@ def _normalize_generated_summary(text: str) -> str:
     return summary
 
 
-def _clip_head(text: str, limit: int) -> str:
-    """Keep the first *limit* chars of *text*."""
-    text = (text or "").strip()
-    return text if len(text) <= limit else text[:limit].rstrip() + " …"
+def _assistant_summary_content(
+    message: HarnessMessage, parts: list[HarnessPart]
+) -> str:
+    """Select closing prose outside Worked, like chat-core's message-copy rule.
 
-
-def _clip_tail(text: str, limit: int) -> str:
-    """Keep the last *limit* chars of *text* (the end of an answer matters most)."""
-    text = (text or "").strip()
-    return text if len(text) <= limit else "… " + text[-limit:].lstrip()
+    Summary rows project only text/steer output into ``summary_text``. Walk
+    backwards through visible text; work, plans, compaction, and steers end the
+    final answer. Never fall back to aggregate content when parts exist.
+    """
+    if not parts:
+        return (message.content or "").strip()
+    has_subtask = any(part.type == "subtask" for part in parts)
+    patched_calls = {
+        part.call_id for part in parts if part.type == "patch" and part.call_id
+    }
+    answer: list[str] = []
+    for part in reversed(parts):
+        if part.type in {"step-start", "step-finish"}:
+            continue
+        text = part.summary_text
+        if part.type == "text":
+            if text:
+                answer.append(text)
+            continue
+        if part.type == "steer" and not text:
+            continue
+        if part.type == "tool":
+            tool = str((part.display or {}).get("tool") or "").strip().lower()
+            if tool in {"question", "ask_user"} and part.state in {
+                "pending",
+                "running",
+            }:
+                continue
+            if has_subtask and (tool == "task" or part.title.startswith("Subagent:")):
+                continue
+            if (
+                tool in {"edit", "write"}
+                and part.state != "error"
+                and part.call_id in patched_calls
+            ):
+                continue
+        break
+    return "".join(reversed(answer)).strip()
 
 
 def _title_from_prompt(prompt: str) -> str:

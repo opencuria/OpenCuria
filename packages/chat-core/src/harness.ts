@@ -131,7 +131,7 @@ export interface HarnessSession {
   harness_id?: HarnessId;
   connection_id?: string | null;
   title: string;
-  /** One sentence: state + next step of the last finished run (empty while busy). */
+  /** Brief recap of the user's conversation goal (empty while busy). */
   summary?: string;
   mode: HarnessSessionMode;
   agent_name: string;
