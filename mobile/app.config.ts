@@ -22,9 +22,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           "Attach a photo to your OpenCuria conversation.",
         NSPhotoLibraryUsageDescription:
           "Choose photos to share with your OpenCuria agent.",
-        ...(development
-          ? { NSAppTransportSecurity: { NSAllowsLocalNetworking: true } }
-          : {}),
+        // HTTP is limited to local-network hosts (unqualified, .local, IPs).
+        NSAppTransportSecurity: { NSAllowsLocalNetworking: true },
       },
     },
     android: {
@@ -51,7 +50,9 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       ],
       [
         "expo-build-properties",
-        { android: { usesCleartextTraffic: development } },
+        // Android cannot scope cleartext to IP ranges; normalizeServerUrl only
+        // accepts http:// for local-network hosts, public hosts need https://.
+        { android: { usesCleartextTraffic: true } },
       ],
       "react-native-enriched-markdown",
     ],
