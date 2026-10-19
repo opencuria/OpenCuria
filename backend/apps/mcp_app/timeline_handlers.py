@@ -10,7 +10,7 @@ from mcp.types import TextContent
 
 def get_harness_timeline(api_key: Any, org_id: Any, args: dict) -> list[TextContent]:
     """Return the lightweight REST timeline envelope through MCP."""
-    from apps.harness.api import _session_to_out_with_unread
+    from apps.harness.schemas import session_to_out_with_unread
     from apps.harness.timeline import (
         TIMELINE_TEXT_PART_TYPES,
         project_question_definitions,
@@ -58,7 +58,7 @@ def get_harness_timeline(api_key: Any, org_id: Any, args: dict) -> list[TextCont
     ]
     return _text(
         {
-            "session": _session_to_out_with_unread(service, session).model_dump(
+            "session": session_to_out_with_unread(service, session).model_dump(
                 mode="json"
             ),
             "messages": [

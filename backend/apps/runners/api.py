@@ -32,9 +32,13 @@ from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.utils import generate_api_token, hash_token
 
-from .enums import RunnerStatus as RS
 from .enums import WorkspaceStatus
 from .exceptions import RunnerOfflineError
+from .image_presenters import (
+    captured_image_to_out,
+    image_artifact_to_out,
+    image_artifacts_to_out,
+)
 from .storage_schemas import RunnerStorageOut
 from .repositories import RunnerRepository, RunnerSystemMetricsRepository
 from .schemas import (
@@ -1751,110 +1755,6 @@ workspace_image_artifact_router = Router(tags=["image-artifacts"])
 image_artifact_router = Router(tags=["image-artifacts"])
 
 
-def _image_artifact_to_out(artifact, extras: dict | None = None) -> ImageArtifactOut:
-    """Map an ImageInstance to ImageArtifactOut.
-
-    Runner and runtime come from the image itself. ``origin_workspace``
-    is provenance only and may be unset after the source is deleted.
-    ``extras`` carries version facts (latest, retention, usage) computed
-    per line by :class:`ImageVersionService`.
-    """
-    if extras is None:
-        from .services.image_versions import ImageVersionService
-
-        extras = ImageVersionService().version_extras([artifact])[artifact.id]
-    runner_build = getattr(artifact, "build_job", None)
-    image_runner = getattr(artifact, "runner", None)
-    runtime_type = getattr(artifact, "runtime_type", None)
-    source_runner_id = getattr(image_runner, "id", None)
-    source_runner_online = False
-    if image_runner is not None:
-        source_runner_online = image_runner.status == RS.ONLINE
-    source_definition_name = None
-    is_deactivated = False
-    if runner_build is not None:
-        source_runner_id = getattr(runner_build, "runner_id", source_runner_id)
-        runner = getattr(runner_build, "runner", None)
-        if runner is not None:
-            source_runner_id = runner.id
-            source_runner_online = runner.status == RS.ONLINE
-        image_definition = getattr(runner_build, "image_definition", None)
-        if image_definition is not None:
-            source_definition_name = image_definition.name
-        is_deactivated = getattr(runner_build, "status", "") == "deactivated"
-    if getattr(artifact, "status", "") == "retired":
-        is_deactivated = True
-
-    return ImageArtifactOut(
-        id=artifact.id,
-        revision_id=artifact.revision_id,
-        generation=artifact.generation,
-        is_legacy=artifact.is_legacy,
-        is_current=bool(
-            runner_build and runner_build.current_generation_id == artifact.id
-        ),
-        source_workspace_id=artifact.origin_workspace_id,
-        runner_artifact_id=artifact.runner_ref,
-        name=artifact.name,
-        size_bytes=artifact.size_bytes,
-        status=artifact.status,
-        artifact_kind=(
-            "built"
-            if getattr(artifact, "origin_type", "") == "definition_build"
-            else "captured"
-        ),
-        build_job_id=artifact.build_job_id,
-        source_definition_name=source_definition_name,
-        source_runner_id=source_runner_id,
-        runtime_type=runtime_type,
-        is_deactivated=is_deactivated,
-        source_runner_online=source_runner_online,
-        delete_requested_at=getattr(artifact, "delete_requested_at", None),
-        delete_confirmed_at=getattr(artifact, "delete_confirmed_at", None),
-        delete_last_error=getattr(artifact, "delete_last_error", "") or "",
-        created_at=artifact.created_at,
-        created_by_id=artifact.created_by_id,
-        captured_image_id=extras["captured_image_id"],
-        version=extras["version"],
-        message=extras["message"],
-        is_latest=extras["is_latest"],
-        retention=extras["retention"],
-        workspace_count=extras["workspace_count"],
-        workspaces=extras["workspaces"],
-    )
-
-
-def _image_artifacts_to_out(artifacts) -> list[ImageArtifactOut]:
-    """Map many versions, computing version facts once per line."""
-    from .services.image_versions import ImageVersionService
-
-    artifacts = list(artifacts)
-    extras = ImageVersionService().version_extras(artifacts)
-    return [_image_artifact_to_out(a, extras[a.id]) for a in artifacts]
-
-
-def _captured_image_to_out(view: dict) -> CapturedImageOut:
-    """Map an ImageVersionService captured-image view."""
-    line = view["line"]
-    latest = view["latest"]
-    return CapturedImageOut(
-        id=line.id,
-        name=line.name,
-        status=line.status,
-        runner_id=line.runner_id,
-        runner_online=line.runner.status == RS.ONLINE,
-        created_by_id=line.created_by_id,
-        created_at=line.created_at,
-        latest_id=latest.id if latest else None,
-        latest_version=latest.generation if latest else None,
-        total_size_bytes=view["total_size_bytes"],
-        workspace_count=view["workspace_count"],
-        versions=[
-            _image_artifact_to_out(v, view["extras"][v.id]) for v in view["versions"]
-        ],
-    )
-
-
 class ImageDeletionIn(Schema):
     target_type: str
     target_id: uuid.UUID
@@ -1944,7 +1844,7 @@ def list_image_artifacts(request: HttpRequest):
 
     service = _get_service()
     artifacts = service.list_image_artifacts_for_user(user=request.user)
-    return _image_artifacts_to_out(artifacts)
+    return image_artifacts_to_out(artifacts)
 
 
 @image_artifact_router.post(
@@ -2013,7 +1913,7 @@ async def rename_image_artifact(
         image_artifact_id, payload.name.strip()
     )
     updated = await sync_to_async(service.get_image_artifact)(image_artifact_id)
-    return 200, _image_artifact_to_out(updated)
+    return 200, image_artifact_to_out(updated)
 
 
 @image_artifact_router.delete(
@@ -2150,7 +2050,7 @@ def list_captured_images(request: HttpRequest):
     from .services.image_versions import ImageVersionService
 
     views = ImageVersionService().list_captured_images(request.user, org_id)
-    return 200, [_captured_image_to_out(view) for view in views]
+    return 200, [captured_image_to_out(view) for view in views]
 
 
 @captured_image_router.get(
@@ -2168,7 +2068,7 @@ def get_captured_image(request: HttpRequest, captured_image_id: uuid.UUID):
     versions = ImageVersionService()
     try:
         line = versions.owned_captured_image(request.user, org_id, captured_image_id)
-        return 200, _captured_image_to_out(versions.captured_image(line))
+        return 200, captured_image_to_out(versions.captured_image(line))
     except NotFoundError as exc:
         return _captured_image_errors(exc)
 
@@ -2191,7 +2091,7 @@ def rename_captured_image(
         view = ImageVersionService().rename_captured_image(
             request.user, org_id, captured_image_id, payload.name
         )
-        return 200, _captured_image_to_out(view)
+        return 200, captured_image_to_out(view)
     except (NotFoundError, ConflictError) as exc:
         return _captured_image_errors(exc)
 
@@ -2268,7 +2168,7 @@ def list_workspace_image_artifacts(request: HttpRequest, workspace_id: uuid.UUID
         _get_owned_workspace(request, org_id, workspace_id)
         service = _get_service()
         artifacts = service.list_image_artifacts_for_workspace(workspace_id)
-        return _image_artifacts_to_out(artifacts)
+        return image_artifacts_to_out(artifacts)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
 
@@ -2497,7 +2397,7 @@ def _build_job_to_list_out(build) -> ImageBuildJobListOut:
         delete_last_error=getattr(build, "delete_last_error", "") or "",
         created_at=build.created_at,
         updated_at=build.updated_at,
-        versions=_image_artifacts_to_out(
+        versions=image_artifacts_to_out(
             ImageVersionService().definition_versions(build)
         ),
     )

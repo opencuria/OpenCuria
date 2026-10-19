@@ -57,6 +57,25 @@ CLAUDE_MODELS: tuple[ClaudeModelSpec, ...] = (
 )
 
 
+def list_engines(*, claude_connected: bool) -> list[dict[str, object]]:
+    """Return the selectable harness engines with their connection state."""
+    rows: list[dict[str, object]] = [
+        {
+            "id": "native",
+            "name": "OpenCuria",
+            "modes": ["build", "plan"],
+            "connected": True,
+        },
+        {
+            "id": "claude",
+            "name": "Claude Agent",
+            "modes": ["build", "plan"],
+            "connected": claude_connected,
+        },
+    ]
+    return [row for row in rows if row["id"] in ENGINE_IDS]
+
+
 def list_claude_models() -> list[ProviderModel]:
     """Return the Claude engine's models, isolated from provider adapters."""
     return [spec.to_provider_model() for spec in CLAUDE_MODELS]

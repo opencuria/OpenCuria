@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
 
 from django.http import HttpRequest
-from ninja import Router, Schema
+from ninja import Router
 
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, NotFoundError
 
-from .catalog import ENGINE_IDS, list_claude_models
+from .catalog import list_claude_models, list_engines
 from .connections import EngineConnectionService
+from .schemas import (
+    ClaudeModelOut,
+    EngineConnectionIn,
+    EngineConnectionOut,
+    HarnessEngineOut,
+    claude_model_to_out,
+    engine_connection_to_out,
+)
 
 engines_router = Router(tags=["harness-engines"])
 
@@ -45,76 +52,6 @@ def _require_membership(request: HttpRequest) -> uuid.UUID:
     return organization_id
 
 
-def _connection_view(
-    organization_id: uuid.UUID, user_id: object
-) -> dict[str, Any] | None:
-    """Return the user's one connection without any credential material."""
-    connections = EngineConnectionService().list_connections(organization_id, user_id)
-    if not connections:
-        return None
-    connection = connections[0]
-    return {
-        "id": connection["id"],
-        "auth_type": connection["auth_type"],
-        "label": connection["label"],
-        "connected": connection["connected"],
-    }
-
-
-class HarnessEngineOut(Schema):
-    """Public engine availability and connection state."""
-
-    id: str
-    name: str
-    modes: list[str]
-    connected: bool
-
-
-class EngineConnectionOut(Schema):
-    """Safe public metadata for one personal Claude connection."""
-
-    id: str
-    auth_type: str
-    label: str
-    connected: bool
-
-
-class EngineConnectionIn(Schema):
-    """Claude-account compatibility upsert; id targets only an owned account."""
-
-    auth_type: str
-    token: str = ""
-    label: str = "Claude"
-    connection_id: uuid.UUID | None = None
-
-
-class ClaudeModelOut(Schema):
-    """Claude engine model using the shared picker model shape."""
-
-    id: str
-    name: str
-    provider: str = "claude"
-    reasoning_efforts: list[str] = []
-    default_effort: str = ""
-    supports_tools: bool = True
-    context_length: int = 0
-    max_output_tokens: int = 0
-
-
-def _model_payload(model) -> ClaudeModelOut:
-    """Convert the shared provider-model shape into this engine's API schema."""
-    return ClaudeModelOut(
-        id=model.id,
-        name=model.name,
-        provider=model.provider,
-        reasoning_efforts=list(model.reasoning_efforts),
-        default_effort=model.default_effort,
-        supports_tools=model.supports_tools,
-        context_length=model.context_length,
-        max_output_tokens=model.max_output_tokens,
-    )
-
-
 @engines_router.get(
     "/harness/engines/",
     response={200: list[HarnessEngineOut], 401: dict, 403: dict, 404: dict},
@@ -126,22 +63,13 @@ def list_harness_engines(request: HttpRequest):
         return _permission_denied(APIKeyPermission.HARNESS_READ)
     try:
         organization_id = _require_membership(request)
-        claude_connection = _connection_view(organization_id, request.user.id)
-        rows = [
-            HarnessEngineOut(
-                id="native",
-                name="OpenCuria",
-                modes=["build", "plan"],
-                connected=True,
-            ),
-            HarnessEngineOut(
-                id="claude",
-                name="Claude Agent",
-                modes=["build", "plan"],
-                connected=bool(claude_connection and claude_connection["connected"]),
-            ),
-        ]
-        return 200, [row for row in rows if row.id in ENGINE_IDS]
+        claude_connection = EngineConnectionService().connection_view(
+            organization_id, request.user.id
+        )
+        rows = list_engines(
+            claude_connected=bool(claude_connection and claude_connection["connected"])
+        )
+        return 200, [HarnessEngineOut(**row) for row in rows]
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -159,7 +87,9 @@ def get_claude_connection(request: HttpRequest):
         return _permission_denied(APIKeyPermission.HARNESS_PROVIDERS)
     try:
         organization_id = _require_membership(request)
-        return 200, _connection_view(organization_id, request.user.id)
+        return 200, EngineConnectionService().connection_view(
+            organization_id, request.user.id
+        )
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -191,12 +121,7 @@ def save_claude_connection(request: HttpRequest, payload: EngineConnectionIn):
             label=payload.label,
             connection_id=payload.connection_id,
         )
-        return 200, EngineConnectionOut(
-            id=str(connection.id),
-            auth_type=connection.auth_type,
-            label=connection.label,
-            connected=connection.credential_id is not None,
-        )
+        return 200, engine_connection_to_out(connection)
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -245,7 +170,7 @@ def list_claude_engine_models(request: HttpRequest):
         return _permission_denied(APIKeyPermission.HARNESS_READ)
     try:
         _require_membership(request)
-        return 200, [_model_payload(model) for model in list_claude_models()]
+        return 200, [claude_model_to_out(model) for model in list_claude_models()]
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:

@@ -7,7 +7,6 @@ import uuid
 
 import pytest
 
-import apps.harness.api as harness_api
 from apps.harness.agents.definitions import get_agent
 from apps.harness.harness_service import (
     HarnessService,
@@ -23,6 +22,7 @@ from apps.harness.repositories import (
     HarnessSessionRepository,
     TodoRepositoryDjango,
 )
+from apps.harness.schemas import session_to_out
 from apps.harness.services import ProviderConfigService
 from apps.harness.tools.todos import TodoItem
 
@@ -370,12 +370,12 @@ async def test_generate_summary_stores_sentence_for_every_engine(
 def test_session_out_carries_the_summary(harness_workspace):
     """The session API exposes the sentence for the chat view."""
     session, assistant = _session_with_answer(harness_workspace)
-    assert harness_api._session_to_out(session).summary == ""
+    assert session_to_out(session).summary == ""
 
     HarnessSessionRepository.set_summary_for_turn(session.id, assistant.id, SENTENCE)
     session.refresh_from_db()
 
-    assert harness_api._session_to_out(session).summary == SENTENCE
+    assert session_to_out(session).summary == SENTENCE
 
 
 @pytest.mark.django_db(transaction=True)

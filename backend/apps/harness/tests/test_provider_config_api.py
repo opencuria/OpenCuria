@@ -105,7 +105,7 @@ def test_provider_defaults_roundtrip_has_only_six_fields(provider_setup):
 
 def test_provider_config_schema_has_no_connection_fields():
     """Defaults schemas cannot accept or expose provider credentials/status."""
-    from apps.harness.api import ProviderConfigIn, ProviderConfigOut
+    from apps.harness.schemas import ProviderConfigIn, ProviderConfigOut
 
     assert set(ProviderConfigIn.model_fields) == DEFAULT_FIELDS
     assert set(ProviderConfigOut.model_fields) == DEFAULT_FIELDS

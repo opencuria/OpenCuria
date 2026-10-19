@@ -429,9 +429,13 @@ class ProviderConfigService:
         clear_models_cache(str(organization_id))
         return config
 
+    def find_config(self, organization_id: uuid.UUID) -> ProviderConfig | None:
+        """Return the provider config for an organization, or None if unset."""
+        return self.repository.get_by_org(organization_id)
+
     def get_config(self, organization_id: uuid.UUID) -> ProviderConfig:
         """Return the provider config for an organization or raise."""
-        config = self.repository.get_by_org(organization_id)
+        config = self.find_config(organization_id)
         if config is None:
             raise NotFoundError("ProviderConfig", str(organization_id))
         return config

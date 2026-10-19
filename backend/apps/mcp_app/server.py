@@ -2424,9 +2424,9 @@ def _call_recreate_workspace(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _captured_image_payload(view: dict) -> dict:
-    from apps.runners.api import _captured_image_to_out
+    from apps.runners.image_presenters import captured_image_to_out
 
-    return _captured_image_to_out(view).model_dump(mode="json")
+    return captured_image_to_out(view).model_dump(mode="json")
 
 
 def _call_list_captured_images(api_key, org_id, args: dict) -> list[TextContent]:
@@ -3583,8 +3583,8 @@ def _owned_harness_session_or_error(api_key, org_id, session_id):
 
 def _call_list_harness_engines(api_key, org_id, args: dict) -> list[TextContent]:
     """List available harness engines and only the caller's Claude status."""
-    from apps.harness.engines.api import _connection_view
-    from apps.harness.engines.catalog import ENGINE_IDS
+    from apps.harness.engines.catalog import list_engines
+    from apps.harness.engines.connections import EngineConnectionService
     from apps.organizations.services import OrganizationService
     from common.exceptions import NotFoundError
 
@@ -3592,27 +3592,15 @@ def _call_list_harness_engines(api_key, org_id, args: dict) -> list[TextContent]
         OrganizationService().require_membership(api_key.user, org_id)
     except NotFoundError as exc:
         return _error(exc.message)
-    connection = _connection_view(org_id, api_key.user.id)
-    rows = [
-        {
-            "id": "native",
-            "name": "OpenCuria",
-            "modes": ["build", "plan"],
-            "connected": True,
-        },
-        {
-            "id": "claude",
-            "name": "Claude Agent",
-            "modes": ["build", "plan"],
-            "connected": bool(connection and connection["connected"]),
-        },
-    ]
-    return _text([row for row in rows if row["id"] in ENGINE_IDS])
+    connection = EngineConnectionService().connection_view(org_id, api_key.user.id)
+    return _text(
+        list_engines(claude_connected=bool(connection and connection["connected"]))
+    )
 
 
 def _call_get_claude_connection(api_key, org_id, args: dict) -> list[TextContent]:
     """Get safe status for the caller's personal Claude authorization."""
-    from apps.harness.engines.api import _connection_view
+    from apps.harness.engines.connections import EngineConnectionService
     from apps.organizations.services import OrganizationService
     from common.exceptions import NotFoundError
 
@@ -3620,12 +3608,13 @@ def _call_get_claude_connection(api_key, org_id, args: dict) -> list[TextContent
         OrganizationService().require_membership(api_key.user, org_id)
     except NotFoundError as exc:
         return _error(exc.message)
-    return _text(_connection_view(org_id, api_key.user.id))
+    return _text(EngineConnectionService().connection_view(org_id, api_key.user.id))
 
 
 def _call_save_claude_connection(api_key, org_id, args: dict) -> list[TextContent]:
     """Upsert a user's Claude token using shared encrypted credentials."""
     from apps.harness.engines.connections import EngineConnectionService
+    from apps.harness.engines.schemas import engine_connection_to_out
     from apps.organizations.services import OrganizationService
     from common.exceptions import NotFoundError
 
@@ -3649,14 +3638,7 @@ def _call_save_claude_connection(api_key, org_id, args: dict) -> list[TextConten
         return _error(exc.message)
     except (ValueError, TypeError) as exc:
         return _error(str(exc))
-    return _text(
-        {
-            "id": str(connection.id),
-            "auth_type": connection.auth_type,
-            "label": connection.label,
-            "connected": connection.credential_id is not None,
-        }
-    )
+    return _text(engine_connection_to_out(connection).model_dump(mode="json"))
 
 
 def _call_delete_claude_connection(api_key, org_id, args: dict) -> list[TextContent]:
@@ -3677,8 +3659,8 @@ def _call_delete_claude_connection(api_key, org_id, args: dict) -> list[TextCont
 
 def _call_list_claude_engine_models(api_key, org_id, args: dict) -> list[TextContent]:
     """List Claude-only model catalog, separate from provider adapters."""
-    from apps.harness.engines.api import _model_payload
     from apps.harness.engines.catalog import list_claude_models
+    from apps.harness.engines.schemas import claude_model_to_out
     from apps.organizations.services import OrganizationService
     from common.exceptions import NotFoundError
 
@@ -3688,88 +3670,104 @@ def _call_list_claude_engine_models(api_key, org_id, args: dict) -> list[TextCon
         return _error(exc.message)
     return _text(
         [
-            _model_payload(model).model_dump(mode="json")
+            claude_model_to_out(model).model_dump(mode="json")
             for model in list_claude_models()
         ]
     )
 
 
 def _call_get_provider_config(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.harness.api import _fetch_org_provider_config
+    from apps.harness.schemas import provider_config_to_out
+    from apps.harness.services import ProviderConfigService
     from apps.organizations.services import OrganizationService
 
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
-    return _text(
-        _fetch_org_provider_config(org_id).model_dump(mode="json")
-    )
+    config = ProviderConfigService().find_config(org_id)
+    return _text(provider_config_to_out(config).model_dump(mode="json"))
 
 
 def _call_list_provider_models(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.harness.api import _list_org_provider_models
+    from apps.harness.schemas import provider_model_to_out
+    from apps.harness.services import ProviderConfigService
     from apps.organizations.services import OrganizationService
 
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
-    models = _list_org_provider_models(org_id, int(api_key.user.id))
-    return _text([model.model_dump(mode="json") for model in models])
+    models = ProviderConfigService().list_models(
+        org_id, user_id=int(api_key.user.id)
+    )
+    return _text(
+        [provider_model_to_out(model).model_dump(mode="json") for model in models]
+    )
 
 
 def _call_save_provider_config(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.harness.api import ProviderConfigIn, _save_org_provider_config
+    from apps.harness.schemas import ProviderConfigIn, provider_config_to_out
+    from apps.harness.services import ProviderConfigService
     from apps.organizations.services import OrganizationService
 
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
     payload = ProviderConfigIn(**args)
-    return _text(
-        _save_org_provider_config(org_id, payload).model_dump(mode="json")
+    config = ProviderConfigService().save_config(
+        organization_id=org_id, **payload.model_dump()
     )
+    return _text(provider_config_to_out(config).model_dump(mode="json"))
 
 
 def _call_delete_provider_config(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.harness.api import _delete_org_provider_config
+    from apps.harness.services import ProviderConfigService
     from apps.organizations.services import OrganizationService
 
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
-    _delete_org_provider_config(org_id)
+    ProviderConfigService().delete_config(org_id)
     return _text({"deleted": True})
 
 
 def _call_get_subagent_config(api_key, org_id, args: dict) -> list[TextContent]:
     """Return subagent config after checking organization membership."""
-    from apps.harness.api import _fetch_org_subagent_config
+    from apps.harness.schemas import SubagentConfigOut
+    from apps.harness.services import SubagentConfigService
     from apps.organizations.services import OrganizationService
 
     OrganizationService().require_membership(api_key.user, org_id)
-    return _text(_fetch_org_subagent_config(org_id).model_dump(mode="json"))
+    config = SubagentConfigOut(**SubagentConfigService().get_or_default(org_id))
+    return _text(config.model_dump(mode="json"))
 
 
 def _call_save_subagent_config(api_key, org_id, args: dict) -> list[TextContent]:
     """Validate and save subagent config with REST-equivalent semantics."""
-    from apps.harness.api import SubagentConfigIn, _save_org_subagent_config
+    from apps.harness.schemas import SubagentConfigIn, SubagentConfigOut
+    from apps.harness.services import SubagentConfigService
     from apps.organizations.services import OrganizationService
 
     OrganizationService().require_membership(api_key.user, org_id)
     try:
         payload = SubagentConfigIn(**args)
-        return _text(_save_org_subagent_config(org_id, payload).model_dump(mode="json"))
+        config = SubagentConfigOut(
+            **SubagentConfigService().save_config(org_id, payload.max_depth)
+        )
+        return _text(config.model_dump(mode="json"))
     except (ValueError, KeyError, TypeError) as exc:
         return _error(str(exc))
 
 
 def _call_get_agent_s_config(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.harness.api import _fetch_org_agent_s_config
+    from apps.harness.schemas import agent_s_config_to_out
+    from apps.harness.services import AgentSConfigService
     from apps.organizations.services import OrganizationService
 
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
-    return _text(_fetch_org_agent_s_config(org_id).model_dump(mode="json"))
+    row = AgentSConfigService().get_or_default(org_id)
+    return _text(agent_s_config_to_out(row).model_dump(mode="json"))
 
 
 def _call_save_agent_s_config(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.harness.api import _save_org_agent_s_config_partial
+    from apps.harness.schemas import agent_s_config_to_out
+    from apps.harness.services import AgentSConfigService
     from apps.organizations.services import OrganizationService
 
     org_service = OrganizationService()
@@ -3777,9 +3775,8 @@ def _call_save_agent_s_config(api_key, org_id, args: dict) -> list[TextContent]:
     try:
         # MCP dict args carry no "explicitly set" tracking, so the service
         # merge treats provided keys as the partial update (never defaults).
-        return _text(
-            _save_org_agent_s_config_partial(org_id, args).model_dump(mode="json")
-        )
+        row = AgentSConfigService().save_config(org_id, dict(args or {}))
+        return _text(agent_s_config_to_out(row).model_dump(mode="json"))
     except (ValueError, KeyError, TypeError) as exc:
         return _error(str(exc))
 

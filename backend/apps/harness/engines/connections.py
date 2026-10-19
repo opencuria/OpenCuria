@@ -90,6 +90,21 @@ class EngineConnectionService:
             }
         ]
 
+    def connection_view(
+        self, organization_id: uuid.UUID, user_id: object
+    ) -> dict[str, Any] | None:
+        """Return the user's one connection without any credential material."""
+        connections = self.list_connections(organization_id, user_id)
+        if not connections:
+            return None
+        connection = connections[0]
+        return {
+            "id": connection["id"],
+            "auth_type": connection["auth_type"],
+            "label": connection["label"],
+            "connected": connection["connected"],
+        }
+
     def save_connection(
         self,
         *,

@@ -218,3 +218,41 @@ def test_claude_mcp_exact_account_mutations_preserve_active_selection(
             {"connection_id": str(second.id), "auth_type": "api_token", "token": "x"},
         )
     )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_engine_and_provider_config_payloads_match_rest(engine_mcp_setup) -> None:
+    """REST and MCP share one engine list and one config DTO, not copies."""
+    from django.test import Client
+
+    from apps.accounts.models import APIKey
+    from apps.mcp_app.server import _call_get_provider_config
+    from common.utils import generate_api_token, hash_token
+
+    data = engine_mcp_setup
+    org_id = data["organization"].id
+    api_key = data["api_key"]
+    token = generate_api_token()
+    APIKey.objects.create(
+        user=api_key.user,
+        name="parity",
+        key_hash=hash_token(token),
+        key_prefix=token[:12],
+        permissions=[APIKeyPermission.HARNESS_READ.value],
+    )
+    rest = Client(HTTP_X_API_KEY=token, HTTP_X_ORGANIZATION_ID=str(org_id))
+
+    def assert_parity() -> None:
+        assert rest.get("/api/v1/harness/engines/").json() == _payload(
+            _call_list_harness_engines(api_key, org_id, {})
+        )
+        assert rest.get("/api/v1/provider-config/").json() == _payload(
+            _call_get_provider_config(api_key, org_id, {})
+        )
+
+    assert_parity()  # unconnected engine, unconfigured (empty) defaults
+    _call_save_claude_connection(
+        api_key, org_id, {"auth_type": "api_token", "token": "parity-token"}
+    )
+    assert _payload(_call_list_harness_engines(api_key, org_id, {}))[1]["connected"]
+    assert_parity()

@@ -24,18 +24,57 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime
-from typing import Any
 
 from django.http import HttpRequest
-from ninja import Router, Schema
-from pydantic import Field
+from ninja import Router
 
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
-from .constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
+from .schemas import (
+    AgentConfigOut,
+    AgentConfigSaveIn,
+    AgentSConfigIn,
+    AgentSConfigOut,
+    ChatGPTOAuthCancelIn,
+    ChatGPTOAuthStartIn,
+    ChatGPTOAuthStartOut,
+    ChatGPTOAuthStatusOut,
+    HarnessConversationOut,
+    HarnessForkIn,
+    HarnessMessageEditIn,
+    HarnessMessageIn,
+    HarnessMessageOut,
+    HarnessModeIn,
+    HarnessPartOut,
+    HarnessPermissionOut,
+    HarnessPermissionResolveIn,
+    HarnessQuestionOut,
+    HarnessQuestionResolveIn,
+    HarnessSessionCreateIn,
+    HarnessSessionOut,
+    HarnessSessionPatchIn,
+    HarnessSteerIn,
+    HarnessSteerOut,
+    HarnessTodoOut,
+    ProviderAccountIn,
+    ProviderAccountOut,
+    ProviderConfigIn,
+    ProviderConfigOut,
+    ProviderModelOut,
+    ProviderSelectionIn,
+    RecentModelOut,
+    RecentModelSaveIn,
+    SubagentConfigIn,
+    SubagentConfigOut,
+    agent_s_config_to_out,
+    provider_config_to_out,
+    provider_model_to_out,
+    session_to_out,
+    session_to_out_with_unread,
+)
 from .timeline import (
     TIMELINE_TEXT_PART_TYPES,
     project_question_definitions,
@@ -107,449 +146,6 @@ def _owned_workspace(request: HttpRequest, org_id: uuid.UUID, workspace_id: uuid
         raise NotFoundError("Workspace", str(workspace_id))
 
 
-# ---------------------------------------------------------------------------
-# Schemas
-# ---------------------------------------------------------------------------
-
-
-class HarnessSessionCreateIn(Schema):
-    """Request schema for starting a harness session."""
-
-    prompt: str
-    agent_name: str = "build"
-    harness_id: str = "native"
-    connection_id: uuid.UUID | None = None
-    mode: str = "build"
-    model: str = ""
-    reasoning_effort: str = ""
-    skill_ids: list[str] = []
-
-
-class HarnessSessionPatchIn(Schema):
-    """Request schema for updating a harness session."""
-
-    title: str = ""
-
-
-class HarnessConversationOut(Schema):
-    """Response schema for org-wide harness conversations."""
-
-    session_id: uuid.UUID
-    workspace_id: uuid.UUID
-    workspace_name: str
-    title: str
-    status: str
-    mode: str
-    agent_name: str
-    harness_id: str = "native"
-    model: str = ""
-    reasoning_effort: str = ""
-    unread: bool = False
-    manual_unread: bool = False
-    needs_attention: bool = False
-    attention_kind: str = ""
-    updated_at: datetime
-    last_message_at: datetime
-
-
-class HarnessMessageIn(Schema):
-    """Request schema for a follow-up prompt on a session."""
-
-    prompt: str
-    mode: str = ""
-    model: str = ""
-    reasoning_effort: str = ""
-    skill_ids: list[str] = []
-
-
-class HarnessSteerIn(Schema):
-    """Request schema for a message sent into a running turn."""
-
-    prompt: str
-
-
-class HarnessSteerOut(Schema):
-    """A queued (or withdrawn) message addressed to a running turn."""
-
-    id: uuid.UUID
-    content: str
-    created_at: datetime
-
-
-class HarnessForkIn(Schema):
-    """Request schema for forking a harness session."""
-
-    message_id: uuid.UUID | None = None
-    include_message: bool = False
-
-
-class HarnessMessageEditIn(Schema):
-    """Request schema for editing a user message and rerunning."""
-
-    prompt: str
-    mode: str = ""
-    model: str = ""
-    reasoning_effort: str = ""
-    skill_ids: list[str] = []
-
-
-class HarnessModeIn(Schema):
-    """Request schema for switching a session's plan|build mode."""
-
-    mode: str
-
-
-class HarnessPermissionResolveIn(Schema):
-    """Request schema for resolving a permission request."""
-
-    response: str
-
-
-class HarnessQuestionResolveIn(Schema):
-    """Request schema for answering a harness question request."""
-
-    answers: list[Any] = []
-    reject: bool = False
-
-
-class HarnessQuestionOut(Schema):
-    """Response schema for a resolved question request."""
-
-    request_id: uuid.UUID
-    status: str
-    resumed: bool = True
-
-
-class HarnessSessionOut(Schema):
-    """Response schema for a harness session."""
-
-    id: uuid.UUID
-    workspace_id: uuid.UUID
-    parent_id: uuid.UUID | None = None
-    title: str
-    summary: str = ""
-    mode: str
-    agent_name: str
-    harness_id: str = "native"
-    model: str
-    reasoning_effort: str = ""
-    status: str
-    cost: float
-    tokens: dict = {}
-    skill_ids: list[str] = []
-    unread: bool = False
-    manual_unread: bool = False
-    needs_attention: bool = False
-    attention_kind: str = ""
-    created_at: datetime
-    updated_at: datetime
-
-
-class HarnessMessageOut(Schema):
-    """Response schema for a harness message."""
-
-    id: uuid.UUID
-    harness_id: str = "native"
-    role: str
-    content: str
-    model: str
-    reasoning_effort: str = ""
-    cost: float
-    tokens: dict = {}
-    finish: str
-    error: str
-    skill_ids: list[str] = []
-    notice_dismissed_at: datetime | None = None
-    position: int = 0
-    message_position: int = 0
-    created_at: datetime
-    completed_at: datetime | None = None
-
-
-class HarnessPartOut(Schema):
-    """Response schema for a harness part."""
-
-    id: uuid.UUID
-    message_id: uuid.UUID
-    type: str
-    state: str
-    call_id: str
-    title: str
-    output: str
-    input: dict = {}
-    meta: dict = {}
-    position: int = 0
-    message_position: int = 0
-
-
-class HarnessTodoOut(Schema):
-    """Response schema for a harness todo."""
-
-    id: uuid.UUID
-    content: str
-    status: str
-    priority: str
-    order: int
-
-
-class HarnessPermissionOut(Schema):
-    """Response schema for a resolved permission request."""
-
-    request_id: uuid.UUID
-    decision: str
-    remember: str
-
-
-class ProviderConfigIn(Schema):
-    """Org-wide model and reasoning-effort defaults; accounts hold credentials."""
-
-    default_model: str = ""
-    small_model: str = ""
-    computer_use_model: str = ""
-    default_effort: str = ""
-    small_effort: str = ""
-    computer_use_effort: str = ""
-
-
-class ProviderConfigOut(ProviderConfigIn):
-    """Saved org-wide model and reasoning-effort defaults."""
-
-
-class AgentConfigIn(Schema):
-    """Request schema for one agent config row."""
-
-    agent: str
-    model: str = ""
-    effort: str = ""
-    inherit_model: bool = False
-    effort_strategy: str = "fixed"
-
-
-class AgentConfigSaveIn(Schema):
-    """Bulk save payload for agent configs."""
-
-    configs: list[AgentConfigIn] = []
-
-
-class AgentConfigOut(Schema):
-    """Response schema for one agent config row."""
-
-    agent: str
-    mode: str
-    description: str
-    model: str = ""
-    effort: str = ""
-    inherit_model: bool = False
-    effort_strategy: str = "fixed"
-
-
-class RecentModelOut(Schema):
-    """One recently used composer model with its last-used effort."""
-
-    model: str
-    effort: str = ""
-    last_used_at: datetime
-
-
-class RecentModelSaveIn(Schema):
-    """Record one model usage (called on successful send)."""
-
-    model: str
-    effort: str = ""
-
-
-class SubagentConfigIn(Schema):
-    """Request schema for org-wide subagent depth."""
-
-    max_depth: int = Field(
-        default=DEFAULT_MAX_DEPTH, strict=True, ge=1, le=MAX_SUBAGENT_DEPTH
-    )
-
-
-class SubagentConfigOut(Schema):
-    """Response schema for org-wide subagent depth."""
-
-    max_depth: int = DEFAULT_MAX_DEPTH
-
-
-class AgentSConfigIn(Schema):
-    """Request schema for saving the org-wide Agent-S harness config."""
-
-    grounding_model: str = ""
-    grounding_width: int = 1920
-    grounding_height: int = 1080
-    model_temperature: float | None = None
-    max_steps: int = 15
-    max_trajectory_length: int = 8
-    enable_reflection: bool = True
-    enable_code_agent: bool = True
-    enable_recording: bool = False
-    screenshot_max_dimension: int = 2400
-    action_pre_delay: float = 1.0
-    action_post_delay: float = 1.0
-    wait_delay: float = 5.0
-
-
-class AgentSConfigOut(Schema):
-    """Response schema for the org-wide Agent-S harness config."""
-
-    grounding_model: str = ""
-    grounding_width: int = 1920
-    grounding_height: int = 1080
-    model_temperature: float | None = None
-    max_steps: int = 15
-    max_trajectory_length: int = 8
-    enable_reflection: bool = True
-    enable_code_agent: bool = True
-    enable_recording: bool = False
-    screenshot_max_dimension: int = 2400
-    action_pre_delay: float = 1.0
-    action_post_delay: float = 1.0
-    wait_delay: float = 5.0
-
-
-class ProviderModelOut(Schema):
-    """One model from the org provider catalog."""
-
-    id: str
-    name: str
-    provider: str = ""
-    reasoning_efforts: list[str] = []
-    default_effort: str = ""
-    supports_tools: bool = False
-    context_length: int = 0
-    max_output_tokens: int = 0
-
-
-class ProviderAccountOut(Schema):
-    """Safe metadata for one provider account."""
-
-    id: str
-    provider: str
-    label: str
-    scope: str
-    connected: bool
-    is_active: bool
-    can_manage: bool
-    base_url: str = ""
-    api_key_hint: str = ""
-    account_id: str = ""
-    region: str = ""
-    auth_method: str = ""
-    models: list[str] = []
-    auth_type: str = ""
-
-
-class ProviderAccountIn(Schema):
-    """Create/update payload for a named provider account."""
-
-    label: str = ""
-    shared: bool = False
-    api_key: str = ""
-    base_url: str = ""
-    models: list[str] = []
-    auth_method: str = ""
-    region: str = "us-east-1"
-    access_key_id: str = ""
-    secret_access_key: str = ""
-    session_token: str = ""
-    bearer_token: str = ""
-    token: str = ""
-    auth_type: str = "api_token"
-
-
-class ProviderSelectionIn(Schema):
-    """Explicit active-account choice, including an empty selection."""
-
-    account_id: uuid.UUID | None = Field(...)
-
-
-class ChatGPTOAuthStartIn(Schema):
-    """Optional account identity for a new or reconnecting ChatGPT flow."""
-
-    label: str = ""
-    shared: bool | None = None
-    account_id: uuid.UUID | None = None
-
-
-class ChatGPTOAuthCancelIn(Schema):
-    """Optional pending OAuth flow identifier for cancellation."""
-
-    flow_id: uuid.UUID | None = None
-
-
-class ChatGPTOAuthStartOut(Schema):
-    """Response for starting the ChatGPT device OAuth flow."""
-
-    flow_id: str
-    user_code: str
-    verification_url: str
-    interval: int
-    expires_in: int
-
-
-class ChatGPTOAuthStatusOut(Schema):
-    """Response for polling ChatGPT device OAuth status."""
-
-    status: str
-    account_id: str = ""
-
-
-def _provider_config_to_out(config) -> ProviderConfigOut:  # type: ignore[no-untyped-def]
-    """Map stored model/effort defaults to the public config response."""
-    return ProviderConfigOut(
-        **{name: getattr(config, name) or "" for name in ProviderConfigOut.model_fields}
-    )
-
-
-def _agent_s_config_to_out(row: dict) -> AgentSConfigOut:
-    """Map an AgentSConfigService view to AgentSConfigOut."""
-    return AgentSConfigOut(
-        grounding_model=row.get("grounding_model") or "",
-        grounding_width=int(row.get("grounding_width", 1920)),
-        grounding_height=int(row.get("grounding_height", 1080)),
-        model_temperature=row.get("model_temperature"),
-        max_steps=int(row.get("max_steps", 15)),
-        max_trajectory_length=int(row.get("max_trajectory_length", 8)),
-        enable_reflection=bool(row.get("enable_reflection", True)),
-        enable_code_agent=bool(row.get("enable_code_agent", True)),
-        enable_recording=bool(row.get("enable_recording", False)),
-        screenshot_max_dimension=int(row.get("screenshot_max_dimension", 2400)),
-        action_pre_delay=float(row.get("action_pre_delay", 1.0)),
-        action_post_delay=float(row.get("action_post_delay", 1.0)),
-        wait_delay=float(row.get("wait_delay", 5.0)),
-    )
-
-
-def _fetch_org_agent_s_config(org_id: uuid.UUID) -> AgentSConfigOut:
-    """Load the org Agent-S config (defaults when unstored)."""
-    from apps.harness.services import AgentSConfigService
-
-    return _agent_s_config_to_out(AgentSConfigService().get_or_default(org_id))
-
-
-def _save_org_agent_s_config(
-    org_id: uuid.UUID, payload: AgentSConfigIn
-) -> AgentSConfigOut:
-    """Validate and upsert the org Agent-S config (partial payloads merge)."""
-    from apps.harness.services import AgentSConfigService
-
-    row = AgentSConfigService().save_config(
-        org_id, payload.model_dump(exclude_unset=True)
-    )
-    return _agent_s_config_to_out(row)
-
-
-def _save_org_agent_s_config_partial(
-    org_id: uuid.UUID, values: dict
-) -> AgentSConfigOut:
-    """Validate raw MCP args (partial dict) and upsert the Agent-S config."""
-    from apps.harness.services import AgentSConfigService
-
-    row = AgentSConfigService().save_config(org_id, dict(values or {}))
-    return _agent_s_config_to_out(row)
-
-
 def _agent_config_to_out(row: dict) -> AgentConfigOut:
     """Map an AgentConfigService row to AgentConfigOut."""
     return AgentConfigOut(
@@ -563,109 +159,12 @@ def _agent_config_to_out(row: dict) -> AgentConfigOut:
     )
 
 
-def _fetch_org_provider_config(org_id: uuid.UUID) -> ProviderConfigOut:
-    """Return the organization's model defaults, empty if not configured."""
-    from apps.harness.services import ProviderConfigService
-
-    try:
-        config = ProviderConfigService().get_config(org_id)
-    except NotFoundError:
-        return ProviderConfigOut()
-    return _provider_config_to_out(config)
-
-
-def _list_org_provider_models(
-    org_id: uuid.UUID, user_id: int
-) -> list[ProviderModelOut]:
-    """Fetch the caller-scoped merged provider catalog."""
-    from apps.harness.services import ProviderConfigService
-
-    models = ProviderConfigService().list_models(org_id, user_id=user_id)
-    return [
-        ProviderModelOut(
-            id=model.id,
-            name=model.name,
-            provider=model.provider,
-            reasoning_efforts=list(model.reasoning_efforts),
-            default_effort=model.default_effort,
-            supports_tools=model.supports_tools,
-            context_length=model.context_length,
-            max_output_tokens=model.max_output_tokens,
-        )
-        for model in models
-    ]
-
-
-def _save_org_provider_config(
-    org_id: uuid.UUID, payload: ProviderConfigIn
-) -> ProviderConfigOut:
-    """Save model defaults without modifying provider accounts."""
-    from apps.harness.services import ProviderConfigService
-
-    config = ProviderConfigService().save_config(
-        organization_id=org_id, **payload.model_dump()
-    )
-    return _provider_config_to_out(config)
-
-
-def _delete_org_provider_config(org_id: uuid.UUID) -> None:
-    """Delete model defaults without disconnecting provider accounts."""
-    from apps.harness.services import ProviderConfigService
-
-    ProviderConfigService().delete_config(org_id)
-
-
 def _recent_model_to_out(row) -> RecentModelOut:  # type: ignore[no-untyped-def]
     """Map a RecentModel ORM row to its response schema."""
     return RecentModelOut(
         model=row.model or "",
         effort=row.effort or "",
         last_used_at=row.last_used_at,
-    )
-
-
-def _session_to_out(
-    session,
-    *,
-    unread: bool = False,
-    manual_unread: bool = False,
-    needs_attention: bool = False,
-    attention_kind: str = "",
-) -> HarnessSessionOut:  # type: ignore[no-untyped-def]
-    """Map a HarnessSession ORM row to HarnessSessionOut."""
-    return HarnessSessionOut(
-        id=session.id,
-        workspace_id=session.workspace_id,
-        parent_id=session.parent_id,
-        harness_id=getattr(session, "harness_id", "native"),
-        title=session.title or "",
-        summary=session.summary or "",
-        mode=session.mode,
-        agent_name=session.agent_name,
-        model=session.model or "",
-        reasoning_effort=session.reasoning_effort or "",
-        status=session.status,
-        cost=float(session.cost or 0.0),
-        tokens=dict(session.tokens or {}),
-        skill_ids=[str(skill_id) for skill_id in (session.skill_ids or [])],
-        unread=unread,
-        manual_unread=manual_unread,
-        needs_attention=needs_attention,
-        attention_kind=attention_kind,
-        created_at=session.created_at,
-        updated_at=session.updated_at,
-    )
-
-
-def _session_to_out_with_unread(service, session) -> HarnessSessionOut:  # type: ignore[no-untyped-def]
-    """Map a session and compute its unread and attention flags."""
-    attention = service.attention_for_sessions([session]).get(session.id, {})
-    return _session_to_out(
-        session,
-        unread=service.is_session_unread(session),
-        manual_unread=session.manual_unread_at is not None,
-        needs_attention=attention.get("needs_attention", False),
-        attention_kind=attention.get("attention_kind", ""),
     )
 
 
@@ -692,7 +191,7 @@ def list_harness_sessions(request: HttpRequest, workspace_id: uuid.UUID):
         unread_map = service.unread_for_sessions(sessions)
         attention_map = service.attention_for_sessions(sessions)
         return 200, [
-            _session_to_out(
+            session_to_out(
                 session,
                 unread=unread_map.get(session.id, False),
                 manual_unread=session.manual_unread_at is not None,
@@ -756,7 +255,7 @@ async def create_harness_session(
             skill_ids=payload.skill_ids or [],
         )
         fresh = await sync_to_async(service.get_session)(session.id)
-        return 201, await sync_to_async(_session_to_out_with_unread)(service, fresh)
+        return 201, await sync_to_async(session_to_out_with_unread)(service, fresh)
     except AuthenticationError as exc:
         status = 403 if exc.code == "authentication_error" else 401
         return status, {"detail": exc.message, "code": exc.code}
@@ -822,7 +321,7 @@ async def send_harness_message(
             skill_ids=payload.skill_ids if payload.skill_ids else None,
         )
         fresh = await sync_to_async(service.get_session)(session.id)
-        return 202, await sync_to_async(_session_to_out_with_unread)(service, fresh)
+        return 202, await sync_to_async(session_to_out_with_unread)(service, fresh)
     except AuthenticationError as exc:
         return 403, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -932,7 +431,7 @@ async def fork_harness_session(
             payload.message_id,
             include_message=payload.include_message,
         )
-        out = await sync_to_async(_session_to_out_with_unread)(service, forked)
+        out = await sync_to_async(session_to_out_with_unread)(service, forked)
         return 201, out
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
@@ -987,7 +486,7 @@ async def edit_harness_message(
             user_id=request.user.id,
         )
         fresh = await sync_to_async(service.get_session)(session.id)
-        return 202, await sync_to_async(_session_to_out_with_unread)(service, fresh)
+        return 202, await sync_to_async(session_to_out_with_unread)(service, fresh)
     except AuthenticationError as exc:
         return 403, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -1021,7 +520,7 @@ async def patch_harness_session(
         if not (payload.title or "").strip():
             raise ValueError("title must not be empty")
         updated = await sync_to_async(service.update_title)(session.id, payload.title)
-        return 200, await sync_to_async(_session_to_out_with_unread)(service, updated)
+        return 200, await sync_to_async(session_to_out_with_unread)(service, updated)
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
     except (ValueError, KeyError) as exc:
@@ -1196,7 +695,7 @@ async def set_harness_session_mode(
                 f"Harness session '{session.id}' already has an active run"
             )
         updated = await sync_to_async(service.set_mode)(session.id, payload.mode)
-        return 200, await sync_to_async(_session_to_out_with_unread)(service, updated)
+        return 200, await sync_to_async(session_to_out_with_unread)(service, updated)
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
     except ConflictError as exc:
@@ -1224,7 +723,7 @@ async def abort_harness_session(request: HttpRequest, session_id: uuid.UUID):
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         aborted = await service.abort_run(session.id)
-        return 200, await sync_to_async(_session_to_out_with_unread)(service, aborted)
+        return 200, await sync_to_async(session_to_out_with_unread)(service, aborted)
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
     except ConflictError as exc:
@@ -1300,7 +799,7 @@ def _harness_conversation_payload(
                 for question in pending_questions
             ]
         return 200, {
-            "session": _session_to_out_with_unread(service, session).model_dump(
+            "session": session_to_out_with_unread(service, session).model_dump(
                 mode="json"
             ),
             "messages": [
@@ -1642,24 +1141,6 @@ def save_org_agent_configs(request: HttpRequest, payload: AgentConfigSaveIn):
         return 400, {"detail": str(exc), "code": "validation_error"}
 
 
-def _fetch_org_subagent_config(org_id: uuid.UUID) -> SubagentConfigOut:
-    """Return the organization's subagent config view."""
-    from apps.harness.services import SubagentConfigService
-
-    return SubagentConfigOut(**SubagentConfigService().get_or_default(org_id))
-
-
-def _save_org_subagent_config(
-    org_id: uuid.UUID, payload: SubagentConfigIn
-) -> SubagentConfigOut:
-    """Persist the organization's validated subagent config."""
-    from apps.harness.services import SubagentConfigService
-
-    return SubagentConfigOut(
-        **SubagentConfigService().save_config(org_id, payload.max_depth)
-    )
-
-
 @harness_router.get(
     "/subagent-config/",
     response={200: SubagentConfigOut, 401: dict, 403: dict, 404: dict},
@@ -1672,7 +1153,11 @@ def get_org_subagent_config(request: HttpRequest):
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        return 200, _fetch_org_subagent_config(org_id)
+        from apps.harness.services import SubagentConfigService
+
+        return 200, SubagentConfigOut(
+            **SubagentConfigService().get_or_default(org_id)
+        )
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -1691,7 +1176,11 @@ def save_org_subagent_config(request: HttpRequest, payload: SubagentConfigIn):
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        return 200, _save_org_subagent_config(org_id, payload)
+        from apps.harness.services import SubagentConfigService
+
+        return 200, SubagentConfigOut(
+            **SubagentConfigService().save_config(org_id, payload.max_depth)
+        )
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -1712,7 +1201,11 @@ def get_org_agent_s_config(request: HttpRequest):
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        return 200, _fetch_org_agent_s_config(org_id)
+        from apps.harness.services import AgentSConfigService
+
+        return 200, agent_s_config_to_out(
+            AgentSConfigService().get_or_default(org_id)
+        )
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -1731,7 +1224,13 @@ def save_org_agent_s_config(request: HttpRequest, payload: AgentSConfigIn):
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        return 200, _save_org_agent_s_config(org_id, payload)
+        from apps.harness.services import AgentSConfigService
+
+        # Partial payloads merge: only explicitly sent fields are updated.
+        row = AgentSConfigService().save_config(
+            org_id, payload.model_dump(exclude_unset=True)
+        )
+        return 200, agent_s_config_to_out(row)
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -1752,7 +1251,11 @@ def get_org_provider_config(request: HttpRequest):
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        return 200, _fetch_org_provider_config(org_id)
+        from apps.harness.services import ProviderConfigService
+
+        return 200, provider_config_to_out(
+            ProviderConfigService().find_config(org_id)
+        )
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -1771,7 +1274,12 @@ def list_org_provider_models(request: HttpRequest):
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        return 200, _list_org_provider_models(org_id, int(request.user.id))
+        from apps.harness.services import ProviderConfigService
+
+        models = ProviderConfigService().list_models(
+            org_id, user_id=int(request.user.id)
+        )
+        return 200, [provider_model_to_out(model) for model in models]
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -1802,7 +1310,12 @@ def save_org_provider_config(request: HttpRequest, payload: ProviderConfigIn):
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        return 200, _save_org_provider_config(org_id, payload)
+        from apps.harness.services import ProviderConfigService
+
+        config = ProviderConfigService().save_config(
+            organization_id=org_id, **payload.model_dump()
+        )
+        return 200, provider_config_to_out(config)
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -1823,7 +1336,9 @@ def delete_org_provider_config(request: HttpRequest):
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        _delete_org_provider_config(org_id)
+        from apps.harness.services import ProviderConfigService
+
+        ProviderConfigService().delete_config(org_id)
         return 204, None
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
