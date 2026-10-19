@@ -7,18 +7,21 @@ import json
 import uuid
 
 import pytest
+from django.db.models.signals import pre_delete
 from django.test import Client
 
 import apps.harness.api as harness_api
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.harness_service import HarnessService
 from apps.harness.permissions.evaluator import PermissionEvaluator
+from apps.harness.permissions.models import PermissionRequest
 from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import Delta, ProviderAdapter, Usage
 from apps.harness.repositories import (
     HarnessMessageRepository,
     HarnessPartRepository,
     HarnessSessionRepository,
+    QuestionRequestRepository,
 )
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
@@ -454,6 +457,209 @@ def test_edit_returns_202_and_reruns(fork_edit_setup, fake_fork_service):
     user_contents = [m.content for m in stored if m.role == "user"]
     assert user_contents[0] == "first edited"
     assert "second" not in user_contents
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("target_turn", [0, 1])
+@pytest.mark.parametrize("with_overrides", [False, True])
+def test_edit_disconnected_provider_preserves_history(
+    fork_edit_setup, monkeypatch, target_turn, with_overrides
+):
+    """Real provider validation must reject an edit without changing stored data."""
+    service = HarnessService(emit=_drop_emit)
+    monkeypatch.setattr(harness_api, "_resolve_harness_service", lambda: service)
+    session = _seed_two_turns(service, fork_edit_setup)
+    HarnessSessionRepository.set_model(session, "openrouter/openai/gpt-4.1")
+    messages = HarnessMessageRepository.list_for_session(session.id)
+    for message in messages:
+        if message.role == "assistant":
+            HarnessPartRepository.create(
+                message_id=message.id,
+                type="text",
+                state="completed",
+                output=message.content,
+            )
+    question = QuestionRequestRepository.create(
+        organization_id=session.organization_id,
+        session_id=session.id,
+        message_id=messages[-1].id,
+        questions=[{"question": "Keep this question?"}],
+    )
+    before_messages = list(session.messages.order_by("position").values())
+    before_parts = list(
+        HarnessPartRepository.model.objects.filter(message__session=session)
+        .order_by("message__position", "position")
+        .values()
+    )
+    session.refresh_from_db()
+    option_fields = (
+        "title",
+        "mode",
+        "agent_name",
+        "model",
+        "reasoning_effort",
+        "skill_ids",
+        "summary",
+        "last_message_at",
+        "updated_at",
+    )
+    before_options = tuple(getattr(session, field) for field in option_fields)
+    payload = {"prompt": "edited"}
+    if with_overrides:
+        payload.update(
+            mode="plan",
+            model="openrouter/anthropic/claude-sonnet-4",
+            reasoning_effort="high",
+        )
+    client = _client(
+        user=fork_edit_setup["owner"], org=fork_edit_setup["org"], permissions=RUN
+    )
+    target = messages[target_turn * 2]
+    response = client.post(
+        f"/api/v1/harness/sessions/{session.id}/messages/{target.id}/edit",
+        data=json.dumps(payload),
+        content_type="application/json",
+    )
+    assert response.status_code == 400, response.content[:500]
+    assert response.json() == {
+        "code": "validation_error",
+        "detail": "Provider 'openrouter' is not connected",
+    }
+    assert list(session.messages.order_by("position").values()) == before_messages
+    assert (
+        list(
+            HarnessPartRepository.model.objects.filter(message__session=session)
+            .order_by("message__position", "position")
+            .values()
+        )
+        == before_parts
+    )
+    session.refresh_from_db()
+    assert tuple(getattr(session, field) for field in option_fields) == before_options
+    assert session.status == "idle"
+    question.refresh_from_db()
+    assert question.status == "pending"
+    assert not service.is_running(session.id)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "failure", ["reservation", "provider_turn", "history", "commit"]
+)
+def test_edit_admission_failure_preserves_existing_state(
+    fork_edit_setup, fake_fork_service, monkeypatch, failure
+):
+    """Later admission failures preserve messages, parts, children and gates too."""
+    service = fake_fork_service
+    session = _seed_two_turns(service, fork_edit_setup)
+    child = service.create_session(
+        workspace_id=session.workspace_id,
+        organization_id=session.organization_id,
+        prompt="child",
+        parent_id=session.id,
+    )
+    messages = HarnessMessageRepository.list_for_session(session.id)
+    HarnessPartRepository.create(
+        message_id=messages[-1].id,
+        type="subtask",
+        state="completed",
+        meta={"child_session_id": str(child.id)},
+    )
+    permission = PermissionRequest.objects.create(
+        organization_id=session.organization_id,
+        session_id=session.id,
+        message_id=messages[-1].id,
+        tool="bash",
+        pattern="keep",
+    )
+    question = QuestionRequestRepository.create(
+        organization_id=session.organization_id,
+        session_id=session.id,
+        message_id=messages[-1].id,
+        questions=[{"question": "Keep?"}],
+    )
+    before_messages = list(session.messages.order_by("position").values())
+    before_parts = list(
+        HarnessPartRepository.model.objects.filter(message__session=session)
+        .order_by("message__position", "position")
+        .values()
+    )
+    session.refresh_from_db()
+    option_fields = (
+        "title",
+        "mode",
+        "agent_name",
+        "model",
+        "reasoning_effort",
+        "skill_ids",
+        "summary",
+        "last_message_at",
+        "updated_at",
+    )
+    before_options = tuple(getattr(session, field) for field in option_fields)
+    original_reserve = HarnessSessionRepository.reserve_workspace_run
+
+    def reserve(session_id, **kwargs):
+        # Exercise the real DB admission fences after initial API authorization.
+        if failure == "reservation":
+            HarnessSessionRepository.model.objects.filter(id=session_id).update(
+                status="busy"
+            )
+        admitted = original_reserve(session_id, **kwargs)
+        if failure == "provider_turn":
+            Membership.objects.filter(
+                organization=fork_edit_setup["org"], user=fork_edit_setup["owner"]
+            ).delete()
+        return admitted
+
+    monkeypatch.setattr(HarnessSessionRepository, "reserve_workspace_run", reserve)
+    if failure == "history":
+
+        async def fail_history(*args, **kwargs):
+            raise ValueError("History preparation failed")
+
+        monkeypatch.setattr(service, "_build_history", fail_history)
+
+    def fail_delete(sender, instance, **kwargs):
+        # This fires inside the real edit transaction, after gate/child updates.
+        if failure == "commit" and instance.id == messages[0].id:
+            raise ValueError("Edit commit failed")
+
+    pre_delete.connect(fail_delete, sender=HarnessMessageRepository.model)
+    try:
+        client = _client(
+            user=fork_edit_setup["owner"], org=fork_edit_setup["org"], permissions=RUN
+        )
+        response = client.post(
+            f"/api/v1/harness/sessions/{session.id}/messages/{messages[0].id}/edit",
+            data=json.dumps({"prompt": "edited", "mode": "plan", "model": "changed"}),
+            content_type="application/json",
+        )
+    finally:
+        pre_delete.disconnect(fail_delete, sender=HarnessMessageRepository.model)
+    assert response.status_code == (409 if failure == "reservation" else 400), (
+        response.content[:500]
+    )
+    if failure == "provider_turn":
+        assert (
+            "no longer has active organization membership" in response.json()["detail"]
+        )
+    assert list(session.messages.order_by("position").values()) == before_messages
+    assert (
+        list(
+            HarnessPartRepository.model.objects.filter(message__session=session)
+            .order_by("message__position", "position")
+            .values()
+        )
+        == before_parts
+    )
+    assert HarnessSessionRepository.get_by_id(child.id) is not None
+    for gate in (permission, question):
+        gate.refresh_from_db()
+        assert gate.status == "pending"
+    session.refresh_from_db()
+    assert tuple(getattr(session, field) for field in option_fields) == before_options
+    assert not service.is_running(session.id)
 
 
 @pytest.mark.django_db(transaction=True)

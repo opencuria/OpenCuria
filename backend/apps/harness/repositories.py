@@ -17,6 +17,7 @@ from django.db.models import (
     Max,
     OuterRef,
     Prefetch,
+    Q,
     Subquery,
     TextField,
     Value,
@@ -797,6 +798,52 @@ class HarnessSessionRepository:
             return True
 
     @staticmethod
+    def commit_message_edit(
+        session: HarnessSession,
+        *,
+        suffix_ids: list[uuid.UUID],
+        child_ids: list[uuid.UUID],
+        model: str,
+        reasoning_effort: str,
+    ) -> tuple[list[uuid.UUID], list[uuid.UUID]]:
+        """Atomically replace an admitted edit's old timeline and run options."""
+        from .engines.repositories import HarnessEngineRepository
+        from .permissions.models import PermissionRequest
+
+        with transaction.atomic():
+            scope = Q(message_id__in=suffix_ids) | Q(message_id__isnull=True)
+            permissions = PermissionRequest.objects.filter(
+                scope, session_id=session.id, status="pending"
+            )
+            questions = QuestionRequest.objects.filter(
+                scope, session_id=session.id, status="pending"
+            )
+            permission_ids = list(permissions.values_list("id", flat=True))
+            question_ids = list(questions.values_list("id", flat=True))
+            now = timezone.now()
+            permissions.update(status="rejected", remember="once", resolved_at=now)
+            questions.update(status="rejected", answers=[], resolved_at=now)
+            HarnessSession.objects.filter(id__in=child_ids).delete()
+            HarnessMessage.objects.filter(
+                session_id=session.id, id__in=suffix_ids
+            ).delete()
+            updates = {
+                "mode": session.mode,
+                "agent_name": session.agent_name,
+                "model": model,
+                "reasoning_effort": reasoning_effort,
+                "skill_ids": list(session.skill_ids or []),
+                "summary": "",
+                "updated_at": now,
+            }
+            if session.harness_id == "claude":
+                HarnessEngineRepository.clear_transcript(session.id)
+                updates.update(external_session_id="", engine_state={})
+            HarnessSession.objects.filter(id=session.id).update(**updates)
+            HarnessMessageRepository.dismiss_prior_notices(session.id)
+            return permission_ids, question_ids
+
+    @staticmethod
     def delete(session: HarnessSession) -> None:
         """Delete a harness session and its related rows."""
         session.delete()
@@ -1045,6 +1092,23 @@ class HarnessMessageRepository:
                 session_id=session_id, id__in=deleted_ids
             ).delete()
         return deleted_ids
+
+    @staticmethod
+    def discard_edit_run(
+        session_id: uuid.UUID,
+        *,
+        message_ids: list[uuid.UUID],
+        last_message_at: datetime,
+        updated_at: datetime,
+    ) -> None:
+        """Remove provisional edit shells when their run was not admitted."""
+        with transaction.atomic():
+            HarnessMessage.objects.filter(
+                session_id=session_id, id__in=message_ids
+            ).delete()
+            HarnessSession.objects.filter(id=session_id).update(
+                last_message_at=last_message_at, updated_at=updated_at
+            )
 
     @staticmethod
     def copy_prefix(
