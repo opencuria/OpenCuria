@@ -1,8 +1,7 @@
-"""Generic stream sessions: validators plus stateful StreamManager.
+"""Workspace-bound process and TCP stream sessions.
 
-Canonical home (Step 1 for constants/validators, Step 3 for state) for
-the stream helpers and session management previously living in
-:mod:`src.service`.
+This module validates stream parameters and manages process-backed streams,
+including durable ownership and cleanup where configured.
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ import hashlib
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -227,28 +226,10 @@ class StreamSession:
 
 
 class StreamManager:
-    """Owns generic bidirectional stream sessions (process / TCP relay).
+    """Owns generic bidirectional process and TCP stream sessions.
 
-    Canonical home (Step 3) for the stream session management previously
-    living on ``WorkspaceService`` in :mod:`src.service`.
-    ``WorkspaceService`` keeps thin delegates (same names/signatures/
-    messages) plus ``_streams`` property aliases onto the manager-owned
-    dict, so existing callers and tests keep working.
-
-    Workspace resolution is injected so this module never imports
-    ``src.service`` (no dependency cycle):
-
-    - ``runtimes``: runtime backends by type (kept for introspection;
-      resolution itself goes through the callables below).
-    - ``get_cached``: ``(workspace_id) -> WorkspaceInfo``; raises
-      ``ValueError("... not found")`` for unknown ids (same shape as
-      ``WorkspaceService._get_cached``).
-    - ``get_runtime``: ``(workspace_id) -> RuntimeBackend``; raises
-      ``RuntimeError`` for unknown runtimes (same shape as
-      ``WorkspaceService._get_runtime``).
-    - ``sanitize_exec_workdir``: ``(path) -> str``; mirrors
-      ``WorkspaceService._sanitize_exec_workdir`` (canonical logic in
-      ``src.services.exec_kernel``).
+    Runtime backends, workspace lookup functions, and a workdir sanitizer are
+    injected by the runner composition root.
     """
 
     def __init__(
@@ -608,32 +589,6 @@ class StreamManager:
         if session is None or session.closed or session.handle is None:
             raise ValueError(f"Unknown stream: {conn_id!r}")
         return session
-
-    def _get_stream(self, connection_id: str) -> StreamSession:
-        """Back-compat alias for :meth:`get_stream`."""
-        return self.get_stream(connection_id)
-
-    async def stream_read(
-        self, connection_id: str, stream: str = "stdout"
-    ) -> AsyncIterator[tuple[str, bytes]]:
-        """Yield ``(stream, data)`` chunks until the stream ends (EOF)."""
-        session = self.get_stream(connection_id)
-        while True:
-            stdout_data = await session.runtime.process_read(
-                session.handle, "stdout", STREAM_CHUNK_SIZE
-            )
-            stderr_data = await session.runtime.process_read(
-                session.handle, "stderr", 4096
-            )
-            emitted = False
-            if stdout_data:
-                emitted = True
-                yield ("stdout", bytes(stdout_data[:STREAM_CHUNK_SIZE]))
-            if stderr_data:
-                emitted = True
-                yield ("stderr", bytes(stderr_data[:STREAM_CHUNK_SIZE]))
-            if not emitted:
-                return
 
     @live_interaction
     async def stream_read_once(

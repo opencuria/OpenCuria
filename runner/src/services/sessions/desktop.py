@@ -1,47 +1,7 @@
-"""Desktop (KasmVNC/Xvnc) session lifecycle (Step 6a sessions group).
+"""Desktop session lifecycle, durable leases, and recording management.
 
-Canonical home for the desktop session management previously living on
-``WorkspaceService`` in :mod:`src.service`:
-
-- ``DESKTOP_*`` / ``DEFAULT_DESKTOP_*`` / ``MIN_DESKTOP_*`` /
-  ``MAX_DESKTOP_*`` / ``COMPUTER_USE_RECORD_DIR`` constants,
-  ``_RUN_ID_RE`` / ``DESKTOP_HOLDER_*`` / ``_SCROLL_BUTTONS`` /
-  ``_CLICK_BUTTONS`` sentinels,
-- the ``_desktop_sessions`` / ``_desktop_recordings`` state plus the
-  ``_desktop_lock_map`` keyed lock map (never-evict semantics), and
-- the start / acquire / release / action / clipboard operations
-  (``desktop_action`` is a thin dispatcher plus one private
-  ``_desktop_action_<action>`` helper per branch — Step 6b split,
-  same order/checks/messages as the verbatim Step 6a method).
-
-``WorkspaceService`` keeps thin delegates (same names/signatures/
-messages) plus ``_desktop_sessions`` / ``_desktop_recordings`` /
-``_desktop_locks`` / ``_desktop_locks_guard`` property aliases onto the
-manager-owned stores, and a ``desktop`` property exposing the manager,
-so existing callers and tests keep working.
-
-Workspace resolution is injected so this module never imports
-``src.service`` (no dependency cycle):
-
-- ``runtimes``: runtime backends by type (kept for introspection;
-  resolution itself goes through the callables below).
-- ``get_cached``: ``(workspace_id) -> WorkspaceInfo``; raises
-  ``ValueError("... not found")`` for unknown ids.
-- ``get_runtime``: ``(workspace_id) -> RuntimeBackend``; raises
-  ``RuntimeError`` for unknown runtimes.
-- ``exec_harness_command``: async
-  ``(workspace_id, command, workdir, env) -> (exit_code, stdout,
-  stderr)`` used by ``desktop_action("execute")``; ``WorkspaceService``
-  passes its bound ``exec_harness_command`` facade (which delegates to
-  the harness manager).
-
-``DesktopSession`` / ``DesktopReleaseResult`` are imported from
-``src.models`` (identical objects, never redefined). Path validation
-uses the canonical ``src.services.exec_kernel.sanitize_path``; xdotool
-key helpers come from :mod:`src.services.sessions.xdotool`.
-
-Extraction owner: Step 6a (sessions group, PART 1: verbatim move);
-Step 6b splits ``desktop_action`` into dispatcher + per-action helpers.
+:class:`DesktopManager` owns Xvnc process state, lease coordination, desktop
+actions, clipboard operations, and recordings.
 """
 
 from __future__ import annotations
@@ -138,19 +98,10 @@ class WorkspaceEndedEvidence:
 
 
 class DesktopManager:
-    """Owns the shared Xvnc desktop process, leases and recordings.
+    """Owns desktop processes, leases, recordings, and desktop actions.
 
-    Injected dependencies (all mirror ``WorkspaceService`` helpers):
-
-    - ``runtimes``: runtime backends by type (kept for introspection;
-      resolution itself goes through the callables below).
-    - ``get_cached``: ``(workspace_id) -> WorkspaceInfo``; raises
-      ``ValueError("... not found")`` for unknown ids.
-    - ``get_runtime``: ``(workspace_id) -> RuntimeBackend``; raises
-      ``RuntimeError`` for unknown runtimes.
-    - ``exec_harness_command``: async ``(workspace_id, command, workdir,
-      env) -> (exit_code, stdout, stderr)`` used by
-      ``desktop_action("execute")``.
+    Runtime backends, workspace lookup functions, and harness execution are
+    injected by the runner composition root.
     """
 
     def __init__(
@@ -197,13 +148,9 @@ class DesktopManager:
         # Serialises concurrent viewer/computer-use lifecycle ops per
         # workspace (same never-evict rationale as the background and
         # git lock maps: dropping a lock object while a holder waits
-        # would hand the next caller a different lock). Step 5: the
-        # get-or-create never-evict mechanics live in the canonical
-        # ``KeyedLockMap`` (``src.services.exec_kernel``);
-        # ``_desktop_locks`` / ``_desktop_locks_guard`` stay
-        # readable/writable as live aliases onto the map's dict/guard
-        # so ``WorkspaceService`` property aliases and tests poking
-        # ``service._desktop_locks.get(...)`` keep working.
+        # would hand the next caller a different lock). ``KeyedLockMap``
+        # supplies get-or-create, and properties below expose its dict and
+        # guard for manager integrations.
         self._desktop_lock_map: KeyedLockMap = KeyedLockMap()
 
     async def workspace_ended(
@@ -935,9 +882,7 @@ class DesktopManager:
         serialisation. One small in-memory ``asyncio.Lock`` per workspace
         is the accepted trade-off for correctness.
 
-        Step 5: mechanics live in the canonical ``KeyedLockMap``
-        (``src.services.exec_kernel``); this stays a thin delegate so
-        behavior (including the never-evict guarantee) is unchanged.
+        The map retains locks permanently to preserve serialization.
         """
         return await self._desktop_lock_map.get(workspace_id)
 
@@ -1805,11 +1750,8 @@ class DesktopManager:
     ) -> dict[str, Any]:
         """Execute a desktop I/O action inside the workspace display.
 
-        Step 6b: thin dispatcher — payload/logging bind, ``execute``
-        code-boundary validation, the liveness gate for every action
-        except ``ensure``/``hold``/``release``, then one private
-        ``_desktop_action_<action>`` helper per branch (same order and
-        messages as the verbatim Step 6a method).
+        Dispatches actions after applying shared validation and liveness
+        checks; individual action handlers implement each operation.
         """
         payload = args or {}
         log = logger.bind(workspace_id=str(workspace_id), desktop_action=action)

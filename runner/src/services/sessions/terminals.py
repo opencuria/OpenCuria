@@ -1,13 +1,4 @@
-"""Interactive terminal sessions (PTY create / write / resize / close).
-
-Canonical home (Step 2) for ``TerminalSession`` and the PTY session
-management previously living on ``WorkspaceService`` in
-:mod:`src.service`. ``WorkspaceService`` keeps thin delegates (same
-signatures/messages) plus a ``_terminals`` property alias onto the
-manager-owned dict, so existing callers and tests keep working.
-
-Extraction owner: Step 2 (leaf cluster: terminals + images).
-"""
+"""Interactive PTY terminal sessions for workspaces."""
 
 from __future__ import annotations
 
@@ -37,25 +28,8 @@ class TerminalSession:
 class TerminalManager:
     """Owns terminal PTY sessions for workspaces.
 
-    Workspace resolution is injected so this module never imports
-    ``src.service`` (no dependency cycle):
-
-    - ``runtimes``: runtime backends by type (kept for introspection;
-      resolution itself goes through the callables below).
-    - ``get_cached``: ``(workspace_id) -> WorkspaceInfo``; raises
-      ``ValueError("... not found")`` for unknown ids (same shape as
-      ``WorkspaceService._get_cached``).
-    - ``get_runtime``: ``(workspace_id) -> RuntimeBackend``; raises
-      ``RuntimeError`` for unknown runtimes (same shape as
-      ``WorkspaceService._get_runtime``).
-    - ``evict_workspace``: ``(workspace_id) -> None``; drops a stale
-      cache entry when the runtime no longer has the instance.
-      ``WorkspaceService`` passes a pop on its live ``_cache`` (a
-      closure, not the dict object) so ``sync_from_runtime``
-      reassignments stay correct.
-    - ``credential_env_file``: guest path sourced by the login shell.
-      ``WorkspaceService`` passes its ``WORKSPACE_CREDENTIAL_ENV_FILE``
-      constant; the default matches it.
+    Runtime lookup, stale-cache eviction, and credential env-file path are
+    injected by the runner composition root.
     """
 
     def __init__(

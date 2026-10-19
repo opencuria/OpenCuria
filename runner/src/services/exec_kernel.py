@@ -1,48 +1,7 @@
-"""Execution kernel pure helpers (Steps 1 + 5).
+"""Execution helpers and shared primitives for runner service managers.
 
-Canonical home for stateless command/path sanitizers previously living on
-``WorkspaceService`` in :mod:`src.service`:
-
-- shell operator / redirection sentinels (``_SHELL_OPERATOR_TOKENS``,
-  ``_REDIRECTION_RE``),
-- :func:`normalise_command_args` (was
-  ``WorkspaceService._normalise_command_args``),
-- :func:`sanitize_path`, :func:`sanitize_exec_workdir`,
-  :func:`sanitize_filename` (were the ``_sanitize_*`` static methods).
-
-Step 5 additions (behavior-preserving cutover of the exec kernel):
-
-- :func:`credential_path_helpers` (was
-  ``WorkspaceService._credential_path_helpers``; verbatim shell lines).
-  Pure — takes no state.
-- :func:`wrap_command_with_persistent_env` (was
-  ``WorkspaceService._wrap_command_with_persistent_env``; verbatim
-  logic). Pure — the guest credential env-file path is an explicit
-  parameter (default is the literal guest path, matching the canonical
-  ``src.services.credentials.WORKSPACE_CREDENTIAL_ENV_FILE`` value) so
-  this module never imports ``src.services.credentials`` (avoids an
-  import cycle: ``credentials`` imports the wrap helpers from here).
-- :func:`exec_command` / :func:`exec_command_stream` (were
-  ``WorkspaceService._exec_command`` / ``_exec_command_stream``;
-  verbatim logic) taking ``(runtime, instance_id, command)`` plus an
-  optional ``credential_env_file`` path.
-- :class:`KeyedLockMap`: tiny get-or-create never-evict keyed lock map
-  encapsulating the guard+dict pattern used by the background / git /
-  desktop lock factories. ``WorkspaceService`` keeps its ``_..._locks``
-  dict attributes and factory methods as thin aliases/delegates, so
-  existing callers and tests keep working.
-- :class:`WorkspaceContext`: dataclass with ``workspace_id``, ``info``,
-  ``runtime``; classmethod :meth:`WorkspaceContext.resolve` performs
-  ``_get_cached`` + ``_get_runtime`` + ``instance_id`` check with
-  messages IDENTICAL to the ``WorkspaceService`` preamble. Used in the
-  NEW code paths only (credentials manager + exec kernel's
-  ``exec_command`` helpers); other clusters' preambles are left for
-  their own move steps (Steps 6-8; lifecycle owns the final cutover) to
-  avoid churn.
-
-Only stdlib + typing (+ ``src.models`` / ``src.runtime.base`` for type
-hints); no dependency on ``WorkspaceService``. The module never imports
-``src.service`` or ``src.services.credentials`` (no cycle).
+Provides command/path normalization, credential-aware exec dispatch,
+workspace resolution, and keyed locks with never-evict semantics.
 """
 
 from __future__ import annotations
@@ -168,13 +127,9 @@ def sanitize_filename(filename: str) -> str:
     return filename
 
 
-# -- credential path helpers + persistent-env wrap (Step 5) -----------------
-# Verbatim logic moved from ``WorkspaceService._credential_path_helpers``
-# / ``WorkspaceService._wrap_command_with_persistent_env`` (src/service.py
-# ~902-969). Pure functions: the guest env-file path and the environment
-# paths/blocks are explicit parameters (defaults are literals matching
-# the canonical ``src.services.credentials`` values) so this module
-# never imports ``src.services.credentials``.
+# -- credential path helpers + persistent-env wrap ---------------------------
+# Pure functions: guest environment paths/blocks are explicit parameters so
+# this module does not import credentials and create a dependency cycle.
 
 
 def credential_path_helpers(
@@ -253,13 +208,8 @@ def wrap_command_with_persistent_env(
     }
 
 
-# -- stateful exec entry points (Step 5) -------------------------------------
-# Verbatim logic moved from ``WorkspaceService._exec_command`` /
-# ``WorkspaceService._exec_command_stream`` (src/service.py ~837-888):
-# wrap with the persistent-env wrapper, normalise, then call the
-# runtime. The only difference is that (runtime, instance_id) arrive as
-# explicit parameters (plus an optional credential-env-file override)
-# instead of via a workspace preamble.
+# -- stateful exec entry points -----------------------------------------------
+# Wrap with the persistent-env helper, normalize, then dispatch to the runtime.
 
 
 async def exec_command(
@@ -325,7 +275,7 @@ async def exec_command_stream(
         yield line
 
 
-# -- KeyedLockMap + WorkspaceContext (Step 5) --------------------------------
+# -- KeyedLockMap + WorkspaceContext ----------------------------------------
 
 
 class KeyedLockMap:
@@ -337,11 +287,8 @@ class KeyedLockMap:
     drop in the release/wait window would hand a third caller a
     different lock object and silently break serialisation).
 
-    The underlying dict stays accessible via :attr:`locks` (and
-    :meth:`as_dict`) so ``WorkspaceService`` property aliases onto
-    manager-owned ``_..._locks`` dicts keep working for tests poking
-    them (e.g. ``service._desktop_locks.get(workspace_id)``), and the
-    guard via :attr:`guard` so ``..._guard`` aliases keep working.
+    The underlying dict and guard are exposed for manager integrations that
+    need to inspect or share the lock state.
     """
 
     def __init__(
@@ -386,17 +333,8 @@ class KeyedLockMap:
 class WorkspaceContext:
     """Resolved workspace preamble: cached info + runtime backend.
 
-    Canonical replacement for the ``_get_cached`` + ``_get_runtime`` +
-    ``instance_id`` preamble repeated at ~30 ``WorkspaceService`` entry
-    points. :meth:`resolve` raises with messages IDENTICAL to the facade
-    preamble:
-
-    - unknown workspace -> ``ValueError("Workspace {id} not found")``
-      (raised by the ``get_cached`` lookup),
-    - unknown runtime -> ``RuntimeError("Runtime ... not available ...")``
-      (raised by the ``get_runtime`` lookup),
-    - missing instance -> ``RuntimeError("Workspace has no instance
-      assigned")``.
+    :meth:`resolve` looks up workspace metadata and its runtime, then checks
+    that the workspace has an assigned runtime instance.
     """
 
     workspace_id: uuid.UUID
@@ -421,17 +359,8 @@ class WorkspaceContext:
 class ExecKernel:
     """Stateful exec kernel: wrap + normalise + runtime dispatch.
 
-    Thin stateful shell over the module-level :func:`exec_command` /
-    :func:`exec_command_stream` / :func:`wrap_command_with_persistent_env`
-    helpers. Wired with an optional ``credential_env_file`` (defaults to
-    the guest literal matching the canonical
-    ``src.services.credentials.WORKSPACE_CREDENTIAL_ENV_FILE`` value;
-    ``WorkspaceService`` passes the canonical constant explicitly).
-
-    ``WorkspaceService`` keeps ``_exec_command`` / ``_exec_command_stream``
-    / ``_normalise_command_args`` / ``_wrap_command_with_persistent_env``
-    as thin delegates onto a kernel instance, so existing callers keep
-    working.
+    Stateful wrapper over the module-level exec and command-normalization
+    helpers. The credential environment-file path is configurable.
     """
 
     def __init__(

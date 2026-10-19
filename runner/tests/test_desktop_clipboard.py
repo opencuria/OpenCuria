@@ -21,7 +21,7 @@ class DesktopClipboardSelectionTests(unittest.IsolatedAsyncioTestCase):
             {"docker": self.runtime}, RunnerSettings(state_dir=tempfile.mkdtemp())
         )
         self.workspace_id = uuid.uuid4()
-        self.service._cache[self.workspace_id] = WorkspaceInfo(
+        self.service.registry._cache[self.workspace_id] = WorkspaceInfo(
             self.workspace_id, "guest", "running", runtime_type="docker"
         )
         self.service.desktop._is_desktop_session_live = AsyncMock(return_value=True)
@@ -30,14 +30,14 @@ class DesktopClipboardSelectionTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_default_read_preserves_existing_snapshot_operation(self):
-        result = await self.service.read_desktop_clipboard(self.workspace_id)
+        result = await self.service.desktop.read_desktop_clipboard(self.workspace_id)
         self.assertEqual(result, "snapshot")
         args = self.runtime.exec_command_wait.await_args.args
         self.assertIn("xclip -selection clipboard -o", args[1][2])
         self.service.desktop._exec_desktop_shell.assert_not_awaited()
 
     async def test_selection_copy_uses_bounded_local_python_and_returns_fresh_text(self):
-        result = await self.service.read_desktop_clipboard(
+        result = await self.service.desktop.read_desktop_clipboard(
             self.workspace_id, copy_selection=True, shift=True
         )
         self.assertEqual(result, "fresh unicode 🧪")
@@ -54,15 +54,15 @@ class DesktopClipboardSelectionTests(unittest.IsolatedAsyncioTestCase):
             {"shift": True},
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
-                await self.service.read_desktop_clipboard(self.workspace_id, **kwargs)
+                await self.service.desktop.read_desktop_clipboard(self.workspace_id, **kwargs)
         self.service.desktop._exec_desktop_shell.assert_not_awaited()
 
     async def test_legacy_computeruse_session_blocks_keyboard_input(self):
         session = DesktopSession(self.workspace_id, "guest")
         session.computeruse_run_ids.add("active-run")
-        self.service._desktop_sessions[self.workspace_id] = session
+        self.service.desktop._desktop_sessions[self.workspace_id] = session
         with self.assertRaisesRegex(RuntimeError, "during computer use"):
-            await self.service.read_desktop_clipboard(
+            await self.service.desktop.read_desktop_clipboard(
                 self.workspace_id, copy_selection=True
             )
         self.service.desktop._exec_desktop_shell.assert_not_awaited()
@@ -82,7 +82,7 @@ class DesktopClipboardSelectionTests(unittest.IsolatedAsyncioTestCase):
                     180,
                 )
                 with self.assertRaisesRegex(RuntimeError, "during computer use"):
-                    await self.service.read_desktop_clipboard(
+                    await self.service.desktop.read_desktop_clipboard(
                         self.workspace_id, copy_selection=True
                     )
         self.service.desktop._exec_desktop_shell.assert_not_awaited()
@@ -95,7 +95,7 @@ class DesktopClipboardSelectionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(
             RuntimeError, "Failed to copy desktop selection"
         ) as exc:
-            await self.service.read_desktop_clipboard(
+            await self.service.desktop.read_desktop_clipboard(
                 self.workspace_id, copy_selection=True
             )
         self.assertNotIn("secret", str(exc.exception))
@@ -107,7 +107,7 @@ class DesktopClipboardSelectionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(
             RuntimeError, "Failed to copy desktop selection"
         ):
-            await self.service.read_desktop_clipboard(
+            await self.service.desktop.read_desktop_clipboard(
                 self.workspace_id, copy_selection=True
             )
 
@@ -115,7 +115,7 @@ class DesktopClipboardSelectionTests(unittest.IsolatedAsyncioTestCase):
         self.service.capture_fence._capturing.add(self.workspace_id)
         try:
             with self.assertRaisesRegex(RuntimeError, "capturing"):
-                await self.service.read_desktop_clipboard(
+                await self.service.desktop.read_desktop_clipboard(
                     self.workspace_id, copy_selection=True
                 )
         finally:

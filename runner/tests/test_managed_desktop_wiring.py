@@ -22,7 +22,7 @@ class ManagedDesktopWiringTests(unittest.IsolatedAsyncioTestCase):
         self.interface = WebSocketInterface(self.service, self.settings)
         self.interface._sio.emit = AsyncMock()
         self.ws = uuid.uuid4()
-        self.service._cache[self.ws] = WorkspaceInfo(
+        self.service.registry._cache[self.ws] = WorkspaceInfo(
             workspace_id=self.ws,
             instance_id="guest",
             status="running",
@@ -56,7 +56,7 @@ class ManagedDesktopWiringTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_production_composition_and_reserve_no_start(self):
         self.assertFalse(self.desktop._legacy_mode)
-        self.assertIs(self.service._registry.desktop_manager, self.desktop)
+        self.assertIs(self.service.registry.desktop_manager, self.desktop)
         self.assertIs(self.service.streams.lease_store, self.desktop.lease_store)
         self.assertEqual(self.desktop.epoch, self.interface._inventory_epoch)
         self.assertEqual(
@@ -182,19 +182,6 @@ class ManagedDesktopWiringTests(unittest.IsolatedAsyncioTestCase):
             [call.args[0] for call in self.interface._sio.emit.await_args_list],
         )
         self.desktop._ensure_desktop_process_locked.assert_not_awaited()
-
-    async def test_facade_preserves_managed_owner(self):
-        self.service.streams.stream_start_process = AsyncMock()
-        owner = {"lease_id": "one", "epoch": self.desktop.epoch}
-        await self.service.stream_start_process(self.ws, "stdio", ["true"], owner=owner)
-        self.assertEqual(
-            self.service.streams.stream_start_process.await_args.kwargs["owner"],
-            owner,
-        )
-        await self.service.stream_start_process(self.ws, "legacy", ["true"])
-        self.assertNotIn(
-            "owner", self.service.streams.stream_start_process.await_args.kwargs
-        )
 
     async def test_hung_recovery_is_cancelled_without_accumulating_tasks(self):
         await self.desktop.desktop_action(self.ws, "reserve", self.intent())

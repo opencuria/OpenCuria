@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-
 from src.config import RunnerSettings
 from src.interfaces.websocket import WebSocketInterface
 from src.models import WorkspaceInfo
@@ -22,7 +21,7 @@ def service():
     )
     service = WorkspaceService({"qemu": runtime}, RunnerSettings())
     ws = uuid.uuid4()
-    service._cache[ws] = WorkspaceInfo(
+    service.registry._cache[ws] = WorkspaceInfo(
         workspace_id=ws, instance_id="guest", status="exited", runtime_type="qemu"
     )
     service.images.scrub_proof_hook = AsyncMock(return_value=True)
@@ -148,10 +147,10 @@ async def test_composed_manager_interactions_are_guarded(
 
 async def test_session_id_only_writes_use_original_workspace(service):
     svc, ws, runtime = service
-    svc._terminals["terminal"] = TerminalSession(
+    svc.terminal_manager._terminals["terminal"] = TerminalSession(
         handle=None, runtime=runtime, workspace_id=ws
     )
-    svc._streams["stream"] = SimpleNamespace(workspace_id=ws)
+    svc.streams._streams["stream"] = SimpleNamespace(workspace_id=ws)
     async with svc.capture_fence.capture(ws):
         for method, args in [
             (svc.terminal_manager.write_terminal, ("terminal", b"text")),
@@ -267,8 +266,8 @@ async def test_lifecycle_queued_before_capture_cannot_run_inside_capture(service
 async def test_stop_closes_active_stream_read_before_capture_drains(service):
     svc, ws, runtime = service
     entered, closed, stopping, release_stop = (asyncio.Event() for _ in range(4))
-    svc._cache[ws].status = "running"
-    svc._streams["stream"] = SimpleNamespace(
+    svc.registry._cache[ws].status = "running"
+    svc.streams._streams["stream"] = SimpleNamespace(
         workspace_id=ws,
         connection_id="stream",
         handle="handle",
@@ -281,7 +280,7 @@ async def test_stop_closes_active_stream_read_before_capture_drains(service):
         await closed.wait()
         return b""
 
-    async def close(*args):
+    async def close(*args, **kwargs):
         closed.set()
 
     async def remove(*args):
@@ -294,9 +293,11 @@ async def test_stop_closes_active_stream_read_before_capture_drains(service):
         return_value=SimpleNamespace(status="running")
     )
     runtime.stop_workspace = AsyncMock()
-    svc.lifecycle.remove_hook = remove
-    svc.lifecycle.kill_all_hook = AsyncMock()
-    svc.lifecycle.release_hook = AsyncMock()
+    svc.credentials.remove_workspace_credentials = AsyncMock(side_effect=remove)
+    svc.background._kill_all_background_processes = AsyncMock()
+    svc.desktop.release_desktop = AsyncMock()
+    svc.desktop._interrupt_desktop_recordings = AsyncMock()
+    svc.streams.close_workspace_streams = AsyncMock(side_effect=close)
     reader = asyncio.create_task(svc.streams.stream_read_once("stream"))
     await entered.wait()
     stop = asyncio.create_task(svc.lifecycle.stop_workspace(ws))
@@ -307,7 +308,7 @@ async def test_stop_closes_active_stream_read_before_capture_drains(service):
     await asyncio.wait_for(asyncio.gather(reader, stop, capture), 1)
     assert closed.is_set()
     assert not svc.capture_fence._users
-    assert svc._cache[ws].status == "exited"
+    assert svc.registry._cache[ws].status == "exited"
 
 
 async def test_admitted_desktop_waiter_is_rechecked_after_stop_epoch(service):
@@ -318,6 +319,6 @@ async def test_admitted_desktop_waiter_is_rechecked_after_stop_epoch(service):
         await asyncio.sleep(0)
         assert svc.capture_fence._users
         async with svc.registry.lifecycle(ws):
-            svc._cache[ws].status = "exited"
+            svc.registry._cache[ws].status = "exited"
     with pytest.raises(RuntimeError, match="lifecycle changed"):
         await asyncio.wait_for(task, 1)

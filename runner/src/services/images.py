@@ -1,27 +1,8 @@
-"""Image build / artifact operations (Step 2 leaf cluster).
+"""Image build, artifact, and image-backed workspace operations.
 
-Canonical home for the image build / artifact helpers previously living
-on ``WorkspaceService`` in :mod:`src.service`:
-
-- :meth:`ImageManager.build_image`,
-- :meth:`ImageManager.create_image_artifact`,
-- :meth:`ImageManager.list_image_artifacts`,
-- :meth:`ImageManager.delete_image_artifact`,
-- :meth:`ImageManager.delete_image_reference`,
-- :meth:`ImageManager.create_workspace_from_image_artifact`.
-
-``WorkspaceService`` keeps thin delegates (same names/signatures/messages)
-plus an ``images`` property exposing the manager, so existing callers and
-websocket handlers keep working while new code can call the manager
-directly.
-
-Workspace resolution / mutation is injected so this module never imports
-``src.service`` (no dependency cycle). ``store_workspace`` always writes
-through to the live service cache (a closure over the service, not a
-captured dict object) so :meth:`src.service.WorkspaceService.sync_from_runtime`
-reassignments stay correct.
-
-Extraction owner: Step 2 (leaf cluster: terminals + images).
+:class:`ImageManager` uses injected runtime, workspace lookup/store, and
+credential dependencies; image-backed workspace updates go through the
+provided ``store_workspace`` callback.
 """
 
 from __future__ import annotations
@@ -41,26 +22,11 @@ logger = structlog.get_logger(__name__)
 
 
 class ImageManager:
-    """Owns image build / artifact operations.
+    """Owns image build and artifact operations.
 
-    Injected dependencies (all mirror ``WorkspaceService`` helpers):
-
-    - ``runtimes``: runtime backends by type (kept for introspection;
-      resolution itself goes through the callables below).
-    - ``get_cached``: ``(workspace_id) -> WorkspaceInfo``; raises
-      ``ValueError("... not found")`` for unknown ids.
-    - ``get_runtime``: ``(workspace_id) -> RuntimeBackend``; raises
-      ``RuntimeError`` for unknown runtimes.
-    - ``get_runtime_by_type``: ``(runtime_type) -> RuntimeBackend``;
-      raises ``RuntimeError("... is not enabled")``.
-    - ``cache``: legacy direct dict reference (accepted for
-      compatibility; prefer ``store_workspace`` which stays correct
-      across ``sync_from_runtime`` reassignments).
-    - ``store_workspace``: ``(info) -> None``; persists a new
-      ``WorkspaceInfo`` into the live service cache.
-    - ``credentials_injector``: async
-      ``(runtime, instance_id, env_vars, files, ssh_keys, log) -> bool``;
-      ``WorkspaceService.inject_workspace_credentials`` bound method.
+    Runtime lookup, workspace storage, and credential injection are provided by
+    the runner composition root. ``store_workspace`` writes new workspace
+    metadata to the active registry.
     """
 
     def __init__(
@@ -69,7 +35,6 @@ class ImageManager:
         get_cached: Callable[[uuid.UUID], WorkspaceInfo] | None = None,
         get_runtime: Callable[[uuid.UUID], RuntimeBackend] | None = None,
         get_runtime_by_type: Callable[[str], RuntimeBackend] | None = None,
-        cache: dict[uuid.UUID, WorkspaceInfo] | None = None,
         store_workspace: Callable[[WorkspaceInfo], None] | None = None,
         credentials_injector: Callable[
             [RuntimeBackend, str, Any, Any, Any, Any], Awaitable[bool]
@@ -81,15 +46,7 @@ class ImageManager:
         self._get_cached = get_cached
         self._get_runtime = get_runtime
         self._get_runtime_by_type = get_runtime_by_type
-        self._cache = cache
-        if store_workspace is not None:
-            self._store_workspace = store_workspace
-        elif cache is not None:
-            self._store_workspace = lambda info: cache.__setitem__(  # noqa: E731
-                info.workspace_id, info
-            )
-        else:
-            self._store_workspace = None
+        self._store_workspace = store_workspace
         self.lifecycle_context = None
         self.scrub_proof_hook = None
         self.checkpoint_hook = None

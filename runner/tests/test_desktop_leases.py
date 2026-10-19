@@ -417,7 +417,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         from src.services.workspace_lifecycle import WorkspaceLifecycle
         from src.services.workspace_registry import WorkspaceRegistry
 
-        manager, runtime, intent = await self.recording_manager()
+        manager, runtime, _intent = await self.recording_manager()
         info = WorkspaceInfo(self.ws, "guest", "running", runtime_type="qemu")
         registry = WorkspaceRegistry(runtimes={"qemu": runtime})
         registry._cache[self.ws] = info
@@ -427,14 +427,27 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         runtime.get_workspace_status = AsyncMock(
             return_value=SimpleNamespace(instance_id="guest", status="running")
         )
-        streams = SimpleNamespace(confirm_workspace_ended=AsyncMock(return_value=True))
-        lifecycle = WorkspaceLifecycle(
-            registry, runtimes={"qemu": runtime}, desktop=manager, streams=streams
+        streams = SimpleNamespace(
+            confirm_workspace_ended=AsyncMock(return_value=True),
+            close_workspace_streams=AsyncMock(return_value=0),
         )
-        lifecycle.remove_hook = AsyncMock()
-        lifecycle.kill_all_hook = AsyncMock()
-        lifecycle.close_streams_hook = AsyncMock(return_value=0)
-        lifecycle.release_hook = AsyncMock(return_value=False)
+        from src.services.credentials import CredentialManager
+
+        credentials = CredentialManager()
+        credentials.remove_workspace_credentials = AsyncMock()
+        background = SimpleNamespace(
+            _kill_all_background_processes=AsyncMock(),
+            _drop_background_tracking=AsyncMock(return_value=0),
+        )
+        manager.release_desktop = AsyncMock(return_value=False)
+        lifecycle = WorkspaceLifecycle(
+            registry,
+            runtimes={"qemu": runtime},
+            credentials=credentials,
+            background=background,
+            desktop=manager,
+            streams=streams,
+        )
         await manager.desktop_action(self.ws, "record_start", {"run_id": "run-1"})
         self.addAsyncCleanup(self.cancel_record_watchers, manager)
         viewer = {**self.intent(), "lease_id": "viewer", "kind": "viewer"}
@@ -467,7 +480,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         runtime.process_detach.assert_awaited_once()
 
     async def test_same_id_remove_allows_a_new_desktop_lease(self):
-        manager, runtime, lifecycle, registry, streams = await self.lifecycle_manager()
+        manager, _runtime, lifecycle, registry, _streams = await self.lifecycle_manager()
         await lifecycle.remove_workspace(self.ws)
         self.assertEqual(await self.store.list_unfinished(str(self.ws)), [])
         from src.models import WorkspaceInfo
@@ -487,16 +500,16 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_stop_failed_preclose_final_proof_finishes_owners(self):
-        manager, runtime, lifecycle, registry, streams = await self.lifecycle_manager()
+        manager, _runtime, lifecycle, registry, streams = await self.lifecycle_manager()
         await lifecycle.stop_workspace(self.ws)
         self.assertEqual(registry._cache[self.ws].status, "exited")
-        lifecycle.release_hook.assert_awaited_once()
+        manager.release_desktop.assert_awaited_once()
         self.assertEqual(await self.store.list_unfinished(str(self.ws)), [])
         self.assertEqual(await self.store.unfinished_recordings(str(self.ws)), [])
         streams.confirm_workspace_ended.assert_awaited_once_with(self.ws, "guest")
 
     async def test_remove_failure_retains_registry_and_ownership(self):
-        manager, runtime, lifecycle, registry, streams = await self.lifecycle_manager()
+        _manager, runtime, lifecycle, registry, streams = await self.lifecycle_manager()
         runtime.remove_workspace.side_effect = RuntimeError("remove failed")
         with self.assertRaises(RuntimeError):
             await lifecycle.remove_workspace(self.ws)
@@ -508,7 +521,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_workspace_ended_mismatched_evidence_rejected(self):
         from src.services.sessions.desktop import WorkspaceEndedEvidence
 
-        manager, runtime, lifecycle, registry, streams = await self.lifecycle_manager()
+        manager, _runtime, _lifecycle, _registry, _streams = await self.lifecycle_manager()
         with self.assertRaises(ValueError):
             await manager.workspace_ended(
                 self.ws,
@@ -519,22 +532,22 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(await self.store.list_unfinished(str(self.ws))), 2)
 
     async def test_cleanup_unknown_confirms_before_forgetting_identity(self):
-        manager, runtime, lifecycle, registry, streams = await self.lifecycle_manager()
+        _manager, _runtime, lifecycle, registry, streams = await self.lifecycle_manager()
         self.assertTrue(await lifecycle.cleanup_unknown_workspace(self.ws))
         streams.confirm_workspace_ended.assert_awaited_once_with(self.ws, "guest")
         self.assertNotIn(self.ws, registry._cache)
         self.assertFalse(await self.store.list_unfinished(str(self.ws)))
 
     async def test_stop_preclose_errors_do_not_skip_physical_proof(self):
-        manager, runtime, lifecycle, registry, streams = await self.lifecycle_manager()
-        lifecycle.close_streams_hook.side_effect = RuntimeError("streams unreachable")
-        lifecycle.release_hook.side_effect = RuntimeError("desktop unreachable")
+        manager, runtime, lifecycle, _registry, streams = await self.lifecycle_manager()
+        streams.close_workspace_streams.side_effect = RuntimeError("streams unreachable")
+        manager.release_desktop.side_effect = RuntimeError("desktop unreachable")
         await lifecycle.stop_workspace(self.ws)
         runtime.stop_workspace.assert_awaited_once_with("guest")
         self.assertFalse(await self.store.list_unfinished(str(self.ws)))
 
     async def test_failed_post_remove_confirmation_keeps_lookup(self):
-        manager, runtime, lifecycle, registry, streams = await self.lifecycle_manager()
+        _manager, _runtime, lifecycle, registry, streams = await self.lifecycle_manager()
         streams.confirm_workspace_ended.return_value = False
         with self.assertRaisesRegex(RuntimeError, "confirmation failed"):
             await lifecycle.remove_workspace(self.ws)

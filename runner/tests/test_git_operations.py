@@ -21,8 +21,6 @@ deterministic and never overfit the host ``/tmp`` layout.
 
 from __future__ import annotations
 
-import tempfile
-
 import asyncio
 import os
 import shutil
@@ -38,7 +36,6 @@ from src.config import RunnerSettings
 from src.interfaces.websocket import WebSocketInterface
 from src.models import WorkspaceInfo
 from src.service import WorkspaceService
-
 
 # ---------------------------------------------------------------------------
 # Host git-environment isolation (module setup/teardown).
@@ -341,7 +338,7 @@ def _service_for(root: str) -> tuple[WorkspaceService, FakeGitRuntime, uuid.UUID
     runtime = FakeGitRuntime(root)
     service = WorkspaceService(runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
     workspace_id = uuid.uuid4()
-    service._cache[workspace_id] = WorkspaceInfo(
+    service.registry._cache[workspace_id] = WorkspaceInfo(
         workspace_id=workspace_id,
         instance_id="instance-1",
         status="running",
@@ -564,7 +561,9 @@ class GitHelperUnitTests(unittest.TestCase):
             git_ops.build_git_env({"GITHUB_TOKEN": "ghp_secret"})  # type: ignore[call-arg]
 
     def test_git_exec_wrapper_sources_persistent_env(self) -> None:
-        from src.git import _GIT_EXEC_WRAPPER_SCRIPT  # noqa: PLC2701 - fixed script under test
+        from src.git import (
+            _GIT_EXEC_WRAPPER_SCRIPT,  # noqa: PLC2701 - fixed script under test
+        )
 
         argv = git_ops.git_exec_wrapper_argv(["git", "status"])
         self.assertEqual(argv[:3], ["sh", "-c", _GIT_EXEC_WRAPPER_SCRIPT])
@@ -2006,7 +2005,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                         settings=RunnerSettings(state_dir=tempfile.mkdtemp()),
                     )
                     ws_id = uuid.uuid4()
-                    service._cache[ws_id] = WorkspaceInfo(
+                    service.registry._cache[ws_id] = WorkspaceInfo(
                         workspace_id=ws_id,
                         instance_id="instance-1",
                         status="running",
@@ -2034,7 +2033,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                 runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
             )
             ws_id = uuid.uuid4()
-            service._cache[ws_id] = WorkspaceInfo(
+            service.registry._cache[ws_id] = WorkspaceInfo(
                 workspace_id=ws_id,
                 instance_id="instance-1",
                 status="running",
@@ -2056,7 +2055,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                 runtimes={"docker": runtime2}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
             )
             ws_id2 = uuid.uuid4()
-            service2._cache[ws_id2] = WorkspaceInfo(
+            service2.registry._cache[ws_id2] = WorkspaceInfo(
                 workspace_id=ws_id2,
                 instance_id="instance-1",
                 status="running",
@@ -2078,7 +2077,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                 runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
             )
             ws_id = uuid.uuid4()
-            service._cache[ws_id] = WorkspaceInfo(
+            service.registry._cache[ws_id] = WorkspaceInfo(
                 workspace_id=ws_id,
                 instance_id="instance-1",
                 status="running",
@@ -2101,7 +2100,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                         settings=RunnerSettings(state_dir=tempfile.mkdtemp()),
                     )
                     ws_bad = uuid.uuid4()
-                    service_bad._cache[ws_bad] = WorkspaceInfo(
+                    service_bad.registry._cache[ws_bad] = WorkspaceInfo(
                         workspace_id=ws_bad,
                         instance_id="instance-1",
                         status="running",
@@ -3905,7 +3904,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
                 runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
             )
             ws_id = uuid.uuid4()
-            service._cache[ws_id] = WorkspaceInfo(
+            service.registry._cache[ws_id] = WorkspaceInfo(
                 workspace_id=ws_id,
                 instance_id="instance-1",
                 status="running",
@@ -3964,7 +3963,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
                 runtimes={"docker": NoGitRuntime()}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
             )
             ws_id = uuid.uuid4()
-            service._cache[ws_id] = WorkspaceInfo(
+            service.registry._cache[ws_id] = WorkspaceInfo(
                 workspace_id=ws_id,
                 instance_id="instance-1",
                 status="running",
@@ -4019,7 +4018,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
                 settings=RunnerSettings(state_dir=tempfile.mkdtemp()),
             )
             ws_id = uuid.uuid4()
-            service._cache[ws_id] = WorkspaceInfo(
+            service.registry._cache[ws_id] = WorkspaceInfo(
                 workspace_id=ws_id,
                 instance_id="instance-1",
                 status="running",
@@ -4053,7 +4052,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
                 runtimes={"docker": Exit1Runtime()}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
             )
             ws_id = uuid.uuid4()
-            service._cache[ws_id] = WorkspaceInfo(
+            service.registry._cache[ws_id] = WorkspaceInfo(
                 workspace_id=ws_id,
                 instance_id="instance-1",
                 status="running",
@@ -4088,7 +4087,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
                 settings=RunnerSettings(state_dir=tempfile.mkdtemp()),
             )
             ws_id = uuid.uuid4()
-            service._cache[ws_id] = WorkspaceInfo(
+            service.registry._cache[ws_id] = WorkspaceInfo(
                 workspace_id=ws_id,
                 instance_id="instance-1",
                 status="running",

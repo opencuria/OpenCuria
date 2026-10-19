@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-
 from src.config import RunnerSettings
 from src.interfaces.websocket import WebSocketInterface
 from src.models import WorkspaceInfo
@@ -94,7 +93,7 @@ def setup(tmp_path):
     runtime = BarrierRuntime(ws_id)
     settings = RunnerSettings(state_dir=str(tmp_path))
     service = WorkspaceService({"qemu": runtime}, settings)
-    service._cache[ws_id] = WorkspaceInfo(
+    service.registry._cache[ws_id] = WorkspaceInfo(
         ws_id, runtime.instance_id, "stopped", runtime_type="qemu"
     )
     interface = WebSocketInterface(service, settings)
@@ -121,10 +120,10 @@ async def test_sync_during_real_handler_and_immediate_next_stop(tmp_path, operat
     ws_id, runtime, service, interface = setup(tmp_path)
     if operation == "stop":
         runtime.state = "running"
-        service._cache[ws_id].status = "running"
+        service.registry._cache[ws_id].status = "running"
     if operation == "create":
         runtime.exists = False
-        service._cache.clear()
+        service.registry._cache.clear()
     data = command(ws_id, operation)
     if operation == "create":
         data.update(
@@ -134,11 +133,9 @@ async def test_sync_during_real_handler_and_immediate_next_stop(tmp_path, operat
         interface._sio.handlers["/"][f"task:{operation}_workspace"](data)
     )
     await asyncio.wait_for(runtime.entered.wait(), 3)
-    canonical = service._get_cached(ws_id)
-    cache = service._cache
-    await service.sync_from_runtime()
+    canonical = service.registry.get_cached(ws_id)
+    await service.registry.sync_from_runtime()
     assert service.registry.get_cached(ws_id) is canonical
-    assert service._cache is cache
     runtime.release.set()
     await asyncio.wait_for(task, 3)
     assert (
@@ -149,7 +146,7 @@ async def test_sync_during_real_handler_and_immediate_next_stop(tmp_path, operat
             "create": "workspace:created",
         }[operation]
     )
-    assert service._get_cached(ws_id) is canonical
+    assert service.registry.get_cached(ws_id) is canonical
     assert canonical.status == ("exited" if operation == "stop" else "running")
     assert canonical.credentials_present is False
     await interface._sio.handlers["/"]["task:stop_workspace"](
@@ -169,12 +166,12 @@ async def test_snapshot_started_before_operation_cannot_overwrite_completion(
     ws_id, runtime, service, interface = setup(tmp_path)
     if operation == "stop":
         runtime.state = "running"
-        service._cache[ws_id].status = "running"
+        service.registry._cache[ws_id].status = "running"
     if operation == "create":
         runtime.exists = False
-        service._cache.clear()
+        service.registry._cache.clear()
     runtime.hold_scan = True
-    refresh = asyncio.create_task(service.sync_from_runtime())
+    refresh = asyncio.create_task(service.registry.sync_from_runtime())
     await runtime.scan_entered.wait()
     runtime.release.set()
     if operation == "create":
@@ -187,10 +184,10 @@ async def test_snapshot_started_before_operation_cannot_overwrite_completion(
         )
     else:
         await service.stop_workspace(ws_id)
-    canonical = service._get_cached(ws_id)
+    canonical = service.registry.get_cached(ws_id)
     runtime.scan_release.set()
     await refresh
-    assert service._get_cached(ws_id) is canonical
+    assert service.registry.get_cached(ws_id) is canonical
     assert canonical.status == ("exited" if operation == "stop" else "running")
     await service.stop_workspace(ws_id)
     interface._operations.journal.close()
@@ -200,16 +197,16 @@ async def test_same_instance_merge_preserves_credentials_different_instance_does
     tmp_path,
 ):
     ws_id, runtime, service, interface = setup(tmp_path)
-    canonical = service._get_cached(ws_id)
+    canonical = service.registry.get_cached(ws_id)
     canonical.credentials_present = False
     await interface._checkpoint_workspace(ws_id, False, "scrubbed")
-    await service.sync_from_runtime()
-    assert service._get_cached(ws_id) is canonical
+    await service.registry.sync_from_runtime()
+    assert service.registry.get_cached(ws_id) is canonical
     assert canonical.credentials_present is False
     runtime.instance_id = "replacement"
-    await service.sync_from_runtime()
-    assert service._get_cached(ws_id) is not canonical
-    assert service._get_cached(ws_id).credentials_present is None
+    await service.registry.sync_from_runtime()
+    assert service.registry.get_cached(ws_id) is not canonical
+    assert service.registry.get_cached(ws_id).credentials_present is None
     assert not await interface._workspace_scrub_proof(ws_id)
     with pytest.raises(RuntimeError, match="no exact scrub proof"):
         await service.stop_workspace(ws_id)
@@ -228,7 +225,7 @@ async def test_live_running_status_overrides_stale_stopped_cache(tmp_path):
 
 async def test_failed_live_observation_never_scrubs_or_stops(tmp_path):
     ws_id, runtime, service, interface = setup(tmp_path)
-    canonical = service._get_cached(ws_id)
+    canonical = service.registry.get_cached(ws_id)
     runtime.get_workspace_status = AsyncMock(side_effect=OSError("unreachable"))
     await interface._sio.handlers["/"]["task:stop_workspace"](command(ws_id, "failed"))
     event, result = interface._operations.journal.pending("failed")[0]
@@ -242,7 +239,7 @@ async def test_failed_live_observation_never_scrubs_or_stops(tmp_path):
     assert "intervention" in result["error"]
     assert not runtime.scrubs
     assert not runtime.entered.is_set()
-    assert service._get_cached(ws_id) is canonical
+    assert service.registry.get_cached(ws_id) is canonical
     assert canonical.status == "stopped"
     assert canonical.credentials_present is None
     assert interface._operations.journal.proof(
@@ -256,18 +253,18 @@ async def test_failed_live_observation_never_scrubs_or_stops(tmp_path):
 async def test_clone_preserves_creating_entry_and_identity_during_inventory(tmp_path):
     ws_id, runtime, service, interface = setup(tmp_path)
     runtime.exists = False
-    service._cache.clear()
+    service.registry._cache.clear()
     task = asyncio.create_task(
         service.images.create_workspace_from_image_artifact("base", ws_id, "qemu")
     )
     await runtime.entered.wait()
-    canonical = service._get_cached(ws_id)
+    canonical = service.registry.get_cached(ws_id)
     assert canonical.status == "creating"
-    await service.sync_from_runtime()
-    assert service._get_cached(ws_id) is canonical
+    await service.registry.sync_from_runtime()
+    assert service.registry.get_cached(ws_id) is canonical
     runtime.release.set()
     await task
-    assert service._get_cached(ws_id) is canonical
+    assert service.registry.get_cached(ws_id) is canonical
     assert canonical.status == "running"
     assert canonical.credentials_present is False
     await service.stop_workspace(ws_id)
@@ -276,11 +273,11 @@ async def test_clone_preserves_creating_entry_and_identity_during_inventory(tmp_
 
 async def test_failed_refresh_and_failed_resume_keep_unknown_credentials(tmp_path):
     ws_id, runtime, service, interface = setup(tmp_path)
-    canonical = service._get_cached(ws_id)
+    canonical = service.registry.get_cached(ws_id)
     runtime.list_workspaces = AsyncMock(side_effect=OSError("inventory unavailable"))
     with pytest.raises(OSError):
-        await service.sync_from_runtime()
-    assert service._get_cached(ws_id) is canonical
+        await service.registry.sync_from_runtime()
+    assert service.registry.get_cached(ws_id) is canonical
     canonical.credentials_present = False
     runtime.start_workspace = AsyncMock(side_effect=OSError("boot uncertain"))
     with pytest.raises(OSError):
@@ -294,14 +291,14 @@ async def test_failed_refresh_and_failed_resume_keep_unknown_credentials(tmp_pat
 
 async def test_incomplete_create_failure_is_preserved_for_recovery(tmp_path):
     ws_id, runtime, service, interface = setup(tmp_path)
-    service._cache.clear()
+    service.registry._cache.clear()
     runtime.exists = False
     runtime.create_workspace = AsyncMock(side_effect=OSError("creation uncertain"))
     with pytest.raises(OSError):
         await service.create_workspace(
             [], workspace_id=ws_id, runtime_type="qemu", base_image_path="/base"
         )
-    await service.sync_from_runtime()
-    assert service._get_cached(ws_id).status == "creating"
-    assert service._get_cached(ws_id).credentials_present is None
+    await service.registry.sync_from_runtime()
+    assert service.registry.get_cached(ws_id).status == "creating"
+    assert service.registry.get_cached(ws_id).credentials_present is None
     interface._operations.journal.close()

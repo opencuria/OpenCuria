@@ -1,23 +1,7 @@
-"""File operations: stateful content-plane on top of the exec kernel.
+"""Workspace file operations and archive helpers.
 
-Canonical home (Step 4) for file constants and stateful file
-operations previously living on ``WorkspaceService`` in
-:mod:`src.service`:
-
-- constants ``FILE_READ_DEFAULT_MAX_SIZE``,
-  ``FILE_READ_ABSOLUTE_MAX_SIZE``, ``FILE_UPLOAD_MAX_SIZE``,
-  ``FILE_DOWNLOAD_MAX_SIZE`` (``src.service`` re-exports them),
-- :class:`FileManager` owning ``_file_read_semaphores`` and
-  ``_realpath_under_workspace``, ``list_files``, ``find_files``,
-  ``read_file``, ``upload_file``, ``download_file``, ``stat_path``,
-  ``write_file_content``.
-
-Pure helpers (find/tar) were canonical here since Step 1 and are
-reused directly by the manager. Path/filename sanitizers are imported
-from :mod:`src.services.exec_kernel` (no ``src.service`` import, no
-cycle). ``WorkspaceService`` keeps thin delegates (same
-names/signatures/messages) plus a ``files`` property and a
-``_file_read_semaphores`` alias onto the manager-owned dict.
+:class:`FileManager` owns bounded reads, uploads/downloads, path checks and
+workspace file mutations. Pure find and tar helpers are also defined here.
 """
 
 from __future__ import annotations
@@ -147,19 +131,9 @@ def build_find_files_command(query: str, limit: int) -> list[str]:
 class FileManager:
     """Owns stateful workspace file operations.
 
-    Injected dependencies (all mirror ``WorkspaceService`` helpers):
-
-    - ``runtimes``: runtime backends by type (kept for introspection;
-      resolution itself goes through the callables below).
-    - ``get_cached``: ``(workspace_id) -> WorkspaceInfo``; raises
-      ``ValueError("... not found")`` for unknown ids.
-    - ``get_runtime``: ``(workspace_id) -> RuntimeBackend``; raises
-      ``RuntimeError`` for unknown runtimes.
-    - ``upload_max_size``: optional override for ``FILE_UPLOAD_MAX_SIZE``
-      (bytes). Defaults to the canonical constant. The facade passes its
-      (patched-in-tests) value at call time so ``monkeypatch`` on either
-      ``src.service`` or ``src.services.files`` stays effective; direct
-      manager use falls back to the canonical constant.
+    Runtime backends and workspace lookup functions are injected by the
+    runner composition root. Upload limits use
+    :data:`FILE_UPLOAD_MAX_SIZE`.
     """
 
     def __init__(
@@ -443,8 +417,6 @@ class FileManager:
         filename: str,
         content_b64: str,
         is_directory: bool = False,
-        *,
-        upload_max_size: int | None = None,
     ) -> None:
         """Upload a file into the workspace container.
 
@@ -466,7 +438,7 @@ class FileManager:
             runtime, info.instance_id, safe_path
         )
 
-        cap = FILE_UPLOAD_MAX_SIZE if upload_max_size is None else upload_max_size
+        cap = FILE_UPLOAD_MAX_SIZE
         # Exact cap on decoded bytes: decode + validate first, before any
         # mkdir side effect. A cheap approximate precheck may reject
         # obvious oversize early, but it must never reject a valid payload
@@ -672,7 +644,6 @@ class FileManager:
         content_b64: str,
         mode: int = 0o644,
         *,
-        upload_max_size: int | None = None,
         allow_external: bool = False,
     ) -> None:
         """Write file content atomically inside the workspace container.
@@ -692,7 +663,7 @@ class FileManager:
         safe_path = await self._realpath_under_workspace(
             runtime, info.instance_id, safe_path, allow_external=allow_external
         )
-        cap = FILE_UPLOAD_MAX_SIZE if upload_max_size is None else upload_max_size
+        cap = FILE_UPLOAD_MAX_SIZE
         # Exact cap on decoded bytes: decode + validate before writing.
         # Whitespace is normalized first (base64 output may wrap lines).
         try:

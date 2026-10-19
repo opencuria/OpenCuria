@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import tempfile
-
 import asyncio
 import json
+import tempfile
 import uuid
 from unittest.mock import AsyncMock
 
 import pytest
-
 from src.chunking import (
     CHUNK_B64_SIZE,
     MAX_CHUNKS_PER_TRANSFER,
@@ -102,27 +100,6 @@ class FakeChunkService:
         self.write_calls.append({"workspace_id": workspace_id, "path": path,
                                  "content_b64": content_b64, "mode": mode})
 
-    # Back-compat shims: existing tests call the facade methods directly.
-    async def read_file(self, workspace_id, path, max_size=None):
-        return await self._read_file_impl(workspace_id, path, max_size=max_size)
-
-    async def download_file(self, workspace_id, path):
-        return await self._download_file_impl(workspace_id, path)
-
-    async def upload_file(
-        self, workspace_id, path, filename, content_b64, is_directory=False
-    ):
-        return await self._upload_file_impl(
-            workspace_id, path, filename, content_b64,
-            is_directory=is_directory,
-        )
-
-    async def write_file_content(
-        self, workspace_id, path, content_b64, mode=0o644
-    ):
-        return await self._write_file_content_impl(
-            workspace_id, path, content_b64, mode=mode
-        )
 
 
 def _interface(service) -> WebSocketInterface:
@@ -487,7 +464,7 @@ def _oversize_download_service():
     runtime = _OversizeProbeRuntime()
     service = WorkspaceService(runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
     workspace_id = uuid.uuid4()
-    service._cache[workspace_id] = WorkspaceInfo(workspace_id=workspace_id,
+    service.registry._cache[workspace_id] = WorkspaceInfo(workspace_id=workspace_id,
         instance_id="instance-1", status="running", runtime_type="docker")
     return service, runtime, workspace_id
 
@@ -499,7 +476,7 @@ async def test_download_oversize_rejected_via_size_precheck() -> None:
     # payload pass — so "before base64" holds for files, not for dirs.
     service, runtime, workspace_id = _oversize_download_service()
     with pytest.raises(ValueError, match="maximum size"):
-        await service.download_file(workspace_id, "/workspace/big.bin")
+        await service.files.download_file(workspace_id, "/workspace/big.bin")
     assert not any(cmd[:1] == ["base64"] for cmd in runtime.calls)
 
 
@@ -671,16 +648,17 @@ class _CapProbeRuntime:
 
 def _cap_service(monkeypatch, cap_bytes: int):
     """Real WorkspaceService with FILE_UPLOAD_MAX_SIZE patched small."""
-    import src.service as service_module
+    import src.services.files as files_module
     from src.models import WorkspaceInfo
+    from src.service import WorkspaceService
 
-    monkeypatch.setattr(service_module, "FILE_UPLOAD_MAX_SIZE", cap_bytes)
+    monkeypatch.setattr(files_module, "FILE_UPLOAD_MAX_SIZE", cap_bytes)
     runtime = _CapProbeRuntime()
-    service = service_module.WorkspaceService(
+    service = WorkspaceService(
         runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
     )
     workspace_id = uuid.uuid4()
-    service._cache[workspace_id] = WorkspaceInfo(
+    service.registry._cache[workspace_id] = WorkspaceInfo(
         workspace_id=workspace_id,
         instance_id="instance-1",
         status="running",
@@ -697,7 +675,7 @@ def _raw_bytes(n: int) -> bytes:
 async def test_upload_file_invalid_base64_rejected_before_mkdir(monkeypatch) -> None:
     service, runtime, workspace_id = _cap_service(monkeypatch, 16)
     with pytest.raises(ValueError, match="Invalid base64"):
-        await service.upload_file(
+        await service.files.upload_file(
             workspace_id, "/workspace", "a.bin", "!!!not-base64!!!"
         )
     # Only the read-only realpath probe may run; no mkdir side effect.
@@ -713,7 +691,7 @@ async def test_upload_file_decoded_oversize_rejected_before_mkdir(monkeypatch) -
     service, runtime, workspace_id = _cap_service(monkeypatch, 16)
     oversize = base64.b64encode(_raw_bytes(17)).decode()
     with pytest.raises(ValueError, match="maximum size"):
-        await service.upload_file(workspace_id, "/workspace", "a.bin", oversize)
+        await service.files.upload_file(workspace_id, "/workspace", "a.bin", oversize)
     assert all(cmd[:2] == ["realpath", "-m"] for cmd in runtime.commands)
     assert not any(cmd[:2] == ["mkdir", "-p"] for cmd in runtime.commands)
     assert runtime.archives == []
@@ -725,7 +703,7 @@ async def test_upload_file_exact_cap_allowed(monkeypatch) -> None:
 
     service, runtime, workspace_id = _cap_service(monkeypatch, 16)
     exact = base64.b64encode(_raw_bytes(16)).decode()
-    await service.upload_file(workspace_id, "/workspace", "a.bin", exact)
+    await service.files.upload_file(workspace_id, "/workspace", "a.bin", exact)
     assert runtime.archives != []
     assert any(cmd[:2] == ["mkdir", "-p"] for cmd in runtime.commands)
 
@@ -737,7 +715,7 @@ async def test_upload_file_whitespace_normalized_and_accepted(monkeypatch) -> No
     service, runtime, workspace_id = _cap_service(monkeypatch, 16)
     exact = base64.b64encode(_raw_bytes(16)).decode()
     noisy = "\n".join(exact[i : i + 60] for i in range(0, len(exact), 60))
-    await service.upload_file(workspace_id, "/workspace", "a.bin", noisy)
+    await service.files.upload_file(workspace_id, "/workspace", "a.bin", noisy)
     assert runtime.archives != []
 
 
@@ -747,7 +725,7 @@ async def test_write_file_content_invalid_base64_rejected_before_write(
 ) -> None:
     service, runtime, workspace_id = _cap_service(monkeypatch, 16)
     with pytest.raises(ValueError, match="Invalid base64"):
-        await service.write_file_content(
+        await service.files.write_file_content(
             workspace_id, "/workspace/a.txt", "!!!not-base64!!!"
         )
     assert runtime.archives == []
@@ -762,7 +740,7 @@ async def test_write_file_content_decoded_oversize_rejected_before_write(
     service, runtime, workspace_id = _cap_service(monkeypatch, 16)
     oversize = base64.b64encode(_raw_bytes(17)).decode()
     with pytest.raises(ValueError, match="maximum size"):
-        await service.write_file_content(
+        await service.files.write_file_content(
             workspace_id, "/workspace/a.txt", oversize
         )
     assert runtime.archives == []
@@ -774,5 +752,5 @@ async def test_write_file_content_exact_cap_allowed(monkeypatch) -> None:
 
     service, runtime, workspace_id = _cap_service(monkeypatch, 16)
     exact = base64.b64encode(_raw_bytes(16)).decode()
-    await service.write_file_content(workspace_id, "/workspace/a.txt", exact)
+    await service.files.write_file_content(workspace_id, "/workspace/a.txt", exact)
     assert runtime.archives != []

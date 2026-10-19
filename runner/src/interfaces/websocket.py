@@ -658,13 +658,14 @@ class WebSocketInterface(Interface):
             try:
                 await self._service.sync_from_runtime()
                 desktop = getattr(self._service, "desktop", None)
+                registry = self._service.registry
                 previous_desktops = (
                     {
                         workspace_id: (
                             desktop.get_desktop_session(workspace_id),
                             self._desktop_lifecycle_payload(workspace_id),
                         )
-                        for workspace_id in getattr(self._service, "_cache", {})
+                        for workspace_id in registry._cache
                     }
                     if desktop is not None
                     else {}
@@ -686,9 +687,7 @@ class WebSocketInterface(Interface):
                                 "epoch": self._desktop_epoch,
                             },
                         )
-                for workspace_id, info in getattr(
-                    getattr(self._service, "_registry", None), "_cache", {}
-                ).items():
+                for workspace_id, info in registry._cache.items():
                     observed = await self._service.workspace_incarnation(
                         str(workspace_id)
                     )

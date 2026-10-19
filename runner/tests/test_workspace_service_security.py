@@ -1,16 +1,15 @@
 import io
 import tarfile
-import uuid
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-
 from src.config import RunnerSettings
-from src.service import (
+from src.service import WorkspaceService
+from src.services.credentials import (
     WORKSPACE_CREDENTIAL_DIR,
     WORKSPACE_CREDENTIAL_ENV_FILE,
-    WorkspaceService,
 )
+from src.services.files import convert_archive_to_tar
 
 
 @pytest.mark.parametrize("link_type", ["sym", "hard"])
@@ -24,20 +23,22 @@ def test_convert_archive_to_tar_rejects_links(link_type: str) -> None:
     source.seek(0)
 
     with pytest.raises(ValueError, match="unsafe links"):
-        WorkspaceService._convert_archive_to_tar(source.getvalue())
+        convert_archive_to_tar(source.getvalue())
 
 
 @pytest.mark.asyncio
 async def test_create_workspace_injects_credentials_and_leaves_them() -> None:
     class DummyRuntime:
-        async def create_workspace(self, config):  # noqa: ANN001
+        def __init__(self):
+            self.exec_command_wait = AsyncMock(return_value=(0, ""))
+            self.put_archive = AsyncMock()
+
+        async def create_workspace(self, config):
             return "instance-1"
 
     runtime = DummyRuntime()
     service = WorkspaceService({"docker": runtime}, RunnerSettings())
-    service.remove_workspace_credentials = AsyncMock()
-    service.inject_workspace_credentials = AsyncMock(return_value=True)
-    service._exec_command = AsyncMock(side_effect=[(0, "")])
+    service.exec_kernel.exec_command = AsyncMock(side_effect=[(0, "")])
 
     workspace_id, credentials_present = await service.create_workspace(
         repos=["git@github.com:example/private-repo.git"],
@@ -48,12 +49,16 @@ async def test_create_workspace_injects_credentials_and_leaves_them() -> None:
     )
 
     assert credentials_present is True
-    inject_args = service.inject_workspace_credentials.await_args.args
-    assert inject_args[0] is runtime
-    assert inject_args[1] == "instance-1"
-    assert inject_args[2] == {"GITHUB_TOKEN": "secret"}
-    assert service._exec_command.await_count == 1
-    clone_call = service._exec_command.await_args_list[0]
+    runtime.put_archive.assert_awaited_once()
+    with tarfile.open(
+        fileobj=io.BytesIO(runtime.put_archive.await_args.args[2]), mode="r"
+    ) as archive:
+        env_file = archive.extractfile("env.sh").read().decode("utf-8")
+        ssh_key = archive.extractfile("ssh/id_ed25519").read().decode("utf-8")
+    assert "GITHUB_TOKEN=secret" in env_file
+    assert "mock" in ssh_key
+    assert service.exec_kernel.exec_command.await_count == 1
+    clone_call = service.exec_kernel.exec_command.await_args_list[0]
     assert "credential_context" not in clone_call.kwargs
     assert clone_call.args[2]["args"] == [
         "git",
@@ -70,18 +75,18 @@ async def test_inject_workspace_credentials_materializes_file_credentials() -> N
             self.archives: list[tuple[str, str, bytes]] = []
             self.commands: list[list[str]] = []
 
-        async def put_archive(self, instance_id, target_dir, archive_data):  # noqa: ANN001
+        async def put_archive(self, instance_id, target_dir, archive_data):
             self.archives.append((instance_id, target_dir, archive_data))
 
-        async def exec_command_wait(self, instance_id, command, workdir):  # noqa: ANN001
+        async def exec_command_wait(self, instance_id, command, workdir):
             self.commands.append(command)
             return 0, ""
 
     runtime = DummyRuntime()
     service = WorkspaceService({"docker": runtime}, RunnerSettings())
-    service.remove_workspace_credentials = AsyncMock()
+    service.credentials.remove_workspace_credentials = AsyncMock()
 
-    present = await service.inject_workspace_credentials(
+    present = await service.credentials.inject_workspace_credentials(
         runtime,
         "instance-1",
         {},
@@ -118,9 +123,9 @@ async def test_inject_workspace_credentials_empty_set_returns_false() -> None:
     runtime = Mock()
     runtime.exec_command_wait = AsyncMock(return_value=(0, ""))
     service = WorkspaceService({"docker": runtime}, RunnerSettings())
-    service.remove_workspace_credentials = AsyncMock()
+    service.credentials.remove_workspace_credentials = AsyncMock()
 
-    present = await service.inject_workspace_credentials(
+    present = await service.credentials.inject_workspace_credentials(
         runtime,
         "instance-1",
         {},
@@ -130,7 +135,7 @@ async def test_inject_workspace_credentials_empty_set_returns_false() -> None:
     )
 
     assert present is False
-    service.remove_workspace_credentials.assert_awaited_once()
+    service.credentials.remove_workspace_credentials.assert_awaited_once()
     runtime.exec_command_wait.assert_not_awaited()
 
 
@@ -140,11 +145,11 @@ async def test_stop_workspace_removes_credentials_before_runtime_stop() -> None:
     runtime.stop_workspace = AsyncMock()
     runtime.get_workspace_status = AsyncMock(return_value=Mock(status="running"))
     service = WorkspaceService({"docker": runtime}, RunnerSettings())
-    service.remove_workspace_credentials = AsyncMock()
+    service.credentials.remove_workspace_credentials = AsyncMock()
     workspace_id = __import__("uuid").uuid4()
     from src.models import WorkspaceInfo
 
-    service._cache[workspace_id] = WorkspaceInfo(
+    service.registry._cache[workspace_id] = WorkspaceInfo(
         workspace_id=workspace_id,
         instance_id="instance-1",
         status="running",
@@ -154,9 +159,9 @@ async def test_stop_workspace_removes_credentials_before_runtime_stop() -> None:
     present = await service.stop_workspace(workspace_id)
 
     assert present is False
-    service.remove_workspace_credentials.assert_awaited_once()
+    service.credentials.remove_workspace_credentials.assert_awaited_once()
     runtime.stop_workspace.assert_awaited_once_with("instance-1")
-    assert service.remove_workspace_credentials.await_args.args[1] == "instance-1"
+    assert service.credentials.remove_workspace_credentials.await_args.args[1] == "instance-1"
 
 
 @pytest.mark.asyncio
@@ -169,14 +174,14 @@ async def test_start_terminal_sources_persistent_env() -> None:
     workspace_id = __import__("uuid").uuid4()
     from src.models import WorkspaceInfo
 
-    service._cache[workspace_id] = WorkspaceInfo(
+    service.registry._cache[workspace_id] = WorkspaceInfo(
         workspace_id=workspace_id,
         instance_id="instance-1",
         status="running",
         runtime_type="docker",
     )
 
-    await service.start_terminal(workspace_id=workspace_id)
+    await service.terminal_manager.start_terminal(workspace_id=workspace_id)
 
     runtime.exec_pty.assert_awaited_once()
     call = runtime.exec_pty.await_args
@@ -189,63 +194,10 @@ async def test_start_terminal_sources_persistent_env() -> None:
 
 def test_wrap_command_sources_persistent_env() -> None:
     service = WorkspaceService({}, RunnerSettings())
-    wrapped = service._wrap_command_with_persistent_env(
+    wrapped = service.exec_kernel.wrap_command_with_persistent_env(
         {"args": ["git", "clone", "repo"], "env": {"EXTRA": "1"}}
     )
     assert wrapped["args"][0] == "bash"
     snippet = wrapped["args"][2]
     assert WORKSPACE_CREDENTIAL_ENV_FILE in snippet
     assert "EXTRA" in snippet
-
-
-@pytest.mark.asyncio
-async def test_create_workspace_from_image_artifact_honors_inject_override() -> None:
-    """Image-create path honors post-construction inject overrides (late-bound).
-
-    Regression test: ``WorkspaceService.__init__`` used to capture the
-    bound ``self.inject_workspace_credentials`` method eagerly in
-    ``ImageManager(credentials_injector=...)``, so an after-construction
-    override (e.g. a test/security wrapper assigning
-    ``service.inject_workspace_credentials = ...``) was ignored by
-    ``create_workspace_from_image_artifact`` while the lifecycle path
-    (``create_workspace``/``resume``/``inject_credentials`` via the
-    late-bound ``_lifecycle.inject_hook``) honored it. The composer now
-    wires a late-bound closure, matching the old god-class behaviour
-    where the call was ``self.inject_workspace_credentials(...)`` at
-    call time.
-    """
-
-    new_workspace_id = uuid.uuid4()
-
-    class DummyRuntime:
-        supports_image_artifacts = True
-
-        async def create_workspace_from_image_artifact(
-            self, image_artifact_id, forwarded_workspace_id, **kwargs
-        ):
-            assert image_artifact_id == "artifact-1"
-            assert forwarded_workspace_id == str(new_workspace_id)
-            return "instance-1"
-
-    runtime = DummyRuntime()
-    service = WorkspaceService({"docker": runtime}, RunnerSettings())
-    service.inject_workspace_credentials = AsyncMock(return_value=True)
-
-    returned_id, credentials_present = (
-        await service.create_workspace_from_image_artifact(
-            "artifact-1",
-            new_workspace_id,
-            "docker",
-            env_vars={"GITHUB_TOKEN": "secret"},
-            files=[],
-            ssh_keys=[],
-        )
-    )
-
-    assert returned_id == new_workspace_id
-    assert credentials_present is True
-    service.inject_workspace_credentials.assert_awaited_once()
-    inject_args = service.inject_workspace_credentials.await_args.args
-    assert inject_args[0] is runtime
-    assert inject_args[1] == "instance-1"
-    assert inject_args[2] == {"GITHUB_TOKEN": "secret"}

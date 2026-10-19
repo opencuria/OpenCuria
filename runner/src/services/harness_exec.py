@@ -1,17 +1,7 @@
-"""Harness command execution: structured exec requested by the backend.
+"""Structured harness command execution with separated output streams.
 
-Canonical home (Step 4) for ``exec_harness_command``,
-``exec_harness_command_stream`` and ``_parse_harness_exec_output``
-previously living on ``WorkspaceService`` in ``src.service``. Built on
-the exec kernel; owns no lifecycle or session state.
-
-``WorkspaceService`` keeps thin delegates (same names/signatures/
-messages) plus a ``harness`` property onto the manager, so existing
-callers and tests keep working.
-
-Workspace resolution is injected so this module never imports
-``src.service`` (no dependency cycle). The credential env-file path is
-imported canonically from :mod:`src.services.credentials`.
+:class:`HarnessExecService` wraps commands, decodes tagged stdout/stderr, and
+streams tagged output using the shared execution and path helpers.
 """
 
 from __future__ import annotations
@@ -34,19 +24,9 @@ logger = structlog.get_logger(__name__)
 class HarnessExecService:
     """Owns structured harness command execution.
 
-    Injected dependencies (all mirror ``WorkspaceService`` helpers):
-
-    - ``runtimes``: runtime backends by type (kept for introspection;
-      resolution itself goes through the callables below).
-    - ``get_cached``: ``(workspace_id) -> WorkspaceInfo``; raises
-      ``ValueError("... not found")`` for unknown ids.
-    - ``get_runtime``: ``(workspace_id) -> RuntimeBackend``; raises
-      ``RuntimeError`` for unknown runtimes.
-    - ``sanitize_exec_workdir``: ``(path) -> str``; defaults to the
-      canonical ``src.services.exec_kernel.sanitize_exec_workdir``.
-    - ``credential_env_file``: guest path sourced by the shell wrappers.
-      ``WorkspaceService`` passes its ``WORKSPACE_CREDENTIAL_ENV_FILE``
-      constant; the default matches it.
+    Runtime backends and workspace lookup functions are injected by the
+    runner composition root. The workdir sanitizer and credential env-file
+    path default to their canonical runner values.
     """
 
     def __init__(

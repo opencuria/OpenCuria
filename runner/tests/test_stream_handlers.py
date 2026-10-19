@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import tempfile
-
 import asyncio
 import base64
+import tempfile
 import unittest
 import uuid
 from unittest.mock import AsyncMock
@@ -48,7 +47,7 @@ def _setup():
         runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
     )
     ws_id = uuid.uuid4()
-    service._cache[ws_id] = WorkspaceInfo(
+    service.registry._cache[ws_id] = WorkspaceInfo(
         workspace_id=ws_id,
         instance_id="instance-1",
         status="running",
@@ -240,9 +239,9 @@ class StreamHandlerTests(unittest.IsolatedAsyncioTestCase):
                 "command": ["sleep", "5"],
             }
         )
-        self.assertIn("d1", _svc._streams)
+        self.assertIn("d1", _svc.streams._streams)
         await handlers["disconnect"]()
-        self.assertIn("d1", _svc._streams)
+        self.assertIn("d1", _svc.streams._streams)
         await _svc.streams.close_all_streams(reason="test_shutdown")
 
     async def test_cancelled_pump_emits_plain_close_no_error(self) -> None:
@@ -286,8 +285,6 @@ class StreamPumpConcurrencyTests(unittest.IsolatedAsyncioTestCase):
     async def test_stderr_only_process_does_not_block(self) -> None:
         """A stderr-only process must still deliver output (no stdout block)."""
         import base64 as _b64
-
-        from src.service import STREAM_CHUNK_SIZE  # noqa: F401
 
         _svc, _rt, ws_id, interface, handlers = _setup()
 
@@ -351,7 +348,7 @@ class StreamPumpConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(pump_before, pump_after)
         self.assertFalse(pump_after.done())
         # Session still live (only stdin was half-closed).
-        self.assertIn("eo1", _svc._streams)
+        self.assertIn("eo1", _svc.streams._streams)
         pump_after.cancel()
         with __import__("contextlib").suppress(asyncio.CancelledError):
             await pump_after
@@ -371,7 +368,7 @@ class StreamPumpConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(pump)
         await asyncio.wait_for(pump, timeout=10)
         # Session removed and closed exactly once; task key popped.
-        self.assertNotIn("ne1", _svc._streams)
+        self.assertNotIn("ne1", _svc.streams._streams)
         self.assertNotIn("stream:ne1", interface._running_tasks)
         closed_payloads = [
             c.args[1]
@@ -404,7 +401,7 @@ class StreamPumpConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         pump = interface._running_tasks.get("stream:na1")
         self.assertIsNotNone(pump)
         await asyncio.wait_for(pump, timeout=10)
-        self.assertNotIn("na1", _svc._streams)
+        self.assertNotIn("na1", _svc.streams._streams)
         errors = [
             c.args[1]
             for c in interface._sio.emit.await_args_list

@@ -22,14 +22,14 @@ def interface(tmp_path):
         workspace_incarnation=AsyncMock(return_value=(incarnation, "running")),
     )
     service = WorkspaceService({"qemu": runtime}, RunnerSettings())
-    service._cache[ws] = WorkspaceInfo(
+    service.registry._cache[ws] = WorkspaceInfo(
         workspace_id=ws,
         instance_id="guest",
         status="exited",
         runtime_type="qemu",
         credentials_present=False,
     )
-    service.lifecycle._call_inject = AsyncMock(
+    service.credentials.inject_workspace_credentials = AsyncMock(
         side_effect=RuntimeError("inject failed")
     )
     interface = WebSocketInterface(service, RunnerSettings(state_dir=str(tmp_path)))
@@ -68,7 +68,7 @@ async def test_started_guest_with_failed_injection_is_unknown(interface):
     assert "credentials_present" not in result
     assert "intervention" in result["error"]
     runtime.start_workspace.assert_awaited_once()
-    assert service._cache[ws].credentials_present is None
+    assert service.registry._cache[ws].credentials_present is None
 
 
 @pytest.mark.parametrize(
@@ -77,7 +77,7 @@ async def test_started_guest_with_failed_injection_is_unknown(interface):
 async def test_known_no_effect_failure_uses_exact_checkpoint(interface, state, present):
     iface, service, runtime, ws, incarnation = interface
     runtime.workspace_incarnation.return_value = (incarnation, state)
-    service.resume_workspace = AsyncMock(side_effect=RuntimeError("preflight refused"))
+    service.lifecycle.resume_workspace = AsyncMock(side_effect=RuntimeError("preflight refused"))
     iface._operations.safe_retry = AsyncMock(return_value=False)
     iface._operations.journal.checkpoint(
         str(ws),
@@ -163,7 +163,7 @@ async def test_partial_stop_without_proof_emits_unknown_wrapped_result(
     runtime.get_workspace_status = AsyncMock(
         return_value=SimpleNamespace(status="running")
     )
-    service.lifecycle._call_remove = AsyncMock(
+    service.credentials.remove_workspace_credentials = AsyncMock(
         side_effect=RuntimeError("partial scrub failed")
     )
     iface._operations.safe_retry = AsyncMock(return_value=False)
@@ -175,8 +175,8 @@ async def test_partial_stop_without_proof_emits_unknown_wrapped_result(
     assert "credentials_present" not in result
     assert "intervention" in result["error"]
     assert result["execution_finished"] is True
-    service.lifecycle._call_remove.assert_awaited_once()
-    assert service._cache[ws].credentials_present is None
+    service.credentials.remove_workspace_credentials.assert_awaited_once()
+    assert service.registry._cache[ws].credentials_present is None
     assert iface._operations.emit.call_args.args[1]["data"] == result
 
 
@@ -186,7 +186,7 @@ async def test_partial_stop_without_proof_emits_unknown_wrapped_result(
 async def test_known_stop_failure_uses_live_checkpoint(interface, state, present):
     iface, service, runtime, ws, incarnation = interface
     runtime.workspace_incarnation.return_value = (incarnation, state)
-    service.stop_workspace = AsyncMock(side_effect=RuntimeError("stop refused"))
+    service.lifecycle.stop_workspace = AsyncMock(side_effect=RuntimeError("stop refused"))
     iface._operations.safe_retry = AsyncMock(return_value=False)
     iface._operations.journal.checkpoint(
         str(ws),

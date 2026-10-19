@@ -1,3 +1,6 @@
+import asyncio
+import contextlib
+import sqlite3
 import tempfile
 import unittest
 import uuid
@@ -6,43 +9,32 @@ from unittest.mock import AsyncMock
 
 from src.config import RunnerSettings
 from src.interfaces.websocket import SOCKETIO_MAX_HTTP_BUFFER_SIZE, WebSocketInterface
+from src.models import DesktopSession, WorkspaceInfo
+from src.runtime.base import RuntimeStatus, RuntimeWorkspaceInfo
+from src.service import WorkspaceService
 
 
 class DummyService:
     def __init__(self) -> None:
         self.supported_runtimes = []
+        self.registry = SimpleNamespace(_cache={})
         self.sync_from_runtime = AsyncMock()
         self.recover_desktop_sessions_from_runtime = AsyncMock()
         self.run_health_check_loop = AsyncMock()
         self.get_workspace_heartbeat_statuses = AsyncMock(return_value=[])
         self.create_workspace_calls = []
-        # Step 2: websocket terminal + image handlers call the managers
-        # directly (``service.terminal_manager`` / ``service.images``).
-        # The dummy mirrors that surface so handler tests exercise the
-        # same path; the underlying mocks stay directly awaitable.
+        # WebSocket terminal and image handlers call the managers directly.
         self.terminal_manager = AsyncMock()
         self.images = AsyncMock()
         self.images.create_workspace_from_image_artifact = AsyncMock(
             side_effect=self._create_workspace_from_image_artifact
         )
-        self.sync_from_runtime = AsyncMock()
-        self.recover_desktop_sessions_from_runtime = AsyncMock()
-        self.run_health_check_loop = AsyncMock()
-        self.get_workspace_heartbeat_statuses = AsyncMock(return_value=[])
-        self.create_workspace_calls = []
-        # Step 6b: websocket desktop handlers call the manager directly
-        # (``service.desktop``). The dummy mirrors that surface so handler
-        # tests exercise the same path; the underlying mocks stay directly
-        # awaitable. Facade shims delegate to the same impls.
-        self.desktop = self._FakeDesktop(self)
-        self.start_desktop = self.desktop.start_desktop
-        self.stop_desktop = self.desktop.stop_desktop
-        self.get_desktop_container_ip = self.desktop.get_desktop_container_ip
-        self.get_desktop_network_name = self.desktop.get_desktop_network_name
+        # WebSocket desktop handlers use the manager directly, as the real
+        # WorkspaceService composition does.
+        self.desktop = self._FakeDesktop()
 
     class _FakeDesktop:
-        def __init__(self, outer) -> None:
-            self._outer = outer
+        def __init__(self) -> None:
             self.start_desktop = AsyncMock(
                 return_value=type(
                     "Session",
@@ -84,20 +76,10 @@ class DummyService:
             """Stub session lookup: no cached session (cold interface path)."""
             return
 
-    def get_desktop_generation(self, workspace_id):
-        return 0
-
-    def get_desktop_session(self, workspace_id):
-        """Stub session lookup: no cached session (cold interface path)."""
-        return
-
     async def _create_workspace_from_image_artifact(self, **kwargs):
         return kwargs["new_workspace_id"], bool(
             kwargs.get("env_vars") or kwargs.get("ssh_keys") or kwargs.get("files")
         )
-
-    async def create_workspace_from_image_artifact(self, **kwargs):
-        return await self._create_workspace_from_image_artifact(**kwargs)
 
     async def create_workspace(self, **kwargs):
         self.create_workspace_calls.append(kwargs)
@@ -173,11 +155,120 @@ class WebSocketMetricsPathTests(unittest.TestCase):
 
 
 class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_observation_announces_desktop_ended_by_maintenance(self) -> None:
+        """Observe maintenance stop using the canonical registry cache."""
+        with tempfile.TemporaryDirectory() as state_dir:
+            workspace_id = uuid.uuid4()
+            maintenance_started = asyncio.Event()
+
+            class Runtime:
+                async def get_workspace_status(self, instance_id):
+                    return RuntimeStatus(instance_id, "running")
+
+                async def workspace_incarnation(self, _workspace_id):
+                    return (
+                        {"runtime": "docker", "resource_id": "instance-1"},
+                        "running",
+                    )
+
+                async def list_workspaces(self):
+                    return [
+                        RuntimeWorkspaceInfo(
+                            str(workspace_id), "instance-1", "running"
+                        )
+                    ]
+
+                def get_container_ip(self, instance_id, workspace_id):
+                    return "127.0.0.1"
+
+                def get_workspace_network_name(self, workspace_id):
+                    return "workspace-net"
+
+                async def exec_command_wait(self, instance_id, command, **kwargs):
+                    if command == ["/usr/local/bin/opencuria-desktop-stop"]:
+                        maintenance_started.set()
+                        return 0, ""
+                    if command[0:2] == ["sh", "-lc"]:
+                        return 0, "stopped"
+                    return 0, ""
+
+            service = WorkspaceService(
+                {"docker": Runtime()}, RunnerSettings(state_dir=state_dir)
+            )
+            service.registry._cache[workspace_id] = WorkspaceInfo(
+                workspace_id, "instance-1", "running"
+            )
+            self.assertFalse(hasattr(service, "_cache"))
+            interface = WebSocketInterface(
+                service,
+                RunnerSettings(state_dir=state_dir, inventory_interval=10**12),
+            )
+            interface._sio.connected = True
+            interface._operations.replay = AsyncMock()
+            emitted = asyncio.Event()
+
+            async def emit(event, payload):
+                if event == "desktop:stopped":
+                    self.assertEqual(payload["workspace_id"], str(workspace_id))
+                    emitted.set()
+
+            interface._sio.emit = AsyncMock(side_effect=emit)
+            session = DesktopSession(workspace_id, "instance-1", generation=4)
+            service.desktop._desktop_sessions[workspace_id] = session
+            service.desktop._desktop_generations[workspace_id] = 4
+            await service.desktop.lease_store.reserve(
+                str(workspace_id),
+                "instance-1",
+                "expired-viewer-lease",
+                "viewer",
+                "viewer-owner",
+                service.desktop.epoch,
+                1,
+                180,
+            )
+            await service.desktop.lease_store.activate(
+                "expired-viewer-lease", service.desktop.epoch, 1
+            )
+            # Persist an already-expired owner so real maintenance selects
+            # the workspace immediately, without waiting on lease wall-clock TTL.
+            lease_path = service.desktop.lease_store.path
+
+            def expire_lease() -> None:
+                with sqlite3.connect(lease_path) as db:
+                    db.execute(
+                        "UPDATE desktop_leases SET expires_at=0 "
+                        "WHERE lease_id='expired-viewer-lease'"
+                    )
+
+            await asyncio.to_thread(expire_lease)
+            # The real manager maintenance cleans the expired owner and stops
+            # the desktop; this event marks its stop exec before the event is
+            # announced by the observation loop.
+            observation = asyncio.create_task(interface._observation_loop())
+            try:
+                await asyncio.wait_for(maintenance_started.wait(), timeout=2)
+                await asyncio.wait_for(emitted.wait(), timeout=2)
+            finally:
+                observation.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await observation
+                interface._operations.journal.close()
+
+            interface._sio.emit.assert_any_await(
+                "desktop:stopped",
+                {
+                    "workspace_id": str(workspace_id),
+                    "stopped": True,
+                    "generation": 4,
+                    "epoch": interface._desktop_epoch,
+                },
+            )
+            self.assertNotIn(workspace_id, service.desktop._desktop_sessions)
+            lease = await service.desktop.lease_store.get("expired-viewer-lease")
+            self.assertEqual(lease["state"], "expired")
+
     async def test_connect_snapshot_is_reused_for_first_heartbeat(self) -> None:
         """Connect snapshot is not immediately re-probed for the first heartbeat."""
-        import asyncio
-        import contextlib
-
         service = DummyService()
         workspaces = [{"workspace_id": str(uuid.uuid4()), "status": "running"}]
         service.get_workspace_heartbeat_statuses = AsyncMock(return_value=workspaces)
@@ -311,14 +402,11 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
                 },
             )()
         )
-        service.start_desktop = service.desktop.start_desktop
         service.desktop.get_desktop_session = (
             lambda _workspace_id: service.desktop.start_desktop.return_value
         )
         service.desktop.get_desktop_container_ip = lambda workspace_id: "10.100.0.2"
-        service.get_desktop_container_ip = service.desktop.get_desktop_container_ip
         service.desktop.get_desktop_network_name = lambda workspace_id: ""
-        service.get_desktop_network_name = service.desktop.get_desktop_network_name
 
         interface = WebSocketInterface(
             service, RunnerSettings(state_dir=tempfile.mkdtemp())
@@ -579,7 +667,6 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
                 },
             )()
         )
-        service.stop_desktop = service.desktop.stop_desktop
         interface = WebSocketInterface(
             service, RunnerSettings(state_dir=tempfile.mkdtemp())
         )

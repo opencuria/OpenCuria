@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import tempfile
-
 import asyncio
 import base64
 import io
 import os
 import tarfile
+import tempfile
 import unittest
 import uuid
 from unittest.mock import AsyncMock
@@ -37,17 +36,9 @@ class _FakeService:
         self.desktop_action_calls: list[tuple[object, str, object]] = []
         self.stream_mode: str = "ok"
         self.wait_result = (0, "out", "err")
-        self._desktop_sessions: dict = {}
-        # Step 4: websocket harness/files handlers call the managers
-        # directly (``service.harness`` / ``service.files``). The fake
-        # mirrors that surface so handler tests exercise the same path;
-        # the underlying coroutines stay directly awaitable.
+        # Mirror the manager surfaces used by the real WebSocket handlers.
         self.harness = self._FakeHarness(self)
         self.files = self._FakeFiles(self)
-        # Step 6b: websocket desktop handlers call the manager directly
-        # (``service.desktop``). The fake mirrors that surface so handler
-        # tests exercise the same path; impls live on the outer fake and
-        # the facade shims delegate to the manager, like the real service.
         self.desktop = self._FakeDesktop(self)
 
     class _FakeHarness:
@@ -99,6 +90,7 @@ class _FakeService:
     class _FakeDesktop:
         def __init__(self, outer: _FakeService) -> None:
             self._outer = outer
+            self._desktop_sessions: dict = {}
 
         async def desktop_action(self, workspace_id, action, args=None):
             return await self._outer._desktop_action_impl(
@@ -110,7 +102,7 @@ class _FakeService:
 
         def get_desktop_session(self, workspace_id):
             # Sessions as plain sentinels: identity comparison detects restarts.
-            return self._outer._desktop_sessions.get(workspace_id)
+            return self._desktop_sessions.get(workspace_id)
 
         async def start_desktop(self, workspace_id, width=None, height=None):
             return await self._outer._start_desktop_impl(
@@ -125,6 +117,93 @@ class _FakeService:
 
         def get_desktop_network_name(self, workspace_id):
             return f"opencuria-ws-{workspace_id}"
+
+    async def _desktop_action_impl(self, workspace_id, action, args=None):
+        self.desktop_action_calls.append((workspace_id, action, args))
+        if action == "ensure":
+            return {"ok": True, "display": ":1", "port": 6901}
+        if action == "hold":
+            # Hold installs a *new* session object (fresh Xvnc incarnation).
+            # Tests asserting the idempotent hold path pre-seed the sentinel
+            # and override the manager method to skip this replacement.
+            from unittest.mock import MagicMock
+
+            fresh = MagicMock()
+            fresh.port = 6901
+            fresh.viewer_held = False
+            fresh.computeruse_run_ids = {"run-1"}
+            fresh.generation = getattr(
+                self.desktop._desktop_sessions.get(workspace_id), "generation", 0
+            ) + 1
+            self.desktop._desktop_sessions[workspace_id] = fresh
+            return {
+                "ok": True,
+                "display": ":1",
+                "port": 6901,
+                "viewer": False,
+                "computer_use": True,
+                "generation": fresh.generation,
+                "epoch": "fake-desktop-epoch",
+            }
+        if action == "release":
+            generation = getattr(
+                self.desktop._desktop_sessions.get(workspace_id), "generation", 1
+            )
+            return {
+                "ok": True,
+                "stopped": False,
+                "process_alive": True,
+                "viewer_held": False,
+                "computer_use_active": True,
+                "generation": generation,
+                "epoch": "fake-desktop-epoch",
+            }
+        if action == "screenshot" and args and args.get("fail"):
+            raise RuntimeError("Desktop session is not active")
+        if action == "record_start" and args and args.get("path") == "/etc/passwd":
+            raise ValueError("Path must be under /workspace")
+        return {"ok": True, "action": action}
+
+    def _get_desktop_state_payload_impl(self, workspace_id):
+        session = self.desktop._desktop_sessions.get(workspace_id)
+        if session is None:
+            return None
+        return {
+            "workspace_id": str(workspace_id),
+            "port": 6901,
+            "container_ip": "172.22.0.2",
+            "network_name": f"opencuria-ws-{workspace_id}",
+            "viewer": session.viewer_held,
+            "computer_use": bool(session.computeruse_run_ids),
+            "generation": session.generation,
+            "epoch": "fake-desktop-epoch",
+        }
+
+    async def _start_desktop_impl(self, workspace_id, width=None, height=None):
+        if workspace_id in self.desktop._desktop_sessions:
+            # Idempotent path: reuse the pre-seeded session object untouched
+            # so tests can pin "same object → no tunnel close".
+            return self.desktop._desktop_sessions[workspace_id]
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.port = 6901
+        session.viewer_held = True
+        session.computeruse_run_ids = set()
+        session.generation = 1
+        # Fresh start installs a new object.
+        self.desktop._desktop_sessions[workspace_id] = session
+        return session
+
+    async def _stop_desktop_impl(self, workspace_id):
+        from unittest.mock import MagicMock
+
+        return MagicMock(
+            stopped=False,
+            process_alive=True,
+            viewer_held=False,
+            computer_use_active=True,
+        )
 
     async def _exec_harness_command_impl(
         self, workspace_id, command, workdir="/workspace", env=None
@@ -162,7 +241,9 @@ class _FakeService:
             "/workspace/"
         )
 
-    async def _read_file_impl(self, workspace_id, path, max_size=None, *, allow_external=False):
+    async def _read_file_impl(
+        self, workspace_id, path, max_size=None, *, allow_external=False
+    ):
         self.read_calls.append((workspace_id, path, max_size))
         self.file_access_calls.append(("read", path, allow_external))
         if self._is_external_path(path) and not allow_external:
@@ -216,156 +297,6 @@ class _FakeService:
             "size": 2,
             "mime_type": "text/plain",
         }
-
-    # Back-compat shims: facade delegates keep the same names.
-    async def exec_harness_command(
-        self, workspace_id, command, workdir="/workspace", env=None
-    ):
-        return await self.harness.exec_harness_command(
-            workspace_id, command, workdir=workdir, env=env
-        )
-
-    async def exec_harness_command_stream(
-        self, workspace_id, command, workdir="/workspace", env=None
-    ):
-        async for chunk in self.harness.exec_harness_command_stream(
-            workspace_id, command, workdir=workdir, env=env
-        ):
-            yield chunk
-
-    async def read_file(self, workspace_id, path, max_size=None, *, allow_external=False):
-        return await self.files.read_file(
-            workspace_id, path, max_size=max_size, allow_external=allow_external
-        )
-
-    async def write_file_content(
-        self, workspace_id, path, content_b64, mode=0o644, *, allow_external=False
-    ):
-        return await self.files.write_file_content(
-            workspace_id, path, content_b64, mode=mode, allow_external=allow_external
-        )
-
-    async def list_files(self, workspace_id, path):
-        return await self.files.list_files(workspace_id, path)
-
-    async def find_files(self, workspace_id, query="", limit=50):
-        return await self.files.find_files(
-            workspace_id, query=query, limit=limit
-        )
-
-    async def stat_path(self, workspace_id, path):
-        return await self.files.stat_path(workspace_id, path)
-
-    async def desktop_action(self, workspace_id, action, args=None):
-        return await self.desktop.desktop_action(workspace_id, action, args)
-
-    async def _desktop_action_impl(self, workspace_id, action, args=None):
-        self.desktop_action_calls.append((workspace_id, action, args))
-        if action == "ensure":
-            return {"ok": True, "display": ":1", "port": 6901}
-        if action == "hold":
-            # Hold installs a *new* session object (fresh Xvnc incarnation).
-            # Tests asserting the idempotent hold path pre-seed the sentinel
-            # and override desktop_action to skip this replacement.
-            from unittest.mock import MagicMock
-
-            fresh = MagicMock()
-            fresh.port = 6901
-            fresh.viewer_held = False
-            fresh.computeruse_run_ids = {"run-1"}
-            fresh.generation = getattr(
-                self._desktop_sessions.get(workspace_id), "generation", 0
-            ) + 1
-            self._desktop_sessions[workspace_id] = fresh
-            return {
-                "ok": True,
-                "display": ":1",
-                "port": 6901,
-                "viewer": False,
-                "computer_use": True,
-                "generation": fresh.generation,
-                "epoch": "fake-desktop-epoch",
-            }
-        if action == "release":
-            generation = getattr(
-                self._desktop_sessions.get(workspace_id), "generation", 1
-            )
-            return {
-                "ok": True,
-                "stopped": False,
-                "process_alive": True,
-                "viewer_held": False,
-                "computer_use_active": True,
-                "generation": generation,
-                "epoch": "fake-desktop-epoch",
-            }
-        if action == "screenshot" and args and args.get("fail"):
-            raise RuntimeError("Desktop session is not active")
-        if action == "record_start" and args and args.get("path") == "/etc/passwd":
-            raise ValueError("Path must be under /workspace")
-        return {"ok": True, "action": action}
-
-    def get_desktop_state_payload(self, workspace_id):
-        return self.desktop.get_desktop_state_payload(workspace_id)
-
-    def _get_desktop_state_payload_impl(self, workspace_id):
-        session = self._desktop_sessions.get(workspace_id)
-        if session is None:
-            return None
-        return {
-            "workspace_id": str(workspace_id),
-            "port": 6901,
-            "container_ip": "172.22.0.2",
-            "network_name": f"opencuria-ws-{workspace_id}",
-            "viewer": session.viewer_held,
-            "computer_use": bool(session.computeruse_run_ids),
-            "generation": session.generation,
-            "epoch": "fake-desktop-epoch",
-        }
-
-    def get_desktop_session(self, workspace_id):
-        # Sessions as plain sentinels: identity comparison detects restarts.
-        return self.desktop.get_desktop_session(workspace_id)
-
-    async def start_desktop(self, workspace_id, width=None, height=None):
-        return await self.desktop.start_desktop(
-            workspace_id, width=width, height=height
-        )
-
-    async def _start_desktop_impl(self, workspace_id, width=None, height=None):
-        if workspace_id in self._desktop_sessions:
-            # Idempotent path: reuse the pre-seeded session object untouched
-            # so tests can pin "same object → no tunnel close".
-            return self._desktop_sessions[workspace_id]
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session.port = 6901
-        session.viewer_held = True
-        session.computeruse_run_ids = set()
-        session.generation = 1
-        # Fresh start installs a new object.
-        self._desktop_sessions[workspace_id] = session
-        return session
-
-    async def stop_desktop(self, workspace_id):
-        return await self.desktop.stop_desktop(workspace_id)
-
-    async def _stop_desktop_impl(self, workspace_id):
-        from unittest.mock import MagicMock
-
-        return MagicMock(
-            stopped=False,
-            process_alive=True,
-            viewer_held=False,
-            computer_use_active=True,
-        )
-
-    def get_desktop_container_ip(self, workspace_id):
-        return self.desktop.get_desktop_container_ip(workspace_id)
-
-    def get_desktop_network_name(self, workspace_id):
-        return self.desktop.get_desktop_network_name(workspace_id)
 
 
 def _interface(service: _FakeService) -> WebSocketInterface:
@@ -805,7 +736,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         sentinel.generation = 1
         sentinel.viewer_held = False
         sentinel.computeruse_run_ids = {"run-1"}
-        service._desktop_sessions[workspace_id] = sentinel
+        service.desktop._desktop_sessions[workspace_id] = sentinel
 
         async def _idempotent_hold(ws_id, action, args=None):
             service.desktop_action_calls.append((ws_id, action, args))
@@ -820,8 +751,6 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
             }
 
         service.desktop.desktop_action = _idempotent_hold  # type: ignore[method-assign]
-        # Facade shim delegates to the manager, so keep both in sync.
-        service.desktop_action = service.desktop.desktop_action
         closed: list = []
 
         async def _fake_close(ws_id, **_kwargs):
@@ -853,7 +782,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         workspace_id = uuid.uuid4()
         other_id = uuid.uuid4()
         sentinel = object()
-        service._desktop_sessions[workspace_id] = sentinel
+        service.desktop._desktop_sessions[workspace_id] = sentinel
         close_order: list = []
         closed: list = []
         orig_emit = interface._sio.emit
@@ -886,7 +815,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
             close_order.index("close"),
             close_order.index("process"),
         )
-        self.assertIsNot(service._desktop_sessions[workspace_id], sentinel)
+        self.assertIsNot(service.desktop._desktop_sessions[workspace_id], sentinel)
         # Other workspaces are untouched: scoping is per-workspace.
         self.assertNotIn(other_id, closed)
 
@@ -901,7 +830,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
 
         kept = MagicMock()
         kept.generation = 1
-        service._desktop_sessions[workspace_id] = kept
+        service.desktop._desktop_sessions[workspace_id] = kept
         handler = interface._sio.handlers["/"]["harness:desktop_action"]
         await handler(
             _payload(
@@ -997,7 +926,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         session.viewer_held = True
         session.computeruse_run_ids = set()
         session.generation = 1
-        service._desktop_sessions[workspace_id] = session
+        service.desktop._desktop_sessions[workspace_id] = session
         # Idempotent path: start_desktop reuses the pre-seeded session, so
         # before/after identity matches and no tunnel is closed.
         await interface._sio.handlers["/"]["task:start_desktop"](
@@ -1016,8 +945,8 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         workspace_id = uuid.uuid4()
         other_id = uuid.uuid4()
         sentinel = object()
-        service._desktop_sessions[workspace_id] = sentinel
-        service._desktop_sessions[other_id] = object()
+        service.desktop._desktop_sessions[workspace_id] = sentinel
+        service.desktop._desktop_sessions[other_id] = object()
         close_order: list = []
         closed: list = []
         orig_emit = interface._sio.emit
@@ -1043,12 +972,10 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
             fresh.viewer_held = True
             fresh.computeruse_run_ids = set()
             fresh.generation = 2
-            service._desktop_sessions[ws_id] = fresh
+            service.desktop._desktop_sessions[ws_id] = fresh
             return fresh
 
         service.desktop.start_desktop = _restarting_start  # type: ignore[method-assign]
-        # Facade shim delegates to the manager, so keep both in sync.
-        service.start_desktop = service.desktop.start_desktop
         await interface._sio.handlers["/"]["task:start_desktop"](
             {"task_id": "task-2", "workspace_id": str(workspace_id)}
         )
@@ -1057,7 +984,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
             close_order.index("close"),
             close_order.index("started"),
         )
-        self.assertIsNot(service._desktop_sessions[workspace_id], sentinel)
+        self.assertIsNot(service.desktop._desktop_sessions[workspace_id], sentinel)
 
     async def test_stop_desktop_kept_emits_viewer_released(self) -> None:
         """Viewer release with computer-use hold keeps the process cached."""
@@ -1132,7 +1059,7 @@ class HarnessServiceSandboxTests(unittest.IsolatedAsyncioTestCase):
 
         service = WorkspaceService(runtimes={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
         with self.assertRaises(ValueError):
-            await service.write_file_content(
+            await service.files.write_file_content(
                 uuid.uuid4(), "/etc/passwd", base64.b64encode(b"x").decode()
             )
 
@@ -1152,7 +1079,7 @@ class HarnessServiceSandboxTests(unittest.IsolatedAsyncioTestCase):
         service = WorkspaceService(
             runtimes={"docker": UnusedRuntime()}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
         )
-        service._cache[workspace_id] = WorkspaceInfo(
+        service.registry._cache[workspace_id] = WorkspaceInfo(
             workspace_id=workspace_id,
             instance_id="instance-1",
             status="running",
@@ -1174,10 +1101,10 @@ class HarnessServiceSandboxTests(unittest.IsolatedAsyncioTestCase):
 
         service = WorkspaceService(runtimes={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
         with self.assertRaises(ValueError):
-            await service.stat_path(uuid.uuid4(), "/workspace/../evil")
+            await service.files.stat_path(uuid.uuid4(), "/workspace/../evil")
 
     def test_parse_exec_output_splits_streams(self) -> None:
-        from src.service import WorkspaceService
+        from src.services.harness_exec import HarnessExecService
 
         stdout_b64 = base64.b64encode(b"out").decode()
         stderr_b64 = base64.b64encode(b"err").decode()
@@ -1185,7 +1112,7 @@ class HarnessServiceSandboxTests(unittest.IsolatedAsyncioTestCase):
             f"OPENCURIA_STDOUT\n{stdout_b64}\n"
             f"OPENCURIA_STDERR\n{stderr_b64}\nEXIT:0"
         )
-        stdout, stderr = WorkspaceService._parse_harness_exec_output(output)
+        stdout, stderr = HarnessExecService._parse_harness_exec_output(output)
         self.assertEqual((stdout, stderr), ("out", "err"))
 
 
@@ -1216,7 +1143,7 @@ class HarnessServiceQuoteInjectionTests(unittest.IsolatedAsyncioTestCase):
             runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
         )
         workspace_id = uuid.uuid4()
-        service._cache[workspace_id] = WorkspaceInfo(
+        service.registry._cache[workspace_id] = WorkspaceInfo(
             workspace_id=workspace_id,
             instance_id="instance-1",
             status="running",
@@ -1230,7 +1157,7 @@ class HarnessServiceQuoteInjectionTests(unittest.IsolatedAsyncioTestCase):
         service, captured, workspace_id = self._service()
         evil = "/workspace/x'; touch /tmp/pwned; echo '"
         with self.assertRaises((RuntimeError, FileNotFoundError)):
-            await service.read_file(workspace_id, evil)
+            await service.files.read_file(workspace_id, evil)
         shell_cmd = next(c[2] for c in captured if c[:2] == ["sh", "-c"])
         self.assertIn(shlex.quote(evil), shell_cmd)
         self.assertNotIn("'x'; touch", shell_cmd.replace(shlex.quote(evil), ""))
@@ -1241,7 +1168,7 @@ class HarnessServiceQuoteInjectionTests(unittest.IsolatedAsyncioTestCase):
         service, captured, workspace_id = self._service()
         evil = "/workspace/x'; touch /tmp/pwned; echo '"
         with self.assertRaises(FileNotFoundError):
-            await service.stat_path(workspace_id, evil)
+            await service.files.stat_path(workspace_id, evil)
         shell_cmd = next(c[2] for c in captured if c[:2] == ["sh", "-c"])
         self.assertIn(shlex.quote(evil), shell_cmd)
 
@@ -1265,16 +1192,17 @@ class HarnessServiceQuoteInjectionTests(unittest.IsolatedAsyncioTestCase):
                     return 0, "4\n"
                 return 0, "QUJD"
 
-        service._runtimes = {"docker": DirRuntime()}
-        info = service._cache[workspace_id]
-        service._cache[workspace_id] = WorkspaceInfo(
+        service.registry._runtimes.clear()
+        service.registry._runtimes.update({"docker": DirRuntime()})
+        info = service.registry._cache[workspace_id]
+        service.registry._cache[workspace_id] = WorkspaceInfo(
             workspace_id=info.workspace_id,
             instance_id="instance-1",
             status="running",
             runtime_type="docker",
         )
         evil = "/workspace/x'; touch /tmp/pwned; echo '"
-        result = await service.download_file(workspace_id, evil)
+        result = await service.files.download_file(workspace_id, evil)
         self.assertTrue(result["content"])
         shell_cmd = next(c[2] for c in captured if c[:2] == ["sh", "-c"])
         self.assertIn(shlex.quote(evil.rsplit("/", 1)[0]), shell_cmd)
@@ -1316,7 +1244,7 @@ class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
             runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
         )
         workspace_id = uuid.uuid4()
-        service._cache[workspace_id] = WorkspaceInfo(
+        service.registry._cache[workspace_id] = WorkspaceInfo(
             workspace_id=workspace_id,
             instance_id="instance-1",
             status="running",
@@ -1327,27 +1255,27 @@ class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
     async def test_read_file_rejects_symlink_escape(self) -> None:
         service, _runtime, workspace_id = self._service("/etc/shadow")
         with self.assertRaises(ValueError):
-            await service.read_file(workspace_id, "/workspace/link")
+            await service.files.read_file(workspace_id, "/workspace/link")
 
     async def test_stat_path_rejects_symlink_escape(self) -> None:
         service, _runtime, workspace_id = self._service("/etc/passwd")
         with self.assertRaises(ValueError):
-            await service.stat_path(workspace_id, "/workspace/link")
+            await service.files.stat_path(workspace_id, "/workspace/link")
 
     async def test_list_files_rejects_symlink_escape(self) -> None:
         service, _runtime, workspace_id = self._service("/etc")
         with self.assertRaises(ValueError):
-            await service.list_files(workspace_id, "/workspace/link")
+            await service.files.list_files(workspace_id, "/workspace/link")
 
     async def test_download_file_rejects_symlink_escape(self) -> None:
         service, _runtime, workspace_id = self._service("/etc/shadow")
         with self.assertRaises(ValueError):
-            await service.download_file(workspace_id, "/workspace/link")
+            await service.files.download_file(workspace_id, "/workspace/link")
 
     async def test_write_file_content_rejects_symlink_escape(self) -> None:
         service, _runtime, workspace_id = self._service("/etc/cron.d/evil")
         with self.assertRaises(ValueError):
-            await service.write_file_content(
+            await service.files.write_file_content(
                 workspace_id,
                 "/workspace/link",
                 base64.b64encode(b"x").decode(),
@@ -1434,8 +1362,8 @@ class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
         service, runtime, workspace_id = self._service(
             "/workspace/sub/file.txt"
         )
-        resolved = await service._realpath_under_workspace(
-            service._get_runtime(workspace_id),
+        resolved = await service.files._realpath_under_workspace(
+            service.registry.get_runtime(workspace_id),
             "instance-1",
             "/workspace/sub/file.txt",
         )
@@ -1455,7 +1383,7 @@ class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
         service = WorkspaceService(
             runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
         )
-        resolved = await service._realpath_under_workspace(
+        resolved = await service.files._realpath_under_workspace(
             runtime, "instance-1", "/workspace/a.txt"
         )
         self.assertEqual(resolved, "/workspace/a.txt")

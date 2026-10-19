@@ -1,45 +1,7 @@
-"""Workspace registry: ownership of the in-memory workspace cache.
+"""Workspace cache ownership, runtime resolution, and status reporting.
 
-Step 8 (final): canonical home of the cache-ownership logic previously
-living on ``WorkspaceService`` in :mod:`src.service`:
-
-- :meth:`WorkspaceRegistry.sync_from_runtime`,
-- :meth:`WorkspaceRegistry._get_cached` / :meth:`get_cached`,
-- :meth:`WorkspaceRegistry._get_runtime` / :meth:`get_runtime`,
-- :meth:`WorkspaceRegistry._get_runtime_by_type` /
-  :meth:`get_runtime_by_type`,
-- :meth:`WorkspaceRegistry.supported_runtimes` (property),
-- :meth:`WorkspaceRegistry.list_workspaces`,
-- :meth:`WorkspaceRegistry.get_workspace`,
-- :meth:`WorkspaceRegistry.get_workspace_statuses`,
-- :meth:`WorkspaceRegistry.get_workspace_heartbeat_statuses`,
-- :meth:`WorkspaceRegistry.recover_desktop_sessions_from_runtime`,
-- :meth:`WorkspaceRegistry.get_vm_metrics`,
-- :meth:`WorkspaceRegistry.workspace_exists`.
-
-Refresh merges same-incarnation observations into canonical cache entries.
-Per-workspace lifecycle epochs fence stale snapshots across awaited effects;
-creating-preservation and heartbeat payload shapes remain unchanged.
-Cross-cluster reads (desktop sessions, background statuses) go through
-optional hooks set post-construction by the composer (``WorkspaceService``),
-so the registry stays unit-testable without importing sibling managers:
-
-- ``desktop_manager``: owner of desktop liveness reconciliation, process
-  tracking, and generation metadata for heartbeat reads.
-- ``desktop_sessions``: read-only view of the live desktop-session map used
-  to capture the expected heartbeat session; the registry never mutates it.
-- ``background_statuses``: async
-  ``(runtime, instance_id, entry) -> dict`` hook (normally
-  ``BackgroundProcessManager._background_status_locked``).
-- ``background_entries``: live
-  ``dict[uuid.UUID, dict[str, BackgroundProcess]]`` tracking dict
-  (normally ``BackgroundProcessManager._background_processes``).
-- ``desktop_live``: async ``(workspace_id) -> bool`` probe passed into the
-  manager-owned reconciliation operation (normally the desktop TCP probe).
-
-Hooks are only called when set; without them the registry degrades to
-plain cache ownership (heartbeat omits desktop/process enrichment
-gracefully, recover is a no-op).
+The registry merges runtime inventory while fencing lifecycle-owned cache
+entries. Optional hooks provide desktop and background-process heartbeat data.
 """
 
 from __future__ import annotations
@@ -61,14 +23,8 @@ logger = structlog.get_logger(__name__)
 class WorkspaceRegistry:
     """Owns the in-memory workspace cache and runtime resolution.
 
-    Injected dependencies (all mirror ``WorkspaceService`` helpers):
-
-    - ``runtimes``: runtime backends by type (kept for introspection;
-      resolution itself goes through the methods below so a plain
-      dict reassignment stays visible — the composer passes the same
-      dict object it hands to every manager).
-    - ``settings``: runner settings (kept for forward compatibility;
-      unused by the registry itself).
+    The runner composition root injects the shared runtime mapping. Optional
+    hooks provide desktop and background-process heartbeat data.
     """
 
     def __init__(
@@ -83,8 +39,8 @@ class WorkspaceRegistry:
         self._active: set[uuid.UUID] = set()
         self._lifecycle_locks: dict[uuid.UUID, asyncio.Lock] = {}
         self._refresh_lock = asyncio.Lock()
-        # Optional cross-cluster hooks, set post-construction by the
-        # composer (``WorkspaceService``). All default to ``None`` so
+        # Optional cross-cluster hooks, set by the runner composition root.
+        # All default to ``None`` so
         # the registry stays unit-testable in isolation.
         self.desktop_manager: Any | None = None
         self.desktop_sessions: dict[uuid.UUID, DesktopSession] | None = None
@@ -176,20 +132,12 @@ class WorkspaceRegistry:
                     self._cache[ws_id] = incoming
             logger.info("cache_synced_from_runtime", workspace_count=len(self._cache))
 
-    def _get_cached(self, workspace_id: uuid.UUID) -> WorkspaceInfo:
-        """Look up a workspace in the cache or raise."""
-        return self.get_cached(workspace_id)
-
     def get_cached(self, workspace_id: uuid.UUID) -> WorkspaceInfo:
         """Look up a workspace in the cache or raise."""
         info = self._cache.get(workspace_id)
         if info is None:
             raise ValueError(f"Workspace {workspace_id} not found")
         return info
-
-    def _get_runtime(self, workspace_id: uuid.UUID) -> RuntimeBackend:
-        """Return the runtime backend for a workspace."""
-        return self.get_runtime(workspace_id)
 
     def get_runtime(self, workspace_id: uuid.UUID) -> RuntimeBackend:
         """Return the runtime backend for a workspace."""
@@ -201,10 +149,6 @@ class WorkspaceRegistry:
                 f"workspace {workspace_id}"
             )
         return runtime
-
-    def _get_runtime_by_type(self, runtime_type: str) -> RuntimeBackend:
-        """Return the runtime backend by type name."""
-        return self.get_runtime_by_type(runtime_type)
 
     def get_runtime_by_type(self, runtime_type: str) -> RuntimeBackend:
         """Return the runtime backend by type name."""

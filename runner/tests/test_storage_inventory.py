@@ -230,6 +230,7 @@ async def test_docker_aliases_one_physical_id_foreign_consumer_blocks():
 
 @pytest.mark.asyncio
 async def test_journal_recovers_exact_publication_without_rerun(tmp_path):
+    from src.config import RunnerSettings
     from src.journal import COMMANDS, Journal, OperationExecutor
     from src.service import WorkspaceService
 
@@ -254,8 +255,7 @@ async def test_journal_recovers_exact_publication_without_rerun(tmp_path):
         source, target, {"operation_id": "op", "artifact_id": image_id, "kind": "build"}
     )
     journal.close()
-    service = object.__new__(WorkspaceService)
-    service.__dict__["_runtimes"] = {"qemu": r}
+    service = WorkspaceService({"qemu": r}, RunnerSettings())
 
     class Socket:
         def __init__(self):
@@ -359,6 +359,7 @@ async def test_workspace_delete_rechecks_after_undefine(tmp_path):
 async def test_source_scrub_survives_corrupt_output_but_not_external_disk_write(
     tmp_path,
 ):
+    from src.config import RunnerSettings
     from src.journal import Journal
     from src.service import WorkspaceService
 
@@ -367,8 +368,7 @@ async def test_source_scrub_survives_corrupt_output_but_not_external_disk_write(
     disk = r._disk_path(ws)
     qcow(disk)
     source_domain(r, ws, disk)
-    service = object.__new__(WorkspaceService)
-    service.__dict__["_runtimes"] = {"qemu": r}
+    service = WorkspaceService({"qemu": r}, RunnerSettings())
     observed = await service.workspace_incarnation(ws)
     assert observed and observed[1] == "exited"
     journal = Journal(str(tmp_path / "journal"))
@@ -399,6 +399,7 @@ async def test_source_scrub_survives_corrupt_output_but_not_external_disk_write(
 
 @pytest.mark.asyncio
 async def test_truncated_conversion_failure_retains_safe_source_evidence(tmp_path):
+    from src.config import RunnerSettings
     from src.journal import COMMANDS, Journal, OperationExecutor
     from src.service import WorkspaceService
 
@@ -407,8 +408,7 @@ async def test_truncated_conversion_failure_retains_safe_source_evidence(tmp_pat
     disk = r._disk_path(ws)
     qcow(disk)
     source_domain(r, ws, disk)
-    service = object.__new__(WorkspaceService)
-    service.__dict__["_runtimes"] = {"qemu": r}
+    service = WorkspaceService({"qemu": r}, RunnerSettings())
     journal = Journal(str(tmp_path / "journal"))
     observed = await service.workspace_incarnation(ws)
     journal.checkpoint(
@@ -480,6 +480,7 @@ async def test_image_manager_never_bypasses_latest_scrub_proof(cached_clean):
 
 @pytest.mark.asyncio
 async def test_docker_intermediate_not_publication_and_untagged_checkpoint(tmp_path):
+    from src.config import RunnerSettings
     from src.journal import Journal
     from src.service import WorkspaceService
 
@@ -503,8 +504,7 @@ async def test_docker_intermediate_not_publication_and_untagged_checkpoint(tmp_p
     client.api.df.return_value = {
         "Images": [{"Id": intermediate.id, "SharedSize": 200, "Size": 250}]
     }
-    service = object.__new__(WorkspaceService)
-    service.__dict__["_runtimes"] = {"docker": r}
+    service = WorkspaceService({"docker": r}, RunnerSettings())
     identity = {
         "operation_id": "op",
         "target": generation,

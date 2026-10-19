@@ -1,21 +1,7 @@
-"""Background (detached) process sessions.
+"""Workspace-scoped detached process management.
 
-Canonical home (Step 3) for the background process management previously
-living on ``WorkspaceService`` in :mod:`src.service`:
-``BackgroundProcess``, ``BACKGROUND_PROCESS_DIR`` / ``_BACKGROUND_*``
-constants, the ``_background_processes`` / ``_background_lock`` /
-``_background_start_locks`` (+ guard) state, and the start / status /
-stop / verify-and-reattach operations.
-
-``WorkspaceService`` keeps thin delegates (same names/signatures/
-messages) plus a ``_background_processes`` property alias onto the
-manager-owned dict, so existing callers and tests keep working.
-
-Workspace resolution is injected so this module never imports
-``src.service`` (no dependency cycle). ``sanitize_exec_workdir`` always
-writes through to the canonical ``src.services.exec_kernel`` helper
-(a callable parameter, defaulting to the canonical function) so
-``sync_from_runtime``-style reassignments stay correct.
+:class:`BackgroundProcessManager` owns process tracking, per-process start
+serialization, status checks, verification/reattachment, and graceful stopping.
 """
 
 from __future__ import annotations
@@ -97,19 +83,8 @@ def _status_dict(
 class BackgroundProcessManager:
     """Owns workspace-scoped detached background processes.
 
-    Injected dependencies (all mirror ``WorkspaceService`` helpers):
-
-    - ``runtimes``: runtime backends by type (kept for introspection;
-      resolution itself goes through the callables below).
-    - ``get_cached``: ``(workspace_id) -> WorkspaceInfo``; raises
-      ``ValueError("... not found")`` for unknown ids.
-    - ``get_runtime``: ``(workspace_id) -> RuntimeBackend``; raises
-      ``RuntimeError`` for unknown runtimes.
-    - ``sanitize_exec_workdir``: ``(path) -> str``; defaults to the
-      canonical ``src.services.exec_kernel.sanitize_exec_workdir``.
-    - ``credential_env_file``: guest path sourced by the start wrapper.
-      ``WorkspaceService`` passes its ``WORKSPACE_CREDENTIAL_ENV_FILE``
-      constant; the default matches it.
+    Runtime backends, workspace lookup functions, workdir sanitizer, and
+    credential env-file path are injected by the runner composition root.
     """
 
     def __init__(
@@ -129,9 +104,7 @@ class BackgroundProcessManager:
             if sanitize_exec_workdir is not None
             else _canonical_sanitize_exec_workdir
         )
-        # Canonical default lives in ``src.services.credentials`` (Step 4
-        # forward-move); the literal matches
-        # ``WORKSPACE_CREDENTIAL_ENV_FILE`` so static parity holds.
+        # The default matches ``WORKSPACE_CREDENTIAL_ENV_FILE``.
         self._credential_env_file = credential_env_file
         self._background_processes: dict[uuid.UUID, dict[str, BackgroundProcess]] = {}
         self._background_lock = asyncio.Lock()
@@ -142,12 +115,8 @@ class BackgroundProcessManager:
         # workspace/process ids, cleared on restart) — same rationale as
         # the desktop locks: dropping a lock object while a holder waits
         # would hand the next caller a different lock.
-        # Step 5: the get-or-create never-evict mechanics live in the
-        # canonical ``KeyedLockMap`` (``src.services.exec_kernel``);
-        # ``_background_start_locks`` / ``_background_start_locks_guard``
-        # stay readable/writable as live aliases onto the map's dict/guard
-        # so ``WorkspaceService`` property aliases and tests poking
-        # ``manager._background_start_locks[...]`` keep working.
+        # Get-or-create uses ``KeyedLockMap``; properties below expose the
+        # lock mapping and guard for manager integrations.
         self._background_start_lock_map: KeyedLockMap[
             tuple[uuid.UUID, str]
         ] = KeyedLockMap()
@@ -207,10 +176,8 @@ class BackgroundProcessManager:
         (e.g. ``exit 3``) only terminate the subshell and the outer
         shell still writes ``$?`` to the exit file.
 
-        ``credential_env_file`` defaults to the runner guest path so the
-        helper stays callable without an instance (parity with the
-        ``WorkspaceService`` static facade); instance calls pass the
-        configured ``self._credential_env_file``.
+        ``credential_env_file`` defaults to the runner guest path; manager
+        calls pass the configured ``self._credential_env_file``.
         """
         env_assignments = " ".join(
             f"{key}={shlex.quote(str(value))}"
@@ -309,7 +276,7 @@ class BackgroundProcessManager:
     ) -> asyncio.Lock:
         """Return the serialising lock for one workspace/process_id pair.
 
-        Step 5: thin delegate onto the canonical ``KeyedLockMap``.
+        Return the retained lock for this workspace/process pair.
         """
         return await self._background_start_lock_map.get(
             (workspace_id, process_id)
@@ -910,10 +877,9 @@ class BackgroundProcessManager:
                 # signal — fall through to kill-skipped. Narrow on
                 # purpose: unexpected errors must propagate.
                 runtime = None
-        # Mirror the facade's direct-cache lookup semantics: when the
-        # workspace is unknown to the cache (or its runtime is missing /
-        # has no instance), there is nothing left to signal — drop
-        # tracking after logging the skip.
+        # When the workspace is unknown, its runtime is missing, or it
+        # has no instance, there is nothing left to signal; drop tracking
+        # after logging the skip.
         if info is None or runtime is None or not info.instance_id:
             logger.warning(
                 "background_processes_kill_skipped",

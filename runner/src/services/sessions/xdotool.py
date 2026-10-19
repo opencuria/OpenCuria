@@ -1,11 +1,7 @@
-"""xdotool key helpers (pure, stateless).
+"""Pure xdotool key and text command builders.
 
-Canonical home (Step 1) for the xdotool key normalisation helpers
-previously living in :mod:`src.service`. All functions here are pure
-and have no dependency on ``WorkspaceService`` (stdlib + typing only).
-
-Extraction owner: Step 1 (pure helpers). Stateful xdotool action
-handlers stay on ``WorkspaceService`` until the sessions group step.
+The builders normalize common key names and account for xdotool behavior in
+Ubuntu 22.04 guest images.
 """
 
 from __future__ import annotations
