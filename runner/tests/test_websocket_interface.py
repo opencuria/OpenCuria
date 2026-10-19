@@ -7,6 +7,8 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import aiohttp
+
 from src.config import RunnerSettings
 from src.interfaces.websocket import SOCKETIO_MAX_HTTP_BUFFER_SIZE, WebSocketInterface
 from src.models import DesktopSession, WorkspaceInfo
@@ -140,6 +142,33 @@ class WebSocketLegacyPromptRemovedTests(unittest.IsolatedAsyncioTestCase):
             DummyService(), RunnerSettings(state_dir=tempfile.mkdtemp())
         )
         assert "task:cancel_prompt" not in interface._sio.handlers["/"]
+
+
+class WebSocketReconnectTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reconnect_loop_survives_handshake_timeouts(self) -> None:
+        """A hanging backend must not kill the reconnect loop (and the runner)."""
+        interface = WebSocketInterface(
+            DummyService(), RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
+        sio = interface._sio
+        sio.reconnection_delay = sio.reconnection_delay_max = 0.01
+        sio.randomization_factor = 0
+        attempts = 0
+
+        async def failing_connect(*args, **kwargs) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                # aiohttp's handshake timeout, raised when the backend
+                # accepts TCP but never answers (e.g. during a restart).
+                raise asyncio.TimeoutError()
+            sio._reconnect_abort.set()
+            raise aiohttp.ClientConnectionError("refused")
+
+        sio.eio.connect = failing_connect
+        await asyncio.wait_for(sio._handle_reconnect(), 5)
+
+        self.assertEqual(attempts, 3)
 
 
 class WebSocketMetricsPathTests(unittest.TestCase):

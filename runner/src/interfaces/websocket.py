@@ -44,6 +44,24 @@ logger = structlog.get_logger(__name__)
 SOCKETIO_MAX_HTTP_BUFFER_SIZE = 200 * 1024 * 1024
 
 
+class _ReconnectingAsyncClient(socketio.AsyncClient):
+    """Socket.IO client whose reconnect loop survives transport failures.
+
+    python-socketio only retries ``ConnectionError``; Engine.IO lets aiohttp
+    handshake timeouts and socket errors escape, which kills the reconnect
+    task and with it the runner. Normalise them so reconnects keep going.
+    """
+
+    async def connect(self, *args, **kwargs):  # type: ignore[override]
+        """Connect, reporting transport failures as ``ConnectionError``."""
+        try:
+            return await super().connect(*args, **kwargs)
+        except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as exc:
+            raise socketio.exceptions.ConnectionError(
+                f"Connection error: {type(exc).__name__}"
+            ) from exc
+
+
 async def _stream_with_timeout(agen, timeout_s: float):
     """Yield items from *agen* enforcing an overall timeout."""
     iterator = agen.__aiter__()
@@ -89,7 +107,7 @@ class WebSocketInterface(Interface):
         self.capture_fence: CaptureFence | None = getattr(
             service, "capture_fence", None
         )
-        self._sio = socketio.AsyncClient(
+        self._sio = _ReconnectingAsyncClient(
             reconnection=True,
             reconnection_attempts=0,  # unlimited
             reconnection_delay=2,
