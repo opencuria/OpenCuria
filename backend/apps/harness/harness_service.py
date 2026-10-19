@@ -873,58 +873,59 @@ class HarnessService:
             raise NotFoundError("HarnessMessage", str(message_id))
         if target.role != "user":
             raise ValueError("Only user messages can be edited")
-        ordered = sorted(
-            stored, key=lambda row: (row.position, row.created_at, str(row.id))
-        )
-        index = next(pos for pos, row in enumerate(ordered) if row.id == message_id)
-        suffix = ordered[index:]
-        suffix_ids = [row.id for row in suffix]
-        child_ids = await self._collect_suffix_child_ids(suffix_ids)
-        for child_id in child_ids:
-            aborted_child = await self.abort_run(child_id)
-            await self._ensure_external_attempt_reconciled(aborted_child, force=True)
-            await sync_to_async(self.sessions.delete)(aborted_child)
-        await self._reject_suffix_user_gates(session, suffix_ids)
-        original_title = session.title or ""
-        await sync_to_async(self.messages.delete_from)(session.id, message_id)
-        if getattr(session, "harness_id", "native") == "claude":
-            # The opaque SDK transcript contains the discarded suffix. Start a
-            # fresh CLI conversation and let the surviving OpenCuria prefix be
-            # supplied as ordinary history instead of resuming stale vendor state.
-            from .engines.repositories import HarnessEngineRepository
-
-            await sync_to_async(HarnessEngineRepository.clear_transcript)(session.id)
-            await sync_to_async(HarnessEngineRepository.set_session_engine_state)(
-                session.id, external_session_id="", engine_state={}
-            )
-            session.external_session_id = ""
-            session.engine_state = {}
-        # Empty/whitespace overrides are a no-op (API sends "" by default).
+        # Validate the candidate options without changing the persisted session.
+        # start_run owns the admission fence and commits the edit only after all
+        # prerequisites (including provider-turn admission) have succeeded.
         if normalized_mode is not None:
-            session = await sync_to_async(self.sessions.set_mode)(
-                session, normalized_mode
-            )
+            session.mode = normalized_mode
+            session.agent_name = normalized_mode
         if normalized_model is not None:
-            session = await sync_to_async(self.sessions.set_model)(
-                session, normalized_model
-            )
+            session.model = normalized_model
         if normalized_effort is not None:
-            session = await sync_to_async(self.sessions.set_reasoning_effort)(
-                session, normalized_effort
-            )
-        assistant = await self.start_run(
+            session.reasoning_effort = normalized_effort
+        return await self.start_run(
             session,
             prompt.strip(),
             organization_id=organization_id or session.organization_id,
             workspace_id=workspace_id or str(session.workspace_id),
             user_id=user_id,
             skill_ids=skill_ids,
+            _edit_message_id=message_id,
         )
-        if session.title != original_title:
-            session = await sync_to_async(self.sessions.set_title)(
-                session, original_title
-            )
-        return assistant
+
+    async def _commit_message_edit(
+        self,
+        session: HarnessSession,
+        suffix_ids: list[uuid.UUID],
+        *,
+        model: str,
+        reasoning_effort: str,
+    ) -> None:
+        """Replace an admitted edit's suffix before its runner can start."""
+        child_ids = await self._collect_suffix_child_ids(suffix_ids)
+        for child_id in child_ids:
+            aborted_child = await self.abort_run(child_id)
+            await self._ensure_external_attempt_reconciled(aborted_child, force=True)
+        permission_ids, question_ids = await sync_to_async(
+            self.sessions.commit_message_edit
+        )(
+            session,
+            suffix_ids=suffix_ids,
+            child_ids=child_ids,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+        for pending, request_ids in (
+            (self._pending_permissions, permission_ids),
+            (self._pending_questions, question_ids),
+        ):
+            for request_id in request_ids:
+                future = pending.pop(str(request_id), None)
+                if future is not None and not future.done():
+                    future.cancel()
+        if getattr(session, "harness_id", "native") == "claude":
+            session.external_session_id = ""
+            session.engine_state = {}
 
     async def _collect_suffix_child_ids(
         self, suffix_ids: list[uuid.UUID]
@@ -947,40 +948,6 @@ class HarnessService:
             except ValueError:
                 continue
         return child_ids
-
-    async def _reject_suffix_user_gates(
-        self, session: HarnessSession, suffix_ids: list[uuid.UUID]
-    ) -> None:
-        """Reject pending permission/question gates linked to *suffix_ids*."""
-        suffix_set = set(suffix_ids)
-        pending_perms = await sync_to_async(
-            self.permissions.requests.list_pending_for_session
-        )(session.id)
-        for request in pending_perms:
-            if request.message_id is not None:
-                if request.message_id not in suffix_set:
-                    continue
-            await sync_to_async(self.permissions.requests.mark_resolved)(
-                request, approved=False, remember="once"
-            )
-            future = self._pending_permissions.pop(str(request.id), None)
-            if future is not None and not future.done():
-                future.cancel()
-        pending_questions = await sync_to_async(
-            QuestionRequestRepository.list_pending_for_session
-        )(session.id)
-        for request in pending_questions:
-            if request.message_id is not None:
-                if request.message_id not in suffix_set:
-                    continue
-            await sync_to_async(QuestionRequestRepository.resolve)(
-                request,
-                answers=[],
-                status="rejected",
-            )
-            future = self._pending_questions.pop(str(request.id), None)
-            if future is not None and not future.done():
-                future.cancel()
 
     def list_conversations(
         self,
@@ -1410,6 +1377,7 @@ class HarnessService:
         scheduled: bool = False,
         account_ids: dict[str, str] | None = None,
         max_depth: int | None = None,
+        _edit_message_id: uuid.UUID | None = None,
     ) -> HarnessMessage:
         """Persist user+assistant messages and start the runner task.
 
@@ -1542,12 +1510,29 @@ class HarnessService:
                 raise AuthenticationError(
                     "A user is required to validate selected skills"
                 )
-            session = await sync_to_async(self.update_skill_ids)(
-                session.id,
-                skill_ids,
+            if _edit_message_id is not None:
+                session.skill_ids = _normalize_skill_ids(skill_ids)
+            else:
+                session = await sync_to_async(self.update_skill_ids)(
+                    session.id,
+                    skill_ids,
+                    user_id=user_id,
+                    organization_id=org_id,
+                )
+        skill_bodies: list[str] = []
+        if session.skill_ids:
+            if user_id is None:
+                raise AuthenticationError(
+                    "A user is required to validate selected skills"
+                )
+            skill_bodies = await sync_to_async(resolve_skill_bodies)(
+                list(session.skill_ids or []),
                 user_id=user_id,
                 organization_id=org_id,
             )
+        # Provider validation may fill per-turn defaults in memory. Do not
+        # turn Auto selections into persisted edit overrides.
+        edit_model, edit_effort = session.model, session.reasoning_effort
         resolved_model = await sync_to_async(self.validate_provider_for_run)(
             org_id,
             session,
@@ -1573,6 +1558,12 @@ class HarnessService:
             raise ConflictError(detail)
 
         assistant: HarnessMessage | None = None
+        user_message: HarnessMessage | None = None
+        edit_suffix_ids: list[uuid.UUID] = []
+        edit_committed = False
+        edit_commit_task: asyncio.Task[None] | None = None
+        original_last_message_at = session.last_message_at
+        original_updated_at = session.updated_at
         spawned_task: asyncio.Task | None = None
         provider_turn_id: uuid.UUID | None = None
         provider_turn_holder: str | None = None
@@ -1581,6 +1572,17 @@ class HarnessService:
         if owner is not None:
             self._admissions[key] = owner
         try:
+            if _edit_message_id is not None:
+                # Read the suffix under the same reservation as normal sends;
+                # never delete the provisional messages used for admission.
+                stored = await sync_to_async(self.messages.list_for_session)(session.id)
+                index = next(
+                    (i for i, row in enumerate(stored) if row.id == _edit_message_id),
+                    None,
+                )
+                if index is None:
+                    raise NotFoundError("HarnessMessage", str(_edit_message_id))
+                edit_suffix_ids = [row.id for row in stored[index:]]
             prior_user_messages = await sync_to_async(
                 lambda: self.messages.model.objects.filter(
                     session_id=session.id, role="user"
@@ -1602,13 +1604,13 @@ class HarnessService:
                 provider=("claude" if engine_id == "claude" else resolved_provider),
                 harness_id=engine_id,
             )
-            if session.parent_id is None:
-                await sync_to_async(self.sessions.clear_summary)(session.id)
-            # A new send clears older stopped/failed notices of the session;
-            # the fresh run gets its own notice only when it stops or fails.
-            await sync_to_async(self.messages.dismiss_prior_notices)(
-                session.id, exclude_ids=[assistant.id]
-            )
+            if _edit_message_id is None:
+                if session.parent_id is None:
+                    await sync_to_async(self.sessions.clear_summary)(session.id)
+                # Edits defer changes to the existing timeline until admission.
+                await sync_to_async(self.messages.dismiss_prior_notices)(
+                    session.id, exclude_ids=[assistant.id]
+                )
             await sync_to_async(self.sessions.mark_status)(
                 session, HarnessSessionStatus.BUSY
             )
@@ -1617,18 +1619,8 @@ class HarnessService:
                 session,
                 exclude_message_id=assistant.id,
                 exclude_user_message_id=user_message.id,
+                exclude_message_ids=edit_suffix_ids,
             )
-            skill_bodies: list[str] = []
-            if session.skill_ids:
-                if user_id is None:
-                    raise AuthenticationError(
-                        "A user is required to validate selected skills"
-                    )
-                skill_bodies = await sync_to_async(resolve_skill_bodies)(
-                    list(session.skill_ids or []),
-                    user_id=user_id,
-                    organization_id=org_id,
-                )
             run_context = {
                 "session_id": key,
                 "workspace_id": workspace_id or str(session.workspace_id),
@@ -1725,6 +1717,19 @@ class HarnessService:
                 )
             if self._user_abort_requested(session):
                 raise asyncio.CancelledError()
+            if _edit_message_id is not None:
+                # A cancelled sync_to_async waiter does not roll back its DB
+                # thread. Keep ownership until the commit outcome is known.
+                edit_commit_task = asyncio.create_task(
+                    self._commit_message_edit(
+                        session,
+                        edit_suffix_ids,
+                        model=edit_model,
+                        reasoning_effort=edit_effort,
+                    )
+                )
+                await asyncio.shield(edit_commit_task)
+                edit_committed = True
             run_coro = self._execute_run(
                 session=session,
                 prompt=prompt.strip(),
@@ -1769,6 +1774,7 @@ class HarnessService:
                     raise asyncio.CancelledError()
             if (
                 engine_id == "native"
+                and _edit_message_id is None
                 and session.parent_id is None
                 and prior_user_messages == 0
                 and provider_turn_id
@@ -1824,6 +1830,18 @@ class HarnessService:
                     raise
                 log.exception("harness_run_admitted_with_caller_error")
                 return assistant
+            if edit_commit_task is not None:
+                while not edit_commit_task.done():
+                    try:
+                        await asyncio.shield(edit_commit_task)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                edit_committed = (
+                    not edit_commit_task.cancelled()
+                    and edit_commit_task.exception() is None
+                )
             user_abort = self._user_abort_requested(session)
             # sync_to_async re-raises CancelledError after a shielded write
             # when this task is already stopping. Retry until the shell is
@@ -1880,6 +1898,21 @@ class HarnessService:
                     )
                 except Exception:
                     log.warning("harness_run_attempt_finalize_failed", session_id=key)
+            if _edit_message_id is not None and not edit_committed:
+                # Failed admission must not leave a replacement turn or alter
+                # the original timeline's activity timestamp.
+                with anyio.CancelScope(shield=True):
+                    await sync_to_async(self.messages.discard_edit_run)(
+                        session.id,
+                        message_ids=[
+                            row.id
+                            for row in (user_message, assistant)
+                            if row is not None
+                        ],
+                        last_message_at=original_last_message_at,
+                        updated_at=original_updated_at,
+                    )
+                self._runs.pop(key, None)
             self._forget_run(key)
             raise
         finally:
@@ -2428,6 +2461,7 @@ class HarnessService:
         *,
         exclude_message_id: uuid.UUID | None = None,
         exclude_user_message_id: uuid.UUID | None = None,
+        exclude_message_ids: list[uuid.UUID] | None = None,
     ) -> list[LLMMessage]:
         """Build provider history from persisted messages and parts.
 
@@ -2438,7 +2472,11 @@ class HarnessService:
         import json
 
         stored = await sync_to_async(self.messages.list_for_session)(session.id)
-        excluded_ids = {exclude_message_id, exclude_user_message_id}
+        excluded_ids = {
+            exclude_message_id,
+            exclude_user_message_id,
+            *(exclude_message_ids or []),
+        }
         stored = [message for message in stored if message.id not in excluded_ids]
         compaction = await self._find_latest_compaction(stored)
         checkpoint_summary = ""

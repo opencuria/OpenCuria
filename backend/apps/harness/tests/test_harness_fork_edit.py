@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -16,7 +17,7 @@ import pytest
 from asgiref.sync import sync_to_async
 
 from apps.harness.harness_service import HarnessService, _forked_title
-from apps.harness.models import Todo
+from apps.harness.models import ProviderConnection, Todo
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.models import PermissionRequest
 from apps.harness.permissions.service import (
@@ -35,6 +36,7 @@ from apps.harness.repositories import (
     HarnessMessageRepository,
     HarnessPartRepository,
     HarnessSessionRepository,
+    ProviderConfigRepository,
     QuestionRequestRepository,
     TodoRepository,
 )
@@ -557,6 +559,65 @@ async def test_edit_truncates_suffix_and_reruns(harness_workspace) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("commit_succeeds", [False, True])
+async def test_edit_cancellation_waits_for_commit_outcome(
+    harness_workspace, monkeypatch, commit_succeeds
+) -> None:
+    """Caller cancellation cannot discard a replacement after its DB commit."""
+    service, _, _ = _service()
+    session = await _db_create_session(harness_workspace)
+    await _run_two_turns(
+        service, session, session.organization_id, harness_workspace.id
+    )
+    messages_before = HarnessMessageRepository.list_for_session(session.id)
+    commit_entered = threading.Event()
+    release_commit = threading.Event()
+    original_commit = HarnessSessionRepository.commit_message_edit
+
+    def delayed_commit(*args, **kwargs):
+        result = original_commit(*args, **kwargs) if commit_succeeds else None
+        commit_entered.set()
+        if not release_commit.wait(timeout=5):
+            raise TimeoutError("Test did not release the edit commit")
+        if not commit_succeeds:
+            raise ValueError("Edit commit failed")
+        return result
+
+    monkeypatch.setattr(HarnessSessionRepository, "commit_message_edit", delayed_commit)
+    edit = asyncio.create_task(
+        service.edit_user_message(
+            session.id,
+            message_id=messages_before[0].id,
+            prompt="edited",
+            organization_id=session.organization_id,
+        )
+    )
+    try:
+        assert await asyncio.to_thread(commit_entered.wait, 5)
+        edit.cancel()
+        await asyncio.sleep(0)
+        edit.cancel()
+        await asyncio.sleep(0)
+        assert not edit.done()
+    finally:
+        release_commit.set()
+        with pytest.raises(asyncio.CancelledError):
+            await edit
+    messages_after = HarnessMessageRepository.list_for_session(session.id)
+    if commit_succeeds:
+        assert [row.content for row in messages_after if row.role == "user"] == [
+            "edited"
+        ]
+        assert len(messages_after) == 2
+        assert messages_after[-1].finish == "error"
+    else:
+        assert messages_after == messages_before
+    session.refresh_from_db()
+    assert session.status == "idle"
+    assert not service.is_running(session.id)
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_edit_busy_raises_conflict(harness_workspace) -> None:
     """Editing while a run is active raises ConflictError (REST 409)."""
     gate = asyncio.Event()
@@ -992,6 +1053,45 @@ async def test_edit_empty_overrides_are_noop(harness_workspace) -> None:
     assert session.agent_name == "build"
     assert session.model == "keep-model"
     assert session.reasoning_effort == "high"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_edit_preserves_auto_model_and_effort(
+    harness_workspace, monkeypatch
+) -> None:
+    """Resolved per-turn defaults must not become persistent edit overrides."""
+    service = HarnessService()
+    session = await _db_create_session(harness_workspace)
+    HarnessSessionRepository.set_model(session, "")
+    ProviderConfigRepository.create(
+        organization_id=session.organization_id,
+        default_model="openrouter/openai/gpt-4.1",
+        default_effort="high",
+    )
+    ProviderConnection.objects.create(
+        organization_id=session.organization_id, provider="openrouter"
+    )
+    user_message = HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="original"
+    )
+
+    async def complete_without_network(*, session, assistant, **kwargs) -> None:
+        await sync_to_async(HarnessMessageRepository.complete)(assistant, finish="stop")
+        await sync_to_async(HarnessSessionRepository.mark_status)(session, "idle")
+
+    monkeypatch.setattr(service, "_execute_run", complete_without_network)
+    assistant = await service.edit_user_message(
+        session.id,
+        message_id=user_message.id,
+        prompt="edited",
+        organization_id=session.organization_id,
+    )
+    await service._tasks[str(session.id)]
+    session.refresh_from_db()
+    assert session.model == ""
+    assert session.reasoning_effort == ""
+    assert assistant.model == "openrouter/openai/gpt-4.1"
+    assert assistant.reasoning_effort == "high"
 
 
 @pytest.mark.django_db(transaction=True)
