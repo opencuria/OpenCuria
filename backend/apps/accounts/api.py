@@ -12,6 +12,7 @@ import uuid
 from django.http import HttpRequest
 from ninja import Router
 
+from apps.accounts.api_auth import JWTAuth
 from apps.accounts.auth_backends import DjangoJWTBackend, get_auth_backend
 from apps.accounts.sso import KeycloakSsoService, get_sso_provider_config
 from apps.organizations.services import OrganizationService
@@ -174,13 +175,14 @@ def me(request: HttpRequest):
 
 
 # ---------------------------------------------------------------------------
-# API key management
+# API key management — JWT sessions only; API keys must not manage credentials.
 # ---------------------------------------------------------------------------
 
 
 @auth_router.get(
     "/api-keys/",
     response=list[APIKeyOut],
+    auth=JWTAuth(),
     summary="List API keys",
 )
 def list_api_keys(request: HttpRequest):
@@ -206,6 +208,7 @@ def list_api_keys(request: HttpRequest):
 @auth_router.post(
     "/api-keys/",
     response={201: APIKeyCreatedOut, 400: dict},
+    auth=JWTAuth(),
     summary="Create API key",
 )
 def create_api_key(request: HttpRequest, payload: APIKeyCreateIn):
@@ -258,6 +261,7 @@ def create_api_key(request: HttpRequest, payload: APIKeyCreateIn):
 @auth_router.patch(
     "/api-keys/{key_id}/",
     response={200: APIKeyOut, 400: dict, 404: dict},
+    auth=JWTAuth(),
     summary="Update API key permissions",
 )
 def update_api_key(request: HttpRequest, key_id: uuid.UUID, payload: APIKeyUpdateIn):
@@ -294,6 +298,7 @@ def update_api_key(request: HttpRequest, key_id: uuid.UUID, payload: APIKeyUpdat
 @auth_router.delete(
     "/api-keys/{key_id}/",
     response={204: None, 404: dict},
+    auth=JWTAuth(),
     summary="Revoke API key",
 )
 def delete_api_key(request: HttpRequest, key_id: uuid.UUID):
