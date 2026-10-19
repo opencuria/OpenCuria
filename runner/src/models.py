@@ -33,11 +33,11 @@ class DesktopSession:
     """In-memory representation of an active KasmVNC desktop session.
 
     The Xvnc process is shared. Independent leases decide whether it
-    stays up: a viewer hold (manual VNC) and zero or more computer-use
-    ``run_id`` holds. The process is stopped only when both are empty.
+    stays up: viewer, computer-use, and MCP owners are projected from the
+    durable lease store. The process stops only when no holders remain.
 
     ``generation`` identifies the Xvnc process incarnation: it is 0 for
-    unknown/recovered legacy sessions and increments on every fresh Xvnc
+    unknown/recovered sessions and increments on every fresh Xvnc
     start. Callers compare it by identity to detect stale restarts
     (recovery/cold start) versus idempotent reuse of the same process.
     """
@@ -52,17 +52,3 @@ class DesktopSession:
     generation: int = 0
     mcp_active: bool = False
     holder_count: int = 0
-
-
-@dataclass
-class DesktopReleaseResult:
-    """Outcome of releasing a desktop lease or force-stopping the process."""
-
-    stopped: bool
-    process_alive: bool
-    viewer_held: bool
-    computer_use_active: bool
-    mcp_active: bool = False
-    holder_count: int = 0
-    generation: int = 0
-    epoch: str | None = None

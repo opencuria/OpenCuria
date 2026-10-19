@@ -123,8 +123,7 @@ async def test_client_clean_flag_does_not_replace_scrub_proof(service):
         ("harness", "exec_harness_command", (["echo", "test"],)),
         ("git", "execute_git_operation", ("list_repos",)),
         ("terminal_manager", "start_terminal", ()),
-        ("desktop", "start_desktop", ()),
-        ("desktop", "stop_desktop", ()),
+        ("desktop", "release_workspace", ()),
         ("desktop", "read_desktop_clipboard", ()),
         ("desktop", "write_desktop_clipboard", ("text",)),
         ("background", "list_background_processes", ()),
@@ -295,8 +294,9 @@ async def test_stop_closes_active_stream_read_before_capture_drains(service):
     runtime.stop_workspace = AsyncMock()
     svc.credentials.remove_workspace_credentials = AsyncMock(side_effect=remove)
     svc.background._kill_all_background_processes = AsyncMock()
-    svc.desktop.release_desktop = AsyncMock()
-    svc.desktop._interrupt_desktop_recordings = AsyncMock()
+    svc.desktop.release_workspace = AsyncMock()
+    svc.streams.confirm_workspace_ended = AsyncMock(return_value=True)
+    svc.desktop.workspace_ended = AsyncMock()
     svc.streams.close_workspace_streams = AsyncMock(side_effect=close)
     reader = asyncio.create_task(svc.streams.stream_read_once("stream"))
     await entered.wait()
@@ -311,11 +311,18 @@ async def test_stop_closes_active_stream_read_before_capture_drains(service):
     assert svc.registry._cache[ws].status == "exited"
 
 
-async def test_admitted_desktop_waiter_is_rechecked_after_stop_epoch(service):
+async def test_admitted_desktop_waiter_is_rechecked_after_stop_epoch(service, tmp_path):
     svc, ws, _ = service
+    svc.configure_desktop_leases(str(tmp_path), "epoch")
     lock = await svc.desktop._desktop_lock(ws)
     async with lock:
-        task = asyncio.create_task(svc.desktop.ensure_desktop_process(ws))
+        task = asyncio.create_task(svc.desktop.desktop_action(ws, "hold", {
+            "lease_id": "viewer",
+            "kind": "viewer",
+            "owner_id": "viewer",
+            "revision": 1,
+            "epoch": "epoch",
+        }))
         await asyncio.sleep(0)
         assert svc.capture_fence._users
         async with svc.registry.lifecycle(ws):

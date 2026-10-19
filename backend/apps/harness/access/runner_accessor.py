@@ -1133,7 +1133,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
     ) -> dict[str, Any]:
         """Run a desktop automation action in the workspace."""
         payload_args = dict(args or {})
-        if action in {"ensure", "hold"} and self._desktop_geometry is not None:
+        if action == "hold" and self._desktop_geometry is not None:
             width, height = await self._desktop_geometry()
             payload_args.setdefault("desktop_width", width)
             payload_args.setdefault("desktop_height", height)

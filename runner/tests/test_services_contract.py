@@ -5,15 +5,18 @@ from __future__ import annotations
 import base64
 import io
 import tarfile
+import tempfile
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+
 from src.config import RunnerSettings
-from src.models import DesktopSession, WorkspaceInfo
+from src.models import WorkspaceInfo
 from src.runtime.base import PtyHandle
 from src.service import WorkspaceService
+from src.services.sessions.desktop_leases import DesktopLeaseStore
 
 
 def _make_service(runtimes: dict | None = None) -> WorkspaceService:
@@ -253,25 +256,36 @@ async def test_composer_wires_desktop_harness_and_image_credentials() -> None:
         assert b"export TOKEN=secret" in env_script.read()
 
 
-async def test_remove_workspace_fans_out_to_canonical_managers() -> None:
-    runtime = SimpleNamespace(remove_workspace=AsyncMock())
+async def test_remove_workspace_uses_managed_lifecycle_confirmation() -> None:
+    runtime = SimpleNamespace(
+        remove_workspace=AsyncMock(),
+        get_workspace_status=AsyncMock(
+            return_value=SimpleNamespace(instance_id="instance-1", status="removed")
+        ),
+        workspace_exists=AsyncMock(return_value=False),
+    )
     service = _make_service(runtimes={"docker": runtime})
     workspace_id = uuid.uuid4()
     _cache_workspace(service, workspace_id)
 
-    service.streams.close_workspace_streams = AsyncMock(return_value=1)
-    service.background._kill_all_background_processes = AsyncMock()
-    service.desktop._interrupt_desktop_recordings = AsyncMock()
-    service.desktop._desktop_sessions[workspace_id] = DesktopSession(
-        workspace_id=workspace_id, instance_id="instance-1"
-    )
-    recording = (workspace_id, "run-1")
-    service.desktop._desktop_recordings[recording] = (
-        123,
-        "/workspace/recording.mp4",
-    )
+    with tempfile.TemporaryDirectory() as state_dir:
+        epoch = "contract-test-epoch"
+        store = DesktopLeaseStore(state_dir)
+        service.streams.intent_store = SimpleNamespace(
+            list_unfinished=AsyncMock(return_value=[]),
+            finish_workspace=AsyncMock(),
+        )
+        service.streams.lease_store = store
+        service.streams.epoch = epoch
+        service.desktop.configure_leases(
+            store, epoch, service.streams.close_owner_streams
+        )
+        service.streams.close_workspace_streams = AsyncMock(return_value=1)
+        service.background._kill_all_background_processes = AsyncMock()
+        confirmed = AsyncMock(return_value=True)
+        service.streams.confirm_workspace_ended = confirmed
 
-    await service.remove_workspace(workspace_id)
+        await service.remove_workspace(workspace_id)
 
     service.streams.close_workspace_streams.assert_awaited_once_with(
         workspace_id, reason="remove"
@@ -279,8 +293,7 @@ async def test_remove_workspace_fans_out_to_canonical_managers() -> None:
     service.background._kill_all_background_processes.assert_awaited_once_with(
         workspace_id, reason="remove"
     )
-    service.desktop._interrupt_desktop_recordings.assert_awaited_once_with(workspace_id)
-    runtime.remove_workspace.assert_awaited_once_with(str(workspace_id))
+    runtime.remove_workspace.assert_awaited_once_with("instance-1")
+    confirmed.assert_awaited_once_with(workspace_id, "instance-1")
     assert workspace_id not in service.registry._cache
     assert workspace_id not in service.desktop._desktop_sessions
-    assert recording not in service.desktop._desktop_recordings

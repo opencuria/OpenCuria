@@ -18,7 +18,6 @@ class ManagedDesktopWiringTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.directory.cleanup)
         self.settings = RunnerSettings(state_dir=self.directory.name)
         self.service = WorkspaceService({}, self.settings)
-        self.assertTrue(self.service.desktop._legacy_mode)
         self.interface = WebSocketInterface(self.service, self.settings)
         self.interface._sio.emit = AsyncMock()
         self.ws = uuid.uuid4()
@@ -55,7 +54,6 @@ class ManagedDesktopWiringTests(unittest.IsolatedAsyncioTestCase):
         }
 
     async def test_production_composition_and_reserve_no_start(self):
-        self.assertFalse(self.desktop._legacy_mode)
         self.assertIs(self.service.registry.desktop_manager, self.desktop)
         self.assertIs(self.service.streams.lease_store, self.desktop.lease_store)
         self.assertEqual(self.desktop.epoch, self.interface._inventory_epoch)

@@ -9,16 +9,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 from src.config import RunnerSettings
-from src.models import DesktopSession, WorkspaceInfo
+from src.models import WorkspaceInfo
 from src.service import WorkspaceService
 from src.services.sessions.desktop import DesktopManager
 
 
 def test_desktop_input_validation_and_geometry_bounds() -> None:
-    assert DesktopManager._parse_desktop_holder("  COMPUTERUSE ") == "computeruse"
-    for holder in ("", "admin", "viewer2"):
-        with pytest.raises(ValueError, match="Invalid desktop holder"):
-            DesktopManager._parse_desktop_holder(holder)
     assert DesktopManager._sanitize_run_id("run-1") == "run-1"
     for run_id in ("", "bad id!", "../escape"):
         with pytest.raises(ValueError, match="Invalid run_id"):
@@ -50,9 +46,12 @@ def _runtime(service: WorkspaceService) -> DummyRuntime:
 
 
 @pytest.fixture
-def service() -> WorkspaceService:
+def service(tmp_path) -> WorkspaceService:
     runtime = DummyRuntime()
-    svc = WorkspaceService(runtimes={"docker": runtime}, settings=RunnerSettings())
+    svc = WorkspaceService(
+        runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=str(tmp_path))
+    )
+    svc.configure_desktop_leases(str(tmp_path), "desktop-test-epoch")
     workspace_id = uuid.uuid4()
     svc.registry._cache[workspace_id] = WorkspaceInfo(
         workspace_id=workspace_id,
@@ -63,60 +62,11 @@ def service() -> WorkspaceService:
     return svc
 
 
-@pytest.mark.asyncio
-async def test_ensure_calls_start_desktop(service: WorkspaceService) -> None:
-    _runtime(service).exec_command_wait.side_effect = [
-        (0, "alive"),
-        (0, "started"),
-    ]
-
-    result = await service.desktop.desktop_action(_workspace_id(service), "ensure")
-
-    assert result["ok"] is True
-    assert result["display"] == ":1"
-    assert _workspace_id(service) in service.desktop._desktop_sessions
-    assert service.desktop._desktop_sessions[_workspace_id(service)].viewer_held is False
-
-
-@pytest.mark.asyncio
-async def test_ensure_returns_existing_live_session(service: WorkspaceService) -> None:
-    service.desktop._desktop_sessions[_workspace_id(service)] = DesktopSession(
-        workspace_id=_workspace_id(service),
-        instance_id="instance-1",
-    )
-    _runtime(service).exec_command_wait.return_value = (0, "alive")
-
-    result = await service.desktop.desktop_action(_workspace_id(service), "ensure")
-
-    assert result["ok"] is True
-    assert _runtime(service).exec_command_wait.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_hold_and_release_computer_use_lease(service: WorkspaceService) -> None:
-    _runtime(service).exec_command_wait.side_effect = [
-        (0, "alive"),
-        (0, ""),
-    ]
-
-    held = await service.desktop.desktop_action(
-        _workspace_id(service),
-        "hold",
-        {"kind": "computeruse", "run_id": "run-1"},
-    )
-    assert held["ok"] is True
-    assert held["computer_use"] is True
-    session = service.desktop._desktop_sessions[_workspace_id(service)]
-    assert "run-1" in session.computeruse_run_ids
-
-    released = await service.desktop.desktop_action(
-        _workspace_id(service),
-        "release",
-        {"kind": "computeruse", "run_id": "run-1"},
-    )
-    assert released["ok"] is True
-    assert released["stopped"] is True
-    assert _workspace_id(service) not in service.desktop._desktop_sessions
+@pytest.mark.parametrize("action", ["hold", "release"])
+async def test_ownership_actions_require_lease_identity(service, action) -> None:
+    with pytest.raises(ValueError, match="lease_id is required"):
+        await service.desktop.desktop_action(_workspace_id(service), action)
+    _runtime(service).exec_command_wait.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -178,39 +128,6 @@ async def test_click_uses_xdotool(service: WorkspaceService) -> None:
 
 
 @pytest.mark.asyncio
-async def test_record_start_and_stop_happy_path(service: WorkspaceService) -> None:
-    _runtime(service).exec_command_wait.side_effect = [
-        (0, "alive"),
-        (0, "1920 1080"),
-        (0, "12345\n"),
-        (0, "alive"),
-        (0, ""),
-    ]
-
-    start = await service.desktop.desktop_action(
-        _workspace_id(service),
-        "record_start",
-        {"run_id": "run-1"},
-    )
-    stop = await service.desktop.desktop_action(
-        _workspace_id(service),
-        "record_stop",
-        {"run_id": "run-1"},
-    )
-
-    assert start == {
-        "ok": True,
-        "run_id": "run-1",
-        "path": "/workspace/.opencuria/computeruse/run-1/session.mp4",
-    }
-    assert stop == {
-        "ok": True,
-        "path": "/workspace/.opencuria/computeruse/run-1/session.mp4",
-    }
-    assert (_workspace_id(service), "run-1") not in service.desktop._desktop_recordings
-
-
-@pytest.mark.asyncio
 async def test_screenshot_fails_when_desktop_down(service: WorkspaceService) -> None:
     _runtime(service).exec_command_wait.return_value = (1, "dead")
 
@@ -219,20 +136,31 @@ async def test_screenshot_fails_when_desktop_down(service: WorkspaceService) -> 
 
 
 @pytest.mark.asyncio
-async def test_record_start_rejects_path_outside_workspace(
+async def test_record_start_rejects_path_outside_workspace_for_durable_owner(
     service: WorkspaceService,
 ) -> None:
-    _runtime(service).exec_command_wait.side_effect = [
-        (0, "alive"),
-        (0, "1920 1080"),
-    ]
+    workspace_id = _workspace_id(service)
+    lease_id = "computeruse-lease"
+    await service.desktop.lease_store.reserve(
+        str(workspace_id),
+        "instance-1",
+        lease_id,
+        "computeruse",
+        "run-1",
+        service.desktop.epoch,
+        1,
+        180,
+    )
+    _runtime(service).exec_command_wait.return_value = (0, "alive")
 
     with pytest.raises(ValueError, match="/workspace"):
         await service.desktop.desktop_action(
-            _workspace_id(service),
+            workspace_id,
             "record_start",
-            {"run_id": "run-1", "path": "/etc/passwd"},
+            {"lease_id": lease_id, "run_id": "run-1", "path": "/etc/passwd"},
         )
+
+    assert await service.desktop.lease_store.recordings(lease_id) == []
 
 
 @pytest.mark.asyncio

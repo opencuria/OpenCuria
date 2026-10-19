@@ -140,11 +140,14 @@ async def test_inject_workspace_credentials_empty_set_returns_false() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stop_workspace_removes_credentials_before_runtime_stop() -> None:
+async def test_stop_workspace_removes_credentials_before_runtime_stop(tmp_path) -> None:
     runtime = Mock()
     runtime.stop_workspace = AsyncMock()
     runtime.get_workspace_status = AsyncMock(return_value=Mock(status="running"))
-    service = WorkspaceService({"docker": runtime}, RunnerSettings())
+    service = WorkspaceService(
+        {"docker": runtime}, RunnerSettings(state_dir=str(tmp_path))
+    )
+    service.configure_desktop_leases(str(tmp_path), "security-test-epoch")
     service.credentials.remove_workspace_credentials = AsyncMock()
     workspace_id = __import__("uuid").uuid4()
     from src.models import WorkspaceInfo

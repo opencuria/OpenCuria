@@ -5,7 +5,7 @@ import uuid
 from unittest.mock import AsyncMock
 
 from src.config import RunnerSettings
-from src.models import DesktopSession, WorkspaceInfo
+from src.models import WorkspaceInfo
 from src.service import WorkspaceService
 
 
@@ -17,9 +17,13 @@ class _Runtime:
 class DesktopClipboardSelectionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.runtime = _Runtime()
+        self.state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.state_dir.cleanup)
         self.service = WorkspaceService(
-            {"docker": self.runtime}, RunnerSettings(state_dir=tempfile.mkdtemp())
+            {"docker": self.runtime},
+            RunnerSettings(state_dir=self.state_dir.name),
         )
+        self.service.configure_desktop_leases(self.state_dir.name, "clipboard-epoch")
         self.workspace_id = uuid.uuid4()
         self.service.registry._cache[self.workspace_id] = WorkspaceInfo(
             self.workspace_id, "guest", "running", runtime_type="docker"
@@ -57,20 +61,9 @@ class DesktopClipboardSelectionTests(unittest.IsolatedAsyncioTestCase):
                 await self.service.desktop.read_desktop_clipboard(self.workspace_id, **kwargs)
         self.service.desktop._exec_desktop_shell.assert_not_awaited()
 
-    async def test_legacy_computeruse_session_blocks_keyboard_input(self):
-        session = DesktopSession(self.workspace_id, "guest")
-        session.computeruse_run_ids.add("active-run")
-        self.service.desktop._desktop_sessions[self.workspace_id] = session
-        with self.assertRaisesRegex(RuntimeError, "during computer use"):
-            await self.service.desktop.read_desktop_clipboard(
-                self.workspace_id, copy_selection=True
-            )
-        self.service.desktop._exec_desktop_shell.assert_not_awaited()
-
-    async def test_active_managed_agent_and_computeruse_leases_block_keyboard(self):
+    async def test_unactivated_agent_and_computeruse_leases_block_keyboard(self):
         for kind in ("agent", "computeruse"):
-            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as state_dir:
-                self.service.configure_desktop_leases(state_dir, "epoch")
+            with self.subTest(kind=kind):
                 await self.service.desktop.lease_store.reserve(
                     str(self.workspace_id),
                     "guest",

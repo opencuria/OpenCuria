@@ -20,7 +20,7 @@ import structlog
 from ..models import WorkspaceInfo
 from ..runtime.base import RuntimeBackend, WorkspaceConfig
 from .capture_fence import CaptureFence, Method
-from .sessions.desktop import DESKTOP_HOLDER_VIEWER, WorkspaceEndedEvidence
+from .sessions.desktop import WorkspaceEndedEvidence
 from .workspace_registry import WorkspaceRegistry
 
 logger = structlog.get_logger(__name__)
@@ -87,8 +87,6 @@ class WorkspaceLifecycle:
         self, info: WorkspaceInfo, operation: str
     ) -> None:
         """Publish successful physical disposal before registry metadata disappears."""
-        if self._desktop is None or self._desktop._legacy_mode:
-            return
         evidence = WorkspaceEndedEvidence(
             info.workspace_id, info.instance_id, info.runtime_type, operation
         )
@@ -110,9 +108,7 @@ class WorkspaceLifecycle:
         """Attempt graceful owner closure; physical disposal is the final proof."""
         for operation in (
             lambda: self._streams.close_workspace_streams(workspace_id, reason=reason),
-            lambda: self._desktop.release_desktop(
-                workspace_id, holder=DESKTOP_HOLDER_VIEWER, force=True
-            ),
+            lambda: self._desktop.release_workspace(workspace_id),
         ):
             try:
                 await operation()
@@ -339,13 +335,7 @@ class WorkspaceLifecycle:
         await self._background._kill_all_background_processes(
             workspace_id, reason="stop"
         )
-        if self._desktop is not None and not self._desktop._legacy_mode:
-            await self._close_managed_before_end(workspace_id, "stop")
-        else:
-            await self._streams.close_workspace_streams(workspace_id, reason="stop")
-            await self._desktop.release_desktop(
-                workspace_id, holder=DESKTOP_HOLDER_VIEWER, force=True
-            )
+        await self._close_managed_before_end(workspace_id, "stop")
         await runtime.stop_workspace(info.instance_id)
         await self._confirm_workspace_ended(info, "stop")
         info.status = "exited"
@@ -471,153 +461,13 @@ class WorkspaceLifecycle:
 
     @coordinated
     async def remove_workspace(self, workspace_id: uuid.UUID) -> None:
-        """Remove a workspace and clean up resources.
-
-        The per-workspace desktop lock is acquired first and held across
-        the entire desktop-state/cache transition (recording interrupt
-        while the cache is still available, then cache pop plus
-        session/recording clear with no lock release in between). A
-        concurrent ensure/start holding the lock therefore completes
-        first; remove only pops the cache afterwards. A queued start/hold
-        acquiring the same retained lock afterwards finds no cache entry
-        and fails cleanly instead of resurrecting a session. The lock
-        object itself is kept for the process lifetime (never dropped) so
-        queued waiters and later callers always share one serialising
-        lock. Runtime removal runs after the lock is released: it must
-        never block behind a stuck Xvnc start while holding the desktop
-        lock. ``_interrupt_desktop_recordings``/``_exec_desktop_shell``
-        take no desktop lock and are awaited while holding it;
-        correctness wins over head-of-line blocking (runtime commands
-        have their own limits). Recording-interrupt errors still clear
-        state and attempt runtime removal.
-        """
-        if self._desktop is not None and not self._desktop._legacy_mode:
-            return await self._remove_managed_workspace(workspace_id, "remove")
-        log = logger.bind(workspace_id=str(workspace_id))
-        await self._streams.close_workspace_streams(workspace_id, reason="remove")
-        await self._background._kill_all_background_processes(
-            workspace_id, reason="remove"
-        )
-        lock = await self._desktop._desktop_lock(workspace_id)
-        async with lock:
-            # Interrupt while the cache is still available:
-            # _exec_desktop_shell needs _get_cached, so popping first
-            # would turn every interrupt into a "not found" failure.
-            # _interrupt_desktop_recordings already swallows per-command
-            # errors and clears the recordings dict; the outer guard only
-            # covers unexpected failures so state clear + runtime remove
-            # still run.
-            try:
-                await self._desktop._interrupt_desktop_recordings(workspace_id)
-            except Exception:
-                logger.exception(
-                    "desktop_recording_interrupt_failed",
-                    workspace_id=str(workspace_id),
-                )
-            info = self._registry._cache.get(workspace_id)
-            self._desktop._desktop_sessions.pop(workspace_id, None)
-            # Final sweep for entries added during the interrupt awaits
-            # (record_start is lock-free); still under the same hold, so
-            # no waiter could publish a session in between.
-            self._desktop._desktop_recordings = {
-                key: value
-                for key, value in self._desktop._desktop_recordings.items()
-                if key[0] != workspace_id
-            }
-
-        if info is None:
-            # Explicit user removal may target a failed partial create whose
-            # domain was never defined. Inventory proof is still mandatory.
-            for runtime in self._runtimes.values():
-                scan = await runtime.inventory()
-                if not scan.complete:
-                    raise RuntimeError(
-                        "Runtime inventory incomplete; no deletion performed"
-                    )
-                matched = any(
-                    r.managed and r.metadata.get("workspace_id") == str(workspace_id)
-                    for r in scan.resources
-                )
-                if matched:
-                    await runtime.remove_workspace(str(workspace_id))
-        if info and info.instance_id:
-            runtime = self._runtimes.get(info.runtime_type)
-            if runtime:
-                await runtime.remove_workspace(
-                    str(workspace_id)
-                    if info.runtime_type == "docker"
-                    else info.instance_id
-                )
-
-        self._registry._cache.pop(workspace_id, None)
-        log.info("workspace_removed")
+        """Remove the exact guest before finalizing durable owners and cache state."""
+        await self._remove_managed_workspace(workspace_id, "remove")
 
     @coordinated
     async def cleanup_unknown_workspace(self, workspace_id: uuid.UUID) -> bool:
-        """Best-effort cleanup for a runtime workspace unknown to the backend.
-
-        Returns ``True`` when a cached runtime instance was found and cleanup
-        was attempted. Returns ``False`` when the workspace was already absent.
-
-        Same atomicity as :meth:`remove_workspace`: the desktop lock is
-        held across recording interrupt (cache still available), cache pop
-        (plus unreachable-timer pop), and session/recording clear, with no
-        release in between. The lock object is retained afterwards (never
-        dropped) so queued waiters keep sharing one lock object.
-        """
-        if self._desktop is not None and not self._desktop._legacy_mode:
-            return await self._remove_managed_workspace(workspace_id, "cleanup_unknown")
-        log = logger.bind(workspace_id=str(workspace_id))
-        await self._streams.close_workspace_streams(
-            workspace_id, reason="cleanup_unknown"
-        )
-        await self._background._kill_all_background_processes(
-            workspace_id, reason="cleanup_unknown"
-        )
-        lock = await self._desktop._desktop_lock(workspace_id)
-        async with lock:
-            # Same ordering as remove_workspace: interrupt while the cache
-            # is still available (per-command errors are swallowed inside
-            # the helper; the guard only covers unexpected failures), then
-            # pop and sweep with no lock release in between.
-            try:
-                await self._desktop._interrupt_desktop_recordings(workspace_id)
-            except Exception:
-                logger.exception(
-                    "desktop_recording_interrupt_failed",
-                    workspace_id=str(workspace_id),
-                )
-            info = self._registry._cache.get(workspace_id)
-            self._unreachable_since.pop(workspace_id, None)
-            self._desktop._desktop_sessions.pop(workspace_id, None)
-            self._desktop._desktop_recordings = {
-                key: value
-                for key, value in self._desktop._desktop_recordings.items()
-                if key[0] != workspace_id
-            }
-
-        if info is None:
-            log.info("unknown_workspace_already_absent")
-            return False
-
-        runtime = self._runtimes.get(info.runtime_type)
-        if runtime is None:
-            raise RuntimeError(
-                f"Runtime '{info.runtime_type}' not available for cleanup"
-            )
-
-        if info.instance_id:
-            await runtime.remove_workspace(
-                str(workspace_id) if info.runtime_type == "docker" else info.instance_id
-            )
-
-        self._registry._cache.pop(workspace_id, None)
-        log.warning(
-            "unknown_workspace_cleaned",
-            runtime_type=info.runtime_type,
-            instance_id=info.instance_id,
-        )
-        return True
+        """Remove a backend-unknown guest while retaining identity until confirmed."""
+        return await self._remove_managed_workspace(workspace_id, "cleanup_unknown")
 
     # -- self-healing SSH health check -------------------------------------
 

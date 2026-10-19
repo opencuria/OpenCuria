@@ -91,6 +91,7 @@ class _FakeService:
         def __init__(self, outer: _FakeService) -> None:
             self._outer = outer
             self._desktop_sessions: dict = {}
+            self.epoch = "fake-desktop-epoch"
 
         async def desktop_action(self, workspace_id, action, args=None):
             return await self._outer._desktop_action_impl(
@@ -104,14 +105,6 @@ class _FakeService:
             # Sessions as plain sentinels: identity comparison detects restarts.
             return self._desktop_sessions.get(workspace_id)
 
-        async def start_desktop(self, workspace_id, width=None, height=None):
-            return await self._outer._start_desktop_impl(
-                workspace_id, width=width, height=height
-            )
-
-        async def stop_desktop(self, workspace_id):
-            return await self._outer._stop_desktop_impl(workspace_id)
-
         def get_desktop_container_ip(self, workspace_id):
             return "172.22.0.2"
 
@@ -120,18 +113,22 @@ class _FakeService:
 
     async def _desktop_action_impl(self, workspace_id, action, args=None):
         self.desktop_action_calls.append((workspace_id, action, args))
-        if action == "ensure":
+        if action == "binding":
             return {"ok": True, "display": ":1", "port": 6901}
         if action == "hold":
             # Hold installs a *new* session object (fresh Xvnc incarnation).
             # Tests asserting the idempotent hold path pre-seed the sentinel
-            # and override the manager method to skip this replacement.
+            # and override desktop_action to skip this replacement.
             from unittest.mock import MagicMock
 
             fresh = MagicMock()
             fresh.port = 6901
-            fresh.viewer_held = False
-            fresh.computeruse_run_ids = {"run-1"}
+            fresh.viewer_held = args.get("kind") == "viewer"
+            fresh.computeruse_run_ids = (
+                {args.get("run_id", "run-1")}
+                if args.get("kind") == "computeruse"
+                else set()
+            )
             fresh.generation = getattr(
                 self.desktop._desktop_sessions.get(workspace_id), "generation", 0
             ) + 1
@@ -140,21 +137,31 @@ class _FakeService:
                 "ok": True,
                 "display": ":1",
                 "port": 6901,
-                "viewer": False,
-                "computer_use": True,
+                "viewer": fresh.viewer_held,
+                "computer_use": bool(fresh.computeruse_run_ids),
                 "generation": fresh.generation,
                 "epoch": "fake-desktop-epoch",
             }
         if action == "release":
-            generation = getattr(
-                self.desktop._desktop_sessions.get(workspace_id), "generation", 1
-            )
+            session = self.desktop._desktop_sessions.get(workspace_id)
+            generation = getattr(session, "generation", 1)
+            if session is not None:
+                if args.get("kind") == "viewer":
+                    session.viewer_held = False
+                elif args.get("kind") == "computeruse":
+                    session.computeruse_run_ids.discard(args.get("run_id", "run-1"))
+                process_alive = bool(session.viewer_held or session.computeruse_run_ids)
+                if not process_alive:
+                    self.desktop._desktop_sessions.pop(workspace_id, None)
+                    session = None
+            else:
+                process_alive = False
             return {
                 "ok": True,
-                "stopped": False,
-                "process_alive": True,
-                "viewer_held": False,
-                "computer_use_active": True,
+                "stopped": not process_alive,
+                "process_alive": process_alive,
+                "viewer_held": bool(session and session.viewer_held),
+                "computer_use_active": bool(session and session.computeruse_run_ids),
                 "generation": generation,
                 "epoch": "fake-desktop-epoch",
             }
@@ -178,32 +185,6 @@ class _FakeService:
             "generation": session.generation,
             "epoch": "fake-desktop-epoch",
         }
-
-    async def _start_desktop_impl(self, workspace_id, width=None, height=None):
-        if workspace_id in self.desktop._desktop_sessions:
-            # Idempotent path: reuse the pre-seeded session object untouched
-            # so tests can pin "same object → no tunnel close".
-            return self.desktop._desktop_sessions[workspace_id]
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session.port = 6901
-        session.viewer_held = True
-        session.computeruse_run_ids = set()
-        session.generation = 1
-        # Fresh start installs a new object.
-        self.desktop._desktop_sessions[workspace_id] = session
-        return session
-
-    async def _stop_desktop_impl(self, workspace_id):
-        from unittest.mock import MagicMock
-
-        return MagicMock(
-            stopped=False,
-            process_alive=True,
-            viewer_held=False,
-            computer_use_active=True,
-        )
 
     async def _exec_harness_command_impl(
         self, workspace_id, command, workdir="/workspace", env=None
@@ -649,6 +630,16 @@ class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _viewer_lease(workspace_id: uuid.UUID, *, revision: int = 1) -> dict:
+        return {
+            "lease_id": f"viewer-{workspace_id}",
+            "kind": "viewer",
+            "owner_id": "viewer-owner",
+            "revision": revision,
+            "epoch": "fake-desktop-epoch",
+        }
+
     async def test_desktop_action_emits_result(self) -> None:
         service = _FakeService()
         interface = _interface(service)
@@ -658,7 +649,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
             _payload(
                 workspace_id,
                 "d1",
-                action="ensure",
+                action="binding",
                 args={},
             )
         )
@@ -674,7 +665,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             service.desktop_action_calls,
-            [(workspace_id, "ensure", {})],
+            [(workspace_id, "binding", {})],
         )
 
     async def test_desktop_action_error_reports_error(self) -> None:
@@ -907,8 +898,8 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("desktop:process", events)
         self.assertNotIn("desktop:stopped", events)
 
-    async def test_start_desktop_does_not_close_healthy_tunnels(self) -> None:
-        """Idempotent viewer acquires must keep concurrent viewers attached."""
+    async def test_viewer_hold_does_not_close_healthy_tunnels(self) -> None:
+        """An idempotent viewer hold keeps concurrent viewers attached."""
         from unittest.mock import MagicMock
 
         service = _FakeService()
@@ -927,16 +918,48 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         session.computeruse_run_ids = set()
         session.generation = 1
         service.desktop._desktop_sessions[workspace_id] = session
-        # Idempotent path: start_desktop reuses the pre-seeded session, so
-        # before/after identity matches and no tunnel is closed.
+
+        async def _idempotent_viewer_hold(ws_id, action, args=None):
+            service.desktop_action_calls.append((ws_id, action, args))
+            return {
+                "ok": True,
+                "port": 6901,
+                "viewer": True,
+                "computer_use": False,
+                "generation": 1,
+                "epoch": "fake-desktop-epoch",
+            }
+
+        service.desktop.desktop_action = _idempotent_viewer_hold  # type: ignore[method-assign]
+        # Idempotent hold keeps the same session and does not close tunnels.
         await interface._sio.handlers["/"]["task:start_desktop"](
-            {"task_id": "task-1", "workspace_id": str(workspace_id)}
+            {
+                "task_id": "task-1",
+                "workspace_id": str(workspace_id),
+                **self._viewer_lease(workspace_id),
+                "desktop_width": 1280,
+                "desktop_height": 720,
+            }
         )
         self.assertEqual(closed, [])
         events = [call.args[0] for call in interface._sio.emit.await_args_list]
         self.assertIn("desktop:started", events)
+        self.assertEqual(
+            service.desktop_action_calls,
+            [
+                (
+                    workspace_id,
+                    "hold",
+                    {
+                        **self._viewer_lease(workspace_id),
+                        "desktop_width": 1280,
+                        "desktop_height": 720,
+                    },
+                )
+            ],
+        )
 
-    async def test_start_desktop_restart_closes_only_target_workspace(
+    async def test_viewer_hold_restart_closes_only_target_workspace(
         self,
     ) -> None:
         """Stale restart closes target tunnels before desktop:started."""
@@ -964,20 +987,12 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
 
         interface._sio.emit = _spy_emit  # type: ignore[method-assign]
 
-        async def _restarting_start(ws_id, width=None, height=None):
-            from unittest.mock import MagicMock
-
-            fresh = MagicMock()
-            fresh.port = 6901
-            fresh.viewer_held = True
-            fresh.computeruse_run_ids = set()
-            fresh.generation = 2
-            service.desktop._desktop_sessions[ws_id] = fresh
-            return fresh
-
-        service.desktop.start_desktop = _restarting_start  # type: ignore[method-assign]
         await interface._sio.handlers["/"]["task:start_desktop"](
-            {"task_id": "task-2", "workspace_id": str(workspace_id)}
+            {
+                "task_id": "task-2",
+                "workspace_id": str(workspace_id),
+                **self._viewer_lease(workspace_id),
+            }
         )
         self.assertEqual(closed, [workspace_id])
         self.assertLess(
@@ -986,17 +1001,47 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNot(service.desktop._desktop_sessions[workspace_id], sentinel)
 
-    async def test_stop_desktop_kept_emits_viewer_released(self) -> None:
+    async def test_stop_desktop_releases_viewer_lease_and_keeps_computer_use(self) -> None:
         """Viewer release with computer-use hold keeps the process cached."""
+        from unittest.mock import MagicMock
+
         service = _FakeService()
         interface = _interface(service)
         workspace_id = uuid.uuid4()
+        session = MagicMock()
+        session.generation = 2
+        session.viewer_held = True
+        session.computeruse_run_ids = {"run-1"}
+        service.desktop._desktop_sessions[workspace_id] = session
+        lease = self._viewer_lease(workspace_id, revision=3)
         await interface._sio.handlers["/"]["task:stop_desktop"](
-            {"task_id": "task-2", "workspace_id": str(workspace_id)}
+            {"task_id": "task-2", "workspace_id": str(workspace_id), **lease}
         )
         events = [call.args[0] for call in interface._sio.emit.await_args_list]
         self.assertIn("desktop:viewer_released", events)
         self.assertNotIn("desktop:stopped", events)
+        self.assertEqual(
+            service.desktop_action_calls,
+            [(workspace_id, "release", lease)],
+        )
+
+    async def test_task_desktop_rejects_invalid_lease_identity(self) -> None:
+        service = _FakeService()
+        interface = _interface(service)
+        workspace_id = uuid.uuid4()
+        valid = self._viewer_lease(workspace_id)
+        invalid = [{}, {**valid, "kind": "computeruse"}, {**valid, "revision": 0}]
+        for task in ("start_desktop", "stop_desktop"):
+            for lease in invalid:
+                with self.subTest(task=task, lease=lease):
+                    interface._sio.emit.reset_mock()
+                    await interface._sio.handlers["/"][f"task:{task}"](
+                        {"task_id": "invalid", "workspace_id": str(workspace_id), **lease}
+                    )
+                    self.assertEqual(service.desktop_action_calls, [])
+                    event, error = interface._sio.emit.await_args.args
+                    self.assertEqual(event, "workspace:error")
+                    self.assertTrue(error["error"])
 
     async def test_desktop_action_registers_cancellable_task(self) -> None:
         service = _FakeService()
@@ -1008,7 +1053,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
                 _payload(
                     workspace_id,
                     "d-reg",
-                    action="ensure",
+                    action="binding",
                     args={},
                 )
             )

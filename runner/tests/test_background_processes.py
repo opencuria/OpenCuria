@@ -90,10 +90,12 @@ class FakeRuntime:
 
 def _service_with_workspace(runtime=None):
     runtime = runtime or FakeRuntime()
+    state_dir = tempfile.mkdtemp()
     service = WorkspaceService(
         runtimes={"docker": runtime},
-        settings=RunnerSettings(state_dir=tempfile.mkdtemp()),
+        settings=RunnerSettings(state_dir=state_dir),
     )
+    service.configure_desktop_leases(state_dir, "background-test-epoch")
     workspace_id = uuid.uuid4()
     service.registry._cache[workspace_id] = WorkspaceInfo(
         workspace_id=workspace_id,
@@ -677,28 +679,19 @@ class BackgroundVerifyTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(OSError):
             await service.background._kill_all_background_processes(ws_id, reason="test")
 
-    async def test_remove_workspace_with_evicted_cache_still_cleans_up(
-        self,
-    ) -> None:
-        """remove_workspace completes when the cache was already evicted.
-
-        Covers the teardown fan-out through the real kill-all path
-        (previously only exercised with a mocked kill-all): orphaned
-        background tracking is dropped and the removal returns normally.
-        """
-        service, _runtime, ws_id = _service_with_workspace()
+    async def test_remove_workspace_with_evicted_cache_is_rejected(self) -> None:
+        """Removal must preserve tracking when physical identity is unavailable."""
+        service, runtime, ws_id = _service_with_workspace()
         await service.background.start_background_process(ws_id, "p1", "sleep 10")
         service.registry._cache.pop(ws_id, None)
-        from src.runtime.inventory import RuntimeInventory
+        calls_before = len(runtime.calls)
 
-        _runtime.inventory = AsyncMock(
-            return_value=RuntimeInventory("docker", complete=True)
-        )
+        with self.assertRaisesRegex(RuntimeError, "physical registry identity"):
+            await service.remove_workspace(ws_id)
 
-        await service.remove_workspace(ws_id)
-
-        self.assertNotIn(ws_id, service.background._background_processes)
-        self.assertNotIn(ws_id, service.registry._cache)
+        self.assertIn(ws_id, service.background._background_processes)
+        self.assertTrue(runtime.alive[100])
+        self.assertEqual(len(runtime.calls), calls_before)
 
     async def test_concurrent_same_id_starts_do_not_orphan(self) -> None:
         service, runtime, ws_id = _service_with_workspace()

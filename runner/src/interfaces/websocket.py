@@ -385,18 +385,30 @@ class WebSocketInterface(Interface):
     @staticmethod
     def _viewer_lease_payload(data: dict) -> dict:
         """Forward the backend-derived viewer identity without replacing it."""
-        return {
-            key: data[key]
-            for key in (
-                "lease_id",
-                "kind",
-                "owner_id",
-                "revision",
-                "epoch",
-                "desktop_width",
-                "desktop_height",
+        required = ("lease_id", "kind", "owner_id", "revision", "epoch")
+        missing = [
+            key
+            for key in required
+            if key not in data or data[key] is None or data[key] == ""
+        ]
+        if missing:
+            raise ValueError(
+                f"Viewer lease identity is missing required fields: {', '.join(missing)}"
             )
-            if key in data
+        for key in ("lease_id", "kind", "owner_id", "epoch"):
+            if not isinstance(data[key], str) or not data[key].strip():
+                raise ValueError(f"Viewer lease {key} must be a non-empty string")
+        if data["kind"] != "viewer":
+            raise ValueError("Viewer tasks require a viewer lease")
+        if type(data["revision"]) is not int or data["revision"] < 1:
+            raise ValueError("Viewer lease revision must be a positive integer")
+        return {
+            **{key: data[key] for key in required},
+            **{
+                key: data[key]
+                for key in ("desktop_width", "desktop_height")
+                if key in data
+            },
         }
 
     async def _announce_desktop_change(
@@ -1517,79 +1529,30 @@ class WebSocketInterface(Interface):
             log.info("task_received", task="start_desktop")
 
             try:
+                lease = self._viewer_lease_payload(data)
                 before = self._service.desktop.get_desktop_session(workspace_id)
-                if data.get("lease_id"):
-                    result = await self._service.desktop.desktop_action(
-                        workspace_id, "hold", self._viewer_lease_payload(data)
-                    )
-                    if not result.get("ok"):
-                        raise RuntimeError("Viewer lease could not be held")
-                    await self._announce_desktop_change(workspace_id, before, result)
-                    state = self._desktop_lifecycle_payload(workspace_id) or {}
-                    current = self._service.desktop.get_desktop_session(workspace_id)
-                    if current is None:
-                        return
-                    await sio.emit(
-                        "desktop:started",
-                        {
-                            **state,
-                            **result,
-                            "task_id": task_id,
-                            "workspace_id": str(workspace_id),
-                            "generation": current.generation,
-                            "epoch": self._desktop_epoch,
-                        },
-                    )
+                result = await self._service.desktop.desktop_action(
+                    workspace_id, "hold", lease
+                )
+                if not result.get("ok"):
+                    raise RuntimeError("Viewer lease could not be held")
+                await self._announce_desktop_change(workspace_id, before, result)
+                state = self._desktop_lifecycle_payload(workspace_id) or {}
+                current = self._service.desktop.get_desktop_session(workspace_id)
+                if current is None:
                     return
-                session = await self._service.desktop.start_desktop(
-                    workspace_id,
-                    width=data.get("desktop_width"),
-                    height=data.get("desktop_height"),
-                )
-
-                # Get container IP for backend proxy
-                container_ip = self._service.desktop.get_desktop_container_ip(
-                    workspace_id
-                )
-                network_name = self._service.desktop.get_desktop_network_name(
-                    workspace_id
-                )
-
-                # A fresh Xvnc incarnation invalidates every tunnel bound to
-                # the old process (stale restart, recovery, or cold start
-                # with leftover tunnels). Close them *before* the
-                # desktop:started/process event so no new viewer attaches
-                # while stale sockets still reference the recycled Xvnc.
-                # Idempotent acquires reuse the identical session object
-                # (same generation): closing tunnels there would drop
-                # healthy viewers on every reconnect.
-                if session is not before:
-                    await self._close_desktop_proxy_tunnels_for_workspace(
-                        workspace_id,
-                        generation=session.generation,
-                        keep_generation=session.generation,
-                        include_generation=True,
-                    )
-                    if self._service.desktop.get_desktop_session(workspace_id) is None:
-                        return
-                    session = self._service.desktop.get_desktop_session(workspace_id)
                 await sio.emit(
                     "desktop:started",
                     {
+                        **result,
+                        **state,
                         "task_id": task_id,
                         "workspace_id": str(workspace_id),
-                        "port": session.port,
-                        "container_ip": container_ip,
-                        "network_name": network_name,
-                        "viewer": session.viewer_held,
-                        "computer_use": bool(session.computeruse_run_ids),
-                        "generation": session.generation,
+                        "generation": current.generation,
                         "epoch": self._desktop_epoch,
                     },
                 )
-                log.info(
-                    "desktop_started", port=session.port, container_ip=container_ip
-                )
+                log.info("desktop_started", port=current.port)
             except Exception as exc:
                 await sio.emit(
                     "workspace:error",
@@ -1605,68 +1568,24 @@ class WebSocketInterface(Interface):
             log.info("task_received", task="stop_desktop")
 
             try:
-                if data.get("lease_id"):
-                    before = self._service.desktop.get_desktop_session(workspace_id)
-                    result = await self._service.desktop.desktop_action(
-                        workspace_id, "release", self._viewer_lease_payload(data)
-                    )
-                    if not result.get("ok"):
-                        raise RuntimeError(
-                            "Viewer lease cleanup could not be confirmed"
-                        )
-                    await self._announce_desktop_change(workspace_id, before, result)
-                    await sio.emit(
-                        "desktop:viewer_released",
-                        {
-                            **result,
-                            "task_id": task_id,
-                            "workspace_id": str(workspace_id),
-                            "generation": result["generation"],
-                            "epoch": result["epoch"],
-                        },
-                    )
-                    return
-                result = await self._service.desktop.stop_desktop(workspace_id)
-                if result.stopped or not result.process_alive:
-                    generation = result.generation
-                    await self._close_desktop_proxy_tunnels_for_workspace(
-                        workspace_id,
-                        generation=generation,
-                        include_generation=True,
-                    )
-                    # A fresh hold may have completed while tunnel teardown awaited.
-                    current = self._service.desktop.get_desktop_session(workspace_id)
-                    if current is not None:
-                        await sio.emit(
-                            "desktop:process",
-                            self._desktop_lifecycle_payload(workspace_id),
-                        )
-                    else:
-                        await sio.emit(
-                            "desktop:stopped",
-                            {
-                                "task_id": task_id,
-                                "workspace_id": str(workspace_id),
-                                "generation": generation,
-                                "epoch": result.epoch or self._desktop_epoch,
-                            },
-                        )
-                    log.info("desktop_stopped")
-                else:
-                    await sio.emit(
-                        "desktop:viewer_released",
-                        {
-                            "task_id": task_id,
-                            "workspace_id": str(workspace_id),
-                            "computer_use_active": result.computer_use_active,
-                            "generation": result.generation,
-                            "epoch": result.epoch or self._desktop_epoch,
-                        },
-                    )
-                    log.info(
-                        "desktop_viewer_released",
-                        computer_use_active=result.computer_use_active,
-                    )
+                lease = self._viewer_lease_payload(data)
+                before = self._service.desktop.get_desktop_session(workspace_id)
+                result = await self._service.desktop.desktop_action(
+                    workspace_id, "release", lease
+                )
+                if not result.get("ok"):
+                    raise RuntimeError("Viewer lease cleanup could not be confirmed")
+                await self._announce_desktop_change(workspace_id, before, result)
+                await sio.emit(
+                    "desktop:viewer_released",
+                    {
+                        **result,
+                        "task_id": task_id,
+                        "workspace_id": str(workspace_id),
+                        "generation": result["generation"],
+                        "epoch": result["epoch"],
+                    },
+                )
             except Exception as exc:
                 await sio.emit(
                     "workspace:error",
@@ -2744,7 +2663,7 @@ class WebSocketInterface(Interface):
                     result = await self._service.desktop.desktop_action(
                         workspace_id, action, args
                     )
-                    if action in {"ensure", "hold", "release"} and result.get("ok"):
+                    if action in {"hold", "release"} and result.get("ok"):
                         await self._announce_desktop_change(
                             workspace_id, before, result
                         )

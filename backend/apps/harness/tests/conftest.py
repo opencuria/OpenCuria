@@ -154,8 +154,6 @@ class FakeAccessor(WorkspaceAccessor):
                 width=self.desktop_width,
                 height=self.desktop_height,
             )
-        if action == "ensure":
-            return {"ok": True, "display": ":1", "port": 5900}
         if action == "hold":
             return {
                 "ok": True,

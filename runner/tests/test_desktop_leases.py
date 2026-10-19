@@ -439,7 +439,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
             _kill_all_background_processes=AsyncMock(),
             _drop_background_tracking=AsyncMock(return_value=0),
         )
-        manager.release_desktop = AsyncMock(return_value=False)
+        manager.release_workspace = AsyncMock(return_value=False)
         lifecycle = WorkspaceLifecycle(
             registry,
             runtimes={"qemu": runtime},
@@ -503,7 +503,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         manager, _runtime, lifecycle, registry, streams = await self.lifecycle_manager()
         await lifecycle.stop_workspace(self.ws)
         self.assertEqual(registry._cache[self.ws].status, "exited")
-        manager.release_desktop.assert_awaited_once()
+        manager.release_workspace.assert_awaited_once()
         self.assertEqual(await self.store.list_unfinished(str(self.ws)), [])
         self.assertEqual(await self.store.unfinished_recordings(str(self.ws)), [])
         streams.confirm_workspace_ended.assert_awaited_once_with(self.ws, "guest")
@@ -541,7 +541,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_stop_preclose_errors_do_not_skip_physical_proof(self):
         manager, runtime, lifecycle, _registry, streams = await self.lifecycle_manager()
         streams.close_workspace_streams.side_effect = RuntimeError("streams unreachable")
-        manager.release_desktop.side_effect = RuntimeError("desktop unreachable")
+        manager.release_workspace.side_effect = RuntimeError("desktop unreachable")
         await lifecycle.stop_workspace(self.ws)
         runtime.stop_workspace.assert_awaited_once_with("guest")
         self.assertFalse(await self.store.list_unfinished(str(self.ws)))

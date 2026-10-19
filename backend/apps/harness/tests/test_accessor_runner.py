@@ -282,8 +282,8 @@ async def test_desktop_action_returns_screenshot_payload() -> None:
     assert payload["args"] == {"full": True}
 
 
-async def test_desktop_action_ensure_includes_geometry() -> None:
-    """ensure/hold attach the workspace framebuffer size for Xvnc start."""
+async def test_desktop_action_hold_includes_geometry() -> None:
+    """Hold attaches the workspace framebuffer size for Xvnc start."""
     transport = FakeTransport()
 
     async def auto_reply(event: str, payload: dict) -> None:
@@ -302,11 +302,15 @@ async def test_desktop_action_ensure_includes_geometry() -> None:
 
     transport.auto_reply = auto_reply
     accessor = _accessor(transport, desktop_geometry=geometry)
-    result = await accessor.desktop_action("ensure")
+    result = await accessor.desktop_action("hold", {"lease_id": "viewer-lease"})
     assert result["ok"] is True
     payload = _request_id(transport, "harness:desktop_action")
-    assert payload["action"] == "ensure"
-    assert payload["args"] == {"desktop_width": 1280, "desktop_height": 720}
+    assert payload["action"] == "hold"
+    assert payload["args"] == {
+        "lease_id": "viewer-lease",
+        "desktop_width": 1280,
+        "desktop_height": 720,
+    }
 
 
 async def test_desktop_action_runner_error_raises() -> None:
