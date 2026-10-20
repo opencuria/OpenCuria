@@ -13,12 +13,7 @@ lazily inside method bodies (no new top-level credentials coupling);
 the ``update`` / ``resume`` resolve paths prefer the injected
 ``credential_resolver`` port via ``CredentialSyncMixin``
 (see :meth:`_credential_resolve_call`) and keep ``CredentialSvc()`` as
-fallback. Phase 4 stream note: ``handle_stream_reply`` prefers an
-injected ``harness_stream_router`` port (``route_stream_output(data)`` /
-``route_stream_closed(data)``) when the facade was constructed with one;
-otherwise the lazy harness path applies. ``fail_streams_for_runner`` and
-``ProcessManagerMixin.mark_processes_killed`` keep the lazy
-``_ACCESSORS_BY_STREAM`` access as documented remainder.
+fallback.
 """
 
 from __future__ import annotations

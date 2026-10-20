@@ -1,29 +1,31 @@
-"""Port protocols for the runners service package (Phase 4).
+"""Port protocols for the runners service package.
 
 Only :class:`typing.Protocol` definitions — no implementations and no
 imports from ``apps.harness`` / ``apps.credentials``. Concrete adapters
 live outside this package; the service depends on these protocols only
 via structural typing so tests can inject fakes.
 
-Phase-4 wiring status (what is actually injected on ``RunnerService``):
+Wiring status (what ``RunnerService`` consumes):
 
 - ``CredentialResolver``: used by ``credential_sync._dispatch_credential_inject``
   and the three ``workspace_lifecycle`` credential paths (``update`` /
   ``resume`` / ``create_from_image_artifact`` uniqueness check).
-- ``HarnessStreamRouter``: used by ``stream_transport.handle_stream_reply``
-  (``route_stream_output(data)`` / ``route_stream_closed(data)``).
-- ``HarnessReplyRouter``: used by ``runner_transport._route_harness_reply``.
+- ``HarnessGateway``: the only way the runner service reaches the agent
+  harness (reply/stream routing, stream failure, viewer desktop actions,
+  busy computer-use checks). The harness app registers its implementation
+  at startup (``infra/harness_gateway.register_harness_gateway``); tests
+  may inject a fake via ``RunnerService(harness_gateway=...)``.
 - ``FrontendBus``: used by ``infra/frontend_bus._forward_to_frontend``.
 
 Everything else in ``workspace_lifecycle`` / ``interactive_sessions`` /
 ``file_transfer`` keeps its lazy ``emit_to_frontend`` import (documented
-Phase-5 remainder). ``fail_streams_for_runner`` /
-``_fail_workspace_processes`` keep the lazy ``_ACCESSORS_BY_STREAM``
-harness access as fallback (documented harness-internal remainder).
+Phase-5 remainder).
 """
 
 from __future__ import annotations
 
+import uuid
+from collections.abc import Callable
 from typing import Any, Protocol
 
 
@@ -89,37 +91,47 @@ class CredentialResolver(Protocol):
         ...
 
 
-class HarnessStreamRouter(Protocol):
-    """Route generic byte-stream transport events to the harness layer.
+class HarnessGateway(Protocol):
+    """Runner-service view of the agent harness.
 
-    Phase-4 wiring: ``StreamTransportMixin.handle_stream_reply`` prefers
-    an injected router (``self._harness_stream_router``) over the lazy
-    ``apps.harness`` import, so stream routing is unit-testable without
-    the harness package. Signature mirrors the real harness functions
-    ``route_stream_output(data)`` / ``route_stream_closed(data)``.
+    Implemented by ``apps.harness`` and registered at app startup, so the
+    runner service never imports harness internals. Routing methods return
+    True when the payload reached a live harness waiter.
     """
 
-    def route_stream_output(self, data: dict) -> bool | None:
-        """Route a stream output/chunk event; True when consumed."""
+    def route_harness_result(self, data: dict) -> bool:
+        """Route a ``harness:*_result`` payload to its waiting accessor."""
         ...
 
-    def route_stream_closed(self, data: dict) -> bool | None:
-        """Route a stream closed/result event; True when consumed."""
+    def route_harness_file_chunk(self, data: dict) -> bool:
+        """Route a ``harness:read_file_chunk`` payload to its accessor."""
         ...
 
-
-class HarnessReplyRouter(Protocol):
-    """Route harness reply events to the owning accessor.
-
-    Phase-4 wiring: ``RunnerTransportMixin._route_harness_reply`` prefers
-    an injected router (``self._harness_reply_router``) over the lazy
-    ``apps.harness`` import.
-    """
-
-    def route_harness_result(self, data: dict) -> None:
-        """Route a generic harness result payload."""
+    def route_stream_output(self, data: dict) -> bool:
+        """Route a ``workspace:stream_output`` chunk to its byte stream."""
         ...
 
-    def route_harness_file_chunk(self, data: dict) -> None:
-        """Route a file-chunk reply payload."""
+    def route_stream_closed(self, data: dict) -> bool:
+        """Route a ``workspace:stream_closed`` notice to its byte stream."""
+        ...
+
+    def fail_streams(
+        self, matches_workspace: Callable[[str], bool], error: str
+    ) -> None:
+        """Fail open byte streams whose workspace id matches the predicate."""
+        ...
+
+    async def desktop_action(
+        self, runner_service: Any, workspace_id: str, action: str, args: dict
+    ) -> dict:
+        """Run a correlated desktop action in *workspace_id*.
+
+        Raises:
+            HarnessActionError: When the runner reports a failure.
+            TimeoutError: When no reply arrives in time.
+        """
+        ...
+
+    def has_busy_computeruse_session(self, workspace_id: uuid.UUID) -> bool:
+        """Return True when a computer-use agent drives the desktop (sync)."""
         ...

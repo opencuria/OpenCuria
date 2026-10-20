@@ -188,6 +188,13 @@ def route_stream_closed(data: dict[str, Any]) -> bool:
     return accessor._deliver_stream_closed(data)
 
 
+def fail_streams(matches_workspace: Callable[[str], bool], error: str) -> None:
+    """Fail every open byte stream whose workspace id matches the predicate."""
+    for accessor in list(_ACCESSORS_BY_STREAM.values()):
+        if matches_workspace(str(accessor.workspace_id)):
+            accessor.fail_all_streams(error)
+
+
 def _normalize_command(command: list[str] | str) -> list[str] | str:
     """Validate and normalize an exec command payload."""
     if isinstance(command, str):

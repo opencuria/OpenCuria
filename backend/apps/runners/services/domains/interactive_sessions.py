@@ -29,6 +29,7 @@ from common.exceptions import ConflictError
 
 from ...enums import TaskType, WorkspaceStatus
 from ...exceptions import (
+    HarnessActionError,
     RunnerOfflineError,
     WorkspaceNotFoundError,
     WorkspaceStateError,
@@ -330,15 +331,11 @@ class InteractiveSessionsMixin:
         self, workspace_id: uuid.UUID, action: str, args: dict
     ) -> dict:
         """Use the existing correlated desktop_action transport."""
-        from apps.harness.access.runner_accessor import (
-            RunnerAccessorError,
-            create_harness_accessor,
-        )
-
-        accessor = await create_harness_accessor(self, str(workspace_id))
         try:
-            return await accessor.desktop_action(action, args)
-        except (RunnerAccessorError, TimeoutError) as exc:
+            return await self._harness().desktop_action(
+                self, str(workspace_id), action, args
+            )
+        except (HarnessActionError, TimeoutError) as exc:
             raise ConflictError(
                 "Viewer desktop operation could not be confirmed"
             ) from exc
@@ -586,12 +583,10 @@ class InteractiveSessionsMixin:
                     raise ConflictError(
                         "Unable to copy the desktop selection. Try again."
                     )
-                from apps.harness.repositories import HarnessSessionRepository
-
-                busy_sessions = await sync_to_async(
-                    HarnessSessionRepository.list_busy_computeruse_for_workspace
+                busy = await sync_to_async(
+                    self._harness().has_busy_computeruse_session
                 )(workspace_id)
-                if busy_sessions:
+                if busy:
                     raise ConflictError(
                         "Unable to copy the desktop selection. Try again."
                     )

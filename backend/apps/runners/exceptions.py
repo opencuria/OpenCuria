@@ -66,3 +66,7 @@ class NoAvailableRunnerError(ConflictError):
         super().__init__(
             message=f"No online runner available for agent type '{agent_type}'"
         )
+
+
+class HarnessActionError(RuntimeError):
+    """Raised by the harness gateway when a runner-side action fails."""

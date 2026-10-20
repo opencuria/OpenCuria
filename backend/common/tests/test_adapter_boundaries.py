@@ -6,7 +6,8 @@ presenter modules, so no application module may import a REST router
 module; only the URL composition root (``config/urls.py``) mounts them.
 Likewise the Socket.IO handler module is mounted only by ``config/asgi.py``;
 services and adapters resolve the runner service and frontend fan-out from
-``apps.runners.services``.
+``apps.runners.services``. The runner service itself never imports the
+harness; the harness plugs in through the ``HarnessGateway`` port.
 """
 
 from __future__ import annotations
@@ -106,4 +107,20 @@ def test_no_application_module_imports_the_socketio_adapter():
         "emit_to_frontend/get_sio_server from "
         "apps.runners.services.infra.realtime instead of the Socket.IO "
         "adapter:\n" + "\n".join(violations)
+    )
+
+
+def test_runner_service_never_imports_the_harness():
+    """Harness depends on the runner service, never the other way round."""
+    package = APPS_ROOT / "runners" / "services"
+    violations = sorted(
+        f"{_module_name(path)} -> {module}"
+        for path in package.rglob("*.py")
+        for module in _imported_modules(path, ast.parse(path.read_text()))
+        if module == "apps.harness" or module.startswith("apps.harness.")
+    )
+    assert violations == [], (
+        "Reach the harness through the HarnessGateway port "
+        "(apps.runners.services.ports) instead of importing it:\n"
+        + "\n".join(violations)
     )

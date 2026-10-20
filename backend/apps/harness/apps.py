@@ -12,5 +12,12 @@ class HarnessConfig(AppConfig):
     name = "apps.harness"
 
     def ready(self) -> None:
-        """Register account-owner deletion revocation signals."""
+        """Register deletion signals and the runner-service gateway."""
+        from apps.runners.services.infra.harness_gateway import (
+            register_harness_gateway,
+        )
+
         from . import signals  # noqa: F401
+        from .runner_gateway import RunnerHarnessGateway
+
+        register_harness_gateway(RunnerHarnessGateway())

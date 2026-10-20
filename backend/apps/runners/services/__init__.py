@@ -17,10 +17,10 @@ keeps working unchanged. ``get_runner_service()`` is the process-wide
 singleton every adapter (REST, Socket.IO, MCP) and other app resolves.
 
 Phase 4: the constructor additionally accepts optional injected ports
-(``credential_resolver``, ``harness_stream_router``,
-``harness_reply_router``, ``frontend_bus`` — all keyword-only, default
-``None``). When unset, every call site keeps its previous lazy-import
-behaviour, so all existing callers and tests run unchanged. The
+(``credential_resolver``, ``harness_gateway``, ``frontend_bus`` — all
+keyword-only, default ``None``). An unset ``harness_gateway`` resolves to
+the gateway the harness app registered at startup; the other ports keep
+their previous lazy-import behaviour when unset. The
 in-memory ``PendingMap`` dict-subclasses live in
 ``services/infra/state.py`` (ownership documentation + dict-compatible
 stores); the shared terminal/desktop maps intentionally stay class
@@ -49,8 +49,10 @@ from .infra.rpc_registry import RpcRegistryMixin
 from .infra.runner_transport import RunnerTransportMixin
 from .infra.frontend_bus import FrontendBusMixin
 from .infra.session_store import SessionStoreMixin
+from .infra.harness_gateway import get_harness_gateway
 from .infra.realtime import get_sio_server
 from .infra.state import PendingMap
+from .ports import HarnessGateway
 from .domains.credential_sync import (
     _CREDENTIAL_INJECT_TIMEOUT_SECONDS,
     CredentialSyncMixin,
@@ -113,8 +115,7 @@ class RunnerService(
         sio_server=None,
         *,
         credential_resolver=None,
-        harness_stream_router=None,
-        harness_reply_router=None,
+        harness_gateway: HarnessGateway | None = None,
         frontend_bus=None,
     ):
         """
@@ -129,16 +130,9 @@ class RunnerService(
                         When set, credential call sites use it instead of
                         constructing ``CredentialSvc()``. Default ``None``
                         keeps the previous lazy behaviour.
-            harness_stream_router: Optional object with
-                        ``route_stream_output(data)`` /
-                        ``route_stream_closed(data)``. When set,
-                        ``handle_stream_reply`` uses it instead of the lazy
-                        ``apps.harness`` import.
-            harness_reply_router: Optional object with
-                        ``route_harness_result`` /
-                        ``route_harness_file_chunk``. When set,
-                        ``_route_harness_reply`` uses it instead of the lazy
-                        ``apps.harness`` import.
+            harness_gateway: Optional ``HarnessGateway``. When unset,
+                        the gateway registered by the harness app is
+                        used (see :meth:`_harness`).
             frontend_bus: Optional async callable
                         ``(event, data, workspace_id)`` or object with an
                         ``emit`` method. When set,
@@ -146,10 +140,9 @@ class RunnerService(
                         ``infra.realtime.emit_to_frontend`` is used.
         """
         self.sio = sio_server
-        # Phase-4 injected ports (all optional; None = legacy lazy path).
+        # Injected ports (all optional; see the constructor docstring).
         self._credential_resolver = credential_resolver
-        self._harness_stream_router = harness_stream_router
-        self._harness_reply_router = harness_reply_router
+        self._harness_gateway = harness_gateway
         self._frontend_bus = frontend_bus
         self.runners = RunnerRepository
         self.workspaces = WorkspaceRepository
@@ -190,6 +183,10 @@ class RunnerService(
         # Per workspace/repo serialisation guards for git operations.
         self._git_locks: dict[str, asyncio.Lock] = {}
         self._git_locks_guard = asyncio.Lock()
+
+    def _harness(self) -> HarnessGateway:
+        """Return the injected or process-registered harness gateway."""
+        return self._harness_gateway or get_harness_gateway()
 
     # In-memory mapping: workspace_id (str) → terminal_id (str)
     _active_terminals: dict[str, str] = {}

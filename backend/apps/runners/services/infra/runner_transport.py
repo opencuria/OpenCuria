@@ -6,12 +6,9 @@ on the facade (``RunnerService``) providing ``self.sio``,
 ``self._call_reply_waiter`` / ``self._discard_call_reply_waiter`` (via
 ``RpcRegistryMixin``), ``self._validate_harness_workspace_runner`` (via
 ``OwnershipMixin``) and ``self._validate_runner_file_chunk`` (still on
-the facade -- Phase 3 candidate). Phase 4: when the facade was
-constructed with ``harness_reply_router``, ``_route_harness_reply``
-keeps its fail-closed validation but dispatches through the injected
-router; otherwise the
-``apps.harness.access.runner_accessor`` import stays lazy inside
-``_route_harness_reply``. This module has no top-level harness imports.
+the facade -- Phase 3 candidate). ``_route_harness_reply`` validates
+replies fail-closed and dispatches them through the ``HarnessGateway``
+port (``self._harness()``); this module never imports ``apps.harness``.
 """
 
 from __future__ import annotations
@@ -151,17 +148,6 @@ class RunnerTransportMixin:
         }
         if event not in harness_events:
             return None
-        # Phase-4 port: prefer the injected harness_reply_router.
-        reply_router = getattr(self, "_harness_reply_router", None)
-        if reply_router is not None:
-            return self._route_harness_reply_via_router(
-                reply_router, event, data, runner_id=runner_id
-            )
-        from apps.harness.access.runner_accessor import (
-            route_harness_file_chunk,
-            route_harness_result,
-        )
-
         workspace_id = data.get("workspace_id", "") if isinstance(data, dict) else ""
         # Ownership stays fail-closed for harness chunk replies as well: a
         # runner claim requires a valid, owned workspace_id; missing or
@@ -189,54 +175,11 @@ class RunnerTransportMixin:
                 workspace_id,
             )
             return True
+        harness = self._harness()
         if event == "harness:read_file_chunk":
-            route_harness_file_chunk(data)
+            harness.route_harness_file_chunk(data)
         else:
-            route_harness_result(data)
-        return True
-
-    def _route_harness_reply_via_router(
-        self,
-        reply_router,
-        event: str,
-        data: dict,
-        runner_id: str | None = None,
-    ) -> bool | None:
-        """Route a harness reply through an injected reply router.
-
-        Same fail-closed validation as the lazy ``apps.harness`` path
-        (ownership + file-chunk shape); only the final dispatch targets
-        the injected router's ``route_harness_result`` /
-        ``route_harness_file_chunk`` methods.
-        """
-        workspace_id = data.get("workspace_id", "") if isinstance(data, dict) else ""
-        if runner_id:
-            try:
-                workspace_id_uuid = uuid.UUID(workspace_id)
-            except (ValueError, TypeError, AttributeError):
-                logger.warning(
-                    "%s rejected: invalid workspace_id %s",
-                    event,
-                    workspace_id,
-                )
-                return True
-            if not self._validate_harness_workspace_runner(
-                workspace_id_uuid, runner_id
-            ):
-                return True
-        if event == "harness:read_file_chunk" and not self._validate_runner_file_chunk(
-            event, data if isinstance(data, dict) else {}
-        ):
-            logger.warning(
-                "%s rejected: invalid chunk payload for workspace %s",
-                event,
-                workspace_id,
-            )
-            return True
-        if event == "harness:read_file_chunk":
-            reply_router.route_harness_file_chunk(data)
-        else:
-            reply_router.route_harness_result(data)
+            harness.route_harness_result(data)
         return True
 
     async def emit_harness_event(

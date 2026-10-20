@@ -8,9 +8,10 @@ helpers (``_emit_to_runner`` via ``RunnerTransportMixin``,
 ``_forward_*`` / ``_push_process_*`` via ``FrontendBusMixin``,
 ``_ensure_process_dispatchable`` / ``_validate_task_runner`` /
 ``_validate_harness_workspace_runner`` via ``OwnershipMixin``). Lazy
-``django`` / ``apps.harness`` imports stay inside the method bodies (no new
-top-level coupling). The single ``RunnerService._process_log_paths`` call
-inside the static ``_process_verify_candidates`` became the explicit
+``django`` imports stay inside the method bodies; harness streams are
+failed through the ``HarnessGateway`` port. The single
+``RunnerService._process_log_paths`` call inside the static
+``_process_verify_candidates`` became the explicit
 ``ProcessManagerMixin._process_log_paths`` (same staticmethod, class name
 instead of facade name — no circular import, no behaviour change).
 """
@@ -1330,13 +1331,11 @@ class ProcessManagerMixin:
         # Streams are workspace-bound too: fail them so harness waiters
         # surface the lifecycle event instead of hanging.
         try:
-            from apps.harness.access import runner_accessor as _accessor_mod
-
-            for accessor in list(_accessor_mod._ACCESSORS_BY_STREAM.values()):
-                if str(accessor.workspace_id) == str(workspace_id):
-                    accessor.fail_all_streams(
-                        f"workspace {workspace_id} lifecycle: {reason}"
-                    )
+            self._harness().fail_streams(
+                lambda stream_workspace_id: stream_workspace_id
+                == str(workspace_id),
+                f"workspace {workspace_id} lifecycle: {reason}",
+            )
         except Exception:
             logger.exception(
                 "Failed failing streams for workspace %s", workspace_id

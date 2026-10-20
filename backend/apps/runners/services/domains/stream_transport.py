@@ -8,14 +8,9 @@ on the facade (``RunnerService``) providing ``self.workspaces``,
 ``_validate_harness_workspace_runner`` (via ``OwnershipMixin``). The single
 ``RunnerService._STREAM_RESULT_EVENTS`` lookup in ``_is_stream_event``
 became ``cls._STREAM_RESULT_EVENTS`` (same frozenset, class name instead
-of facade name — no circular import, no behaviour change). The
-``apps.harness`` imports stay lazy inside the method bodies (no new
-top-level harness coupling). Phase 4: ``handle_stream_reply`` prefers an
-injected ``harness_stream_router`` port (``route_stream_output(data)`` /
-``route_stream_closed(data)``) when the facade was constructed with one;
-otherwise the lazy harness path applies. ``fail_streams_for_runner`` and
-``ProcessManagerMixin._fail_workspace_processes`` keep the lazy
-``_ACCESSORS_BY_STREAM`` access as documented remainder.
+of facade name — no circular import, no behaviour change). Accepted
+stream events and runner-disconnect failures reach the harness only via
+the ``HarnessGateway`` port (``self._harness()``).
 """
 
 from __future__ import annotations
@@ -176,20 +171,10 @@ class StreamTransportMixin:
         if event == "workspace:stream_close_result":
             # Control reply only: never turn it into a data-plane EOF.
             return resolved
-        # Phase-4 port: prefer the injected harness_stream_router.
-        stream_router = getattr(self, "_harness_stream_router", None)
-        if stream_router is not None:
-            if event == "workspace:stream_output":
-                return stream_router.route_stream_output(data)
-            return stream_router.route_stream_closed(data)
-        from apps.harness.access.runner_accessor import (
-            route_stream_closed,
-            route_stream_output,
-        )
-
+        harness = self._harness()
         if event == "workspace:stream_output":
-            return route_stream_output(data)
-        return route_stream_closed(data)
+            return harness.route_stream_output(data)
+        return harness.route_stream_closed(data)
 
     async def call_stream_event(
         self,
@@ -207,14 +192,7 @@ class StreamTransportMixin:
         )
 
     def fail_streams_for_runner(self, runner_id: str) -> None:
-        """Fail all byte streams owned by a disconnecting runner (sync).
-
-        Phase-4 note: ``_ACCESSORS_BY_STREAM`` is harness-internal state;
-        the lazy import stays as fallback (documented remainder — no port
-        method, no behaviour change).
-        """
-        from apps.harness.access import runner_accessor as _accessor_mod
-
+        """Fail all byte streams owned by a disconnecting runner (sync)."""
         try:
             claimed = uuid.UUID(str(runner_id))
         except (ValueError, TypeError, AttributeError):
@@ -222,14 +200,14 @@ class StreamTransportMixin:
                 "stream fail rejected: invalid runner_id %s", runner_id
             )
             return
-        for accessor in list(_accessor_mod._ACCESSORS_BY_STREAM.values()):
+
+        def owned_by_runner(workspace_id: str) -> bool:
             try:
-                owner_id = self.workspaces.get_runner_id(
-                    uuid.UUID(str(accessor.workspace_id))
-                )
+                owner_id = self.workspaces.get_runner_id(uuid.UUID(workspace_id))
             except (ValueError, TypeError, AttributeError):
-                continue
-            if owner_id == claimed:
-                accessor.fail_all_streams(
-                    f"runner {runner_id} disconnected"
-                )
+                return False
+            return owner_id == claimed
+
+        self._harness().fail_streams(
+            owned_by_runner, f"runner {runner_id} disconnected"
+        )

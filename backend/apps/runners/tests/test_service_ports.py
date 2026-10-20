@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from apps.runners.services import RunnerService, _PendingGitRequest
+from apps.runners.services.infra.harness_gateway import get_harness_gateway
 from apps.runners.services.infra.state import PendingMap, SessionMap
 
 
@@ -29,20 +30,36 @@ class _FakeResolver:
         return {"ok": True}
 
 
-class _FakeStreamRouter:
+class _FakeHarnessGateway:
+    def __init__(self):
+        self.calls = []
+
+    def route_harness_result(self, data):
+        self.calls.append(("result", data))
+        return True
+
+    def route_harness_file_chunk(self, data):
+        self.calls.append(("chunk", data))
+        return True
+
     def route_stream_output(self, data):
+        self.calls.append(("stream_output", data))
         return True
 
     def route_stream_closed(self, data):
+        self.calls.append(("stream_closed", data))
         return True
 
+    def fail_streams(self, matches_workspace, error):
+        self.calls.append(("fail_streams", matches_workspace, error))
 
-class _FakeReplyRouter:
-    def route_harness_result(self, data):
-        return None
+    async def desktop_action(self, runner_service, workspace_id, action, args):
+        self.calls.append(("desktop_action", workspace_id, action, args))
+        return {"ok": True}
 
-    def route_harness_file_chunk(self, data):
-        return None
+    def has_busy_computeruse_session(self, workspace_id):
+        self.calls.append(("busy", workspace_id))
+        return False
 
 
 async def _fake_emit(event, data, workspace_id):
@@ -51,19 +68,16 @@ async def _fake_emit(event, data, workspace_id):
 
 def test_constructor_injects_ports():
     resolver = _FakeResolver()
-    stream_router = _FakeStreamRouter()
-    reply_router = _FakeReplyRouter()
+    gateway = _FakeHarnessGateway()
     svc = RunnerService(
         None,
         credential_resolver=resolver,
-        harness_stream_router=stream_router,
-        harness_reply_router=reply_router,
+        harness_gateway=gateway,
         frontend_bus=_fake_emit,
     )
     assert svc.sio is None
     assert svc._credential_resolver is resolver
-    assert svc._harness_stream_router is stream_router
-    assert svc._harness_reply_router is reply_router
+    assert svc._harness() is gateway
     assert svc._frontend_bus is _fake_emit
 
 
@@ -71,12 +85,74 @@ def test_constructor_defaults_and_positional():
     svc_default = RunnerService()
     assert svc_default.sio is None
     assert svc_default._credential_resolver is None
-    assert svc_default._harness_stream_router is None
-    assert svc_default._harness_reply_router is None
+    assert svc_default._harness_gateway is None
+    assert svc_default._harness() is get_harness_gateway()
     assert svc_default._frontend_bus is None
     sentinel = object()
     svc_positional = RunnerService(sentinel)
     assert svc_positional.sio is sentinel
+
+
+def test_registered_harness_gateway_is_the_harness_adapter():
+    from apps.harness.runner_gateway import RunnerHarnessGateway
+
+    assert isinstance(get_harness_gateway(), RunnerHarnessGateway)
+
+
+def test_harness_reply_and_stream_routing_use_gateway():
+    gateway = _FakeHarnessGateway()
+    svc = RunnerService(harness_gateway=gateway)
+    svc._resolve_call_reply = MagicMock(return_value=False)
+    result = {"request_id": "r1", "workspace_id": "w"}
+    chunk = {"request_id": "r2", "workspace_id": "w"}
+    assert svc._route_harness_reply("harness:stat_result", result) is True
+    svc._validate_runner_file_chunk = MagicMock(return_value=True)
+    assert svc._route_harness_reply("harness:read_file_chunk", chunk) is True
+    assert svc._route_harness_reply("terminal:output", {}) is None
+    assert gateway.calls == [("result", result), ("chunk", chunk)]
+
+
+def test_fail_streams_for_runner_matches_owned_workspaces():
+    gateway = _FakeHarnessGateway()
+    svc = RunnerService(harness_gateway=gateway)
+    runner_id = uuid.uuid4()
+    owned, foreign = uuid.uuid4(), uuid.uuid4()
+    svc.workspaces = MagicMock()
+    svc.workspaces.get_runner_id.side_effect = lambda ws: (
+        runner_id if ws == owned else uuid.uuid4()
+    )
+    svc.fail_streams_for_runner(str(runner_id))
+    [(kind, matches, error)] = gateway.calls
+    assert kind == "fail_streams"
+    assert error == f"runner {runner_id} disconnected"
+    assert matches(str(owned)) is True
+    assert matches(str(foreign)) is False
+    assert matches("not-a-uuid") is False
+
+
+def test_fail_streams_for_runner_rejects_invalid_runner_id():
+    gateway = _FakeHarnessGateway()
+    RunnerService(harness_gateway=gateway).fail_streams_for_runner("bogus")
+    assert gateway.calls == []
+
+
+def test_viewer_rpc_maps_harness_failures_to_conflict():
+    from apps.runners.exceptions import HarnessActionError
+    from common.exceptions import ConflictError
+
+    gateway = _FakeHarnessGateway()
+    svc = RunnerService(harness_gateway=gateway)
+    workspace_id = uuid.uuid4()
+    assert asyncio.run(svc._viewer_rpc(workspace_id, "status", {})) == {"ok": True}
+    assert gateway.calls == [("desktop_action", str(workspace_id), "status", {})]
+
+    for error in (HarnessActionError("down"), TimeoutError()):
+        async def _fail(*args, error=error):
+            raise error
+
+        gateway.desktop_action = _fail
+        with pytest.raises(ConflictError, match="could not be confirmed"):
+            asyncio.run(svc._viewer_rpc(workspace_id, "status", {}))
 
 
 def test_constructor_repositories_and_stores():
