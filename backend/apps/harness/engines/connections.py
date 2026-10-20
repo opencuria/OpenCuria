@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
 
 from apps.organizations.repositories import MembershipRepository
 from common.exceptions import NotFoundError
@@ -36,7 +35,7 @@ class AuthConfiguration:
 
 
 class EngineConnectionService:
-    """Compatibility wrapper exposing active Claude provider accounts."""
+    """Resolve Claude runtime authentication from scoped provider accounts."""
 
     PROVIDER = "claude-agent"
 
@@ -70,118 +69,12 @@ class EngineConnectionService:
             self.PROVIDER
         )
 
-    def list_connections(
-        self, organization_id: uuid.UUID, user_id: object
-    ) -> list[dict[str, Any]]:
-        """List only the active account's safe metadata, if any."""
+    def is_connected(self, organization_id: uuid.UUID, user_id: object) -> bool:
+        """Return whether the caller's selected Claude account has credentials."""
         organization_id, user_id = self._ids(organization_id, user_id)
         self._assert_member(organization_id, user_id)
         account = self._active_account(organization_id, user_id)
-        if account is None:
-            return []
-        return [
-            {
-                "id": str(account.id),
-                "auth_type": account.auth_type,
-                "label": account.label,
-                "connected": account.credential_id is not None,
-                "created_at": account.created_at,
-                "updated_at": account.updated_at,
-            }
-        ]
-
-    def connection_view(
-        self, organization_id: uuid.UUID, user_id: object
-    ) -> dict[str, Any] | None:
-        """Return the user's one connection without any credential material."""
-        connections = self.list_connections(organization_id, user_id)
-        if not connections:
-            return None
-        connection = connections[0]
-        return {
-            "id": connection["id"],
-            "auth_type": connection["auth_type"],
-            "label": connection["label"],
-            "connected": connection["connected"],
-        }
-
-    def save_connection(
-        self,
-        *,
-        organization_id: uuid.UUID,
-        user,
-        auth_type: str,
-        token: str = "",
-        label: str = "",
-        connection_id: uuid.UUID | str | None = None,
-    ):
-        """Create or update the caller's active personal Claude account."""
-        organization_id, user_id = self._ids(organization_id, user)
-        self._assert_member(organization_id, user_id)
-        normalized_type = self._normalize_auth_type(auth_type)
-        if not isinstance(token, str):
-            raise ValueError("token must be a string")
-        if len(token) > 8192:
-            raise ValueError("token exceeds the 8192 character limit")
-        secret = token.strip()
-        if secret and any(char.isspace() for char in secret):
-            raise ValueError("token must not contain whitespace")
-        if "\x00" in secret:
-            raise ValueError("token must not contain control characters")
-        cleaned_label = (label or "").strip()[:255] or "Claude"
-        existing = self._active_account(organization_id, user_id)
-        if connection_id is not None:
-            try:
-                requested = uuid.UUID(str(connection_id))
-            except (TypeError, ValueError, AttributeError):
-                raise NotFoundError("ProviderAccount", str(connection_id)) from None
-            existing = self.accounts.get_account(
-                organization_id, user_id, requested, manage=True
-            )
-            if existing.provider != self.PROVIDER or existing.user_id != user_id:
-                raise NotFoundError("ProviderAccount", str(connection_id))
-        if existing is not None and existing.user_id != user_id:
-            # Saving a compatibility connection must never mutate a shared
-            # account or an account belonging to another member.
-            existing = None
-        if not secret and existing is None:
-            raise ValueError("A token is required to connect Claude")
-        payload: dict[str, Any] = {
-            "label": cleaned_label,
-            "auth_type": normalized_type,
-            "token": secret,
-            "shared": False,
-        }
-        if existing is not None and not secret and existing.auth_type != normalized_type:
-            raise ValueError("A token is required when changing auth_type")
-        account = self.accounts.save_account(
-            organization_id=organization_id,
-            user=user,
-            provider=self.PROVIDER,
-            payload=payload,
-            account_id=existing.id if existing is not None else None,
-        )
-        return account
-
-    def delete_connection(
-        self,
-        organization_id: uuid.UUID,
-        user_id: object,
-        connection_id: uuid.UUID | str | None = None,
-    ) -> None:
-        """Delete the selected Claude account through provider-account ACLs."""
-        organization_id, user_id = self._ids(organization_id, user_id)
-        self._assert_member(organization_id, user_id)
-        account = (
-            self.accounts.get_account(
-                organization_id, user_id, connection_id, manage=True
-            )
-            if connection_id is not None
-            else self._active_account(organization_id, user_id)
-        )
-        if account is None or account.provider != self.PROVIDER:
-            raise NotFoundError("ProviderAccount", str(connection_id or user_id))
-        self.accounts.delete_account(organization_id, user_id, account.id)
+        return account is not None and account.credential_id is not None
 
     def resolve(
         self,
@@ -193,9 +86,7 @@ class EngineConnectionService:
         organization_id, user_id = self._ids(organization_id, user_id)
         self._assert_member(organization_id, user_id)
         if connection_id is not None:
-            account = self.accounts.get_account(
-                organization_id, user_id, connection_id
-            )
+            account = self.accounts.get_account(organization_id, user_id, connection_id)
         else:
             account = self._active_account(organization_id, user_id)
         if account is None or account.provider != self.PROVIDER:

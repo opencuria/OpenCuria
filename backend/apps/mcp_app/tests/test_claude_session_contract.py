@@ -13,14 +13,13 @@ from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 
 from apps.accounts.models import APIKeyPermission
-from apps.credentials.models import CredentialService
-from apps.credentials.repositories import OrgCredentialServiceActivationRepository
 from apps.harness.engines.connections import EngineConnectionService
 from apps.harness.engines.repositories import HarnessEngineRepository
 from apps.harness.engines.run_repository import HarnessRunRepository
 from apps.harness.engines.runs import HarnessRunService, RunOwnership
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessMessage, HarnessSession
+from apps.harness.provider_accounts import ProviderAccountService
 from apps.harness.providers.base import Usage
 from apps.harness.repositories import HarnessMessageRepository
 from apps.harness.tests.conftest import FakeAccessor
@@ -33,8 +32,6 @@ from apps.mcp_app.server import (
     _call_get_harness_timeline,
     _call_list_harness_conversations,
     _call_list_harness_sessions,
-    _call_resolve_harness_permission,
-    _call_resolve_harness_question,
     _call_resolve_harness_permission,
     _call_resolve_harness_question,
     _call_send_harness_message,
@@ -149,45 +146,27 @@ def claude_mcp_setup(db, monkeypatch):
         status=WorkspaceStatus.RUNNING,
         created_by=owner,
     )
-    credential_services = [
-        CredentialService.objects.get_or_create(
-            slug="claude-agent-api-token",
-            organization=None,
-            defaults={
-                "name": "Claude Agent API Token",
-                "credential_type": "env",
-                "env_var_name": "ANTHROPIC_API_KEY",
-                "label": "Claude API Token",
-            },
-        )[0],
-        CredentialService.objects.get_or_create(
-            slug="claude-agent-subscription-token",
-            organization=None,
-            defaults={
-                "name": "Claude Subscription Token",
-                "credential_type": "env",
-                "env_var_name": "CLAUDE_CODE_OAUTH_TOKEN",
-                "label": "Claude Subscription Token",
-            },
-        )[0],
-    ]
-    OrgCredentialServiceActivationRepository.ensure_activated(
-        org.id, [service.id for service in credential_services]
-    )
     connections = EngineConnectionService()
-    connection = connections.save_connection(
+    provider_accounts = ProviderAccountService()
+    connection = provider_accounts.save_account(
         organization_id=org.id,
         user=owner,
-        auth_type="api_token",
-        token="mcp-claude-secret-never-return",
-        label="MCP Claude",
+        provider="claude-agent",
+        payload={
+            "auth_type": "api_token",
+            "token": "mcp-claude-secret-never-return",
+            "label": "MCP Claude",
+        },
     )
-    foreign_connection = connections.save_connection(
+    foreign_connection = provider_accounts.save_account(
         organization_id=org.id,
         user=other,
-        auth_type="api_token",
-        token="another-users-mcp-secret",
-        label="Other Claude",
+        provider="claude-agent",
+        payload={
+            "auth_type": "api_token",
+            "token": "another-users-mcp-secret",
+            "label": "Other Claude",
+        },
     )
     registry = _FakeRegistry()
 
@@ -340,6 +319,7 @@ def claude_mcp_setup(db, monkeypatch):
         "other": other,
         "workspace": workspace,
         "connection": connection,
+        "provider_accounts": provider_accounts,
         "foreign_connection": foreign_connection,
         "service": service,
         "registry": registry,
@@ -491,7 +471,7 @@ async def test_mcp_claude_create_rejects_missing_foreign_and_invalid_engine(
         "prompt": "not created",
         "harness_id": "claude",
     }
-    await sync_to_async(data["service"]._engine_connections.delete_connection)(
+    await sync_to_async(data["provider_accounts"].delete_account)(
         data["org"].id, data["owner"].id, data["connection"].id
     )
     before = await sync_to_async(HarnessSession.objects.count)()

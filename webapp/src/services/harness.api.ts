@@ -113,22 +113,6 @@ export interface HarnessEngine {
 
 export type HarnessEngineOut = HarnessEngine
 
-/** Safe personal Claude Agent connection metadata; never contains a token. */
-export interface ClaudeConnection {
-  id: string
-  auth_type: 'api_token' | 'subscription_token'
-  label: string
-  connected: boolean
-  created_at?: string
-  updated_at?: string
-}
-
-export interface ClaudeConnectionUpsertIn {
-  auth_type: 'api_token' | 'subscription_token'
-  token: string
-  label?: string
-}
-
 /**
  * Org-wide Agent-S harness parameters (`GET/PUT /agent-s-config/`).
  *
@@ -204,18 +188,6 @@ export interface HarnessPermissionOut {
 
 export function listHarnessEngines(): Promise<HarnessEngine[]> {
   return get<HarnessEngine[]>('/harness/engines/')
-}
-
-export function getClaudeConnection(): Promise<ClaudeConnection | null> {
-  return get<ClaudeConnection | null>('/harness/engines/claude/connection/')
-}
-
-export function saveClaudeConnection(data: ClaudeConnectionUpsertIn): Promise<ClaudeConnection> {
-  return put<ClaudeConnection>('/harness/engines/claude/connection/', data)
-}
-
-export function deleteClaudeConnection(): Promise<void> {
-  return del<void>('/harness/engines/claude/connection/')
 }
 
 export function listClaudeModels(): Promise<ProviderModel[]> {

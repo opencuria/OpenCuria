@@ -39,7 +39,8 @@ acting admin becomes the account's personal owner; the UI requires confirmation.
 
 `GET` / `PUT /api/v1/provider-config/` only read/write model and reasoning-effort
 defaults; credentials and connection metadata belong to the account APIs above.
-The old provider-wide connection REST endpoints and MCP tools are removed.
+Provider-wide and Claude-specific connection CRUD endpoints and MCP tools are
+removed; all providers use the account APIs above.
 
 ChatGPT device flows return a `flow_id`; status/cancel must address that flow.
 Flows are durable, user/org-scoped, expire after ten minutes, and use fenced

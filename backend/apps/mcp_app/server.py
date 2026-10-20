@@ -51,8 +51,8 @@ Tools and their required permissions
 - get_provider_config → harness:read
 - list_provider_models → harness:read
 - list_harness_engines / list_claude_engine_models → harness:read
-- get_claude_connection / save_claude_connection /
-  delete_claude_connection → harness:providers
+- list_provider_accounts / save_provider_account /
+  delete_provider_account / select_provider_account → harness:providers
 - save_provider_config → harness:run
 - delete_provider_config → harness:run
 - get_subagent_config → harness:read
@@ -684,41 +684,6 @@ _TOOLS: list[Tool] = [
         name="list_harness_engines",
         description="List native and Claude harness engines and connection status.",
         inputSchema={"type": "object", "properties": {}},
-    ),
-    Tool(
-        name="get_claude_connection",
-        description="Get the current user's personal Claude connection status.",
-        inputSchema={"type": "object", "properties": {}},
-    ),
-    Tool(
-        name="save_claude_connection",
-        description=(
-            "Save the current user's personal Claude API or subscription token."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "auth_type": {
-                    "type": "string",
-                    "enum": ["api_token", "subscription_token"],
-                },
-                "token": {"type": "string"},
-                "label": {"type": "string"},
-                "connection_id": {"type": "string", "format": "uuid"},
-            },
-            "required": ["auth_type"],
-            "additionalProperties": False,
-        },
-    ),
-    Tool(
-        name="delete_claude_connection",
-        description="Delete the selected or explicitly addressed Claude account.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "connection_id": {"type": "string", "format": "uuid"},
-            },
-        },
     ),
     Tool(
         name="list_claude_engine_models",
@@ -1708,9 +1673,6 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "get_provider_config": APIKeyPermission.HARNESS_READ,
     "list_provider_models": APIKeyPermission.HARNESS_READ,
     "list_harness_engines": APIKeyPermission.HARNESS_READ,
-    "get_claude_connection": APIKeyPermission.HARNESS_PROVIDERS,
-    "save_claude_connection": APIKeyPermission.HARNESS_PROVIDERS,
-    "delete_claude_connection": APIKeyPermission.HARNESS_PROVIDERS,
     "list_claude_engine_models": APIKeyPermission.HARNESS_READ,
     "save_provider_config": APIKeyPermission.HARNESS_RUN,
     "delete_provider_config": APIKeyPermission.HARNESS_RUN,
@@ -3343,69 +3305,13 @@ def _call_list_harness_engines(api_key, org_id, args: dict) -> list[TextContent]
         OrganizationService().require_membership(api_key.user, org_id)
     except NotFoundError as exc:
         return _error(exc.message)
-    connection = EngineConnectionService().connection_view(org_id, api_key.user.id)
     return _text(
-        list_engines(claude_connected=bool(connection and connection["connected"]))
+        list_engines(
+            claude_connected=EngineConnectionService().is_connected(
+                org_id, api_key.user.id
+            )
+        )
     )
-
-
-def _call_get_claude_connection(api_key, org_id, args: dict) -> list[TextContent]:
-    """Get safe status for the caller's personal Claude authorization."""
-    from apps.harness.engines.connections import EngineConnectionService
-    from apps.organizations.services import OrganizationService
-    from common.exceptions import NotFoundError
-
-    try:
-        OrganizationService().require_membership(api_key.user, org_id)
-    except NotFoundError as exc:
-        return _error(exc.message)
-    return _text(EngineConnectionService().connection_view(org_id, api_key.user.id))
-
-
-def _call_save_claude_connection(api_key, org_id, args: dict) -> list[TextContent]:
-    """Upsert a user's Claude token using shared encrypted credentials."""
-    from apps.harness.engines.connections import EngineConnectionService
-    from apps.harness.engines.schemas import engine_connection_to_out
-    from apps.organizations.services import OrganizationService
-    from common.exceptions import NotFoundError
-
-    try:
-        OrganizationService().require_membership(api_key.user, org_id)
-    except NotFoundError as exc:
-        return _error(exc.message)
-    auth_type = args.get("auth_type")
-    if not isinstance(auth_type, str):
-        return _error("auth_type is required")
-    try:
-        connection = EngineConnectionService().save_connection(
-            organization_id=org_id,
-            user=api_key.user,
-            auth_type=auth_type,
-            token=args.get("token", ""),
-            label=args.get("label", "Claude"),
-            connection_id=args.get("connection_id"),
-        )
-    except NotFoundError as exc:
-        return _error(exc.message)
-    except (ValueError, TypeError) as exc:
-        return _error(str(exc))
-    return _text(engine_connection_to_out(connection).model_dump(mode="json"))
-
-
-def _call_delete_claude_connection(api_key, org_id, args: dict) -> list[TextContent]:
-    """Disconnect only the caller's Claude credentials."""
-    from apps.harness.engines.connections import EngineConnectionService
-    from apps.organizations.services import OrganizationService
-    from common.exceptions import NotFoundError
-
-    try:
-        OrganizationService().require_membership(api_key.user, org_id)
-        EngineConnectionService().delete_connection(
-            org_id, api_key.user.id, args.get("connection_id")
-        )
-    except NotFoundError as exc:
-        return _error(exc.message)
-    return _text({"deleted": True})
 
 
 def _call_list_claude_engine_models(api_key, org_id, args: dict) -> list[TextContent]:
@@ -5639,9 +5545,6 @@ _TOOL_HANDLERS = {
     "get_provider_config": _call_get_provider_config,
     "list_provider_models": _call_list_provider_models,
     "list_harness_engines": _call_list_harness_engines,
-    "get_claude_connection": _call_get_claude_connection,
-    "save_claude_connection": _call_save_claude_connection,
-    "delete_claude_connection": _call_delete_claude_connection,
     "list_claude_engine_models": _call_list_claude_engine_models,
     "save_provider_config": _call_save_provider_config,
     "delete_provider_config": _call_delete_provider_config,

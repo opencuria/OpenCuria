@@ -291,6 +291,13 @@ def test_removed_provider_connection_routes_are_not_found(accounts_setup):
         client.put(url, data="{}", content_type="application/json").status_code == 404
     )
     assert client.delete(url).status_code == 404
+    claude_url = "/api/v1/harness/engines/claude/connection/"
+    assert client.get(claude_url).status_code == 404
+    assert (
+        client.put(claude_url, data="{}", content_type="application/json").status_code
+        == 404
+    )
+    assert client.delete(claude_url).status_code == 404
 
 
 @pytest.mark.django_db

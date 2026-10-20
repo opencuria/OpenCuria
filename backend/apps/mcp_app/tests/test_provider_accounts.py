@@ -68,6 +68,9 @@ def test_mcp_provider_account_tools_are_registered_and_old_tools_removed():
         "list_provider_connections",
         "save_provider_connection",
         "delete_provider_connection",
+        "get_claude_connection",
+        "save_claude_connection",
+        "delete_claude_connection",
     }
     assert tool_names.isdisjoint(removed)
     assert not (_TOOL_HANDLERS.keys() & removed)
@@ -75,7 +78,19 @@ def test_mcp_provider_account_tools_are_registered_and_old_tools_removed():
 
 
 @pytest.mark.django_db(transaction=True)
-def test_mcp_provider_accounts_save_list_select_and_delete(provider_mcp_setup):
+@pytest.mark.parametrize(
+    "provider,credentials",
+    [
+        ("openrouter", {"api_key": "sk-mcp-private-1234"}),
+        (
+            "claude-agent",
+            {"auth_type": "api_token", "token": "sk-mcp-private-1234"},
+        ),
+    ],
+)
+def test_mcp_provider_accounts_save_list_select_and_delete(
+    provider_mcp_setup, provider, credentials
+):
     """Account tools expose safe metadata and preserve selection semantics."""
     api_key = provider_mcp_setup["api_key"]
     org_id = provider_mcp_setup["org"].id
@@ -84,12 +99,13 @@ def test_mcp_provider_accounts_save_list_select_and_delete(provider_mcp_setup):
             api_key,
             org_id,
             {
-                "provider": "openrouter",
+                "provider": provider,
                 "label": "Personal MCP",
-                "api_key": "sk-mcp-private-1234",
+                **credentials,
             },
         )
     )
+    assert saved["provider"] == provider
     assert saved["scope"] == "personal"
     assert saved["api_key_hint"] == "••••1234"
     assert "sk-mcp-private-1234" not in repr(saved)
@@ -100,7 +116,7 @@ def test_mcp_provider_accounts_save_list_select_and_delete(provider_mcp_setup):
 
     cleared = _parse_text(
         _call_select_provider_account(
-            api_key, org_id, {"provider": "openrouter", "account_id": None}
+            api_key, org_id, {"provider": provider, "account_id": None}
         )
     )
     assert cleared["selected"] is True

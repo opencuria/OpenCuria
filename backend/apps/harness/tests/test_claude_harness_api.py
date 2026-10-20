@@ -15,8 +15,6 @@ from django.test import AsyncClient
 
 import apps.harness.api as harness_api
 from apps.accounts.models import APIKey, APIKeyPermission
-from apps.credentials.models import CredentialService
-from apps.credentials.repositories import OrgCredentialServiceActivationRepository
 from apps.harness.engines.connections import EngineConnectionService
 from apps.harness.engines.repositories import HarnessEngineRepository
 from apps.harness.engines.run_repository import HarnessRunRepository
@@ -28,6 +26,7 @@ from apps.harness.models import (
     HarnessSession,
     HarnessSessionStatus,
 )
+from apps.harness.provider_accounts import ProviderAccountService
 from apps.harness.providers.base import Usage
 from apps.harness.repositories import HarnessMessageRepository
 from apps.harness.tests.conftest import FakeAccessor
@@ -100,35 +99,6 @@ async def _fake_accessor(workspace_id: str) -> FakeAccessor:
     return FakeAccessor(workspace_id)
 
 
-def _configure_claude_services(organization_id: uuid.UUID) -> None:
-    """Ensure the two personal Claude credential services are active for tests."""
-    services = [
-        CredentialService.objects.get_or_create(
-            slug="claude-agent-api-token",
-            organization=None,
-            defaults={
-                "name": "Claude Agent API Token",
-                "credential_type": "env",
-                "env_var_name": "ANTHROPIC_API_KEY",
-                "label": "Claude API Token",
-            },
-        )[0],
-        CredentialService.objects.get_or_create(
-            slug="claude-agent-subscription-token",
-            organization=None,
-            defaults={
-                "name": "Claude Subscription Token",
-                "credential_type": "env",
-                "env_var_name": "CLAUDE_CODE_OAUTH_TOKEN",
-                "label": "Claude Subscription Token",
-            },
-        )[0],
-    ]
-    OrgCredentialServiceActivationRepository.ensure_activated(
-        organization_id, [service.id for service in services]
-    )
-
-
 def _api_key(
     user, organization_id: uuid.UUID, permissions=None
 ) -> tuple[AsyncClient, str]:
@@ -191,17 +161,18 @@ def claude_api_setup(db, monkeypatch):
         status=WorkspaceStatus.RUNNING,
         created_by=owner,
     )
-    from apps.harness.engines.connections import EngineConnectionService
-
     data = {"org": org, "owner": owner, "stranger": stranger, "owned": owned}
-    _configure_claude_services(data["org"].id)
     connections = EngineConnectionService()
-    owner_connection = connections.save_connection(
+    provider_accounts = ProviderAccountService()
+    owner_connection = provider_accounts.save_account(
         organization_id=data["org"].id,
         user=data["owner"],
-        auth_type="api_token",
-        token="rest-personal-claude-secret-do-not-return",
-        label="REST test Claude",
+        provider="claude-agent",
+        payload={
+            "auth_type": "api_token",
+            "token": "rest-personal-claude-secret-do-not-return",
+            "label": "REST test Claude",
+        },
     )
     registry = _FakeEngineRegistry()
     def finalize_fake_turn(
@@ -325,6 +296,7 @@ def claude_api_setup(db, monkeypatch):
         **data,
         "client": client,
         "connection": owner_connection,
+        "provider_accounts": provider_accounts,
         "service": service,
         "registry": registry,
     }
@@ -462,8 +434,7 @@ async def test_rest_claude_connection_failures_are_scoped_and_do_not_orphan_sess
     client = data["client"]
     url = f"/api/v1/workspaces/{data['owned'].id}/harness/sessions/"
 
-    connections = EngineConnectionService()
-    connections.delete_connection(
+    data["provider_accounts"].delete_account(
         data["org"].id, data["owner"].id, data["connection"].id
     )
     count_before = await sync_to_async(HarnessSession.objects.count)()
@@ -476,12 +447,15 @@ async def test_rest_claude_connection_failures_are_scoped_and_do_not_orphan_sess
     assert missing.status_code == 404, missing.content[:500]
     assert await sync_to_async(HarnessSession.objects.count)() == count_before
 
-    foreign_connection = EngineConnectionService().save_connection(
+    foreign_connection = data["provider_accounts"].save_account(
         organization_id=data["org"].id,
         user=data["stranger"],
-        auth_type="api_token",
-        token="foreign-claude-connection-secret",
-        label="Other user's Claude",
+        provider="claude-agent",
+        payload={
+            "auth_type": "api_token",
+            "token": "foreign-claude-connection-secret",
+            "label": "Other user's Claude",
+        },
     )
     foreign = await client.post(
         url,
@@ -563,12 +537,15 @@ async def test_rest_claude_gate_resolution_is_restricted_to_session_owner(
     claude_api_setup, monkeypatch, gate, route_suffix, payload, resolver_name
 ):
     data = claude_api_setup
-    stranger_connection = EngineConnectionService().save_connection(
+    stranger_connection = data["provider_accounts"].save_account(
         organization_id=data["org"].id,
         user=data["stranger"],
-        auth_type="api_token",
-        token="stranger-personal-claude-secret",
-        label="Stranger Claude",
+        provider="claude-agent",
+        payload={
+            "auth_type": "api_token",
+            "token": "stranger-personal-claude-secret",
+            "label": "Stranger Claude",
+        },
     )
     stranger_session = await sync_to_async(data["service"].create_session)(
         workspace_id=data["owned"].id,

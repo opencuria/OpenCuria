@@ -6,8 +6,6 @@ expose identical payloads without importing each other.
 
 from __future__ import annotations
 
-import uuid
-
 from ninja import Schema
 
 
@@ -18,24 +16,6 @@ class HarnessEngineOut(Schema):
     name: str
     modes: list[str]
     connected: bool
-
-
-class EngineConnectionOut(Schema):
-    """Safe public metadata for one personal Claude connection."""
-
-    id: str
-    auth_type: str
-    label: str
-    connected: bool
-
-
-class EngineConnectionIn(Schema):
-    """Claude-account compatibility upsert; id targets only an owned account."""
-
-    auth_type: str
-    token: str = ""
-    label: str = "Claude"
-    connection_id: uuid.UUID | None = None
 
 
 class ClaudeModelOut(Schema):
@@ -49,16 +29,6 @@ class ClaudeModelOut(Schema):
     supports_tools: bool = True
     context_length: int = 0
     max_output_tokens: int = 0
-
-
-def engine_connection_to_out(connection) -> EngineConnectionOut:  # type: ignore[no-untyped-def]
-    """Map a saved Claude provider account to its safe public metadata."""
-    return EngineConnectionOut(
-        id=str(connection.id),
-        auth_type=connection.auth_type,
-        label=connection.label,
-        connected=connection.credential_id is not None,
-    )
 
 
 def claude_model_to_out(model) -> ClaudeModelOut:  # type: ignore[no-untyped-def]

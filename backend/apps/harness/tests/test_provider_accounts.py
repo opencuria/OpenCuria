@@ -441,6 +441,44 @@ def test_catalog_tracks_selected_account_revision_and_never_caches_private_visib
 
 
 @pytest.mark.django_db
+def test_claude_blank_token_preserves_secret_but_auth_switch_requires_token(
+    account_members,
+):
+    org, _admin, owner, _other, service = account_members
+    account = service.save_account(
+        organization_id=org.id,
+        user=owner,
+        provider="claude-agent",
+        payload={"auth_type": "subscription_token", "token": "subscription-secret"},
+    )
+    update = {
+        "organization_id": org.id,
+        "user": owner,
+        "provider": "claude-agent",
+        "account_id": account.id,
+    }
+    unchanged = service.save_account(
+        **update, payload={"auth_type": "subscription_token", "token": ""}
+    )
+    assert unchanged.id == account.id
+    assert unchanged.auth_type == "subscription_token"
+    assert service.get_credentials(unchanged)["token"] == "subscription-secret"
+
+    with pytest.raises(ValueError, match="token is required when changing auth_type"):
+        service.save_account(**update, payload={"auth_type": "api_token"})
+    persisted = service.get_account(org.id, owner.id, account.id)
+    assert persisted.auth_type == "subscription_token"
+    assert service.get_credentials(persisted)["token"] == "subscription-secret"
+
+    switched = service.save_account(
+        **update, payload={"auth_type": "api_token", "token": "api-secret"}
+    )
+    assert switched.id == account.id
+    assert switched.auth_type == "api_token"
+    assert service.get_credentials(switched)["token"] == "api-secret"
+
+
+@pytest.mark.django_db
 def test_bedrock_auth_switch_removes_stale_bearer_credentials(account_members):
     """Switching auth modes must not silently keep sending the old bearer."""
     org, _admin, owner, _other, service = account_members

@@ -2,11 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as api from './api'
 import {
   createHarnessSession,
-  deleteClaudeConnection,
-  getClaudeConnection,
   listClaudeModels,
   listHarnessEngines,
-  saveClaudeConnection,
   createProviderAccount,
   deleteProviderAccount,
   listProviderAccounts,
@@ -68,35 +65,6 @@ describe('harness engine API', () => {
       skill_ids: [],
       harness_id: 'native',
     })
-  })
-
-  it('reads and saves safe connection metadata without reshaping token payloads', async () => {
-    const connection = {
-      id: 'personal-1',
-      auth_type: 'api_token' as const,
-      label: 'Personal',
-      connected: true,
-      created_at: '2026-10-08T00:00:00Z',
-      updated_at: '2026-10-08T00:00:00Z',
-    }
-    const get = vi.spyOn(api, 'get').mockResolvedValue(connection)
-    const put = vi.spyOn(api, 'put').mockResolvedValue(connection)
-    await expect(getClaudeConnection()).resolves.toEqual(connection)
-    await expect(
-      saveClaudeConnection({ auth_type: 'api_token', token: 'secret', label: 'Personal' }),
-    ).resolves.toEqual(connection)
-    expect(get).toHaveBeenCalledWith('/harness/engines/claude/connection/')
-    expect(put).toHaveBeenCalledWith('/harness/engines/claude/connection/', {
-      auth_type: 'api_token',
-      token: 'secret',
-      label: 'Personal',
-    })
-  })
-
-  it('deletes the personal Claude connection', async () => {
-    const del = vi.spyOn(api, 'del').mockResolvedValue(undefined)
-    await expect(deleteClaudeConnection()).resolves.toBeUndefined()
-    expect(del).toHaveBeenCalledWith('/harness/engines/claude/connection/')
   })
 
   it('uses account UUIDs for provider account changes and sends null for no selection', async () => {
