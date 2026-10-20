@@ -266,6 +266,7 @@ class ScheduledTaskRepository:
             "skill_ids": list(task.skill_ids or []),
             "recurrence": task.recurrence,
             "weekdays": list(task.weekdays or []),
+            "cron_expression": task.cron_expression,
             "local_time": task.local_time.strftime("%H:%M"),
             "timezone_name": task.timezone_name,
         }

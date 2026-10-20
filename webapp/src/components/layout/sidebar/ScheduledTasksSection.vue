@@ -4,7 +4,7 @@ import { CalendarClock, CirclePause, Plus } from '@lucide/vue'
 import { useSidebar } from '@/components/ui/sidebar'
 import { Button } from '@/components/ui/button'
 import { useScheduledTaskStore } from '@/stores/scheduledTasks'
-import { WEEKDAYS } from '@/lib/scheduledTasks'
+import { describeSchedule } from '@/lib/scheduledTasks'
 import type { ScheduledTask } from '@/services/scheduledTasks.api'
 
 defineProps<{ tasks: ScheduledTask[] }>()
@@ -35,13 +35,7 @@ async function openTask(id: string): Promise<void> {
 }
 
 function cadence(task: ScheduledTask): string {
-  if (task.recurrence === 'daily') return `Daily · ${task.local_time}`
-  if (task.weekdays.length === 5 && [0, 1, 2, 3, 4].every((day) => task.weekdays.includes(day)))
-    return `Weekdays · ${task.local_time}`
-  const days = WEEKDAYS.filter((day) => task.weekdays.includes(day.value))
-    .map((day) => day.label)
-    .join(', ')
-  return `${days || 'Weekly'} · ${task.local_time}`
+  return describeSchedule(task)
 }
 </script>
 

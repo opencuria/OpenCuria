@@ -65,6 +65,7 @@ class ScheduledTaskIn(Schema):
     skill_ids: list[str] = []
     recurrence: str = "daily"
     weekdays: list[int] = []
+    cron_expression: str = ""
     local_time: str = "09:00"
     timezone_name: str = "UTC"
     enabled: bool = True
@@ -81,6 +82,7 @@ class ScheduledTaskPatchIn(Schema):
     skill_ids: list[str] | None = None
     recurrence: str | None = None
     weekdays: list[int] | None = None
+    cron_expression: str | None = None
     local_time: str | None = None
     timezone_name: str | None = None
     enabled: bool | None = None
@@ -98,6 +100,7 @@ class ScheduledTaskOut(Schema):
     skill_ids: list[str]
     recurrence: str
     weekdays: list[int]
+    cron_expression: str
     local_time: str
     timezone_name: str
     enabled: bool
@@ -134,6 +137,7 @@ def _task_out(task: ScheduledTask) -> ScheduledTaskOut:
         skill_ids=list(task.skill_ids or []),
         recurrence=task.recurrence,
         weekdays=list(task.weekdays or []),
+        cron_expression=task.cron_expression,
         local_time=task.local_time.strftime("%H:%M"),
         timezone_name=task.timezone_name,
         enabled=task.enabled,

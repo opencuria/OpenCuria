@@ -454,6 +454,68 @@ describe('ScheduledTaskDialog', () => {
     expect(api.createScheduledTask).not.toHaveBeenCalled()
   })
 
+  it('saves several times a day as a cron schedule', async () => {
+    const { wrapper } = await mountDialog('new')
+    await wrapper.get('[data-testid="task-name"]').setValue('Twice daily')
+    await wrapper.get('[data-testid="task-prompt"]').setValue('Review issues')
+    await wrapper.get('[data-testid="add-time"]').trigger('click')
+    await wrapper.get('[data-testid="task-time-1"]').setValue('14:30')
+    expect(wrapper.get('[data-testid="schedule-summary"]').text()).toContain(
+      'Daily · 09:00, 14:30 · up to 2 runs a day',
+    )
+    await wrapper.get('[data-testid="save-task"]').trigger('click')
+    await flushPromises()
+    expect(api.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recurrence: 'cron',
+        weekdays: [],
+        cron_expression: '0 9 * * *; 30 14 * * *',
+      }),
+    )
+  })
+
+  it('saves a repeating interval and prefills the cron editor from it', async () => {
+    const { wrapper } = await mountDialog('new')
+    await wrapper.get('[data-testid="task-name"]').setValue('Quarter-hourly')
+    await wrapper.get('[data-testid="task-prompt"]').setValue('Check CI')
+    await wrapper.get('[data-testid="schedule-mode-interval"]').trigger('click')
+    const option = wrapper.findAll('button').find((item) => item.text() === '15 minutes')!
+    await option.trigger('click')
+    await wrapper.get('[data-testid="weekdays-weekdays"]').trigger('click')
+    expect(wrapper.get('[data-testid="schedule-summary"]').text()).toContain(
+      'Weekdays · Every 15 min',
+    )
+    await wrapper.get('[data-testid="schedule-mode-cron"]').trigger('click')
+    expect((wrapper.get('[data-testid="task-cron"]').element as HTMLInputElement).value).toBe(
+      '*/15 * * * 1-5',
+    )
+    await wrapper.get('[data-testid="save-task"]').trigger('click')
+    await flushPromises()
+    expect(api.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({ recurrence: 'cron', cron_expression: '*/15 * * * 1-5' }),
+    )
+  })
+
+  it('opens custom cron tasks in the cron editor and blocks invalid expressions', async () => {
+    const { wrapper } = await mountDialog('edit', {
+      ...task,
+      recurrence: 'cron',
+      weekdays: [],
+      cron_expression: '0 9 1 * *',
+    })
+    expect(wrapper.get('[data-testid="schedule-mode-cron"]').attributes('aria-checked')).toBe(
+      'true',
+    )
+    expect(wrapper.get('[data-testid="schedule-summary"]').text()).toContain(
+      'Day 1 of month · 09:00',
+    )
+    await wrapper.get('[data-testid="task-cron"]').setValue('61 * * * *')
+    expect(wrapper.get('[data-testid="task-cron-error"]').text()).toContain('between 0 and 59')
+    await wrapper.get('[data-testid="save-task"]').trigger('click')
+    await flushPromises()
+    expect(api.updateScheduledTask).not.toHaveBeenCalled()
+  })
+
   it('saves a weekly task through shared store, but does not run it', async () => {
     const { wrapper, store } = await mountDialog('new')
     await wrapper.get('[data-testid="task-name"]').setValue('Morning check')

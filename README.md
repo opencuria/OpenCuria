@@ -273,8 +273,11 @@ rejects duplicate workers before recovery starts; SQLite uses a renewed TTL-row 
 (best effort, not suitable for separate hosts without shared locking semantics).
 Raw Django `runserver` has no scheduler startup hook and is not suitable for production.
 Scheduled tasks are personal
-recurring prompts (daily or selected weekdays, local `HH:MM` and an IANA timezone),
-with DST gaps skipped and fall-back repeated times executed once. Each occurrence
+recurring prompts in an IANA timezone: daily or selected weekdays at a local `HH:MM`,
+or `recurrence: "cron"` with five-field cron expressions (`cron_expression`, several
+joined by `;`) for multiple runs per day, intervals and monthly/yearly cadences. The
+UI offers set times, repeating intervals and a raw cron editor. DST gaps are skipped
+and fall-back repeated times executed once. Each occurrence
 creates a new root harness session. REST endpoints are under
 `/api/v1/scheduled-tasks/` (`harness:read` for listing/history, `harness:run` for
 create/edit/pause/delete/run-now); matching MCP tools are exposed.

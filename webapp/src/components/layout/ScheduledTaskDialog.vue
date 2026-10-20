@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Check, Loader2, MoreHorizontal, Play, RefreshCw, Trash2, X } from '@lucide/vue'
+import { Check, Loader2, MoreHorizontal, Play, Plus, RefreshCw, Trash2, X } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
@@ -41,11 +41,22 @@ import { useScheduledTaskStore } from '@/stores/scheduledTasks'
 import { WorkspaceStatus } from '@/types'
 import type { HarnessId } from '@/types/harness'
 import {
+  CRON_PRESETS,
+  defaultScheduleDraft,
+  describeScheduleDraft,
+  INTERVAL_OPTIONS,
   isValidTimeZone,
-  nextLocalOccurrence,
+  maxRunsPerDay,
+  MAX_SCHEDULE_TIMES,
+  scheduleDraftFromTask,
+  scheduleDraftToCron,
+  schedulePayload,
   validateSchedule,
+  validateScheduleDraft,
   WEEKDAYS,
 } from '@/lib/scheduledTasks'
+import type { ScheduleDraft, ScheduleMode } from '@/lib/scheduledTasks'
+import { nextCronOccurrences } from '@/lib/cron'
 import { useNotificationStore } from '@/stores/notifications'
 import { usePolling } from '@/composables/usePolling'
 
@@ -81,8 +92,7 @@ interface FormState {
   model: string
   reasoning_effort: string
   skill_ids: string[]
-  weekdays: number[]
-  local_time: string
+  schedule: ScheduleDraft
   timezone_name: string
   enabled: boolean
 }
@@ -96,16 +106,21 @@ function blankForm(): FormState {
     model: '',
     reasoning_effort: '',
     skill_ids: [],
-    weekdays: WEEKDAYS.map((day) => day.value),
-    local_time: '09:00',
+    schedule: defaultScheduleDraft(),
     timezone_name: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
     enabled: true,
   }
 }
 const form = ref<FormState>(blankForm())
-const recurrence = computed(() =>
-  WEEKDAYS.every((day) => form.value.weekdays.includes(day.value)) ? 'daily' : 'weekly',
-)
+const SCHEDULE_MODES: { value: ScheduleMode; label: string }[] = [
+  { value: 'times', label: 'At set times' },
+  { value: 'interval', label: 'Repeating' },
+  { value: 'cron', label: 'Custom (cron)' },
+]
+const HOURS = Array.from({ length: 25 }, (_, hour) => ({
+  value: hour,
+  label: `${String(hour).padStart(2, '0')}:00`,
+}))
 const errors = ref<Record<string, string>>({})
 let formBaseline = JSON.stringify(form.value)
 watch(
@@ -152,30 +167,42 @@ const workspaceCanManageFiles = computed(
     !chosenWorkspace.value.active_operation,
 )
 const timezoneValid = computed(() => isValidTimeZone(form.value.timezone_name))
-const nextPreview = computed(() => {
-  if (!timezoneValid.value) return null
+const scheduleErrors = computed(() => validateScheduleDraft(form.value.schedule))
+const scheduleCron = computed(() => scheduleDraftToCron(form.value.schedule))
+const scheduleSummary = computed(() => describeScheduleDraft(form.value.schedule))
+const runsPerDay = computed(() =>
+  Object.keys(scheduleErrors.value).length ? 0 : maxRunsPerDay(scheduleCron.value),
+)
+const upcomingRuns = computed<Date[]>(() => {
+  if (!timezoneValid.value || Object.keys(scheduleErrors.value).length) return []
+  const zone = form.value.timezone_name
   if (!dirty.value && selectedTask.value) {
     const authoritative = new Date(selectedTask.value.next_run_at)
-    if (!Number.isNaN(authoritative.getTime())) return authoritative
+    if (!Number.isNaN(authoritative.getTime()))
+      return [authoritative, ...nextCronOccurrences(scheduleCron.value, zone, authoritative, 3)]
   }
-  return nextLocalOccurrence(
-    recurrence.value,
-    form.value.weekdays,
-    form.value.local_time,
-    form.value.timezone_name,
-  )
+  return nextCronOccurrences(scheduleCron.value, zone, new Date(), 4)
 })
+function formatRunTime(date: Date, withDay: boolean): string {
+  return new Intl.DateTimeFormat(undefined, {
+    timeZone: form.value.timezone_name,
+    ...(withDay ? { weekday: 'short', month: 'short', day: 'numeric' } : {}),
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(date)
+}
+const localDayKey = (date: Date): string =>
+  new Intl.DateTimeFormat('en-CA', { timeZone: form.value.timezone_name }).format(date)
 const previewText = computed(() =>
-  nextPreview.value
-    ? new Intl.DateTimeFormat(undefined, {
-        timeZone: form.value.timezone_name,
-        weekday: 'short',
-        month: 'short',
-        day: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit',
-      }).format(nextPreview.value)
-    : 'Choose a valid time',
+  upcomingRuns.value[0] ? formatRunTime(upcomingRuns.value[0], true) : 'Choose a valid time',
+)
+const laterRunsText = computed(() =>
+  upcomingRuns.value
+    .slice(1)
+    .map((date, index) =>
+      formatRunTime(date, localDayKey(date) !== localDayKey(upcomingRuns.value[index]!)),
+    )
+    .join(' · '),
 )
 const busy = computed(() => saving.value || uploading.value || actionBusy.value || deleting.value)
 let postDiscardAction: (() => void) | null = null
@@ -198,8 +225,7 @@ function applyTask(task: ScheduledTask): void {
     model: task.model,
     reasoning_effort: task.reasoning_effort,
     skill_ids: [...task.skill_ids],
-    weekdays: task.recurrence === 'daily' ? WEEKDAYS.map((day) => day.value) : [...task.weekdays],
-    local_time: task.local_time,
+    schedule: scheduleDraftFromTask(task),
     timezone_name: task.timezone_name,
     enabled: task.enabled,
   }
@@ -264,11 +290,45 @@ function discardChanges(): void {
   action()
 }
 function toggleWeekday(day: number): void {
-  const days = new Set(form.value.weekdays)
+  const days = new Set(form.value.schedule.weekdays)
   if (days.has(day)) days.delete(day)
   else days.add(day)
-  form.value.weekdays = [...days].sort((a, b) => a - b)
+  updateSchedule(
+    'weekdays',
+    [...days].sort((a, b) => a - b),
+  )
+}
+function updateSchedule<K extends keyof ScheduleDraft>(key: K, value: ScheduleDraft[K]): void {
+  if (JSON.stringify(form.value.schedule[key]) === JSON.stringify(value)) return
+  form.value.schedule[key] = value
   dirty.value = true
+  apiError.value = ''
+}
+function setScheduleMode(mode: ScheduleMode): void {
+  if (mode === form.value.schedule.mode) return
+  // Carry the current cadence into the cron editor so it can be fine-tuned.
+  if (mode === 'cron' && !form.value.schedule.cron_expression.trim())
+    updateSchedule('cron_expression', scheduleCron.value)
+  updateSchedule('mode', mode)
+}
+function setTime(index: number, value: string): void {
+  const times = [...form.value.schedule.times]
+  times[index] = value
+  updateSchedule('times', times)
+}
+function addTime(): void {
+  const times = form.value.schedule.times
+  const last = [...times].sort().pop() ?? '08:00'
+  const hour = Math.min(Number(last.slice(0, 2)) + 1, 23)
+  let candidate = `${String(hour).padStart(2, '0')}:${last.slice(3, 5) || '00'}`
+  if (times.includes(candidate)) candidate = '12:00'
+  updateSchedule('times', [...times, candidate])
+}
+function removeTime(index: number): void {
+  updateSchedule(
+    'times',
+    form.value.schedule.times.filter((_, item) => item !== index),
+  )
 }
 function updateForm<K extends keyof FormState>(key: K, value: FormState[K]): void {
   if (JSON.stringify(form.value[key]) === JSON.stringify(value)) return
@@ -277,17 +337,11 @@ function updateForm<K extends keyof FormState>(key: K, value: FormState[K]): voi
   apiError.value = ''
 }
 function validate(): boolean {
-  const result = validateSchedule({ ...form.value, recurrence: recurrence.value })
-  errors.value = { ...result.errors }
+  const result = validateSchedule({ ...form.value, ...schedulePayload(form.value.schedule) })
+  errors.value = { ...result.errors, ...scheduleErrors.value }
   if (isNew.value && !form.value.workspace_id && visibleWorkspaces.value.length === 0)
     errors.value.workspace_id = 'Create a workspace before scheduling a task.'
-  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(form.value.local_time))
-    errors.value.local_time = 'Enter a valid time.'
-  return (
-    result.valid &&
-    !errors.value.local_time &&
-    !(isNew.value && !form.value.workspace_id && visibleWorkspaces.value.length === 0)
-  )
+  return Object.keys(errors.value).length === 0
 }
 async function save(): Promise<void> {
   if (busy.value || taskUnavailable.value || !validate()) return
@@ -297,12 +351,12 @@ async function save(): Promise<void> {
   const organizationId = authStore.activeOrganizationId
   apiError.value = ''
   try {
+    const { schedule, ...fields } = form.value
     const payload: ScheduledTaskInput = {
-      ...form.value,
+      ...fields,
       name: form.value.name.trim(),
       prompt: form.value.prompt.trim(),
-      recurrence: recurrence.value,
-      weekdays: recurrence.value === 'daily' ? [] : form.value.weekdays,
+      ...schedulePayload(schedule),
     }
     const saved = selectedId.value
       ? await taskStore.update(selectedId.value, payload)
@@ -744,83 +798,281 @@ onMounted(async () => {
                 class="space-y-3 border-t border-border pt-3"
                 aria-labelledby="schedule-heading"
               >
-                <div>
+                <div class="flex flex-wrap items-center justify-between gap-2">
                   <h3 id="schedule-heading" class="text-xs font-semibold">Schedule</h3>
-                </div>
-                <div class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_130px]">
-                  <div class="space-y-1.5">
-                    <span class="block text-xs font-medium">Days</span>
-                    <div class="flex flex-wrap items-center gap-1.5" data-testid="weekday-picker">
-                      <Button
-                        v-for="day in WEEKDAYS"
-                        :key="day.value"
-                        variant="outline"
-                        size="sm"
-                        class="h-9 min-w-9 rounded-md px-2 text-xs"
-                        :class="
-                          form.weekdays.includes(day.value)
-                            ? 'border-primary/50 bg-primary/10 text-primary'
-                            : 'border-border text-muted-foreground'
-                        "
-                        :aria-pressed="form.weekdays.includes(day.value)"
-                        :data-testid="`weekday-${day.value}`"
-                        @click="toggleWeekday(day.value)"
-                      >
-                        {{ day.label }}</Button
-                      ><Button
-                        variant="ghost"
-                        size="sm"
-                        class="h-8 rounded-lg px-2 text-xs"
-                        data-testid="weekdays-weekdays"
-                        @click="updateForm('weekdays', [0, 1, 2, 3, 4])"
-                        >Mon–Fri</Button
-                      >
-                    </div>
-                    <span v-if="errors.weekdays" class="text-xs text-destructive">{{
-                      errors.weekdays
-                    }}</span>
+                  <div
+                    role="radiogroup"
+                    aria-label="Repeat"
+                    class="inline-flex rounded-lg border border-border bg-muted/40 p-0.5"
+                    data-testid="schedule-mode"
+                  >
+                    <button
+                      v-for="option in SCHEDULE_MODES"
+                      :key="option.value"
+                      type="button"
+                      role="radio"
+                      class="h-7 rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-primary"
+                      :class="
+                        form.schedule.mode === option.value
+                          ? 'bg-background text-foreground shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground'
+                      "
+                      :aria-checked="form.schedule.mode === option.value"
+                      :data-testid="`schedule-mode-${option.value}`"
+                      @click="setScheduleMode(option.value)"
+                    >
+                      {{ option.label }}
+                    </button>
                   </div>
+                </div>
+
+                <div v-if="form.schedule.mode !== 'cron'" class="space-y-1.5">
+                  <span class="block text-xs font-medium">Days</span>
+                  <div class="flex flex-wrap items-center gap-1.5" data-testid="weekday-picker">
+                    <Button
+                      v-for="day in WEEKDAYS"
+                      :key="day.value"
+                      variant="outline"
+                      size="sm"
+                      class="h-9 min-w-9 rounded-md px-2 text-xs"
+                      :class="
+                        form.schedule.weekdays.includes(day.value)
+                          ? 'border-primary/50 bg-primary/10 text-primary'
+                          : 'border-border text-muted-foreground'
+                      "
+                      :aria-pressed="form.schedule.weekdays.includes(day.value)"
+                      :data-testid="`weekday-${day.value}`"
+                      @click="toggleWeekday(day.value)"
+                    >
+                      {{ day.label }}</Button
+                    ><Button
+                      variant="ghost"
+                      size="sm"
+                      class="h-8 rounded-lg px-2 text-xs"
+                      data-testid="weekdays-weekdays"
+                      @click="updateSchedule('weekdays', [0, 1, 2, 3, 4])"
+                      >Mon–Fri</Button
+                    ><Button
+                      variant="ghost"
+                      size="sm"
+                      class="h-8 rounded-lg px-2 text-xs"
+                      data-testid="weekdays-all"
+                      @click="updateSchedule('weekdays', [0, 1, 2, 3, 4, 5, 6])"
+                      >Every day</Button
+                    >
+                  </div>
+                  <span v-if="errors.weekdays" class="text-xs text-destructive">{{
+                    errors.weekdays
+                  }}</span>
+                </div>
+
+                <div v-if="form.schedule.mode === 'times'" class="space-y-1.5">
+                  <span class="block text-xs font-medium">Times</span>
+                  <div class="flex flex-wrap items-center gap-1.5" data-testid="time-list">
+                    <div
+                      v-for="(time, index) in form.schedule.times"
+                      :key="index"
+                      class="relative flex items-center"
+                    >
+                      <Input
+                        type="time"
+                        :model-value="time"
+                        class="h-9 w-[9.5rem] rounded-lg"
+                        :class="form.schedule.times.length > 1 ? 'pr-7' : ''"
+                        :aria-label="`Run time ${index + 1}`"
+                        :data-testid="index === 0 ? 'task-time' : `task-time-${index}`"
+                        @update:model-value="setTime(index, String($event))"
+                      /><button
+                        v-if="form.schedule.times.length > 1"
+                        type="button"
+                        class="absolute right-1.5 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                        :aria-label="`Remove ${time}`"
+                        :data-testid="`remove-time-${index}`"
+                        @click="removeTime(index)"
+                      >
+                        <X class="size-3.5" />
+                      </button>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      class="h-8 rounded-lg px-2 text-xs"
+                      :disabled="form.schedule.times.length >= MAX_SCHEDULE_TIMES"
+                      data-testid="add-time"
+                      @click="addTime"
+                      ><Plus class="mr-1 size-3.5" />Add time</Button
+                    >
+                  </div>
+                  <span v-if="errors.times" class="text-xs text-destructive">{{
+                    errors.times
+                  }}</span>
+                </div>
+
+                <div
+                  v-else-if="form.schedule.mode === 'interval'"
+                  class="flex flex-wrap items-end gap-x-4 gap-y-3"
+                >
                   <label class="block space-y-1.5"
-                    ><span class="block text-xs font-medium">Time</span
-                    ><Input
-                      type="time"
-                      :model-value="form.local_time"
-                      class="h-9 rounded-lg"
-                      data-testid="task-time"
-                      @update:model-value="updateForm('local_time', String($event))"
-                    /><span v-if="errors.local_time" class="text-xs text-destructive">{{
-                      errors.local_time
-                    }}</span></label
+                    ><span class="block text-xs font-medium">Every</span>
+                    <Select
+                      :model-value="form.schedule.interval"
+                      :disabled="busy"
+                      @update:model-value="updateSchedule('interval', String($event))"
+                    >
+                      <SelectTrigger class="h-9 w-36 rounded-lg" data-testid="task-interval"
+                        ><SelectValue
+                      /></SelectTrigger>
+                      <SelectContent
+                        ><SelectItem
+                          v-for="option in INTERVAL_OPTIONS"
+                          :key="option.value"
+                          :value="option.value"
+                          >{{ option.label }}</SelectItem
+                        ></SelectContent
+                      >
+                    </Select>
+                  </label>
+                  <div class="space-y-1.5">
+                    <label class="flex h-[18px] items-center gap-2 text-xs font-medium"
+                      ><Switch
+                        :model-value="form.schedule.window_enabled"
+                        class="scale-90"
+                        data-testid="task-window-enabled"
+                        @update:model-value="updateSchedule('window_enabled', $event)"
+                      />Only between</label
+                    >
+                    <div
+                      class="flex items-center gap-1.5 text-xs text-muted-foreground"
+                      :class="form.schedule.window_enabled ? '' : 'opacity-50'"
+                    >
+                      <Select
+                        :model-value="String(form.schedule.window_start)"
+                        :disabled="busy || !form.schedule.window_enabled"
+                        @update:model-value="updateSchedule('window_start', Number($event))"
+                      >
+                        <SelectTrigger
+                          class="h-9 w-24 rounded-lg"
+                          aria-label="Start hour"
+                          data-testid="task-window-start"
+                          ><SelectValue
+                        /></SelectTrigger>
+                        <SelectContent
+                          ><SelectItem
+                            v-for="hour in HOURS.slice(0, 24)"
+                            :key="hour.value"
+                            :value="String(hour.value)"
+                            >{{ hour.label }}</SelectItem
+                          ></SelectContent
+                        >
+                      </Select>
+                      and
+                      <Select
+                        :model-value="String(form.schedule.window_end)"
+                        :disabled="busy || !form.schedule.window_enabled"
+                        @update:model-value="updateSchedule('window_end', Number($event))"
+                      >
+                        <SelectTrigger
+                          class="h-9 w-24 rounded-lg"
+                          aria-label="End hour"
+                          data-testid="task-window-end"
+                          ><SelectValue
+                        /></SelectTrigger>
+                        <SelectContent
+                          ><SelectItem
+                            v-for="hour in HOURS.slice(1)"
+                            :key="hour.value"
+                            :value="String(hour.value)"
+                            >{{ hour.label }}</SelectItem
+                          ></SelectContent
+                        >
+                      </Select>
+                    </div>
+                  </div>
+                  <span
+                    v-if="form.schedule.window_enabled && scheduleErrors.window"
+                    class="w-full text-xs text-destructive"
+                    >{{ scheduleErrors.window }}</span
                   >
                 </div>
-                <div class="grid gap-3 sm:grid-cols-2">
+
+                <div v-else class="space-y-1.5">
                   <label class="block space-y-1.5"
-                    ><span class="block text-xs font-medium">Time zone</span
+                    ><span class="block text-xs font-medium">Cron expression</span
                     ><Input
-                      v-model="form.timezone_name"
-                      list="scheduled-timezones"
-                      placeholder="Europe/Berlin"
-                      class="h-9 rounded-lg"
-                      data-testid="task-timezone"
-                      @update:model-value="dirty = true"
-                    /><datalist id="scheduled-timezones">
-                      <option value="UTC" />
-                      <option value="Europe/London" />
-                      <option value="Europe/Berlin" />
-                      <option value="America/New_York" />
-                      <option value="America/Los_Angeles" />
-                      <option value="Asia/Tokyo" /></datalist
-                    ><span class="block text-xs text-muted-foreground"
-                      >Local time, including daylight saving.</span
-                    ><span
-                      v-if="form.timezone_name && !timezoneValid"
-                      class="block text-xs text-destructive"
-                      >{{ errors.timezone_name || 'Enter a valid IANA time zone.' }}</span
-                    ></label
+                      :model-value="form.schedule.cron_expression"
+                      placeholder="*/30 9-17 * * 1-5"
+                      spellcheck="false"
+                      autocomplete="off"
+                      class="h-9 rounded-lg font-mono text-sm"
+                      data-testid="task-cron"
+                      @update:model-value="updateSchedule('cron_expression', String($event))"
+                  /></label>
+                  <p class="text-xs text-muted-foreground">
+                    <span class="font-mono">minute hour day month weekday</span> · Sunday = 0 ·
+                    combine several with <span class="font-mono">;</span>
+                  </p>
+                  <span
+                    v-if="scheduleErrors.cron_expression"
+                    class="block text-xs text-destructive"
+                    data-testid="task-cron-error"
+                    >{{ scheduleErrors.cron_expression }}</span
                   >
-                  <p class="self-center text-xs text-muted-foreground sm:pt-5">
+                  <div class="flex flex-wrap gap-1.5 pt-0.5">
+                    <Button
+                      v-for="preset in CRON_PRESETS"
+                      :key="preset.expression"
+                      variant="outline"
+                      size="sm"
+                      class="h-7 rounded-full px-2.5 text-xs font-normal text-muted-foreground"
+                      :title="preset.expression"
+                      @click="updateSchedule('cron_expression', preset.expression)"
+                      >{{ preset.label }}</Button
+                    >
+                  </div>
+                </div>
+
+                <label class="block space-y-1.5 sm:max-w-[50%] sm:pr-1.5"
+                  ><span class="block text-xs font-medium">Time zone</span
+                  ><Input
+                    v-model="form.timezone_name"
+                    list="scheduled-timezones"
+                    placeholder="Europe/Berlin"
+                    class="h-9 rounded-lg"
+                    data-testid="task-timezone"
+                    @update:model-value="dirty = true"
+                  /><datalist id="scheduled-timezones">
+                    <option value="UTC" />
+                    <option value="Europe/London" />
+                    <option value="Europe/Berlin" />
+                    <option value="America/New_York" />
+                    <option value="America/Los_Angeles" />
+                    <option value="Asia/Tokyo" /></datalist
+                  ><span
+                    v-if="form.timezone_name && !timezoneValid"
+                    class="block text-xs text-destructive"
+                    >{{ errors.timezone_name || 'Enter a valid IANA time zone.' }}</span
+                  ></label
+                >
+
+                <div
+                  class="space-y-0.5 rounded-lg border border-border bg-muted/30 px-3 py-2.5 text-xs"
+                  data-testid="schedule-summary"
+                >
+                  <p class="font-medium text-foreground">
+                    {{ scheduleSummary
+                    }}<span v-if="runsPerDay > 1" class="font-normal text-muted-foreground">
+                      · up to {{ runsPerDay }} runs a day</span
+                    >
+                  </p>
+                  <p class="text-muted-foreground">
                     Next run · {{ previewText }} in
                     {{ form.timezone_name || 'the selected time zone' }}
+                  </p>
+                  <p v-if="laterRunsText" class="text-muted-foreground" data-testid="later-runs">
+                    Then {{ laterRunsText }}
+                  </p>
+                  <p v-if="runsPerDay > 48" class="text-amber-600 dark:text-amber-400">
+                    This runs very often. Each run starts a new chat.
                   </p>
                 </div>
                 <div class="flex items-center justify-between gap-4 border-t border-border pt-3">

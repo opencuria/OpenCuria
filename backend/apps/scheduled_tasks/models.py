@@ -12,6 +12,7 @@ class ScheduledTask(models.Model):
     class Recurrence(models.TextChoices):
         DAILY = "daily", "Daily"
         WEEKLY = "weekly", "Weekly"
+        CRON = "cron", "Cron"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     organization = models.ForeignKey(
@@ -32,6 +33,8 @@ class ScheduledTask(models.Model):
     skill_ids = models.JSONField(default=list, blank=True)
     recurrence = models.CharField(max_length=16, choices=Recurrence.choices)
     weekdays = models.JSONField(default=list, blank=True)
+    # Only used by CRON recurrence; ``;``-separated five-field expressions.
+    cron_expression = models.CharField(max_length=1000, blank=True, default="")
     local_time = models.TimeField()
     timezone_name = models.CharField(max_length=64, default="UTC")
     enabled = models.BooleanField(default=True)
