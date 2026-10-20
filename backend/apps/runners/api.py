@@ -19,7 +19,6 @@ from datetime import timedelta
 
 from asgiref.sync import sync_to_async
 from django.core.exceptions import ObjectDoesNotExist, SynchronousOnlyOperation
-from django.db.models import Q
 from django.http import HttpRequest
 from django.utils import timezone
 from ninja import Body, Schema, Router
@@ -33,7 +32,12 @@ from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.utils import generate_api_token, hash_token
 
 from .enums import WorkspaceStatus
-from .exceptions import RunnerOfflineError
+from .exceptions import (
+    AdminRoleRequiredError,
+    ImageRecipeNotFoundError,
+    ImageRecipeValidationError,
+    RunnerOfflineError,
+)
 from .image_presenters import (
     captured_image_to_out,
     image_artifact_to_out,
@@ -94,6 +98,7 @@ from .schemas import (
     validate_commit_hash,
 )
 from .services import get_runner_service
+from .services.image_definitions import ImageDefinitionService
 
 
 def _perm_denied(permission: APIKeyPermission):
@@ -230,25 +235,6 @@ def _get_org_service() -> OrganizationService:
     return OrganizationService()
 
 
-def _org_image_definition_copy_name(base_name: str, org_id: uuid.UUID) -> str:
-    """Return a unique image definition copy name scoped to an organization."""
-    return _get_service().image_definition_copy_name(base_name, org_id)
-
-
-def _validate_image_definition_runtime(runtime_type: str, base_distro: str):
-    """Validate runtime-specific image definition constraints."""
-    if (runtime_type or "").strip().lower() == "qemu":
-        if not (base_distro or "").strip().lower().startswith("ubuntu:"):
-            return 409, ErrorOut(
-                detail=(
-                    "QEMU image definitions currently require an ubuntu:<version> "
-                    "base distro"
-                ),
-                code="unsupported_base_distro",
-            )
-    return None
-
-
 async def _get_org_admin_flag_async(request: HttpRequest, org_id: uuid.UUID) -> bool:
     """Validate membership and return whether the user is an org admin."""
     org_service = _get_org_service()
@@ -263,13 +249,6 @@ async def _require_org_membership_async(
     """Validate organization membership for async endpoints."""
     org_service = _get_org_service()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
-
-
-def _is_org_admin(user, org_id: uuid.UUID) -> bool:
-    """Return whether user is organization admin (membership required)."""
-    org_service = _get_org_service()
-    org_service.require_membership(user, org_id)
-    return org_service.get_user_role(user, org_id) == "admin"
 
 
 def _get_owned_workspace(
@@ -313,36 +292,6 @@ async def _get_owned_workspace_artifact_async(
     if artifact.created_by_id != request.user.id:
         raise NotFoundError("ImageArtifact", str(image_artifact_id))
     return workspace, artifact
-
-
-def _get_image_definition_for_org(org_id: uuid.UUID, definition_id: uuid.UUID):
-    """Return a visible image definition for an organization."""
-    return _get_service().get_visible_image_definition(definition_id, org_id)
-
-
-def _get_build_job_for_org(
-    org_id: uuid.UUID,
-    definition_id: uuid.UUID,
-    runner_id: uuid.UUID,
-):
-    """Return a runner image build scoped to an organization."""
-    from .models import ImageBuildJob
-
-    return (
-        ImageBuildJob.objects.filter(
-            image_definition_id=definition_id,
-            runner_id=runner_id,
-            runner__organization_id=org_id,
-        )
-        .filter(
-            Q(image_definition__organization_id=org_id)
-            | Q(image_definition__organization__isnull=True)
-        )
-        .select_related(
-            "image_definition", "runner", "build_task", "current_generation"
-        )
-        .first()
-    )
 
 
 # ===========================================================================
@@ -2311,11 +2260,36 @@ async def create_workspace_from_workspace_image_artifact(
 
 image_definition_router = Router(tags=["image-definitions"])
 
+#: Service errors an image recipe endpoint maps to an HTTP status.
+_IMAGE_RECIPE_ERRORS = (
+    AdminRoleRequiredError,
+    ImageRecipeNotFoundError,
+    ImageRecipeValidationError,
+    ConflictError,
+)
+
+
+def _image_definitions() -> ImageDefinitionService:
+    return ImageDefinitionService(_get_service())
+
+
+def _image_recipe_error(exc: Exception):
+    """Map an ``_IMAGE_RECIPE_ERRORS`` exception to its REST error response."""
+    if isinstance(exc, AdminRoleRequiredError):
+        status = 403
+    elif isinstance(exc, ImageRecipeNotFoundError):
+        status = 404
+    elif isinstance(exc, ImageRecipeValidationError):
+        status = 400
+    else:
+        status = 409
+    return status, ErrorOut(
+        detail=exc.message, code=exc.code, gaps=getattr(exc, "gaps", None)
+    )
+
 
 def _image_definition_to_out(defn) -> ImageDefinitionOut:
-    from .repositories import ImageDefinitionRepository
-
-    summary = ImageDefinitionRepository.build_summary(defn)
+    summary = ImageDefinitionService.build_summary(defn)
     return ImageDefinitionOut(
         id=defn.id,
         organization_id=defn.organization_id,
@@ -2410,13 +2384,10 @@ def _build_job_to_list_out(build) -> ImageBuildJobListOut:
 def list_image_definitions(request: HttpRequest):
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_READ):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-    service = _get_service()
-    return 200, [
-        _image_definition_to_out(d) for d in service.list_image_definitions(org_id)
-    ]
+    definitions = _image_definitions().list_visible(
+        request.user, _get_org_id(request)
+    )
+    return 200, [_image_definition_to_out(d) for d in definitions]
 
 
 @image_definition_router.post(
@@ -2427,30 +2398,12 @@ def list_image_definitions(request: HttpRequest):
 def create_image_definition(request: HttpRequest, payload: ImageDefinitionCreateIn):
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_WRITE):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    if not _is_org_admin(request.user, org_id):
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    validation_error = _validate_image_definition_runtime(
-        payload.runtime_type,
-        payload.base_distro,
-    )
-    if validation_error is not None:
-        return validation_error
-
-    definition = _get_service().create_image_definition(
-        organization_id=org_id,
-        created_by=request.user,
-        name=payload.name,
-        description=payload.description,
-        runtime_type=payload.runtime_type,
-        base_distro=payload.base_distro,
-        packages=payload.packages,
-        env_vars=payload.env_vars,
-        custom_dockerfile=payload.custom_dockerfile,
-        custom_init_script=payload.custom_init_script,
-        is_active=payload.is_active,
-    )
+    try:
+        definition = _image_definitions().create(
+            request.user, _get_org_id(request), payload.model_dump()
+        )
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
     return 201, _image_definition_to_out(definition)
 
 
@@ -2466,33 +2419,12 @@ def duplicate_image_definition(
 ):
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_WRITE):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-    if org_service.get_user_role(request.user, org_id) != "admin":
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    source = _get_service().get_visible_image_definition(definition_id, org_id)
-    if source is None:
-        return 404, ErrorOut(detail="Image definition not found", code="not_found")
-
-    if payload.name is not None and not payload.name.strip():
-        return 400, ErrorOut(detail="name cannot be empty", code="validation_error")
-
-    target_name = _org_image_definition_copy_name(payload.name or source.name, org_id)
-    copied = _get_service().create_image_definition(
-        organization_id=org_id,
-        created_by=request.user,
-        name=target_name,
-        description=source.description,
-        runtime_type=source.runtime_type,
-        base_distro=source.base_distro,
-        packages=list(source.packages or []),
-        env_vars=dict(source.env_vars or {}),
-        custom_dockerfile=source.custom_dockerfile,
-        custom_init_script=source.custom_init_script,
-        is_active=source.is_active,
-    )
+    try:
+        copied = _image_definitions().duplicate(
+            request.user, _get_org_id(request), definition_id, payload.name
+        )
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
     return 201, _image_definition_to_out(copied)
 
 
@@ -2506,35 +2438,12 @@ def update_image_definition(
 ):
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_WRITE):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    if not _is_org_admin(request.user, org_id):
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    definition = _get_service().get_visible_image_definition(definition_id, org_id)
-    if definition is None or definition.organization_id != org_id:
-        return 404, ErrorOut(detail="Image definition not found", code="not_found")
-
-    validation_error = _validate_image_definition_runtime(
-        payload.runtime_type or definition.runtime_type,
-        payload.base_distro or definition.base_distro,
-    )
-    if validation_error is not None:
-        return validation_error
-
-    fields = [
-        "name",
-        "description",
-        "runtime_type",
-        "base_distro",
-        "packages",
-        "env_vars",
-        "custom_dockerfile",
-        "custom_init_script",
-        "is_active",
-    ]
-    definition = _get_service().update_image_recipe(
-        definition.id, {field: getattr(payload, field, None) for field in fields}
-    )
+    try:
+        definition = _image_definitions().update(
+            request.user, _get_org_id(request), definition_id, payload.model_dump()
+        )
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
     return 200, _image_definition_to_out(definition)
 
 
@@ -2556,29 +2465,17 @@ async def delete_image_definition(request: HttpRequest, definition_id: uuid.UUID
     """
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_WRITE):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    if not await sync_to_async(_is_org_admin)(request.user, org_id):
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    definition = await sync_to_async(_get_image_definition_for_org)(
-        org_id, definition_id
-    )
-    if definition is None or definition.organization_id != org_id:
-        return 404, ErrorOut(detail="Image definition not found", code="not_found")
-
-    service = _get_service()
     try:
-        await service.delete_image_definition(definition_id)
-        definition = await sync_to_async(service.get_image_definition)(definition_id)
-        if definition is None:
-            return 204, None
-        return 202, await sync_to_async(_image_definition_to_out)(definition)
-    except ConflictError as e:
-        return 409, ErrorOut(
-            detail=e.message, code=e.code, gaps=getattr(e, "gaps", None)
+        definition = await _image_definitions().delete(
+            request.user, _get_org_id(request), definition_id
         )
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
     except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
+    if definition is None:
+        return 204, None
+    return 202, await sync_to_async(_image_definition_to_out)(definition)
 
 
 @image_definition_router.post(
@@ -2590,23 +2487,13 @@ async def deactivate_image_definition(request: HttpRequest, definition_id: uuid.
     """Deactivate a definition — immediately not selectable for new workspaces."""
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_WRITE):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    if not await sync_to_async(_is_org_admin)(request.user, org_id):
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    definition = await sync_to_async(_get_image_definition_for_org)(
-        org_id, definition_id
-    )
-    if definition is None or definition.organization_id != org_id:
-        return 404, ErrorOut(detail="Image definition not found", code="not_found")
-
-    service = _get_service()
     try:
-        await service.deactivate_image_definition(definition_id)
-        definition = await sync_to_async(service.get_image_definition)(definition_id)
-        return 200, await sync_to_async(_image_definition_to_out)(definition)
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
+        definition = await _image_definitions().deactivate(
+            request.user, _get_org_id(request), definition_id
+        )
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
+    return 200, await sync_to_async(_image_definition_to_out)(definition)
 
 
 @image_definition_router.post(
@@ -2618,23 +2505,13 @@ async def activate_image_definition(request: HttpRequest, definition_id: uuid.UU
     """Re-activate a deactivated definition."""
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_WRITE):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
-    org_id = _get_org_id(request)
-    if not await sync_to_async(_is_org_admin)(request.user, org_id):
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    definition = await sync_to_async(_get_image_definition_for_org)(
-        org_id, definition_id
-    )
-    if definition is None or definition.organization_id != org_id:
-        return 404, ErrorOut(detail="Image definition not found", code="not_found")
-
-    service = _get_service()
     try:
-        await service.activate_image_definition(definition_id)
-        definition = await sync_to_async(service.get_image_definition)(definition_id)
-        return 200, await sync_to_async(_image_definition_to_out)(definition)
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
+        definition = await _image_definitions().activate(
+            request.user, _get_org_id(request), definition_id
+        )
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
+    return 200, await sync_to_async(_image_definition_to_out)(definition)
 
 
 @image_definition_router.get(
@@ -2645,16 +2522,13 @@ async def activate_image_definition(request: HttpRequest, definition_id: uuid.UU
 def list_image_definition_runner_builds(request: HttpRequest, definition_id: uuid.UUID):
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_READ):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-    service = _get_service()
-    if _get_image_definition_for_org(org_id, definition_id) is None:
-        return 404, ErrorOut(detail="Image definition not found", code="not_found")
-    return 200, [
-        _build_job_to_list_out(b)
-        for b in service.list_build_jobs(definition_id, org_id)
-    ]
+    try:
+        builds = _image_definitions().list_builds(
+            request.user, _get_org_id(request), definition_id
+        )
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
+    return 200, [_build_job_to_list_out(b) for b in builds]
 
 
 @image_definition_router.post(
@@ -2669,29 +2543,17 @@ async def create_image_definition_runner_build(
         request, APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS
     ):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS)
-    org_id = _get_org_id(request)
-    if not await _get_org_admin_flag_async(request, org_id):
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-    definition = await sync_to_async(_get_image_definition_for_org)(
-        org_id, definition_id
-    )
-    if definition is None:
-        return 404, ErrorOut(detail="Image definition not found", code="not_found")
-    runner = await sync_to_async(RunnerRepository.get_by_id)(payload.runner_id)
-    if runner is None or runner.organization_id != org_id:
-        return 404, ErrorOut(detail="Runner not found", code="not_found")
-
-    service = _get_service()
     try:
-        build = await service.trigger_build_job(
-            image_definition=definition,
-            runner=runner,
+        build = await _image_definitions().create_build(
+            request.user,
+            _get_org_id(request),
+            definition_id,
+            payload.runner_id,
             activate=payload.activate,
-            created_by=request.user,
             message=payload.message,
         )
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
     return 202, _build_job_to_out(build)
 
 
@@ -2710,55 +2572,18 @@ async def update_image_definition_runner_build(
         request, APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS
     ):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS)
-    org_id = _get_org_id(request)
-    if not await _get_org_admin_flag_async(request, org_id):
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-    from django.utils import timezone
-
-    build = await sync_to_async(_get_build_job_for_org)(
-        org_id,
-        definition_id,
-        runner_id,
-    )
-    if build is None:
-        return 404, ErrorOut(detail="Runner image build not found", code="not_found")
-
-    action = payload.action.strip().lower()
-    service = _get_service()
-    if action == "deactivate":
-        try:
-            service.ensure_definition_mutable(build.image_definition)
-        except ConflictError as e:
-            return 409, ErrorOut(detail=e.message, code=e.code)
-        build = await sync_to_async(service.deactivate_runner_image)(build)
-        return 200, _build_job_to_out(build)
-
-    if action not in {"activate", "rebuild"}:
-        return 409, ErrorOut(
-            detail="action must be one of: deactivate, activate, rebuild",
-            code="conflict",
-        )
-
-    definition = build.image_definition
-    runner = build.runner
     try:
-        if action == "activate":
-            updated = await service.activate_build_job(
-                build,
-                created_by=request.user,
-                message=payload.message,
-            )
-        else:
-            updated = await service.trigger_build_job(
-                image_definition=definition,
-                runner=runner,
-                activate=True,
-                created_by=request.user,
-                message=payload.message,
-            )
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
-    return 200, _build_job_to_out(updated)
+        build = await _image_definitions().update_build(
+            request.user,
+            _get_org_id(request),
+            definition_id,
+            runner_id,
+            payload.action,
+            message=payload.message,
+        )
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
+    return 200, _build_job_to_out(build)
 
 
 @image_definition_router.delete(
@@ -2773,26 +2598,15 @@ async def delete_image_definition_runner_build(
         request, APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS
     ):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS)
-    org_id = _get_org_id(request)
-    if not await sync_to_async(_is_org_admin)(request.user, org_id):
-        return 403, ErrorOut(detail="Admin role required", code="forbidden")
-
-    build = await sync_to_async(_get_build_job_for_org)(
-        org_id, definition_id, runner_id
-    )
-    if build is None:
-        return 404, ErrorOut(detail="Runner image build not found", code="not_found")
-
-    service = _get_service()
     try:
-        await service.delete_build_job(build.id)
-        return 202, {"detail": "Build job deletion initiated"}
-    except ConflictError as e:
-        return 409, ErrorOut(
-            detail=e.message, code=e.code, gaps=getattr(e, "gaps", None)
+        await _image_definitions().delete_build(
+            request.user, _get_org_id(request), definition_id, runner_id
         )
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
     except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
+    return 202, {"detail": "Build job deletion initiated"}
 
 
 @image_definition_router.get(
@@ -2805,16 +2619,13 @@ def get_image_definition_runner_build_log(
 ):
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_READ):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-    if _get_image_definition_for_org(org_id, definition_id) is None:
-        return 404, ErrorOut(detail="Image definition not found", code="not_found")
-
-    build = _get_build_job_for_org(org_id, definition_id, runner_id)
-    if build is None:
-        return 404, ErrorOut(detail="Runner image build not found", code="not_found")
-    return 200, {"build_log": build.build_log}
+    try:
+        build_log = _image_definitions().build_log(
+            request.user, _get_org_id(request), definition_id, runner_id
+        )
+    except _IMAGE_RECIPE_ERRORS as exc:
+        return _image_recipe_error(exc)
+    return 200, {"build_log": build_log}
 
 
 @runner_router.get(

@@ -1,8 +1,8 @@
 """Port/delegation contract tests for the runners service facade (Phase 5).
 
 Only ports, delegation, aliases and stores — no business-logic
-duplicates. Covers: constructor injection, ``ensure_definition_mutable``
-alias delegation, repository-delegation methods (mocked repos),
+duplicates. Covers: constructor injection, the definition mutability
+guard, repository-delegation methods (mocked repos),
 ``PendingMap``/``SessionMap`` store behaviour, and facade attribute
 reachability (``__all__``, whitelists, timeouts).
 """
@@ -172,16 +172,7 @@ def test_constructor_repositories_and_stores():
     assert isinstance(svc._pending_process_verify, PendingMap)
 
 
-def test_ensure_definition_mutable_delegates():
-    svc = RunnerService()
-    calls = []
-    svc._ensure_definition_mutable = lambda definition: calls.append(definition)  # type: ignore[method-assign]
-    sentinel = object()
-    svc.ensure_definition_mutable(sentinel)
-    assert calls == [sentinel]
-
-
-def test_ensure_definition_mutable_frozen_raises_in_both():
+def test_ensure_definition_mutable_rejects_frozen_definition():
     from apps.runners.models import ImageDefinition
     from common.exceptions import ConflictError
 
@@ -190,19 +181,18 @@ def test_ensure_definition_mutable_frozen_raises_in_both():
     with pytest.raises(ConflictError):
         svc._ensure_definition_mutable(frozen)
     with pytest.raises(ConflictError):
-        svc.ensure_definition_mutable(frozen)
+        svc.deactivate_runner_image(
+            types.SimpleNamespace(image_definition=frozen, runner=object())
+        )
 
 
 def test_repository_delegation_methods_mocked():
     svc = RunnerService()
     artifact_id = uuid.uuid4()
-    definition_id = uuid.uuid4()
     svc.image_instances = MagicMock()
     svc.image_instances.get_by_id.return_value = "artifact"
     svc.image_instances.update_name.return_value = True
     svc.image_instances.timeout_stale.return_value = 3
-    svc.image_definitions = MagicMock()
-    svc.image_definitions.get_by_id.return_value = "definition"
     svc.workspaces = MagicMock()
     svc.workspaces.get_by_id.return_value = "workspace"
 
@@ -212,8 +202,6 @@ def test_repository_delegation_methods_mocked():
     svc.image_instances.update_name.assert_called_with(artifact_id, "new-name")
     assert svc.timeout_stale_image_artifacts(timeout_hours=2) == 3
     svc.image_instances.timeout_stale.assert_called_with(timeout_hours=2)
-    assert svc.get_image_definition(definition_id) == "definition"
-    svc.image_definitions.get_by_id.assert_called_with(definition_id)
     assert svc.get_workspace_or_none(artifact_id) == "workspace"
     svc.workspaces.get_by_id.assert_called_with(artifact_id)
 

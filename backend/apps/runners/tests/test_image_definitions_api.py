@@ -715,7 +715,6 @@ def test_create_runner_build_returns_pending_build_without_artifact(client: Clie
         "apps.runners.api._get_service",
         lambda: SimpleNamespace(
             trigger_build_job=_trigger_build_job,
-            get_visible_image_definition=lambda *_: definition,
         ),
     )
 
@@ -813,7 +812,6 @@ def test_rebuild_runner_build_allows_global_definition_builds(client: Client, mo
         "apps.runners.api._get_service",
         lambda: SimpleNamespace(
             trigger_build_job=_trigger_build_job,
-            get_visible_image_definition=lambda *_: definition,
         ),
     )
 

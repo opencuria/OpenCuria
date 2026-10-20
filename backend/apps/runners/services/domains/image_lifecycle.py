@@ -232,23 +232,6 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         ]
         return "\n".join(lines).strip() + "\n"
 
-    def list_image_definitions(self, organization_id: uuid.UUID) -> list:
-        """List image definitions for an organization."""
-        return list(self.image_definitions.list_by_org(organization_id))
-
-    def list_build_jobs(
-        self,
-        image_definition_id: uuid.UUID,
-        organization_id: uuid.UUID,
-    ) -> list:
-        """List runner build records for an image definition."""
-        return list(
-            self.build_jobs.list_for_definition(
-                image_definition_id,
-                organization_id=organization_id,
-            )
-        )
-
     def timeout_stale_image_operations(self, *, timeout_hours: int = 1) -> None:
         """Fail hung builds and stuck deletions so the UI can retry."""
         from ...models import ImageDefinition, ImageInstance
@@ -285,22 +268,11 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
                 f"Cannot modify image definition in state '{definition.status}'"
             )
 
-    def ensure_definition_mutable(self, definition) -> None:
-        """Public alias for :meth:`_ensure_definition_mutable`.
-
-        Phase 4 (leak closure): external callers (``apps/runners/api.py``,
-        ``apps/mcp_app/server.py``) use this public name. The private name
-        stays canonical with the logic so tests that mock
-        ``_ensure_definition_mutable`` with a lambda keep working; this
-        method delegates to it (same signature, same effect).
-        """
-        self._ensure_definition_mutable(definition)
-
     # -- Phase-4 public repository delegation (leak closure) ----------------
-    # Thin sync delegations over ``self.image_instances`` /
-    # ``self.image_definitions`` so production callers no longer reach
-    # into ``service.<repository>`` directly. No logic, no behaviour
-    # change; async callers keep wrapping them in ``sync_to_async``.
+    # Thin sync delegations over ``self.image_instances`` so production
+    # callers no longer reach into ``service.<repository>`` directly. No
+    # logic, no behaviour change; async callers keep wrapping them in
+    # ``sync_to_async``. Recipe CRUD lives in ``ImageDefinitionService``.
 
     def get_image_artifact(self, artifact_id: uuid.UUID):
         """Return an image artifact by ID or None."""
@@ -314,30 +286,10 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         """Mark stale creating image artifacts as failed; return count."""
         return self.image_instances.timeout_stale(timeout_hours=timeout_hours)
 
-    def create_image_definition(self, **fields):
-        """Create a recipe without requesting a build."""
-        return self.image_definitions.create(**fields)
-
-    def update_image_recipe(self, definition_id, values):
-        """Persist recipe edits through the repository transaction."""
-        return self.image_definitions.update_recipe(definition_id, values)
-
-    def image_definition_copy_name(self, base_name, organization_id):
-        """Resolve an organization-scoped duplicate name."""
-        return self.image_definitions.copy_name(base_name, organization_id)
-
-    def get_visible_image_definition(self, definition_id, organization_id):
-        """Resolve a recipe visible to an organization."""
-        return self.image_definitions.get_by_id_and_org(definition_id, organization_id)
-
     def deactivate_runner_image(self, build):
         """Disable assignment selection without mutating any generation."""
         self._ensure_definition_mutable(build.image_definition)
         return self.build_jobs.ensure_inactive(build.image_definition, build.runner)
-
-    def get_image_definition(self, definition_id: uuid.UUID):
-        """Return an image definition by ID or None."""
-        return self.image_definitions.get_by_id(definition_id)
 
     async def activate_build_job(self, build, *, created_by=None, message: str = ""):
         """Make an existing runner image selectable, or build it if none exists."""

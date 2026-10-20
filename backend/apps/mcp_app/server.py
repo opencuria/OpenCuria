@@ -110,6 +110,7 @@ import os
 import re
 import uuid
 
+from asgiref.sync import sync_to_async
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.server.streamable_http import StreamableHTTPServerTransport
@@ -125,6 +126,8 @@ from starlette.routing import Mount
 from apps.accounts.models import APIKeyPermission
 from apps.harness.constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
 from apps.runners.services import get_runner_service
+from apps.runners.services.image_definitions import ImageDefinitionService
+from common.exceptions import ServiceError
 
 logger = logging.getLogger(__name__)
 
@@ -2580,10 +2583,13 @@ def _call_create_image_artifact(api_key, org_id, args: dict) -> list[TextContent
         return _error(str(e))
 
 
+def _image_definitions() -> ImageDefinitionService:
+    """Return the image recipe service shared with the REST adapter."""
+    return ImageDefinitionService(_runner_service())
+
+
 def _image_definition_payload(definition) -> dict:
     """Serialize an image definition the same way REST list responses do."""
-    from apps.runners.repositories import ImageDefinitionRepository
-
     return {
         "id": str(definition.id),
         "organization_id": (
@@ -2600,239 +2606,118 @@ def _image_definition_payload(definition) -> dict:
         "custom_init_script": definition.custom_init_script or "",
         "is_active": bool(definition.is_active),
         "status": getattr(definition, "status", "active"),
-        "runner_build_summary": ImageDefinitionRepository.build_summary(definition),
+        "runner_build_summary": ImageDefinitionService.build_summary(definition),
         "delete_last_error": getattr(definition, "delete_last_error", "") or "",
         "created_at": definition.created_at.isoformat(),
         "updated_at": definition.updated_at.isoformat(),
     }
 
 
-def _call_list_image_definitions(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.organizations.services import OrganizationService
+def _parse_definition_id(args: dict) -> tuple:
+    """Parse ``definition_id`` from MCP args or return an MCP error."""
+    raw = args.get("definition_id")
+    if not raw:
+        return None, _error("definition_id is required")
+    try:
+        return uuid.UUID(raw), None
+    except ValueError:
+        return None, _error("Invalid definition_id UUID")
 
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    svc = _runner_service()
-    definitions = svc.list_image_definitions(org_id)
+
+def _parse_build_ids(args: dict) -> tuple:
+    """Parse ``definition_id`` and ``runner_id`` or return an MCP error."""
+    if not args.get("definition_id") or not args.get("runner_id"):
+        return None, _error("definition_id and runner_id are required")
+    try:
+        return (uuid.UUID(args["definition_id"]), uuid.UUID(args["runner_id"])), None
+    except ValueError:
+        return None, _error("Invalid definition_id or runner_id UUID")
+
+
+def _call_list_image_definitions(api_key, org_id, args: dict) -> list[TextContent]:
+    definitions = _image_definitions().list_visible(api_key.user, org_id)
     return _text([_image_definition_payload(definition) for definition in definitions])
 
 
 def _call_create_image_definition(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.organizations.services import OrganizationService
-    from apps.runners.models import ImageDefinition
-
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    if org_service.get_user_role(api_key.user, org_id) != "admin":
-        return _error("Admin role required")
-
     name = (args.get("name") or "").strip()
     if not name:
         return _error("name is required")
-
-    runtime_type = args.get("runtime_type") or "docker"
-    base_distro = args.get("base_distro") or "ubuntu:22.04"
-    if runtime_type == "qemu" and not base_distro.lower().startswith("ubuntu:"):
-        return _error(
-            "QEMU image definitions currently require an ubuntu:<version> base distro"
-        )
-
-    definition = ImageDefinition.objects.create(
-        organization_id=org_id,
-        created_by=api_key.user,
-        name=name,
-        description=args.get("description") or "",
-        runtime_type=runtime_type,
-        base_distro=base_distro,
-        packages=list(args.get("packages") or []),
-        env_vars=dict(args.get("env_vars") or {}),
-        custom_dockerfile=args.get("custom_dockerfile") or "",
-        custom_init_script=args.get("custom_init_script") or "",
-        is_active=bool(args.get("is_active", True)),
-    )
+    recipe = {
+        "name": name,
+        "description": args.get("description") or "",
+        "runtime_type": args.get("runtime_type") or "docker",
+        "base_distro": args.get("base_distro") or "ubuntu:22.04",
+        "packages": list(args.get("packages") or []),
+        "env_vars": dict(args.get("env_vars") or {}),
+        "custom_dockerfile": args.get("custom_dockerfile") or "",
+        "custom_init_script": args.get("custom_init_script") or "",
+        "is_active": bool(args.get("is_active", True)),
+    }
+    try:
+        definition = _image_definitions().create(api_key.user, org_id, recipe)
+    except ServiceError as exc:
+        return _error(exc.message)
     return _text({"id": str(definition.id), "name": definition.name})
 
 
 def _call_duplicate_image_definition(api_key, org_id, args: dict) -> list[TextContent]:
-    import uuid as _uuid
-
-    from django.db.models import Q
-
-    from apps.organizations.services import OrganizationService
-    from apps.runners.models import ImageDefinition
-
-    definition_id_str = args.get("definition_id")
-    if not definition_id_str:
-        return _error("definition_id is required")
+    definition_id, error = _parse_definition_id(args)
+    if error is not None:
+        return error
+    name = args.get("name")
     try:
-        definition_id = _uuid.UUID(definition_id_str)
-    except ValueError:
-        return _error("Invalid definition_id UUID")
-
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    if org_service.get_user_role(api_key.user, org_id) != "admin":
-        return _error("Admin role required")
-
-    source = (
-        ImageDefinition.objects.filter(id=definition_id)
-        .filter(Q(organization__isnull=True) | Q(organization_id=org_id))
-        .first()
-    )
-    if source is None:
-        return _error("Image definition not found")
-
-    raw_name = args.get("name")
-    if raw_name is not None and not str(raw_name).strip():
-        return _error("name cannot be empty")
-
-    base_name = str(raw_name).strip() if raw_name is not None else source.name
-    if not base_name:
-        base_name = "image"
-    base_name = base_name[:255]
-    candidate = base_name
-    if ImageDefinition.objects.filter(organization_id=org_id, name=candidate).exists():
-        suffix = " (Copy)"
-        candidate = f"{base_name[: 255 - len(suffix)]}{suffix}"
-        index = 2
-        while ImageDefinition.objects.filter(
-            organization_id=org_id,
-            name=candidate,
-        ).exists():
-            suffix = f" (Copy {index})"
-            candidate = f"{base_name[: 255 - len(suffix)]}{suffix}"
-            index += 1
-
-    copied = ImageDefinition.objects.create(
-        organization_id=org_id,
-        created_by=api_key.user,
-        name=candidate,
-        description=source.description,
-        runtime_type=source.runtime_type,
-        base_distro=source.base_distro,
-        packages=list(source.packages or []),
-        env_vars=dict(source.env_vars or {}),
-        custom_dockerfile=source.custom_dockerfile or "",
-        custom_init_script=source.custom_init_script or "",
-        is_active=bool(source.is_active),
-    )
+        copied = _image_definitions().duplicate(
+            api_key.user,
+            org_id,
+            definition_id,
+            None if name is None else str(name),
+        )
+    except ServiceError as exc:
+        return _error(exc.message)
     return _text({"id": str(copied.id), "name": copied.name})
 
 
 def _call_update_image_definition(api_key, org_id, args: dict) -> list[TextContent]:
-    import uuid as _uuid
-
-    from apps.organizations.services import OrganizationService
-    from apps.runners.repositories import ImageDefinitionRepository
-
-    definition_id_str = args.get("definition_id")
-    if not definition_id_str:
-        return _error("definition_id is required")
+    definition_id, error = _parse_definition_id(args)
+    if error is not None:
+        return error
     try:
-        definition_id = _uuid.UUID(definition_id_str)
-    except ValueError:
-        return _error("Invalid definition_id UUID")
-
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    if org_service.get_user_role(api_key.user, org_id) != "admin":
-        return _error("Admin role required")
-
-    definition = ImageDefinitionRepository.get_by_id_and_org(definition_id, org_id)
-    if definition is None or definition.organization_id != org_id:
-        return _error("Image definition not found")
-
-    runtime_type = args.get("runtime_type") or definition.runtime_type
-    base_distro = args.get("base_distro") or definition.base_distro
-    if runtime_type == "qemu" and not base_distro.lower().startswith("ubuntu:"):
-        return _error(
-            "QEMU image definitions currently require an ubuntu:<version> base distro"
+        definition = _image_definitions().update(
+            api_key.user, org_id, definition_id, args
         )
-
-    fields = [
-        "name",
-        "description",
-        "runtime_type",
-        "base_distro",
-        "packages",
-        "env_vars",
-        "custom_dockerfile",
-        "custom_init_script",
-        "is_active",
-    ]
-    definition = _runner_service().update_image_recipe(
-        definition.id, {field: args[field] for field in fields if field in args}
-    )
+    except ServiceError as exc:
+        return _error(exc.message)
     return _text({"id": str(definition.id), "name": definition.name})
 
 
-def _call_delete_image_definition(api_key, org_id, args: dict) -> list[TextContent]:
-    import asyncio
-    import uuid as _uuid
-
-    from apps.organizations.services import OrganizationService
-    from apps.runners.repositories import ImageDefinitionRepository
-    from common.exceptions import ConflictError
-
-    definition_id_str = args.get("definition_id")
-    if not definition_id_str:
-        return _error("definition_id is required")
+async def _call_delete_image_definition(
+    api_key, org_id, args: dict
+) -> list[TextContent]:
+    definition_id, error = _parse_definition_id(args)
+    if error is not None:
+        return error
     try:
-        definition_id = _uuid.UUID(definition_id_str)
-    except ValueError:
-        return _error("Invalid definition_id UUID")
-
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    if org_service.get_user_role(api_key.user, org_id) != "admin":
-        return _error("Admin role required")
-
-    definition = ImageDefinitionRepository.get_by_id_and_org(definition_id, org_id)
-    if definition is None or definition.organization_id != org_id:
-        return _error("Image definition not found")
-
-    svc = _runner_service()
-
-    async def _delete():
-        await svc.delete_image_definition(definition_id)
-
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(_delete())
-    except ConflictError as e:
-        return _error(e.message)
-    except ValueError as e:
-        return _error(str(e))
-    finally:
-        loop.close()
-
-    updated = ImageDefinitionRepository.get_by_id(definition_id)
-    if updated is None or updated.status == "deleted":
+        definition = await _image_definitions().delete(
+            api_key.user, org_id, definition_id
+        )
+    except ServiceError as exc:
+        return _error(exc.message)
+    except ValueError as exc:
+        return _error(str(exc))
+    if definition is None or definition.status == "deleted":
         return _text({"deleted": True, "status": "deleted"})
-    return _text(_image_definition_payload(updated))
+    return _text(await sync_to_async(_image_definition_payload)(definition))
 
 
 def _call_list_build_jobs(api_key, org_id, args: dict) -> list[TextContent]:
-    import uuid as _uuid
-
-    from apps.organizations.services import OrganizationService
-    from apps.runners.repositories import ImageDefinitionRepository
-
-    definition_id_str = args.get("definition_id")
-    if not definition_id_str:
-        return _error("definition_id is required")
+    definition_id, error = _parse_definition_id(args)
+    if error is not None:
+        return error
     try:
-        definition_id = _uuid.UUID(definition_id_str)
-    except ValueError:
-        return _error("Invalid definition_id UUID")
-
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    if ImageDefinitionRepository.get_by_id_and_org(definition_id, org_id) is None:
-        return _error("Image definition not found")
-
-    svc = _runner_service()
-    builds = svc.list_build_jobs(definition_id, org_id)
+        builds = _image_definitions().list_builds(api_key.user, org_id, definition_id)
+    except ServiceError as exc:
+        return _error(exc.message)
     return _text(
         [
             {
@@ -2876,190 +2761,67 @@ def _call_list_build_jobs(api_key, org_id, args: dict) -> list[TextContent]:
     )
 
 
-def _call_create_build_job(api_key, org_id, args: dict) -> list[TextContent]:
-    import asyncio
-    import uuid as _uuid
-
-    from apps.organizations.services import OrganizationService
-    from apps.runners.repositories import ImageDefinitionRepository, RunnerRepository
-
-    definition_id_str = args.get("definition_id")
-    runner_id_str = args.get("runner_id")
-    if not definition_id_str or not runner_id_str:
-        return _error("definition_id and runner_id are required")
+async def _call_create_build_job(api_key, org_id, args: dict) -> list[TextContent]:
+    build_ids, error = _parse_build_ids(args)
+    if error is not None:
+        return error
     try:
-        definition_id = _uuid.UUID(definition_id_str)
-        runner_id = _uuid.UUID(runner_id_str)
-    except ValueError:
-        return _error("Invalid definition_id or runner_id UUID")
-
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    if org_service.get_user_role(api_key.user, org_id) != "admin":
-        return _error("Admin role required")
-
-    definition = ImageDefinitionRepository.get_by_id_and_org(definition_id, org_id)
-    runner = RunnerRepository.get_by_id(runner_id)
-    if definition is None:
-        return _error("Image definition not found")
-    if runner is None or runner.organization_id != org_id:
-        return _error("Runner not found")
-
-    svc = _runner_service()
-
-    async def _create():
-        return await svc.trigger_build_job(
-            image_definition=definition,
-            runner=runner,
+        build = await _image_definitions().create_build(
+            api_key.user,
+            org_id,
+            *build_ids,
             activate=bool(args.get("activate", True)),
-            created_by=api_key.user,
             message=(args.get("message") or "")[:500],
         )
-
-    loop = asyncio.new_event_loop()
-    build = loop.run_until_complete(_create())
-    loop.close()
+    except ServiceError as exc:
+        return _error(exc.message)
     return _text({"id": str(build.id), "status": build.status})
 
 
-def _call_update_build_job(api_key, org_id, args: dict) -> list[TextContent]:
-    import asyncio
-    import uuid as _uuid
-
-    from django.utils import timezone
-
-    from apps.organizations.services import OrganizationService
-    from apps.runners.models import ImageBuildJob
-    from apps.runners.repositories import ImageBuildJobRepository
-    from common.exceptions import ConflictError
-
-    definition_id_str = args.get("definition_id")
-    runner_id_str = args.get("runner_id")
+async def _call_update_build_job(api_key, org_id, args: dict) -> list[TextContent]:
     action = (args.get("action") or "").strip().lower()
-    if not definition_id_str or not runner_id_str or not action:
+    if not args.get("definition_id") or not args.get("runner_id") or not action:
         return _error("definition_id, runner_id and action are required")
+    build_ids, error = _parse_build_ids(args)
+    if error is not None:
+        return error
     try:
-        definition_id = _uuid.UUID(definition_id_str)
-        runner_id = _uuid.UUID(runner_id_str)
-    except ValueError:
-        return _error("Invalid definition_id or runner_id UUID")
-
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    if org_service.get_user_role(api_key.user, org_id) != "admin":
-        return _error("Admin role required")
-
-    build = ImageBuildJobRepository.get_for_org(definition_id, runner_id, org_id)
-    if build is None:
-        return _error("Runner image build not found")
-
-    if action == "deactivate":
-        try:
-            svc = _runner_service()
-            svc.ensure_definition_mutable(build.image_definition)
-        except ConflictError as e:
-            return _error(e.message)
-        build = svc.deactivate_runner_image(build)
-        return _text({"id": str(build.id), "status": build.status})
-
-    if action not in {"activate", "rebuild"}:
-        return _error("action must be one of: deactivate, activate, rebuild")
-
-    svc = _runner_service()
-
-    async def _update():
-        message = (args.get("message") or "")[:500]
-        if action == "activate":
-            return await svc.activate_build_job(
-                build,
-                created_by=api_key.user,
-                message=message,
-            )
-        return await svc.trigger_build_job(
-            image_definition=build.image_definition,
-            runner=build.runner,
-            activate=True,
-            created_by=api_key.user,
-            message=message,
+        build = await _image_definitions().update_build(
+            api_key.user,
+            org_id,
+            *build_ids,
+            action,
+            message=(args.get("message") or "")[:500],
         )
+    except ServiceError as exc:
+        return _error(exc.message)
+    return _text({"id": str(build.id), "status": build.status})
 
-    loop = asyncio.new_event_loop()
+
+async def _call_delete_build_job(api_key, org_id, args: dict) -> list[TextContent]:
+    build_ids, error = _parse_build_ids(args)
+    if error is not None:
+        return error
     try:
-        updated = loop.run_until_complete(_update())
-    except ConflictError as e:
-        return _error(e.message)
-    finally:
-        loop.close()
-    return _text({"id": str(updated.id), "status": updated.status})
-
-
-def _call_delete_build_job(api_key, org_id, args: dict) -> list[TextContent]:
-    import asyncio
-    import uuid as _uuid
-
-    from apps.organizations.services import OrganizationService
-    from apps.runners.repositories import ImageBuildJobRepository
-    from common.exceptions import ConflictError
-
-    definition_id_str = args.get("definition_id")
-    runner_id_str = args.get("runner_id")
-    if not definition_id_str or not runner_id_str:
-        return _error("definition_id and runner_id are required")
-    try:
-        definition_id = _uuid.UUID(definition_id_str)
-        runner_id = _uuid.UUID(runner_id_str)
-    except ValueError:
-        return _error("Invalid definition_id or runner_id UUID")
-
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    if org_service.get_user_role(api_key.user, org_id) != "admin":
-        return _error("Admin role required")
-
-    build = ImageBuildJobRepository.get_for_org(definition_id, runner_id, org_id)
-    if build is None:
-        return _error("Runner image build not found")
-
-    svc = _runner_service()
-
-    async def _delete():
-        return await svc.delete_build_job(build.id)
-
-    loop = asyncio.new_event_loop()
-    try:
-        result = loop.run_until_complete(_delete())
-    except ConflictError as e:
-        return _error(e.message)
-    except ValueError as e:
-        return _error(str(e))
-    finally:
-        loop.close()
+        result = await _image_definitions().delete_build(
+            api_key.user, org_id, *build_ids
+        )
+    except ServiceError as exc:
+        return _error(exc.message)
+    except ValueError as exc:
+        return _error(str(exc))
     return _text(result)
 
 
 def _call_get_build_job_log(api_key, org_id, args: dict) -> list[TextContent]:
-    import uuid as _uuid
-
-    from apps.organizations.services import OrganizationService
-    from apps.runners.repositories import ImageBuildJobRepository
-
-    definition_id_str = args.get("definition_id")
-    runner_id_str = args.get("runner_id")
-    if not definition_id_str or not runner_id_str:
-        return _error("definition_id and runner_id are required")
+    build_ids, error = _parse_build_ids(args)
+    if error is not None:
+        return error
     try:
-        definition_id = _uuid.UUID(definition_id_str)
-        runner_id = _uuid.UUID(runner_id_str)
-    except ValueError:
-        return _error("Invalid definition_id or runner_id UUID")
-
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-
-    build = ImageBuildJobRepository.get_for_org(definition_id, runner_id, org_id)
-    if build is None:
-        return _error("Runner image build not found")
-    return _text({"build_log": build.build_log})
+        build_log = _image_definitions().build_log(api_key.user, org_id, *build_ids)
+    except ServiceError as exc:
+        return _error(exc.message)
+    return _text({"build_log": build_log})
 
 
 def _call_list_credentials(api_key, org_id, args: dict) -> list[TextContent]:

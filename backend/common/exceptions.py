@@ -18,11 +18,18 @@ class ServiceError(Exception):
 
 
 class NotFoundError(ServiceError):
-    """Raised when a requested resource does not exist."""
+    """Raised when a requested resource does not exist.
 
-    def __init__(self, resource: str, identifier: str) -> None:
+    Omit ``identifier`` when the message must not echo the requested ID.
+    """
+
+    def __init__(self, resource: str, identifier: str | None = None) -> None:
         super().__init__(
-            message=f"{resource} '{identifier}' not found",
+            message=(
+                f"{resource} not found"
+                if identifier is None
+                else f"{resource} '{identifier}' not found"
+            ),
             code="not_found",
         )
         self.resource = resource

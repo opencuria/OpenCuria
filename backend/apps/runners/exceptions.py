@@ -4,7 +4,32 @@ App-specific exceptions for the runners app.
 
 from __future__ import annotations
 
-from common.exceptions import ConflictError, NotFoundError
+from common.exceptions import ConflictError, NotFoundError, ServiceError
+
+
+class AdminRoleRequiredError(ServiceError):
+    """Raised when an organization-scoped mutation needs the admin role."""
+
+    def __init__(self) -> None:
+        super().__init__(message="Admin role required", code="forbidden")
+
+
+class ImageRecipeNotFoundError(NotFoundError):
+    """Raised when a recipe, its runner build or a runner is not visible.
+
+    The message names only the resource so callers cannot probe other
+    organizations' recipes by ID.
+    """
+
+    def __init__(self, resource: str) -> None:
+        super().__init__(resource=resource)
+
+
+class ImageRecipeValidationError(ServiceError):
+    """Raised when an image recipe request carries invalid input."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message=message, code="validation_error")
 
 
 class RunnerNotFoundError(NotFoundError):

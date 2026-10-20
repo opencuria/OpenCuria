@@ -110,6 +110,32 @@ def test_no_application_module_imports_the_socketio_adapter():
     )
 
 
+def test_adapters_reach_image_recipes_only_through_their_service():
+    """REST and MCP share ``ImageDefinitionService`` for recipes and builds."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    adapters = {
+        path
+        for path, tree in trees.items()
+        if _defines_ninja_router(tree) or _module_name(path).startswith("apps.mcp_app")
+    }
+    persistence = {
+        "apps.runners.models.ImageBuildJob",
+        "apps.runners.models.ImageDefinition",
+        "apps.runners.repositories.ImageBuildJobRepository",
+        "apps.runners.repositories.ImageDefinitionRepository",
+    }
+    violations = sorted(
+        f"{_module_name(path)} -> {name}"
+        for path in adapters
+        for name in _imported_modules(path, trees[path]) & persistence
+    )
+    assert violations == [], (
+        "Use apps.runners.services.image_definitions.ImageDefinitionService "
+        "instead of image recipe models/repositories in adapters:\n"
+        + "\n".join(violations)
+    )
+
+
 def test_runner_service_never_imports_the_harness():
     """Harness depends on the runner service, never the other way round."""
     package = APPS_ROOT / "runners" / "services"
