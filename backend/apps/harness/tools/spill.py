@@ -1,6 +1,6 @@
 """Spill truncated tool output to a workspace file (OpenCode parity).
 
-When the registry clips a tool result, the full output is written to
+When a tool or the registry clips a result, the full output is written to
 ``/workspace/.opencuria/tool-output/<uuid>.log`` so the model can page
 through it with ``read``/``grep`` or delegate it to an explore subagent.
 Spilling is best-effort: any failure is logged and never breaks the tool.
@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 if TYPE_CHECKING:
-    from .base import ToolContext
+    from .base import ToolContext, ToolResult
 
 log = structlog.get_logger(__name__)
 
@@ -40,6 +40,28 @@ def build_spill_hint(path: str, *, task_hint: bool = False) -> str:
     if task_hint:
         hint += " Use the task tool (explore agent) to process this file."
     return hint
+
+
+async def preserve_full_output(
+    ctx: ToolContext, result: ToolResult, full_output: str
+) -> None:
+    """Attach a full-output file and recovery hint to a truncated result.
+
+    Reuse an existing spill if the registry clips a tool's preview again.
+    Once attempted, never spill that preview as though it were the full output.
+    """
+    metadata = dict(result.metadata or {})
+    path = metadata.get("output_path")
+    if path is None and not metadata.get("truncated"):
+        path = await spill_full_output(ctx, full_output)
+    result.truncated = True
+    metadata["truncated"] = True
+    if path is not None:
+        metadata["output_path"] = path
+        hint = build_spill_hint(path, task_hint=task_available(ctx))
+        if hint not in result.output:
+            result.output += hint
+    result.metadata = metadata
 
 
 async def spill_full_output(ctx: ToolContext, full_output: str) -> str | None:

@@ -9,10 +9,11 @@ import structlog
 from pydantic import BaseModel, Field
 
 from .base import Tool, ToolContext, ToolError, ToolResult
+from .spill import preserve_full_output
 
 log = structlog.get_logger(__name__)
 
-#: Max characters of a child result forwarded as the parent tool output.
+#: Max characters of a child answer kept in the parent tool preview.
 TASK_OUTPUT_MAX_CHARS = 8000
 
 #: Agents allowed as ``task`` targets. Anything else (notably primary
@@ -73,6 +74,39 @@ def render_task_output(task_id: str, text: str, *, state: str = "completed") -> 
     )
 
 
+async def build_task_result(
+    task_id: str,
+    output: str,
+    ctx: ToolContext,
+    *,
+    agent: str,
+    metadata: dict[str, Any],
+) -> ToolResult:
+    """Build a bounded child result, preserving the full answer when clipped."""
+    if agent == "computeruse":
+        from ..agent_s.harness import extract_recording_path, truncate_task_output
+
+        preview, truncated = truncate_task_output(
+            output, extract_recording_path(output), TASK_OUTPUT_MAX_CHARS
+        )
+    else:
+        truncated = len(output) > TASK_OUTPUT_MAX_CHARS
+        preview = output
+        if truncated:
+            preview = (
+                output[:TASK_OUTPUT_MAX_CHARS]
+                + f"\n…[truncated {len(output)} chars total]"
+            )
+    result = ToolResult(
+        output=render_task_output(task_id, preview),
+        truncated=truncated,
+        metadata=metadata,
+    )
+    if truncated:
+        await preserve_full_output(ctx, result, output)
+    return result
+
+
 class TaskTool(Tool):
     """Launch a subagent child run via a fresh HarnessRunner.
 
@@ -83,9 +117,10 @@ class TaskTool(Tool):
     ``task`` tool from children at the limit (see ``runner``). The model
     is inherited from the parent unless ``model_override`` is given.
     Child events propagate as ``subtask_started``/``subtask_finished``
-    via ``ctx.parent_emit``; the child result returns as truncated text
-    wrapped in an OpenCode-style ``<task id="...">`` envelope whose id
-    can be passed back as ``task_id`` to resume the same subagent
+    via ``ctx.parent_emit``; the child result returns as a bounded preview
+    with a full-output file when clipped, wrapped in an OpenCode-style
+    ``<task id="...">`` envelope whose id can be passed back as ``task_id``
+    to resume the same subagent
     session (see ``TaskArgs.task_id``). ``subagent_type`` mismatches on
     resume are ignored: the stored child agent keeps running.
     """
@@ -221,25 +256,6 @@ class TaskTool(Tool):
             )
             raise ToolError(f"Subagent '{agent}' failed: {exc}", tool=self.name)
         output = result.output or ""
-        if agent == "computeruse":
-            from ..agent_s.harness import extract_recording_path, truncate_task_output
-
-            # Only a recording marker really present in the child output
-            # may be preserved — never invent one via a default path when
-            # recording was disabled (see ``truncate_task_output``).
-            output, truncated = truncate_task_output(
-                output,
-                extract_recording_path(output),
-                TASK_OUTPUT_MAX_CHARS,
-            )
-        else:
-            truncated = len(output) > TASK_OUTPUT_MAX_CHARS
-            if truncated:
-                output = (
-                    output[:TASK_OUTPUT_MAX_CHARS]
-                    + f"\n…[truncated {len(result.output)} chars total]"
-                )
-        wrapped = render_task_output(subtask_id, output)
         await self._emit_parent(
             ctx,
             {
@@ -256,9 +272,11 @@ class TaskTool(Tool):
             subtask_id=subtask_id,
             status="completed",
         )
-        return ToolResult(
-            output=wrapped,
-            truncated=truncated,
+        return await build_task_result(
+            subtask_id,
+            output,
+            ctx,
+            agent=agent,
             metadata={
                 "subtask_id": subtask_id,
                 "task_id": subtask_id,

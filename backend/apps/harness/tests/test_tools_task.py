@@ -21,6 +21,7 @@ from apps.harness.runner import HarnessRunner, RunOptions
 from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.tools import TaskTool, default_tool_registry
 from apps.harness.tools.base import ToolContext, ToolError
+from apps.harness.tools.subagents import TASK_OUTPUT_MAX_CHARS, build_task_result
 
 
 class FakeProvider(ProviderAdapter):
@@ -159,6 +160,9 @@ async def test_task_happy_path_returns_child_text(fake_accessor) -> None:
     finished = next(e for e in events if e["type"] == "subtask_finished")
     assert finished["status"] == "completed"
     assert finished["agent"] == "general"
+    assert result.truncated is False
+    assert "output_path" not in result.metadata
+    assert not fake_accessor.written
 
 
 async def test_task_rejects_unknown_and_primary_agents(fake_accessor) -> None:
@@ -294,18 +298,74 @@ async def test_task_inherits_parent_model(fake_accessor) -> None:
     assert provider2.calls[0]["model"] == "child-model"
 
 
-async def test_task_long_output_truncated(fake_accessor) -> None:
-    """Oversized child results are truncated with a marker."""
-    from apps.harness.tools.subagents import TASK_OUTPUT_MAX_CHARS
-
+@pytest.mark.parametrize("registered", [False, True])
+@pytest.mark.parametrize("many_lines", [False, True])
+async def test_task_long_output_spills_full_answer(
+    fake_accessor: FakeAccessor, registered: bool, many_lines: bool
+) -> None:
+    """Both result caps retain one complete, readable UTF-8 answer on disk."""
+    output = ("ä\n" * 6000 if many_lines else "ä" * 9000) + "\nmissing conclusion"
     events: list[dict[str, Any]] = []
-    ctx, _ = _task_ctx(
-        fake_accessor, events, [_text_step("y" * (TASK_OUTPUT_MAX_CHARS + 10))]
-    )
-    result = await TaskTool().execute({"description": "d", "prompt": "p"}, ctx)
+    ctx, _ = _task_ctx(fake_accessor, events, [_text_step(output)])
+    args = {"description": "d", "prompt": "p"}
+    if registered:
+        result = await ctx.registry.execute("task", args, ctx)
+    else:
+        result = await TaskTool().execute(args, ctx)
     assert result.truncated is True
+    assert result.metadata["truncated"] is True
     assert "truncated" in result.output
     assert '<task id="' in result.output
+    path = result.metadata["output_path"]
+    assert result.output.count(f"Full output: {path}.") == 1
+    assert "Use read with offset/limit or grep" in result.output
+    assert "missing conclusion" not in result.output
+    assert fake_accessor.written == {path: output.encode("utf-8")}
+    assert len(result.output) < TASK_OUTPUT_MAX_CHARS + 1000
+
+
+@pytest.mark.parametrize("many_lines", [False, True])
+async def test_task_spill_failure_keeps_preview(
+    fake_accessor: FakeAccessor, monkeypatch: pytest.MonkeyPatch, many_lines: bool
+) -> None:
+    """A failed spill never fails the task or points at an incomplete answer."""
+    attempts: list[bytes] = []
+
+    async def fail_write(path: str, content: bytes, mode: int = 0o644) -> None:
+        attempts.append(content)
+        if len(attempts) == 1:
+            raise PermissionError("write denied")
+        await FakeAccessor.write_file(fake_accessor, path, content, mode)
+
+    monkeypatch.setattr(fake_accessor, "write_file", fail_write)
+    output = ("x\n" * 6000 if many_lines else "x" * 9000) + "\nconclusion"
+    ctx, _ = _task_ctx(fake_accessor, [], [_text_step(output)])
+    result = await ctx.registry.execute(
+        "task", {"description": "d", "prompt": "p"}, ctx
+    )
+    assert result.truncated is True
+    assert '<task id="' in result.output
+    assert "truncated" in result.output
+    assert "Full output:" not in result.output
+    assert "output_path" not in result.metadata
+    assert attempts == [output.encode("utf-8")]
+    assert not fake_accessor.written
+
+
+@pytest.mark.parametrize("recorded", [False, True])
+async def test_task_spill_preserves_computeruse_recording(
+    fake_accessor: FakeAccessor, recorded: bool
+) -> None:
+    """The preview keeps the real recording and the file keeps the full text."""
+    marker = "![Computer use](/workspace/.opencuria/computeruse/child/session.mp4)"
+    output = "x" * 9000 + (f"\n\n{marker}" if recorded else "")
+    result = await build_task_result(
+        "child", output, _ctx(fake_accessor, []), agent="computeruse", metadata={}
+    )
+    assert result.truncated is True
+    assert result.output.count(marker) == int(recorded)
+    path = result.metadata["output_path"]
+    assert fake_accessor.files[path].decode("utf-8") == output
 
 
 async def test_task_envelope_carries_resumable_task_id(fake_accessor) -> None:
