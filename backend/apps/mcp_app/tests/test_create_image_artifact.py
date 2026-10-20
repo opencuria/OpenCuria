@@ -27,7 +27,7 @@ def test_capture_reports_outcome_and_always_closes_loop(monkeypatch, error_type)
         lambda *args: (workspace, None),
     )
     monkeypatch.setattr(
-        "apps.runners.sio_server.get_runner_service",
+        "apps.mcp_app.server._runner_service",
         lambda: SimpleNamespace(create_image_artifact=capture),
     )
     loop = asyncio.new_event_loop()
@@ -61,7 +61,7 @@ def test_capture_unexpected_error_also_closes_loop(monkeypatch):
         lambda *args: (workspace, None),
     )
     monkeypatch.setattr(
-        "apps.runners.sio_server.get_runner_service",
+        "apps.mcp_app.server._runner_service",
         lambda: SimpleNamespace(
             create_image_artifact=AsyncMock(side_effect=RuntimeError("unexpected"))
         ),

@@ -304,7 +304,9 @@ async def test_async_operation_delivery_stays_on_original_loop(
     if injected:
         service._frontend_bus = emit
     else:
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
 
     # Capture only this projection task, not unrelated tasks on pytest's loop.
     tasks = []

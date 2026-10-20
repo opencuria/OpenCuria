@@ -1,9 +1,12 @@
-"""Architecture guard: REST router modules are leaf adapters.
+"""Architecture guard: REST router and Socket.IO modules are leaf adapters.
 
 REST (``api.py``) and MCP (``apps.mcp_app``) are sibling adapters over the
 same services. Shared request/response shapes live in ``schemas`` /
 presenter modules, so no application module may import a REST router
 module; only the URL composition root (``config/urls.py``) mounts them.
+Likewise the Socket.IO handler module is mounted only by ``config/asgi.py``;
+services and adapters resolve the runner service and frontend fan-out from
+``apps.runners.services``.
 """
 
 from __future__ import annotations
@@ -83,4 +86,24 @@ def test_no_application_module_imports_a_rest_router_module():
         "REST router modules must only be imported by config/urls.py; move "
         "shared schemas/mappers to a schemas or presenter module:\n"
         + "\n".join(violations)
+    )
+
+
+def test_no_application_module_imports_the_socketio_adapter():
+    """Only the ASGI entry point mounts the Socket.IO handler module."""
+    adapter = "apps.runners.sio_server"
+    violations = sorted(
+        _module_name(path)
+        for path in _source_files()
+        if _module_name(path) != adapter
+        and any(
+            module == adapter or module.startswith(f"{adapter}.")
+            for module in _imported_modules(path, ast.parse(path.read_text()))
+        )
+    )
+    assert violations == [], (
+        "Import get_runner_service from apps.runners.services and "
+        "emit_to_frontend/get_sio_server from "
+        "apps.runners.services.infra.realtime instead of the Socket.IO "
+        "adapter:\n" + "\n".join(violations)
     )

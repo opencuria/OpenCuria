@@ -120,7 +120,7 @@ def test_admin_only_sees_own_workspaces(workspace_access_setup):
 
 @pytest.mark.django_db
 def test_owner_can_clone_workspace_image_artifact(workspace_access_setup, monkeypatch):
-    from apps.runners.sio_server import get_runner_service
+    from apps.runners.services import get_runner_service
 
     async def fake_emit(*args, **kwargs):
         return None

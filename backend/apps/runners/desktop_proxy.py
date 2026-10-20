@@ -243,7 +243,7 @@ def _desktop_workspace_available(workspace_id: str) -> bool:
     from common.exceptions import ConflictError
 
     from .repositories import WorkspaceRepository
-    from .sio_server import get_runner_service
+    from .services import get_runner_service
 
     workspace = WorkspaceRepository.get_by_id(uuid.UUID(workspace_id))
     if workspace is None:
@@ -421,7 +421,7 @@ async def _proxy_http(
         return
 
     try:
-        from .sio_server import get_sio_server
+        from .services.infra.realtime import get_sio_server
 
         response = await get_sio_server().call(
             "desktop:proxy_http_request",
@@ -497,7 +497,7 @@ async def _proxy_websocket(
     queue = _register_ws_tunnel(tunnel_id, workspace_id, runner_id)
 
     try:
-        from .sio_server import get_sio_server
+        from .services.infra.realtime import get_sio_server
 
         response = await get_sio_server().call(
             "desktop:proxy_ws_open",
@@ -568,7 +568,7 @@ async def _ws_proxy_loop(
 ):
     """Bidirectional proxy between client ASGI WebSocket and the runner tunnel."""
 
-    from .sio_server import get_sio_server
+    from .services.infra.realtime import get_sio_server
 
     runner_close_task: asyncio.Task | None = None
     unavailable_close_sent = False
@@ -685,7 +685,7 @@ async def _ws_proxy_loop(
             return
         from django.contrib.auth import get_user_model
 
-        from .sio_server import get_runner_service
+        from .services import get_runner_service
 
         service = get_runner_service()
         try:
@@ -772,7 +772,7 @@ async def _validate_token(token: str):
 def _get_desktop_proxy_target(workspace_id: str) -> dict | None:
     """Resolve the active desktop state and online runner socket for a workspace."""
     from .repositories import WorkspaceRepository
-    from .sio_server import get_runner_service
+    from .services import get_runner_service
 
     try:
         service = get_runner_service()

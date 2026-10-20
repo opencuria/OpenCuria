@@ -2,14 +2,10 @@
 
 Byte-identical method bodies extracted from the former monolithic
 ``apps/runners/services/__init__.py``. No logic changes; the mixin relies
-on the facade (``RunnerService``) providing ``self.workspaces``. The
-``sio_server.emit_to_frontend`` import stays lazy inside
-``_forward_to_frontend`` (note the deeper relative level ``...`` from
-``infra/``); this module has no top-level harness/credential imports.
-Phase 4: only ``_forward_to_frontend`` honours an injected
-``frontend_bus`` port. The further lazy ``emit_to_frontend`` call sites
-in ``interactive_sessions`` (7x) and ``file_transfer`` (2x) are
-intentionally untouched (documented Phase-5 remainder).
+on the facade (``RunnerService``) providing ``self.workspaces``. Fan-out
+goes through ``realtime.emit_to_frontend``; this module has no top-level
+harness/credential imports. Phase 4: only ``_forward_to_frontend`` honours
+an injected ``frontend_bus`` port.
 """
 
 from __future__ import annotations
@@ -21,6 +17,7 @@ from asgiref.sync import async_to_sync, sync_to_async
 from django.db import transaction
 
 from ...enums import WorkspaceStatus
+from . import realtime
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +40,7 @@ class FrontendBusMixin:
         Phase 4: when the facade was constructed with ``frontend_bus=...``,
         the injected bus is used (async callable ``(event, data,
         workspace_id)`` or object with an ``emit`` method, sync or async).
-        Otherwise the previous lazy ``emit_to_frontend`` path is kept
-        unchanged (including monkeypatch compatibility).
+        Otherwise ``realtime.emit_to_frontend`` is used.
         """
         try:
             asyncio.get_running_loop()
@@ -72,15 +68,13 @@ class FrontendBusMixin:
                     },
                 )
             return
-        from ...sio_server import emit_to_frontend
-
         try:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                async_to_sync(emit_to_frontend)(event, data, workspace_id)
+                async_to_sync(realtime.emit_to_frontend)(event, data, workspace_id)
             else:
-                loop.create_task(emit_to_frontend(event, data, workspace_id))
+                loop.create_task(realtime.emit_to_frontend(event, data, workspace_id))
         except Exception:
             logger.exception(
                 "Failed forwarding event to frontend",

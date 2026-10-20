@@ -63,7 +63,7 @@ CSRF_TRUSTED_ORIGINS = os.getenv(
 # CORS
 CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173").split(",")
 
-# Socket.IO CORS — used by sio_server.py
+# Socket.IO CORS — used by apps.runners.services.infra.realtime
 SIO_CORS_ALLOWED_ORIGINS = os.getenv(
     "SIO_CORS_ALLOWED_ORIGINS",
     os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173"),

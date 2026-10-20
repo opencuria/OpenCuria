@@ -183,7 +183,8 @@ SIO_CORS_ALLOWED_ORIGINS = "*"
 # (CVE-2026-44545). Computer-use PNG screenshots and video payloads are
 # sent as base64 over the runner Socket.IO connection and routinely
 # exceed that. File transfers are chunked; keep these aligned with
-# Socket.IO max_http_buffer_size in apps.runners.sio_server (200 MiB).
+# Socket.IO max_http_buffer_size in apps.runners.services.infra.realtime
+# (200 MiB).
 # Both message and frame caps must be raised: a screenshot is a single
 # WebSocket frame.
 DAPHNE_WEBSOCKET_MAX_MESSAGE_SIZE = 200 * 1024 * 1024

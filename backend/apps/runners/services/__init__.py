@@ -13,7 +13,8 @@ logic lives in the :class:`Mixin <apps.runners.services.domains>` modules
 ``services/infra/*.py``. This module keeps the service constructor, the
 shared ``_PendingGitRequest`` record and the public re-exports so that
 ``from apps.runners.services import RunnerService, _PendingGitRequest``
-keeps working unchanged.
+keeps working unchanged. ``get_runner_service()`` is the process-wide
+singleton every adapter (REST, Socket.IO, MCP) and other app resolves.
 
 Phase 4: the constructor additionally accepts optional injected ports
 (``credential_resolver``, ``harness_stream_router``,
@@ -48,6 +49,7 @@ from .infra.rpc_registry import RpcRegistryMixin
 from .infra.runner_transport import RunnerTransportMixin
 from .infra.frontend_bus import FrontendBusMixin
 from .infra.session_store import SessionStoreMixin
+from .infra.realtime import get_sio_server
 from .infra.state import PendingMap
 from .domains.credential_sync import (
     _CREDENTIAL_INJECT_TIMEOUT_SECONDS,
@@ -140,9 +142,8 @@ class RunnerService(
             frontend_bus: Optional async callable
                         ``(event, data, workspace_id)`` or object with an
                         ``emit`` method. When set,
-                        ``_forward_to_frontend`` uses it; otherwise the lazy
-                        ``emit_to_frontend`` import is kept (so
-                        monkeypatch-based tests keep working).
+                        ``_forward_to_frontend`` uses it; otherwise
+                        ``infra.realtime.emit_to_frontend`` is used.
         """
         self.sio = sio_server
         # Phase-4 injected ports (all optional; None = legacy lazy path).
@@ -201,4 +202,21 @@ class RunnerService(
     _active_desktops: dict[str, dict] = {}
     _desktop_workspace_runner: dict[str, str] = {}
 
-__all__ = ["RunnerService", "_PendingGitRequest", "_CREDENTIAL_INJECT_TIMEOUT_SECONDS"]
+# The RunnerService instance — created lazily
+_runner_service: RunnerService | None = None
+
+
+def get_runner_service() -> RunnerService:
+    """Get or create the process-wide RunnerService singleton."""
+    global _runner_service
+    if _runner_service is None:
+        _runner_service = RunnerService(sio_server=get_sio_server())
+    return _runner_service
+
+
+__all__ = [
+    "RunnerService",
+    "_PendingGitRequest",
+    "_CREDENTIAL_INJECT_TIMEOUT_SECONDS",
+    "get_runner_service",
+]

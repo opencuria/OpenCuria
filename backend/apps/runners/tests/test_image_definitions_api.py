@@ -339,7 +339,7 @@ def test_list_captured_image_without_origin_includes_runner_metadata(client: Cli
 
 @pytest.mark.django_db
 def test_clone_captured_image_while_origin_deleting(client: Client, monkeypatch):
-    from apps.runners.sio_server import get_runner_service
+    from apps.runners.services import get_runner_service
 
     user_model = get_user_model()
     admin = user_model.objects.create_user(
@@ -1398,7 +1398,7 @@ def test_global_recipe_lifecycle_is_read_only_for_org_admin(client, action):
 
 @pytest.mark.django_db
 def test_image_artifact_get_does_not_run_timeout_recovery(client, monkeypatch):
-    from apps.runners.sio_server import get_runner_service
+    from apps.runners.services import get_runner_service
 
     user = get_user_model().objects.create_user(email="readonly-capture@test.com", password="secret")
     org = Organization.objects.create(name="Read only", slug="readonly-capture")

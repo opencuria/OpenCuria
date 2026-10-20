@@ -31,6 +31,7 @@ from ninja import Router
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
+from apps.runners.services import get_runner_service
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .schemas import (
@@ -94,8 +95,6 @@ def _perm_denied(permission: APIKeyPermission):  # type: ignore[no-untyped-def]
 
 def _get_service():  # type: ignore[no-untyped-def]
     """Return the runners service (owner scoping lives there)."""
-    from apps.runners.sio_server import get_runner_service
-
     return get_runner_service()
 
 

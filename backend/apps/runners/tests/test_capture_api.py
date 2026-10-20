@@ -13,7 +13,7 @@ from apps.organizations.models import Membership, MembershipRole
 from apps.runners.enums import WorkspaceStatus
 from apps.runners.models import CaptureRequest
 from apps.runners.schemas import ImageArtifactCreateIn
-from apps.runners.sio_server import get_runner_service
+from apps.runners.services import get_runner_service
 from common.utils import generate_api_token, hash_token
 
 pytestmark = pytest.mark.django_db

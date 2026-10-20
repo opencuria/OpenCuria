@@ -63,6 +63,7 @@ from apps.runners.exceptions import (
     RunnerOfflineError,
     WorkspaceNotFoundError,
 )
+from apps.runners.services import get_runner_service
 from common.exceptions import ConflictError
 
 from .base import (
@@ -1030,9 +1031,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
     # -- Background processes (direct RunnerService calls) ----------------
 
     def _runner_service(self) -> Any:
-        """Return the process-wide RunnerService (lazy import, no cycle)."""
-        from apps.runners.sio_server import get_runner_service
-
+        """Return the process-wide RunnerService."""
         return get_runner_service()
 
     def _workspace_uuid(self) -> uuid.UUID:

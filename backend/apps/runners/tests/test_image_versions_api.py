@@ -15,7 +15,7 @@ from apps.mcp_app.server import (
 )
 from apps.organizations.models import Membership, MembershipRole
 from apps.runners.models import WorkspaceRecreateRequest
-from apps.runners.sio_server import get_runner_service
+from apps.runners.services import get_runner_service
 from apps.runners.tests.test_image_versions import make_line, qemu_workspace
 from common.utils import generate_api_token, hash_token
 

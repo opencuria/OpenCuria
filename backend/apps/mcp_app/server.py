@@ -124,6 +124,7 @@ from starlette.routing import Mount
 
 from apps.accounts.models import APIKeyPermission
 from apps.harness.constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
+from apps.runners.services import get_runner_service
 
 logger = logging.getLogger(__name__)
 
@@ -1791,9 +1792,7 @@ def _error(msg: str) -> list[TextContent]:
 
 
 def _runner_service():
-    """Return the process-wide RunnerService (lazy import, no cycle)."""
-    from apps.runners.sio_server import get_runner_service
-
+    """Return the process-wide RunnerService."""
     return get_runner_service()
 
 
@@ -1825,9 +1824,8 @@ def _call_list_workspaces(api_key, org_id, args: dict) -> list[TextContent]:
     import uuid as _uuid
 
     from apps.organizations.services import OrganizationService
-    from apps.runners.sio_server import get_runner_service
 
-    svc = get_runner_service()
+    svc = _runner_service()
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
 
@@ -1909,7 +1907,6 @@ def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
     import asyncio
     import uuid as _uuid
 
-    from apps.runners.sio_server import get_runner_service
     from common.exceptions import ConflictError, NotFoundError
 
     name = args.get("name")
@@ -1957,7 +1954,7 @@ def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         except ValueError:
             return _error("Invalid image_artifact_id UUID")
 
-    svc = get_runner_service()
+    svc = _runner_service()
 
     async def _create():
         workspace, task = await svc.create_workspace(
@@ -2018,7 +2015,6 @@ def _call_update_workspace(api_key, org_id, args: dict) -> list[TextContent]:
     import asyncio
     import uuid as _uuid
 
-    from apps.runners.sio_server import get_runner_service
     from common.exceptions import ConflictError, NotFoundError
 
     workspace_id_str = args.get("workspace_id")
@@ -2062,7 +2058,7 @@ def _call_update_workspace(api_key, org_id, args: dict) -> list[TextContent]:
             plugin_ids = [_uuid.UUID(str(value)) for value in args["plugin_ids"]]
         except (ValueError, TypeError):
             return _error("Invalid plugin_ids UUID")
-    svc = get_runner_service()
+    svc = _runner_service()
 
     async def _update():
         return await svc.update_workspace(
@@ -2137,9 +2133,7 @@ def _call_stop_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         if error is not None:
             return error
 
-        from apps.runners.sio_server import get_runner_service
-
-        svc = get_runner_service()
+        svc = _runner_service()
 
         async def _stop():
             return await svc.stop_workspace(workspace_id)
@@ -2171,9 +2165,7 @@ def _call_resume_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         if error is not None:
             return error
 
-        from apps.runners.sio_server import get_runner_service
-
-        svc = get_runner_service()
+        svc = _runner_service()
 
         async def _resume():
             return await svc.resume_workspace(workspace_id)
@@ -2205,9 +2197,7 @@ def _call_remove_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         if error is not None:
             return error
 
-        from apps.runners.sio_server import get_runner_service
-
-        svc = get_runner_service()
+        svc = _runner_service()
 
         async def _remove():
             return await svc.remove_workspace(workspace_id)
@@ -2271,12 +2261,11 @@ def _call_inspect_lifecycle_operation(
     api_key, org_id: uuid.UUID, args: dict
 ) -> list[TextContent]:
     from apps.runners.services.disposition import DispositionService
-    from apps.runners.sio_server import get_runner_service
 
     return _text(
         asyncio.run(
             DispositionService().inspect(
-                get_runner_service(),
+                _runner_service(),
                 api_key.user,
                 org_id,
                 uuid.UUID(args["operation_id"]),
@@ -2289,7 +2278,6 @@ def _call_dispose_lifecycle_operation(
     api_key, org_id: uuid.UUID, args: dict
 ) -> list[TextContent]:
     from apps.runners.services.disposition import DispositionService
-    from apps.runners.sio_server import get_runner_service
 
     if args["action"] == "retry":
         from apps.runners.disposition_repository import DispositionRepository
@@ -2307,7 +2295,7 @@ def _call_dispose_lifecycle_operation(
     return _text(
         asyncio.run(
             DispositionService().act(
-                get_runner_service(),
+                _runner_service(),
                 api_key.user,
                 org_id,
                 uuid.UUID(args["operation_id"]),
@@ -2327,12 +2315,11 @@ def _call_get_runner_storage(api_key, org_id, args: dict) -> list[TextContent]:
 
 def _call_refresh_runner_storage(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.runners.services.storage import StorageService
-    from apps.runners.sio_server import get_runner_service
 
     return _text(
         asyncio.run(
             StorageService().refresh(
-                get_runner_service(), api_key.user, org_id, uuid.UUID(args["runner_id"])
+                _runner_service(), api_key.user, org_id, uuid.UUID(args["runner_id"])
             )
         )
     )
@@ -2340,9 +2327,8 @@ def _call_refresh_runner_storage(api_key, org_id, args: dict) -> list[TextConten
 
 def _call_list_runners(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.organizations.services import OrganizationService
-    from apps.runners.sio_server import get_runner_service
 
-    svc = get_runner_service()
+    svc = _runner_service()
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
 
@@ -2360,9 +2346,8 @@ def _call_list_runners(api_key, org_id, args: dict) -> list[TextContent]:
 
 def _call_list_image_artifacts(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.organizations.services import OrganizationService
-    from apps.runners.sio_server import get_runner_service
 
-    svc = get_runner_service()
+    svc = _runner_service()
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
     artifacts = svc.list_image_artifacts_for_user(user=api_key.user)
@@ -2574,9 +2559,7 @@ def _call_create_image_artifact(api_key, org_id, args: dict) -> list[TextContent
         if error is not None:
             return error
 
-        from apps.runners.sio_server import get_runner_service
-
-        svc = get_runner_service()
+        svc = _runner_service()
 
         async def _create():
             return await svc.create_image_artifact(
@@ -2626,11 +2609,10 @@ def _image_definition_payload(definition) -> dict:
 
 def _call_list_image_definitions(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.organizations.services import OrganizationService
-    from apps.runners.sio_server import get_runner_service
 
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
-    svc = get_runner_service()
+    svc = _runner_service()
     definitions = svc.list_image_definitions(org_id)
     return _text([_image_definition_payload(definition) for definition in definitions])
 
@@ -2778,9 +2760,7 @@ def _call_update_image_definition(api_key, org_id, args: dict) -> list[TextConte
         "custom_init_script",
         "is_active",
     ]
-    from apps.runners.sio_server import get_runner_service
-
-    definition = get_runner_service().update_image_recipe(
+    definition = _runner_service().update_image_recipe(
         definition.id, {field: args[field] for field in fields if field in args}
     )
     return _text({"id": str(definition.id), "name": definition.name})
@@ -2792,7 +2772,6 @@ def _call_delete_image_definition(api_key, org_id, args: dict) -> list[TextConte
 
     from apps.organizations.services import OrganizationService
     from apps.runners.repositories import ImageDefinitionRepository
-    from apps.runners.sio_server import get_runner_service
     from common.exceptions import ConflictError
 
     definition_id_str = args.get("definition_id")
@@ -2812,7 +2791,7 @@ def _call_delete_image_definition(api_key, org_id, args: dict) -> list[TextConte
     if definition is None or definition.organization_id != org_id:
         return _error("Image definition not found")
 
-    svc = get_runner_service()
+    svc = _runner_service()
 
     async def _delete():
         await svc.delete_image_definition(definition_id)
@@ -2838,7 +2817,6 @@ def _call_list_build_jobs(api_key, org_id, args: dict) -> list[TextContent]:
 
     from apps.organizations.services import OrganizationService
     from apps.runners.repositories import ImageDefinitionRepository
-    from apps.runners.sio_server import get_runner_service
 
     definition_id_str = args.get("definition_id")
     if not definition_id_str:
@@ -2853,7 +2831,7 @@ def _call_list_build_jobs(api_key, org_id, args: dict) -> list[TextContent]:
     if ImageDefinitionRepository.get_by_id_and_org(definition_id, org_id) is None:
         return _error("Image definition not found")
 
-    svc = get_runner_service()
+    svc = _runner_service()
     builds = svc.list_build_jobs(definition_id, org_id)
     return _text(
         [
@@ -2904,7 +2882,6 @@ def _call_create_build_job(api_key, org_id, args: dict) -> list[TextContent]:
 
     from apps.organizations.services import OrganizationService
     from apps.runners.repositories import ImageDefinitionRepository, RunnerRepository
-    from apps.runners.sio_server import get_runner_service
 
     definition_id_str = args.get("definition_id")
     runner_id_str = args.get("runner_id")
@@ -2928,7 +2905,7 @@ def _call_create_build_job(api_key, org_id, args: dict) -> list[TextContent]:
     if runner is None or runner.organization_id != org_id:
         return _error("Runner not found")
 
-    svc = get_runner_service()
+    svc = _runner_service()
 
     async def _create():
         return await svc.trigger_build_job(
@@ -2954,7 +2931,6 @@ def _call_update_build_job(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.organizations.services import OrganizationService
     from apps.runners.models import ImageBuildJob
     from apps.runners.repositories import ImageBuildJobRepository
-    from apps.runners.sio_server import get_runner_service
     from common.exceptions import ConflictError
 
     definition_id_str = args.get("definition_id")
@@ -2979,7 +2955,7 @@ def _call_update_build_job(api_key, org_id, args: dict) -> list[TextContent]:
 
     if action == "deactivate":
         try:
-            svc = get_runner_service()
+            svc = _runner_service()
             svc.ensure_definition_mutable(build.image_definition)
         except ConflictError as e:
             return _error(e.message)
@@ -2989,7 +2965,7 @@ def _call_update_build_job(api_key, org_id, args: dict) -> list[TextContent]:
     if action not in {"activate", "rebuild"}:
         return _error("action must be one of: deactivate, activate, rebuild")
 
-    svc = get_runner_service()
+    svc = _runner_service()
 
     async def _update():
         message = (args.get("message") or "")[:500]
@@ -3023,7 +2999,6 @@ def _call_delete_build_job(api_key, org_id, args: dict) -> list[TextContent]:
 
     from apps.organizations.services import OrganizationService
     from apps.runners.repositories import ImageBuildJobRepository
-    from apps.runners.sio_server import get_runner_service
     from common.exceptions import ConflictError
 
     definition_id_str = args.get("definition_id")
@@ -3045,7 +3020,7 @@ def _call_delete_build_job(api_key, org_id, args: dict) -> list[TextContent]:
     if build is None:
         return _error("Runner image build not found")
 
-    svc = get_runner_service()
+    svc = _runner_service()
 
     async def _delete():
         return await svc.delete_build_job(build.id)
@@ -4860,11 +4835,10 @@ def _call_delete_harness_session(api_key, org_id, args: dict) -> list[TextConten
 
 def _call_list_harness_conversations(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.organizations.services import OrganizationService
-    from apps.runners.sio_server import get_runner_service
 
     org_service = OrganizationService()
     org_service.require_membership(api_key.user, org_id)
-    runner_service = get_runner_service()
+    runner_service = _runner_service()
     workspaces = runner_service.list_workspaces(
         organization_id=org_id,
         user=api_key.user,

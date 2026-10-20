@@ -93,7 +93,9 @@ class TestDesktopStateCleanup:
             status=TaskStatus.IN_PROGRESS,
         )
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
 
         await service.handle_desktop_started(
             str(task.id),
@@ -134,7 +136,9 @@ class TestDesktopStateCleanup:
             status=TaskStatus.IN_PROGRESS,
         )
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
 
         await service.handle_desktop_started(
             str(task.id),
@@ -347,7 +351,9 @@ class TestDesktopStateCleanup:
     ):
         """Harness hold/ensure announcements fill the same cache the proxy uses."""
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
 
         await service.handle_desktop_process(
             str(workspace.id),
@@ -424,7 +430,9 @@ class TestDesktopStateCleanup:
         foreign_ws_id = str(foreign_workspace.id)
         assert foreign_ws_id not in service._desktop_workspace_runner
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
 
         await service.handle_desktop_process(
             foreign_ws_id,
@@ -450,7 +458,9 @@ class TestDesktopStateCleanup:
     ):
         """Events for unknown workspaces plant no cache and emit nothing."""
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         missing_ws_id = str(uuid.uuid4())
 
         await service.handle_desktop_process(
@@ -507,7 +517,9 @@ class TestDesktopStateCleanup:
             runner_id=str(foreign_runner.id),
         )
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
 
         await service.handle_desktop_stopped(
             None,
@@ -537,7 +549,9 @@ class TestDesktopStateCleanup:
     ):
         """The real owner clears state even without a cached runner entry."""
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         ws_id = str(workspace.id)
         service._record_active_desktop(
             ws_id,
@@ -572,7 +586,9 @@ class TestDesktopStateCleanup:
     ):
         """A stray runner must not hijack another runner's desktop cache."""
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         service._record_active_desktop(
             str(workspace.id),
             {
@@ -615,7 +631,9 @@ class TestDesktopStateCleanup:
         from django.core.exceptions import SynchronousOnlyOperation
 
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
         try:
             owned = await service._desktop_event_owned_by_runner(
@@ -672,7 +690,9 @@ class TestDesktopStateCleanup:
     ):
         """A delayed stop in one runner epoch cannot remove a newer route."""
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         ws_id = str(workspace.id)
         service._record_active_desktop(
             ws_id,
@@ -704,7 +724,9 @@ class TestDesktopStateCleanup:
         self, service, runner, workspace, monkeypatch
     ):
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         ws_id = str(workspace.id)
         service._set_runner_desktop_epoch(str(runner.id), "desktop-epoch")
         service._record_active_desktop(
@@ -743,7 +765,9 @@ class TestDesktopStateCleanup:
     ):
         """A late active update cannot revive the route after a same-gen stop."""
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         ws_id = str(workspace.id)
         runner_id = str(runner.id)
         service._set_runner_desktop_epoch(runner_id, "desktop-epoch")
@@ -839,7 +863,9 @@ class TestDesktopStateCleanup:
     ):
         """Process and heartbeat observations share the stop generation fence."""
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         ws_id = str(workspace.id)
         service._set_runner_desktop_epoch(str(runner.id), "desktop-epoch")
         service._record_active_desktop(
@@ -914,7 +940,9 @@ class TestDesktopStateCleanup:
     ):
         """Harness releases announce stops without a viewer task to complete."""
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         service._record_active_desktop(
             str(workspace.id),
             {
@@ -954,7 +982,9 @@ class TestDesktopStateCleanup:
             status=TaskStatus.IN_PROGRESS,
         )
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         service._record_active_desktop(
             str(workspace.id),
             {
@@ -1005,7 +1035,9 @@ class TestDesktopStateCleanup:
             status=TaskStatus.IN_PROGRESS,
         )
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         service._record_active_desktop(
             str(workspace.id),
             {
@@ -2761,7 +2793,9 @@ class TestForwardFilesFind:
             created_by=user,
         )
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         await service.forward_files_event(
             workspace_id=str(workspace.id),
             event="files:find",
@@ -4306,7 +4340,9 @@ class TestChunkedFileTransferOwnership:
         self, service, workspace, monkeypatch
     ):
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         payload = {
             "workspace_id": str(workspace.id),
             "request_id": "content-1",
@@ -4325,7 +4361,9 @@ class TestChunkedFileTransferOwnership:
         self, service, workspace, monkeypatch
     ):
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         payload = {
             "workspace_id": str(workspace.id),
             "request_id": "download-1",
@@ -4346,7 +4384,9 @@ class TestChunkedFileTransferOwnership:
         self, service, workspace, monkeypatch
     ):
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         await service.handle_files_result(
             "files:content_chunk",
             {
@@ -4366,7 +4406,9 @@ class TestChunkedFileTransferOwnership:
         self, service, sio_mock, workspace, monkeypatch
     ):
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         sio_mock.emit.reset_mock()
         await service.forward_files_event(
             workspace_id=str(workspace.id),
@@ -4391,7 +4433,9 @@ class TestChunkedFileTransferOwnership:
         self, service, sio_mock, workspace, monkeypatch
     ):
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         sio_mock.emit.reset_mock()
         await service.forward_files_event(
             workspace_id=str(workspace.id),
@@ -4443,7 +4487,9 @@ class TestChunkedFileTransferOwnership:
             created_by=user,
         )
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         sio_mock.emit.reset_mock()
         start = {
             "workspace_id": str(workspace.id),
@@ -4490,7 +4536,9 @@ class TestChunkedFileTransferOwnership:
         self, service, sio_mock, workspace, monkeypatch
     ):
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         sio_mock.emit.reset_mock()
         await service.forward_files_event(
             workspace_id=str(workspace.id),
@@ -4514,7 +4562,9 @@ class TestChunkedFileTransferOwnership:
         self, service, sio_mock, workspace, monkeypatch
     ):
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         sio_mock.emit.reset_mock()
         await service.forward_files_event(
             workspace_id=str(workspace.id),
@@ -4562,7 +4612,9 @@ class TestChunkedFileTransferOwnership:
         self, service, workspace, monkeypatch
     ):
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         for total in (0, 561, "bad"):
             await service.handle_files_result(
                 "files:content_chunk",
@@ -4583,7 +4635,9 @@ class TestChunkedFileTransferOwnership:
         self, service, workspace, monkeypatch
     ):
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         await service.handle_files_result(
             "files:content_chunk",
             {
@@ -4603,7 +4657,9 @@ class TestChunkedFileTransferOwnership:
         self, service, workspace, monkeypatch
     ):
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         exact = {
             "workspace_id": str(workspace.id),
             "request_id": "exact-cap",
@@ -4629,7 +4685,9 @@ class TestChunkedFileTransferOwnership:
         self, service, workspace, monkeypatch
     ):
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         for content in ("", "   \n ", "A" * (256 * 1024 + 1)):
             await service.handle_files_result(
                 "files:content_chunk",
@@ -4650,7 +4708,9 @@ class TestChunkedFileTransferOwnership:
         self, service, workspace, monkeypatch
     ):
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         payload = {
             "workspace_id": str(workspace.id),
             "request_id": "ws-clean",
@@ -4669,7 +4729,9 @@ class TestChunkedFileTransferOwnership:
         self, service, workspace, monkeypatch
     ):
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         await service.handle_files_result(
             "files:content_chunk",
             {
@@ -4688,7 +4750,9 @@ class TestChunkedFileTransferOwnership:
         self, service, workspace, monkeypatch
     ):
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         await service.handle_files_result(
             "files:content_chunk",
             {
@@ -4708,7 +4772,9 @@ class TestChunkedFileTransferOwnership:
         self, service, workspace, monkeypatch
     ):
         emit = AsyncMock()
-        monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+        monkeypatch.setattr(
+            "apps.runners.services.infra.realtime.emit_to_frontend", emit
+        )
         await service.handle_files_result(
             "files:download_chunk",
             {

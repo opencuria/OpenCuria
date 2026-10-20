@@ -93,6 +93,7 @@ from .schemas import (
     WorkspaceUpdateOut,
     validate_commit_hash,
 )
+from .services import get_runner_service
 
 
 def _perm_denied(permission: APIKeyPermission):
@@ -210,9 +211,7 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
 
 
 def _get_service():
-    """Get the RunnerService singleton (lazy import to avoid circular deps)."""
-    from .sio_server import get_runner_service
-
+    """Get the RunnerService singleton."""
     return get_runner_service()
 
 

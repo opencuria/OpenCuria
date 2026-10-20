@@ -10,8 +10,9 @@ relies on the facade providing ``self.tasks`` / ``self.workspaces``,
 ``_emit_to_runner`` / ``_call_runner`` (``RunnerTransportMixin``),
 ``_forward_*`` (``FrontendBusMixin``), ``_desktop_event_owned_by_runner``
 (``OwnershipMixin``) and ``_record_active_desktop`` et al.
-(``SessionStoreMixin``). Lazy ``from ...sio_server`` / ``common.utils``
-imports keep their depth/semantics.
+(``SessionStoreMixin``). Frontend fan-out goes through
+``infra.realtime.emit_to_frontend``; lazy ``common.utils`` imports keep
+their semantics.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from ...exceptions import (
     WorkspaceNotFoundError,
     WorkspaceStateError,
 )
+from ..infra import realtime
 
 if TYPE_CHECKING:
     from ...models import Task
@@ -107,8 +109,6 @@ class InteractiveSessionsMixin:
         runner_id: str | None = None,
     ) -> None:
         """Handle terminal:started event from a runner."""
-        from ...sio_server import emit_to_frontend
-
         task = await sync_to_async(self.tasks.get_by_id)(uuid.UUID(task_id))
         if task:
             if not self._validate_task_runner(task, runner_id):
@@ -125,7 +125,7 @@ class InteractiveSessionsMixin:
             terminal_id,
         )
 
-        await emit_to_frontend(
+        await realtime.emit_to_frontend(
             "terminal:started",
             {
                 "workspace_id": workspace_id,
@@ -160,9 +160,7 @@ class InteractiveSessionsMixin:
                 )
                 return
 
-        from ...sio_server import emit_to_frontend
-
-        await emit_to_frontend(
+        await realtime.emit_to_frontend(
             "terminal:output",
             {
                 "workspace_id": workspace_id,
@@ -191,8 +189,6 @@ class InteractiveSessionsMixin:
                 )
                 return
 
-        from ...sio_server import emit_to_frontend
-
         self._active_terminals.pop(workspace_id, None)
         self._terminal_workspace_runner.pop(workspace_id, None)
         logger.info(
@@ -200,7 +196,7 @@ class InteractiveSessionsMixin:
             workspace_id,
             terminal_id,
         )
-        await emit_to_frontend(
+        await realtime.emit_to_frontend(
             "terminal:closed",
             {
                 "workspace_id": workspace_id,
@@ -658,8 +654,6 @@ class InteractiveSessionsMixin:
         epoch: str | None = None,
     ) -> None:
         """Handle desktop:started after a viewer lease is acquired."""
-        from ...sio_server import emit_to_frontend
-
         current = self.get_desktop_info(workspace_id) or {}
         epoch, generation = self._inherit_current_desktop_version(
             workspace_id,
@@ -720,7 +714,7 @@ class InteractiveSessionsMixin:
         if not task_id:
             return
 
-        await emit_to_frontend(
+        await realtime.emit_to_frontend(
             "desktop:started",
             {
                 "workspace_id": workspace_id,
@@ -758,8 +752,6 @@ class InteractiveSessionsMixin:
         workspace owner (not just the in-memory cache) so a stray runner
         cannot hijack another runner's desktop even with an empty cache.
         """
-        from ...sio_server import emit_to_frontend
-
         if not await self._desktop_event_owned_by_runner(workspace_id, runner_id):
             return
         epoch, generation = self._inherit_current_desktop_version(
@@ -808,7 +800,7 @@ class InteractiveSessionsMixin:
             updated.get("viewer", False),
             updated.get("computer_use", False),
         )
-        await emit_to_frontend(
+        await realtime.emit_to_frontend(
             "desktop:started",
             {
                 "workspace_id": workspace_id,
@@ -838,8 +830,6 @@ class InteractiveSessionsMixin:
         the in-memory cache) so a foreign runner can never clear another
         runner's desktop state, even with an empty cache.
         """
-        from ...sio_server import emit_to_frontend
-
         if not await self._desktop_event_owned_by_runner(workspace_id, runner_id):
             return
         epoch, generation = self._inherit_current_desktop_version(
@@ -909,7 +899,7 @@ class InteractiveSessionsMixin:
             workspace_id,
             computer_use_active,
         )
-        await emit_to_frontend(
+        await realtime.emit_to_frontend(
             "desktop:viewer_released",
             {
                 "workspace_id": workspace_id,
@@ -941,8 +931,6 @@ class InteractiveSessionsMixin:
         the in-memory cache) so a foreign runner can never clear another
         runner's desktop state, even with an empty cache.
         """
-        from ...sio_server import emit_to_frontend
-
         if not await self._desktop_event_owned_by_runner(workspace_id, runner_id):
             return
 
@@ -1013,7 +1001,7 @@ class InteractiveSessionsMixin:
 
         logger.info("Desktop stopped: workspace=%s", workspace_id)
 
-        await emit_to_frontend(
+        await realtime.emit_to_frontend(
             "desktop:stopped",
             {
                 "workspace_id": workspace_id,

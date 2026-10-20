@@ -12,6 +12,7 @@ from ninja import Router, Schema
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
+from apps.runners.services import get_runner_service
 from common.exceptions import NotFoundError
 
 from .models import ScheduledTask, ScheduledTaskRun
@@ -164,8 +165,6 @@ def _run_out(run: ScheduledTaskRun) -> ScheduledTaskRunOut:
 async def _owned_workspace(
     request: HttpRequest, org_id: uuid.UUID, workspace_id: uuid.UUID
 ):
-    from apps.runners.sio_server import get_runner_service
-
     return await sync_to_async(get_runner_service().get_workspace_for_user)(
         workspace_id, user=request.user, organization_id=org_id
     )

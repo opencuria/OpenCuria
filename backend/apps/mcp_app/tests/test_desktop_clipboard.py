@@ -79,7 +79,7 @@ def _install_runner_service(
     service.workspaces = Mock()
     service.workspaces.get_by_id.return_value = workspace
     service.read_desktop_clipboard = AsyncMock(return_value=clipboard_text)
-    monkeypatch.setattr("apps.runners.sio_server.get_runner_service", lambda: service)
+    monkeypatch.setattr("apps.mcp_app.server._runner_service", lambda: service)
     return service
 
 

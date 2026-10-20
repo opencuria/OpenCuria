@@ -139,7 +139,9 @@ async def test_proxy_http_fetches_asset_via_runner(monkeypatch):
             "body_encoding": "base64",
         }
     )
-    monkeypatch.setattr("apps.runners.sio_server.get_sio_server", lambda: sio)
+    monkeypatch.setattr(
+        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+    )
     monkeypatch.setattr(
         "apps.runners.desktop_proxy._validate_token",
         AsyncMock(return_value=SimpleNamespace(pk=1)),
@@ -301,7 +303,9 @@ async def test_upstream_close_closes_runner_tunnel_and_sanitizes_code(
     expected_code,
 ):
     sio = AsyncMock()
-    monkeypatch.setattr("apps.runners.sio_server.get_sio_server", lambda: sio)
+    monkeypatch.setattr(
+        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+    )
     tunnel_id = uuid.uuid4().hex
     queue = asyncio.Queue()
     await queue.put({"type": "close", "code": upstream_code})
@@ -337,7 +341,9 @@ async def test_proxy_loop_failures_close_runner_tunnel_once_without_reserved_cod
     caplog,
 ):
     sio = AsyncMock()
-    monkeypatch.setattr("apps.runners.sio_server.get_sio_server", lambda: sio)
+    monkeypatch.setattr(
+        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+    )
     tunnel_id = uuid.uuid4().hex
     queue = asyncio.Queue()
     if failure_side == "send":
@@ -376,7 +382,9 @@ async def test_proxy_loop_failures_close_runner_tunnel_once_without_reserved_cod
 @pytest.mark.asyncio
 async def test_client_disconnect_closes_runner_tunnel(monkeypatch):
     sio = AsyncMock()
-    monkeypatch.setattr("apps.runners.sio_server.get_sio_server", lambda: sio)
+    monkeypatch.setattr(
+        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+    )
     tunnel_id = uuid.uuid4().hex
 
     async def receive():
@@ -404,7 +412,9 @@ async def test_client_disconnect_closes_runner_tunnel(monkeypatch):
 async def test_proxy_websocket_unregisters_tunnel_after_loop(monkeypatch):
     sio = AsyncMock()
     sio.call = AsyncMock(return_value={})
-    monkeypatch.setattr("apps.runners.sio_server.get_sio_server", lambda: sio)
+    monkeypatch.setattr(
+        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+    )
     monkeypatch.setattr(
         "apps.runners.desktop_proxy._ws_proxy_loop",
         AsyncMock(return_value=None),
@@ -541,7 +551,9 @@ async def test_proxy_vnc_html_injects_idle_guard(monkeypatch):
             "body_encoding": "base64",
         }
     )
-    monkeypatch.setattr("apps.runners.sio_server.get_sio_server", lambda: sio)
+    monkeypatch.setattr(
+        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+    )
     monkeypatch.setattr(
         "apps.runners.desktop_proxy._validate_token",
         AsyncMock(return_value=SimpleNamespace(pk=1)),
@@ -584,7 +596,7 @@ async def test_manual_tunnel_renews_existing_lease_and_closes_without_release(
     monkeypatch,
 ):
     """Live tunnel renewal does not depend on visible-tab browser timers."""
-    from apps.runners.sio_server import get_runner_service
+    from apps.runners.services import get_runner_service
 
     workspace_id, client_id = str(uuid.uuid4()), str(uuid.uuid4())
     service = get_runner_service()
@@ -610,7 +622,9 @@ async def test_manual_tunnel_renews_existing_lease_and_closes_without_release(
         get_user_model().objects, "get", lambda **kwargs: SimpleNamespace(id=1)
     )
     sio = SimpleNamespace(emit=AsyncMock())
-    monkeypatch.setattr("apps.runners.sio_server.get_sio_server", lambda: sio)
+    monkeypatch.setattr(
+        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+    )
 
     async def receive():
         await renewed.wait()
@@ -636,7 +650,7 @@ async def test_manual_tunnel_renews_existing_lease_and_closes_without_release(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["user", "workspace"])
 async def test_renew_lookup_failure_explicitly_closes_browser(monkeypatch, failure):
-    from apps.runners.sio_server import get_runner_service
+    from apps.runners.services import get_runner_service
 
     service = get_runner_service()
 
@@ -650,7 +664,9 @@ async def test_renew_lookup_failure_explicitly_closes_browser(monkeypatch, failu
     )
     monkeypatch.setattr(service, "get_workspace", fail)
     sio = SimpleNamespace(emit=AsyncMock())
-    monkeypatch.setattr("apps.runners.sio_server.get_sio_server", lambda: sio)
+    monkeypatch.setattr(
+        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+    )
     send = AsyncMock()
 
     async def receive():

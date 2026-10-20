@@ -4,8 +4,8 @@ Byte-identical method bodies extracted from the former monolithic
 ``apps/runners/services/__init__.py``. No logic changes; the mixin relies
 on the facade (``RunnerService``) providing ``self.workspaces`` plus
 sibling helpers (``_emit_to_runner`` / ``_route_harness_reply`` via
-``RunnerTransportMixin``). The ``sio_server`` import stays lazy inside the
-method bodies (deeper relative level ``...`` from ``domains/``).
+``RunnerTransportMixin``). Frontend fan-out goes through
+``infra.realtime.emit_to_frontend``.
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ import logging
 import uuid
 
 from asgiref.sync import sync_to_async
+
+from ..infra import realtime
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +35,6 @@ class FileTransferMixin:
         When the runner is offline, a synthetic error result is sent back
         to the frontend so callers do not get stuck waiting indefinitely.
         """
-        from ...sio_server import emit_to_frontend
-
         # Map request event → result event for error responses.
         _result_event: dict[str, str] = {
             "files:read": "files:content_result",
@@ -66,7 +66,7 @@ class FileTransferMixin:
                 # Terminal error was already synthesized for the start.
                 return
             if not self._validate_upload_relay(event, data):
-                await emit_to_frontend(
+                await realtime.emit_to_frontend(
                     "files:upload_result",
                     {
                         "workspace_id": workspace_id,
@@ -80,7 +80,7 @@ class FileTransferMixin:
                 return
         if event == "files:upload" and data.get("chunked"):
             if not runner.is_online:
-                await emit_to_frontend(
+                await realtime.emit_to_frontend(
                     "files:upload_result",
                     {
                         "workspace_id": workspace_id,
@@ -93,7 +93,7 @@ class FileTransferMixin:
                 )
                 return
             if not self._validate_upload_start(data):
-                await emit_to_frontend(
+                await realtime.emit_to_frontend(
                     "files:upload_result",
                     {
                         "workspace_id": workspace_id,
@@ -133,7 +133,9 @@ class FileTransferMixin:
                             "size": 0,
                         }
                     )
-                await emit_to_frontend(result_event, error_payload, workspace_id)
+                await realtime.emit_to_frontend(
+                    result_event, error_payload, workspace_id
+                )
             return
 
         await self._emit_to_runner(runner, event, data)
@@ -258,8 +260,6 @@ class FileTransferMixin:
         routed = self._route_harness_reply(event, data, runner_id=runner_id)
         if routed is not None:
             return
-        from ...sio_server import emit_to_frontend
-
         workspace_id = data.get("workspace_id", "") if isinstance(data, dict) else ""
         # Ownership is fail-closed: with a runner claim present, only a
         # valid workspace_id owned by that runner may fan out. Missing or
@@ -297,4 +297,4 @@ class FileTransferMixin:
             )
             return
 
-        await emit_to_frontend(event, data, workspace_id)
+        await realtime.emit_to_frontend(event, data, workspace_id)

@@ -1,10 +1,11 @@
 """
 Socket.IO server for runner and frontend communication.
 
-This module creates and configures the python-socketio AsyncServer that
-handles WebSocket connections from runners and frontend clients. It serves
-as the thin adapter between the Socket.IO protocol and the RunnerService
-business logic.
+This module registers the event handlers that serve WebSocket connections
+from runners and frontend clients on the shared AsyncServer (owned by
+``apps.runners.services.infra.realtime``). It is the thin adapter between
+the Socket.IO protocol and the RunnerService business logic; no other
+module may import it except the ASGI entry point.
 
 The server is mounted as an ASGI app in config/asgi.py.
 """
@@ -12,9 +13,7 @@ The server is mounted as an ASGI app in config/asgi.py.
 from __future__ import annotations
 
 import logging
-import os
 import uuid
-from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from functools import wraps
 
@@ -24,22 +23,15 @@ from asgiref.sync import sync_to_async
 from common.exceptions import ConflictError
 from common.utils import hash_token
 
+from .services import get_runner_service
+from .services.infra.realtime import (
+    drop_frontend,
+    get_sio_server,
+    subscribe_frontend,
+    unsubscribe_frontend,
+)
+
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Singleton instances
-# ---------------------------------------------------------------------------
-
-# The Socket.IO server — created once, shared across the app
-_sio: socketio.AsyncServer | None = None
-
-# The RunnerService instance — created lazily
-_runner_service = None
-
-# Frontend subscription tracking: workspace_id -> set of frontend sids
-_frontend_subscriptions: dict[str, set[str]] = defaultdict(set)
-# Reverse mapping: frontend sid -> set of workspace_ids
-_frontend_sid_workspaces: dict[str, set[str]] = defaultdict(set)
 
 
 @sync_to_async
@@ -103,87 +95,49 @@ async def _ensure_frontend_workspace_access(
     return True
 
 
-def get_sio_server() -> socketio.AsyncServer:
-    """Get or create the Socket.IO server singleton."""
-    global _sio
-    if _sio is None:
-        from django.conf import settings as django_settings
-
-        cors_origins = getattr(django_settings, "SIO_CORS_ALLOWED_ORIGINS", "*")
-        _sio = socketio.AsyncServer(
-            async_mode="asgi",
-            client_manager=socketio.AsyncRedisManager(
-                os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
-                channel="opencuria-runner",
-            ),
-            cors_allowed_origins=cors_origins,
-            logger=False,
-            engineio_logger=False,
-            # Keep the 200 MiB engine.io HTTP buffer for monolithic control
-            # traffic (computer-use PNG screenshots, video). Chunking keeps
-            # file transfers under Daphne's ~1 MiB default, but screenshots
-            # are still a single WebSocket frame. Align
-            # DAPHNE_WEBSOCKET_MAX_MESSAGE/FRAME_SIZE (settings) and the
-            # daphne CLI flags in entrypoint.sh at the same 200 MiB value.
-            max_http_buffer_size=200 * 1024 * 1024,
-            # The runner answers server->client events with Socket.IO
-            # ACKs (``sio.call``); without an active Engine.IO monitor
-            # task, a stalled socket is never pinged/closed and ACKs can
-            # hang until the caller's timeout. Keep the monitor enabled
-            # explicitly so control calls fail fast instead of hanging.
-            monitor_clients=True,
-            ping_interval=25,
-            ping_timeout=20,
-        )
-        _register_event_handlers(_sio)
-        from .operations import RESULT_METHODS, LifecycleCommand
-
-        # Durable terminal results must use the versioned envelope. Legacy
-        # direct callbacks cannot bypass target/attempt/session fencing.
-        for event in RESULT_METHODS:
-            original = _sio.handlers["/"].get(event)
-            if original is None:
-                continue
-
-            def fenced(handler):
-                async def receive(sid, data):
-                    durable = await sync_to_async(
-                        lambda: LifecycleCommand.objects.filter(
-                            task_id=data.get("task_id")
-                        ).exists()
-                    )()
-                    if durable:
-                        return
-                    return await handler(sid, data)
-
-                return receive
-
-            _sio.on(event, fenced(original))
-        _register_frontend_handlers(_sio)
-    return _sio
-
-
-def get_runner_service():
-    """Get or create the RunnerService singleton."""
-    global _runner_service
-    if _runner_service is None:
-        from .services import RunnerService
-
-        _runner_service = RunnerService(sio_server=get_sio_server())
-    return _runner_service
-
-
 def create_sio_app() -> socketio.ASGIApp:
     """
     Create the Socket.IO ASGI application.
 
-    Called from config/asgi.py to mount the Socket.IO server.
+    Called from config/asgi.py to mount the Socket.IO server. Attaches the
+    runner and frontend event handlers to the shared server singleton.
     """
     sio = get_sio_server()
+    _register_event_handlers(sio)
+    _fence_durable_results(sio)
+    _register_frontend_handlers(sio)
     return socketio.ASGIApp(
         sio,
         socketio_path="/ws/runner",
     )
+
+
+def _fence_durable_results(sio: socketio.AsyncServer) -> None:
+    """Route durable terminal results exclusively through the envelope.
+
+    Legacy direct callbacks cannot bypass target/attempt/session fencing.
+    """
+    from .operations import RESULT_METHODS, LifecycleCommand
+
+    for event in RESULT_METHODS:
+        original = sio.handlers["/"].get(event)
+        if original is None:
+            continue
+
+        def fenced(handler):
+            async def receive(sid, data):
+                durable = await sync_to_async(
+                    lambda: LifecycleCommand.objects.filter(
+                        task_id=data.get("task_id")
+                    ).exists()
+                )()
+                if durable:
+                    return
+                return await handler(sid, data)
+
+            return receive
+
+        sio.on(event, fenced(original))
 
 
 # ---------------------------------------------------------------------------
@@ -1314,11 +1268,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
     @sio.on("disconnect", namespace="/frontend")
     async def frontend_disconnect(sid: str):
         """Clean up subscriptions when a frontend client disconnects."""
-        workspace_ids = _frontend_sid_workspaces.pop(sid, set())
-        for ws_id in workspace_ids:
-            _frontend_subscriptions[ws_id].discard(sid)
-            if not _frontend_subscriptions[ws_id]:
-                del _frontend_subscriptions[ws_id]
+        drop_frontend(sid)
         logger.info("Frontend client disconnected (sid=%s)", sid)
 
     @sio.on("frontend:subscribe_workspace", namespace="/frontend")
@@ -1330,8 +1280,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         ):
             return
 
-        _frontend_subscriptions[workspace_id].add(sid)
-        _frontend_sid_workspaces[sid].add(workspace_id)
+        subscribe_frontend(sid, workspace_id)
         logger.debug("Frontend %s subscribed to workspace %s", sid, workspace_id)
 
     @sio.on("frontend:unsubscribe_workspace", namespace="/frontend")
@@ -1344,10 +1293,7 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         if not await _ensure_frontend_workspace_access(sio, sid, workspace_id):
             return
 
-        _frontend_subscriptions[workspace_id].discard(sid)
-        if not _frontend_subscriptions[workspace_id]:
-            del _frontend_subscriptions[workspace_id]
-        _frontend_sid_workspaces[sid].discard(workspace_id)
+        unsubscribe_frontend(sid, workspace_id)
         logger.debug("Frontend %s unsubscribed from workspace %s", sid, workspace_id)
 
     # --- Terminal events from frontend ---
@@ -1558,26 +1504,3 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
             event="files:download",
             data=data,
         )
-
-
-async def emit_to_frontend(
-    event: str,
-    data: dict,
-    workspace_id: str,
-) -> None:
-    """
-    Emit an event to all frontend clients subscribed to a workspace.
-
-    This is called by the RunnerService when processing runner events
-    to forward real-time updates to the frontend.
-    """
-    sio = get_sio_server()
-    sids = _frontend_subscriptions.get(workspace_id, set())
-    if not sids:
-        return
-
-    for sid in sids.copy():
-        try:
-            await sio.emit(event, data, to=sid, namespace="/frontend")
-        except Exception:
-            logger.warning("Failed to emit %s to frontend sid %s", event, sid)

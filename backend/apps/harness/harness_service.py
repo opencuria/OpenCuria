@@ -33,6 +33,8 @@ import anyio
 import structlog
 from asgiref.sync import ThreadSensitiveContext, async_to_sync, sync_to_async
 
+from apps.runners.services import get_runner_service
+from apps.runners.services.infra import realtime
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .agents.definitions import get_agent
@@ -4932,9 +4934,7 @@ class HarnessService:
             if self._emit is not None:
                 await self._emit(event, data)
                 return
-            from apps.runners.sio_server import emit_to_frontend
-
-            await emit_to_frontend(event, data, workspace_id)
+            await realtime.emit_to_frontend(event, data, workspace_id)
         except Exception:  # pragma: no cover - forwarding is best-effort
             log.warning("harness_frontend_emit_failed", event_name=event)
 
@@ -5808,8 +5808,6 @@ def create_default_harness_service() -> HarnessService:
     REST and MCP both use :func:`get_harness_service` so abort, permissions,
     and in-flight runs share one task registry.
     """
-    from apps.runners.sio_server import get_runner_service
-
     from .access.runner_accessor import create_harness_accessor
 
     runner_service = get_runner_service()

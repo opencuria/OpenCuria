@@ -139,12 +139,12 @@ def test_mcp_requires_terminal_permission(action):
 @pytest.mark.asyncio
 async def test_desktop_events_preserve_process_aggregates(monkeypatch):
     """Partial viewer events must not erase MCP or remaining viewer holders."""
-    from apps.runners import sio_server
+    from apps.runners.services.infra import realtime
 
     service = RunnerService(sio_server=Mock())
     workspace = str(uuid.uuid4())
     emit = AsyncMock()
-    monkeypatch.setattr(sio_server, "emit_to_frontend", emit)
+    monkeypatch.setattr(realtime, "emit_to_frontend", emit)
     service._desktop_event_owned_by_runner = AsyncMock(return_value=True)
     service.tasks.get_by_id = Mock(return_value=None)
     await service.handle_desktop_process(

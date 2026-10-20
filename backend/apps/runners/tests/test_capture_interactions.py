@@ -207,7 +207,9 @@ async def test_new_proxy_requests_blocked_after_auth(monkeypatch, scope_type):
 @pytest.mark.parametrize("idle", [False, True])
 async def test_existing_tunnel_retires_during_capture(monkeypatch, idle):
     sio = AsyncMock()
-    monkeypatch.setattr("apps.runners.sio_server.get_sio_server", lambda: sio)
+    monkeypatch.setattr(
+        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+    )
     monkeypatch.setattr(
         desktop_proxy, "_desktop_workspace_available", AsyncMock(return_value=False)
     )
@@ -266,7 +268,9 @@ async def test_internal_session_cleanup_can_settle_during_capture(interaction_se
 @pytest.mark.asyncio
 async def test_idle_tunnel_detects_capture_acquired_after_connection(monkeypatch):
     sio = AsyncMock()
-    monkeypatch.setattr("apps.runners.sio_server.get_sio_server", lambda: sio)
+    monkeypatch.setattr(
+        "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
+    )
     availability = AsyncMock(side_effect=[True, False])
     monkeypatch.setattr(desktop_proxy, "_desktop_workspace_available", availability)
 
@@ -299,7 +303,7 @@ async def test_file_runner_results_not_blocked_during_capture(
     service, workspace = interaction_service
     service._route_harness_reply = Mock(return_value=None)
     emit = AsyncMock()
-    monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+    monkeypatch.setattr("apps.runners.services.infra.realtime.emit_to_frontend", emit)
     payload = {"workspace_id": str(workspace.id), "entries": []}
     await service.handle_files_result("files:list_result", payload)
     emit.assert_awaited_once_with("files:list_result", payload, str(workspace.id))
@@ -315,7 +319,7 @@ async def test_file_normal_dispatch_and_offline_error(
     workspace.current_task_id = None
     workspace.runner.is_online = online
     emit = AsyncMock()
-    monkeypatch.setattr("apps.runners.sio_server.emit_to_frontend", emit)
+    monkeypatch.setattr("apps.runners.services.infra.realtime.emit_to_frontend", emit)
     await service.forward_files_event(
         str(workspace.id), "files:download", {"request_id": "read", "path": "/x"}
     )

@@ -15,7 +15,7 @@ from django.utils import timezone
 
 from apps.harness.harness_service import HarnessService, get_harness_service
 from apps.runners.enums import WorkspaceOperation, WorkspaceStatus
-from apps.runners.sio_server import get_runner_service
+from apps.runners.services import get_runner_service
 from common.exceptions import ConflictError, NotFoundError
 
 from .models import ScheduledTask, ScheduledTaskRun

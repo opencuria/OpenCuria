@@ -13,6 +13,7 @@ import socketio
 from apps.runners import sio_server
 from apps.runners.enums import WorkspaceStatus
 from apps.runners.services import RunnerService
+from apps.runners.services.infra import realtime
 
 # These are the completion events consumed by useWorkspaceFileEvents. In
 # particular, reads return content_result and upload chunks fail upload_result.
@@ -39,8 +40,8 @@ def capture_socket(monkeypatch):
     server.get_session = AsyncMock(return_value={"user_id": "123"})
     access = AsyncMock(return_value=True)
     monkeypatch.setattr(sio_server, "_frontend_user_can_access_workspace", access)
-    monkeypatch.setattr(sio_server, "_frontend_subscriptions", defaultdict(set))
-    monkeypatch.setattr(sio_server, "_frontend_sid_workspaces", defaultdict(set))
+    monkeypatch.setattr(realtime, "_frontend_subscriptions", defaultdict(set))
+    monkeypatch.setattr(realtime, "_frontend_sid_workspaces", defaultdict(set))
     workspace = SimpleNamespace(
         id=uuid.uuid4(),
         status=WorkspaceStatus.RUNNING,
@@ -53,7 +54,7 @@ def capture_socket(monkeypatch):
     service.workspaces.get_by_id.return_value = workspace
     service._emit_to_runner = AsyncMock()
     monkeypatch.setattr(sio_server, "get_runner_service", lambda: service)
-    monkeypatch.setattr(sio_server, "get_sio_server", lambda: server)
+    monkeypatch.setattr(realtime, "get_sio_server", lambda: server)
     return server, service, workspace, access
 
 
@@ -165,16 +166,16 @@ async def test_capture_allows_subscriptions_and_status_delivery(capture_socket):
     data = {"workspace_id": workspace_id}
     handlers = server.handlers["/frontend"]
     await handlers["frontend:subscribe_workspace"]("caller", data)
-    assert sio_server._frontend_subscriptions[workspace_id] == {"caller"}
-    assert sio_server._frontend_sid_workspaces["caller"] == {workspace_id}
+    assert realtime._frontend_subscriptions[workspace_id] == {"caller"}
+    assert realtime._frontend_sid_workspaces["caller"] == {workspace_id}
     status = {**data, "status": "running", "active_operation": "capturing_image"}
-    await sio_server.emit_to_frontend("workspace:status_changed", status, workspace_id)
+    await realtime.emit_to_frontend("workspace:status_changed", status, workspace_id)
     server.emit.assert_awaited_once_with(
         "workspace:status_changed", status, to="caller", namespace="/frontend"
     )
     await handlers["frontend:unsubscribe_workspace"]("caller", data)
-    assert workspace_id not in sio_server._frontend_subscriptions
-    assert not sio_server._frontend_sid_workspaces["caller"]
+    assert workspace_id not in realtime._frontend_subscriptions
+    assert not realtime._frontend_sid_workspaces["caller"]
     service._emit_to_runner.assert_not_awaited()
 
 
