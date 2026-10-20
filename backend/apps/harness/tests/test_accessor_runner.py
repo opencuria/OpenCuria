@@ -9,14 +9,11 @@ import uuid
 
 import pytest
 
-from apps.harness.access.base import ExecChunk
 from apps.harness.access.runner_accessor import (
     HARNESS_CHUNK_B64_SIZE,
     RunnerAccessorError,
     RunnerWorkspaceAccessor,
     create_harness_accessor,
-    route_harness_chunk,
-    route_harness_done,
     route_harness_file_chunk,
     route_harness_result,
 )
@@ -98,48 +95,6 @@ async def test_exec_wait_allows_external_workdir() -> None:
     assert payload["workdir"] == "/tmp"
 
 
-async def test_exec_stream_chunks_stdout_stderr_and_exit() -> None:
-    """exec_stream yields separated stdout/stderr chunks then exit code."""
-    transport = FakeTransport()
-    accessor = _accessor(transport)
-
-    async def consume():
-        chunks: list[ExecChunk] = []
-        async for chunk in accessor.exec_stream(["ls"]):
-            chunks.append(chunk)
-        return chunks
-
-    task = asyncio.create_task(consume())
-    await transport.event.wait()
-    payload = _request_id(transport, "harness:exec_stream")
-    request_id = payload["request_id"]
-    route_harness_chunk(
-        {
-            "request_id": request_id,
-            "workspace_id": "ws-1",
-            "stream": "stdout",
-            "data": "hello",
-        }
-    )
-    route_harness_chunk(
-        {
-            "request_id": request_id,
-            "workspace_id": "ws-1",
-            "stream": "stderr",
-            "data": "oops",
-        }
-    )
-    route_harness_done(
-        {"request_id": request_id, "workspace_id": "ws-1", "exit_code": 3}
-    )
-    chunks = await task
-    assert [c.stream for c in chunks] == ["stdout", "stderr", ""]
-    assert chunks[0].data == "hello"
-    assert chunks[1].data == "oops"
-    assert chunks[2].done is True
-    assert chunks[2].exit_code == 3
-
-
 async def test_runner_error_raises() -> None:
     """Runner-reported errors surface as RunnerAccessorError."""
     transport = FakeTransport()
@@ -168,25 +123,6 @@ async def test_exec_wait_timeout_sends_cancel() -> None:
     events = [event for event, _ in transport.emitted]
     assert events[0] == "harness:exec_wait"
     assert events[-1] == "harness:cancel"
-
-
-async def test_exec_stream_cancel_sends_cancel() -> None:
-    """Cancelling exec_stream emits harness:cancel for cleanup."""
-    transport = FakeTransport()
-    accessor = _accessor(transport)
-    task = asyncio.create_task(
-        _collect(accessor.exec_stream(["sleep", "5"], timeout=30.0))
-    )
-    await transport.event.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    events = [event for event, _ in transport.emitted]
-    assert "harness:cancel" in events
-
-
-async def _collect(agen):
-    return [chunk async for chunk in agen]
 
 
 async def test_read_write_list_stat_roundtrip() -> None:
@@ -346,8 +282,6 @@ async def test_desktop_action_timeout_sends_cancel() -> None:
 async def test_unknown_request_id_returns_false() -> None:
     """Routing helpers return False for unknown request ids."""
     assert route_harness_result({"request_id": "nope"}) is False
-    assert route_harness_chunk({"request_id": "nope"}) is False
-    assert route_harness_done({"request_id": "nope"}) is False
 
 
 async def test_result_delivered_from_worker_thread() -> None:

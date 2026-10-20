@@ -133,7 +133,6 @@ class RunnerService(
                         ``handle_stream_reply`` uses it instead of the lazy
                         ``apps.harness`` import.
             harness_reply_router: Optional object with
-                        ``route_harness_chunk`` / ``route_harness_done`` /
                         ``route_harness_result`` /
                         ``route_harness_file_chunk``. When set,
                         ``_route_harness_reply`` uses it instead of the lazy

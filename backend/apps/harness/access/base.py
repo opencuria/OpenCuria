@@ -11,7 +11,6 @@ from __future__ import annotations
 import abc
 import mimetypes
 import os
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -115,16 +114,6 @@ def guess_mime_type(path: str) -> str:
 
 
 @dataclass(frozen=True)
-class ExecChunk:
-    """One streamed output chunk of a running command."""
-
-    stream: str  # "stdout" or "stderr"
-    data: str = ""
-    exit_code: int | None = None
-    done: bool = False
-
-
-@dataclass(frozen=True)
 class ExecResult:
     """Buffered result of a command execution."""
 
@@ -209,18 +198,6 @@ class WorkspaceAccessor(abc.ABC):
 
     def __init__(self, workspace_id: str) -> None:
         self.workspace_id = workspace_id
-
-    @abc.abstractmethod
-    def exec_stream(
-        self,
-        command: list[str] | str,
-        workdir: str = HARNESS_WORKSPACE_ROOT,
-        env: dict[str, str] | None = None,
-        timeout: float | None = None,
-    ) -> AsyncIterator[ExecChunk]:
-        """Stream stdout/stderr chunks; final chunk carries the exit code."""
-        raise NotImplementedError
-        yield ExecChunk(stream="stdout")  # pragma: no cover - iterator marker
 
     @abc.abstractmethod
     async def exec_wait(

@@ -7,8 +7,6 @@ correlates responses by ``request_id``.
 
 Protocol (backend -> runner)::
 
-    harness:exec_stream {request_id, workspace_id, command, workdir,
-                         env, timeout}
     harness:exec_wait   {request_id, workspace_id, command, workdir,
                          env, timeout}
     harness:read_file   {request_id, workspace_id, path, max_size}
@@ -22,9 +20,6 @@ Protocol (backend -> runner)::
 
 Protocol (runner -> backend)::
 
-    harness:exec_chunk       {request_id, workspace_id, stream, data}
-    harness:exec_done        {request_id, workspace_id, exit_code}
-                             or {request_id, workspace_id, error}
     harness:exec_wait_result {request_id, workspace_id, exit_code,
                               stdout, stderr} or {..., error}
     harness:read_file_result {request_id, workspace_id, content, size,
@@ -72,7 +67,6 @@ from common.exceptions import ConflictError
 
 from .base import (
     DirEntry,
-    ExecChunk,
     ExecResult,
     FileContent,
     FileStat,
@@ -137,30 +131,6 @@ class RunnerAccessorError(RuntimeError):
 # Maps in-flight request_id -> owning accessor instance. Runner reply
 # handlers in ``apps.runners.sio_server`` route through this registry.
 _ACCESSORS_BY_REQUEST: dict[str, RunnerWorkspaceAccessor] = {}
-
-
-def route_harness_chunk(data: dict[str, Any]) -> bool:
-    """Deliver a ``harness:exec_chunk`` payload to its accessor."""
-    accessor = _ACCESSORS_BY_REQUEST.get(str(data.get("request_id", "")))
-    if accessor is None:
-        log.warning(
-            "harness_chunk_unknown_request",
-            request_id=data.get("request_id", ""),
-        )
-        return False
-    return accessor._deliver_chunk(data)
-
-
-def route_harness_done(data: dict[str, Any]) -> bool:
-    """Deliver a ``harness:exec_done`` payload to its accessor."""
-    accessor = _ACCESSORS_BY_REQUEST.get(str(data.get("request_id", "")))
-    if accessor is None:
-        log.warning(
-            "harness_done_unknown_request",
-            request_id=data.get("request_id", ""),
-        )
-        return False
-    return accessor._deliver_done(data)
 
 
 def route_harness_result(data: dict[str, Any]) -> bool:
@@ -423,7 +393,6 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         self._call = call
         self._on_stderr = on_stderr
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
-        self._streams: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         # Byte-stream state: connection_id -> _StreamState (bounded queues).
         self._byte_streams: dict[str, _StreamState] = {}
         # Bounded reassembly for chunked harness reads (request_id -> state).
@@ -551,54 +520,22 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         self._schedule(_store)
         return True
 
-    def _deliver_chunk(self, data: dict[str, Any]) -> bool:
-        """Push a stream chunk into the queue for *data*."""
-        request_id = str(data.get("request_id", ""))
-        queue = self._streams.get(request_id)
-        if queue is None:
-            log.warning("harness_chunk_no_stream", request_id=request_id)
-            return False
-        self._schedule(
-            queue.put_nowait,
-            {
-                "type": "chunk",
-                "stream": str(data.get("stream", "stdout")),
-                "data": str(data.get("data", "")),
-            },
-        )
-        return True
-
-    def _deliver_done(self, data: dict[str, Any]) -> bool:
-        """Push the terminal stream message into the queue for *data*."""
-        request_id = str(data.get("request_id", ""))
-        queue = self._streams.get(request_id)
-        if queue is None:
-            log.warning("harness_done_no_stream", request_id=request_id)
-            return False
-        self._schedule(queue.put_nowait, {"type": "done", "payload": data})
-        return True
-
     # -- internals --------------------------------------------------------
 
     def _register(
         self,
         request_id: str,
         *,
-        future: asyncio.Future[dict[str, Any]] | None = None,
-        queue: asyncio.Queue[dict[str, Any]] | None = None,
+        future: asyncio.Future[dict[str, Any]],
     ) -> None:
         """Track an in-flight request for reply routing."""
         _ACCESSORS_BY_REQUEST[request_id] = self
-        if future is not None:
-            self._pending[request_id] = future
-        if queue is not None:
-            self._streams[request_id] = queue
+        self._pending[request_id] = future
 
     def _unregister(self, request_id: str) -> None:
         """Drop all routing state for *request_id*."""
         _ACCESSORS_BY_REQUEST.pop(request_id, None)
         self._pending.pop(request_id, None)
-        self._streams.pop(request_id, None)
         self._file_chunks.pop(request_id, None)
 
     def _resolve_timeout(self, timeout: float | None) -> float:
@@ -659,68 +596,6 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             raise RunnerAccessorError(f"{operation} failed: {error}")
 
     # -- WorkspaceAccessor API --------------------------------------------
-
-    async def exec_stream(
-        self,
-        command: list[str] | str,
-        workdir: str = "/workspace",
-        env: dict[str, str] | None = None,
-        timeout: float | None = None,
-    ):  # type: ignore[override]
-        """Stream command output; final chunk carries the exit code."""
-        safe_workdir = sanitize_exec_workdir(workdir)
-        normalized = _normalize_command(command)
-        timeout_s = self._resolve_timeout(timeout)
-        request_id = uuid.uuid4().hex
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        self._register(request_id, queue=queue)
-        await self._emit(
-            "harness:exec_stream",
-            {
-                "request_id": request_id,
-                "workspace_id": self.workspace_id,
-                "command": normalized,
-                "workdir": safe_workdir,
-                "env": dict(env or {}),
-                "timeout": timeout_s,
-            },
-        )
-        deadline = asyncio.get_running_loop().time() + timeout_s
-        finished = False
-        try:
-            while True:
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    raise TimeoutError(
-                        "Harness request 'harness:exec_stream' timed out "
-                        f"after {timeout_s:.1f}s"
-                    )
-                try:
-                    item = await asyncio.wait_for(queue.get(), remaining)
-                except TimeoutError as exc:
-                    raise TimeoutError(
-                        "Harness request 'harness:exec_stream' timed out "
-                        f"after {timeout_s:.1f}s"
-                    ) from exc
-                if item.get("type") == "chunk":
-                    yield ExecChunk(
-                        stream=item["stream"],
-                        data=item.get("data", ""),
-                    )
-                else:
-                    payload = item.get("payload", {})
-                    self._raise_for_error(payload, "harness:exec_stream")
-                    finished = True
-                    yield ExecChunk(
-                        stream="",
-                        exit_code=int(payload.get("exit_code", 0)),
-                        done=True,
-                    )
-                    return
-        finally:
-            self._unregister(request_id)
-            if not finished:
-                await self._emit_cancel(request_id)
 
     async def exec_wait(
         self,

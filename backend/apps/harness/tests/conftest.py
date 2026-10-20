@@ -5,14 +5,13 @@ from __future__ import annotations
 import base64
 import os
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 
 from apps.harness.access.base import (
     DirEntry,
-    ExecChunk,
     ExecResult,
     FileContent,
     FileStat,
@@ -198,17 +197,6 @@ class FakeAccessor(WorkspaceAccessor):
         if action == "execute":
             return {"ok": True, "exit_code": 0, "stdout": "", "stderr": ""}
         return {"ok": True}
-
-    async def exec_stream(
-        self,
-        command,
-        workdir="/workspace",
-        env=None,
-        timeout=None,
-    ) -> AsyncIterator[ExecChunk]:
-        """Yield a single done chunk (unused by current tools)."""
-        self._maybe_fail()
-        yield ExecChunk(stream="", exit_code=0, done=True)
 
     async def exec_wait(
         self,

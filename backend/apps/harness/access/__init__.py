@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from .base import (
     DirEntry,
-    ExecChunk,
     ExecResult,
     FileContent,
     FileStat,
@@ -18,7 +17,6 @@ from .runner_accessor import RunnerWorkspaceAccessor, create_harness_accessor
 
 __all__ = [
     "DirEntry",
-    "ExecChunk",
     "ExecResult",
     "FileContent",
     "FileStat",

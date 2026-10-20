@@ -26,7 +26,6 @@ class _FakeService:
         self.run_health_check_loop = AsyncMock()
         self.get_workspace_heartbeat_statuses = AsyncMock(return_value=[])
         self.exec_calls: list[dict] = []
-        self.stream_payloads: list[tuple[str, object, object, object]] = []
         self.list_calls: list[tuple[str, str]] = []
         self.find_calls: list[tuple[object, str, object]] = []
         self.read_calls: list[tuple[str, str, object]] = []
@@ -34,7 +33,6 @@ class _FakeService:
         self.stat_calls: list[tuple[str, str]] = []
         self.file_access_calls: list[tuple[str, str, bool]] = []
         self.desktop_action_calls: list[tuple[object, str, object]] = []
-        self.stream_mode: str = "ok"
         self.wait_result = (0, "out", "err")
         # Mirror the manager surfaces used by the real WebSocket handlers.
         self.harness = self._FakeHarness(self)
@@ -51,14 +49,6 @@ class _FakeService:
             return await self._outer._exec_harness_command_impl(
                 workspace_id, command, workdir=workdir, env=env
             )
-
-        async def exec_harness_command_stream(
-            self, workspace_id, command, workdir="/workspace", env=None
-        ):
-            async for chunk in self._outer._exec_harness_command_stream_impl(
-                workspace_id, command, workdir=workdir, env=env
-            ):
-                yield chunk
 
     class _FakeFiles:
         def __init__(self, outer: _FakeService) -> None:
@@ -201,20 +191,6 @@ class _FakeService:
             raise ValueError("Path must be under /workspace")
         return self.wait_result
 
-    async def _exec_harness_command_stream_impl(
-        self, workspace_id, command, workdir="/workspace", env=None
-    ):
-        self.stream_payloads.append((workspace_id, command, workdir, env))
-        if self.stream_mode == "timeout":
-            await asyncio.sleep(5)
-            yield ("exit", "0")  # pragma: no cover
-        elif self.stream_mode == "error":
-            raise RuntimeError("boom")
-        else:
-            yield ("stdout", "hello")
-            yield ("stderr", "oops")
-            yield ("exit", "3")
-
     @staticmethod
     def _is_external_path(path) -> bool:
         normalized = os.path.normpath(str(path))
@@ -295,6 +271,13 @@ def _payload(workspace_id: uuid.UUID, request_id: str, **extra) -> dict:
 
 
 class HarnessExecWaitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exec_stream_handler_is_not_registered(self) -> None:
+        interface = _interface(_FakeService())
+        handlers = interface._sio.handlers["/"]
+
+        self.assertNotIn("harness:exec_stream", handlers)
+        self.assertIn("harness:exec_wait", handlers)
+
     async def test_exec_wait_returns_separated_stdout_stderr(self) -> None:
         service = _FakeService()
         interface = _interface(service)
@@ -345,87 +328,6 @@ class HarnessExecWaitTests(unittest.IsolatedAsyncioTestCase):
         event, payload = interface._sio.emit.await_args.args
         self.assertEqual(event, "harness:exec_wait_result")
         self.assertIn("timed out", payload["error"])
-
-
-class HarnessExecStreamTests(unittest.IsolatedAsyncioTestCase):
-    async def test_exec_stream_emits_chunks_and_done(self) -> None:
-        service = _FakeService()
-        interface = _interface(service)
-        workspace_id = uuid.uuid4()
-        handler = interface._sio.handlers["/"]["harness:exec_stream"]
-        await handler(
-            _payload(
-                workspace_id,
-                "req-s",
-                command=["ls"],
-                workdir="/workspace",
-                env={},
-            )
-        )
-        task = interface._running_tasks["harness:req-s"]
-        await task
-        emitted = [call.args for call in interface._sio.emit.await_args_list]
-        self.assertIn(
-            (
-                "harness:exec_chunk",
-                {
-                    "workspace_id": str(workspace_id),
-                    "request_id": "req-s",
-                    "stream": "stdout",
-                    "data": "hello",
-                },
-            ),
-            emitted,
-        )
-        self.assertIn(
-            (
-                "harness:exec_done",
-                {
-                    "workspace_id": str(workspace_id),
-                    "request_id": "req-s",
-                    "exit_code": 3,
-                },
-            ),
-            emitted,
-        )
-
-    async def test_exec_stream_error_reports_done_error(self) -> None:
-        service = _FakeService()
-        service.stream_mode = "error"
-        interface = _interface(service)
-        workspace_id = uuid.uuid4()
-        handler = interface._sio.handlers["/"]["harness:exec_stream"]
-        await handler(
-            _payload(
-                workspace_id, "req-e", command=["x"], workdir="/workspace"
-            )
-        )
-        task = interface._running_tasks["harness:req-e"]
-        await task
-        event, payload = interface._sio.emit.await_args.args
-        self.assertEqual(event, "harness:exec_done")
-        self.assertEqual(payload["error"], "boom")
-
-    async def test_exec_stream_cancel_stops_task(self) -> None:
-        service = _FakeService()
-        service.stream_mode = "timeout"
-        interface = _interface(service)
-        workspace_id = uuid.uuid4()
-        handler = interface._sio.handlers["/"]["harness:exec_stream"]
-        await handler(
-            _payload(
-                workspace_id, "req-c", command=["sleep"], workdir="/workspace"
-            )
-        )
-        cancel = interface._sio.handlers["/"]["harness:cancel"]
-        await cancel({"request_id": "req-c"})
-        task = interface._running_tasks.get("harness:req-c")
-        if task is not None:
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        self.assertNotIn("harness:req-c", interface._running_tasks)
 
 
 class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):

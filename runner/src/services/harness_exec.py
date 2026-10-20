@@ -1,14 +1,14 @@
 """Structured harness command execution with separated output streams.
 
-:class:`HarnessExecService` wraps commands, decodes tagged stdout/stderr, and
-streams tagged output using the shared execution and path helpers.
+:class:`HarnessExecService` wraps commands and decodes tagged stdout/stderr
+using the shared execution and path helpers.
 """
 
 from __future__ import annotations
 
 import shlex
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 
 import structlog
 
@@ -103,76 +103,6 @@ class HarnessExecService:
         )
         stdout, stderr = self._parse_harness_exec_output(output)
         return exit_code, stdout, stderr
-
-    @live_interaction
-    async def exec_harness_command_stream(
-        self,
-        workspace_id: uuid.UUID,
-        command: list[str] | str,
-        workdir: str = "/workspace",
-        env: dict[str, str] | None = None,
-    ) -> AsyncIterator[tuple[str, str]]:
-        """Execute a harness command and yield ``(stream, data)`` chunks.
-
-        Yields ``("stdout", text)`` / ``("stderr", text)`` tuples while the
-        command runs, then a final ``("exit", str(exit_code))`` tuple.
-        """
-        safe_workdir = self._sanitize_exec_workdir(workdir)
-        assert self._get_cached is not None and self._get_runtime is not None
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        if isinstance(command, str):
-            argv: list[str] = ["bash", "-lc", command]
-        else:
-            argv = [str(arg) for arg in command]
-            if not argv:
-                raise ValueError("command must not be empty")
-        marker_out = "OPENCURIA_LINE_STDOUT:"
-        marker_err = "OPENCURIA_LINE_STDERR:"
-        inner = " ".join(shlex.quote(arg) for arg in argv)
-        source = (
-            f"if [ -f {shlex.quote(self._credential_env_file)} ]; then "
-            f". {shlex.quote(self._credential_env_file)}; fi; "
-        )
-        # Portable fifo-based streaming wrapper: multiplexes the child
-        # stdout/stderr into tagged lines on the combined output stream,
-        # then reports the exit code on the last line.
-        portable = (
-            f"{source}"
-            "__oc_dir=$(mktemp -d); "
-            "__oc_o=$__oc_dir/o; __oc_e=$__oc_dir/e; "
-            'mkfifo "$__oc_o" "$__oc_e"; '
-            f"(sh -c {shlex.quote(inner)} "
-            '>"$__oc_o" 2>"$__oc_e"; echo $? >"$__oc_dir/code") & '
-            "__oc_pid=$!; "
-            "(while IFS= read -r __oc_l; do "
-            f"printf '{marker_out}%s\\n' \"$__oc_l\"; "
-            'done <"$__oc_o" & '
-            "while IFS= read -r __oc_m; do "
-            f"printf '{marker_err}%s\\n' \"$__oc_m\"; "
-            'done <"$__oc_e" & wait); '
-            'wait $__oc_pid; __oc_code=$(cat "$__oc_dir/code"); '
-            'rm -rf "$__oc_dir"; '
-            'echo "OPENCURIA_EXIT:$__oc_code"'
-        )
-        exit_code = 0
-        async for line in runtime.exec_command(
-            info.instance_id,
-            command=["sh", "-lc", portable],
-            workdir=safe_workdir,
-            env=env,
-        ):
-            if line.startswith(marker_out):
-                yield ("stdout", line[len(marker_out) :])
-            elif line.startswith(marker_err):
-                yield ("stderr", line[len(marker_err) :])
-            elif line.startswith("OPENCURIA_EXIT:"):
-                exit_code = int(line.split(":", 1)[1].strip() or 0)
-                yield ("exit", str(exit_code))
-            else:
-                yield ("stdout", line)
 
     @staticmethod
     def _parse_harness_exec_output(output: str) -> tuple[str, str]:

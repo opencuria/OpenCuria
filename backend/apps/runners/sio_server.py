@@ -540,28 +540,6 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
 
     # --- Harness workspace-access replies from runner ---
 
-    @sio.on("harness:exec_chunk")
-    async def on_harness_exec_chunk(sid: str, data: dict):
-        """Route exec stream chunks to the owning harness accessor."""
-        runner_id = await _require_runner_id(sio, sid, "harness:exec_chunk")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_harness_reply)(
-            "harness:exec_chunk", data, runner_id=runner_id
-        )
-
-    @sio.on("harness:exec_done")
-    async def on_harness_exec_done(sid: str, data: dict):
-        """Route exec completion to the owning harness accessor."""
-        runner_id = await _require_runner_id(sio, sid, "harness:exec_done")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_harness_reply)(
-            "harness:exec_done", data, runner_id=runner_id
-        )
-
     @sio.on("harness:exec_wait_result")
     async def on_harness_exec_wait_result(sid: str, data: dict):
         """Route buffered exec results to the owning harness accessor."""

@@ -140,8 +140,6 @@ class RunnerTransportMixin:
         in which case callers must not forward it to the frontend.
         """
         harness_events = {
-            "harness:exec_chunk",
-            "harness:exec_done",
             "harness:exec_wait_result",
             "harness:read_file_result",
             "harness:read_file_chunk",
@@ -160,8 +158,6 @@ class RunnerTransportMixin:
                 reply_router, event, data, runner_id=runner_id
             )
         from apps.harness.access.runner_accessor import (
-            route_harness_chunk,
-            route_harness_done,
             route_harness_file_chunk,
             route_harness_result,
         )
@@ -193,11 +189,7 @@ class RunnerTransportMixin:
                 workspace_id,
             )
             return True
-        if event == "harness:exec_chunk":
-            route_harness_chunk(data)
-        elif event == "harness:exec_done":
-            route_harness_done(data)
-        elif event == "harness:read_file_chunk":
+        if event == "harness:read_file_chunk":
             route_harness_file_chunk(data)
         else:
             route_harness_result(data)
@@ -214,8 +206,7 @@ class RunnerTransportMixin:
 
         Same fail-closed validation as the lazy ``apps.harness`` path
         (ownership + file-chunk shape); only the final dispatch targets
-        the injected router's ``route_harness_chunk`` /
-        ``route_harness_done`` / ``route_harness_result`` /
+        the injected router's ``route_harness_result`` /
         ``route_harness_file_chunk`` methods.
         """
         workspace_id = data.get("workspace_id", "") if isinstance(data, dict) else ""
@@ -242,11 +233,7 @@ class RunnerTransportMixin:
                 workspace_id,
             )
             return True
-        if event == "harness:exec_chunk":
-            reply_router.route_harness_chunk(data)
-        elif event == "harness:exec_done":
-            reply_router.route_harness_done(data)
-        elif event == "harness:read_file_chunk":
+        if event == "harness:read_file_chunk":
             reply_router.route_harness_file_chunk(data)
         else:
             reply_router.route_harness_result(data)

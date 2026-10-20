@@ -161,14 +161,6 @@ async def test_session_id_only_writes_use_original_workspace(service):
                 await method(*args)
 
 
-async def test_exec_iterator_is_guarded_and_drained(service):
-    svc, ws, _ = service
-    async with svc.capture_fence.capture(ws):
-        iterator = svc.harness.exec_harness_command_stream(ws, ["echo", "test"])
-        with pytest.raises(RuntimeError, match="capturing image"):
-            await anext(iterator)
-
-
 async def test_websocket_exec_rejection_keeps_result_envelope(service, tmp_path):
     svc, ws, _ = service
     interface = WebSocketInterface(svc, RunnerSettings(state_dir=str(tmp_path)))
@@ -212,29 +204,6 @@ async def test_second_capture_is_rejected_and_does_not_release_first():
         with pytest.raises(RuntimeError, match="capturing image"):
             async with fence.interaction(ws):
                 pass
-
-
-async def test_idle_iterator_does_not_hold_capture_admission():
-    from src.services.capture_fence import live_interaction
-
-    class Manager:
-        capture_fence = CaptureFence()
-
-        @live_interaction
-        async def output(self, workspace_id):
-            yield "first"
-            yield "second"
-
-    manager = Manager()
-    ws = uuid.uuid4()
-    iterator = manager.output(ws)
-    assert await anext(iterator) == "first"
-    async with manager.capture_fence.capture(ws):
-        await asyncio.wait_for(manager.capture_fence.drain(ws), 1)
-        with pytest.raises(RuntimeError, match="capturing image"):
-            await anext(iterator)
-    await iterator.aclose()
-    assert not manager.capture_fence._users
 
 
 async def test_live_call_queued_behind_stop_is_rejected_after_epoch_change(service):

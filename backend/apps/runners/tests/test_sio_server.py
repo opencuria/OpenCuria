@@ -12,6 +12,18 @@ from apps.runners.sio_server import _frontend_user_can_access_workspace
 from common.utils import hash_token
 
 
+def test_harness_exec_reply_registration() -> None:
+    """Only buffered exec replies remain; byte-stream transport stays active."""
+    from apps.runners.sio_server import _register_event_handlers, socketio
+
+    sio = socketio.AsyncServer(async_mode="asgi")
+    _register_event_handlers(sio)
+    handlers = sio.handlers["/"]
+    assert {"harness:exec_chunk", "harness:exec_done"}.isdisjoint(handlers)
+    assert "harness:exec_wait_result" in handlers
+    assert "workspace:stream_output" in handlers
+
+
 # Async ORM calls use separate connections and need committed fixture data.
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio

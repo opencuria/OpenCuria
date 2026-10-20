@@ -46,7 +46,7 @@ Nach bestehender Clean Architecture: `api.py` -> `services.py` ->
 | `providers/models.py` | `ProviderConfig(org UNIQUE, api_key_encrypted Fernet, base_url, default_model, small_model)` - org-weit, via Credentials-Verschluesselung |
 | `tools/base.py` | `Tool`-ABC: `name, description, args_schema (pydantic->JSON-Schema), permission_key, title(args)->str, async execute(args, ctx)`; `ToolContext{session, workspace_id, accessor, agent, directory}`; Before/After-Hooks als Extension-Point (Plugins/MCP spaeter) |
 | `tools/` v1 | `read, write, edit, bash, glob, grep, list, todowrite, task` (+ optional `webfetch`). Alle ueber `WorkspaceAccessor`, nie direkt Shell/FS im Harness |
-| `access/base.py` | `WorkspaceAccessor`-ABC: `exec_stream, exec_wait, read_file, write_file, list_dir, stat` - Pfade auf `/workspace` sandboxen |
+| `access/base.py` | `WorkspaceAccessor`-ABC: `exec_wait, read_file, write_file, list_dir, stat` - Pfade auf `/workspace` sandboxen |
 | `access/runner_accessor.py` | Implementierung via Socket.IO-RPC zum Runner (s.u.), `request_id`-Korrelation, Timeouts, Cancel |
 | `permissions/` | `PermissionEvaluator`: Regeln `{"*": ask, bash: allow, ...}`, Wildcards (`*`/`?`), **last-match-wins**, `external_directory`/`doom_loop`, Merge global->Agent->Modus. `PermissionRequest`-Modell + `updated/replied`-Flow |
 | `agents/` | Statische Definitionen als Code (statt DB, wie OpenCode `.opencode/agents/*.md`): `build` (primary, alles allow), `plan` (primary, `edit/bash` ask), `general`+`explore` (subagents), `title/compaction` (hidden, small_model). Felder: `mode, description, model-override, permission, prompt, steps, color` |
@@ -75,8 +75,8 @@ in den Accessor-Kontext.
 - Runner bleibt Exec-Daemon: Lifecycle, Heartbeat, Terminal, Desktop,
   `list/read/upload/download` bleiben.
 - **Neu:** generische Harness-RPC-Events statt `task:run_prompt`:
-  `harness:exec_stream`, `harness:exec_wait` (mit Timeout/Cancel, getrennte
-  stdout/stderr, Exit-Code-Streaming), `harness:read_file`,
+  `harness:exec_wait` (mit Timeout/Cancel, getrennte stdout/stderr,
+  Exit-Code), `harness:read_file`,
   `harness:write_file` (atomar, mode), `harness:list/stat`. Implementiert als
   duenne Handler ueber existierendem `WorkspaceService` (+ fehlende
   `write_file`-Primitive ergaenzen, `/workspace`-Sandbox behalten).

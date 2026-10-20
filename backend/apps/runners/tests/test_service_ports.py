@@ -38,12 +38,6 @@ class _FakeStreamRouter:
 
 
 class _FakeReplyRouter:
-    def route_harness_chunk(self, data):
-        return None
-
-    def route_harness_done(self, data):
-        return None
-
     def route_harness_result(self, data):
         return None
 

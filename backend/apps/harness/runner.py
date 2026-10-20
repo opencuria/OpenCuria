@@ -1867,13 +1867,6 @@ class HarnessRunner:
 class _MissingAccessor(WorkspaceAccessor):
     """Fallback accessor that fails loudly when no accessor is wired."""
 
-    async def exec_stream(
-        self, command, workdir=HARNESS_WORKSPACE_ROOT, env=None, timeout=None
-    ):  # type: ignore[no-untyped-def]
-        """Raise (no workspace connected)."""
-        raise RuntimeError("No workspace accessor configured")
-        yield  # pragma: no cover - keeps the method an iterator
-
     async def exec_wait(
         self, command, workdir=HARNESS_WORKSPACE_ROOT, env=None, timeout=None
     ):  # type: ignore[no-untyped-def]

@@ -96,7 +96,7 @@ class CaptureFence:
             self._capturing.remove(workspace_id)
 
     async def drain(self, workspace_id: uuid.UUID) -> None:
-        """Wait for active calls, not idle iterator consumers or session readers."""
+        """Wait for active calls, not idle stream sessions."""
         async with self._changed:
             await self._changed.wait_for(
                 lambda: not any(ws == workspace_id for ws, _ in self._users)
@@ -104,7 +104,7 @@ class CaptureFence:
 
 
 def live_interaction(method: Method) -> Method:
-    """Guard calls and each active iterator read, including session-ID writes."""
+    """Guard live runtime calls, including session-ID writes."""
     signature = inspect.signature(method)
 
     def workspace(
@@ -134,24 +134,6 @@ def live_interaction(method: Method) -> Method:
         else:
             async with fence.interaction(ws):
                 yield
-
-    if inspect.isasyncgenfunction(method):
-
-        @wraps(method)
-        async def iterator(self: Any, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
-            generator = method(self, *args, **kwargs)
-            try:
-                while True:
-                    async with admission(self, args, kwargs):
-                        try:
-                            item = await anext(generator)
-                        except StopAsyncIteration:
-                            return
-                    yield item
-            finally:
-                await generator.aclose()
-
-        return iterator  # type: ignore[return-value]
 
     @wraps(method)
     async def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:

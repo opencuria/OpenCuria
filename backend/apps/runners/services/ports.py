@@ -116,14 +116,6 @@ class HarnessReplyRouter(Protocol):
     ``apps.harness`` import.
     """
 
-    def route_harness_chunk(self, data: dict) -> None:
-        """Route an exec-chunk reply payload."""
-        ...
-
-    def route_harness_done(self, data: dict) -> None:
-        """Route an exec-done reply payload."""
-        ...
-
     def route_harness_result(self, data: dict) -> None:
         """Route a generic harness result payload."""
         ...
