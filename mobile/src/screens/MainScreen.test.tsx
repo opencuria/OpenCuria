@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -83,6 +84,7 @@ jest.mock("../components", () => {
   return {
     ChatComposer: (props: {
       settings?: { model?: string; effort?: string };
+      onSettings: () => void;
       onSend: (value: {
         text: string;
         skillIds: string[];
@@ -92,6 +94,11 @@ jest.mock("../components", () => {
       ReactRuntime.createElement(
         View,
         null,
+        ReactRuntime.createElement(
+          Pressable,
+          { testID: "test-settings", onPress: props.onSettings },
+          ReactRuntime.createElement(Text, null, "Settings"),
+        ),
         ReactRuntime.createElement(
           Text,
           { testID: "chat-settings" },
@@ -316,5 +323,130 @@ it("keeps a ready workspace and sendable chat if the engine catalog fails", asyn
   expect(screen.getByTestId("catalog-warning")).toBeTruthy();
   fireEvent.press(screen.getByTestId("test-send"));
   await waitFor(() => expect(mockController.send).toHaveBeenCalled());
+  tree.unmount();
+});
+
+const codexModel: ProviderModel = {
+  ...nativeModel,
+  id: "chatgpt/gpt-6.1-sol",
+  name: "Codex Sol",
+  provider: "chatgpt",
+  reasoning_efforts: ["low", "ultra"],
+  default_effort: "low",
+};
+const routerModel: ProviderModel = {
+  ...nativeModel,
+  id: "openrouter/vendor/model",
+  name: "Router Codex",
+  provider: "openrouter",
+};
+
+it("selects Codex defaults, preserves explicit effort across catalog refresh and sends the existing new-chat flow", async () => {
+  const client = mockClient();
+  client.harness.listEngines.mockResolvedValue([
+    {
+      id: "native",
+      name: "OpenCuria",
+      connected: true,
+      modes: ["build", "plan"],
+    },
+    {
+      id: "codex",
+      name: "Codex",
+      connected: true,
+      modes: ["build", "plan"],
+      default_model: codexModel.id,
+      default_effort: "low",
+    },
+  ]);
+  const listEngineModels = jest
+    .fn()
+    .mockResolvedValue([codexModel, routerModel]);
+  Object.assign(client.harness, { listEngineModels });
+  const value = sessionValue(client);
+  mockUseSession.mockReturnValue(value as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() => expect(listEngineModels).toHaveBeenCalledWith("codex"));
+  fireEvent.press(screen.getByTestId("test-settings"));
+  fireEvent.press(screen.getByText("Codex"));
+  await waitFor(() =>
+    expect(screen.getByTestId("chat-settings").props.children).toBe(
+      "Codex Sol|Low",
+    ),
+  );
+  fireEvent.press(screen.getByText("Ultra"));
+  const foreground = value.registerForegroundRefresh.mock.calls[0]?.[0] as
+    | (() => Promise<void>)
+    | undefined;
+  expect(foreground).toBeDefined();
+  await act(async () => {
+    await foreground?.();
+  });
+  expect(screen.getByTestId("chat-settings").props.children).toBe(
+    "Codex Sol|Ultra",
+  );
+  fireEvent.press(screen.getByTestId("test-send"));
+  await waitFor(() =>
+    expect(mockController.send).toHaveBeenCalledWith(
+      "hello from mobile",
+      expect.objectContaining({
+        harnessId: "codex",
+        model: codexModel.id,
+        reasoningEffort: "ultra",
+      }),
+    ),
+  );
+  tree.unmount();
+});
+
+it("resumes a Codex session with an immutable engine/provider and no native-model fallback", async () => {
+  const client = mockClient();
+  client.harness.listEngines.mockResolvedValue([
+    { id: "codex", name: "Codex", connected: true, modes: ["build", "plan"] },
+  ]);
+  Object.assign(client.harness, {
+    listEngineModels: jest.fn().mockResolvedValue([codexModel, routerModel]),
+  });
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() => expect(mockController.newChat).toHaveBeenCalled());
+  await act(async () => {
+    snapshot = {
+      ...snapshot,
+      activeSessionId: "codex-session",
+      activeSession: {
+        id: "codex-session",
+        harness_id: "codex",
+        model: routerModel.id,
+        reasoning_effort: "medium",
+        mode: "build",
+        skill_ids: [],
+      } as never,
+    };
+    listeners.forEach((listener) => listener());
+  });
+  await waitFor(() =>
+    expect(screen.getByTestId("chat-settings").props.children).toBe(
+      "Router Codex|Medium",
+    ),
+  );
+  fireEvent.press(screen.getByTestId("test-settings"));
+  expect(screen.queryByText("Codex Sol")).toBeNull();
+  expect(screen.getByText("OpenCuria")).toBeDisabled();
+  fireEvent.press(screen.getByTestId("test-send"));
+  await waitFor(() =>
+    expect(mockController.send).toHaveBeenCalledWith(
+      "hello from mobile",
+      expect.objectContaining({ harnessId: "codex", model: routerModel.id }),
+    ),
+  );
   tree.unmount();
 });

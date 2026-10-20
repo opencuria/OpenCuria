@@ -398,6 +398,35 @@ describe('ScheduledTaskDialog', () => {
     )
   })
 
+  it('restores and saves Codex configuration through the existing scheduled composer', async () => {
+    const codexTask: ScheduledTask = {
+      ...task,
+      harness_id: 'codex',
+      model: 'openrouter/vendor/model',
+      reasoning_effort: 'ultra',
+    }
+    const { wrapper } = await mountDialog('edit', codexTask)
+    const composer = wrapper.findComponent({ name: 'HarnessChatInput' })
+    expect(composer.props()).toMatchObject({
+      harnessId: 'codex',
+      model: codexTask.model,
+      effort: 'ultra',
+    })
+    await composer.vm.$emit('update:model', 'chatgpt/gpt-6.1-sol')
+    await composer.vm.$emit('update:effort', 'low')
+    await wrapper.get('[data-testid="save-task"]').trigger('click')
+    await flushPromises()
+    expect(api.updateScheduledTask).toHaveBeenCalledWith(
+      task.id,
+      expect.objectContaining({
+        harness_id: 'codex',
+        model: 'chatgpt/gpt-6.1-sol',
+        reasoning_effort: 'low',
+      }),
+    )
+    wrapper.unmount()
+  })
+
   it('loads daily tasks with seven days and derives weekly after deselecting one', async () => {
     const { wrapper } = await mountDialog('edit', { ...task, recurrence: 'daily', weekdays: [] })
     for (let day = 0; day < 7; day += 1) {

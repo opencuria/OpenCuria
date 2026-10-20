@@ -111,7 +111,7 @@ export interface HarnessMessage {
 }
 
 /** Harness engine selected for a conversation. */
-export type HarnessId = "native" | "claude";
+export type HarnessId = "native" | "claude" | "codex";
 
 /** Execution mode of a harness session. */
 export type HarnessSessionMode = "plan" | "build";

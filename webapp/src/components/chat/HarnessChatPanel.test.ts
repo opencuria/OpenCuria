@@ -60,6 +60,7 @@ const HarnessChatInputStub = {
     'stopOnly',
     'harnessId',
     'engineLocked',
+    'sessionModel',
     'mode',
     'model',
     'effort',
@@ -286,6 +287,32 @@ describe('HarnessChatPanel', () => {
     await wrapper.vm.$nextTick()
     expect(listSessions).toHaveBeenCalledTimes(1)
     expect(useHarnessStore().modelInput).toBe('opus')
+  })
+
+  it('hydrates Codex with the persisted model/provider and effort for the existing composer', async () => {
+    vi.mocked(listHarnessSessions).mockResolvedValueOnce([
+      makeSession({
+        harness_id: 'codex',
+        model: 'openrouter/vendor/model',
+        reasoning_effort: 'ultra',
+        mode: 'plan',
+      }),
+    ])
+    await router.push('/workspaces/ws-1?session=session-root')
+    const wrapper = mount(HarnessChatPanel, {
+      props: { workspaceId: 'ws-1', canPrompt: true },
+      global: { plugins: [router], stubs },
+    })
+    await flushPromises()
+    expect(wrapper.findComponent(HarnessChatInputStub).props()).toMatchObject({
+      harnessId: 'codex',
+      engineLocked: true,
+      sessionModel: 'openrouter/vendor/model',
+      model: 'openrouter/vendor/model',
+      effort: 'ultra',
+      mode: 'plan',
+    })
+    wrapper.unmount()
   })
 
   it('keeps follow-up messages on their loaded session engine', async () => {

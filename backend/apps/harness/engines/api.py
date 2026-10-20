@@ -12,16 +12,18 @@ from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, NotFoundError
 
-from .catalog import list_claude_models, list_engines
 from .connections import EngineConnectionService
 from .schemas import (
     ClaudeModelOut,
     EngineConnectionIn,
     EngineConnectionOut,
+    EngineModelOut,
     HarnessEngineOut,
     claude_model_to_out,
     engine_connection_to_out,
+    engine_model_to_out,
 )
+from .service import EngineCatalogService
 
 engines_router = Router(tags=["harness-engines"])
 
@@ -58,17 +60,12 @@ def _require_membership(request: HttpRequest) -> uuid.UUID:
     summary="List harness engines and personal connection status",
 )
 def list_harness_engines(request: HttpRequest):
-    """Return native and Claude harness engines for the active organization."""
+    """Return available harnesses for the active organization and user."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _permission_denied(APIKeyPermission.HARNESS_READ)
     try:
         organization_id = _require_membership(request)
-        claude_connection = EngineConnectionService().connection_view(
-            organization_id, request.user.id
-        )
-        rows = list_engines(
-            claude_connected=bool(claude_connection and claude_connection["connected"])
-        )
+        rows = EngineCatalogService().list_engines(organization_id, request.user.id)
         return 200, [HarnessEngineOut(**row) for row in rows]
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
@@ -169,9 +166,58 @@ def list_claude_engine_models(request: HttpRequest):
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _permission_denied(APIKeyPermission.HARNESS_READ)
     try:
-        _require_membership(request)
-        return 200, [claude_model_to_out(model) for model in list_claude_models()]
+        organization_id = _require_membership(request)
+        models = EngineCatalogService().list_models(
+            "claude", organization_id, request.user.id
+        )
+        return 200, [claude_model_to_out(model) for model in models]
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
+
+
+@engines_router.get(
+    "/harness/engines/{engine_id}/models/",
+    response={
+        200: list[EngineModelOut],
+        400: dict,
+        401: dict,
+        403: dict,
+        404: dict,
+        502: dict,
+    },
+    summary="List models supported by a harness engine",
+)
+def list_engine_models(request: HttpRequest, engine_id: str):
+    """Return the selected-account-scoped engine catalog (also used by MCP)."""
+    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
+        return _permission_denied(APIKeyPermission.HARNESS_READ)
+    try:
+        organization_id = _require_membership(request)
+        models = EngineCatalogService().list_models(
+            engine_id, organization_id, request.user.id
+        )
+        return 200, [engine_model_to_out(model) for model in models]
+    except AuthenticationError as exc:
+        return 401, {"detail": exc.message, "code": exc.code}
+    except NotFoundError as exc:
+        return 404, {"detail": exc.message, "code": exc.code}
+    except ValueError as exc:
+        return 400, {"detail": str(exc), "code": "validation_error"}
+    except Exception as exc:
+        from ..providers.base import (
+            ProviderAuthError,
+            ProviderResponseError,
+            ProviderTimeoutError,
+        )
+
+        if isinstance(
+            exc, (ProviderAuthError, ProviderResponseError, ProviderTimeoutError)
+        ):
+            # Provider responses can echo credential-bearing request context.
+            return 502, {
+                "detail": "Engine model catalog is temporarily unavailable",
+                "code": "provider_error",
+            }
+        raise

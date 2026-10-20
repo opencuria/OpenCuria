@@ -457,16 +457,29 @@ class HarnessService:
         if parent_id is not None:
             parent_session = self.get_session(parent_id)
             harness_id = getattr(parent_session, "harness_id", "native") or "native"
-            if harness_id == "claude":
+            if (
+                parent_session.workspace_id != workspace_id
+                or parent_session.organization_id != organization_id
+            ):
+                raise ValueError(
+                    "Child sessions must share their parent workspace and organization"
+                )
+            if harness_id in {"claude", "codex"}:
                 created_by_id = getattr(parent_session, "created_by_id", None)
                 if user_id is not None and str(user_id) != str(created_by_id):
                     raise AuthenticationError(
-                        "Claude child sessions inherit their owner's scope"
+                        "External child sessions inherit their owner's scope"
                     )
                 if created_by_id is None:
-                    raise AuthenticationError("Claude child sessions require an owner")
+                    raise AuthenticationError(
+                        "External child sessions require an owner"
+                    )
                 user_id = created_by_id
                 connection_id = getattr(parent_session, "connection_id", None)
+                if harness_id == "codex":
+                    model = model or parent_session.model
+                    if skill_ids is None:
+                        skill_ids = list(parent_session.skill_ids or [])
         from .engines.catalog import (
             DEFAULT_CLAUDE_EFFORT,
             DEFAULT_CLAUDE_MODEL,
@@ -482,10 +495,14 @@ class HarnessService:
         if normalized_mode not in ("plan", "build"):
             raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
         requested = (agent_name or "").strip().lower()
-        if engine_id == "claude" and requested == "computeruse":
-            raise ValueError("Claude engine does not support Agent-S computeruse")
-        if engine_id == "claude" and requested in {"title", "summary", "compaction"}:
-            raise ValueError("Claude engine cannot use hidden harness agents")
+        if engine_id in {"claude", "codex"} and requested == "computeruse":
+            raise ValueError(f"{engine_id} engine does not support Agent-S computeruse")
+        if engine_id in {"claude", "codex"} and requested in {
+            "title",
+            "summary",
+            "compaction",
+        }:
+            raise ValueError(f"{engine_id} engine cannot use hidden harness agents")
         # Root sessions: agent_name follows mode (plan|build). Child sessions
         # honor subagent agent_name while keeping parent plan|build mode.
         resolved_agent = normalized_mode
@@ -507,9 +524,33 @@ class HarnessService:
                 user_id=user_id,
                 organization_id=organization_id,
             )
+        codex_provider_id = None
+        if engine_id == "codex":
+            from .engines.codex.catalog import codex_provider
+            from .engines.service import EngineCatalogService
+
+            if user_id is None:
+                raise AuthenticationError("A user is required for Codex authorization")
+            parent_provider = (
+                codex_provider(parent_session.model, parent_session.engine_state)
+                if parent_id is not None
+                else None
+            )
+            inherited = self._provider_turn_context(parent_session) if parent_id else {}
+            model, reasoning_effort = EngineCatalogService().validate_codex_config(
+                organization_id,
+                user_id,
+                model,
+                reasoning_effort,
+                provider=parent_provider,
+                account_ids=inherited.get("account_ids"),
+            )
+            codex_provider_id = codex_provider(model)
         normalized_effort = (
             normalize_claude_effort(reasoning_effort or DEFAULT_CLAUDE_EFFORT)
             if engine_id == "claude"
+            else reasoning_effort
+            if engine_id == "codex"
             else normalize_reasoning_effort(reasoning_effort)
         )
         normalized_model = (
@@ -552,26 +593,36 @@ class HarnessService:
         }
         if engine_id != "native":
             if user_id is None:
-                raise AuthenticationError("A Claude Agent account is required")
-            from .provider_accounts import ProviderAccountService
-
-            accounts = ProviderAccountService()
-            if connection_id is not None:
-                account = accounts.get_account(organization_id, user_id, connection_id)
-                if account.provider != "claude-agent":
-                    raise NotFoundError("ProviderAccount", str(connection_id))
+                raise AuthenticationError("An engine provider account is required")
+            if engine_id == "codex":
+                if connection_id is not None:
+                    raise ValueError(
+                        "Codex uses the selected provider account, not connection_id"
+                    )
             else:
-                account = accounts.selected_accounts(organization_id, user_id).get(
-                    "claude-agent"
-                )
-            if account is None:
-                raise NotFoundError("ProviderAccount", str(user_id))
+                from .provider_accounts import ProviderAccountService
+
+                accounts = ProviderAccountService()
+                if connection_id is not None:
+                    account = accounts.get_account(
+                        organization_id, user_id, connection_id
+                    )
+                    if account.provider != "claude-agent":
+                        raise NotFoundError("ProviderAccount", str(connection_id))
+                else:
+                    account = accounts.selected_accounts(organization_id, user_id).get(
+                        "claude-agent"
+                    )
+                if account is None:
+                    raise NotFoundError("ProviderAccount", str(user_id))
             session_kwargs.update(
                 harness_id=engine_id,
                 connection_id=None,
                 created_by_id=user_id,
                 external_session_id="",
-                engine_state={},
+                engine_state={"provider_id": codex_provider_id}
+                if codex_provider_id
+                else {},
             )
         if user_id is not None:
             session_kwargs["created_by_id"] = user_id
@@ -621,6 +672,30 @@ class HarnessService:
             self._emit_conversations_changed_sync(updated.workspace_id)
         return updated
 
+    @staticmethod
+    def _codex_provider_for_session(session) -> str:
+        """Read the immutable non-secret provider binding."""
+        from .engines.codex.catalog import codex_provider
+
+        return codex_provider(session.model, session.engine_state)
+
+    def _validate_codex_session_config(
+        self, session, model, effort, *, user_id=None, account_ids=None
+    ) -> tuple[str, str]:
+        """Validate the candidate without mutating model/provider binding."""
+        from .engines.codex.catalog import codex_provider
+        from .engines.service import EngineCatalogService
+
+        provider = codex_provider(session.model, session.engine_state)
+        return EngineCatalogService().validate_codex_config(
+            session.organization_id,
+            user_id or getattr(session, "created_by_id", None),
+            model,
+            effort,
+            provider=provider,
+            account_ids=account_ids,
+        )
+
     def set_model(self, session_id: uuid.UUID, model: str) -> HarnessSession:
         """Persist a model override for subsequent runs."""
         session = self.get_session(session_id)
@@ -630,6 +705,18 @@ class HarnessService:
             from .engines.catalog import normalize_claude_model
 
             value = normalize_claude_model(value)
+        if getattr(session, "harness_id", "native") == "codex":
+            value, default_effort = self._validate_codex_session_config(
+                session, value, ""
+            )
+            # Model changes within a provider remain possible when the old
+            # model supported an effort (e.g. ultra) that the new one does not.
+            try:
+                self._validate_codex_session_config(
+                    session, value, session.reasoning_effort
+                )
+            except ValueError:
+                session = self.sessions.set_reasoning_effort(session, default_effort)
         return self.sessions.set_model(session, value)
 
     def set_reasoning_effort(
@@ -642,6 +729,10 @@ class HarnessService:
             from .engines.catalog import normalize_claude_effort
 
             effort = normalize_claude_effort(reasoning_effort)
+        elif getattr(session, "harness_id", "native") == "codex":
+            _, effort = self._validate_codex_session_config(
+                session, session.model, reasoning_effort
+            )
         else:
             effort = normalize_reasoning_effort(reasoning_effort)
         return self.sessions.set_reasoning_effort(session, effort)
@@ -771,7 +862,10 @@ class HarnessService:
                 connection_id=None,
                 created_by_id=getattr(session, "created_by_id", None),
                 external_session_id="",
-                engine_state={},
+                engine_state=(
+                    {"provider_id": self._codex_provider_for_session(session)}
+                    if session.harness_id == "codex" else {}
+                ),
             )
         forked = await sync_to_async(self.sessions.create_fork)(**fork_kwargs)
         await sync_to_async(self.messages.copy_prefix)(
@@ -814,11 +908,11 @@ class HarnessService:
             raise ConflictError(
                 f"Harness session '{session.id}' already has an active run"
             )
-        if getattr(session, "harness_id", "native") == "claude":
+        if getattr(session, "harness_id", "native") != "native":
             owner_id = getattr(session, "created_by_id", None)
             if user_id is None or owner_id is None or str(user_id) != str(owner_id):
                 raise AuthenticationError(
-                    "Only the session owner may edit a Claude conversation"
+                    "Only the session owner may edit an external conversation"
                 )
         await self._ensure_external_attempt_reconciled(session, force=True)
         normalized_mode = None
@@ -834,7 +928,21 @@ class HarnessService:
                 from .engines.catalog import normalize_claude_model
 
                 normalized_model = normalize_claude_model(normalized_model)
-        if reasoning_effort is not None and reasoning_effort.strip():
+        if getattr(session, "harness_id", "native") == "codex":
+            normalized_model, normalized_effort = await sync_to_async(
+                self._validate_codex_session_config
+            )(
+                session,
+                normalized_model or session.model,
+                reasoning_effort
+                if reasoning_effort is not None
+                else session.reasoning_effort,
+            )
+        if (
+            getattr(session, "harness_id", "native") != "codex"
+            and reasoning_effort is not None
+            and reasoning_effort.strip()
+        ):
             if getattr(session, "harness_id", "native") == "claude":
                 from .engines.catalog import normalize_claude_effort
 
@@ -853,7 +961,11 @@ class HarnessService:
             else _normalize_skill_ids(list(session.skill_ids or []))
         )
         claude_session = getattr(session, "harness_id", "native") == "claude"
-        if claude_session or skill_ids is not None:
+        if (
+            claude_session
+            or getattr(session, "harness_id", "native") == "codex"
+            or skill_ids is not None
+        ):
             if user_id is None and (effective_skill_ids or skill_ids is not None):
                 raise AuthenticationError(
                     "A user is required to validate selected skills"
@@ -925,9 +1037,13 @@ class HarnessService:
                 future = pending.pop(str(request_id), None)
                 if future is not None and not future.done():
                     future.cancel()
-        if getattr(session, "harness_id", "native") == "claude":
+        if getattr(session, "harness_id", "native") != "native":
             session.external_session_id = ""
-            session.engine_state = {}
+            session.engine_state = (
+                {"provider_id": self._codex_provider_for_session(session)}
+                if session.harness_id == "codex"
+                else {}
+            )
 
     async def _collect_suffix_child_ids(
         self, suffix_ids: list[uuid.UUID]
@@ -1171,6 +1287,17 @@ class HarnessService:
             ValueError: When API key or model is missing.
         """
         session_model = (session.model or "").strip()
+        if getattr(session, "harness_id", "native") == "codex":
+            session.model, session.reasoning_effort = (
+                self._validate_codex_session_config(
+                    session,
+                    session_model,
+                    session.reasoning_effort,
+                    user_id=user_id,
+                    account_ids=account_ids,
+                )
+            )
+            return session.model
         if getattr(session, "harness_id", "native") == "claude":
             from .engines.catalog import (
                 DEFAULT_CLAUDE_MODEL,
@@ -1405,7 +1532,7 @@ class HarnessService:
                     "Subagent provider accounts inherit their owner's snapshot"
                 )
             run_user_id = snapshot_owner
-        if engine_id == "claude":
+        if engine_id != "native":
             owner_id = getattr(session, "created_by_id", None)
             if (
                 run_user_id is None
@@ -1413,8 +1540,10 @@ class HarnessService:
                 or str(run_user_id) != str(owner_id)
             ):
                 raise AuthenticationError(
-                    "Only the session owner may use its Claude connection"
+                    "Only the session owner may use its external engine connection"
                 )
+        if engine_id == "codex":
+            user_id = run_user_id
         self._remember_run(session)
         # Parent stop already covers this session: do not spawn another run.
         if self._user_abort_requested(session):
@@ -5310,7 +5439,13 @@ class HarnessService:
         row = configs.get(agent, {})
         inherit = bool(row.get("inherit_model", True))
         fixed_model = str(row.get("model") or "").strip()
-        fixed_effort = normalize_reasoning_effort(str(row.get("effort") or ""))
+        codex_parent = getattr(parent, "harness_id", "native") == "codex"
+        effort_normalizer = (
+            (lambda value: (value or "").strip().lower())
+            if codex_parent
+            else normalize_reasoning_effort
+        )
+        fixed_effort = effort_normalizer(str(row.get("effort") or ""))
         strategy = str(row.get("effort_strategy") or "inherit").strip() or "inherit"
         override = (args.model_override or "").strip()
         if inherit:
@@ -5334,6 +5469,22 @@ class HarnessService:
                 "No model available for subagent run",
                 tool="task",
             )
+        if codex_parent:
+            if agent == "computeruse":
+                raise ToolError(
+                    "Codex task computeruse is not supported yet; "
+                    "use a native Agent-S session",
+                    tool="task",
+                )
+            try:
+                model, _ = await sync_to_async(self._validate_codex_session_config)(
+                    parent,
+                    model,
+                    "",
+                    account_ids=self._provider_turn_context(parent).get("account_ids"),
+                )
+            except (ValueError, AuthenticationError, NotFoundError) as exc:
+                raise ToolError(str(exc), tool="task") from exc
         parent_ctx = self._runs.get(str(parent.id), {})
         message_id = parent_ctx.get("message_id")
         if not message_id:
@@ -5353,17 +5504,34 @@ class HarnessService:
         validate_subagent_delegation(parent.agent_name, agent)
         if inherit:
             if strategy in ("lowest", "medium", "highest"):
-                catalog_efforts = self._catalog_efforts_for_model(
-                    organization_id,
-                    model,
-                    self._provider_turn_context(parent).get("initiated_by_id"),
-                    dict(self._provider_turn_context(parent).get("account_ids") or {}),
-                )
+                if codex_parent:
+                    from .engines.service import EngineCatalogService
+
+                    models = await sync_to_async(EngineCatalogService().list_models)(
+                        "codex",
+                        organization_id,
+                        parent.created_by_id,
+                        account_ids=self._provider_turn_context(parent).get(
+                            "account_ids"
+                        ),
+                    )
+                    catalog_efforts = next(
+                        (list(m.reasoning_efforts) for m in models if m.id == model), []
+                    )
+                else:
+                    catalog_efforts = self._catalog_efforts_for_model(
+                        organization_id,
+                        model,
+                        self._provider_turn_context(parent).get("initiated_by_id"),
+                        dict(
+                            self._provider_turn_context(parent).get("account_ids") or {}
+                        ),
+                    )
                 from .agents.effort_strategy import resolve_strategy_effort
 
                 child_effort = resolve_strategy_effort(catalog_efforts, strategy)
             else:
-                child_effort = normalize_reasoning_effort(parent.reasoning_effort or "")
+                child_effort = effort_normalizer(parent.reasoning_effort or "")
         else:
             child_effort = fixed_effort
         if resumed:
@@ -5371,6 +5539,15 @@ class HarnessService:
             # wins, otherwise the existing child model/effort continue.
             assert child is not None
             if override:
+                if codex_parent:
+                    await sync_to_async(self._validate_codex_session_config)(
+                        child,
+                        override,
+                        child.reasoning_effort,
+                        account_ids=self._provider_turn_context(parent).get(
+                            "account_ids"
+                        ),
+                    )
                 child = await sync_to_async(self.sessions.set_model)(child, override)
                 model = override
             else:
@@ -5380,7 +5557,7 @@ class HarnessService:
                         "No model available for subagent run",
                         tool="task",
                     )
-            child_effort = normalize_reasoning_effort(child.reasoning_effort or "")
+            child_effort = effort_normalizer(child.reasoning_effort or "")
         else:
             child = await sync_to_async(self.create_session)(
                 workspace_id=parent.workspace_id,
@@ -5392,6 +5569,8 @@ class HarnessService:
                 reasoning_effort=child_effort,
                 title=args.description[:255],
                 parent_id=parent.id,
+                user_id=getattr(parent, "created_by_id", None),
+                skill_ids=list(parent.skill_ids or []),
             )
         await self._on_runner_event(
             parent,
@@ -5416,6 +5595,7 @@ class HarnessService:
                 organization_id=organization_id,
                 workspace_id=str(parent.workspace_id),
                 max_depth=ctx.max_depth,
+                user_id=getattr(parent, "created_by_id", None),
             )
             child_task = self._tasks.get(str(child.id))
             if child_task is not None:

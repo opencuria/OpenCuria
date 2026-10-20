@@ -2,7 +2,12 @@
  * Shared provider catalog fetch so chat surfaces reuse one in-flight request.
  */
 
-import { HARNESS_ENGINE_CONNECTION_CHANGED_EVENT, listProviderModels } from '@/services/harness.api'
+import {
+  HARNESS_ENGINE_CONNECTION_CHANGED_EVENT,
+  listProviderModels,
+  listClaudeModels,
+  listEngineModels,
+} from '@/services/harness.api'
 import type { ProviderModel } from './harnessModels'
 
 interface CatalogCacheEntry {
@@ -10,9 +15,9 @@ interface CatalogCacheEntry {
   promise: Promise<ProviderModel[]>
 }
 
-let cached: CatalogCacheEntry | null = null
+const cached = new Map<string, CatalogCacheEntry>()
 
-function currentContext(): string {
+export function providerCatalogContext(): string {
   const userId = (() => {
     try {
       const user = JSON.parse(localStorage.getItem('kern_user') ?? 'null') as {
@@ -28,16 +33,26 @@ function currentContext(): string {
 
 /** Load provider models, coalescing concurrent and repeat callers per organization. */
 export function loadProviderModelsCached(): Promise<ProviderModel[]> {
-  const context = currentContext()
-  if (cached?.context === context) return cached.promise
+  return loadEngineModelsCached('native')
+}
+
+export function loadEngineModelsCached(engineId: string): Promise<ProviderModel[]> {
+  const context = `${engineId}:${providerCatalogContext()}`
+  const existing = cached.get(context)
+  if (existing) return existing.promise
 
   const entry: CatalogCacheEntry = {
     context,
-    promise: listProviderModels(),
+    promise:
+      engineId === 'native'
+        ? listProviderModels()
+        : engineId === 'claude'
+          ? listClaudeModels()
+          : listEngineModels(engineId),
   }
-  cached = entry
+  cached.set(context, entry)
   entry.promise = entry.promise.catch((error: unknown) => {
-    if (cached === entry) cached = null
+    if (cached.get(context) === entry) cached.delete(context)
     throw error
   })
   return entry.promise
@@ -45,7 +60,7 @@ export function loadProviderModelsCached(): Promise<ProviderModel[]> {
 
 /** Drop the cached promise so the next load refetches. */
 export function invalidateProviderCatalog(): void {
-  cached = null
+  cached.clear()
 }
 
 if (typeof window !== 'undefined') {
@@ -54,7 +69,7 @@ if (typeof window !== 'undefined') {
 
 /** Clear user-context provider data when auth state is discarded. */
 export function resetProviderCatalogCache(): void {
-  cached = null
+  cached.clear()
 }
 
 /** Refresh mounted chat surfaces after user or organization context changes. */

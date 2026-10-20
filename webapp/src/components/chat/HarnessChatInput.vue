@@ -29,11 +29,19 @@ import {
 import type { HarnessId, HarnessSessionMode } from '@/types/harness'
 import type { FileNode, Skill } from '@/types'
 import { sendFilesUpload, subscribeToWorkspace } from '@/services/socket'
-import { resolveCatalogModel, snapEffort, type ProviderModel } from '@/lib/harnessModels'
-import { loadProviderModelsCached } from '@/lib/providerCatalog'
+import {
+  resolveCatalogModel,
+  snapEffort,
+  harnessEngineChoices,
+  harnessEngineLabel,
+  harnessEngineDefaults,
+  harnessSessionModels,
+  type HarnessEngine,
+  type ProviderModel,
+} from '@/lib/harnessModels'
+import { loadEngineModelsCached, providerCatalogContext } from '@/lib/providerCatalog'
 import {
   HARNESS_ENGINE_CONNECTION_CHANGED_EVENT,
-  listClaudeModels,
   listHarnessEngines,
 } from '@/services/harness.api'
 import {
@@ -110,6 +118,8 @@ const props = defineProps<{
   mode?: HarnessSessionMode
   harnessId?: HarnessId
   engineLocked?: boolean
+  /** Persisted session model, never the editable composer selection. */
+  sessionModel?: string
   skillOptions?: Skill[]
   /**
    * External mention navigation state mirrored from the parent sheet stack.
@@ -178,15 +188,27 @@ const localMode = ref<HarnessSessionMode>(props.mode ?? 'build')
 const localHarnessId = ref<HarnessId>(props.harnessId ?? 'native')
 const localModel = ref(props.model ?? '')
 const localEffort = ref(props.effort ?? '')
-const catalog = ref<ProviderModel[]>([])
+const engineCatalog = ref<ProviderModel[]>([])
+const catalog = computed(() =>
+  harnessSessionModels(
+    engineCatalog.value,
+    localHarnessId.value,
+    props.engineLocked
+      ? (props.sessionModel ?? harness.sessions.find((s) => s.id === props.sessionId)?.model ?? '')
+      : undefined,
+  ),
+)
+const engines = ref<HarnessEngine[]>([])
+const engineChoices = computed(() => harnessEngineChoices(engines.value))
+function engineUnavailable(id: HarnessId): boolean {
+  return id !== 'native' && !engines.value.find((engine) => engine.id === id)?.connected
+}
 const { entries: recentEntries } = useRecentModels()
 const recentModels = computed(() =>
   localHarnessId.value === 'native' ? recentCatalogModels(catalog.value) : [],
 )
 const modelLoading = ref(true)
 const providerMissing = ref(false)
-const claudeConnected = ref(false)
-const claudeEngineAvailable = ref(false)
 const selectedSkillIds = ref<string[]>([...(props.skillIds ?? [])])
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const isUploading = ref(false)
@@ -206,6 +228,8 @@ const authStore = useAuthStore()
 let applyingDefaults = false
 let applyEngineDefaultsAfterCatalog = false
 let modelRequestGeneration = 0
+let selectionRevision = 0
+let catalogContext = ''
 
 const { loadFromCache, saveToCache, clearCache } = useChatInputCache(
   () => props.workspaceId || '',
@@ -390,7 +414,7 @@ watch(
 const modeIcon = computed(() => (localMode.value === 'plan' ? ListTodo : Hammer))
 const modeLabel = computed(() => (localMode.value === 'plan' ? 'Plan' : 'Build'))
 const harnessLabel = computed(() =>
-  localHarnessId.value === 'claude' ? 'Claude Agent' : 'OpenCuria',
+  harnessEngineLabel(localHarnessId.value, engines.value),
 )
 const modeMenuLabel = computed(() => `${harnessLabel.value} ${modeLabel.value}`)
 
@@ -407,7 +431,7 @@ function applyModeDefaults(mode: HarnessSessionMode, opts: { resetDirty?: boolea
   const defaults = harness.agentDefault(mode)
   if (
     isScheduledTask.value ||
-    localHarnessId.value === 'claude' ||
+    localHarnessId.value !== 'native' ||
     (!defaults.model && !defaults.effort)
   )
     return
@@ -428,41 +452,53 @@ async function loadProviderModels(): Promise<void> {
   modelLoading.value = true
   providerMissing.value = false
   const requestGeneration = ++modelRequestGeneration
-  const organizationId = authStore.activeOrganizationId
+  const currentContext = () =>
+    `${authStore.user?.id ?? ''}:${authStore.activeOrganizationId ?? ''}:${providerCatalogContext()}`
+  const context = currentContext()
+  const engineId = localHarnessId.value
+  const nextCatalogContext = `${engineId}:${context}`
+  if (catalogContext !== nextCatalogContext) engineCatalog.value = []
+  catalogContext = nextCatalogContext
+  const revision = selectionRevision
+  const isCurrent = () =>
+    requestGeneration === modelRequestGeneration &&
+    engineId === localHarnessId.value &&
+    context === currentContext()
   try {
-    const [models, engines] = await Promise.all([
-      localHarnessId.value === 'claude' ? listClaudeModels() : loadProviderModelsCached(),
+    const [models, availableEngines] = await Promise.all([
+      loadEngineModelsCached(engineId),
       listHarnessEngines().catch(() => []),
     ])
+    if (!isCurrent()) return
+    engineCatalog.value = models
+    engines.value = availableEngines
+    providerMissing.value = engineUnavailable(engineId) || catalog.value.length === 0
     if (
-      requestGeneration !== modelRequestGeneration ||
-      organizationId !== authStore.activeOrganizationId
-    )
-      return
-    catalog.value = models
-    claudeEngineAvailable.value = engines.some((engine) => engine.id === 'claude')
-    claudeConnected.value = Boolean(engines.find((engine) => engine.id === 'claude')?.connected)
-    if (localHarnessId.value === 'claude' && !claudeConnected.value) providerMissing.value = true
-    else if (catalog.value.length === 0) providerMissing.value = true
+      engineId !== 'native' &&
+      !props.engineLocked &&
+      revision === selectionRevision &&
+      (applyEngineDefaultsAfterCatalog || !localModel.value)
+    ) {
+      const defaults = harnessEngineDefaults(engineId, engines.value)
+      const model = models.find((item) => item.id === defaults.model) ?? models[0]
+      localModel.value = model?.id ?? defaults.model
+      localEffort.value = model ? snapEffort(model, defaults.effort) : defaults.effort
+      emit('update:model', localModel.value)
+      emit('update:effort', localEffort.value)
+      applyEngineDefaultsAfterCatalog = false
+    }
     if (localHarnessId.value === 'native') {
       if (!isScheduledTask.value) await harness.loadAgentConfigs()
       await loadRecentModels()
     }
   } catch {
-    if (
-      requestGeneration !== modelRequestGeneration ||
-      organizationId !== authStore.activeOrganizationId
-    )
-      return
+    if (!isCurrent()) return
     providerMissing.value = true
-    catalog.value = []
+    engineCatalog.value = []
   } finally {
-    if (
-      requestGeneration === modelRequestGeneration &&
-      organizationId === authStore.activeOrganizationId
-    )
-      modelLoading.value = false
+    if (isCurrent()) modelLoading.value = false
   }
+  if (!isCurrent() || revision !== selectionRevision) return
   if (applyEngineDefaultsAfterCatalog && localHarnessId.value === 'native') {
     applyModeDefaults(localMode.value, { resetDirty: true })
     applyEngineDefaultsAfterCatalog = false
@@ -493,6 +529,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  modelRequestGeneration++
   window.removeEventListener(HARNESS_ENGINE_CONNECTION_CHANGED_EVENT, loadProviderModels)
   uploadDisposed = true
   invalidateUploads()
@@ -526,7 +563,7 @@ watch(
 )
 
 watch(
-  () => authStore.activeOrganizationId,
+  () => `${authStore.user?.id ?? ''}:${authStore.activeOrganizationId ?? ''}`,
   () => void loadProviderModels(),
 )
 
@@ -540,14 +577,20 @@ watch(
 watch(
   () => props.model,
   (next) => {
-    if (typeof next === 'string' && next !== localModel.value) localModel.value = next
+    if (typeof next === 'string' && next !== localModel.value) {
+      selectionRevision++
+      localModel.value = next
+    }
   },
 )
 
 watch(
   () => props.effort,
   (next) => {
-    if (typeof next === 'string' && next !== localEffort.value) localEffort.value = next
+    if (typeof next === 'string' && next !== localEffort.value) {
+      selectionRevision++
+      localEffort.value = next
+    }
   },
 )
 
@@ -565,11 +608,12 @@ watch(
       localHarnessId.value = next
       if (!isScheduledTask.value) prompt.value = loadFromCache()
       if (!props.engineLocked) {
-        localModel.value = next === 'claude' ? 'sonnet' : ''
-        localEffort.value = next === 'claude' ? 'high' : recentEffortFor(localModel.value)
+        const defaults = harnessEngineDefaults(next, engines.value)
+        localModel.value = defaults.model
+        localEffort.value = defaults.effort || recentEffortFor(localModel.value)
         emit('update:model', localModel.value)
         emit('update:effort', localEffort.value)
-        applyEngineDefaultsAfterCatalog = next === 'native'
+        applyEngineDefaultsAfterCatalog = true
       }
       void loadProviderModels()
     }
@@ -598,6 +642,8 @@ watch(
     closeComposerQuery()
     releaseMentionSubscription?.()
     releaseMentionSubscription = null
+    selectionRevision++
+    applyEngineDefaultsAfterCatalog = false
     localMode.value = props.mode ?? 'build'
     localHarnessId.value = props.harnessId ?? 'native'
     localModel.value = props.model ?? ''
@@ -640,9 +686,9 @@ function handleSend(): void {
 function setHarnessMode(harnessId: HarnessId, mode: HarnessSessionMode): void {
   if (props.engineLocked && harnessId !== localHarnessId.value) return
   if (
-    harnessId === 'claude' &&
+    harnessId !== 'native' &&
     harnessId !== localHarnessId.value &&
-    (!claudeEngineAvailable.value || !claudeConnected.value)
+    engineUnavailable(harnessId)
   ) {
     openProviderSettings()
     return
@@ -652,12 +698,13 @@ function setHarnessMode(harnessId: HarnessId, mode: HarnessSessionMode): void {
   if (harnessChanged) {
     emit('update:harnessId', harnessId)
 
-    localModel.value = harnessId === 'claude' ? 'sonnet' : ''
-    localEffort.value = harnessId === 'claude' ? 'high' : ''
+    const defaults = harnessEngineDefaults(harnessId, engines.value)
+    localModel.value = defaults.model
+    localEffort.value = defaults.effort
     emit('update:model', localModel.value)
     emit('update:effort', localEffort.value)
     harness.composerDirty = false
-    applyEngineDefaultsAfterCatalog = harnessId === 'native'
+    applyEngineDefaultsAfterCatalog = true
     void loadProviderModels()
   }
   setMode(mode)
@@ -679,12 +726,17 @@ function toggleMode(): void {
 }
 
 function setModel(value: string): void {
+  if (!catalog.value.some((model) => model.id === value)) return
+  selectionRevision++
+  applyEngineDefaultsAfterCatalog = false
   localModel.value = value
   emit('update:model', value)
   if (!applyingDefaults && !isScheduledTask.value) harness.markComposerDirty()
 }
 
 function setEffort(value: string): void {
+  selectionRevision++
+  applyEngineDefaultsAfterCatalog = false
   localEffort.value = value
   emit('update:effort', value)
   if (!applyingDefaults && !isScheduledTask.value) harness.markComposerDirty()
@@ -1315,7 +1367,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
             class="mx-4 mt-3 w-fit cursor-pointer rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-500/20 dark:text-amber-300"
             @click="openProviderSettings"
           >
-            Connect a provider in Settings
+            {{ localHarnessId === 'native' ? 'Connect a provider in Settings' : `${harnessLabel} unavailable — check accounts in Provider settings` }}
           </button>
 
           <HarnessMentionImages
@@ -1423,88 +1475,30 @@ function onComposerKeydown(e: KeyboardEvent): void {
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent side="top" align="start" class="min-w-48">
-                  <DropdownMenuLabel class="px-2 pb-1 pt-2">OpenCuria Build/Plan</DropdownMenuLabel>
-                  <DropdownMenuItem
-                    class="text-xs"
-                    data-testid="composer-mode-native-build"
-                    :disabled="engineLocked && localHarnessId !== 'native'"
-                    @click="setHarnessMode('native', 'build')"
-                  >
-                    <Hammer :size="14" />
-                    OpenCuria Build
-                    <Check
-                      v-if="localHarnessId === 'native' && localMode === 'build'"
-                      class="ml-auto size-3.5"
-                    />
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    class="text-xs"
-                    data-testid="composer-mode-native-plan"
-                    :disabled="engineLocked && localHarnessId !== 'native'"
-                    @click="setHarnessMode('native', 'plan')"
-                  >
-                    <ListTodo :size="14" />
-                    OpenCuria Plan
-                    <Check
-                      v-if="localHarnessId === 'native' && localMode === 'plan'"
-                      class="ml-auto size-3.5"
-                    />
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuLabel class="px-2 pb-1 pt-2"
-                    >Claude Agent Build/Plan</DropdownMenuLabel
-                  >
-                  <DropdownMenuItem
-                    class="text-xs"
-                    data-testid="composer-mode-claude-build"
-                    :disabled="
-                      (engineLocked && localHarnessId === 'native') ||
-                      (localHarnessId !== 'claude' && (!claudeEngineAvailable || !claudeConnected))
-                    "
-                    :title="
-                      localHarnessId !== 'claude' && (!claudeEngineAvailable || !claudeConnected)
-                        ? 'Connect Claude Agent in Provider settings first.'
-                        : undefined
-                    "
-                    @click="setHarnessMode('claude', 'build')"
-                  >
-                    <Hammer :size="14" />
-                    Claude Agent Build
-                    <Check
-                      v-if="localHarnessId === 'claude' && localMode === 'build'"
-                      class="ml-auto size-3.5"
-                    />
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    class="text-xs"
-                    data-testid="composer-mode-claude-plan"
-                    :disabled="
-                      (engineLocked && localHarnessId === 'native') ||
-                      (localHarnessId !== 'claude' && (!claudeEngineAvailable || !claudeConnected))
-                    "
-                    :title="
-                      localHarnessId !== 'claude' && (!claudeEngineAvailable || !claudeConnected)
-                        ? 'Connect Claude Agent in Provider settings first.'
-                        : undefined
-                    "
-                    @click="setHarnessMode('claude', 'plan')"
-                  >
-                    <ListTodo :size="14" />
-                    Claude Agent Plan
-                    <Check
-                      v-if="localHarnessId === 'claude' && localMode === 'plan'"
-                      class="ml-auto size-3.5"
-                    />
-                  </DropdownMenuItem>
-                  <button
-                    v-if="!claudeConnected"
-                    type="button"
-                    class="w-full px-3 py-2 text-left text-xs text-muted-foreground hover:text-foreground"
-                    data-testid="claude-provider-settings"
-                    @click.stop="openProviderSettings"
-                  >
-                    Connect Claude Agent in Provider settings
-                  </button>
+                  <template v-for="(engine, index) in engineChoices" :key="engine.id">
+                    <DropdownMenuSeparator v-if="index" />
+                    <DropdownMenuLabel class="px-2 pb-1 pt-2">{{ engine.name }} Build/Plan</DropdownMenuLabel>
+                    <DropdownMenuItem
+                      v-for="mode in engine.modes.filter((mode): mode is HarnessSessionMode => mode === 'build' || mode === 'plan')"
+                      :key="mode"
+                      class="text-xs"
+                      :data-testid="`composer-mode-${engine.id}-${mode}`"
+                      :disabled="(engineLocked && localHarnessId !== engine.id) || (localHarnessId !== engine.id && engineUnavailable(engine.id))"
+                      :title="engineUnavailable(engine.id) ? `Connect ${engine.name} in Provider settings first.` : undefined"
+                      @click="setHarnessMode(engine.id, mode)"
+                    >
+                      <component :is="mode === 'plan' ? ListTodo : Hammer" :size="14" />
+                      {{ engine.name }} {{ mode === 'plan' ? 'Plan' : 'Build' }}
+                      <Check v-if="localHarnessId === engine.id && localMode === mode" class="ml-auto size-3.5" />
+                    </DropdownMenuItem>
+                    <button
+                      v-if="engineUnavailable(engine.id)"
+                      type="button"
+                      class="w-full px-3 py-2 text-left text-xs text-muted-foreground hover:text-foreground"
+                      :data-testid="`${engine.id}-provider-settings`"
+                      @click.stop="openProviderSettings"
+                    >Connect {{ engine.name }} in Provider settings</button>
+                  </template>
                 </DropdownMenuContent>
               </DropdownMenu>
 

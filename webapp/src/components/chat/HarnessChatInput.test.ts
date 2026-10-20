@@ -42,6 +42,7 @@ vi.mock('@/services/harness.api', async () => {
     ...actual,
     listProviderModels: vi.fn(),
     listClaudeModels: vi.fn(),
+    listEngineModels: vi.fn(),
     listHarnessEngines: vi.fn(),
     listAgentConfigs: vi.fn(),
     listRecentModels: vi.fn().mockResolvedValue([]),
@@ -193,6 +194,168 @@ describe('HarnessChatInput', () => {
         max_output_tokens: 16_000,
       },
     ])
+  })
+
+  const codexModels: ProviderModel[] = [
+    {
+      ...catalog[0]!,
+      id: 'chatgpt/gpt-6.1-sol',
+      provider: 'chatgpt',
+      name: 'Codex Sol',
+      reasoning_efforts: ['low', 'ultra'],
+      default_effort: 'low',
+    },
+    { ...catalog[0]!, id: 'openrouter/vendor/codex', name: 'Router Codex' },
+  ]
+  function enableCodex() {
+    listHarnessEnginesMock.mockResolvedValue([
+      { id: 'native', name: 'OpenCuria', modes: ['build', 'plan'], connected: true },
+      { id: 'claude', name: 'Claude Agent', modes: ['build', 'plan'], connected: true },
+      {
+        id: 'codex',
+        name: 'Codex',
+        modes: ['build', 'plan'],
+        connected: true,
+        default_model: 'chatgpt/gpt-6.1-sol',
+        default_effort: 'low',
+      },
+    ])
+    vi.mocked(harnessApi.listEngineModels).mockResolvedValue(codexModels)
+  }
+
+  it('creates a Codex chat with backend defaults through the existing mode/model menus', async () => {
+    enableCodex()
+    const wrapper = mountInput()
+    await flushPromises()
+    await wrapper.get('[data-testid="composer-mode-codex-plan"]').trigger('click')
+    await flushPromises()
+    expect(harnessApi.listEngineModels).toHaveBeenCalledWith('codex')
+    expect(wrapper.get('[data-testid="composer-mode-trigger"]').text()).toContain('Codex Plan')
+    expect(wrapper.get('[data-testid="composer-model-trigger"]').text()).toContain('Codex Sol')
+    expect(wrapper.find('[data-testid="composer-model-openrouter/vendor/codex"]').exists()).toBe(
+      true,
+    )
+    await setEditorText(wrapper, 'Use Codex')
+    await wrapper.get('[data-testid="composer-send"]').trigger('click')
+    expect(wrapper.emitted('send')?.slice(-1)[0]).toEqual([
+      'Use Codex',
+      'plan',
+      'chatgpt/gpt-6.1-sol',
+      [],
+      'low',
+      'codex',
+    ])
+    wrapper.unmount()
+  })
+
+  it('locks an existing Codex chat to its persisted provider, not the editable draft model', async () => {
+    enableCodex()
+    const wrapper = mountInput({
+      harnessId: 'codex',
+      engineLocked: true,
+      sessionModel: 'openrouter/vendor/original',
+      model: 'openrouter/vendor/codex',
+      effort: 'high',
+    })
+    await flushPromises()
+    expect(
+      wrapper.get('[data-testid="composer-mode-native-build"]').attributes('disabled'),
+    ).toBeDefined()
+    expect(
+      wrapper.get('[data-testid="composer-mode-claude-build"]').attributes('disabled'),
+    ).toBeDefined()
+    expect(
+      wrapper.get('[data-testid="composer-mode-codex-plan"]').attributes('disabled'),
+    ).toBeUndefined()
+    expect(wrapper.find('[data-testid="composer-model-chatgpt/gpt-6.1-sol"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="composer-model-openrouter/vendor/codex"]').exists()).toBe(
+      true,
+    )
+    await wrapper.setProps({ model: 'chatgpt/gpt-6.1-sol' })
+    expect(wrapper.find('[data-testid="composer-model-chatgpt/gpt-6.1-sol"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('uses the same Codex defaults in the scheduled-task composer without chat send controls', async () => {
+    enableCodex()
+    const wrapper = mountInput({ variant: 'scheduled-task', prompt: 'Daily review' })
+    await flushPromises()
+    await wrapper.get('[data-testid="composer-mode-codex-build"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('update:harnessId')?.slice(-1)[0]).toEqual(['codex'])
+    expect(wrapper.emitted('update:model')?.slice(-1)[0]).toEqual(['chatgpt/gpt-6.1-sol'])
+    expect(wrapper.emitted('update:effort')?.slice(-1)[0]).toEqual(['low'])
+    expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('refreshes the Codex catalog after account changes without erasing explicit model/effort choices', async () => {
+    enableCodex()
+    const wrapper = mountInput({
+      harnessId: 'codex',
+      model: 'chatgpt/gpt-6.1-sol',
+      effort: 'ultra',
+    })
+    await flushPromises()
+    window.dispatchEvent(new Event(harnessApi.PROVIDER_ACCOUNTS_CHANGED_EVENT))
+    await flushPromises()
+    expect(harnessApi.listEngineModels).toHaveBeenCalledTimes(2)
+    expect(wrapper.emitted('update:effort')).toBeUndefined()
+    expect(wrapper.get('[data-testid="composer-effort-row"]').text()).toContain('Ultra')
+    wrapper.unmount()
+  })
+
+  it('does not replace a new selection when a stale catalog response finishes', async () => {
+    enableCodex()
+    let resolve!: (models: ProviderModel[]) => void
+    vi.mocked(harnessApi.listEngineModels).mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done
+        }),
+    )
+    const wrapper = mountInput({ harnessId: 'codex' })
+    await flushPromises()
+    await wrapper.setProps({ model: 'openrouter/vendor/codex', effort: 'high' })
+    resolve(codexModels)
+    await flushPromises()
+    expect(wrapper.emitted('update:model')).toBeUndefined()
+    expect(wrapper.emitted('update:effort')).toBeUndefined()
+    expect(wrapper.get('[data-testid="composer-model-trigger"]').text()).toContain('Router Codex')
+    wrapper.unmount()
+  })
+
+  it('ignores an external catalog response belonging to a previous user', async () => {
+    enableCodex()
+    let resolveFirst!: (models: ProviderModel[]) => void
+    vi.mocked(harnessApi.listEngineModels)
+      .mockImplementationOnce(() => new Promise(done => { resolveFirst = done }))
+      .mockResolvedValueOnce([codexModels[1]!])
+    const wrapper = mountInput({ harnessId: 'codex', model: 'openrouter/vendor/codex' })
+    await flushPromises()
+    const auth = useAuthStore()
+    auth.user = { ...auth.user, id: 999 } as NonNullable<typeof auth.user>
+    localStorage.setItem('kern_user', JSON.stringify({ id: 999 }))
+    await flushPromises()
+    resolveFirst([codexModels[0]!])
+    await flushPromises()
+    expect(wrapper.find('[data-testid="composer-model-openrouter/vendor/codex"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="composer-model-chatgpt/gpt-6.1-sol"]').exists()).toBe(false)
+    wrapper.unmount()
+    localStorage.removeItem('kern_user')
+  })
+
+  it('reports external auth/catalog failure explicitly instead of using native models', async () => {
+    enableCodex()
+    vi.mocked(harnessApi.listEngineModels).mockRejectedValue(new Error('Unauthorized'))
+    const wrapper = mountInput({ harnessId: 'codex', model: 'chatgpt/gpt-6.1-sol' })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="composer-provider-cta"]').text()).toContain(
+      'Codex unavailable',
+    )
+    expect(listProviderModelsMock).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="composer-model-openrouter/model-big"]').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('loads the provider catalog into the model picker', async () => {

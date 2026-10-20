@@ -67,12 +67,7 @@ export interface SkillUpdateInput {
   body?: string;
 }
 
-export interface HarnessEngine {
-  id: string;
-  name: string;
-  modes: string[];
-  connected: boolean;
-}
+export type { HarnessEngine } from "@opencuria/chat-core/harnessModels";
 
 export interface AgentConfig {
   agent: string;

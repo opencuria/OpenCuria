@@ -65,6 +65,7 @@ class ChatGPTAdapter(ProviderAdapter):
         credentials: dict[str, Any],
         on_tokens_refreshed: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         client: httpx.AsyncClient | None = None,
+        fresh_credentials: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         """Create an adapter backed by OAuth credentials.
 
@@ -73,9 +74,11 @@ class ChatGPTAdapter(ProviderAdapter):
                 ``account_id``, and optional ``residency``.
             on_tokens_refreshed: Async callback invoked after token refresh.
             client: Optional shared httpx client (mainly for tests).
+            fresh_credentials: Central account-scoped OAuth coordinator.
         """
         self._credentials = dict(credentials)
         self._on_tokens_refreshed = on_tokens_refreshed
+        self._fresh_credentials = fresh_credentials
         self._client = client
         self._refresh_lock = asyncio.Lock()
 
@@ -495,7 +498,10 @@ class ChatGPTAdapter(ProviderAdapter):
         return "\n".join(system_parts), input_items
 
     async def _ensure_fresh_tokens(self) -> None:
-        """Refresh OAuth tokens when missing or expired."""
+        """Revalidate live account credentials, or refresh a standalone adapter."""
+        if self._fresh_credentials is not None:
+            self._credentials = dict(await self._fresh_credentials())
+            return
         access = str(self._credentials.get("access", "") or "")
         expires = int(self._credentials.get("expires") or 0)
         if access and expires > int(time.time() * 1000):
@@ -508,8 +514,17 @@ class ChatGPTAdapter(ProviderAdapter):
                 return
             await self._refresh_credentials()
 
-    async def _refresh_credentials(self) -> None:
-        """Refresh tokens and persist them via the callback."""
+    async def _refresh_credentials(
+        self, *, rejected_access_token: str | None = None
+    ) -> None:
+        """Use central refresh, or the legacy standalone test/client callback."""
+        if self._fresh_credentials is not None:
+            self._credentials = dict(
+                await self._fresh_credentials(
+                    rejected_access_token=rejected_access_token, force=True
+                )
+            )
+            return
         refresh = str(self._credentials.get("refresh", "") or "")
         if not refresh:
             raise ProviderAuthError(
@@ -517,7 +532,10 @@ class ChatGPTAdapter(ProviderAdapter):
                 provider=self.name,
             )
         client = self._client
-        tokens = await refresh_tokens(refresh, client=client)
+        try:
+            tokens = await refresh_tokens(refresh, client=client)
+        except Exception:
+            raise ProviderAuthError(RECONNECT_MESSAGE, provider=self.name) from None
         updated = self._credentials_from_tokens(tokens)
         if tokens.account_id:
             updated["account_id"] = tokens.account_id
@@ -553,6 +571,8 @@ class ChatGPTAdapter(ProviderAdapter):
         timeout: httpx.Timeout,
         options: ChatOptions,
         deadline: float | None,
+        *,
+        _auth_retry: bool = True,
     ) -> AsyncIterator[Delta]:
         """Open one SSE stream with header and chunk idle timeouts."""
         stream_cm = client.stream(
@@ -562,6 +582,7 @@ class ChatGPTAdapter(ProviderAdapter):
             headers=headers,
             timeout=timeout,
         )
+        closed = False
         try:
             header_timeout = effective_timeout(
                 options.header_timeout_seconds, deadline
@@ -577,6 +598,27 @@ class ChatGPTAdapter(ProviderAdapter):
                 raise self._header_or_total_timeout(
                     options, deadline, header_timeout
                 ) from exc
+            if (
+                response.status_code == 401
+                and _auth_retry
+                and self._fresh_credentials is not None
+            ):
+                # Close the rejected response before awaiting the coordinator.
+                await stream_cm.__aexit__(None, None, None)
+                closed = True
+                rejected = headers.get("Authorization", "").removeprefix("Bearer ")
+                await self._refresh_credentials(rejected_access_token=rejected)
+                async for delta in self._stream_request(
+                    client,
+                    payload,
+                    self._build_headers(),
+                    timeout,
+                    options,
+                    deadline,
+                    _auth_retry=False,
+                ):
+                    yield delta
+                return
             async for delta in self._parse_stream(
                 response,
                 chunk_timeout=options.chunk_timeout_seconds,
@@ -585,8 +627,9 @@ class ChatGPTAdapter(ProviderAdapter):
             ):
                 yield delta
         finally:
-            with suppress(Exception):
-                await stream_cm.__aexit__(None, None, None)
+            if not closed:
+                with suppress(Exception):
+                    await stream_cm.__aexit__(None, None, None)
 
     def _header_or_total_timeout(
         self,
@@ -961,9 +1004,7 @@ class ChatGPTAdapter(ProviderAdapter):
         if not isinstance(error, dict):
             error = event
         nested = event.get("response")
-        nested_error = (
-            nested.get("error") if isinstance(nested, dict) else None
-        )
+        nested_error = nested.get("error") if isinstance(nested, dict) else None
         code = str(error.get("code", "") or "")
         message = str(error.get("message", "") or "")
         if not code and isinstance(nested_error, dict):

@@ -83,6 +83,7 @@ describe('ProviderConfigTab', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.spyOn(providerCatalog, 'loadProviderModelsCached').mockResolvedValue(catalog)
+    vi.spyOn(providerCatalog, 'loadEngineModelsCached').mockResolvedValue([])
     vi.mocked(harnessApi.getProviderConfig).mockResolvedValue(config)
     vi.mocked(harnessApi.saveProviderConfig).mockResolvedValue(config)
     vi.mocked(harnessApi.listProviderAccounts).mockResolvedValue([account])
@@ -101,6 +102,22 @@ describe('ProviderConfigTab', () => {
     )
     expect(wrapper.find('[data-testid="provider-status-openrouter"]').text()).toBe('Active')
     expect(wrapper.findAllComponents(ModelPicker)).toHaveLength(1)
+  })
+
+  it('aggregates Codex-only models without double-counting native/catalog overlaps', async () => {
+    vi.mocked(providerCatalog.loadEngineModelsCached).mockResolvedValue([
+      ...catalog,
+      { ...catalog[0]!, id: 'chatgpt/gpt-6.1-sol', provider: 'chatgpt' },
+    ])
+    const wrapper = mountTab()
+    await flushPromises()
+    expect(providerCatalog.loadEngineModelsCached).toHaveBeenCalledWith('codex')
+    expect(wrapper.get('[data-testid="provider-row-openrouter"]').text()).toContain('1 model')
+    expect(wrapper.get('[data-testid="provider-row-openrouter"]').text()).not.toContain('2 models')
+    expect(wrapper.get('[data-testid="provider-row-chatgpt"]').text()).toContain('1 model')
+    // Native defaults must not accidentally use the Codex capability catalog.
+    expect(wrapper.findComponent(ModelPicker).props('models')).toEqual(catalog)
+    wrapper.unmount()
   })
 
   it('saves only the changed small model and preserves legacy defaults', async () => {

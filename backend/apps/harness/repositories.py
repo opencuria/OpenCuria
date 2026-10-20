@@ -836,9 +836,18 @@ class HarnessSessionRepository:
                 "summary": "",
                 "updated_at": now,
             }
-            if session.harness_id == "claude":
+            if session.harness_id != "native":
                 HarnessEngineRepository.clear_transcript(session.id)
-                updates.update(external_session_id="", engine_state={})
+                state = {}
+                if session.harness_id == "codex":
+                    from .engines.codex.catalog import codex_provider
+
+                    state = {
+                        "provider_id": codex_provider(
+                            session.model, session.engine_state
+                        )
+                    }
+                updates.update(external_session_id="", engine_state=state)
             HarnessSession.objects.filter(id=session.id).update(**updates)
             HarnessMessageRepository.dismiss_prior_notices(session.id)
             return permission_ids, question_ids

@@ -46,6 +46,26 @@ def _create_claude_engine(**kwargs: Any) -> HarnessEngine:
     )
 
 
+def _create_codex_engine(**kwargs: Any) -> HarnessEngine:
+    """Load Codex only when requested; credentials remain server-side."""
+    from .codex.engine import CodexEngine
+
+    return CodexEngine(
+        tools=kwargs["tools"],
+        accessor=kwargs["accessor"],
+        emit=kwargs.get("emit"),
+        auth=kwargs.get("auth"),
+        refresh_auth=kwargs.get("refresh_auth"),
+        external_session_id=kwargs.get("external_session_id", ""),
+        engine_state=kwargs.get("engine_state"),
+        session_store=kwargs.get("session_store"),
+        on_binding=kwargs.get("on_binding"),
+        on_owner=kwargs.get("on_owner"),
+        evaluator=kwargs.get("evaluator"),
+        effort=kwargs.get("effort", "low"),
+    )
+
+
 class DefaultEngineRegistry:
     """Create engines from a name-to-factory registry."""
 
@@ -53,6 +73,7 @@ class DefaultEngineRegistry:
         self._factories: dict[str, EngineFactory] = {}
         self.register("native", _create_native_engine)
         self.register("claude", _create_claude_engine)
+        self.register("codex", _create_codex_engine)
 
     @staticmethod
     def _normalize_name(name: str) -> str:

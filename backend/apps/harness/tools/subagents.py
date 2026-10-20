@@ -175,7 +175,11 @@ class TaskTool(Tool):
                 "Subagent execution is not wired (no registry in ToolContext).",
                 tool=self.name,
             )
-        if ctx.model_resolver is None and ctx.provider is None:
+        if (
+            ctx.run_subagent is None
+            and ctx.model_resolver is None
+            and ctx.provider is None
+        ):
             raise ToolError(
                 "Subagent execution is not wired (no provider in ToolContext).",
                 tool=self.name,

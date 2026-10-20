@@ -30,7 +30,7 @@ FETCH_TIMEOUT_SECONDS = 30.0
 
 # Known OpenRouter effort tokens (plus empty = provider default).
 ALLOWED_REASONING_EFFORTS = frozenset(
-    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 )
 
 

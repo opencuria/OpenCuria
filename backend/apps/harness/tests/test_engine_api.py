@@ -104,12 +104,24 @@ def test_engine_api_lists_catalog_and_safe_connection(engine_api_setup) -> None:
             "name": "OpenCuria",
             "modes": ["build", "plan"],
             "connected": True,
+            "default_model": None,
+            "default_effort": None,
         },
         {
             "id": "claude",
             "name": "Claude Agent",
             "modes": ["build", "plan"],
             "connected": False,
+            "default_model": "sonnet",
+            "default_effort": "high",
+        },
+        {
+            "id": "codex",
+            "name": "Codex",
+            "modes": ["build", "plan"],
+            "connected": False,
+            "default_model": "chatgpt/gpt-6.1-sol",
+            "default_effort": "low",
         },
     ]
     assert (

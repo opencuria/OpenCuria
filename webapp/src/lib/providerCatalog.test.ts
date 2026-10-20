@@ -5,6 +5,7 @@ import type { ProviderModel } from './harnessModels'
 import {
   invalidateProviderCatalog,
   loadProviderModelsCached,
+  loadEngineModelsCached,
   resetProviderCatalogCache,
 } from './providerCatalog'
 
@@ -14,6 +15,7 @@ vi.mock('@/services/harness.api', async () => {
   return {
     ...actual,
     listProviderModels: vi.fn(),
+    listEngineModels: vi.fn(),
   }
 })
 
@@ -36,6 +38,25 @@ describe('loadProviderModelsCached', () => {
   afterEach(() => {
     resetProviderCatalogCache()
     vi.clearAllMocks()
+  })
+
+  it('keys external catalogs by engine, user and organization and invalidates them on account changes', async () => {
+    const external = vi.mocked(harnessApi.listEngineModels).mockResolvedValue(catalog)
+    localStorage.setItem('kern_user', JSON.stringify({ id: 10 }))
+    localStorage.setItem('kern_active_org_id', 'org-a')
+    await Promise.all([loadEngineModelsCached('codex'), loadEngineModelsCached('codex')])
+    expect(external).toHaveBeenCalledTimes(1)
+    localStorage.setItem('kern_active_org_id', 'org-b')
+    await loadEngineModelsCached('codex')
+    localStorage.setItem('kern_user', JSON.stringify({ id: 11 }))
+    await loadEngineModelsCached('codex')
+    window.dispatchEvent(new Event(harnessApi.PROVIDER_ACCOUNTS_CHANGED_EVENT))
+    await loadEngineModelsCached('codex')
+    expect(external).toHaveBeenCalledTimes(4)
+    external.mockRejectedValueOnce(new Error('Unauthorized'))
+    invalidateProviderCatalog()
+    await expect(loadEngineModelsCached('codex')).rejects.toThrow('Unauthorized')
+    await expect(loadEngineModelsCached('codex')).resolves.toEqual(catalog)
   })
 
   it('coalesces concurrent callers onto one request', async () => {

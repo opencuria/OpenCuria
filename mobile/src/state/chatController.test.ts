@@ -169,6 +169,50 @@ async function openRoot(controller: ChatController): Promise<void> {
 }
 
 describe("ChatController", () => {
+  it("resumes Codex and permits same-provider send/edit while rejecting engine or provider changes", async () => {
+    const root = session("root", {
+      harness_id: "codex",
+      model: "chatgpt/gpt-6.1-sol",
+      reasoning_effort: "low",
+    });
+    const { client } = makeClient([root]);
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    expect(controller.getSnapshot().activeSession?.harness_id).toBe("codex");
+    await expect(
+      controller.send("wrong engine", { harnessId: "claude" }),
+    ).rejects.toThrow("harness cannot be changed");
+    await expect(
+      controller.send("wrong provider", { model: "openrouter/vendor/model" }),
+    ).rejects.toThrow("provider cannot be changed");
+    await expect(
+      controller.edit("u1", "wrong provider", {
+        model: "openrouter/vendor/model",
+      }),
+    ).rejects.toThrow("provider cannot be changed");
+    expect(client.harness.send).not.toHaveBeenCalled();
+    expect(client.harness.edit).not.toHaveBeenCalled();
+    await controller.send("continue", {
+      harnessId: "codex",
+      model: "chatgpt/gpt-6.1-sol",
+      reasoningEffort: "ultra",
+    });
+    await controller.edit("u1", "edit", {
+      harnessId: "codex",
+      model: "chatgpt/gpt-6.1-sol",
+      reasoningEffort: "low",
+    });
+    expect(client.harness.edit).toHaveBeenCalledWith(
+      "root",
+      "u1",
+      expect.objectContaining({
+        model: "chatgpt/gpt-6.1-sol",
+        reasoning_effort: "low",
+      }),
+    );
+    controller.dispose();
+  });
+
   it("ignores late workspace responses after a workspace switch", async () => {
     const a = deferred<HarnessSession[]>();
     const b = deferred<HarnessSession[]>();

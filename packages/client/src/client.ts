@@ -168,6 +168,7 @@ export interface OpenCuriaClient {
     ): Promise<HarnessSession>;
     listEngines(signal?: AbortSignal): Promise<HarnessEngine[]>;
     listProviderModels(signal?: AbortSignal): Promise<ProviderModel[]>;
+    listEngineModels(engineId: string, signal?: AbortSignal): Promise<ProviderModel[]>;
     listClaudeModels(signal?: AbortSignal): Promise<ProviderModel[]>;
     listAgentConfigs(signal?: AbortSignal): Promise<AgentConfig[]>;
     saveAgentConfigs(
@@ -431,6 +432,8 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
         api.get<HarnessEngine[]>("/harness/engines/", signal),
       listProviderModels: (signal) =>
         api.get<ProviderModel[]>("/provider-config/models/", signal),
+      listEngineModels: (engineId, signal) =>
+        api.get<ProviderModel[]>(`/harness/engines/${encodeURIComponent(engineId)}/models/`, signal),
       listClaudeModels: (signal) =>
         api.get<ProviderModel[]>("/harness/engines/claude/models/", signal),
       listAgentConfigs: (signal) =>

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from apps.harness.providers.models_catalog import ProviderModel
 
-ENGINE_IDS = ("native", "claude")
+ENGINE_IDS = ("native", "claude", "codex")
 CLAUDE_AGENT_SDK_VERSION = "0.2.164"
 CLAUDE_CODE_CLI_VERSION = "2.1.292"
 DEFAULT_CLAUDE_MODEL = "sonnet"
@@ -57,20 +57,36 @@ CLAUDE_MODELS: tuple[ClaudeModelSpec, ...] = (
 )
 
 
-def list_engines(*, claude_connected: bool) -> list[dict[str, object]]:
+def list_engines(
+    *, claude_connected: bool, codex_connected: bool = False
+) -> list[dict[str, object]]:
     """Return the selectable harness engines with their connection state."""
+    from .codex.catalog import DEFAULT_CODEX_EFFORT, DEFAULT_CODEX_MODEL
+
     rows: list[dict[str, object]] = [
         {
             "id": "native",
             "name": "OpenCuria",
             "modes": ["build", "plan"],
             "connected": True,
+            "default_model": None,
+            "default_effort": None,
         },
         {
             "id": "claude",
             "name": "Claude Agent",
             "modes": ["build", "plan"],
             "connected": claude_connected,
+            "default_model": DEFAULT_CLAUDE_MODEL,
+            "default_effort": DEFAULT_CLAUDE_EFFORT,
+        },
+        {
+            "id": "codex",
+            "name": "Codex",
+            "modes": ["build", "plan"],
+            "connected": codex_connected,
+            "default_model": DEFAULT_CODEX_MODEL,
+            "default_effort": DEFAULT_CODEX_EFFORT,
         },
     ]
     return [row for row in rows if row["id"] in ENGINE_IDS]

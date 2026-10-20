@@ -36,13 +36,6 @@ def _cli_total_cost_update(result: Any) -> dict[str, float] | None:
     return {CLI_TOTAL_COST_KEY: float(value)}
 
 
-def _safe_transcript_recovery_message(error: object) -> str:
-    """Expose only the fixed actionable message from Claude transcript errors."""
-    from .claude.errors import ClaudeTranscriptError
-
-    return str(error) if isinstance(error, ClaudeTranscriptError) else ""
-
-
 async def execute_external_run(
     service: HarnessService,
     *,
@@ -58,15 +51,16 @@ async def execute_external_run(
     """Run an external engine under durable ownership and common persistence."""
     from ..harness_service import _merge_skill_bodies, _tail_remainder
     from ..providers.base import Usage
-    from .session_store import HarnessClaudeSessionStore
+    from .external_runtime import prepare_external_runtime
 
+    label = "Codex" if engine_id == "codex" else "Claude"
     key = str(session.id)
     context = service._runs.get(key, {})
     ownership = context.get("ownership")
     mcp_runtime = None
     accessor = None
     engine = None
-    auth = None
+    runtime = None
     status = HarnessRunStatus.ERROR
     safe_error = ""
     public_error = ""
@@ -78,20 +72,27 @@ async def execute_external_run(
     assistant_content = ""
 
     async def ensure_current() -> None:
-        if ownership is not None and not await ownership.is_current_owner():
-            raise ConflictError("Claude run ownership was superseded")
+        if ownership is None:
+            raise ConflictError(f"{label} run ownership was not initialized")
+        check = (
+            ownership.is_owner_for_finalization
+            if engine_id == "codex" and context.get("engine_closing")
+            else ownership.is_current_owner
+        )
+        if not await check():
+            raise ConflictError(f"{label} run ownership was superseded")
 
     try:
         if ownership is None:
-            raise RuntimeError("Claude run ownership was not initialized")
+            raise RuntimeError(f"{label} run ownership was not initialized")
         if not await ownership.start():
-            raise ConflictError("Claude run ownership was superseded")
+            raise ConflictError(f"{label} run ownership was superseded")
 
         ownership.start_heartbeat(on_lost=lambda: service._cancel_owned_task(key))
         context["cleanup_confirmed"] = True
         await ensure_current()
         if service._accessor_factory is None:
-            raise RuntimeError("Claude engine requires a workspace accessor")
+            raise RuntimeError(f"{label} engine requires a workspace accessor")
         accessor = await service._accessor_factory(str(session.workspace_id))
         # The same credential snapshot is fail-closed for native and SDK tools.
         mcp_snapshot = await sync_to_async(service._prepare_mcp_snapshot_for_run)(
@@ -122,21 +123,14 @@ async def execute_external_run(
                     session_id=key,
                     skipped=mcp_runtime.skipped,
                 )
-        account_id = (context.get("account_ids") or {}).get("claude-agent")
-        await service._register_provider_use(
-            context.get("provider_turn_id"), account_id
-        )
-        auth = await sync_to_async(service._resolve_engine_auth, thread_sensitive=True)(
-            organization_id,
-            context.get("initiated_by_id"),
-            account_id,
-        )
-        session_store = HarnessClaudeSessionStore(
-            session_id=session.id,
-            external_session_id=session.external_session_id or "",
-            # The SDK project key derives from its normalized cwd, not
-            # the workspace UUID; the store still validates the key shape.
-            project_key="",
+        runtime = await prepare_external_runtime(
+            service=service,
+            engine_id=engine_id,
+            session=session,
+            organization_id=organization_id,
+            context=context,
+            ownership=ownership,
+            ensure_current=ensure_current,
         )
         run_options = RunOptions(
             depth=depth,
@@ -153,11 +147,20 @@ async def execute_external_run(
             on_permission=lambda **kw: service._on_permission(session, assistant, **kw),
             on_question=lambda **kw: service._on_question(session, assistant, **kw),
             steering=context.get("steering"),
+            run_subagent=lambda args, ctx, subtask_id: service._run_subagent_tool(
+                parent=session,
+                args=args,
+                ctx=ctx,
+                subtask_id=subtask_id,
+                organization_id=organization_id,
+            ),
         )
         run_options.authorize_file_read = lambda path: service._authorize_file_read(
             session, assistant, path
         )
-        run_options.reasoning_effort = session.reasoning_effort or "high"
+        run_options.reasoning_effort = session.reasoning_effort or (
+            "" if engine_id == "codex" else "high"
+        )
 
         async def on_owner(owner: dict[str, str], owner_phase: str) -> None:
             nonlocal cleanup_confirmed
@@ -167,13 +170,26 @@ async def execute_external_run(
                 if not await ownership.bind_runner_lease(
                     str(owner.get("lease_id", "")), str(owner.get("epoch", ""))
                 ):
-                    raise ConflictError("Claude runner lease ownership was superseded")
+                    raise ConflictError(
+                        f"{label} runner lease ownership was superseded"
+                    )
                 await ensure_current()
             elif owner_phase == "closing":
+                if engine_id == "codex":
+                    # Checkpoint persistence follows runner-confirmed shutdown.
+                    # Preserve this owner's finalization authority, not tool use.
+                    await ownership.stop_heartbeat()
+                    context["engine_closing"] = True
                 cleanup_confirmed = False
                 context["cleanup_confirmed"] = False
                 if not await ownership.begin_close():
-                    raise ConflictError("Claude runner lease ownership was superseded")
+                    raise ConflictError(
+                        f"{label} runner lease ownership was superseded"
+                    )
+                if engine_id == "codex" and (
+                    await service._provider_turn_revocation_message(session)
+                ):
+                    raise ConflictError("Codex checkpoint authorization was revoked")
             elif owner_phase == "released":
                 cleanup_confirmed = True
                 context["cleanup_confirmed"] = True
@@ -181,6 +197,12 @@ async def execute_external_run(
         async def on_binding(external_id: str, metadata: dict[str, Any]) -> None:
             from .repositories import HarnessEngineRepository
 
+            if (
+                engine_id == "codex"
+                and metadata.get("codex_dirty") is False
+                and (await service._provider_turn_revocation_message(session))
+            ):
+                raise ConflictError("Codex checkpoint authorization was revoked")
             bound = await sync_to_async(
                 HarnessEngineRepository.bind_external_session_if_owner,
                 thread_sensitive=True,
@@ -192,13 +214,17 @@ async def execute_external_run(
                 engine_state=dict(metadata or {}),
             )
             if not bound:
-                raise ConflictError("Claude session binding ownership was superseded")
-            session.external_session_id = external_id
-            session.engine_state = dict(metadata or {})
+                raise ConflictError(f"{label} session binding ownership was superseded")
+            if external_id:
+                session.external_session_id = external_id
+            session.engine_state = {**(session.engine_state or {}), **(metadata or {})}
 
         async def emit(event: dict[str, Any]) -> None:
             await ensure_current()
-            await service._on_claude_root_event(session, assistant, event)
+            if engine_id == "claude":
+                await service._on_claude_root_event(session, assistant, event)
+            else:
+                await service._on_runner_event(session, assistant, event)
 
         async def on_child_event(parent_call_id: str, event: dict[str, Any]) -> None:
             await ensure_current()
@@ -209,22 +235,22 @@ async def execute_external_run(
             tools=tools,
             accessor=accessor,
             emit=emit,
-            auth_env=auth.secret_env,
+            **runtime.engine_options,
             external_session_id=session.external_session_id or "",
             engine_state=dict(session.engine_state or {}),
-            session_store=session_store,
+            session_store=runtime.session_store,
             on_binding=on_binding,
             on_child_event=on_child_event,
             on_owner=on_owner,
             evaluator=service.permissions.evaluator,
-            effort=session.reasoning_effort or "high",
+            effort=session.reasoning_effort or ("" if engine_id == "codex" else "high"),
         )
         await ensure_current()
         try:
             result = await engine.run(
                 prompt,
                 session.agent_name or session.mode or "build",
-                session.model or "sonnet",
+                session.model or runtime.default_model,
                 session.mode or "build",
                 run_options,
             )
@@ -270,7 +296,7 @@ async def execute_external_run(
             else "aborted by user"
             if status == HarnessRunStatus.INTERRUPTED
             and service._user_abort_requested(session)
-            else "Claude run was aborted"
+            else f"{label} run was aborted"
             if status == HarnessRunStatus.INTERRUPTED
             else ""
         )
@@ -295,18 +321,18 @@ async def execute_external_run(
         raise
     except Exception as exc:
         status = HarnessRunStatus.ERROR
-        public_error = "Claude run failed."
+        public_error = f"{label} run failed."
         try:
-            safe_error = service._redact_claude_error(exc, auth)
+            safe_error = runtime.redact_error(exc) if runtime else f"{label} run failed"
         except Exception:
-            safe_error = "Claude run failed"
+            safe_error = f"{label} run failed"
         revocation_message = await service._provider_turn_revocation_message(session)
         if revocation_message:
             context["provider_revocation_message"] = revocation_message
             status = HarnessRunStatus.INTERRUPTED
             safe_error = revocation_message
             public_error = revocation_message
-        public_recovery_error = _safe_transcript_recovery_message(exc)
+        public_recovery_error = runtime.recovery_message(exc) if runtime else ""
         if public_recovery_error and not revocation_message:
             public_error = public_recovery_error
         current_owner = (
@@ -320,7 +346,8 @@ async def execute_external_run(
             if public_recovery_error:
                 public_error = public_recovery_error
         log.warning(
-            "claude_harness_run_failed",
+            "external_harness_run_failed",
+            engine_id=engine_id,
             session_id=key,
             error=safe_error,
         )
@@ -390,7 +417,7 @@ async def execute_external_run(
                         if status == HarnessRunStatus.INTERRUPTED
                         else public_recovery_error
                         if status == HarnessRunStatus.ERROR and public_recovery_error
-                        else "Claude run failed."
+                        else f"{label} run failed."
                         if status == HarnessRunStatus.ERROR
                         else ""
                     )
@@ -458,7 +485,7 @@ async def execute_external_run(
                             else "error"
                         )
                         safe_shell_error = (
-                            "Claude process cleanup could not be confirmed"
+                            f"{label} process cleanup could not be confirmed"
                             if status == HarnessRunStatus.COMPLETED
                             else public_error
                         )
@@ -469,7 +496,8 @@ async def execute_external_run(
                             engine_meta=allowed_metadata or None,
                         )
             if context.get("cleanup_confirmed", True):
-                await service._finalize_claude_children(session, assistant)
+                if engine_id == "claude":
+                    await service._finalize_claude_children(session, assistant)
                 if status != HarnessRunStatus.ERROR:
                     await service._finalize_run(session, assistant)
                 else:
