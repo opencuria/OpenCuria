@@ -5277,9 +5277,8 @@ class HarnessService:
         A ``subagent_type`` mismatch on resume is ignored — the stored
         child agent keeps running.
         """
-        from .agent_s.harness import truncate_task_output
-        from .tools.base import ToolError, ToolResult
-        from .tools.subagents import TASK_OUTPUT_MAX_CHARS, render_task_output
+        from .tools.base import ToolError
+        from .tools.subagents import TASK_OUTPUT_MAX_CHARS, build_task_result
 
         if ctx.depth >= ctx.max_depth:
             raise ToolError(
@@ -5518,26 +5517,6 @@ class HarnessService:
                 f"Subagent '{agent}' failed (task_id: {child.id}): {exc}",
                 tool="task",
             ) from exc
-        if agent == "computeruse":
-            from .agent_s.harness import extract_recording_path
-
-            # Only a recording marker really present in the child output
-            # may be preserved — never invent one via a default path when
-            # recording was disabled (see ``truncate_task_output``).
-            recording_path = extract_recording_path(output)
-            display_output, truncated = truncate_task_output(
-                output,
-                recording_path,
-                TASK_OUTPUT_MAX_CHARS,
-            )
-        else:
-            truncated = len(output) > TASK_OUTPUT_MAX_CHARS
-            display_output = output
-            if truncated:
-                display_output = (
-                    output[:TASK_OUTPUT_MAX_CHARS]
-                    + f"\n…[truncated {len(output)} chars total]"
-                )
         await self._on_runner_event(
             parent,
             parent_assistant,
@@ -5550,10 +5529,11 @@ class HarnessService:
                 "summary": output[:500],
             },
         )
-        wrapped = render_task_output(str(child.id), display_output)
-        return ToolResult(
-            output=wrapped,
-            truncated=truncated,
+        return await build_task_result(
+            str(child.id),
+            output,
+            ctx,
+            agent=agent,
             metadata={
                 "subtask_id": subtask_id,
                 "child_session_id": str(child.id),

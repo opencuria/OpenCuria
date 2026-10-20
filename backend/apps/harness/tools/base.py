@@ -253,19 +253,10 @@ class ToolRegistry:
             direction=direction,  # type: ignore[arg-type]
         )
         if clipped.truncated:
-            from .spill import build_spill_hint, spill_full_output, task_available
+            from .spill import preserve_full_output
 
-            spill_path = await spill_full_output(ctx, result.output)
+            full_output = result.output
             result.output = clipped.content
-            result.truncated = True
-            metadata: dict[str, Any] = dict(result.metadata or {})
-            metadata["truncated"] = True
-            if spill_path is not None:
-                metadata["output_path"] = spill_path
-                result.output += build_spill_hint(
-                    spill_path,
-                    task_hint=task_available(ctx),
-                )
-            result.metadata = metadata
+            await preserve_full_output(ctx, result, full_output)
         await self.run_after(tool.name, validated, ctx, result)
         return result
