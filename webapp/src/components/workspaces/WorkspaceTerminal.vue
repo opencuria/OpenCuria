@@ -39,6 +39,8 @@ let fitAddon: FitAddon | null = null
 let resizeObserver: ResizeObserver | null = null
 const cleanupFns: (() => void)[] = []
 let pendingResize: { cols: number; rows: number } | null = null
+// Task of the in-flight start; null until the start request resolves.
+let startTaskId: string | null = null
 
 // --- Helpers ---
 
@@ -167,13 +169,15 @@ function initTerminal(): void {
 async function connectTerminal(): Promise<void> {
   connecting.value = true
   error.value = null
+  startTaskId = null
 
   try {
     await fitTerminal(true)
     const cols = terminal?.cols ?? 80
     const rows = terminal?.rows ?? 24
-    await workspacesApi.startTerminal(props.workspaceId, cols, rows)
-    // The terminal:started event will arrive via Socket.IO
+    const { task_id } = await workspacesApi.startTerminal(props.workspaceId, cols, rows)
+    startTaskId = task_id
+    // terminal:started (or workspace:error for this task) arrives via Socket.IO
   } catch (err: unknown) {
     error.value = err instanceof Error ? err.message : 'Failed to start terminal'
     connecting.value = false
@@ -189,7 +193,23 @@ function setupSocketListeners(): void {
         flushPendingResize()
         void fitTerminal(true)
         connecting.value = false
+        error.value = null
         terminal?.focus()
+      }
+    }),
+  )
+
+  // The runner reports a failed PTY start as workspace:error for the start
+  // task. It may arrive before the start request resolves.
+  cleanupFns.push(
+    onEvent('workspace:error', (data) => {
+      if (
+        data.workspace_id === props.workspaceId &&
+        connecting.value &&
+        (startTaskId === null || data.task_id === startTaskId)
+      ) {
+        error.value = data.error || 'Failed to start terminal'
+        connecting.value = false
       }
     }),
   )
