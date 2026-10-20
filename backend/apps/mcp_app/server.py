@@ -135,6 +135,14 @@ logger = logging.getLogger(__name__)
 # Tool definitions (JSON Schema input schemas)
 # ---------------------------------------------------------------------------
 
+CRON_EXPRESSION_HELP = (
+    "Required when recurrence is 'cron'. Five-field cron "
+    "(minute hour day-of-month month day-of-week, Sunday=0) evaluated in "
+    "timezone_name, e.g. '*/30 8-17 * * 1-5'. Lists, ranges, steps, names "
+    "and @hourly/@daily/@weekly/@monthly are supported; separate several "
+    "expressions with ';'."
+)
+
 _TOOLS: list[Tool] = [
     Tool(
         name="list_workspaces",
@@ -887,7 +895,11 @@ _TOOLS: list[Tool] = [
     ),
     Tool(
         name="create_scheduled_task",
-        description="Create a personal recurring prompt schedule.",
+        description=(
+            "Create a personal recurring prompt schedule. Use recurrence "
+            "daily/weekly with local_time, or cron with cron_expression for "
+            "multiple runs per day and other cron cadences."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -899,19 +911,17 @@ _TOOLS: list[Tool] = [
                 "model": {"type": "string"},
                 "reasoning_effort": {"type": "string"},
                 "skill_ids": {"type": "array", "items": {"type": "string"}},
-                "recurrence": {"type": "string", "enum": ["daily", "weekly"]},
+                "recurrence": {"type": "string", "enum": ["daily", "weekly", "cron"]},
                 "weekdays": {"type": "array", "items": {"type": "integer"}},
+                "cron_expression": {
+                    "type": "string",
+                    "description": CRON_EXPRESSION_HELP,
+                },
                 "local_time": {"type": "string"},
                 "timezone_name": {"type": "string"},
                 "enabled": {"type": "boolean"},
             },
-            "required": [
-                "workspace_id",
-                "name",
-                "prompt",
-                "local_time",
-                "timezone_name",
-            ],
+            "required": ["workspace_id", "name", "prompt", "timezone_name"],
         },
     ),
     Tool(
@@ -929,8 +939,12 @@ _TOOLS: list[Tool] = [
                 "model": {"type": "string"},
                 "reasoning_effort": {"type": "string"},
                 "skill_ids": {"type": "array", "items": {"type": "string"}},
-                "recurrence": {"type": "string"},
+                "recurrence": {"type": "string", "enum": ["daily", "weekly", "cron"]},
                 "weekdays": {"type": "array", "items": {"type": "integer"}},
+                "cron_expression": {
+                    "type": "string",
+                    "description": CRON_EXPRESSION_HELP,
+                },
                 "local_time": {"type": "string"},
                 "timezone_name": {"type": "string"},
                 "enabled": {"type": "boolean"},
@@ -3657,6 +3671,7 @@ def _scheduled_task_dict(task) -> dict:
         "skill_ids": list(task.skill_ids or []),
         "recurrence": task.recurrence,
         "weekdays": list(task.weekdays or []),
+        "cron_expression": getattr(task, "cron_expression", ""),
         "local_time": task.local_time.strftime("%H:%M"),
         "timezone_name": task.timezone_name,
         "enabled": task.enabled,

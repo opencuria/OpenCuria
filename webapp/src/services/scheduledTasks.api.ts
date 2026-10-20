@@ -2,6 +2,8 @@
 import { del, get, patch, post } from './api'
 import type { HarnessId } from '@/types/harness'
 
+export type ScheduleRecurrence = 'daily' | 'weekly' | 'cron'
+
 export interface ScheduledTask {
   id: string
   name: string
@@ -12,8 +14,10 @@ export interface ScheduledTask {
   model: string
   reasoning_effort: string
   skill_ids: string[]
-  recurrence: 'daily' | 'weekly'
+  recurrence: ScheduleRecurrence
   weekdays: number[]
+  /** `;`-separated five-field cron expressions; only used by `cron`. */
+  cron_expression?: string
   local_time: string
   timezone_name: string
   enabled: boolean
@@ -31,8 +35,9 @@ export interface ScheduledTaskInput {
   model: string
   reasoning_effort: string
   skill_ids: string[]
-  recurrence: 'daily' | 'weekly'
+  recurrence: ScheduleRecurrence
   weekdays: number[]
+  cron_expression?: string
   local_time: string
   timezone_name: string
   enabled: boolean

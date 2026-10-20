@@ -1,4 +1,15 @@
-import type { ScheduledTaskInput } from '@/services/scheduledTasks.api'
+import type { ScheduledTask, ScheduledTaskInput } from '@/services/scheduledTasks.api'
+import {
+  cronMatchesDate,
+  describeCron,
+  describeCronWeekdays,
+  formatClock,
+  nextCronOccurrences,
+  parseCron,
+  parseCronField,
+  splitCronExpressions,
+  validateCronExpression,
+} from '@/lib/cron'
 
 export const WEEKDAYS = [
   { value: 0, label: 'Mon', full: 'Monday' },
@@ -40,10 +51,9 @@ export function validateSchedule(input: Pick<ScheduledTaskInput,
 }
 
 /**
- * Find the next valid local wall-clock occurrence. Candidate UTC instants are
- * derived from the zone's actual offsets around the target date, then round-
- * tripped through Intl. This skips spring-forward gaps and picks the earlier
- * UTC instant in a fall-back fold, matching the backend's fold=0 policy.
+ * Find the next valid local wall-clock occurrence. Spring-forward gaps are
+ * skipped and a fall-back fold runs once at the earlier UTC instant, matching
+ * the backend's fold=0 policy.
  */
 export function nextLocalOccurrence(
   recurrence: 'daily' | 'weekly',
@@ -52,59 +62,276 @@ export function nextLocalOccurrence(
   timezone: string,
   now = new Date(),
 ): Date | null {
-  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(localTime) || !isValidTimeZone(timezone) || Number.isNaN(now.getTime())) return null
+  if (!CLOCK.test(localTime) || !isValidTimeZone(timezone)) return null
   if (recurrence === 'weekly' && (!weekdays.length || weekdays.some((day) => !Number.isInteger(day) || day < 0 || day > 6))) return null
-
   const [hours, minutes] = localTime.split(':').map(Number) as [number, number]
-  const formatter = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone,
-    year: 'numeric', month: 'numeric', day: 'numeric',
-    hour: 'numeric', minute: 'numeric', hourCycle: 'h23',
-  })
-  const localParts = (instant: Date): Record<string, number> => Object.fromEntries(
-    formatter.formatToParts(instant).map((part) => [part.type, Number(part.value)]),
-  )
-  const nowLocal = localParts(now)
-  const firstDay = new Date(Date.UTC(nowLocal.year!, nowLocal.month! - 1, nowLocal.day!))
-  const weekdayFormatter = new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: 'UTC' })
-  const weekdayIndexes = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-  const afterMs = now.getTime()
+  const days = recurrence === 'daily' ? '*' : cronWeekdayField(weekdays)
+  return nextCronOccurrences(`${minutes} ${hours} * * ${days}`, timezone, now)[0] ?? null
+}
 
-  // Backend searches 15 local dates (today through two weeks ahead).
-  for (let offset = 0; offset < 15; offset += 1) {
-    const day = new Date(firstDay)
-    day.setUTCDate(day.getUTCDate() + offset)
-    const weekday = weekdayIndexes.indexOf(weekdayFormatter.format(day))
-    if (recurrence === 'weekly' && !weekdays.includes(weekday)) continue
+// ---------------------------------------------------------------------------
+// Schedule drafts: the dialog's friendly modes, stored as daily/weekly or cron
+// ---------------------------------------------------------------------------
 
-    const wallClockMs = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), hours, minutes)
-    const offsets = new Set<number>()
-    // IANA offsets can change close to the target date. Sample a wide UTC
-    // window around the wall clock, including both sides of nearby transitions.
-    for (let deltaMinutes = -36 * 60; deltaMinutes <= 36 * 60; deltaMinutes += 30) {
-      const sampleMs = wallClockMs + deltaMinutes * 60_000
-      const sample = localParts(new Date(sampleMs))
-      const displayedAsUtc = Date.UTC(sample.year!, sample.month! - 1, sample.day!, sample.hour!, sample.minute!)
-      offsets.add(displayedAsUtc - sampleMs)
+export type ScheduleMode = 'times' | 'interval' | 'cron'
+
+export const INTERVAL_OPTIONS = [
+  { value: '5m', label: '5 minutes', minutes: 5 },
+  { value: '10m', label: '10 minutes', minutes: 10 },
+  { value: '15m', label: '15 minutes', minutes: 15 },
+  { value: '20m', label: '20 minutes', minutes: 20 },
+  { value: '30m', label: '30 minutes', minutes: 30 },
+  { value: '1h', label: 'hour', minutes: 60 },
+  { value: '2h', label: '2 hours', minutes: 120 },
+  { value: '3h', label: '3 hours', minutes: 180 },
+  { value: '4h', label: '4 hours', minutes: 240 },
+  { value: '6h', label: '6 hours', minutes: 360 },
+  { value: '8h', label: '8 hours', minutes: 480 },
+  { value: '12h', label: '12 hours', minutes: 720 },
+] as const
+
+export const CRON_PRESETS = [
+  { label: 'Every 15 minutes', expression: '*/15 * * * *' },
+  { label: 'Hourly on weekdays, 9–17', expression: '0 9-17 * * 1-5' },
+  { label: 'Twice a day', expression: '0 9,17 * * *' },
+  { label: '1st of every month', expression: '0 9 1 * *' },
+] as const
+
+export const MAX_SCHEDULE_TIMES = 24
+
+export interface ScheduleDraft {
+  mode: ScheduleMode
+  /** 0 = Monday … 6 = Sunday; used by `times` and `interval`. */
+  weekdays: number[]
+  /** HH:MM wall-clock times; used by `times`. */
+  times: string[]
+  interval: string
+  window_enabled: boolean
+  /** Active hours for `interval`: start hour 0-23, end hour 1-24. */
+  window_start: number
+  window_end: number
+  cron_expression: string
+}
+
+export type ScheduleDraftErrors = Partial<Record<'weekdays' | 'times' | 'window' | 'cron_expression', string>>
+
+const CLOCK = /^([01]\d|2[0-3]):[0-5]\d$/
+const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6]
+
+export function defaultScheduleDraft(): ScheduleDraft {
+  return {
+    mode: 'times',
+    weekdays: [...ALL_DAYS],
+    times: ['09:00'],
+    interval: '1h',
+    window_enabled: false,
+    window_start: 9,
+    window_end: 17,
+    cron_expression: '',
+  }
+}
+
+/** Cron day-of-week field for UI weekdays (0 = Monday); ranges for ≥3 days. */
+export function cronWeekdayField(weekdays: number[]): string {
+  const days = [...new Set(weekdays.map((day) => (day + 1) % 7))].sort((a, b) => a - b)
+  if (days.length >= 7) return '*'
+  const parts: string[] = []
+  for (let index = 0; index < days.length;) {
+    let end = index
+    while (end + 1 < days.length && days[end + 1] === days[end]! + 1) end += 1
+    if (end - index >= 2) parts.push(`${days[index]}-${days[end]}`)
+    else for (let item = index; item <= end; item += 1) parts.push(String(days[item]))
+    index = end + 1
+  }
+  return parts.join(',')
+}
+
+function uiWeekdays(field: string): number[] | null {
+  if (field === '*') return [...ALL_DAYS]
+  try {
+    const days = parseCronField(field, 0, 7, 'day-of-week', ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'])
+    return [...new Set([...days].map((day) => (day + 6) % 7))].sort((a, b) => a - b)
+  } catch {
+    return null
+  }
+}
+
+function sortedTimes(times: string[]): string[] {
+  return [...new Set(times)].sort()
+}
+
+function intervalMinutes(value: string): number {
+  return INTERVAL_OPTIONS.find((option) => option.value === value)?.minutes ?? 60
+}
+
+/** Build the cron expression equivalent to a draft in any mode. */
+export function scheduleDraftToCron(draft: ScheduleDraft): string {
+  if (draft.mode === 'cron') return splitCronExpressions(draft.cron_expression).join('; ')
+  const days = cronWeekdayField(draft.weekdays)
+  if (draft.mode === 'interval') {
+    const every = intervalMinutes(draft.interval)
+    const { window_enabled: windowed, window_start: start, window_end: end } = draft
+    if (every < 60) {
+      const hours = !windowed ? '*' : end - 1 === start ? `${start}` : `${start}-${end - 1}`
+      return `*/${every} ${hours} * * ${days}`
     }
+    const hours = windowed ? `${start}-${Math.min(end, 23)}` : '*'
+    return `0 ${hours}/${every / 60} * * ${days}`
+  }
+  const minutesByHour = new Map<number, number[]>()
+  for (const time of sortedTimes(draft.times.filter((value) => CLOCK.test(value)))) {
+    const [hour, minute] = time.split(':').map(Number) as [number, number]
+    minutesByHour.set(hour, [...(minutesByHour.get(hour) ?? []), minute])
+  }
+  // Hours sharing the same minutes collapse into one expression.
+  const groups = new Map<string, number[]>()
+  for (const [hour, minutes] of minutesByHour) {
+    const key = minutes.join(',')
+    groups.set(key, [...(groups.get(key) ?? []), hour])
+  }
+  return [...groups].map(([minutes, hours]) => `${minutes} ${hours.join(',')} * * ${days}`).join('; ')
+}
 
-    const matches: number[] = []
-    for (const offsetMs of offsets) {
-      const candidateMs = wallClockMs - offsetMs
-      const actual = localParts(new Date(candidateMs))
-      if (actual.year === day.getUTCFullYear()
-        && actual.month === day.getUTCMonth() + 1
-        && actual.day === day.getUTCDate()
-        && actual.hour === hours
-        && actual.minute === minutes) {
-        matches.push(candidateMs)
+function parseTimesDraft(parts: string[]): ScheduleDraft | null {
+  let dayField: string | null = null
+  const times: string[] = []
+  for (const part of parts) {
+    const match = /^(\d+(?:,\d+)*) (\d+(?:,\d+)*) \* \* (\S+)$/.exec(part)
+    if (!match || (dayField !== null && dayField !== match[3])) return null
+    dayField = match[3]!
+    for (const hour of match[2]!.split(',').map(Number)) {
+      for (const minute of match[1]!.split(',').map(Number)) {
+        if (hour > 23 || minute > 59) return null
+        times.push(formatClock(hour, minute))
       }
     }
-    // An ambiguous fall-back local time has two matches; the first is fold=0.
-    // If that instant has passed, skip the local occurrence rather than run
-    // it a second time during the repeated hour.
-    const candidateMs = matches.sort((a, b) => a - b)[0]
-    if (candidateMs !== undefined && candidateMs > afterMs) return new Date(candidateMs)
   }
-  return null
+  const weekdays = dayField === null ? null : uiWeekdays(dayField)
+  if (!weekdays?.length || times.length > MAX_SCHEDULE_TIMES) return null
+  return { ...defaultScheduleDraft(), weekdays, times: sortedTimes(times) }
+}
+
+function parseIntervalDraft(part: string): ScheduleDraft | null {
+  const minutely = /^\*\/(\d+) (\*|\d+|\d+-\d+) \* \* (\S+)$/.exec(part)
+  const hourly = /^0 (\*|\d+-\d+)\/(\d+) \* \* (\S+)$/.exec(part)
+  const match = minutely ?? hourly
+  if (!match) return null
+  const every = minutely ? Number(minutely[1]) : Number(hourly![2]) * 60
+  const option = INTERVAL_OPTIONS.find((item) => item.minutes === every)
+  const hourField = minutely ? minutely[2]! : hourly![1]!
+  const weekdays = uiWeekdays(match[3]!)
+  if (!option || !weekdays?.length) return null
+  const draft: ScheduleDraft = { ...defaultScheduleDraft(), mode: 'interval', interval: option.value, weekdays }
+  if (hourField !== '*') {
+    const [start, last = start] = hourField.split('-').map(Number) as [number, number?]
+    draft.window_enabled = true
+    draft.window_start = start
+    draft.window_end = minutely ? last + 1 : last
+  }
+  return draft
+}
+
+/** Derive the friendliest editor mode that reproduces a stored schedule. */
+export function scheduleDraftFromTask(
+  task: Pick<ScheduledTask, 'recurrence' | 'weekdays' | 'local_time'> & { cron_expression?: string },
+): ScheduleDraft {
+  if (task.recurrence !== 'cron') {
+    return {
+      ...defaultScheduleDraft(),
+      weekdays: task.recurrence === 'daily' ? [...ALL_DAYS] : [...task.weekdays],
+      times: [task.local_time],
+    }
+  }
+  const expression = task.cron_expression ?? ''
+  const parts = splitCronExpressions(expression)
+  const canonical = parts.join('; ')
+  for (const candidate of [parts.length === 1 ? parseIntervalDraft(parts[0]!) : null, parseTimesDraft(parts)]) {
+    if (candidate && scheduleDraftToCron(candidate) === canonical) return candidate
+  }
+  return { ...defaultScheduleDraft(), mode: 'cron', cron_expression: canonical }
+}
+
+export function validateScheduleDraft(draft: ScheduleDraft): ScheduleDraftErrors {
+  const errors: ScheduleDraftErrors = {}
+  if (draft.mode === 'cron') {
+    const error = validateCronExpression(draft.cron_expression)
+    if (error) errors.cron_expression = error
+    return errors
+  }
+  if (!draft.weekdays.length) errors.weekdays = 'Choose at least one day.'
+  if (draft.mode === 'times') {
+    if (!draft.times.length) errors.times = 'Add at least one time.'
+    else if (draft.times.some((time) => !CLOCK.test(time))) errors.times = 'Enter a valid time.'
+    else if (draft.times.length > MAX_SCHEDULE_TIMES) errors.times = `Use at most ${MAX_SCHEDULE_TIMES} times.`
+  } else if (draft.window_enabled && draft.window_end <= draft.window_start) {
+    errors.window = 'End must be after start.'
+  }
+  return errors
+}
+
+/** API fields for a draft; a single daily time keeps the classic format. */
+export function schedulePayload(
+  draft: ScheduleDraft,
+): Pick<ScheduledTaskInput, 'recurrence' | 'weekdays' | 'local_time' | 'cron_expression'> {
+  const times = sortedTimes(draft.times)
+  if (draft.mode === 'times' && times.length === 1) {
+    const daily = ALL_DAYS.every((day) => draft.weekdays.includes(day))
+    return {
+      recurrence: daily ? 'daily' : 'weekly',
+      weekdays: daily ? [] : [...draft.weekdays].sort((a, b) => a - b),
+      local_time: times[0]!,
+      cron_expression: '',
+    }
+  }
+  return {
+    recurrence: 'cron',
+    weekdays: [],
+    local_time: times.find((time) => CLOCK.test(time)) ?? '09:00',
+    cron_expression: scheduleDraftToCron(draft),
+  }
+}
+
+function uiDaysLabel(weekdays: number[]): string {
+  return describeCronWeekdays(weekdays.map((day) => (day + 1) % 7))
+}
+
+function hourLabel(hour: number): string {
+  return `${String(hour).padStart(2, '0')}:00`
+}
+
+/** Compact cadence label such as "Weekdays · 09:00, 14:30". */
+export function describeScheduleDraft(draft: ScheduleDraft): string {
+  if (draft.mode === 'cron') return describeCron(draft.cron_expression)
+  const days = uiDaysLabel(draft.weekdays)
+  if (draft.mode === 'times') return `${days} · ${sortedTimes(draft.times).join(', ')}`
+  const every = intervalMinutes(draft.interval)
+  const cadence = every < 60 ? `Every ${every} min` : every === 60 ? 'Every hour' : `Every ${every / 60} h`
+  const window = draft.window_enabled ? `, ${hourLabel(draft.window_start)}–${hourLabel(draft.window_end)}` : ''
+  return `${days} · ${cadence}${window}`
+}
+
+export function describeSchedule(
+  task: Pick<ScheduledTask, 'recurrence' | 'weekdays' | 'local_time'> & { cron_expression?: string },
+): string {
+  return describeScheduleDraft(scheduleDraftFromTask(task))
+}
+
+/** Most distinct wall-clock runs on any calendar day within the next year. */
+export function maxRunsPerDay(expression: string, now = new Date()): number {
+  try {
+    const specs = splitCronExpressions(expression).map(parseCron)
+    let most = 0
+    for (let offset = 0; offset < 366; offset += 1) {
+      const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + offset))
+      const walls = new Set<number>()
+      for (const spec of specs) {
+        if (!cronMatchesDate(spec, date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate())) continue
+        for (const hour of spec.hours) for (const minute of spec.minutes) walls.add(hour * 60 + minute)
+      }
+      most = Math.max(most, walls.size)
+    }
+    return most
+  } catch {
+    return 0
+  }
 }

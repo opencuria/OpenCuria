@@ -63,3 +63,32 @@ async def test_update_model_and_skill_changes_are_validated_without_chat_creatio
         service.update(task, {"skill_ids": ["nope"]})
     updated = service.update(task, {"model": "openrouter/new-model"})
     assert updated.updated["model"] == "openrouter/new-model"
+
+
+def test_cron_schedule_normalizes_expression_and_ignores_weekdays():
+    recurrence, weekdays, _, zone, cron = ScheduledTaskService._validate_schedule(
+        {
+            "recurrence": "cron",
+            "weekdays": [1, 2],
+            "cron_expression": "*/15  8-17 * * 1-5",
+            "timezone_name": "Europe/Berlin",
+        }
+    )
+    assert (recurrence, weekdays, zone, cron) == (
+        "cron",
+        [],
+        "Europe/Berlin",
+        "*/15 8-17 * * 1-5",
+    )
+    _, _, _, _, cleared = ScheduledTaskService._validate_schedule(
+        {"recurrence": "daily", "cron_expression": "* * * * *"}
+    )
+    assert cleared == ""
+
+
+@pytest.mark.parametrize("expression", [None, "", "61 * * * *", 5])
+def test_cron_schedule_rejects_missing_or_invalid_expression(expression):
+    with pytest.raises(ValueError):
+        ScheduledTaskService._validate_schedule(
+            {"recurrence": "cron", "cron_expression": expression}
+        )

@@ -217,6 +217,58 @@ def test_local_time_stays_hhmm_across_task_endpoints(schedule_api_setup, monkeyp
     assert [item["id"] for item in history.json()] == [str(run.id)]
 
 
+def test_cron_schedule_round_trips_and_switches_back_to_daily(
+    schedule_api_setup, monkeypatch
+):
+    from datetime import datetime
+
+    from apps.harness.harness_service import HarnessService
+
+    monkeypatch.setattr(
+        HarnessService,
+        "validate_provider_for_run",
+        lambda self, organization_id, session, provider=None: "openrouter/test",
+    )
+    org, owner, _, workspace = schedule_api_setup
+    client = schedule_client(
+        owner,
+        org,
+        [APIKeyPermission.HARNESS_READ.value, APIKeyPermission.HARNESS_RUN.value],
+    )
+    created = client.post(
+        "/api/v1/scheduled-tasks/",
+        data={
+            "name": "Quarter-hourly check",
+            "workspace_id": str(workspace.id),
+            "prompt": "Check CI",
+            "recurrence": "cron",
+            "cron_expression": "*/15  * * * *",
+            "timezone_name": "UTC",
+        },
+        content_type="application/json",
+    )
+    assert created.status_code == 201, created.content
+    task = created.json()
+    assert task["recurrence"] == "cron"
+    assert task["cron_expression"] == "*/15 * * * *"
+    assert datetime.fromisoformat(task["next_run_at"]).minute % 15 == 0
+    url = f"/api/v1/scheduled-tasks/{task['id']}/"
+
+    invalid = client.patch(
+        url, data={"cron_expression": "0 25 * * *"}, content_type="application/json"
+    )
+    assert invalid.status_code == 400, invalid.content
+
+    daily = client.patch(
+        url,
+        data={"recurrence": "daily", "local_time": "07:30"},
+        content_type="application/json",
+    )
+    assert daily.status_code == 200, daily.content
+    assert daily.json()["recurrence"] == "daily"
+    assert daily.json()["cron_expression"] == ""
+
+
 def test_claude_harness_id_round_trips_through_api(schedule_api_setup, monkeypatch):
     from apps.harness.engines.connections import EngineConnectionService
     from apps.harness.harness_service import HarnessService

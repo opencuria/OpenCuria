@@ -1,5 +1,19 @@
 import { describe, expect, it } from 'vitest'
-import { isValidTimeZone, nextLocalOccurrence, validateSchedule } from './scheduledTasks'
+import {
+  cronWeekdayField,
+  defaultScheduleDraft,
+  describeSchedule,
+  describeScheduleDraft,
+  isValidTimeZone,
+  maxRunsPerDay,
+  nextLocalOccurrence,
+  scheduleDraftFromTask,
+  scheduleDraftToCron,
+  schedulePayload,
+  validateSchedule,
+  validateScheduleDraft,
+} from './scheduledTasks'
+import type { ScheduleDraft } from './scheduledTasks'
 
 const base = {
   name: 'Daily review', workspace_id: 'ws-1', prompt: 'Check the project',
@@ -59,5 +73,58 @@ describe('scheduled-task schedule helpers', () => {
     expect(nextLocalOccurrence('weekly', [7], '09:00', 'UTC', now)).toBeNull()
     expect(nextLocalOccurrence('weekly', [], '09:00', 'UTC', now)).toBeNull()
     expect(nextLocalOccurrence('daily', [0], '09:00', 'UTC', now)?.toISOString()).toBe('2025-01-01T09:00:00.000Z')
+  })
+})
+
+describe('schedule drafts', () => {
+  const draft = (overrides: Partial<ScheduleDraft>): ScheduleDraft => ({ ...defaultScheduleDraft(), ...overrides })
+
+  it('keeps a single time as the classic daily/weekly payload', () => {
+    expect(schedulePayload(draft({ times: ['07:30'] }))).toEqual({
+      recurrence: 'daily', weekdays: [], local_time: '07:30', cron_expression: '',
+    })
+    expect(schedulePayload(draft({ weekdays: [0, 2], times: ['07:30'] }))).toMatchObject({
+      recurrence: 'weekly', weekdays: [0, 2],
+    })
+  })
+
+  it('compiles several times per day into compact cron expressions', () => {
+    const multi = draft({ weekdays: [0, 1, 2, 3, 4], times: ['18:00', '09:00', '14:30'] })
+    expect(schedulePayload(multi)).toEqual({
+      recurrence: 'cron', weekdays: [], local_time: '09:00', cron_expression: '0 9,18 * * 1-5; 30 14 * * 1-5',
+    })
+    expect(scheduleDraftFromTask({ recurrence: 'cron', weekdays: [], local_time: '09:00', cron_expression: '0 9,18 * * 1-5; 30 14 * * 1-5' }))
+      .toMatchObject({ mode: 'times', weekdays: [0, 1, 2, 3, 4], times: ['09:00', '14:30', '18:00'] })
+    expect(cronWeekdayField([5, 6])).toBe('0,6')
+  })
+
+  it('round-trips repeating intervals with optional active hours', () => {
+    const minutes = draft({ mode: 'interval', interval: '15m', window_enabled: true, window_start: 8, window_end: 18 })
+    expect(scheduleDraftToCron(minutes)).toBe('*/15 8-17 * * *')
+    const hours = draft({ mode: 'interval', interval: '2h', weekdays: [0, 1, 2, 3, 4] })
+    expect(scheduleDraftToCron(hours)).toBe('0 */2 * * 1-5')
+    for (const value of [minutes, hours]) {
+      expect(scheduleDraftFromTask({ recurrence: 'cron', weekdays: [], local_time: '09:00', cron_expression: scheduleDraftToCron(value) }))
+        .toEqual(value)
+    }
+    expect(describeScheduleDraft(minutes)).toBe('Daily · Every 15 min, 08:00–18:00')
+    expect(validateScheduleDraft({ ...minutes, window_end: 8 }).window).toBe('End must be after start.')
+  })
+
+  it('falls back to the cron editor for anything else', () => {
+    const task = { recurrence: 'cron' as const, weekdays: [], local_time: '09:00', cron_expression: '0  9 1 * *' }
+    expect(scheduleDraftFromTask(task)).toMatchObject({ mode: 'cron', cron_expression: '0 9 1 * *' })
+    expect(describeSchedule(task)).toBe('Day 1 of month · 09:00')
+    expect(describeSchedule({ recurrence: 'weekly', weekdays: [0, 1, 2, 3, 4], local_time: '09:00' })).toBe('Weekdays · 09:00')
+    expect(validateScheduleDraft(draft({ mode: 'cron', cron_expression: '61 * * * *' })).cron_expression).toBeDefined()
+    expect(maxRunsPerDay('*/15 8-17 * * *')).toBe(40)
+  })
+})
+
+describe('maxRunsPerDay', () => {
+  it('counts runs per calendar day rather than across all expressions', () => {
+    expect(maxRunsPerDay('0 9-17/2 * * 1-5; 0 10 * * sat')).toBe(5)
+    expect(maxRunsPerDay('0 9 * * *; 0 9 * * 1')).toBe(1)
+    expect(maxRunsPerDay('nope')).toBe(0)
   })
 })
