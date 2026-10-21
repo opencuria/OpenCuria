@@ -2061,23 +2061,6 @@ class WebSocketInterface(Interface):
                     )
                 )
                 self._running_tasks[task_key] = pump
-                # Explicit start-ACK: the backend correlates
-                # ``sio.call``-style waits via reply events (runner
-                # handlers never return Socket.IO ACK payloads through
-                # this stack), so announce readiness with the first
-                # best-effort output event. The pump's natural-EOF
-                # ``stream_closed`` notice is unchanged.
-                with contextlib.suppress(Exception):
-                    await sio.emit(
-                        "workspace:stream_output",
-                        {
-                            "connection_id": conn_echo,
-                            "workspace_id": str(workspace_id),
-                            "stream": "stdout",
-                            "data": "",
-                            "started": True,
-                        },
-                    )
                 return {
                     "ok": True,
                     "connection_id": conn_echo,
@@ -2130,12 +2113,6 @@ class WebSocketInterface(Interface):
             ws_echo, conn_echo = _stream_echo(data)
             raw = data if isinstance(data, dict) else {}
 
-            async def reply(result: dict) -> dict:
-                """Send the exact correlated outcome before returning an ACK."""
-                result["close_request_id"] = raw.get("close_request_id", "")
-                await sio.emit("workspace:stream_close_result", result)
-                return result
-
             try:
                 workspace_id = uuid.UUID(ws_echo)
                 if conn_echo:
@@ -2154,13 +2131,13 @@ class WebSocketInterface(Interface):
                     # Half-close: deliver stdin EOF but NEVER cancel the
                     # output pump — the process reply still follows.
                     await self._service.streams.stream_write_eof(conn_echo)
-                    return await reply({
+                    return {
                         "ok": True,
                         "connection_id": conn_echo,
                         "workspace_id": str(workspace_id),
                         "eof": True,
                         "closed": False,
-                    })
+                    }
                 # Full close: stop the pump exactly once (guard against
                 # a concurrently finishing natural-EOF pump), then kill
                 # the process tree.
@@ -2170,25 +2147,25 @@ class WebSocketInterface(Interface):
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
                 result = await self._service.streams.stream_close(conn_echo)
-                return await reply({
+                return {
                     "ok": True,
                     "connection_id": conn_echo,
                     "workspace_id": str(workspace_id),
                     "closed": result.get("closed") is True,
-                })
+                }
             except Exception as exc:
                 logger.warning(
                     "stream_close_rejected",
                     connection_id=conn_echo,
                     error=str(exc),
                 )
-                return await reply({
+                return {
                     "ok": False,
                     "connection_id": conn_echo,
                     "workspace_id": ws_echo,
                     "closed": False,
                     "error": str(exc),
-                })
+                }
 
         @sio.on("harness:exec_wait")
         async def on_harness_exec_wait(data: dict) -> None:

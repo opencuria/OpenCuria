@@ -1335,10 +1335,6 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             return False
         raw = "".join(str(data.get("data", "")).split())
         if not raw:
-            # ``started`` open-ACK marker: no bytes, but a valid control
-            # signal — accept it (ACK True) without queueing payload.
-            if bool(data.get("started", False)):
-                return True
             log.warning(
                 "stream_output_empty", connection_id=connection_id
             )

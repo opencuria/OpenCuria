@@ -111,7 +111,6 @@ def test_registered_harness_gateway_is_the_harness_adapter():
 def test_harness_reply_and_stream_routing_use_gateway():
     gateway = _FakeHarnessGateway()
     svc = RunnerService(harness_gateway=gateway)
-    svc._resolve_call_reply = MagicMock(return_value=False)
     result = {"request_id": "r1", "workspace_id": "w"}
     chunk = {"request_id": "r2", "workspace_id": "w"}
     assert svc._route_harness_reply("harness:stat_result", result) is True
@@ -309,6 +308,5 @@ def test_facade_constants_reachable():
     assert svc.BUILD_LOG_MAX_CHARS == 200_000
     assert svc._PROCESS_RPC_TIMEOUT_SECONDS == 30
     assert svc._STREAM_CHUNK_SIZE == 64 * 1024
-    assert "workspace:stream_start" in svc._CALL_REPLY_EVENTS
     assert isinstance(RunnerService._active_terminals, dict)
     assert isinstance(RunnerService._active_desktops, dict)

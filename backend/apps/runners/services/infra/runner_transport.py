@@ -1,19 +1,11 @@
-"""Runner transport and harness-reply routing (Phase 2 infra mixin).
+"""Runner Socket.IO transport and ownership-checked harness reply routing.
 
-Byte-identical method bodies extracted from the former monolithic
-``apps/runners/services/__init__.py``. No logic changes; the mixin relies
-on the facade (``RunnerService``) providing ``self.sio``,
-``self._call_reply_waiter`` / ``self._discard_call_reply_waiter`` (via
-``RpcRegistryMixin``), ``self._validate_harness_workspace_runner`` (via
-``OwnershipMixin``) and ``self._validate_runner_file_chunk`` (still on
-the facade -- Phase 3 candidate). ``_route_harness_reply`` validates
-replies fail-closed and dispatches them through the ``HarnessGateway``
-port (``self._harness()``); this module never imports ``apps.harness``.
+Request/response calls use Socket.IO ACKs. Harness reply events are validated
+fail-closed and dispatched through the HarnessGateway port.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 
@@ -82,42 +74,18 @@ class RunnerTransportMixin:
         *,
         timeout: int = 15,
     ) -> dict:
-        """Send request/response call to a specific runner.
-
-        Runner handlers answer two ways: newer handlers return a
-        Socket.IO ACK payload (``sio.call``), older fire-and-forget
-        handlers emit ``*_result`` events. Prefer ``sio.call`` and fall
-        back to reply-event correlation only when no ACK arrives — but
-        only for events with a registered reply waiter (stream control).
-        """
+        """Call a runner handler and return its Socket.IO acknowledgement."""
         if self.sio is None:
             raise RuntimeError("No Socket.IO server configured")
         if not runner.sid:
             raise RunnerOfflineError(str(runner.id))
 
-        if event == "workspace:stream_close":
-            # An attempt token isolates concurrent closes and late retry replies.
-            data = dict(data)
-            data["close_request_id"] = str(uuid.uuid4())
-        waiter = self._call_reply_waiter(event, data)
         try:
-            try:
-                response = await self.sio.call(
-                    event, data, to=runner.sid, timeout=timeout
-                )
-            except SocketIOTimeoutError:
-                if waiter is None:
-                    raise RuntimeError(f"Runner call timed out for event '{event}'")
-                _, future = waiter
-                try:
-                    response = await asyncio.wait_for(future, timeout)
-                except asyncio.TimeoutError as exc:
-                    raise RuntimeError(
-                        f"Runner call timed out for event '{event}'"
-                    ) from exc
-        finally:
-            if waiter is not None:
-                self._discard_call_reply_waiter(event, waiter[0])
+            response = await self.sio.call(
+                event, data, to=runner.sid, timeout=timeout
+            )
+        except SocketIOTimeoutError as exc:
+            raise RuntimeError(f"Runner call timed out for event '{event}'") from exc
         if response is None:
             return {}
         if isinstance(response, dict):

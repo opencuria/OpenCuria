@@ -688,18 +688,6 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         )
         return {"ok": bool(accepted)}
 
-    @sio.on("workspace:stream_close_result")
-    async def on_workspace_stream_close_result(sid: str, data: dict):
-        """Correlate an authenticated runner's explicit close outcome."""
-        runner_id = await _require_runner_id(sio, sid, "workspace:stream_close_result")
-        if not runner_id:
-            return {"ok": False, "error": "unauthenticated"}
-        service = get_runner_service()
-        accepted = await sync_to_async(service.handle_stream_reply)(
-            "workspace:stream_close_result", data, runner_id=runner_id
-        )
-        return {"ok": bool(accepted)}
-
     # --- Terminal events from runner ---
 
     @sio.on("terminal:started")

@@ -473,20 +473,18 @@ async def test_route_returns_false_for_closed_stream() -> None:
         is False
     )
     assert route_stream_closed({"connection_id": conn, "workspace_id": "ws-1"}) is False
-    # Invalid stream label NACKs on a live stream.
+    # Invalid stream labels and empty chunks NACK on a live stream.
     stream2 = await accessor.open_process(["cat"])
     conn2 = stream2.connection_id
-    assert (
-        route_stream_output(
+    for label, content in (("bogus", _b64(b"x")), ("stdout", "")):
+        assert route_stream_output(
             {
                 "connection_id": conn2,
                 "workspace_id": "ws-1",
-                "stream": "bogus",
-                "data": _b64(b"x"),
+                "stream": label,
+                "data": content,
             }
-        )
-        is False
-    )
+        ) is False
     await stream2.aclose()
     assert conn not in _ACCESSORS_BY_STREAM
 

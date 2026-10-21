@@ -61,28 +61,18 @@ def _setup():
 
 
 class StreamHandlerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_close_emits_correlated_unverified_and_error_results(self) -> None:
+    async def test_close_ack_preserves_unverified_and_error_results(self) -> None:
         svc, _rt, ws_id, interface, handlers = _setup()
         svc.streams.stream_close = AsyncMock(return_value={"closed": False})
-        payload = {
-            "workspace_id": str(ws_id), "connection_id": "close-test",
-            "close_request_id": "attempt-1",
-        }
+        payload = {"workspace_id": str(ws_id), "connection_id": "close-test"}
         result = await handlers["workspace:stream_close"](payload)
-        self.assertFalse(result["closed"])
-        interface._sio.emit.assert_awaited_with(
-            "workspace:stream_close_result", result
-        )
-        self.assertEqual(result["close_request_id"], "attempt-1")
+        self.assertEqual(result, {**payload, "ok": True, "closed": False})
         svc.streams.stream_close.side_effect = RuntimeError("unverified")
-        payload["close_request_id"] = "attempt-2"
         result = await handlers["workspace:stream_close"](payload)
-        self.assertFalse(result["ok"])
-        self.assertFalse(result["closed"])
-        interface._sio.emit.assert_awaited_with(
-            "workspace:stream_close_result", result
-        )
-        self.assertEqual(result["close_request_id"], "attempt-2")
+        self.assertEqual(result, {
+            **payload, "ok": False, "closed": False, "error": "unverified",
+        })
+        interface._sio.emit.assert_not_awaited()
 
     async def test_natural_eof_does_not_confirm_unverified_termination(self) -> None:
         svc, _rt, ws_id, interface, handlers = _setup()
@@ -101,7 +91,7 @@ class StreamHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("unverified", notices[-1]["error"])
 
     async def test_start_process_returns_ack(self) -> None:
-        _svc, _rt, ws_id, _if, handlers = _setup()
+        _svc, _rt, ws_id, interface, handlers = _setup()
         result = await handlers["workspace:stream_start"](
             {
                 "connection_id": "c1",
@@ -114,6 +104,7 @@ class StreamHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(result["ok"])
         self.assertEqual(result["connection_id"], "c1")
+        interface._sio.emit.assert_not_awaited()
 
     async def test_start_duplicate_id_rejected(self) -> None:
         _svc, _rt, ws_id, _if, handlers = _setup()

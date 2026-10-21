@@ -1,16 +1,8 @@
-"""Generic byte-stream transport (Phase 3 domain mixin).
+"""Workspace byte streams for RunnerService.
 
-Byte-identical method bodies extracted from the former monolithic
-``apps/runners/services/__init__.py``. No logic changes; the mixin relies
-on the facade (``RunnerService``) providing ``self.workspaces``,
-``self._call_pending`` (via :class:`RpcRegistryMixin`), ``_call_runner`` /
-``_emit_to_runner`` (via ``RunnerTransportMixin``) and the ownership guard
-``_validate_harness_workspace_runner`` (via ``OwnershipMixin``). The single
-``RunnerService._STREAM_RESULT_EVENTS`` lookup in ``_is_stream_event``
-became ``cls._STREAM_RESULT_EVENTS`` (same frozenset, class name instead
-of facade name — no circular import, no behaviour change). Accepted
-stream events and runner-disconnect failures reach the harness only via
-the ``HarnessGateway`` port (``self._harness()``).
+Control calls use Socket.IO ACKs. Output chunks and EOF notices are validated
+against workspace ownership and routed through the HarnessGateway, never to
+frontend clients.
 """
 
 from __future__ import annotations
@@ -39,7 +31,6 @@ class StreamTransportMixin:
         {
             "workspace:stream_output",
             "workspace:stream_closed",
-            "workspace:stream_close_result",
         }
     )
 
@@ -80,15 +71,7 @@ class StreamTransportMixin:
         return workspace_id, connection_id
 
     def _validate_stream_chunk_payload(self, data: dict) -> bool:
-        """Validate one ``workspace:stream_output`` chunk (bounded base64).
-
-        A ``started`` marker (empty data, sent by the runner right after
-        ``stream_start`` as the open-ACK) is valid control traffic: it
-        carries no bytes and must pass validation so the start waiter
-        resolves and the live byte stream still accepts it.
-        """
-        if bool(data.get("started", False)):
-            return True
+        """Validate one ``workspace:stream_output`` chunk (bounded base64)."""
         stream = data.get("stream", "")
         if stream not in ("stdout", "stderr"):
             return False
@@ -164,13 +147,6 @@ class StreamTransportMixin:
                     connection_id,
                 )
                 return False
-        # Reply-awaited ``sio.call`` replacement: resolve the pending
-        # control-call future first. Close outcomes have a dedicated channel
-        # and do not imply the live byte stream reached EOF.
-        resolved = self._resolve_call_reply(event, data)
-        if event == "workspace:stream_close_result":
-            # Control reply only: never turn it into a data-plane EOF.
-            return resolved
         harness = self._harness()
         if event == "workspace:stream_output":
             return harness.route_stream_output(data)

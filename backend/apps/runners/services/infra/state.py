@@ -19,8 +19,7 @@ Deliberately NOT moved here (Phase-5 remainder, documented):
   attributes on the ``RunnerService`` facade: tests read and write them
   directly, so rebinding them per instance would break the shared-state
   contract. The facade ``__init__`` must NOT shadow them.
-- ``_call_pending`` (nested ``event -> id -> Future``) and
-  ``_pending_unknown_workspace_cleanup`` /
+- ``_pending_unknown_workspace_cleanup`` /
   ``_pending_credential_inject`` (sets) keep their plain builtin types.
 """
 

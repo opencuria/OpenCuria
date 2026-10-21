@@ -162,12 +162,6 @@ class RunnerService(
         # Phase 4: PendingMap is a dict subclass (ownership documentation
         # only — direct dict syntax used by tests keeps working).
         self._process_pending: dict[str, asyncio.Future] = PendingMap()
-        # In-flight reply-awaited Socket.IO calls: event ->
-        # request_id/connection_id -> Future. Runner handlers never
-        # return Socket.IO ACK payloads (they emit ``*_result`` events),
-        # so ``sio.call`` would always time out; correlation uses the
-        # reply events instead (see ``_call_reply_waiter``).
-        self._call_pending: dict[str, dict[str, asyncio.Future]] = {}
         # In-flight git RPCs: request_id -> _PendingGitRequest. Runner
         # git:operation handlers only emit git:operation_result events
         # (no Socket.IO ACK), so correlation uses request_id futures plus
