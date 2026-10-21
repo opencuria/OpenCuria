@@ -88,7 +88,7 @@ def test_session_message_part_crud(harness_workspace) -> None:
     assert assistant.completed_at is not None
 
     assert len(HarnessMessageRepository.list_for_session(session.id)) == 2
-    assert {p.id for p in HarnessPartRepository.list_for_session(session.id)} == {
+    assert {p.id for p in HarnessPartRepository.list_for_message(assistant.id)} == {
         part.id,
         reasoning.id,
     }

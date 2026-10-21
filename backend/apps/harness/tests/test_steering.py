@@ -36,6 +36,7 @@ from apps.harness.steering import (
     SteeringChannel,
 )
 from apps.harness.tests.conftest import FakeAccessor
+from apps.harness.tests.helpers import parts_for_session
 from apps.harness.tools import default_tool_registry
 from common.exceptions import ConflictError, NotFoundError
 
@@ -329,7 +330,7 @@ async def test_steer_is_persisted_in_order_and_seen_by_the_model(
     assert provider.seen[1][-1].content == "prefer tabs"
 
     assistant = HarnessMessageRepository.list_for_session(session.id)[-1]
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     kinds = [part.type for part in parts if part.message_id == assistant.id]
     steer_index = kinds.index("steer")
     assert "tool" in kinds[:steer_index]
@@ -418,7 +419,7 @@ async def test_withdrawn_steer_never_reaches_the_model(harness_workspace) -> Non
     assert all(message.content != "never mind" for message in provider.seen[1])
     assert not [
         part
-        for part in HarnessPartRepository.list_for_session(session.id)
+        for part in parts_for_session(session.id)
         if part.type == "steer"
     ]
     assert _queue_snapshots(events) == [["never mind"], []]

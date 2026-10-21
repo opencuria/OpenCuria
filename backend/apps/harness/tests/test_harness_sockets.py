@@ -28,9 +28,9 @@ from apps.harness.providers.base import (
 )
 from apps.harness.repositories import (
     HarnessMessageRepository,
-    HarnessPartRepository,
     HarnessSessionRepository,
 )
+from apps.harness.tests.helpers import parts_for_session
 
 
 class FakeProvider(ProviderAdapter):
@@ -260,7 +260,7 @@ async def test_todo_subtask_permission_socket_shapes(harness_workspace) -> None:
             "reasoning_effort": "high",
         },
     )
-    part = HarnessPartRepository.list_for_session(session.id)
+    part = parts_for_session(session.id)
     assert any(p.type == "subtask" for p in part)
     await service._on_runner_event(
         session,
@@ -328,7 +328,7 @@ async def test_subtask_part_persists_child_session_id(harness_workspace) -> None
     )
     started_parts = [
         part
-        for part in HarnessPartRepository.list_for_session(session.id)
+        for part in parts_for_session(session.id)
         if part.type == "subtask"
     ]
     assert len(started_parts) == 1
@@ -349,7 +349,7 @@ async def test_subtask_part_persists_child_session_id(harness_workspace) -> None
     )
     finished_parts = [
         part
-        for part in HarnessPartRepository.list_for_session(session.id)
+        for part in parts_for_session(session.id)
         if part.type == "subtask"
     ]
     assert finished_parts[0].meta.get("child_session_id") == "child-session-1"

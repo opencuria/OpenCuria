@@ -1248,11 +1248,6 @@ class HarnessService:
         """Return all sessions of a workspace."""
         return self.sessions.list_for_workspace(workspace_id)
 
-    def list_parts(self, session_id: uuid.UUID) -> list[HarnessPart]:
-        """Return all full parts of a session (legacy compatibility)."""
-        self.get_session(session_id)
-        return self.parts.list_for_session(session_id)
-
     def list_timeline_parts(self, session_id: uuid.UUID) -> list[HarnessPart]:
         """Return lightweight timeline parts without loading large detail fields."""
         self.get_session(session_id)
@@ -1265,11 +1260,6 @@ class HarnessService:
         if part is None:
             raise NotFoundError("HarnessPart", str(part_id))
         return part
-
-    def list_messages(self, session_id: uuid.UUID) -> list[HarnessMessage]:
-        """Return all messages of a session."""
-        self.get_session(session_id)
-        return self.messages.list_for_session(session_id)
 
     def list_timeline_messages(self, session_id: uuid.UUID) -> list[HarnessMessage]:
         """Return message headers without duplicate assistant text bodies."""

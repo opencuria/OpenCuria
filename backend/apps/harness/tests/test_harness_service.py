@@ -42,6 +42,7 @@ from apps.harness.repositories import (
     HarnessSessionRepository,
     QuestionRequestRepository,
 )
+from apps.harness.tests.helpers import parts_for_session
 from apps.harness.tools.truncate import MAX_BYTES
 from common.exceptions import ConflictError
 
@@ -205,7 +206,7 @@ async def test_start_run_persists_messages_parts_and_history(
     assert assistant.tokens.get("prompt") == 1
     assert assistant.tokens.get("completion") == 1
 
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     assert any(p.type == "text" and "hello" in (p.output or "") for p in parts)
     assert any(p.type == "step-finish" for p in parts)
 
@@ -524,7 +525,7 @@ async def test_abort_marks_message_and_parts(harness_workspace) -> None:
     assistant = [m for m in stored if m.role == "assistant"][0]
     assert assistant.finish == "aborted"
     assert assistant.error == "aborted by user"
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     reasoning = [p for p in parts if p.type == "reasoning"]
     assert reasoning
     assert reasoning[0].state == "completed"
@@ -724,7 +725,7 @@ async def test_start_run_settles_open_text_and_reasoning_parts(
     )
     await service._tasks[str(session.id)]
 
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     reasoning = [p for p in parts if p.type == "reasoning"]
     text = [p for p in parts if p.type == "text"]
     assert reasoning
@@ -760,7 +761,7 @@ async def test_run_error_preserves_stream_content_and_fails_tools(
     assistant = [m for m in stored if m.role == "assistant"][0]
     assert assistant.finish == "error"
     assert "provider exploded" in (assistant.error or "")
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     reasoning = [p for p in parts if p.type == "reasoning"]
     assert reasoning
     assert reasoning[0].state == "completed"
@@ -1136,7 +1137,7 @@ async def test_execute_run_todowrite_without_sync_orm(
         os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
 
     assert Todo.objects.filter(session_id=session.id).count() == 2
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     tool_parts = [part for part in parts if part.type == "tool"]
     assert len(tool_parts) == 1
     assert tool_parts[0].state == "completed"
@@ -1459,7 +1460,7 @@ async def test_tool_completed_event_persists_attachments_in_meta(
     )
     parts = [
         part
-        for part in HarnessPartRepository.list_for_session(session.id)
+        for part in parts_for_session(session.id)
         if part.type == "tool"
     ]
     assert len(parts) == 1
@@ -1676,7 +1677,7 @@ async def test_compaction_event_persists_output(harness_workspace) -> None:
     )
     parts = [
         part
-        for part in HarnessPartRepository.list_for_session(session.id)
+        for part in parts_for_session(session.id)
         if part.type == "compaction"
     ]
     assert len(parts) == 1
@@ -1710,7 +1711,7 @@ async def test_patch_event_persists_unified_diff(harness_workspace) -> None:
     )
     parts = [
         part
-        for part in HarnessPartRepository.list_for_session(session.id)
+        for part in parts_for_session(session.id)
         if part.type == "patch"
     ]
     assert len(parts) == 1
@@ -2132,7 +2133,7 @@ async def _wait_for_part(
     """Poll until a part of *part_type* exists for *session_id*."""
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
-        parts = await sync_to_async(HarnessPartRepository.list_for_session)(
+        parts = await sync_to_async(parts_for_session)(
             session_id
         )
         match = [part for part in parts if part.type == part_type]
@@ -2194,7 +2195,7 @@ async def test_agent_and_reasoning_events_persist_parts(harness_workspace) -> No
         assistant,
         {"type": "part_updated", "delta": {"reasoning": "looks good"}, "step": 1},
     )
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     agent_parts = [part for part in parts if part.type == "agent"]
     reasoning_parts = [part for part in parts if part.type == "reasoning"]
     assert len(agent_parts) == 1
@@ -2251,7 +2252,7 @@ async def test_start_run_uses_accessor_factory_for_list_tool(
     await service._tasks[str(session.id)]
 
     assert wired == [str(harness_workspace.id)]
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     tool_parts = [part for part in parts if part.type == "tool"]
     assert len(tool_parts) == 1
     assert tool_parts[0].state == "completed"
@@ -2278,7 +2279,7 @@ async def test_start_run_without_accessor_factory_errors_list_tool(
         workspace_id=str(harness_workspace.id),
     )
     await service._tasks[str(session.id)]
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     tool_parts = [part for part in parts if part.type == "tool"]
     assert tool_parts and tool_parts[0].state == "error"
     assert "No workspace accessor configured" in (tool_parts[0].output or "")
@@ -2341,7 +2342,7 @@ async def test_parallel_tool_events_persist_distinct_parts_by_call_id(
     )
     parts = [
         part
-        for part in HarnessPartRepository.list_for_session(session.id)
+        for part in parts_for_session(session.id)
         if part.type == "tool"
     ]
     by_call = {part.call_id: part for part in parts}
@@ -2587,7 +2588,7 @@ async def test_step_start_carries_part_id_and_finish_completes_it(
     ]
     assert len(started) == 1
     assert started[0].get("part_id")
-    part = await sync_to_async(HarnessPartRepository.list_for_session)(session.id)
+    part = await sync_to_async(parts_for_session)(session.id)
     step_starts = [p for p in part if p.type == "step-start"]
     assert len(step_starts) == 1
     assert step_starts[0].state == "running"
@@ -2645,7 +2646,7 @@ async def test_reasoning_part_is_per_step_and_meta_carries_step(
     )
     second_id = service._runs[str(session.id)].get("reasoning_part_id")
     assert second_id and second_id != first_id
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     by_id = {str(part.id): part for part in parts if part.type == "reasoning"}
     assert by_id[first_id].state == "completed"
     assert by_id[first_id].output == "first"
@@ -2710,7 +2711,7 @@ async def test_text_part_is_per_step_so_final_answer_stays_after_tools(
     )
     second_id = service._runs[str(session.id)].get("text_part_id")
     assert second_id and second_id != first_id
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     by_id = {str(part.id): part for part in parts if part.type == "text"}
     assert by_id[first_id].state == "completed"
     assert by_id[first_id].output == "I'll look"
@@ -2740,7 +2741,7 @@ async def test_reasoning_without_step_still_persists(harness_workspace) -> None:
     await service._on_runner_event(
         session, assistant, {"type": "part_updated", "delta": {"reasoning": "x"}}
     )
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     reasoning = [p for p in parts if p.type == "reasoning"]
     assert len(reasoning) == 1
     assert reasoning[0].output == "x"
@@ -2782,7 +2783,7 @@ async def test_agent_event_persists_meta_and_forwards_agent_meta(
     await service._on_runner_event(
         session, assistant, {"type": "agent", "delta": {"plan": plan}, "step": 3}
     )
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     agent_parts = [p for p in parts if p.type == "agent"]
     assert len(agent_parts) == 1
     assert agent_parts[0].output == plan
@@ -2868,7 +2869,7 @@ async def test_agent_event_ignores_injected_agent_meta(harness_workspace) -> Non
             "step": 4,
         },
     )
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     agent_parts = [p for p in parts if p.type == "agent"]
     assert len(agent_parts) == 1
     persisted_meta = agent_parts[0].meta.get("agent_meta", {})
@@ -2921,7 +2922,7 @@ async def test_agent_event_type_action_redacts_secret(harness_workspace) -> None
     await service._on_runner_event(
         session, assistant, {"type": "agent", "delta": {"plan": plan}, "step": 5}
     )
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     agent_parts = [p for p in parts if p.type == "agent"]
     assert len(agent_parts) == 1
     persisted_meta = agent_parts[0].meta.get("agent_meta", {})

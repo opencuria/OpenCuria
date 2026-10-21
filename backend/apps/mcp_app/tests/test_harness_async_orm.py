@@ -27,7 +27,7 @@ from apps.harness.providers.base import (
 )
 from apps.mcp_app.server import (
     _call_create_harness_session,
-    _call_list_harness_parts,
+    _call_get_harness_timeline,
     _call_send_harness_message,
     _call_steer_harness_session,
     _call_withdraw_harness_steer,
@@ -187,10 +187,10 @@ async def test_mcp_send_harness_message_without_sync_orm(monkeypatch) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_mcp_list_harness_parts_includes_message_reasoning_effort(
+async def test_mcp_timeline_includes_message_reasoning_effort(
     monkeypatch,
 ) -> None:
-    """list_harness_parts returns the effort snapshotted on the assistant."""
+    """get_harness_timeline returns the effort snapshotted on the assistant."""
     org, user, workspace = await sync_to_async(_setup_owned_workspace)()
     service = _service()
     session = await sync_to_async(service.create_session)(
@@ -214,7 +214,7 @@ async def test_mcp_list_harness_parts_includes_message_reasoning_effort(
         "apps.mcp_app.server._get_harness_service", lambda: service
     )
     api_key = SimpleNamespace(user=user)
-    result = await sync_to_async(_call_list_harness_parts)(
+    result = await sync_to_async(_call_get_harness_timeline)(
         api_key, org.id, {"session_id": str(session.id)}
     )
     body = _parse(result)
@@ -226,56 +226,8 @@ async def test_mcp_list_harness_parts_includes_message_reasoning_effort(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_mcp_list_harness_parts_includes_tool_input(monkeypatch) -> None:
-    """list_harness_parts returns persisted tool input for MCP clients."""
-    from apps.harness.repositories import (
-        HarnessMessageRepository,
-        HarnessPartRepository,
-    )
-
-    org, user, workspace = await sync_to_async(_setup_owned_workspace)()
-    service = _service()
-    session = await sync_to_async(service.create_session)(
-        workspace_id=workspace.id,
-        organization_id=org.id,
-        prompt="read a file",
-        agent_name="build",
-        mode="build",
-        user_id=user.id,
-    )
-    assistant = await sync_to_async(HarnessMessageRepository.create)(
-        session_id=session.id, role="assistant", content=""
-    )
-    part = await sync_to_async(HarnessPartRepository.create)(
-        message_id=assistant.id,
-        type="tool",
-        state="completed",
-        call_id="call-1",
-        title="Read a.txt",
-        input={"tool": "read", "arguments": '{"path":"a.txt"}'},
-    )
-    await sync_to_async(HarnessPartRepository.mark_state)(
-        part, "completed", output="hello"
-    )
-    monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
-    api_key = SimpleNamespace(user=user)
-    result = await sync_to_async(_call_list_harness_parts)(
-        api_key, org.id, {"session_id": str(session.id)}
-    )
-    body = _parse(result)
-    assistant_out = next(
-        message
-        for message in body["messages"]
-        if message["role"] == "assistant" and message["parts"]
-    )
-    tool_part = next(item for item in assistant_out["parts"] if item["type"] == "tool")
-    assert tool_part["input"] == {"tool": "read", "arguments": '{"path":"a.txt"}'}
-    assert tool_part["output"] == "hello"
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_mcp_list_harness_parts_includes_pending_gates(monkeypatch) -> None:
-    """list_harness_parts returns pending permission and question gates."""
+async def test_mcp_timeline_includes_pending_gates(monkeypatch) -> None:
+    """get_harness_timeline returns pending permission and question gates."""
     from apps.harness.permissions.service import PermissionRequestRepository
     from apps.harness.repositories import QuestionRequestRepository
 
@@ -305,20 +257,22 @@ async def test_mcp_list_harness_parts_includes_pending_gates(monkeypatch) -> Non
     )
     monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
     api_key = SimpleNamespace(user=user)
-    result = await sync_to_async(_call_list_harness_parts)(
+    result = await sync_to_async(_call_get_harness_timeline)(
         api_key, org.id, {"session_id": str(session.id)}
     )
     body = _parse(result)
     assert [item["request_id"] for item in body["permissions"]] == [str(permission.id)]
     assert [item["request_id"] for item in body["questions"]] == [str(question.id)]
-    assert body["questions"][0]["questions"] == [{"question": "Which color?"}]
+    assert body["questions"][0]["questions"] == [
+        {"header": "", "question": "Which color?", "options": [], "multiple": False}
+    ]
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_mcp_list_harness_parts_includes_descendant_gates(
+async def test_mcp_timeline_includes_descendant_gates(
     monkeypatch,
 ) -> None:
-    """list_harness_parts on a parent includes child pending gates."""
+    """get_harness_timeline on a parent includes child pending gates."""
     from apps.harness.permissions.service import PermissionRequestRepository
     from apps.harness.repositories import QuestionRequestRepository
 
@@ -358,7 +312,7 @@ async def test_mcp_list_harness_parts_includes_descendant_gates(
     )
     monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
     api_key = SimpleNamespace(user=user)
-    result = await sync_to_async(_call_list_harness_parts)(
+    result = await sync_to_async(_call_get_harness_timeline)(
         api_key, org.id, {"session_id": str(parent.id)}
     )
     body = _parse(result)
@@ -406,7 +360,7 @@ async def test_mcp_steer_and_withdraw_without_sync_orm(monkeypatch) -> None:
     try:
         queued = _parse(await _call_steer_harness_session(api_key, org.id, args))
         listed = _parse(
-            await sync_to_async(_call_list_harness_parts)(
+            await sync_to_async(_call_get_harness_timeline)(
                 api_key, org.id, {"session_id": key}
             )
         )

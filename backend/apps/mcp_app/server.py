@@ -74,7 +74,6 @@ Tools and their required permissions
 - abort_harness_session → harness:run
 - take_desktop_control → harness:run (also requires terminal:access)
 - read_desktop_clipboard → terminal:access
-- list_harness_parts → harness:read
 - get_harness_timeline → harness:read
 - get_harness_part → harness:read
 - list_harness_todos → harness:read
@@ -1145,15 +1144,6 @@ _TOOLS: list[Tool] = [
         },
     ),
     Tool(
-        name="list_harness_parts",
-        description="List messages, parts, and pending permission/question gates of a harness session.",
-        inputSchema={
-            "type": "object",
-            "properties": {"session_id": {"type": "string"}},
-            "required": ["session_id"],
-        },
-    ),
-    Tool(
         name="get_harness_timeline",
         description="Load lightweight message/part timeline, including pending gates.",
         inputSchema={
@@ -1708,7 +1698,6 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
         name: APIKeyPermission.TERMINAL_ACCESS
         for name in ("start_desktop", "stop_desktop", "renew_desktop", "desktop_status")
     },
-    "list_harness_parts": APIKeyPermission.HARNESS_READ,
     "get_harness_timeline": APIKeyPermission.HARNESS_READ,
     "get_harness_part": APIKeyPermission.HARNESS_READ,
     "list_harness_todos": APIKeyPermission.HARNESS_READ,
@@ -4278,81 +4267,6 @@ def _call_take_desktop_control(api_key, org_id, args: dict) -> list[TextContent]
     return _text({"aborted_session_ids": [str(session.id) for session in aborted]})
 
 
-def _call_list_harness_parts(api_key, org_id, args: dict) -> list[TextContent]:
-    import uuid as _uuid
-
-    session_id_str = args.get("session_id")
-    if not session_id_str:
-        return _error("session_id is required")
-    try:
-        session_id = _uuid.UUID(session_id_str)
-    except ValueError:
-        return _error("Invalid session_id UUID")
-
-    session, error = _owned_harness_session_or_error(api_key, org_id, session_id)
-    if error is not None:
-        return error
-
-    service = _get_harness_service()
-    messages = service.list_messages(session.id)
-    parts = service.list_parts(session.id)
-    parts_by_message: dict[str, list] = {}
-    for part in parts:
-        safe_meta = dict(part.meta or {})
-        if part.type == "patch":
-            safe_meta.pop("old_content", None)
-            safe_meta.pop("new_content", None)
-        parts_by_message.setdefault(str(part.message_id), []).append(
-            {
-                "id": str(part.id),
-                "message_id": str(part.message_id),
-                "type": part.type,
-                "state": part.state,
-                "call_id": part.call_id or "",
-                "title": part.title or "",
-                "output": part.output or "",
-                "input": dict(part.input or {}),
-                "meta": safe_meta,
-            }
-        )
-    return _text(
-        {
-            "session": _session_dict_with_unread(service, session),
-            "messages": [
-                {
-                    "id": str(message.id),
-                    "harness_id": getattr(session, "harness_id", "native") or "native",
-                    "role": message.role,
-                    "content": message.content or "",
-                    "model": message.model or "",
-                    "reasoning_effort": message.reasoning_effort or "",
-                    "cost": float(message.cost or 0.0),
-                    "tokens": dict(message.tokens or {}),
-                    "finish": message.finish or "",
-                    "error": message.error or "",
-                    "created_at": message.created_at.isoformat(),
-                    "completed_at": (
-                        message.completed_at.isoformat()
-                        if message.completed_at
-                        else None
-                    ),
-                    "parts": parts_by_message.get(str(message.id), []),
-                }
-                for message in messages
-            ],
-            "permissions": service.list_pending_permissions(
-                session.id, include_descendants=True
-            ),
-            "questions": service.list_pending_questions(
-                session.id, include_descendants=True
-            ),
-            "steers": [
-                entry.to_payload() for entry in service.list_pending_steers(session.id)
-            ],
-        }
-    )
-
-
 def _call_get_harness_timeline(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.mcp_app.timeline_handlers import get_harness_timeline
 
@@ -5589,7 +5503,6 @@ _TOOL_HANDLERS = {
             ("desktop_status", "status"),
         )
     },
-    "list_harness_parts": _call_list_harness_parts,
     "get_harness_timeline": _call_get_harness_timeline,
     "get_harness_part": _call_get_harness_part,
     "list_harness_todos": _call_list_harness_todos,

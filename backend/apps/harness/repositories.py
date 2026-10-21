@@ -1367,20 +1367,6 @@ class HarnessPartRepository:
                 continue
 
     @staticmethod
-    def list_for_session(session_id: uuid.UUID) -> list[HarnessPart]:
-        """Return all full parts of a session in timeline order (legacy path)."""
-        return list(
-            HarnessPart.objects.filter(message__session_id=session_id).order_by(
-                "message__position",
-                "message__created_at",
-                "message__id",
-                "position",
-                "created_at",
-                "id",
-            )
-        )
-
-    @staticmethod
     def list_timeline_for_session(session_id: uuid.UUID) -> list[HarnessPart]:
         """Fetch timeline rows without loading large tool/patch/agent/reasoning data."""
         rows = list(

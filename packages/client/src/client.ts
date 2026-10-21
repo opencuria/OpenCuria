@@ -99,10 +99,6 @@ export interface OpenCuriaClient {
       signal?: AbortSignal,
     ): Promise<HarnessSession>;
     timeline(sessionId: string, signal?: AbortSignal): Promise<HarnessTimeline>;
-    listMessages(
-      sessionId: string,
-      signal?: AbortSignal,
-    ): Promise<HarnessTimeline>;
     getPart(
       sessionId: string,
       partId: string,
@@ -330,11 +326,6 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
       timeline: (sessionId, signal) =>
         api.get<HarnessTimeline>(
           `/harness/sessions/${segment(sessionId)}/timeline`,
-          signal,
-        ),
-      listMessages: (sessionId, signal) =>
-        api.get<HarnessTimeline>(
-          `/harness/sessions/${segment(sessionId)}/parts`,
           signal,
         ),
       getPart: (sessionId, partId, signal) =>

@@ -23,6 +23,7 @@ from apps.harness.repositories import (
     HarnessSessionRepository,
     QuestionRequestRepository,
 )
+from apps.harness.tests.helpers import parts_for_session
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
@@ -191,11 +192,11 @@ def test_fork_returns_201_and_prefix_only(fork_edit_setup, fake_fork_service):
         org=fork_edit_setup["org"],
         permissions=READ,
     )
-    parts = read_client.get(f"/api/v1/harness/sessions/{body['id']}/parts")
-    assert parts.status_code == 200, parts.content[:500]
-    contents = [m["content"] for m in parts.json()["messages"]]
+    timeline = read_client.get(f"/api/v1/harness/sessions/{body['id']}/timeline")
+    assert timeline.status_code == 200, timeline.content[:500]
+    contents = [m["content"] for m in timeline.json()["messages"]]
     assert contents == ["first", "answer one"]
-    roles = [m["role"] for m in parts.json()["messages"]]
+    roles = [m["role"] for m in timeline.json()["messages"]]
     assert roles == ["user", "assistant"]
 
 
@@ -242,7 +243,7 @@ def test_fork_includes_last_assistant_and_parts(
                 output=f"answer part {index}",
             )
         )
-    source_parts = HarnessPartRepository.list_for_session(session.id)
+    source_parts = parts_for_session(session.id)
     source_message_state = [
         (message.id, message.role, message.content, message.position)
         for message in source_messages
@@ -269,7 +270,7 @@ def test_fork_includes_last_assistant_and_parts(
         "second",
         "answer two",
     ]
-    forked_parts = HarnessPartRepository.list_for_session(fork_id)
+    forked_parts = parts_for_session(fork_id)
     assert [part.output for part in forked_parts] == [
         "answer part 1",
         "answer part 2",
@@ -287,7 +288,7 @@ def test_fork_includes_last_assistant_and_parts(
     ] == source_message_state
     assert [
         (part.id, part.message_id, part.output, part.position)
-        for part in HarnessPartRepository.list_for_session(session.id)
+        for part in parts_for_session(session.id)
     ] == source_part_state
     assert len(assistant_parts) == 2
 
@@ -324,9 +325,11 @@ def test_fork_full_copy_without_message_id(fork_edit_setup, fake_fork_service):
     read_client = _client(
         user=fork_edit_setup["owner"], org=fork_edit_setup["org"], permissions=READ
     )
-    parts = read_client.get(f"/api/v1/harness/sessions/{response.json()['id']}/parts")
-    assert parts.status_code == 200
-    assert len(parts.json()["messages"]) == 4
+    timeline = read_client.get(
+        f"/api/v1/harness/sessions/{response.json()['id']}/timeline"
+    )
+    assert timeline.status_code == 200
+    assert len(timeline.json()["messages"]) == 4
 
 
 @pytest.mark.django_db(transaction=True)
@@ -873,6 +876,6 @@ def test_edit_preserves_parts_before_cutoff(fork_edit_setup, fake_fork_service):
         content_type="application/json",
     )
     assert response.status_code == 202, response.content[:500]
-    remaining_parts = HarnessPartRepository.list_for_session(session.id)
+    remaining_parts = parts_for_session(session.id)
     assert any(p.output == "answer" for p in remaining_parts)
     assert first_user.id is not None

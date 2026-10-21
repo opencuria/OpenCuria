@@ -1,5 +1,5 @@
 """
-REST API for the harness sessions (M6, additive).
+REST API for harness sessions.
 
 Thin Ninja routers: validate input, resolve organization + owner
 scoping via the runners ``RunnerService`` (``get_workspace_for_user``
@@ -14,9 +14,6 @@ existing keys — see ``APIKeyPermission``)::
   switch session mode, rename/delete sessions, save/delete provider config
 - ``harness:permissions`` — resolve permission and question requests
 - ``harness:providers`` — manage named provider accounts and ChatGPT OAuth
-
-All old ``session:*`` socket events and runners REST endpoints stay
-untouched (M8 removes them).
 """
 
 from __future__ import annotations
@@ -729,10 +726,13 @@ async def abort_harness_session(request: HttpRequest, session_id: uuid.UUID):
         return 409, {"detail": exc.message, "code": exc.code}
 
 
-def _harness_conversation_payload(
-    request: HttpRequest, session_id: uuid.UUID, *, timeline: bool
-):
-    """Build legacy or lightweight conversation envelope after ownership checks."""
+@harness_router.get(
+    "/harness/sessions/{session_id}/timeline",
+    response={200: dict, 403: dict, 404: dict},
+    summary="Load all session messages with lightweight part projections",
+)
+def get_harness_timeline(request: HttpRequest, session_id: uuid.UUID):
+    """Return the session envelope without heavyweight detail fields."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
     org_id = _get_org_id(request)
@@ -741,62 +741,32 @@ def _harness_conversation_payload(
         service = _resolve_harness_service()
         session = service.get_session(session_id)
         _owned_workspace(request, org_id, session.workspace_id)
-        messages = (
-            service.list_timeline_messages(session.id)
-            if timeline
-            else service.list_messages(session.id)
-        )
-        parts = (
-            service.list_timeline_parts(session.id)
-            if timeline
-            else service.list_parts(session.id)
-        )
+        messages = service.list_timeline_messages(session.id)
+        parts = service.list_timeline_parts(session.id)
         message_positions = {
             str(message.id): int(getattr(message, "position", 0) or 0)
             for message in messages
         }
         parts_by_message: dict[str, list] = {}
         for part in parts:
-            if timeline:
-                part.message_position = message_positions.get(str(part.message_id), 0)
-                payload = timeline_part_payload(
-                    part,
-                    text_output=getattr(part, "timeline_output", "")
-                    if part.type in TIMELINE_TEXT_PART_TYPES
-                    else None,
-                )
-            else:
-                safe_meta = dict(part.meta or {})
-                if part.type == "patch":
-                    safe_meta.pop("old_content", None)
-                    safe_meta.pop("new_content", None)
-                payload = HarnessPartOut(
-                    id=part.id,
-                    message_id=part.message_id,
-                    type=part.type,
-                    state=part.state,
-                    call_id=part.call_id or "",
-                    title=part.title or "",
-                    output=part.output or "",
-                    input=dict(part.input or {}),
-                    meta=safe_meta,
-                    position=int(getattr(part, "position", 0) or 0),
-                    message_position=message_positions.get(str(part.message_id), 0),
-                ).model_dump(mode="json")
+            part.message_position = message_positions.get(str(part.message_id), 0)
+            payload = timeline_part_payload(
+                part,
+                text_output=getattr(part, "timeline_output", "")
+                if part.type in TIMELINE_TEXT_PART_TYPES
+                else None,
+            )
             parts_by_message.setdefault(str(part.message_id), []).append(payload)
         pending_questions = service.list_pending_questions(
             session.id, include_descendants=True
         )
-        if timeline:
-            pending_questions = [
-                {
-                    **question,
-                    "questions": project_question_definitions(
-                        question.get("questions")
-                    ),
-                }
-                for question in pending_questions
-            ]
+        pending_questions = [
+            {
+                **question,
+                "questions": project_question_definitions(question.get("questions")),
+            }
+            for question in pending_questions
+        ]
         return 200, {
             "session": session_to_out_with_unread(service, session).model_dump(
                 mode="json"
@@ -810,11 +780,7 @@ def _harness_conversation_payload(
                         # Timeline text comes from ordered text parts; only
                         # legacy assistant rows with no text parts need the
                         # message-level fallback. This prevents sending both.
-                        content=(
-                            (getattr(message, "timeline_content", "") or "")
-                            if timeline
-                            else (message.content or "")
-                        ),
+                        content=getattr(message, "timeline_content", "") or "",
                         model=message.model or "",
                         reasoning_effort=message.reasoning_effort or "",
                         cost=float(message.cost or 0.0),
@@ -844,26 +810,6 @@ def _harness_conversation_payload(
         }
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
-
-
-@harness_router.get(
-    "/harness/sessions/{session_id}/parts",
-    response={200: dict, 403: dict, 404: dict},
-    summary="List messages and full parts of a harness session (legacy)",
-)
-def list_harness_parts(request: HttpRequest, session_id: uuid.UUID):
-    """Return the full legacy message/part envelope, excluding patch file copies."""
-    return _harness_conversation_payload(request, session_id, timeline=False)
-
-
-@harness_router.get(
-    "/harness/sessions/{session_id}/timeline",
-    response={200: dict, 403: dict, 404: dict},
-    summary="Load all session messages with lightweight part projections",
-)
-def get_harness_timeline(request: HttpRequest, session_id: uuid.UUID):
-    """Return the session envelope without heavyweight detail fields."""
-    return _harness_conversation_payload(request, session_id, timeline=True)
 
 
 @harness_router.get(

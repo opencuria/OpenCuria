@@ -1,4 +1,4 @@
-"""Compare harness parts and timeline HTTP payloads on a disposable SQLite DB.
+"""Measure harness timeline and part-detail HTTP payloads on a disposable SQLite DB.
 
 Run with ``backend/.venv/bin/python scripts/benchmark_harness_timeline.py``.
 Only deterministic synthetic fixture content is created; SQLITE_PATH always
@@ -313,7 +313,6 @@ def main() -> None:
                 "attachment_urls_per_tool": 1,
             },
             "requests": {
-                "parts_full": _measure(client, f"{prefix}/parts"),
                 "timeline": _measure(client, f"{prefix}/timeline"),
                 "single_part_detail": _measure(
                     client, f"{prefix}/parts/{detail_id}"

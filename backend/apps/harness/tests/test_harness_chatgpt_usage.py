@@ -13,8 +13,9 @@ import pytest
 from apps.harness.harness_service import FRONTEND_EVENT_PART, HarnessService
 from apps.harness.providers.chatgpt import ChatGPTAdapter
 from apps.harness.providers.chatgpt_oauth import CODEX_API_ENDPOINT
-from apps.harness.repositories import HarnessPartRepository, HarnessSessionRepository
+from apps.harness.repositories import HarnessSessionRepository
 from apps.harness.tests.conftest import FakeAccessor
+from apps.harness.tests.helpers import parts_for_session
 from apps.runners.models import Workspace
 
 
@@ -101,7 +102,7 @@ async def test_chatgpt_terminal_usage_persisted_and_emitted(
     assert assistant.tokens == {"prompt": 10, "completion": 5, "total": 15}
     assert session.tokens == assistant.tokens
     tokens = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-    parts = HarnessPartRepository.list_for_session(session.id)
+    parts = parts_for_session(session.id)
     finished = [part for part in parts if part.type == "step-finish"]
     assert len(finished) == 1
     assert finished[0].state == "completed"

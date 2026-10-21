@@ -10,8 +10,9 @@ import pytest
 
 from apps.harness.models import HarnessSession
 from apps.harness.providers.base import Delta, ProviderError
-from apps.harness.repositories import HarnessMessageRepository, HarnessPartRepository
+from apps.harness.repositories import HarnessMessageRepository
 from apps.harness.tests.conftest import FakeAccessor
+from apps.harness.tests.helpers import parts_for_session
 from apps.harness.tests.test_harness_service import (
     FakeProvider,
     _db_create_session,
@@ -123,7 +124,7 @@ def assert_settled(service, sessions) -> None:
 def task_parts(session, part_type="tool"):
     return [
         p
-        for p in HarnessPartRepository.list_for_session(session.id)
+        for p in parts_for_session(session.id)
         if p.type == part_type
     ]
 

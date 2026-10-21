@@ -40,6 +40,7 @@ from apps.harness.repositories import (
     QuestionRequestRepository,
     TodoRepository,
 )
+from apps.harness.tests.helpers import parts_for_session
 from common.exceptions import ConflictError
 
 
@@ -197,14 +198,14 @@ async def test_fork_copies_parts_and_clears_child_session_id(
         session_id=session.id, role="user", content="anchor"
     )
     forked = await service.fork_session(session.id, anchor.id)
-    forked_parts = HarnessPartRepository.list_for_session(forked.id)
+    forked_parts = parts_for_session(forked.id)
     assert any(p.type == "text" for p in forked_parts)
     subtask = [p for p in forked_parts if p.type == "subtask"]
     assert len(subtask) == 1
     assert subtask[0].meta.get("subtask_id") == "sub-1"
     assert subtask[0].meta.get("child_session_id") == ""
     # New part rows (no shared IDs with the source session).
-    src_parts = HarnessPartRepository.list_for_session(session.id)
+    src_parts = parts_for_session(session.id)
     assert {p.id for p in forked_parts}.isdisjoint({p.id for p in src_parts})
 
 
@@ -240,7 +241,7 @@ async def test_fork_includes_early_and_last_assistant_with_parts(
         output="answer two part",
     )
     source_messages = HarnessMessageRepository.list_for_session(session.id)
-    source_parts = HarnessPartRepository.list_for_session(session.id)
+    source_parts = parts_for_session(session.id)
     source_message_state = [
         (message.id, message.role, message.content, message.position)
         for message in source_messages
@@ -253,7 +254,7 @@ async def test_fork_includes_early_and_last_assistant_with_parts(
         session.id, first_answer.id, include_message=True
     )
     early_messages = HarnessMessageRepository.list_for_session(early_fork.id)
-    early_parts = HarnessPartRepository.list_for_session(early_fork.id)
+    early_parts = parts_for_session(early_fork.id)
     assert [message.content for message in early_messages] == ["first", "answer one"]
     assert len(early_parts) == 1
     assert early_parts[0].output == first_part.output
@@ -264,7 +265,7 @@ async def test_fork_includes_early_and_last_assistant_with_parts(
         session.id, last_answer.id, include_message=True
     )
     last_messages = HarnessMessageRepository.list_for_session(last_fork.id)
-    last_parts = HarnessPartRepository.list_for_session(last_fork.id)
+    last_parts = parts_for_session(last_fork.id)
     assert [message.content for message in last_messages] == [
         "first",
         "answer one",
@@ -285,7 +286,7 @@ async def test_fork_includes_early_and_last_assistant_with_parts(
     ] == source_message_state
     assert [
         (part.id, part.message_id, part.output, part.position)
-        for part in HarnessPartRepository.list_for_session(session.id)
+        for part in parts_for_session(session.id)
     ] == source_part_state
     assert first_user.id is not None and second_user.id is not None
 
@@ -410,7 +411,7 @@ async def test_fork_remaps_compaction_tail_start_id(harness_workspace) -> None:
     forked = await service.fork_session(session.id, anchor.id)
     forked_parts = [
         p
-        for p in HarnessPartRepository.list_for_session(forked.id)
+        for p in parts_for_session(forked.id)
         if p.type == "compaction"
     ]
     assert len(forked_parts) == 1
@@ -454,12 +455,12 @@ async def test_fork_drops_compaction_tail_start_id_outside_prefix(
     forked = await service.fork_session(session.id, anchor.id)
     # Prefix before the very first message is empty.
     assert HarnessMessageRepository.list_for_session(forked.id) == []
-    assert HarnessPartRepository.list_for_session(forked.id) == []
+    assert parts_for_session(forked.id) == []
 
     full = await service.fork_session(session.id)
     compactions = [
         p
-        for p in HarnessPartRepository.list_for_session(full.id)
+        for p in parts_for_session(full.id)
         if p.type == "compaction"
     ]
     assert len(compactions) == 1
@@ -944,7 +945,7 @@ async def test_edit_aborts_and_deletes_suffix_child_session(
     await service._tasks[str(session.id)]
 
     assert await sync_to_async(HarnessSessionRepository.get_by_id)(child.id) is None
-    remaining = HarnessPartRepository.list_for_session(session.id)
+    remaining = parts_for_session(session.id)
     assert all(
         str((p.meta or {}).get("child_session_id", "") or "") != str(child.id)
         for p in remaining
@@ -1291,7 +1292,7 @@ async def test_compaction_tail_start_id_drop_for_missing_message(
         meta={"tail_start_id": "not-a-uuid"},
     )
     HarnessMessageRepository.copy_prefix(session.id, other.id, None)
-    parts = HarnessPartRepository.list_for_session(other.id)
+    parts = parts_for_session(other.id)
     compactions = [p for p in parts if p.type == "compaction"]
     assert len(compactions) == 1
     assert "tail_start_id" not in (compactions[0].meta or {})

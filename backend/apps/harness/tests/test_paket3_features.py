@@ -192,8 +192,8 @@ def test_create_session_returns_skill_ids_in_body(paket3_setup, fake_harness_ser
 
 
 @pytest.mark.django_db(transaction=True)
-def test_parts_returns_per_message_skill_ids(paket3_setup, fake_harness_service):
-    """parts echoes the per-turn skill snapshot on each user message."""
+def test_timeline_returns_per_message_skill_ids(paket3_setup, fake_harness_service):
+    """Timeline echoes the per-turn skill snapshot on each user message."""
     from apps.harness.repositories import HarnessMessageRepository
 
     org_skill_id = str(paket3_setup["org_skill"].id)
@@ -215,9 +215,11 @@ def test_parts_returns_per_message_skill_ids(paket3_setup, fake_harness_service)
     assert list(messages[1].skill_ids or []) == []
 
     read_client = _client(user=owner, org=org, permissions=READ)
-    parts_response = read_client.get(f"/api/v1/harness/sessions/{session_id}/parts")
-    assert parts_response.status_code == 200, parts_response.content[:500]
-    payload = parts_response.json()
+    timeline_response = read_client.get(
+        f"/api/v1/harness/sessions/{session_id}/timeline"
+    )
+    assert timeline_response.status_code == 200, timeline_response.content[:500]
+    payload = timeline_response.json()
     by_role = {row["role"]: row for row in payload["messages"]}
     assert by_role["user"]["skill_ids"] == [org_skill_id]
     assert by_role["assistant"]["skill_ids"] == []

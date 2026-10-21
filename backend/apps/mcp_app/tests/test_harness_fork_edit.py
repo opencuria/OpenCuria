@@ -33,6 +33,7 @@ from apps.harness.providers.base import (
     Usage,
 )
 from apps.harness.repositories import HarnessMessageRepository, HarnessPartRepository
+from apps.harness.tests.helpers import parts_for_session
 from apps.mcp_app.server import (
     _TOOL_HANDLERS,
     _TOOL_PERMISSIONS,
@@ -145,6 +146,9 @@ def test_timeline_detail_mcp_tools_registered_read_permission() -> None:
     """Timeline and detail parity tools are discoverable to read-only keys."""
     names = {tool.name for tool in _TOOLS}
     assert {"get_harness_timeline", "get_harness_part"} <= names
+    assert "list_harness_parts" not in names
+    assert "list_harness_parts" not in _TOOL_PERMISSIONS
+    assert "list_harness_parts" not in _TOOL_HANDLERS
     assert _TOOL_PERMISSIONS["get_harness_timeline"] == APIKeyPermission.HARNESS_READ
     assert _TOOL_PERMISSIONS["get_harness_part"] == APIKeyPermission.HARNESS_READ
     assert _TOOL_HANDLERS["get_harness_timeline"] is _call_get_harness_timeline
@@ -207,6 +211,7 @@ def test_mcp_timeline_and_detail_owned(monkeypatch):
         )
     )
     assert detail["detail_loaded"] is True
+    assert detail["input"] == {"tool": "read", "arguments": '{"path":"a"}'}
     assert detail["output"] == "private output"
     agent_detail = _parse(
         _call_get_harness_part(
@@ -397,9 +402,7 @@ async def test_mcp_fork_includes_last_assistant_and_parts(monkeypatch) -> None:
     source_messages = await sync_to_async(HarnessMessageRepository.list_for_session)(
         session.id
     )
-    source_parts = await sync_to_async(HarnessPartRepository.list_for_session)(
-        session.id
-    )
+    source_parts = await sync_to_async(parts_for_session)(session.id)
     source_message_state = [
         (message.id, message.role, message.content, message.position)
         for message in source_messages
@@ -422,9 +425,7 @@ async def test_mcp_fork_includes_last_assistant_and_parts(monkeypatch) -> None:
     forked_messages = await sync_to_async(HarnessMessageRepository.list_for_session)(
         body["id"]
     )
-    forked_parts = await sync_to_async(HarnessPartRepository.list_for_session)(
-        body["id"]
-    )
+    forked_parts = await sync_to_async(parts_for_session)(body["id"])
     assert [message.content for message in forked_messages] == [
         "first",
         "answer one",
@@ -445,9 +446,7 @@ async def test_mcp_fork_includes_last_assistant_and_parts(monkeypatch) -> None:
     stored_source_messages = await sync_to_async(
         HarnessMessageRepository.list_for_session
     )(session.id)
-    stored_source_parts = await sync_to_async(
-        HarnessPartRepository.list_for_session
-    )(session.id)
+    stored_source_parts = await sync_to_async(parts_for_session)(session.id)
     assert [
         (message.id, message.role, message.content, message.position)
         for message in stored_source_messages
