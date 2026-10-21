@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import abc
 import json
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -111,14 +110,6 @@ class ImageArtifactInfo:
     size_bytes: int | None = None
 
 
-class CommandExecutionError(RuntimeError):
-    """Raised when a streamed workspace command exits unsuccessfully."""
-
-    def __init__(self, exit_code: int) -> None:
-        self.exit_code = exit_code
-        super().__init__(f"Command failed with exit code {exit_code}")
-
-
 class RuntimeBackend(abc.ABC):
     """Abstract interface for workspace runtime management.
 
@@ -215,19 +206,6 @@ class RuntimeBackend(abc.ABC):
         """
 
     # --- Execution ------------------------------------------------------------
-
-    @abc.abstractmethod
-    async def exec_command(
-        self,
-        instance_id: str,
-        command: list[str],
-        workdir: str | None = None,
-        env: dict[str, str] | None = None,
-    ) -> AsyncIterator[str]:
-        """Execute a command inside the workspace and stream stdout/stderr.
-
-        Yields output line-by-line as an async iterator.
-        """
 
     @abc.abstractmethod
     async def exec_command_wait(

@@ -8,7 +8,7 @@ import pytest
 asyncssh = pytest.importorskip("asyncssh")
 pytest.importorskip("libvirt")
 
-from src.runtime.base import CommandExecutionError, ProcessHandle
+from src.runtime.base import ProcessHandle
 from src.runtime.qemu_runtime import QemuRuntime
 
 
@@ -43,10 +43,6 @@ def _runtime_with_ssh(ssh: SimpleNamespace) -> QemuRuntime:
     runtime = object.__new__(QemuRuntime)
     runtime._get_ssh = AsyncMock(return_value=ssh)
     return runtime
-
-
-async def _collect(stream: AsyncIterator[str]) -> list[str]:
-    return [line async for line in stream]
 
 
 @pytest.mark.parametrize("exit_status", [0, 19])
@@ -134,47 +130,6 @@ async def test_process_wait_propagates_cancellation() -> None:
 
     with pytest.raises(asyncio.CancelledError):
         await runtime.process_wait(ProcessHandle("vm", process))
-
-
-@pytest.mark.parametrize(
-    "unknown_status",
-    [None, asyncssh.Error(1, "status unavailable"), OSError("status unavailable")],
-)
-async def test_exec_command_rejects_unknown_exit_without_replaying(
-    unknown_status: int | Exception | None,
-) -> None:
-    process = _ExitStatus(
-        unknown_status,
-        stdout=_Lines("output\n"),
-        wait_closed=AsyncMock(),
-    )
-    ssh = SimpleNamespace(create_process=AsyncMock(return_value=process))
-    runtime = _runtime_with_ssh(ssh)
-    streamed: list[str] = []
-
-    with pytest.raises(RuntimeError, match="exit status is unknown"):
-        async for line in runtime.exec_command("vm", ["echo", "test"]):
-            streamed.append(line)
-
-    assert streamed == ["output\n"]
-    runtime._get_ssh.assert_awaited_once_with("vm")
-    ssh.create_process.assert_awaited_once()
-
-
-async def test_exec_command_keeps_streamed_nonzero_error_type_and_code() -> None:
-    process = SimpleNamespace(
-        stdout=_Lines("output\n"),
-        wait_closed=AsyncMock(),
-        exit_status=23,
-    )
-    ssh = SimpleNamespace(create_process=AsyncMock(return_value=process))
-    runtime = _runtime_with_ssh(ssh)
-
-    with pytest.raises(CommandExecutionError) as exc_info:
-        await _collect(runtime.exec_command("vm", ["false"]))
-
-    assert exc_info.value.exit_code == 23
-    ssh.create_process.assert_awaited_once()
 
 
 @pytest.mark.parametrize(

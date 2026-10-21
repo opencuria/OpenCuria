@@ -20,7 +20,6 @@ import tarfile
 import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,7 +30,6 @@ import structlog
 
 from ..config import RunnerSettings
 from .base import (
-    CommandExecutionError,
     ImageArtifactInfo,
     ProcessHandle,
     PtyHandle,
@@ -1361,37 +1359,6 @@ class QemuRuntime(RuntimeBackend):
             name=domain_name,
         )
 
-    async def exec_command(
-        self,
-        instance_id: str,
-        command: list[str],
-        workdir: str | None = None,
-        env: dict[str, str] | None = None,
-    ) -> AsyncIterator[str]:
-        """Execute a command in the VM via SSH and stream output.
-
-        Note: cancellation stops draining the SSH stream but does not
-        kill the remote process — once ``create_process`` yields lines,
-        the handle is consumed locally and no kill is issued, mirroring
-        ``DockerRuntime.exec_command`` behaviour.
-        """
-        ssh = await self._get_ssh(instance_id)
-        cmd_str = self._build_shell_command(command, workdir, env)
-
-        process = await ssh.create_process(
-            cmd_str,
-            stdin=asyncssh.DEVNULL,
-            stderr=asyncssh.STDOUT,
-        )
-
-        assert process.stdout is not None
-        async for line in process.stdout:
-            yield line
-        await process.wait_closed()
-        exit_code = self._require_exit_status(process)
-        if exit_code != 0:
-            raise CommandExecutionError(exit_code)
-
     async def exec_command_wait(
         self,
         instance_id: str,
@@ -1401,10 +1368,9 @@ class QemuRuntime(RuntimeBackend):
     ) -> tuple[int, str]:
         """Execute a command and wait for completion.
 
-        Note: like ``DockerRuntime.exec_command``, cancellation of the
-        awaiting caller does not kill the remote SSH command — ``ssh.run``
-        exposes no process handle, so the command runs to completion in
-        the VM. Cancelling only stops waiting for the result.
+        Cancellation of the awaiting caller does not kill the remote SSH
+        command — ``ssh.run`` exposes no process handle, so the command runs
+        to completion in the VM. Cancelling only stops waiting for the result.
         """
         ssh = await self._get_ssh(instance_id)
         cmd_str = self._build_shell_command(command, workdir, env)

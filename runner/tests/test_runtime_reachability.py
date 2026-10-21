@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
 import pytest
@@ -50,16 +49,6 @@ class _RuntimeStub(RuntimeBackend):
 
     async def list_workspaces(self) -> list[RuntimeWorkspaceInfo]:
         raise NotImplementedError
-
-    async def exec_command(
-        self,
-        instance_id: str,
-        command: list[str],
-        workdir: str | None = None,
-        env: dict[str, str] | None = None,
-    ) -> AsyncIterator[str]:
-        raise NotImplementedError
-        yield ""  # Make this an async generator.
 
     async def exec_command_wait(
         self,

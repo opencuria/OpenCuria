@@ -13,7 +13,6 @@ import os
 import queue as _queue
 import threading
 import uuid
-from collections.abc import AsyncIterator
 
 import docker
 import structlog
@@ -21,7 +20,6 @@ from docker.errors import NotFound as ContainerNotFound
 from docker.errors import NotFound as NetworkNotFound
 
 from .base import (
-    CommandExecutionError,
     ProcessHandle,
     PtyHandle,
     RuntimeBackend,
@@ -404,83 +402,6 @@ class DockerRuntime(RuntimeBackend):
         return await asyncio.to_thread(_list)
 
     # -- execution -------------------------------------------------------------
-
-    async def exec_command(
-        self,
-        instance_id: str,
-        command: list[str],
-        workdir: str | None = None,
-        env: dict[str, str] | None = None,
-    ) -> AsyncIterator[str]:
-        """Execute a command inside the container and stream output line by line.
-
-        Note: the Docker SDK offers no reliable ``exec_kill`` for a running
-        exec, so a cancelled consumer stops draining but the remote command
-        runs to completion; the thread always terminates and ``exec_inspect``
-        state is never leaked.
-        """
-
-        # docker SDK exec_run with stream=True returns a blocking generator,
-        # so we run the iteration in a thread and push lines into an async queue.
-        queue: asyncio.Queue[str | None] = asyncio.Queue()
-        loop = asyncio.get_running_loop()
-        state: dict[str, object] = {
-            "exit_code": 0,
-            "error": None,
-        }
-
-        def _run() -> None:
-            try:
-                container = self._container(instance_id)
-                api = self._get_client().api
-                exec_id = api.exec_create(
-                    container.id,
-                    cmd=command,
-                    workdir=workdir,
-                    environment=env,
-                    stdout=True,
-                    stderr=True,
-                    stdin=False,
-                    tty=False,
-                )["Id"]
-                output_stream = api.exec_start(
-                    exec_id,
-                    stream=True,
-                    demux=False,
-                )
-                buffer = ""
-                for chunk in output_stream:
-                    text = chunk.decode("utf-8", errors="replace")
-                    buffer += text
-                    while "\n" in buffer:
-                        line, buffer = buffer.split("\n", 1)
-                        loop.call_soon_threadsafe(queue.put_nowait, line)
-                if buffer:
-                    loop.call_soon_threadsafe(queue.put_nowait, buffer)
-
-                inspect = api.exec_inspect(exec_id)
-                state["exit_code"] = int(inspect.get("ExitCode") or 0)
-            except Exception as exc:
-                state["error"] = exc
-            finally:
-                loop.call_soon_threadsafe(queue.put_nowait, None)
-
-        task = loop.run_in_executor(None, _run)
-
-        while True:
-            line = await queue.get()
-            if line is None:
-                break
-            yield line
-
-        # Ensure the thread finished cleanly
-        await asyncio.wrap_future(task)  # type: ignore[arg-type]
-        error = state["error"]
-        if error is not None:
-            raise RuntimeError("Failed to stream command output") from error
-        exit_code = int(state["exit_code"])
-        if exit_code != 0:
-            raise CommandExecutionError(exit_code)
 
     async def exec_command_wait(
         self,

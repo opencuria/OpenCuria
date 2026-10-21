@@ -19,6 +19,7 @@ asyncssh = pytest.importorskip("asyncssh")
 pytest.importorskip("libvirt")
 
 from src.runtime import qemu_runtime
+from src.runtime.base import ProcessHandle
 from src.runtime.qemu_runtime import QemuRuntime
 
 # Preserve the real connector before the fixture patches only the runtime's
@@ -295,11 +296,11 @@ class _LocalSSHSession(asyncssh.SSHServerSession):
             self._control.notify()
 
     def eof_received(self) -> bool:
-        # Commands use DEVNULL for stdin but still need to send stdout later.
+        # Keep stdout open when a client half-closes stdin.
         return True
 
     def data_received(self, data, datatype) -> None:
-        # The tested runtime uses DEVNULL for these commands' stdin.
+        # The test commands do not consume stdin.
         del data, datatype
 
 
@@ -377,27 +378,23 @@ async def _wait_until(predicate, *, timeout: float = 1.0) -> None:
     await asyncio.wait_for(poll(), timeout=timeout)
 
 
-async def _start_stream(runtime: QemuRuntime, marker: str):
-    stream = runtime.exec_command("vm", [marker])
-    first_line = await asyncio.wait_for(stream.__anext__(), timeout=1)
-    assert first_line == f"{marker}:ready\n"
-    return stream
+async def _start_stream(runtime: QemuRuntime, marker: str) -> ProcessHandle:
+    handle = await runtime.spawn_process("vm", [marker])
+    first_chunk = await asyncio.wait_for(runtime.process_read(handle), timeout=1)
+    assert first_chunk == f"{marker}:ready\n".encode()
+    return handle
 
 
-async def _finish_stream(control: _ServerControl, stream, marker: str) -> None:
+async def _finish_stream(
+    runtime: QemuRuntime, control: _ServerControl, handle: ProcessHandle, marker: str
+) -> None:
     closed_before = control.closed_sessions
     control.stream_releases[marker].set()
-    assert await asyncio.wait_for(stream.__anext__(), timeout=1) == (
-        f"{marker}:finished\n"
+    assert await asyncio.wait_for(runtime.process_read(handle), timeout=1) == (
+        f"{marker}:finished\n".encode()
     )
-    # Drain any final empty line and drive the runtime generator through
-    # wait_closed and its exit-status check.
-    while True:
-        try:
-            extra_line = await asyncio.wait_for(stream.__anext__(), timeout=1)
-        except StopAsyncIteration:
-            break
-        assert not extra_line, f"unexpected trailing stream data: {extra_line!r}"
+    assert await asyncio.wait_for(runtime.process_read(handle), timeout=1) == b""
+    assert await asyncio.wait_for(runtime.process_wait(handle), timeout=1) == 0
     await _wait_until(lambda: control.closed_sessions == closed_before + 1)
 
 
@@ -461,8 +458,8 @@ async def test_repeated_timed_out_and_cancelled_probes_preserve_two_streams(
     assert not shared_connection.is_closed()
     assert control.active_sessions == 2
 
-    await _finish_stream(control, alpha, "stream-alpha")
-    await _finish_stream(control, beta, "stream-beta")
+    await _finish_stream(runtime, control, alpha, "stream-alpha")
+    await _finish_stream(runtime, control, beta, "stream-beta")
     await control.wait_for(lambda: control.active_sessions == 0)
     assert state.connection is shared_connection
     assert not shared_connection.is_closed()
@@ -490,8 +487,8 @@ async def test_channel_resource_shortage_does_not_close_parent_or_streams(
     assert state.connection is shared_connection
     assert not shared_connection.is_closed()
 
-    await _finish_stream(control, alpha, "stream-alpha")
-    await _finish_stream(control, beta, "stream-beta")
+    await _finish_stream(runtime, control, alpha, "stream-alpha")
+    await _finish_stream(runtime, control, beta, "stream-beta")
     await control.wait_for(lambda: control.active_sessions == 0)
     assert not shared_connection.is_closed()
 

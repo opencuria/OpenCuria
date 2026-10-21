@@ -11,7 +11,7 @@ import os
 import re
 import shlex
 import uuid
-from collections.abc import AsyncIterator, Callable, Hashable
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 
 from ..models import WorkspaceInfo
@@ -243,38 +243,6 @@ async def exec_command(
     )
 
 
-async def exec_command_stream(
-    runtime: RuntimeBackend,
-    instance_id: str,
-    command: dict,
-    credential_env_file: str = DEFAULT_CREDENTIAL_ENV_FILE,
-) -> AsyncIterator[str]:
-    """Execute a structured command dict and stream output lines.
-
-    Args:
-        runtime: The runtime backend to use.
-        instance_id: Runtime-specific instance ID.
-        command: Dict with keys ``args``, ``workdir``, ``env``,
-            ``description``.
-        credential_env_file: Guest path of the persistent credential env
-            file sourced by the wrapper.
-
-    Yields:
-        Raw output lines from the command.
-    """
-    wrapped_command = wrap_command_with_persistent_env(
-        command, credential_env_file
-    )
-    command_args = normalise_command_args(wrapped_command["args"])
-    async for line in runtime.exec_command(
-        instance_id,
-        command=command_args,
-        workdir=wrapped_command.get("workdir"),
-        env=wrapped_command.get("env"),
-    ):
-        yield line
-
-
 # -- KeyedLockMap + WorkspaceContext ----------------------------------------
 
 
@@ -402,18 +370,6 @@ class ExecKernel:
             runtime, instance_id, command, self._credential_env_file
         )
 
-    async def exec_command_stream(
-        self,
-        runtime: RuntimeBackend,
-        instance_id: str,
-        command: dict,
-    ) -> AsyncIterator[str]:
-        """Execute a structured command dict and stream output lines."""
-        async for line in exec_command_stream(
-            runtime, instance_id, command, self._credential_env_file
-        ):
-            yield line
-
     async def resolve(
         self,
         get_cached: Callable[[uuid.UUID], WorkspaceInfo],
@@ -435,7 +391,6 @@ __all__ = [
     "_SHELL_OPERATOR_TOKENS",
     "credential_path_helpers",
     "exec_command",
-    "exec_command_stream",
     "normalise_command_args",
     "sanitize_exec_workdir",
     "sanitize_filename",
