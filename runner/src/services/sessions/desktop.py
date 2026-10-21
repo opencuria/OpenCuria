@@ -15,6 +15,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -58,14 +59,13 @@ DESKTOP_EXECUTE_MAX_CHARS = 200_000
 #: Timeout (seconds) for one remote ``desktop_action("execute")`` snippet.
 DESKTOP_EXECUTE_TIMEOUT_S = 120.0
 _RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
-DESKTOP_STOP_SCRIPT = "/usr/local/bin/opencuria-desktop-stop"
-#: Exit 0 once Xvnc is gone (bounded ~5 s wait after SIGTERM). Older guest
-#: stop scripts kill every ``pgrep -f 'Xvnc.*:1'`` match, so neither this
-#: argv nor the stop invocation may contain a literal ``Xvnc``; the
-#: bracketed first letters keep the regex while hiding the literal name.
+DESKTOP_STOP_COMMAND = (
+    Path(__file__).with_name("desktop_stop.sh").read_text(encoding="utf-8")
+)
+#: Exit 0 once the exact :1 Xvnc display is gone (bounded ~5 s after SIGTERM).
 DESKTOP_STOPPED_PROBE = (
     'i=0; while [ "$i" -lt 20 ]; do '
-    "pgrep -f '^(/usr/bin/)?X[v]nc :1|^(/usr/bin/)?X[t]igervnc :1' "
+    "pgrep -f '^(/[^[:space:]]*/)?(X[v]nc|X[t]igervnc) :1([[:space:]]|$)' "
     ">/dev/null || exit 0; i=$((i+1)); sleep 0.25; done; exit 1"
 )
 _SCROLL_BUTTONS = {
@@ -927,18 +927,13 @@ class DesktopManager:
     def _desktop_start_command(width: int, height: int) -> str:
         """Return the shell used to start Xvnc at a fixed geometry.
 
-        Must not call ``opencuria-desktop-stop``. That script uses
-        ``pgrep -f 'Xvnc.*:1'``, which matches this ``bash -lc`` argv and
-        would kill the start process before Xvnc is launched.
-
         Readiness requires the X11 socket *and* the Kasm websocket port
         6901 (dependency-free ``/dev/tcp`` poll): ``xstartup`` launches
         exactly once as soon as the X11 socket exists, and the loop only
         returns once 6901 is additionally reachable so ensure never
         reports a half-ready Xvnc. The ``.xstartup-started`` marker is
         per-start: it is cleared before Xvnc launches so every restart
-        re-runs ``xstartup`` even though the stop path never executes
-        (the stop script would match this shell's own ``Xvnc`` argv).
+        re-runs ``xstartup`` after the separate stop command.
         """
         geometry = f"{width}x{height}"
         return (
@@ -1166,16 +1161,11 @@ class DesktopManager:
 
         log = logger.bind(workspace_id=str(workspace_id))
 
-        # Stop first as its own exec. The baked stop script matches
-        # ``Xvnc.*:1`` in any process argv, so it must not run inside the
-        # start command whose command line contains those bytes.
+        # Use the runner-owned command for existing images too: legacy baked
+        # stop scripts match arbitrary argv text and can kill agent transports.
         await runtime.exec_command_wait(
             info.instance_id,
-            [
-                "bash",
-                "-lc",
-                "/usr/local/bin/opencuria-desktop-stop >/dev/null 2>&1 || true",
-            ],
+            ["bash", "-lc", DESKTOP_STOP_COMMAND],
             env={"HOME": "/root"},
         )
 
@@ -1226,11 +1216,11 @@ class DesktopManager:
         runtime = self._get_runtime(workspace_id)
         info = self._get_cached(workspace_id)
         exit_code, output = await runtime.exec_command_wait(
-            info.instance_id, [DESKTOP_STOP_SCRIPT]
+            info.instance_id, ["bash", "-lc", DESKTOP_STOP_COMMAND]
         )
         if exit_code != 0:
             log.warning("desktop_stop_nonzero", exit_code=exit_code, output=output)
-        # A separate exec: the stop script must never see this argv.
+        # Confirm exit separately before releasing desktop ownership.
         exit_code, output = await runtime.exec_command_wait(
             info.instance_id, ["sh", "-lc", DESKTOP_STOPPED_PROBE]
         )

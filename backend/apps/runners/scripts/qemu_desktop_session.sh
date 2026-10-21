@@ -637,21 +637,15 @@ echo "Desktop session failed to start" >&2
 exit 1
 DESKSTART
 
+# Generated copy of runner/src/services/sessions/desktop_stop.sh; tested for parity.
 cat >/usr/local/bin/opencuria-desktop-stop <<'DESKSTOP'
 #!/bin/bash
-# Stop Xvnc and the XFCE session (including Plank / skippy-xd).
+# Stop only desktop executable names; agent argv can contain words like profile.
 for pattern in \
-    '^(/usr/bin/)?Xvnc :1' \
-    '^(/usr/bin/)?Xtigervnc :1' \
-    'xfce4-session' \
-    'xfwm4' \
-    'xfce4-panel' \
-    'xfdesktop' \
-    'plank' \
-    'skippy-xd' \
-    'rofi'
+    '^(/[^[:space:]]*/)?(Xvnc|Xtigervnc) :1([[:space:]]|$)' \
+    '^(/[^[:space:]]*/)?(xfce4-session|xfwm4|xfce4-panel|xfdesktop|plank|skippy-xd|rofi|openbox)([[:space:]]|$)'
 do
-    for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+    for pid in $(pgrep -f -- "$pattern" 2>/dev/null); do
         kill "$pid" 2>/dev/null || true
     done
 done

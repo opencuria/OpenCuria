@@ -8,12 +8,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import aiohttp
-
 from src.config import RunnerSettings
 from src.interfaces.websocket import SOCKETIO_MAX_HTTP_BUFFER_SIZE, WebSocketInterface
 from src.models import DesktopSession, WorkspaceInfo
 from src.runtime.base import RuntimeStatus, RuntimeWorkspaceInfo
 from src.service import WorkspaceService
+from src.services.sessions.desktop import DESKTOP_STOP_COMMAND
 
 
 class DummyService:
@@ -247,7 +247,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
                     return "workspace-net"
 
                 async def exec_command_wait(self, instance_id, command, **kwargs):
-                    if command == ["/usr/local/bin/opencuria-desktop-stop"]:
+                    if command == ["bash", "-lc", DESKTOP_STOP_COMMAND]:
                         maintenance_started.set()
                         return 0, ""
                     if command[0:2] == ["sh", "-lc"]:

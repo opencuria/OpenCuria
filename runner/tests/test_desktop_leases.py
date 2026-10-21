@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from src.models import DesktopSession
-from src.services.sessions.desktop import DesktopManager
+from src.services.sessions.desktop import DESKTOP_STOP_COMMAND, DesktopManager
 from src.services.sessions.desktop_leases import DesktopLeaseStore
 
 
@@ -676,13 +676,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(rows[0]["guest_token"])
 
     def guest_manager(self, *, stop_kills_xvnc: bool = True):
-        """Manager with the real stop path against a pre-a001a88 guest.
-
-        The guest's stop script kills every process whose argv matches
-        ``Xvnc.*:1`` (including its own wrapper shell) as old images did.
-        """
-        import re
-
+        """Exercise the real stop path without invoking unsafe baked guest scripts."""
         stop_script = "/usr/local/bin/opencuria-desktop-stop"
         guest = {"xvnc": True, "kills": stop_kills_xvnc}
         commands: list[list[str]] = []
@@ -690,13 +684,12 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         async def exec_command_wait(instance_id, command, workdir=None, env=None):
             commands.append(list(command))
             argv = " ".join(command)
-            if command == [stop_script]:
+            if command == ["bash", "-lc", DESKTOP_STOP_COMMAND]:
                 if guest["kills"]:
                     guest["xvnc"] = False
                 return 0, ""
-            if stop_script in argv and re.search(r"Xvnc.*:1", argv):
-                guest["xvnc"] = False
-                return -1, ""
+            if stop_script in argv:
+                raise AssertionError("Unsafe legacy desktop stop script invoked")
             if "pgrep" in argv:
                 return (1, "") if guest["xvnc"] else (0, "")
             return 0, ""
@@ -729,10 +722,9 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["lease_state"], "released")
         self.assertFalse(guest["xvnc"])
         self.assertEqual(len(commands), 2)
+        self.assertEqual(commands[0], ["bash", "-lc", DESKTOP_STOP_COMMAND])
         for argv in commands:
-            joined = " ".join(argv)
-            self.assertNotIn("Xvnc", joined)
-            self.assertNotIn("Xtigervnc", joined)
+            self.assertNotIn("opencuria-desktop-stop", " ".join(argv))
         self.assertNotIn(self.ws, manager._desktop_sessions)
         held = await manager.desktop_action(self.ws, "hold", self.viewer(2))
         self.assertEqual((held["lease_state"], held["revision"]), ("held", 2))

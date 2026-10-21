@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 from src.config import RunnerSettings
 from src.models import DesktopSession, WorkspaceInfo
 from src.service import WorkspaceService
+from src.services.sessions.desktop import DESKTOP_STOP_COMMAND
 from src.services.sessions.desktop_leases import DesktopLeaseStore
 from src.services.sessions.stream_intents import StreamIntentStore
 
@@ -32,9 +33,7 @@ class DummyRuntime:
         text = " ".join(command)
         if "connect_ex" in text:
             return (0, "alive") if self.desktop_live else (1, "dead")
-        if command == ["/usr/local/bin/opencuria-desktop-stop"] or (
-            "opencuria-desktop-stop" in text
-        ):
+        if command == ["bash", "-lc", DESKTOP_STOP_COMMAND]:
             self.desktop_live = False
             return 0, "stopped"
         if "/usr/bin/Xvnc :1 -geometry" in text:
@@ -134,6 +133,8 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("-AcceptSetDesktopSize=0", start_command[2])
         self.assertNotIn("opencuria-desktop-start", start_command[2])
         self.assertNotIn("opencuria-desktop-stop", start_command[2])
+        self.assertIn(["bash", "-lc", DESKTOP_STOP_COMMAND], commands)
+        self.assertFalse(any("opencuria-desktop-stop" in str(c) for c in commands))
 
     async def test_start_command_waits_for_x11_socket_and_kasm_port(self) -> None:
         command = self.service.desktop._desktop_start_command(1920, 1080)
@@ -164,7 +165,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
             text = command[2] if len(command) > 2 else " ".join(command)
             if "connect_ex" in text:
                 return (0, "alive") if self.runtime.desktop_live else (1, "dead")
-            if "opencuria-desktop-stop" in text:
+            if command == ["bash", "-lc", DESKTOP_STOP_COMMAND]:
                 self.runtime.desktop_live = False
                 return 0, "stopped"
             if "/usr/bin/Xvnc :1 -geometry" in text:
@@ -218,6 +219,10 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.hold(viewer)
         await self.hold(computeruse)
+        stop_calls = sum(
+            command == ["bash", "-lc", DESKTOP_STOP_COMMAND]
+            for _, command, _ in self.runtime.exec_calls
+        )
 
         result = await self.service.desktop.desktop_action(
             self.workspace_id, "release", viewer
@@ -234,9 +239,12 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
             ].computeruse_run_ids
         )
         self.close_owner_streams.assert_awaited_once_with("viewer-lease")
-        self.assertNotIn(
-            ["/usr/local/bin/opencuria-desktop-stop"],
-            [command for _, command, _ in self.runtime.exec_calls],
+        self.assertEqual(
+            stop_calls,
+            sum(
+                command == ["bash", "-lc", DESKTOP_STOP_COMMAND]
+                for _, command, _ in self.runtime.exec_calls
+            ),
         )
 
     async def test_heartbeat_stale_negative_does_not_prune_replacement(self) -> None:

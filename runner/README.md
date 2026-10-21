@@ -13,6 +13,12 @@ for local development.
   process-group cleanup limits, epoch recovery, and coordinated rollout.
 - [Lifecycle recovery](../docs/image-lifecycle-implementation.md#recovery-hardening-operator-workflow).
 
+Desktop startup and cleanup use the runner-owned `desktop_stop.sh`, including
+for existing workspace images. Process matching is anchored to desktop
+executables and display `:1`; arbitrary argv text such as the agent wrapper's
+`profile` must never match `rofi`. Image helper copies are checked against this
+canonical script. Restart the runner after updating; no image rebuild is needed.
+
 ## QEMU image bootstrap
 
 Each newly provisioned VM gets a fresh
