@@ -19,6 +19,7 @@ from apps.harness.engines.codex.auth import CodexAuthConfiguration
 from apps.harness.engines.codex.engine import CodexEngine
 from apps.harness.engines.codex.protocol import CodexProtocol, CodexProtocolError
 from apps.harness.engines.codex.session_store import home_for, validate_snapshot
+from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.runner import RunOptions
 from apps.harness.tools import default_tool_registry
 
@@ -206,6 +207,8 @@ async def fixture_run(
     agent="build",
     tool="write",
     args=None,
+    code: str | None = None,
+    evaluator: PermissionEvaluator | None = None,
     resume=False,
     cancel_on_native=False,
     fail_checkpoint=False,
@@ -231,6 +234,9 @@ async def fixture_run(
                     args or {"path": "note.txt", "content": "codex local test"}
                 ),
             }
+            if code is not None:
+                item.update(type="custom_tool_call", input=code)
+                del item["arguments"]
         else:
             item = {
                 "id": f"msg_{calls}",
@@ -275,6 +281,35 @@ async def fixture_run(
     app.router.add_post("/v1/responses", responses)
 
     async def models(_):
+        if code is not None:
+            # Match models such as GPT-6.1-Sol that require code mode even when
+            # the optional feature is disabled in the managed configuration.
+            return web.json_response(
+                {
+                    "models": [
+                        {
+                            "slug": "~test/model",
+                            "display_name": "Local code-mode-only model",
+                            "description": "Local test only",
+                            "base_instructions": "Use tools to complete the task.",
+                            "default_reasoning_level": "low",
+                            "supported_reasoning_levels": [],
+                            "shell_type": "shell_command",
+                            "tool_mode": "code_mode_only",
+                            "visibility": "list",
+                            "supported_in_api": True,
+                            "priority": 0,
+                            "supports_reasoning_summaries": False,
+                            "support_verbosity": False,
+                            "truncation_policy": {"mode": "tokens", "limit": 10000},
+                            "supports_parallel_tool_calls": True,
+                            "context_window": 32000,
+                            "experimental_supported_tools": [],
+                            "input_modalities": ["text"],
+                        }
+                    ]
+                }
+            )
         return web.json_response({"data": []})
 
     app.router.add_get("/v1/models", models)
@@ -323,6 +358,7 @@ async def fixture_run(
             accessor=accessor,
             auth=auth,
             emit=emit,
+            evaluator=evaluator,
             session_store=store,
             on_binding=binding,
         )
@@ -356,6 +392,7 @@ async def fixture_run(
                 accessor=accessor,
                 auth=auth,
                 emit=emit,
+                evaluator=evaluator,
                 session_store=store,
                 on_binding=binding,
                 external_session_id=external,
@@ -497,6 +534,76 @@ async def test_real_codex_build_native_shell_write_no_approvals(tmp_path):
     assert accessor.path("/workspace/native.txt").read_text() == "native-verified"
     assert sum(e["type"] == "tool_started" for e in events) == 1
     assert sum(e["type"] == "tool_completed" for e in events) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "agent,mode,deny,allowed,asks",
+    [
+        ("build", "build", False, True, 0),
+        ("build", "plan", False, False, 1),
+        ("general", "plan", False, True, 0),
+        ("explore", "build", False, False, 0),
+        ("build", "build", True, False, 0),
+    ],
+    ids=["build", "plan", "general-under-plan", "explore", "global-deny"],
+)
+async def test_real_codex_code_mode_managed_write_respects_permissions(
+    tmp_path: Path,
+    agent: str,
+    mode: str,
+    deny: bool,
+    allowed: bool,
+    asks: int,
+) -> None:
+    """Model-issued exec calls reach the shared managed-tool permission checks."""
+    result, events, accessor, requests, permissions, _ = await fixture_run(
+        tmp_path,
+        agent=agent,
+        mode=mode,
+        tool="exec",
+        code='text(await tools.write({path:"note.txt",content:"code-mode write"}));',
+        evaluator=PermissionEvaluator(global_rules={"edit": "deny"}) if deny else None,
+    )
+    assert result.output == "Local done."
+    assert "code-mode host is disabled" not in json.dumps(requests)
+    assert len(permissions) == asks
+    if allowed:
+        assert accessor.path("/workspace/note.txt").read_text() == "code-mode write"
+        assert any(e["type"] == "tool_completed" for e in events)
+    else:
+        assert not accessor.path("/workspace/note.txt").exists()
+        assert any(e["type"] == "tool_error" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_real_codex_code_mode_native_shell(tmp_path: Path) -> None:
+    """Required code mode also supports native workspace commands in Build."""
+    _, events, accessor, requests, permissions, _ = await fixture_run(
+        tmp_path,
+        tool="exec",
+        code=(
+            "text(await tools.exec_command({"
+            'cmd:"printf code-mode-native > native.txt",yield_time_ms:1000}));'
+        ),
+    )
+    assert not permissions
+    assert accessor.path("/workspace/native.txt").read_text() == "code-mode-native"
+    assert any(e["type"] == "tool_completed" for e in events)
+    assert "code-mode host is disabled" not in json.dumps(requests)
+
+
+@pytest.mark.asyncio
+async def test_real_codex_code_mode_script_failure_is_returned(tmp_path: Path) -> None:
+    """A script error reaches the model without running unrelated workspace tools."""
+    result, events, accessor, requests, _, state = await fixture_run(
+        tmp_path, tool="exec", code='throw new Error("local script failure");'
+    )
+    assert result.output == "Local done."
+    assert "local script failure" in json.dumps(requests[-1]["input"])
+    assert not any(e["type"] == "tool_started" for e in events)
+    assert not accessor.path("/workspace/note.txt").exists()
+    assert not state["codex_dirty"]
 
 
 @pytest.mark.asyncio

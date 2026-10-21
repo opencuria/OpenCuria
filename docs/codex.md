@@ -30,6 +30,9 @@ not a compatibility guarantee. See [OpenRouter's Codex guide][openrouter].
 
 - **Build** uses Codex's native shell/patch tools with `danger-full-access` and
   approval policy `never`. Treat the workspace as fully writable by the agent.
+- The bundled code-mode host stays enabled: models such as GPT-6.1-Sol require
+  `exec`/`wait` wrappers even when optional code mode is disabled. Wrapped
+  OpenCuria tools still pass through the shared permission dispatcher.
 - **Root Plan** disables native shell and uses native `read-only` mode. Managed
   direct source edits ask for approval, while permitted shell/process actions
   follow the existing OpenCuria Plan policy. Plan is **not** an absolute read-only

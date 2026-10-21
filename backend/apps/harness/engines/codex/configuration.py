@@ -32,7 +32,6 @@ DISABLED_FEATURES = (
     "shell_snapshot_v2",
     "js_repl",
     "code_mode",
-    "code_mode_host",
     "tool_search",
     "skill_search",
     "skill_mcp_dependency_install",
@@ -89,6 +88,10 @@ def runtime_settings(
         "skills.include_instructions": False,
         "features.skip_host_skill_discovery": True,
         "features.shell_tool": not readonly,
+        # Models can require exec/wait even with optional code mode disabled.
+        # The host executes their wrappers; managed tools still use OpenCuria's
+        # dispatcher and native tools retain the thread's sandbox policy.
+        "features.code_mode_host": True,
     }
     settings.update({f"features.{key}": False for key in DISABLED_FEATURES})
     if provider == "openrouter":
