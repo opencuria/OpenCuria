@@ -28,8 +28,12 @@ extra footer row or introduce horizontal scrolling.
 - On smaller screens and devices without hover, all footers stay visible.
 - Streaming shows model metadata but exposes neither copy-answer nor fork,
   following the same responsive visibility rules.
-- Busy, read-only, and subagent views retain copy/metadata but hide edit/fork.
-- The inline user editor temporarily replaces its footer.
+- Read-only and subagent views retain copy/metadata but hide edit/fork. Busy
+  sessions hide fork only.
+- The inline user editor temporarily replaces its footer. It preselects the
+  session model/effort and lets the user change them for the rerun. Rerun
+  works with an unchanged prompt; on a busy session it first asks to stop and
+  discard the running turn (queued steers return to the composer, like Stop).
 - Keep accessible action labels and the existing success/failure clipboard UX.
 
 ## Fork semantics

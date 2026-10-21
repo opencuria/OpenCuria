@@ -298,10 +298,10 @@ function handleContextMetrics(
 
 const isSubagentSession = computed(() => Boolean(activeSession.value?.parent_id))
 
-/** No message edit/fork while a run is active or inside a subagent session. */
-const messageActionsDisabled = computed(
-  () => !props.canPrompt || isSubagentSession.value || activeSession.value?.status === 'busy',
-)
+/** No message edit/fork without prompt access or inside a subagent session. */
+const messageActionsDisabled = computed(() => !props.canPrompt || isSubagentSession.value)
+/** A running session hides fork; edit stays available and stops the run first. */
+const sessionBusy = computed(() => activeSession.value?.status === 'busy')
 
 /** A running session keeps its composer: new messages steer the run. */
 const inputDisabled = computed(() => !props.canPrompt)
@@ -724,9 +724,28 @@ function handleOpenSubtask(childSessionId: string): void {
   }
 }
 
-async function handleEditMessage(messageId: string, text: string): Promise<void> {
-  if (!props.canPrompt || !harness.activeSessionId || isSubagentSession.value) return
-  await harness.editMessage(harness.activeSessionId, messageId, text)
+/**
+ * Rerun from an edited user message. A running session is stopped first (the
+ * edit card already confirmed discarding it); like Stop, unsent queued steers
+ * go back to the composer.
+ */
+async function handleEditMessage(
+  messageId: string,
+  text: string,
+  selection?: { model: string; effort: string },
+): Promise<void> {
+  const sessionId = harness.activeSessionId
+  if (!props.canPrompt || !sessionId || isSubagentSession.value) return
+  if (sessionBusy.value) {
+    const restored = await harness.abortSession(sessionId)
+    // A failed stop is already reported; never rerun over a live run.
+    if (harness.activeSessionId !== sessionId || sessionBusy.value) return
+    if (restored.length) chatInputRef.value?.setPrompt(restored.join('\n\n'), { append: true })
+  }
+  await harness.editMessage(sessionId, messageId, text, {
+    model: selection?.model,
+    reasoningEffort: selection?.effort,
+  })
 }
 
 /**
@@ -759,6 +778,7 @@ async function handleForkMessage(messageId: string): Promise<void> {
       :child-session-ids="childSessionIds"
       :summary="activeSession?.status === 'idle' ? activeSession.summary : ''"
       :disabled="messageActionsDisabled"
+      :busy="sessionBusy"
       class="min-h-0 flex-1"
       :class="entering ? 'chat-content-enter' : ''"
       @open-subtask="handleOpenSubtask"

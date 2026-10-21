@@ -17,11 +17,13 @@ const props = defineProps<{
   /** State + next step of the finished run; shown under the last answer. */
   summary?: string
   disabled?: boolean
+  /** The session is running (edits ask before stopping it). */
+  busy?: boolean
 }>()
 
 const emit = defineEmits<{
   openSubtask: [childSessionId: string]
-  edit: [messageId: string, text: string]
+  edit: [messageId: string, text: string, selection: { model: string; effort: string }]
   fork: [messageId: string]
 }>()
 
@@ -449,8 +451,9 @@ watch(
           :child-session-ids="childSessionIds"
           :summary="entry.message.id === lastMessageId ? summary : ''"
           :disabled="disabled"
+          :busy="busy"
           @open-subtask="emit('openSubtask', $event)"
-          @edit="(messageId, text) => emit('edit', messageId, text)"
+          @edit="(messageId, text, selection) => emit('edit', messageId, text, selection)"
           @fork="(messageId) => emit('fork', messageId)"
         />
       </template>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { pinHarnessMessageKey } from '@/lib/harnessMessagePin'
-import { BookText, CornerDownRight, CornerDownLeft } from '@lucide/vue'
+import { BookText, CornerDownRight } from '@lucide/vue'
 import type { HarnessMessage } from '@/types/harness'
 import { buildMessageBlocks, type MessageRenderBlock, type RenderBlock } from '@/lib/harnessBlocks'
 import { getMessageCopyText } from '@/lib/harnessMessageCopy'
@@ -12,9 +12,8 @@ import { loadProviderModelsCached } from '@/lib/providerCatalog'
 import { formatHarnessModelEffort, type ProviderModel } from '@/lib/harnessModels'
 import { elapsedMs, formatElapsed } from '@/lib/formatElapsed'
 import { useSkillStore } from '@/stores/skills'
-import { Button } from '@/components/ui/button'
-import { Textarea } from '@/components/ui/textarea'
 import HarnessUserBubble from './HarnessUserBubble.vue'
+import HarnessMessageEditCard from './HarnessMessageEditCard.vue'
 import HarnessAgentStep from './HarnessAgentStep.vue'
 import HarnessThinking from './HarnessThinking.vue'
 import HarnessBlockList from './HarnessBlockList.vue'
@@ -30,13 +29,15 @@ const props = defineProps<{
   models?: ProviderModel[]
   /** Brief user-goal recap, shown quietly under the final answer. */
   summary?: string
-  /** Hide edit/fork actions (busy run or subagent session). */
+  /** Hide edit/fork actions (read-only workspace or subagent session). */
   disabled?: boolean
+  /** The session is running: fork is hidden, edit reruns after a stop confirmation. */
+  busy?: boolean
 }>()
 
 const emit = defineEmits<{
   openSubtask: [childSessionId: string]
-  edit: [messageId: string, text: string]
+  edit: [messageId: string, text: string, selection: { model: string; effort: string }]
   fork: [messageId: string]
 }>()
 
@@ -248,10 +249,9 @@ function blockKey(block: MessageRenderBlock, index: number): string {
 
 /** Inline edit state for user messages (OpenCode session.revert parity). */
 const editing = ref(false)
-const editDraft = ref('')
 
 const isForkableMessage = computed(
-  () => props.message.role === 'assistant' && !props.disabled && finished.value,
+  () => props.message.role === 'assistant' && !props.disabled && !props.busy && finished.value,
 )
 
 /** Local optimistic ids (`local-user-*`) have no backend row to edit. */
@@ -260,46 +260,18 @@ const isEditableMessage = computed(
     props.message.role === 'user' && !props.disabled && !props.message.id.startsWith('local-user-'),
 )
 
-watch(
-  () => props.message.content,
-  () => {
-    if (!editing.value) editDraft.value = props.message.content
-  },
-)
-
-const editInput = ref<{ $el: HTMLTextAreaElement } | null>(null)
-
 function startEdit(): void {
-  editDraft.value = props.message.content
   editing.value = true
-  void nextTick(() => {
-    const el = editInput.value?.$el
-    if (!el) return
-    el.focus()
-    el.setSelectionRange(el.value.length, el.value.length)
-  })
-}
-
-/** Enter saves, Shift+Enter breaks the line; never steal Enter from IME composition. */
-function onEditEnter(event: KeyboardEvent): void {
-  if (event.isComposing) return
-  event.preventDefault()
-  saveEdit()
 }
 
 function cancelEdit(): void {
   editing.value = false
-  editDraft.value = props.message.content
 }
 
-function saveEdit(): void {
-  const text = editDraft.value.trim()
-  if (!text || text === props.message.content) {
-    editing.value = false
-    return
-  }
+/** Rerun even with an unchanged prompt; the card already confirmed a busy stop. */
+function submitEdit(text: string, selection: { model: string; effort: string }): void {
   editing.value = false
-  emit('edit', props.message.id, text)
+  emit('edit', props.message.id, text, selection)
 }
 
 function forkFromHere(): void {
@@ -334,47 +306,14 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
   >
     <div class="min-w-0" :class="editing ? 'w-full max-w-3xl' : 'max-w-[85%]'">
       <HarnessUserBubble v-if="!editing" :text="message.content" />
-      <div
+      <HarnessMessageEditCard
         v-else
-        data-testid="message-edit-card"
-        class="flex flex-col rounded-2xl border border-border bg-card shadow-xs transition-[border-color,box-shadow] focus-within:border-primary/50 focus-within:ring-3 focus-within:ring-primary/15"
-      >
-        <Textarea
-          ref="editInput"
-          v-model="editDraft"
-          aria-label="Edit message"
-          class="max-h-[50vh] min-h-12 overflow-y-auto rounded-none border-0 bg-transparent px-3.5 pb-1 pt-3 text-sm leading-relaxed shadow-none focus-visible:ring-0 dark:bg-transparent"
-          data-testid="message-edit-input"
-          @keydown.escape="cancelEdit"
-          @keydown.enter.exact="onEditEnter"
-        />
-        <div class="flex items-center justify-between gap-2 py-2 pl-3.5 pr-2">
-          <span class="truncate text-[11px] text-muted-foreground">Reruns from here</span>
-          <div class="flex shrink-0 items-center gap-1">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              class="h-7 px-2.5 text-xs text-muted-foreground hover:text-foreground"
-              data-testid="message-edit-cancel"
-              @click="cancelEdit"
-            >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              class="h-7 gap-1.5 px-2.5 text-xs"
-              data-testid="message-edit-save"
-              :disabled="!editDraft.trim() || editDraft.trim() === message.content"
-              @click="saveEdit"
-            >
-              Rerun
-              <CornerDownLeft :size="12" aria-hidden="true" class="opacity-70" />
-            </Button>
-          </div>
-        </div>
-      </div>
+        :text="message.content"
+        :session-id="message.session_id"
+        :busy="busy"
+        @cancel="cancelEdit"
+        @submit="submitEdit"
+      />
       <div
         v-if="messageSkills.length > 0"
         class="mt-1.5 flex flex-wrap justify-end gap-1.5"

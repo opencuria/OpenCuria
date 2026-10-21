@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 
 import HarnessMessageView from './HarnessMessageView.vue'
-import type { HarnessMessage } from '@/types/harness'
+import ModelPicker from '@/components/common/ModelPicker.vue'
+import type { HarnessMessage, HarnessSession } from '@/types/harness'
 import { resetProviderCatalogCache } from '@/lib/providerCatalog'
+import { useHarnessStore } from '@/stores/harness'
 import { useSkillStore } from '@/stores/skills'
 
 vi.mock('@/services/harness.api', async () => {
@@ -13,7 +15,11 @@ vi.mock('@/services/harness.api', async () => {
     await vi.importActual<typeof import('@/services/harness.api')>('@/services/harness.api')
   return {
     ...actual,
-    listProviderModels: vi.fn().mockResolvedValue([]),
+    listProviderModels: vi.fn().mockResolvedValue([
+      { id: 'acme/think', name: 'Think', provider: 'acme', reasoning_efforts: ['low', 'high'] },
+      { id: 'acme/other', name: 'Other', provider: 'acme', reasoning_efforts: ['low', 'high'] },
+    ]),
+    listRecentModels: vi.fn().mockResolvedValue([]),
   }
 })
 
@@ -50,6 +56,25 @@ function seedSkills(): void {
       created_by_email: null,
       created_at: '2026-03-29T10:00:00.000Z',
       updated_at: '2026-03-29T10:00:00.000Z',
+    },
+  ]
+}
+
+function seedSession(overrides: Partial<HarnessSession> = {}): void {
+  useHarnessStore().sessions = [
+    {
+      id: 'session-1',
+      workspace_id: 'ws-1',
+      parent_id: null,
+      title: 'Chat',
+      mode: 'build',
+      agent_name: 'build',
+      model: 'acme/think',
+      reasoning_effort: 'high',
+      status: 'idle',
+      cost: 0,
+      tokens: {},
+      ...overrides,
     },
   ]
 }
@@ -98,13 +123,23 @@ describe('HarnessMessageView edit/fork', () => {
     expect(wrapper.find('[data-testid="message-fork"]').exists()).toBe(false)
   })
 
-  it('hides edit/fork while disabled (busy run)', () => {
+  it('hides edit/fork while disabled (read-only or subagent)', () => {
     const wrapper = mount(HarnessMessageView, {
       props: { message: makeUser(), disabled: true },
     })
 
     expect(wrapper.find('[data-testid="message-edit"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="message-fork"]').exists()).toBe(false)
+  })
+
+  it('keeps edit but hides fork while the session is busy', () => {
+    const user = mount(HarnessMessageView, { props: { message: makeUser(), busy: true } })
+    const assistant = mount(HarnessMessageView, {
+      props: { message: makeAssistant(), busy: true },
+    })
+
+    expect(user.find('[data-testid="message-edit"]').exists()).toBe(true)
+    expect(assistant.find('[data-testid="message-fork"]').exists()).toBe(false)
   })
 
   it('hides edit/fork for local optimistic messages without a backend row', () => {
@@ -128,23 +163,94 @@ describe('HarnessMessageView edit/fork', () => {
     await input.setValue('edited prompt')
     await wrapper.get('[data-testid="message-edit-save"]').trigger('click')
 
-    expect(wrapper.emitted('edit')).toEqual([['user-1', 'edited prompt']])
+    expect(wrapper.emitted('edit')).toEqual([
+      ['user-1', 'edited prompt', { model: '', effort: '' }],
+    ])
     expect(wrapper.find('[data-testid="message-edit-input"]').exists()).toBe(false)
   })
 
-  it('does not emit edit when saving unchanged or blank text', async () => {
+  it('reruns an unchanged prompt but never blank text', async () => {
     const wrapper = mount(HarnessMessageView, {
       props: { message: makeUser() },
     })
 
     await wrapper.get('[data-testid="message-edit"]').trigger('click')
-    await wrapper.get('[data-testid="message-edit-save"]').trigger('click')
-    expect(wrapper.emitted('edit')).toBeUndefined()
-
     const input = wrapper.get('[data-testid="message-edit-input"]')
     await input.setValue('   ')
-    await wrapper.get('[data-testid="message-edit-save"]').trigger('click')
+    expect(wrapper.get('[data-testid="message-edit-save"]').attributes('disabled')).toBeDefined()
+    await input.trigger('keydown', { key: 'Enter' })
     expect(wrapper.emitted('edit')).toBeUndefined()
+
+    await input.setValue('original prompt')
+    const save = wrapper.get('[data-testid="message-edit-save"]')
+    expect(save.attributes('disabled')).toBeUndefined()
+    await save.trigger('click')
+    expect(wrapper.emitted('edit')).toEqual([
+      ['user-1', 'original prompt', { model: '', effort: '' }],
+    ])
+  })
+
+  it('preselects the session model and forwards a changed model/effort', async () => {
+    seedSession()
+    const wrapper = mount(HarnessMessageView, {
+      props: { message: makeUser() },
+    })
+
+    await wrapper.get('[data-testid="message-edit"]').trigger('click')
+    await flushPromises()
+    const picker = wrapper.get('[data-testid="message-edit-card"]').findComponent(ModelPicker)
+    expect(picker.props('model')).toBe('acme/think')
+    expect(picker.props('effort')).toBe('high')
+    expect(picker.props('models').map((model: { id: string }) => model.id)).toEqual([
+      'acme/think',
+      'acme/other',
+    ])
+
+    picker.vm.$emit('update:model', 'acme/other')
+    picker.vm.$emit('update:effort', 'low')
+    await nextTick()
+    await wrapper.get('[data-testid="message-edit-save"]').trigger('click')
+
+    expect(wrapper.emitted('edit')).toEqual([
+      ['user-1', 'original prompt', { model: 'acme/other', effort: 'low' }],
+    ])
+  })
+
+  it('asks before stopping a busy session and keeps editing on cancel', async () => {
+    seedSession({ status: 'busy' })
+    const wrapper = mount(HarnessMessageView, {
+      props: { message: makeUser(), busy: true },
+      attachTo: document.body,
+    })
+
+    await wrapper.get('[data-testid="message-edit"]').trigger('click')
+    await wrapper.get('[data-testid="message-edit-input"]').setValue('edited prompt')
+    await wrapper.get('[data-testid="message-edit-save"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('edit')).toBeUndefined()
+    const cancel = document.querySelector<HTMLElement>(
+      '[data-testid="message-edit-confirm-cancel"]',
+    )
+    expect(document.querySelector('[data-testid="message-edit-confirm"]')?.textContent).toContain(
+      'Stop the running session?',
+    )
+    cancel?.click()
+    await flushPromises()
+    expect(document.querySelector('[data-testid="message-edit-confirm"]')).toBeNull()
+    expect(wrapper.emitted('edit')).toBeUndefined()
+    expect(wrapper.find('[data-testid="message-edit-input"]').exists()).toBe(true)
+
+    await wrapper.get('[data-testid="message-edit-input"]').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    document.querySelector<HTMLElement>('[data-testid="message-edit-confirm-rerun"]')?.click()
+    await flushPromises()
+
+    expect(wrapper.emitted('edit')).toEqual([
+      ['user-1', 'edited prompt', { model: 'acme/think', effort: 'high' }],
+    ])
+    expect(wrapper.find('[data-testid="message-edit-input"]').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('closes the editor on cancel and on Escape', async () => {
@@ -224,7 +330,9 @@ describe('HarnessMessageView edit/fork', () => {
     expect(wrapper.emitted('edit')).toBeUndefined()
 
     await input.trigger('keydown', { key: 'Enter' })
-    expect(wrapper.emitted('edit')).toEqual([['user-1', 'edited prompt']])
+    expect(wrapper.emitted('edit')).toEqual([
+      ['user-1', 'edited prompt', { model: '', effort: '' }],
+    ])
   })
 
   it('shows no skill pills without skill_ids', () => {

@@ -6,6 +6,7 @@ import { useNotificationStore } from '@/stores/notifications'
 import { useHarnessConversationStore } from '@/stores/harnessConversations'
 import { ApiRequestError } from '@/services/api'
 import { editHarnessMessage, forkHarnessSession, listHarnessParts } from '@/services/harness.api'
+import { useRecentModels } from '@/lib/recentModels'
 import type { HarnessMessage, HarnessSession } from '@/types/harness'
 
 vi.mock('@/services/harness.api', async () => {
@@ -19,6 +20,7 @@ vi.mock('@/services/harness.api', async () => {
     listHarnessTodos: vi.fn().mockResolvedValue([]),
     listHarnessSessions: vi.fn().mockResolvedValue([]),
     markHarnessSessionRead: vi.fn().mockResolvedValue(undefined),
+    saveRecentModel: vi.fn().mockResolvedValue(undefined),
   }
 })
 
@@ -160,6 +162,126 @@ describe('harness store fork/edit', () => {
     expect(partsMock).toHaveBeenCalledWith('session-1')
   })
 
+  it('replaces the edited suffix immediately, even with the same prompt and stale stop fetches', async () => {
+    const store = useHarnessStore()
+    const idle = makeSession()
+    const busy = makeSession({ status: 'busy' })
+    store.sessions = [idle]
+    const history = [
+      makeMessage({ id: 'earlier-user', position: 0 }),
+      makeMessage({
+        id: 'earlier-answer',
+        role: 'assistant',
+        content: 'Keep this answer',
+        completed_at: '2026-10-21T10:00:00Z',
+        position: 1,
+      }),
+    ]
+    const original = [
+      ...history,
+      makeMessage({ position: 2 }),
+      makeMessage({
+        id: 'discarded-answer',
+        role: 'assistant',
+        content: 'Old response',
+        finish: 'aborted',
+        position: 3,
+      }),
+      makeMessage({ id: 'discarded-followup', content: 'Also discard this', position: 4 }),
+    ]
+    store.messagesBySession['session-1'] = original
+
+    // Stop's idle event can leave an old snapshot in flight.
+    let finishOldFetch!: (value: Awaited<ReturnType<typeof listHarnessParts>>) => void
+    partsMock.mockImplementationOnce(() => new Promise((resolve) => (finishOldFetch = resolve)))
+    const oldFetch = store.fetchParts('session-1')
+    let finishEdit!: (value: HarnessSession) => void
+    editMock.mockImplementationOnce(() => new Promise((resolve) => (finishEdit = resolve)))
+    const edit = store.editMessage('session-1', 'msg-1', 'original prompt')
+
+    expect(store.activeMessages).toEqual([])
+    expect(store.messagesBySession['session-1']?.map((message) => message.content)).toEqual([
+      'original prompt',
+      'Keep this answer',
+      'original prompt',
+    ])
+    store.handleSessionStatus('session-1', 'busy', {
+      message_id: 'new-answer',
+      user_message_id: 'new-user',
+    })
+    store.handlePartUpdated('session-1', { text: 'Fresh response' }, { messageId: 'new-answer' })
+
+    const newMessages = [
+      ...history,
+      makeMessage({ id: 'new-user', position: 2 }),
+      makeMessage({ id: 'new-answer', role: 'assistant', content: '', position: 3 }),
+    ]
+    partsMock.mockResolvedValueOnce({ session: busy, messages: newMessages })
+    finishEdit(busy)
+    // Must fetch a new snapshot instead of joining Stop's stale one.
+    await edit
+    expect(partsMock).toHaveBeenCalledTimes(2)
+
+    finishOldFetch({ session: idle, messages: original })
+    await oldFetch
+    // Also ignore delayed events for every discarded turn.
+    store.handlePartUpdated(
+      'session-1',
+      { text: 'Stale response' },
+      { messageId: 'discarded-answer' },
+    )
+    store.handleSubtaskStarted('session-1', {
+      subtask_id: 'stale-child',
+      agent: 'explore',
+      description: 'Discarded subtask',
+      message_id: 'discarded-answer',
+    })
+    store.handleSessionStatus('session-1', 'idle', { message_id: 'discarded-answer' })
+    expect(store.sessions[0]?.status).toBe('busy')
+    expect(store.messagesBySession['session-1']?.map((message) => message.id)).toEqual([
+      'earlier-user',
+      'earlier-answer',
+      'new-user',
+      'new-answer',
+    ])
+    expect(store.messagesBySession['session-1']?.slice(-1)[0]?.content).toBe('Fresh response')
+  })
+
+  it('restores the full transcript when an edit is rejected', async () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession()]
+    const original = [
+      makeMessage(),
+      makeMessage({
+        id: 'answer',
+        role: 'assistant',
+        content: 'Original response',
+        parts: [
+          {
+            id: 'tool',
+            session_id: 'session-1',
+            type: 'tool',
+            state: 'completed',
+            title: 'Read',
+            input: { arguments: '{}' },
+            output: 'Full tool output',
+            detail_loaded: true,
+          },
+        ],
+      }),
+    ]
+    store.messagesBySession['session-1'] = structuredClone(original)
+    editMock.mockRejectedValueOnce(new ApiRequestError(409, 'active run', 'conflict'))
+
+    await store.editMessage('session-1', 'msg-1', 'edited')
+
+    expect(store.messagesBySession['session-1']).toEqual(original)
+    store.handlePartUpdated('session-1', { text: ' continued' }, { messageId: 'answer' })
+    expect(store.messagesBySession['session-1']?.slice(-1)[0]?.content).toBe(
+      'Original response continued',
+    )
+  })
+
   it('editMessage forwards mode/model/effort overrides', async () => {
     const store = useHarnessStore()
     store.sessions = [makeSession()]
@@ -178,6 +300,7 @@ describe('harness store fork/edit', () => {
       skill_ids: undefined,
       reasoning_effort: 'low',
     })
+    expect(useRecentModels().entries.value[0]).toEqual({ id: 'acme/other', effort: 'low' })
   })
 
   it('editMessage maps 409 to an Agent-is-running notification', async () => {

@@ -821,7 +821,7 @@ describe('HarnessChatPanel', () => {
     expect(store.activeSessionId).toBe('session-child')
   })
 
-  it('disables message edit/fork actions while the active session is busy', async () => {
+  it('keeps message edit available but flags the busy session to the container', async () => {
     const wrapper = mount(HarnessChatPanel, {
       props: {
         workspaceId: 'ws-1',
@@ -840,7 +840,8 @@ describe('HarnessChatPanel', () => {
     await wrapper.vm.$nextTick()
 
     const container = wrapper.findComponent({ name: 'HarnessChatContainer' })
-    expect(container.props('disabled')).toBe(true)
+    expect(container.props('disabled')).toBe(false)
+    expect(container.props('busy')).toBe(true)
   })
 
   it('enables message edit/fork actions on idle root sessions', async () => {
@@ -919,10 +920,74 @@ describe('HarnessChatPanel', () => {
     await flushPromises()
     const spy = vi.spyOn(store, 'editMessage').mockResolvedValue(undefined)
 
-    wrapper.findComponent({ name: 'HarnessChatContainer' }).vm.$emit('edit', 'user-1', 'edited')
+    wrapper
+      .findComponent({ name: 'HarnessChatContainer' })
+      .vm.$emit('edit', 'user-1', 'edited', { model: 'acme/other', effort: 'low' })
     await flushPromises()
 
-    expect(spy).toHaveBeenCalledWith('session-root', 'user-1', 'edited')
+    expect(spy).toHaveBeenCalledWith('session-root', 'user-1', 'edited', {
+      model: 'acme/other',
+      reasoningEffort: 'low',
+    })
+  })
+
+  it('stops a busy session before rerunning an edit and restores queued steers', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: { workspaceId: 'ws-1', canPrompt: true },
+      global: { plugins: [router], stubs },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'busy' })]
+    store.setActiveSession('session-root')
+    await flushPromises()
+    const calls: string[] = []
+    const abort = vi.spyOn(store, 'abortSession').mockImplementation(async () => {
+      calls.push('abort')
+      store.sessions = [makeSession({ status: 'idle' })]
+      return ['queued steer']
+    })
+    const edit = vi.spyOn(store, 'editMessage').mockImplementation(async () => {
+      calls.push('edit')
+    })
+
+    wrapper
+      .findComponent({ name: 'HarnessChatContainer' })
+      .vm.$emit('edit', 'user-1', 'same prompt', { model: 'm', effort: '' })
+    await flushPromises()
+
+    expect(abort).toHaveBeenCalledWith('session-root')
+    expect(edit).toHaveBeenCalledWith('session-root', 'user-1', 'same prompt', {
+      model: 'm',
+      reasoningEffort: '',
+    })
+    expect(calls).toEqual(['abort', 'edit'])
+    const input = wrapper.findComponent(HarnessChatInputStub)
+    expect(input.emitted('prefill')).toEqual([['queued steer', { append: true }]])
+  })
+
+  it('does not rerun an edit when stopping the busy session failed', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: { workspaceId: 'ws-1', canPrompt: true },
+      global: { plugins: [router], stubs },
+    })
+    await flushPromises()
+
+    const store = useHarnessStore()
+    store.sessions = [makeSession({ status: 'busy' })]
+    store.setActiveSession('session-root')
+    await flushPromises()
+    const abort = vi.spyOn(store, 'abortSession').mockResolvedValue([])
+    const edit = vi.spyOn(store, 'editMessage').mockResolvedValue(undefined)
+
+    wrapper
+      .findComponent({ name: 'HarnessChatContainer' })
+      .vm.$emit('edit', 'user-1', 'edited', { model: 'm', effort: '' })
+    await flushPromises()
+
+    expect(abort).toHaveBeenCalledWith('session-root')
+    expect(edit).not.toHaveBeenCalled()
   })
 
   it.each(['original', ''])(

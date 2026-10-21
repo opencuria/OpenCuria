@@ -117,6 +117,8 @@ export const useHarnessStore = defineStore('harness', () => {
   const partFetches = new Map<string, Promise<void>>()
   const todoFetches = new Map<string, Promise<void>>()
   const partGenerations = new Map<string, number>()
+  /** Deleted edit suffixes must not be resurrected by stale snapshots or events. */
+  const discardedMessageIds = new Map<string, Set<string>>()
   const detailGenerations = new Map<string, number>()
   const detailFetches = new Map<string, Promise<boolean>>()
   const detailCache = new Map<string, HarnessPart>()
@@ -314,14 +316,19 @@ export const useHarnessStore = defineStore('harness', () => {
     return protectedIds
   }
 
-  function forgetTranscript(sessionId: string): void {
-    transcriptLru.delete(sessionId)
+  function invalidatePartFetches(sessionId: string): void {
     partGenerations.set(sessionId, (partGenerations.get(sessionId) ?? 0) + 1)
-    detailGenerations.set(sessionId, (detailGenerations.get(sessionId) ?? 0) + 1)
-    todoGenerations.set(sessionId, (todoGenerations.get(sessionId) ?? 0) + 1)
     for (const key of partFetches.keys()) {
       if (key.startsWith(`${sessionId}:`)) partFetches.delete(key)
     }
+  }
+
+  function forgetTranscript(sessionId: string): void {
+    transcriptLru.delete(sessionId)
+    discardedMessageIds.delete(sessionId)
+    invalidatePartFetches(sessionId)
+    detailGenerations.set(sessionId, (detailGenerations.get(sessionId) ?? 0) + 1)
+    todoGenerations.set(sessionId, (todoGenerations.get(sessionId) ?? 0) + 1)
     for (const key of detailFetches.keys()) {
       if (key.startsWith(`${sessionId}:`)) detailFetches.delete(key)
     }
@@ -398,6 +405,7 @@ export const useHarnessStore = defineStore('harness', () => {
     }
     transcriptLru.clear()
     partFetches.clear()
+    discardedMessageIds.clear()
     detailFetches.clear()
     todoFetches.clear()
     detailCache.clear()
@@ -704,37 +712,39 @@ export const useHarnessStore = defineStore('harness', () => {
             previous.flatMap((row) => row.parts.map((part) => [part.id, part] as const)),
           )
           const incoming = sortHarnessMessages(
-            response.messages.map((message) => {
-              const parts = (message.parts ?? []).map((part) => {
-                const prior = previousByPart.get(part.id)
-                const cached = detailCache.get(`${sessionId}:${part.id}`)
-                const source = prior?.detail_loaded ? prior : cached
-                const mergedPart = source
-                  ? {
-                      ...part,
-                      input: source.input,
-                      output: source.output,
-                      meta: source.meta,
-                      detail_loaded: true,
-                    }
-                  : part
-                const hydratedPart = hydrateHarnessPart({
-                  ...mergedPart,
-                  session_id: sessionId,
-                  message_id: message.id,
+            response.messages
+              .filter((message) => !isDiscardedMessage(sessionId, message.id))
+              .map((message) => {
+                const parts = (message.parts ?? []).map((part) => {
+                  const prior = previousByPart.get(part.id)
+                  const cached = detailCache.get(`${sessionId}:${part.id}`)
+                  const source = prior?.detail_loaded ? prior : cached
+                  const mergedPart = source
+                    ? {
+                        ...part,
+                        input: source.input,
+                        output: source.output,
+                        meta: source.meta,
+                        detail_loaded: true,
+                      }
+                    : part
+                  const hydratedPart = hydrateHarnessPart({
+                    ...mergedPart,
+                    session_id: sessionId,
+                    message_id: message.id,
+                  })
+                  if (hydratedPart.detail_loaded) rememberPartDetail(sessionId, hydratedPart)
+                  return hydratedPart
                 })
-                if (hydratedPart.detail_loaded) rememberPartDetail(sessionId, hydratedPart)
-                return hydratedPart
-              })
-              const content =
-                message.role === 'assistant' && !message.content
-                  ? parts
-                      .filter((part) => part.type === 'text')
-                      .map((part) => part.output)
-                      .join('')
-                  : message.content
-              return { ...message, content, session_id: sessionId, parts }
-            }),
+                const content =
+                  message.role === 'assistant' && !message.content
+                    ? parts
+                        .filter((part) => part.type === 'text')
+                        .map((part) => part.output)
+                        .join('')
+                    : message.content
+                return { ...message, content, session_id: sessionId, parts }
+              }),
           )
           const session = sessions.value.find((item) => item.id === sessionId)
           messagesBySession.value[sessionId] =
@@ -904,7 +914,7 @@ export const useHarnessStore = defineStore('harness', () => {
    * user message that opened the run is unknown locally.
    */
   async function ensureUserTurnLoaded(sessionId: string, userMessageId: string): Promise<void> {
-    if (userTurnRequests.has(sessionId)) return
+    if (userTurnRequests.has(sessionId) || isDiscardedMessage(sessionId, userMessageId)) return
     if (!sessions.value.some((item) => item.id === sessionId)) return
     const messages = messagesBySession.value[sessionId] ?? []
     if (messages.some((message) => message.id === userMessageId)) return
@@ -1122,9 +1132,9 @@ export const useHarnessStore = defineStore('harness', () => {
   }
 
   /**
-   * Edit a user message and rerun the session from there (OpenCode
-   * `session.revert` parity). The panel socket refetches on
-   * `session_status:idle`; an optimistic fetch covers the gap.
+   * Replace the edited suffix immediately, then reconcile the fresh server ids.
+   * Normal busy merges preserve missing rows, so explicitly retire the deleted
+   * suffix and invalidate Stop's in-flight fetches before admitting the new run.
    */
   async function editMessage(
     sessionId: string,
@@ -1140,8 +1150,30 @@ export const useHarnessStore = defineStore('harness', () => {
     if (sessionTransitioning(sessionId)) return
     const notifications = useNotificationStore()
     await trackUserTurn(sessionId, async () => {
+      const previous = messagesBySession.value[sessionId]
+      const cutoff = previous?.findIndex((message) => message.id === messageId) ?? -1
+      const previousDiscarded = discardedMessageIds.get(sessionId)
+      if (previous && cutoff !== -1) {
+        discardedMessageIds.set(
+          sessionId,
+          new Set([
+            ...(previousDiscarded ?? []),
+            ...previous.slice(cutoff).map((message) => message.id),
+          ]),
+        )
+        messagesBySession.value[sessionId] = [
+          ...previous.slice(0, cutoff),
+          {
+            ...previous[cutoff]!,
+            id: `local-edit-${messageId}`,
+            content: prompt.trim(),
+            skill_ids: options.skillIds ?? previous[cutoff]!.skill_ids,
+          },
+        ]
+      }
+      invalidatePartFetches(sessionId)
+      invalidatePartDetails(sessionId)
       try {
-        invalidatePartDetails(sessionId, true)
         const session = await editHarnessMessage(sessionId, messageId, {
           prompt,
           mode: options.mode,
@@ -1150,8 +1182,16 @@ export const useHarnessStore = defineStore('harness', () => {
           reasoning_effort: options.reasoningEffort,
         })
         upsertSession(session)
+        // A refresh started during admission may still contain the old suffix.
+        invalidatePartFetches(sessionId)
         await fetchParts(sessionId)
+        if (session.harness_id !== 'claude')
+          recordRecentModelUsage(options.model ?? '', options.reasoningEffort ?? '')
       } catch (e: unknown) {
+        invalidatePartFetches(sessionId)
+        if (previous && cutoff !== -1) messagesBySession.value[sessionId] = previous
+        if (previousDiscarded) discardedMessageIds.set(sessionId, previousDiscarded)
+        else discardedMessageIds.delete(sessionId)
         if (e instanceof ApiRequestError && e.status === 409) {
           notifications.error('Agent is running — stop it before editing this message.', e.message)
           return
@@ -1170,6 +1210,10 @@ export const useHarnessStore = defineStore('harness', () => {
     }
   }
 
+  function isDiscardedMessage(sessionId: string, messageId?: string): boolean {
+    return Boolean(messageId && discardedMessageIds.get(sessionId)?.has(messageId))
+  }
+
   // --- Real-time reducers (called from socket handlers) ---
 
   /**
@@ -1185,6 +1229,7 @@ export const useHarnessStore = defineStore('harness', () => {
     sessionId: string,
     messageId?: string,
   ): { messages: HarnessMessage[]; message: HarnessMessage } | null {
+    if (isDiscardedMessage(sessionId, messageId)) return null
     const messages = messagesFor(sessionId)
     if (!messageId) {
       return { messages, message: ensureAssistantMessage(messages, sessionId) }
@@ -1331,6 +1376,7 @@ export const useHarnessStore = defineStore('harness', () => {
       user_message_id?: string
     },
   ): void {
+    if (isDiscardedMessage(sessionId, extras?.message_id)) return
     const session = sessions.value.find((s) => s.id === sessionId)
     if (session) {
       session.status = status
