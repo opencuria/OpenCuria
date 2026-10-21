@@ -31,8 +31,9 @@ class _FakeResolver:
 
 
 class _FakeHarnessGateway:
-    def __init__(self):
+    def __init__(self, *, busy=False):
         self.calls = []
+        self.busy = busy
 
     def route_harness_result(self, data):
         self.calls.append(("result", data))
@@ -60,6 +61,14 @@ class _FakeHarnessGateway:
     def has_busy_computeruse_session(self, workspace_id):
         self.calls.append(("busy", workspace_id))
         return False
+
+    def has_busy_session(self, workspace_id):
+        self.calls.append(("busy_session", workspace_id))
+        return self.busy
+
+    async def abort_busy_computeruse(self, workspace_id):
+        self.calls.append(("abort_computeruse", workspace_id))
+        return [uuid.UUID(int=1)]
 
 
 async def _fake_emit(event, data, workspace_id):
@@ -153,6 +162,58 @@ def test_viewer_rpc_maps_harness_failures_to_conflict():
         gateway.desktop_action = _fail
         with pytest.raises(ConflictError, match="could not be confirmed"):
             asyncio.run(svc._viewer_rpc(workspace_id, "status", {}))
+
+
+def test_take_desktop_control_checks_availability_before_gateway():
+    from common.exceptions import ConflictError
+
+    gateway = _FakeHarnessGateway()
+    svc = RunnerService(harness_gateway=gateway)
+    workspace = types.SimpleNamespace(
+        id=uuid.uuid4(), status="running", active_operation=None, current_task_id=None
+    )
+    assert asyncio.run(svc.take_desktop_control(workspace)) == [uuid.UUID(int=1)]
+    assert gateway.calls == [("abort_computeruse", workspace.id)]
+
+    gateway.calls.clear()
+    workspace.active_operation = "stopping"
+    with pytest.raises(ConflictError):
+        asyncio.run(svc.take_desktop_control(workspace))
+    assert gateway.calls == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_lifecycle_admissions_ask_gateway_for_busy_agents(runner, user):
+    """Capture, recreate and auto-stop take the busy check from the port."""
+    from datetime import timedelta
+
+    from asgiref.sync import async_to_sync
+    from django.utils import timezone
+
+    from apps.runners.models import Task
+    from apps.runners.tests.test_image_versions import make_line, qemu_workspace
+    from common.exceptions import ConflictError
+
+    runner.organization.workspace_auto_stop_timeout_minutes = 1
+    runner.organization.save(update_fields=["workspace_auto_stop_timeout_minutes"])
+    _, (v1,) = make_line(runner, user)
+    workspace = qemu_workspace(runner, user, v1)
+    workspace.last_activity_at = timezone.now() - timedelta(hours=1)
+    workspace.save(update_fields=["last_activity_at"])
+    gateway = _FakeHarnessGateway(busy=True)
+    svc = RunnerService(harness_gateway=gateway)
+
+    with pytest.raises(ConflictError, match="agent is active"):
+        async_to_sync(svc.create_image_artifact)(workspace.id, "capture")
+    with pytest.raises(ConflictError, match="agent is active"):
+        async_to_sync(svc.recreate_workspace)(workspace.id, v1.id)
+    with pytest.raises(ConflictError, match="no longer eligible"):
+        async_to_sync(svc.stop_workspace)(workspace.id, auto_stop=True)
+
+    assert gateway.calls == [("busy_session", workspace.id)] * 3
+    workspace.refresh_from_db()
+    assert workspace.active_operation is None
+    assert not Task.objects.filter(workspace=workspace).exists()
 
 
 def test_constructor_repositories_and_stores():

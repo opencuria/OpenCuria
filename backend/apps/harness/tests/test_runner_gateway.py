@@ -101,3 +101,36 @@ def test_has_busy_computeruse_session(monkeypatch, sessions, expected):
     workspace_id = uuid.uuid4()
     assert RunnerHarnessGateway().has_busy_computeruse_session(workspace_id) is expected
     lookup.assert_called_once_with(workspace_id)
+
+
+@pytest.mark.django_db
+def test_has_busy_session_sees_any_busy_session_in_the_workspace(
+    harness_workspace,
+):
+    gateway = RunnerHarnessGateway()
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+    )
+    assert gateway.has_busy_session(harness_workspace.id) is False
+    HarnessSessionRepository.mark_status(session, "busy")
+    assert gateway.has_busy_session(harness_workspace.id) is True
+    assert gateway.has_busy_session(uuid.uuid4()) is False
+
+
+def test_abort_busy_computeruse_returns_aborted_session_ids(monkeypatch):
+    aborted = [SimpleNamespace(id=uuid.uuid4()), SimpleNamespace(id=uuid.uuid4())]
+    calls = []
+
+    async def _abort(workspace_id):
+        calls.append(workspace_id)
+        return aborted
+
+    monkeypatch.setattr(
+        "apps.harness.runner_gateway.get_harness_service",
+        lambda: SimpleNamespace(abort_busy_computeruse_for_workspace=_abort),
+    )
+    workspace_id = uuid.uuid4()
+    result = asyncio.run(RunnerHarnessGateway().abort_busy_computeruse(workspace_id))
+    assert result == [session.id for session in aborted]
+    assert calls == [workspace_id]

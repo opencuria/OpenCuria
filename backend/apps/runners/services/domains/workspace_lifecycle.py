@@ -619,6 +619,7 @@ class WorkspaceLifecycleMixin:
                 workspace_id,
                 idle_before=idle_before,
                 expected_timeout_minutes=timeout_minutes,
+                has_busy_agent=self._harness().has_busy_session,
             )
             if workspace is None:
                 raise ConflictError(
@@ -803,6 +804,7 @@ class WorkspaceLifecycleMixin:
         )(
             workspace_id,
             image_id,
+            has_busy_agent=self._harness().has_busy_session,
             requested_by=user,
             qemu_disk_size_gb=disk_size_gb,
         )

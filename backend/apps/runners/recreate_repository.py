@@ -8,6 +8,7 @@ kept; only the runner runtime and disk are recreated under the same id.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 
 from django.db import transaction
 
@@ -88,10 +89,15 @@ class RecreateRepository:
         workspace_id: uuid.UUID,
         image_id: uuid.UUID,
         *,
+        has_busy_agent: Callable[[uuid.UUID], bool],
         requested_by=None,
         qemu_disk_size_gb: int | None = None,
     ) -> tuple[Workspace, Task, WorkspaceRecreateRequest]:
-        """Validate everything up front, then reserve the remove child atomically."""
+        """Validate everything up front, then reserve the remove child atomically.
+
+        ``has_busy_agent`` is the harness busy check, evaluated under the
+        runner lock that also serializes agent run admission.
+        """
         with transaction.atomic():
             runner_id = Workspace.objects.values_list("runner_id", flat=True).get(
                 pk=workspace_id
@@ -102,7 +108,7 @@ class RecreateRepository:
                 .select_related("runner")
                 .get(pk=workspace_id)
             )
-            RecreateRepository._ensure_idle(ws)
+            RecreateRepository._ensure_idle(ws, has_busy_agent)
             target = RecreateRepository._lock_target(ws, image_id)
             reason = (
                 WorkspaceRecreateRequest.Reason.RESET
@@ -123,7 +129,9 @@ class RecreateRepository:
             return ws, task, request
 
     @staticmethod
-    def _ensure_idle(ws: Workspace) -> None:
+    def _ensure_idle(
+        ws: Workspace, has_busy_agent: Callable[[uuid.UUID], bool]
+    ) -> None:
         """Reject every state in which destroying the runtime is not well defined."""
         for deletion in ImageDeletionRequest.objects.filter(
             organization_id=ws.runner.organization_id, mode="force"
@@ -151,9 +159,7 @@ class RecreateRepository:
             raise ConflictError(
                 "Workspace credentials are synchronizing. Try again in a moment."
             )
-        from apps.harness.models import HarnessSession
-
-        if HarnessSession.objects.filter(workspace=ws, status="busy").exists():
+        if has_busy_agent(ws.id):
             raise ConflictError(
                 "An agent is active or waiting for an answer or approval. "
                 "Finish or stop it before resetting this workspace."

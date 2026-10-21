@@ -23,6 +23,7 @@ from apps.runners.models import (
 from apps.runners.operations import apply_result
 from apps.runners.services import RunnerService
 from apps.runners.services.deletion import DeletionService
+from apps.runners.tests.conftest import has_busy_agent
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -353,7 +354,7 @@ def test_retirement_blocks_clone_and_capture(runner, user):
     with transaction.atomic(), pytest.raises(ConflictError, match="ready"):
         ImageGenerationRepository.validate_selection(base.id)
     with pytest.raises(ConflictError, match="retired"):
-        CaptureRepository.allocate(ws.id, "new capture")
+        CaptureRepository.allocate(ws.id, "new capture", has_busy_agent=has_busy_agent)
 
 
 def test_false_and_stale_task_success_fenced(runner, user):

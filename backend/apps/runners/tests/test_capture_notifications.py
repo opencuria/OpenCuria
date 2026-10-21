@@ -16,6 +16,7 @@ from apps.runners.models import (
 )
 from apps.runners.operations import OperationRepository
 from apps.runners.services.recovery import RecoveryService
+from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_capture_pipeline import result
 from apps.runners.tests.test_services import service as service
 from apps.runners.tests.test_services import sio_mock as sio_mock
@@ -45,7 +46,9 @@ def test_unknown_result_notifies_only_after_commit(
 ):
     workspace.runtime_type = "qemu"
     workspace.save()
-    _, child = CaptureRepository.allocate(workspace.id, "capture")
+    _, child = CaptureRepository.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
     diagnostic = "Unknown outcome; intervention required"
     with transaction.atomic():
         assert not result(
@@ -85,7 +88,9 @@ def test_child_result_rollback_discards_changes_and_events(
     workspace.runtime_type = "qemu"
     workspace.credentials_present = True
     workspace.save()
-    _, child = CaptureRepository.allocate(workspace.id, "capture")
+    _, child = CaptureRepository.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
     request = CaptureRequest.objects.get(workspace=workspace)
     if phase in {"capture", "resume"}:
         assert result(
@@ -166,7 +171,9 @@ def test_deadline_intervention_tick_and_recovery_flags(
 ):
     workspace.runtime_type = "qemu"
     workspace.save()
-    _, child = CaptureRepository.allocate(workspace.id, "capture")
+    _, child = CaptureRepository.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
     diagnostic = "Unknown capture deadline"
     OperationRepository.intervene(child, diagnostic)
     notification = {
@@ -203,7 +210,9 @@ def test_completed_duplicate_ticks_notify_exactly_once(
     workspace = stopped_workspace
     workspace.runtime_type = "qemu"
     workspace.save()
-    _, child = CaptureRepository.allocate(workspace.id, "capture")
+    _, child = CaptureRepository.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
     assert result(
         service,
         runner,
@@ -250,7 +259,9 @@ async def test_async_operation_projection_without_unsafe_orm(
     def allocate():
         workspace.runtime_type = "qemu"
         workspace.save()
-        CaptureRepository.allocate(workspace.id, "capture")
+        CaptureRepository.allocate(
+            workspace.id, "capture", has_busy_agent=has_busy_agent
+        )
 
     await sync_to_async(allocate)()
     service._forward_workspace_operation(str(workspace.id), None)

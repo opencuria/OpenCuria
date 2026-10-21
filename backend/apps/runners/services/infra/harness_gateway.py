@@ -2,8 +2,8 @@
 
 The harness app depends on runners, never the other way round. It
 registers its gateway implementation from ``HarnessConfig.ready()`` and
-the runner service resolves it here, so ``apps.runners.services`` stays
-free of ``apps.harness`` imports.
+the runner service resolves it here, so ``apps.runners`` stays free of
+``apps.harness`` imports (guarded by ``tests/test_dependency_direction.py``).
 """
 
 from __future__ import annotations

@@ -247,12 +247,16 @@ async def test_nested_abort_settles_before_capture_and_blocks_child_resume(
         sessions = tree(root)
         with pytest.raises(ConflictError, match="agent is active"):
             await sync_to_async(CaptureRepository.allocate)(
-                harness_workspace.id, "blocked capture"
+                harness_workspace.id,
+                "blocked capture",
+                has_busy_agent=HarnessSessionRepository.has_busy_for_workspace,
             )
         await service.abort_run(root.id)
         assert_user_abort(service, sessions)
         await sync_to_async(CaptureRepository.allocate)(
-            harness_workspace.id, "after tree abort"
+            harness_workspace.id,
+            "after tree abort",
+            has_busy_agent=HarnessSessionRepository.has_busy_for_workspace,
         )
         leaf = sessions[-1]
         before = HarnessMessageRepository.list_for_session(leaf.id)
@@ -312,7 +316,9 @@ async def test_capture_between_abort_join_and_gate_cleanup_keeps_tree_cleanup(
                 ).exists()
                 captured.append(
                     await sync_to_async(CaptureRepository.allocate)(
-                        harness_workspace.id, "during stop cleanup"
+                        harness_workspace.id,
+                        "during stop cleanup",
+                        has_busy_agent=HarnessSessionRepository.has_busy_for_workspace,
                     )
                 )
             await original_reject(session)

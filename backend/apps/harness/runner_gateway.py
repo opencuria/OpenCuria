@@ -13,6 +13,7 @@ from typing import Any
 from apps.runners.exceptions import HarnessActionError
 
 from .access import runner_accessor
+from .harness_service import get_harness_service
 from .repositories import HarnessSessionRepository
 
 
@@ -60,3 +61,14 @@ class RunnerHarnessGateway:
                 workspace_id
             )
         )
+
+    def has_busy_session(self, workspace_id: uuid.UUID) -> bool:
+        """Return True when any agent session in the workspace is busy."""
+        return HarnessSessionRepository.has_busy_for_workspace(workspace_id)
+
+    async def abort_busy_computeruse(self, workspace_id: uuid.UUID) -> list[uuid.UUID]:
+        """Abort busy computer-use sessions and return their session ids."""
+        aborted = await get_harness_service().abort_busy_computeruse_for_workspace(
+            workspace_id
+        )
+        return [session.id for session in aborted]

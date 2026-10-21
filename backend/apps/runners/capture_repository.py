@@ -1,6 +1,7 @@
 """Atomic capture phase allocation with exact runner publication identity."""
 
 import uuid
+from collections.abc import Callable
 
 from django.db import transaction
 
@@ -32,10 +33,15 @@ class CaptureRepository:
         workspace_id: uuid.UUID,
         name: str = "",
         *,
+        has_busy_agent: Callable[[uuid.UUID], bool],
         captured_image_id: uuid.UUID | None = None,
         message: str = "",
     ) -> tuple[Workspace, Task]:
-        """Atomically reserve an automatic stop/capture/replace operation."""
+        """Atomically reserve an automatic stop/capture/replace operation.
+
+        ``has_busy_agent`` is the harness busy check, evaluated under the
+        runner lock that also serializes agent run admission.
+        """
         with transaction.atomic():
             runner_id = Workspace.objects.values_list("runner_id", flat=True).get(
                 pk=workspace_id
@@ -78,9 +84,7 @@ class CaptureRepository:
                 raise ConflictError("Only QEMU supports capture")
             if ws.status not in ["running", "stopped"]:
                 raise ConflictError("Capture requires a running or stopped workspace")
-            from apps.harness.models import HarnessSession
-
-            if HarnessSession.objects.filter(workspace=ws, status="busy").exists():
+            if has_busy_agent(ws.id):
                 raise ConflictError(
                     "An agent is active or waiting for an answer or approval. "
                     "Finish or stop it before capturing this workspace."

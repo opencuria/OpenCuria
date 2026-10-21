@@ -9,6 +9,7 @@ from data access and makes services easy to test with mock repositories.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -503,13 +504,15 @@ class WorkspaceRepository:
         *,
         idle_before: datetime,
         expected_timeout_minutes: int,
+        has_busy_agent: Callable[[uuid.UUID], bool],
     ) -> Workspace | None:
         """Atomically claim an idle workspace for an inactivity stop.
 
-        The service supplies the policy-derived cutoff. Under the same row
-        lock used by scheduled admission, verify the workspace is still
-        running/idle and the configured timeout has not changed, then claim
-        STOPPING. Returning None means state changed before the claim.
+        The service supplies the policy-derived cutoff and the harness busy
+        check. Under the same row lock used by scheduled admission, verify the
+        workspace is still running/idle and the configured timeout has not
+        changed, then claim STOPPING. Returning None means state changed
+        before the claim.
         """
         with transaction.atomic():
             identity = (
@@ -536,11 +539,7 @@ class WorkspaceRepository:
                 .values_list("runner__status", flat=True)
                 .first()
             )
-            from apps.harness.models import HarnessSession
-
-            has_busy_session = HarnessSession.objects.filter(
-                workspace_id=workspace_id, status="busy"
-            ).exists()
+            has_busy_session = has_busy_agent(workspace_id)
             if (
                 workspace.status != WorkspaceStatus.RUNNING
                 or workspace.active_operation is not None

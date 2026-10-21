@@ -443,6 +443,7 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         workspace, task = await sync_to_async(CaptureRepository.allocate)(
             workspace_id,
             name,
+            has_busy_agent=self._harness().has_busy_session,
             captured_image_id=captured_image_id,
             message=message,
         )

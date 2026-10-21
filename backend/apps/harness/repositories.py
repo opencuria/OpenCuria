@@ -549,6 +549,13 @@ class HarnessSessionRepository:
         return list(HarnessSession.objects.filter(id__in=session_ids))
 
     @staticmethod
+    def has_busy_for_workspace(workspace_id: uuid.UUID) -> bool:
+        """Return True when any session in *workspace_id* is busy."""
+        return HarnessSession.objects.filter(
+            workspace_id=workspace_id, status=HarnessSessionStatus.BUSY
+        ).exists()
+
+    @staticmethod
     def list_busy_computeruse_for_workspace(
         workspace_id: uuid.UUID,
     ) -> list[HarnessSession]:

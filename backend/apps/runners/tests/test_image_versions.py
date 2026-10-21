@@ -24,6 +24,7 @@ from apps.runners.recreate_repository import RecreateRepository
 from apps.runners.repositories import ImageGenerationRepository
 from apps.runners.retention_repository import RetentionRepository
 from apps.runners.services.deletion import DeletionService
+from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_capture_pipeline import result
 from apps.runners.tests.test_services import service as service
 from apps.runners.tests.test_services import sio_mock as sio_mock
@@ -80,7 +81,9 @@ def drive(service, runner, request, event, **extra):
 
 def test_new_image_capture_creates_line_with_v1(runner, user):
     ws = qemu_workspace(runner, user, None, status=WorkspaceStatus.STOPPED)
-    CaptureRepository.allocate(ws.id, "  My image ", message=" first ")
+    CaptureRepository.allocate(
+        ws.id, "  My image ", message=" first ", has_busy_agent=has_busy_agent
+    )
     image = ImageInstance.objects.get(origin_workspace=ws)
     assert image.captured_image.name == "My image"
     assert image.generation == 1 and image.message == "first"
@@ -90,7 +93,9 @@ def test_new_image_capture_creates_line_with_v1(runner, user):
 def test_new_version_numbers_are_monotonic_and_never_reused(runner, user):
     line, (v1, _failed) = make_line(runner, user, ("ready", "failed"))
     ws = qemu_workspace(runner, user, v1, status=WorkspaceStatus.STOPPED)
-    CaptureRepository.allocate(ws.id, captured_image_id=line.id, message="next")
+    CaptureRepository.allocate(
+        ws.id, captured_image_id=line.id, message="next", has_busy_agent=has_busy_agent
+    )
     image = ImageInstance.objects.get(origin_workspace=ws)
     assert image.captured_image_id == line.id and image.generation == 3
 
@@ -105,14 +110,20 @@ def test_new_version_preconditions(runner, user, organization):
     line, (v1,) = make_line(runner, user)
     ws = qemu_workspace(runner, user, v1, status=WorkspaceStatus.STOPPED)
     with pytest.raises(ConflictError, match="name is required"):
-        CaptureRepository.allocate(ws.id, " ")
+        CaptureRepository.allocate(ws.id, " ", has_busy_agent=has_busy_agent)
     with pytest.raises(NotFoundError):
-        CaptureRepository.allocate(ws.id, captured_image_id=foreign_line.id)
+        CaptureRepository.allocate(
+            ws.id, captured_image_id=foreign_line.id, has_busy_agent=has_busy_agent
+        )
     with pytest.raises(ConflictError, match="runner"):
-        CaptureRepository.allocate(ws.id, captured_image_id=remote_line.id)
+        CaptureRepository.allocate(
+            ws.id, captured_image_id=remote_line.id, has_busy_agent=has_busy_agent
+        )
     CapturedImage.objects.filter(pk=line.id).update(status="pending_deletion")
     with pytest.raises(ConflictError, match="being deleted"):
-        CaptureRepository.allocate(ws.id, captured_image_id=line.id)
+        CaptureRepository.allocate(
+            ws.id, captured_image_id=line.id, has_busy_agent=has_busy_agent
+        )
     CapturedImage.objects.filter(pk=line.id).update(status="active")
     ImageInstance.objects.create(
         runner=runner,
@@ -123,7 +134,9 @@ def test_new_version_preconditions(runner, user, organization):
         status="capturing",
     )
     with pytest.raises(ConflictError, match="being captured"):
-        CaptureRepository.allocate(ws.id, captured_image_id=line.id)
+        CaptureRepository.allocate(
+            ws.id, captured_image_id=line.id, has_busy_agent=has_busy_agent
+        )
     assert not CapturedImage.objects.filter(name="").exists()
 
 
@@ -148,7 +161,9 @@ def test_reset_keeps_identity_and_reprovisions_same_version(service, runner, use
     session = HarnessSession.objects.create(
         workspace=ws, organization_id=runner.organization_id, status="idle"
     )
-    _, remove, request = RecreateRepository.allocate(ws.id, v1.id)
+    _, remove, request = RecreateRepository.allocate(
+        ws.id, v1.id, has_busy_agent=has_busy_agent
+    )
     assert request.reason == "reset" and remove.type == "remove_workspace"
     ws.refresh_from_db()
     assert ws.active_operation == "resetting"
@@ -188,7 +203,9 @@ def test_reset_keeps_identity_and_reprovisions_same_version(service, runner, use
 def test_update_moves_to_latest_and_releases_old_pin(service, runner, user):
     _, (v1, v2) = make_line(runner, user, ("ready", "ready"))
     ws = qemu_workspace(runner, user, v1)
-    _, _, request = RecreateRepository.allocate(ws.id, v2.id)
+    _, _, request = RecreateRepository.allocate(
+        ws.id, v2.id, has_busy_agent=has_busy_agent
+    )
     assert request.reason == "update"
     assert ImageLineRepository.pin_counts([v1.id, v2.id]) == {v1.id: 1, v2.id: 1}
     drive(service, runner, request, "workspace:removed", result="deleted")
@@ -202,11 +219,13 @@ def test_update_rejects_stale_and_foreign_targets(runner, user):
     _, (other,) = make_line(runner, user, name="Other")
     ws = qemu_workspace(runner, user, v1)
     with pytest.raises(ConflictError, match="newer"):
-        RecreateRepository.allocate(ws.id, v2.id)
+        RecreateRepository.allocate(ws.id, v2.id, has_busy_agent=has_busy_agent)
     with pytest.raises(ConflictError, match="latest version of its image"):
-        RecreateRepository.allocate(ws.id, other.id)
+        RecreateRepository.allocate(ws.id, other.id, has_busy_agent=has_busy_agent)
     assert not WorkspaceRecreateRequest.objects.exists()
-    _, _, request = RecreateRepository.allocate(ws.id, v3.id)
+    _, _, request = RecreateRepository.allocate(
+        ws.id, v3.id, has_busy_agent=has_busy_agent
+    )
     assert request.reason == "update"
 
 
@@ -230,7 +249,7 @@ def test_recreate_rejects_undefined_states(runner, user, state):
             workspace=ws, organization_id=runner.organization_id, status="busy"
         )
     with pytest.raises(ConflictError):
-        RecreateRepository.allocate(ws.id, v1.id)
+        RecreateRepository.allocate(ws.id, v1.id, has_busy_agent=has_busy_agent)
     ws.refresh_from_db()
     assert ws.pending_base_image_instance_id is None
     assert not WorkspaceRecreateRequest.objects.exists()
@@ -241,14 +260,18 @@ def test_remove_failure_fails_workspace_keeps_target_and_allows_retry(
 ):
     _, (v1, v2) = make_line(runner, user, ("ready", "ready"))
     ws = qemu_workspace(runner, user, v1)
-    _, _, request = RecreateRepository.allocate(ws.id, v2.id)
+    _, _, request = RecreateRepository.allocate(
+        ws.id, v2.id, has_busy_agent=has_busy_agent
+    )
     done = drive(service, runner, request, "workspace:error", error="disk busy")
     assert done[0]["phase"] == "failed" and "Retry" in done[0]["diagnostic"]
     ws.refresh_from_db()
     assert ws.status == "failed" and ws.active_operation is None
     assert ws.pending_base_image_instance_id == v2.id
     assert ws.base_image_instance_id == v1.id
-    _, _, retry = RecreateRepository.allocate(ws.id, v2.id)
+    _, _, retry = RecreateRepository.allocate(
+        ws.id, v2.id, has_busy_agent=has_busy_agent
+    )
     assert retry.phase == "remove" and retry.final_running is True
 
 
@@ -257,14 +280,18 @@ def test_create_failure_fails_workspace_on_target_and_reset_retries(
 ):
     _, (v1, v2) = make_line(runner, user, ("ready", "ready"))
     ws = qemu_workspace(runner, user, v1)
-    _, _, request = RecreateRepository.allocate(ws.id, v2.id)
+    _, _, request = RecreateRepository.allocate(
+        ws.id, v2.id, has_busy_agent=has_busy_agent
+    )
     drive(service, runner, request, "workspace:removed", result="deleted")
     done = drive(service, runner, request, "workspace:error", error="no space")
     assert done[0]["phase"] == "failed" and done[0]["status"] == "failed"
     ws.refresh_from_db()
     assert ws.base_image_instance_id == v2.id
     assert ws.pending_base_image_instance_id is None
-    _, _, retry = RecreateRepository.allocate(ws.id, v2.id)
+    _, _, retry = RecreateRepository.allocate(
+        ws.id, v2.id, has_busy_agent=has_busy_agent
+    )
     assert retry.reason == "reset"
 
 
@@ -273,7 +300,9 @@ def test_stopped_workspace_ends_stopped_and_stop_failure_is_reported(
 ):
     _, (v1,) = make_line(runner, user)
     ws = qemu_workspace(runner, user, v1, status=WorkspaceStatus.STOPPED)
-    _, _, request = RecreateRepository.allocate(ws.id, v1.id)
+    _, _, request = RecreateRepository.allocate(
+        ws.id, v1.id, has_busy_agent=has_busy_agent
+    )
     assert request.final_running is False
     drive(service, runner, request, "workspace:removed", result="deleted")
     assert (
@@ -298,7 +327,7 @@ def test_legacy_workspace_without_base_image_cannot_recreate(runner, user):
     ws = qemu_workspace(runner, user, None)
     _, (v1,) = make_line(runner, user)
     with pytest.raises(ConflictError, match="latest version of its image"):
-        RecreateRepository.allocate(ws.id, v1.id)
+        RecreateRepository.allocate(ws.id, v1.id, has_busy_agent=has_busy_agent)
     assert not WorkspaceRecreateRequest.objects.exists()
     assert ws.pending_base_image_instance_id is None
 
@@ -306,7 +335,7 @@ def test_legacy_workspace_without_base_image_cannot_recreate(runner, user):
 def test_heartbeat_does_not_override_status_during_recreate(service, runner, user):
     _, (v1,) = make_line(runner, user)
     ws = qemu_workspace(runner, user, v1)
-    RecreateRepository.allocate(ws.id, v1.id)
+    RecreateRepository.allocate(ws.id, v1.id, has_busy_agent=has_busy_agent)
     service.handle_heartbeat(
         runner, [{"workspace_id": str(ws.id), "status": "removed"}]
     )

@@ -11,6 +11,7 @@ from apps.harness.permissions.models import PermissionRequest
 from apps.runners.capture_repository import CaptureRepository
 from apps.runners.models import CaptureRequest, ImageInstance, LifecycleCommand, Task
 from apps.runners.operations import OperationRepository, apply_result
+from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_capture_pipeline import result
 from apps.runners.tests.test_services import service as service
 from apps.runners.tests.test_services import sio_mock as sio_mock
@@ -73,7 +74,9 @@ def test_any_busy_session_refuses_capture_without_mutations(
         LifecycleCommand.objects.count(),
     )
     for allocate in [
-        lambda: CaptureRepository.allocate(workspace.id, "capture"),
+        lambda: CaptureRepository.allocate(
+            workspace.id, "capture", has_busy_agent=has_busy_agent
+        ),
         lambda: async_to_sync(service.create_image_artifact)(workspace.id, "capture"),
     ]:
         with pytest.raises(ConflictError, match="agent is active or waiting"):
@@ -117,7 +120,9 @@ def test_foreign_callback_does_not_release_capture_or_emit_events(
 ):
     workspace.runtime_type = "qemu"
     workspace.save()
-    _, child = CaptureRepository.allocate(workspace.id, "capture")
+    _, child = CaptureRepository.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
     row = LifecycleCommand.objects.get(task=child)
     data = OperationRepository.envelope(
         row,
@@ -148,7 +153,9 @@ def test_unknown_stop_preserves_scrub_fence(service, runner, workspace):
     workspace.runtime_type = "qemu"
     workspace.credentials_present = True
     workspace.save()
-    _, child = CaptureRepository.allocate(workspace.id, "capture")
+    _, child = CaptureRepository.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
     for attempt in range(2):
         assert not result(
             service,
@@ -205,11 +212,15 @@ def test_admitted_credential_sync_blocks_capture(runner, workspace, task_status)
     )
     Task.objects.filter(pk=task.id).update(status=task_status)
     with pytest.raises(ConflictError, match="credentials are synchronizing"):
-        CaptureRepository.allocate(workspace.id, "capture")
+        CaptureRepository.allocate(
+            workspace.id, "capture", has_busy_agent=has_busy_agent
+        )
     assert not CaptureRequest.objects.filter(workspace=workspace).exists()
     assert not ImageInstance.objects.filter(origin_workspace=workspace).exists()
     TaskRepository.complete(task)
-    _, child = CaptureRepository.allocate(workspace.id, "capture")
+    _, child = CaptureRepository.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
     assert child.type == "stop_workspace"
 
 
@@ -218,7 +229,9 @@ def test_capture_admitted_first_blocks_delayed_credential_sync(runner, workspace
 
     workspace.runtime_type = "qemu"
     workspace.save(update_fields=["runtime_type"])
-    _, child = CaptureRepository.allocate(workspace.id, "capture")
+    _, child = CaptureRepository.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
     with pytest.raises(ConflictError, match="capturing image"):
         TaskRepository.create(
             task_id=uuid.uuid4(),

@@ -319,15 +319,16 @@ def test_take_desktop_control_requires_harness_run(workspace_access_setup):
 @pytest.mark.django_db
 def test_take_desktop_control_aborts_computeruse(workspace_access_setup, monkeypatch):
     """Take-control with terminal + harness:run aborts busy computer-use sessions."""
-    from types import SimpleNamespace
+    from apps.runners.services.infra.harness_gateway import get_harness_gateway
+
+    aborted_id = uuid.uuid4()
+    calls = []
 
     async def fake_abort(workspace_id):
-        return [SimpleNamespace(id=uuid.uuid4())]
+        calls.append(workspace_id)
+        return [aborted_id]
 
-    monkeypatch.setattr(
-        "apps.harness.harness_service.get_harness_service",
-        lambda: SimpleNamespace(abort_busy_computeruse_for_workspace=fake_abort),
-    )
+    monkeypatch.setattr(get_harness_gateway(), "abort_busy_computeruse", fake_abort)
     client = _make_client(
         user=workspace_access_setup["owner"],
         org=workspace_access_setup["org"],
@@ -341,6 +342,5 @@ def test_take_desktop_control_aborts_computeruse(workspace_access_setup, monkeyp
         "/desktop/take-control/"
     )
     assert response.status_code == 200, response.content[:500]
-    body = response.json()
-    assert "aborted_session_ids" in body
-    assert len(body["aborted_session_ids"]) == 1
+    assert response.json() == {"aborted_session_ids": [str(aborted_id)]}
+    assert calls == [workspace_access_setup["owner_workspace"].id]

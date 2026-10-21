@@ -9,7 +9,7 @@ from apps.runners.models import (
     WorkspaceRecreateRequest,
 )
 from apps.runners.operations import OperationRepository, apply_result
-from apps.runners.tests.conftest import capture_version_fields
+from apps.runners.tests.conftest import capture_version_fields, has_busy_agent
 from apps.runners.tests.test_services import service as service
 from apps.runners.tests.test_services import sio_mock as sio_mock
 from common.exceptions import ConflictError
@@ -29,7 +29,9 @@ def test_automatic_stop_capture_resume(service, runner, workspace):
     workspace.runtime_type = "qemu"
     workspace.credentials_present = True
     workspace.save()
-    _, stop = CaptureRepository.allocate(workspace.id, "capture")
+    _, stop = CaptureRepository.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
     req = CaptureRequest.objects.get(workspace=workspace)
     assert result(service, runner, stop, "workspace:stopped", credentials_present=False)
     CaptureRepository.tick()
@@ -66,7 +68,9 @@ def test_unknown_capture_fences_and_suppressed_resume(
     ws = stopped_workspace
     ws.runtime_type = "qemu"
     ws.save()
-    _, task = CaptureRepository.allocate(ws.id, "capture")
+    _, task = CaptureRepository.allocate(
+        ws.id, "capture", has_busy_agent=has_busy_agent
+    )
     OperationRepository.intervene(task, "Unknown capture deadline")
     CaptureRepository.tick()
     req = CaptureRequest.objects.get(workspace=ws)
@@ -80,7 +84,9 @@ def test_safe_capture_failure_resumes_but_unknown_failure_does_not(
 ):
     workspace.runtime_type = "qemu"
     workspace.save()
-    _, stop = CaptureRepository.allocate(workspace.id, "capture")
+    _, stop = CaptureRepository.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
     assert result(service, runner, stop, "workspace:stopped", credentials_present=False)
     CaptureRepository.tick()
     req = CaptureRequest.objects.get(workspace=workspace)
@@ -97,7 +103,9 @@ def test_journal_interruption_failure_retains_fence(service, runner, stopped_wor
     ws = stopped_workspace
     ws.runtime_type = "qemu"
     ws.save()
-    _, task = CaptureRepository.allocate(ws.id, "capture")
+    _, task = CaptureRepository.allocate(
+        ws.id, "capture", has_busy_agent=has_busy_agent
+    )
     assert not result(
         service,
         runner,
@@ -126,7 +134,9 @@ def test_retirement_after_clean_stop_preserves_restart_approval(
     workspace.runtime_type = "qemu"
     workspace.base_image_instance = base
     workspace.save()
-    _, stop = CaptureRepository.allocate(workspace.id, "capture")
+    _, stop = CaptureRepository.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
     assert result(service, runner, stop, "workspace:stopped", credentials_present=False)
     base.status = "retired"
     base.save()
@@ -142,7 +152,9 @@ def test_unknown_handler_failure_and_delayed_unknown_result_hold_fence(
 ):
     workspace.runtime_type = "qemu"
     workspace.save()
-    _, stop = CaptureRepository.allocate(workspace.id, "capture")
+    _, stop = CaptureRepository.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
     for _ in range(2):
         assert not result(
             service,
@@ -157,7 +169,9 @@ def test_unknown_handler_failure_and_delayed_unknown_result_hold_fence(
         assert workspace.current_task_id == stop.id
         assert LifecycleCommand.objects.get(task=stop).phase == "intervention"
         with pytest.raises(ConflictError):
-            CaptureRepository.allocate(workspace.id, "overlap")
+            CaptureRepository.allocate(
+                workspace.id, "overlap", has_busy_agent=has_busy_agent
+            )
     CaptureRepository.tick()
     assert CaptureRequest.objects.get(workspace=workspace).phase == "stop"
 
@@ -176,7 +190,9 @@ def test_capture_resume_child_retains_exact_qemu_resources(
     workspace.qemu_memory_mb = 1024
     workspace.qemu_disk_size_gb = 20
     workspace.save()
-    _, stop = CaptureRepository.allocate(workspace.id, "capture")
+    _, stop = CaptureRepository.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
     assert result(service, runner, stop, "workspace:stopped", credentials_present=False)
     CaptureRepository.tick()
     req = CaptureRequest.objects.get(workspace=workspace)
@@ -357,7 +373,9 @@ def test_stopped_capture_final_clear_without_resume(service, runner, stopped_wor
     ws = stopped_workspace
     ws.runtime_type = "qemu"
     ws.save()
-    _, child = CaptureRepository.allocate(ws.id, "capture")
+    _, child = CaptureRepository.allocate(
+        ws.id, "capture", has_busy_agent=has_busy_agent
+    )
     request = CaptureRequest.objects.get(workspace=ws)
     assert not request.prior_running and request.phase == "capture"
     assert result(
@@ -407,7 +425,9 @@ def test_safe_failure_final_diagnostics_and_recovery_event(
 
     workspace.runtime_type = "qemu"
     workspace.save()
-    _, stop = CaptureRepository.allocate(workspace.id, "capture")
+    _, stop = CaptureRepository.allocate(
+        workspace.id, "capture", has_busy_agent=has_busy_agent
+    )
     assert result(service, runner, stop, "workspace:stopped", credentials_present=False)
     assert CaptureRepository.tick() == []
     request = CaptureRequest.objects.get(workspace=workspace)

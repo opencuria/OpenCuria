@@ -189,6 +189,7 @@ def test_auto_stop_and_scheduled_admission_serialize_on_workspace(
                 workspace.id,
                 idle_before=idle_before,
                 expected_timeout_minutes=timeout,
+                has_busy_agent=HarnessSessionRepository.has_busy_for_workspace,
             ),
             lambda: HarnessSessionRepository.reserve_workspace_run(
                 session.id, scheduled=True

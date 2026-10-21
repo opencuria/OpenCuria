@@ -10,11 +10,14 @@ Wiring status (what ``RunnerService`` consumes):
 - ``CredentialResolver``: used by ``credential_sync._dispatch_credential_inject``
   and the three ``workspace_lifecycle`` credential paths (``update`` /
   ``resume`` / ``create_from_image_artifact`` uniqueness check).
-- ``HarnessGateway``: the only way the runner service reaches the agent
+- ``HarnessGateway``: the only way the runners app reaches the agent
   harness (reply/stream routing, stream failure, viewer desktop actions,
-  busy computer-use checks). The harness app registers its implementation
-  at startup (``infra/harness_gateway.register_harness_gateway``); tests
-  may inject a fake via ``RunnerService(harness_gateway=...)``.
+  busy agent checks, desktop take-over). The harness app registers its
+  implementation at startup (``infra/harness_gateway.register_harness_gateway``);
+  tests may inject a fake via ``RunnerService(harness_gateway=...)``.
+  Repositories never resolve the gateway themselves: lifecycle admissions
+  receive ``has_busy_session`` from the service as a predicate evaluated
+  under their row lock.
 - ``FrontendBus``: used by ``infra/frontend_bus._forward_to_frontend``.
 
 Everything else in ``workspace_lifecycle`` / ``interactive_sessions`` /
@@ -134,4 +137,15 @@ class HarnessGateway(Protocol):
 
     def has_busy_computeruse_session(self, workspace_id: uuid.UUID) -> bool:
         """Return True when a computer-use agent drives the desktop (sync)."""
+        ...
+
+    def has_busy_session(self, workspace_id: uuid.UUID) -> bool:
+        """Return True when any agent session in the workspace is busy (sync).
+
+        Busy includes sessions waiting for a user answer or approval.
+        """
+        ...
+
+    async def abort_busy_computeruse(self, workspace_id: uuid.UUID) -> list[uuid.UUID]:
+        """Abort busy computer-use sessions and return their session ids."""
         ...

@@ -13,6 +13,7 @@ from apps.runners.capture_repository import CaptureRepository
 from apps.runners.disposition_repository import DispositionRepository
 from apps.runners.models import CaptureRequest, LifecycleCommand, Task
 from apps.runners.operations import OperationRepository
+from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_capture_pipeline import result
 from apps.runners.tests.test_services import service as service
 from apps.runners.tests.test_services import sio_mock as sio_mock
@@ -26,7 +27,9 @@ def interrupted_capture(service, runner, workspace, phase: str):
     workspace.runtime_type = "qemu"
     workspace.credentials_present = True
     workspace.save()
-    _, child = CaptureRepository.allocate(workspace.id, "interrupted capture")
+    _, child = CaptureRepository.allocate(
+        workspace.id, "interrupted capture", has_busy_agent=has_busy_agent
+    )
     if phase != "stop":
         assert result(
             service, runner, child, "workspace:stopped", credentials_present=False
@@ -89,7 +92,9 @@ def test_acknowledge_capture_closes_reservation_and_preserves_ready_image(
     assert Task.objects.count() == count
     # The same version line can now reserve the next generation.
     CaptureRepository.allocate(
-        workspace.id, captured_image_id=request.image.captured_image_id
+        workspace.id,
+        captured_image_id=request.image.captured_image_id,
+        has_busy_agent=has_busy_agent,
     )
 
 

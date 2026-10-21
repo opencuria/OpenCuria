@@ -11,6 +11,7 @@ from apps.runners.capture_repository import CaptureRepository
 from apps.runners.enums import TaskStatus, WorkspaceStatus
 from apps.runners.models import CaptureRequest, LifecycleCommand
 from apps.runners.operations import OperationRepository, apply_result
+from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_services import service as service
 from apps.runners.tests.test_services import sio_mock as sio_mock
 
@@ -20,7 +21,9 @@ pytestmark = pytest.mark.django_db
 def resume_child(service, runner, workspace):
     workspace.runtime_type = "qemu"
     workspace.save()
-    _, stop = CaptureRepository.allocate(workspace.id, "evidence capture")
+    _, stop = CaptureRepository.allocate(
+        workspace.id, "evidence capture", has_busy_agent=has_busy_agent
+    )
     send(service, runner, stop, "workspace:stopped", credentials_present=False)
     CaptureRepository.tick()
     request = CaptureRequest.objects.get(workspace=workspace)
@@ -152,7 +155,9 @@ def test_known_stop_failure_persists_actual_evidence(
     workspace.runtime_type = "qemu"
     workspace.credentials_present = not present
     workspace.save()
-    _, stop = CaptureRepository.allocate(workspace.id, "stop evidence")
+    _, stop = CaptureRepository.allocate(
+        workspace.id, "stop evidence", has_busy_agent=has_busy_agent
+    )
     assert send(
         service,
         runner,
@@ -175,7 +180,9 @@ def test_unknown_stop_failure_does_not_release_capture_reservation(
 ):
     workspace.runtime_type = "qemu"
     workspace.save()
-    _, stop = CaptureRepository.allocate(workspace.id, "partial scrub")
+    _, stop = CaptureRepository.allocate(
+        workspace.id, "partial scrub", has_busy_agent=has_busy_agent
+    )
     assert not send(
         service,
         runner,

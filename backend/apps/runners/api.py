@@ -700,15 +700,8 @@ async def take_desktop_control(
         if not is_admin and workspace.created_by_id != request.user.id:
             raise NotFoundError("Workspace", str(workspace_id))
 
-        await sync_to_async(service._ensure_workspace_available)(workspace)
-
-        from apps.harness.harness_service import get_harness_service
-
-        harness = get_harness_service()
-        aborted = await harness.abort_busy_computeruse_for_workspace(workspace_id)
-        return 200, DesktopTakeControlOut(
-            aborted_session_ids=[session.id for session in aborted]
-        )
+        aborted_ids = await service.take_desktop_control(workspace)
+        return 200, DesktopTakeControlOut(aborted_session_ids=aborted_ids)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:

@@ -16,10 +16,16 @@ from common.utils import generate_api_token, hash_token
 
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
+from apps.runners.services.infra.harness_gateway import get_harness_gateway
 
 # Allow sync ORM calls from async test functions (Django safety check).
 # In production code, we use sync_to_async / async-safe patterns.
 os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
+
+
+def has_busy_agent(workspace_id: uuid.UUID) -> bool:
+    """Busy check the runner service passes to lifecycle admissions."""
+    return get_harness_gateway().has_busy_session(workspace_id)
 
 
 @pytest.fixture

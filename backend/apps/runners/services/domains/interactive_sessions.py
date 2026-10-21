@@ -37,7 +37,7 @@ from ...exceptions import (
 from ..infra import realtime
 
 if TYPE_CHECKING:
-    from ...models import Task
+    from ...models import Task, Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -339,6 +339,14 @@ class InteractiveSessionsMixin:
             raise ConflictError(
                 "Viewer desktop operation could not be confirmed"
             ) from exc
+
+    async def take_desktop_control(self, workspace: Workspace) -> list[uuid.UUID]:
+        """Abort busy computer-use sessions so a viewer can drive the desktop.
+
+        Returns the ids of the aborted agent sessions.
+        """
+        await sync_to_async(self._ensure_workspace_available)(workspace)
+        return await self._harness().abort_busy_computeruse(workspace.id)
 
     async def viewer_desktop_status(
         self,

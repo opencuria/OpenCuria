@@ -29,6 +29,7 @@ from apps.runners.models import (
 )
 from apps.runners.repositories import TaskRepository
 from apps.runners.services import get_runner_service
+from apps.runners.tests.conftest import has_busy_agent
 from common.utils import generate_api_token, hash_token
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -66,7 +67,10 @@ def api_key_factory():
 
 def _capture_generation(source, *, name, captured_image_id=None):
     _, task = CaptureRepository.allocate(
-        source.id, name=name, captured_image_id=captured_image_id
+        source.id,
+        name=name,
+        captured_image_id=captured_image_id,
+        has_busy_agent=has_busy_agent,
     )
     image = ImageInstance.objects.get(
         origin_workspace=source, generation=(1 if captured_image_id is None else 2)
