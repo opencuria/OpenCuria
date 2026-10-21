@@ -814,26 +814,28 @@ class ScheduledTaskService:
     async def _wait_for_workspace_running(
         self, workspace_id: uuid.UUID, *, timeout_seconds: int = 120
     ) -> bool:
-        """Wait for the runner lifecycle event to confirm workspace resume."""
+        """Wait for the runner lifecycle event to confirm workspace resume.
+
+        Heartbeats mirror the runtime and may report ``running`` while the
+        resume operation still owns the workspace, so status alone is not
+        the confirmation.
+        """
         deadline = asyncio.get_running_loop().time() + timeout_seconds
         while asyncio.get_running_loop().time() < deadline:
-            status = await sync_to_async(self.repository.workspace_status)(workspace_id)
-            if status == WorkspaceStatus.RUNNING:
+            status, active_operation, *_ = await sync_to_async(
+                self.repository.workspace_resume_state
+            )(workspace_id)
+            if (
+                status == WorkspaceStatus.RUNNING
+                and active_operation != WorkspaceOperation.STARTING
+            ):
                 return True
             if status not in {
+                WorkspaceStatus.RUNNING,
                 WorkspaceStatus.CREATING,
                 WorkspaceStatus.STOPPED,
                 "resuming",
             }:
-                active_operation = await sync_to_async(
-                    self.repository.workspace_resume_state
-                )(workspace_id)
-                if (
-                    status == WorkspaceStatus.STOPPED
-                    and active_operation[1] == WorkspaceOperation.STARTING
-                ):
-                    await asyncio.sleep(1)
-                    continue
                 return False
             await asyncio.sleep(1)
         return False

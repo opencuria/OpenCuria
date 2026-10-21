@@ -57,9 +57,6 @@ class FakeRepository:
     def delete_unstarted_session(self, run_id, session_id, **scope):
         return True
 
-    def workspace_status(self, workspace_id):
-        return self.status
-
     def workspace_resume_state(self, workspace_id):
         return self.status, None, "online", True, None
 
@@ -188,18 +185,67 @@ async def test_stopped_workspace_resumes_then_starts_a_new_root_session():
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_running_status_does_not_end_own_resume_wait(monkeypatch):
+    """A heartbeat may report running before the runner confirms the resume."""
+    repo = FakeRepository()
+    state = {"value": ("stopped", None, "online", True, None)}
+    repo.workspace_resume_state = lambda workspace_id: state["value"]
+
+    class FakeRunner:
+        async def resume_workspace(self, workspace_id):
+            # The resume operation is allocated, then a heartbeat sees the VM.
+            state["value"] = (
+                "running",
+                WorkspaceOperation.STARTING,
+                "online",
+                True,
+                uuid.uuid4(),
+            )
+
+    class FakeHarness:
+        def create_session(self, **values):
+            return SimpleNamespace(id=uuid.uuid4(), **values)
+
+        async def start_run(self, session, prompt, **values):
+            return SimpleNamespace(id=uuid.uuid4())
+
+    async def runner_confirms_resume(_):
+        state["value"] = ("running", None, "online", True, None)
+
+    monkeypatch.setattr(asyncio, "sleep", runner_confirms_resume)
+    task = SimpleNamespace(
+        id=uuid.uuid4(),
+        workspace_id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        owner_id=1,
+        next_run_at=datetime.now(timezone.utc),
+        prompt="Review",
+        mode="build",
+        model="",
+        reasoning_effort="",
+        skill_ids=[],
+    )
+    service = ScheduledTaskService(
+        repository=repo, harness=FakeHarness(), runner=FakeRunner()
+    )
+    run = await service._launch(task, scheduled_for=task.next_run_at)
+    assert run.status == ScheduledTaskRun.Status.RUNNING
+    assert run.assistant_message is not None
+
+
+@pytest.mark.asyncio
 async def test_existing_starting_operation_waits_for_resume_confirmation(monkeypatch):
     repo = FakeRepository()
     repo.status = "stopped"
     resume_states = iter(
         [
             ("stopped", WorkspaceOperation.STARTING, "online", True, None),
+            ("stopped", WorkspaceOperation.STARTING, "online", True, None),
+            ("running", None, "online", True, None),
             ("running", None, "online", True, None),
         ]
     )
     repo.workspace_resume_state = lambda workspace_id: next(resume_states)
-    statuses = iter(["stopped", "running"])
-    repo.workspace_status = lambda workspace_id: next(statuses)
 
     class UnexpectedRunner:
         async def resume_workspace(self, workspace_id):
@@ -283,11 +329,10 @@ async def test_running_workspace_is_skipped_when_runner_unavailable_or_busy(stat
 async def test_resume_revalidates_state_before_start(monkeypatch):
     repo = FakeRepository()
     repo.status = "stopped"
-    statuses = iter(["stopped", "running"])
-    repo.workspace_status = lambda workspace_id: next(statuses)
     state_reads = iter(
         [
             ("stopped", WorkspaceOperation.STARTING, "online", True, None),
+            ("running", None, "online", True, None),
             ("running", WorkspaceOperation.STOPPING, "online", True, None),
         ]
     )
@@ -323,8 +368,13 @@ async def test_resume_revalidates_state_before_start(monkeypatch):
 async def test_resume_waits_when_status_is_resuming(monkeypatch):
     repo = FakeRepository()
     repo.status = "resuming"
-    statuses = iter(["resuming", "running"])
-    repo.workspace_status = lambda workspace_id: next(statuses)
+    states = iter(
+        [
+            ("resuming", WorkspaceOperation.STARTING, "online", True, None),
+            ("running", None, "online", True, None),
+        ]
+    )
+    repo.workspace_resume_state = lambda workspace_id: next(states)
     service = ScheduledTaskService(repository=repo)
 
     async def no_sleep(_):

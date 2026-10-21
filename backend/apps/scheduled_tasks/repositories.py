@@ -199,16 +199,6 @@ class ScheduledTaskRepository:
         return row or (None, None, None, False, None)
 
     @staticmethod
-    def workspace_status(workspace_id: uuid.UUID) -> str | None:
-        from apps.runners.models import Workspace
-
-        return (
-            Workspace.objects.filter(id=workspace_id)
-            .values_list("status", flat=True)
-            .first()
-        )
-
-    @staticmethod
     def touch_workspace_activity(workspace_id: uuid.UUID) -> None:
         from apps.runners.models import Workspace
 
