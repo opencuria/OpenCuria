@@ -7,7 +7,9 @@ module; only the URL composition root (``config/urls.py``) mounts them.
 Likewise the Socket.IO handler module is mounted only by ``config/asgi.py``;
 services and adapters resolve the runner service and frontend fan-out from
 ``apps.runners.services``. The runner service itself never imports the
-harness; the harness plugs in through the ``HarnessGateway`` port.
+harness; the harness plugs in through the ``HarnessGateway`` port. The
+harness in turn never imports the apps built on it; they subscribe to its
+run events (``apps.harness.run_events``).
 """
 
 from __future__ import annotations
@@ -148,5 +150,23 @@ def test_runner_service_never_imports_the_harness():
     assert violations == [], (
         "Reach the harness through the HarnessGateway port "
         "(apps.runners.services.ports) instead of importing it:\n"
+        + "\n".join(violations)
+    )
+
+
+def test_harness_never_imports_the_apps_built_on_it():
+    """Consumers subscribe to harness run events; the harness never calls them."""
+    consumers = ("apps.scheduled_tasks", "apps.mcp_app")
+    package = APPS_ROOT / "harness"
+    violations = sorted(
+        f"{_module_name(path)} -> {module}"
+        for path in _source_files()
+        if path.is_relative_to(package)
+        for module in _imported_modules(path, ast.parse(path.read_text()))
+        if any(module == app or module.startswith(f"{app}.") for app in consumers)
+    )
+    assert violations == [], (
+        "Connect a receiver to apps.harness.run_events from the consuming "
+        "app's AppConfig.ready() instead of importing it from the harness:\n"
         + "\n".join(violations)
     )

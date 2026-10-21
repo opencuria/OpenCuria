@@ -12,6 +12,7 @@ import pytest
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
+from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessMessage, HarnessSession
 from apps.scheduled_tasks.models import ScheduledTask, ScheduledTaskRun
 from apps.scheduled_tasks.repositories import ScheduledTaskRepository
@@ -62,6 +63,29 @@ def test_completion_maps_persisted_assistant_outcome(
     assert run.error == error
     assert run.finished_at == run.assistant_message.completed_at
     assert run.completion_check_pending
+
+
+@pytest.mark.django_db(transaction=True)
+def test_harness_engine_error_finalization_settles_linked_ledger(completed_run):
+    """External-engine error finalization settles history without the scheduler."""
+    run = completed_run
+    HarnessMessage.objects.filter(id=run.assistant_message_id).update(
+        finish="error", error="engine failed"
+    )
+    events = []
+
+    async def capture(event, data):
+        events.append(event)
+
+    harness = HarnessService(emit=capture)
+    asyncio.run(
+        harness._finalize_owned_claude_error(run.session, run.assistant_message)
+    )
+    run.refresh_from_db()
+    assert run.status == ScheduledTaskRun.Status.ERROR
+    assert run.error == "engine failed"
+    assert run.completion_check_pending
+    assert events
 
 
 @pytest.mark.django_db

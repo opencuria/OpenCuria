@@ -42,6 +42,7 @@ from apps.harness.repositories import (
     HarnessSessionRepository,
     QuestionRequestRepository,
 )
+from apps.harness.run_events import assistant_run_finished
 from apps.harness.tests.helpers import parts_for_session
 from apps.harness.tools.truncate import MAX_BYTES
 from common.exceptions import ConflictError
@@ -454,6 +455,44 @@ async def test_scheduled_plugin_credential_failure_finishes_run(
     assert not service.is_running(run.session_id)
     assert str(run.session_id) not in service._runs
     assert provider_calls == []
+    statuses = [e for e in events if e["event"] == FRONTEND_EVENT_STATUS]
+    assert statuses[-1]["status"] == "idle"
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_finished_run_publishes_event_and_isolates_receivers(
+    harness_workspace,
+) -> None:
+    """Each settled run notifies subscribers once; failures never block idle."""
+    received: list[uuid.UUID] = []
+
+    def failing(sender, message_id, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("subscriber failed")
+
+    def recording(sender, message_id, **kwargs):  # type: ignore[no-untyped-def]
+        received.append(message_id)
+
+    assistant_run_finished.connect(failing)
+    assistant_run_finished.connect(recording)
+    try:
+        service, _, events = _service()
+        session = await _db_create_session(harness_workspace)
+        assistant = await service.start_run(
+            session,
+            "hello",
+            organization_id=harness_workspace.runner.organization_id,
+            workspace_id=str(harness_workspace.id),
+        )
+        background = service._tasks.get(str(session.id))
+        if background is not None:
+            await background
+    finally:
+        assistant_run_finished.disconnect(failing)
+        assistant_run_finished.disconnect(recording)
+
+    assert received == [assistant.id]
+    assert not service.is_running(session.id)
+    assert str(session.id) not in service._runs
     statuses = [e for e in events if e["event"] == FRONTEND_EVENT_STATUS]
     assert statuses[-1]["status"] == "idle"
 

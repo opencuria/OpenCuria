@@ -62,6 +62,7 @@ from .repositories import (
     QuestionRequestRepository,
     TodoRepository,
 )
+from .run_events import publish_assistant_run_finished
 from .runner import HarnessRunner, RunOptions
 from .steering import NO_ACTIVE_RUN_CODE, SteerEntry, SteeringChannel
 from .tools import default_tool_registry
@@ -3285,14 +3286,7 @@ class HarnessService:
         key = str(session.id)
         try:
             with anyio.CancelScope(shield=True):
-                from apps.scheduled_tasks.services import ScheduledTaskService
-
-                try:
-                    await sync_to_async(ScheduledTaskService().complete_assistant_run)(
-                        assistant.id
-                    )
-                except Exception:
-                    log.exception("scheduled_task_completion_failed", session_id=key)
+                await publish_assistant_run_finished(assistant.id, session_id=key)
                 await self._emit_frontend(
                     FRONTEND_EVENT_STATUS,
                     self._session_status_payload(
@@ -3575,18 +3569,9 @@ class HarnessService:
                 await sync_to_async(self.sessions.mark_status)(
                     session, HarnessSessionStatus.IDLE
                 )
-                # Task history must settle even when the scheduler is not running.
-                # Use a local import to keep harness/task service imports acyclic.
-                from apps.scheduled_tasks.services import ScheduledTaskService
-
-                try:
-                    await sync_to_async(ScheduledTaskService().complete_assistant_run)(
-                        assistant.id
-                    )
-                except Exception:
-                    # The scheduler/history read can repair a failed projection;
-                    # it must never prevent idle emission or tracking cleanup.
-                    log.exception("scheduled_task_completion_failed", session_id=key)
+                # Receiver failures are isolated and logged; they must never
+                # prevent idle emission or tracking cleanup.
+                await publish_assistant_run_finished(assistant.id, session_id=key)
                 if session.parent_id is None:
                     await self._schedule_summary(session, assistant)
                 context = self._runs.get(key, {})
