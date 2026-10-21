@@ -1362,24 +1362,6 @@ class ImageInstanceRepository:
         )
 
     @staticmethod
-    def list_by_workspace(workspace_id: uuid.UUID) -> QuerySet[ImageInstance]:
-        """Return all image instances captured from a workspace."""
-        return (
-            ImageInstance.objects.filter(origin_workspace_id=workspace_id)
-            .exclude(status=ImageInstance.Status.DELETED)
-            .select_related(
-                "runner",
-                "origin_workspace",
-                "origin_workspace__runner",
-                "created_by",
-                "origin_definition",
-                "build_job",
-                "build_job__runner",
-                "build_job__image_definition",
-            )
-        )
-
-    @staticmethod
     def list_by_user(user) -> QuerySet[ImageInstance]:
         """Return all visible image instances created by a specific user."""
         return (

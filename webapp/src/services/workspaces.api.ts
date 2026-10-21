@@ -220,33 +220,11 @@ export function deleteProcess(
 
 // --- Workspace image artifact API ---
 
-export function listWorkspaceImageArtifacts(workspaceId: string): Promise<ImageArtifact[]> {
-  return get<ImageArtifact[]>(`/workspaces/${workspaceId}/image-artifacts/`)
-}
-
 export function createWorkspaceImageArtifact(
   workspaceId: string,
   data: ImageArtifactCreateIn,
 ): Promise<ImageArtifactCreateOut> {
   return post<ImageArtifactCreateOut>(`/workspaces/${workspaceId}/image-artifacts/`, data)
-}
-
-export function deleteWorkspaceImageArtifact(
-  workspaceId: string,
-  imageArtifactId: string,
-): Promise<void> {
-  return del<void>(`/workspaces/${workspaceId}/image-artifacts/${imageArtifactId}/`)
-}
-
-export function createWorkspaceFromImageArtifact(
-  workspaceId: string,
-  imageArtifactId: string,
-  data: ImageArtifactCloneIn,
-): Promise<ImageArtifactCloneOut> {
-  return post<ImageArtifactCloneOut>(
-    `/workspaces/${workspaceId}/image-artifacts/${imageArtifactId}/workspaces/`,
-    data,
-  )
 }
 
 // --- Global image artifact API ---

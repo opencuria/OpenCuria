@@ -275,25 +275,6 @@ async def _get_owned_workspace_async(
     return await sync_to_async(_get_owned_workspace)(request, org_id, workspace_id)
 
 
-async def _get_owned_workspace_artifact_async(
-    request: HttpRequest,
-    org_id: uuid.UUID,
-    workspace_id: uuid.UUID,
-    image_artifact_id: uuid.UUID,
-):
-    """Return a workspace-scoped image artifact only for the workspace owner."""
-    service = _get_service()
-    workspace = await _get_owned_workspace_async(request, org_id, workspace_id)
-    artifact = await sync_to_async(service.get_image_artifact)(image_artifact_id)
-    if artifact is None:
-        raise NotFoundError("ImageArtifact", str(image_artifact_id))
-    if artifact.origin_workspace_id != workspace.id:
-        raise NotFoundError("ImageArtifact", str(image_artifact_id))
-    if artifact.created_by_id != request.user.id:
-        raise NotFoundError("ImageArtifact", str(image_artifact_id))
-    return workspace, artifact
-
-
 # ===========================================================================
 # Runner Router — /api/v1/runners/
 # ===========================================================================
@@ -2099,28 +2080,6 @@ async def create_workspace_from_captured_image(
         return _captured_image_errors(exc)
 
 
-@workspace_image_artifact_router.get(
-    "/{workspace_id}/image-artifacts/",
-    response={200: list[ImageArtifactOut], 404: ErrorOut},
-    summary="List image artifacts for a workspace",
-)
-def list_workspace_image_artifacts(request: HttpRequest, workspace_id: uuid.UUID):
-    """Return all image artifacts captured from a workspace."""
-    if not check_api_key_permission(request, APIKeyPermission.IMAGES_READ):
-        return _perm_denied(APIKeyPermission.IMAGES_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-
-    try:
-        _get_owned_workspace(request, org_id, workspace_id)
-        service = _get_service()
-        artifacts = service.list_image_artifacts_for_workspace(workspace_id)
-        return image_artifacts_to_out(artifacts)
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-
-
 @workspace_image_artifact_router.post(
     "/{workspace_id}/image-artifacts/",
     response={202: ImageArtifactCreateOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
@@ -2150,106 +2109,6 @@ async def create_workspace_image_artifact(
         return 409, ErrorOut(detail=e.message, code="conflict")
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code="not_found")
-    except ValueError as e:
-        return 404, ErrorOut(detail=str(e), code="not_found")
-
-
-@workspace_image_artifact_router.delete(
-    "/{workspace_id}/image-artifacts/{image_artifact_id}/",
-    response={204: None, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
-    summary="Delete an image artifact",
-)
-async def delete_workspace_image_artifact(
-    request: HttpRequest,
-    workspace_id: uuid.UUID,
-    image_artifact_id: uuid.UUID,
-):
-    """Delete an image artifact."""
-    if not check_api_key_permission(request, APIKeyPermission.IMAGES_DELETE):
-        return _perm_denied(APIKeyPermission.IMAGES_DELETE)
-    org_id = _get_org_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    service = _get_service()
-    try:
-        from .services.deletion import DeletionService
-
-        artifact = await sync_to_async(service.get_image_artifact)(image_artifact_id)
-        if artifact is None or artifact.origin_workspace_id != workspace_id:
-            raise NotFoundError("Image artifact", str(image_artifact_id))
-        await sync_to_async(DeletionService().request)(
-            request.user, org_id, "image", image_artifact_id
-        )
-        return 204, None
-    except AuthenticationError as e:
-        return 403, ErrorOut(detail=e.message, code=e.code)
-    except (NotFoundError, ValueError) as e:
-        detail = e.message if isinstance(e, NotFoundError) else str(e)
-        return 404, ErrorOut(detail=detail, code="not_found")
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
-
-
-@workspace_image_artifact_router.post(
-    "/{workspace_id}/image-artifacts/{image_artifact_id}/workspaces/",
-    response={202: WorkspaceFromImageArtifactOut, 404: ErrorOut, 409: ErrorOut},
-    summary="Create a workspace from an image artifact",
-)
-async def create_workspace_from_workspace_image_artifact(
-    request: HttpRequest,
-    workspace_id: uuid.UUID,
-    image_artifact_id: uuid.UUID,
-    payload: WorkspaceFromImageArtifactIn,
-):
-    """Create a workspace from an image artifact."""
-    if not check_api_key_permission(request, APIKeyPermission.IMAGES_CLONE):
-        return _perm_denied(APIKeyPermission.IMAGES_CLONE)
-    if payload.plugin_ids and not check_api_key_permission(
-        request, APIKeyPermission.PLUGINS_WRITE
-    ):
-        return _perm_denied(APIKeyPermission.PLUGINS_WRITE)
-    org_id = _get_org_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    service = _get_service()
-    try:
-        await _get_owned_workspace_artifact_async(
-            request,
-            org_id,
-            workspace_id,
-            image_artifact_id,
-        )
-        resolved = await sync_to_async(CredentialSvc().resolve_credentials)(
-            payload.credential_ids,
-            org_id=org_id,
-            user=request.user,
-        )
-        workspace, task = await service.create_workspace_from_image_artifact(
-            image_artifact_id=image_artifact_id,
-            name=payload.name,
-            env_vars=resolved.env_vars,
-            files=resolved.files,
-            ssh_keys=resolved.ssh_keys,
-            credentials=resolved.credentials,
-            resolved_credentials=resolved,
-            user=request.user,
-            organization_id=org_id,
-            plugin_ids=payload.plugin_ids,
-        )
-        return 202, WorkspaceFromImageArtifactOut(
-            workspace_id=workspace.id,
-            task_id=task.id,
-            status=workspace.status,
-            plugin_ids=await sync_to_async(_workspace_plugin_ids)(workspace),
-        )
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-    except RunnerOfflineError as e:
-        return 409, ErrorOut(detail=str(e), code="runner_offline")
-    except ConflictError as e:
-        return 409, ErrorOut(
-            detail=e.message, code=e.code, gaps=getattr(e, "gaps", None)
-        )
     except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
 

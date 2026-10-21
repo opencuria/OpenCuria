@@ -13,9 +13,7 @@ import type {
   WorkspaceDetail,
   WorkspaceCreateIn,
   WorkspaceUpdateIn,
-  ImageArtifact,
   ImageArtifactCreateIn,
-  ImageArtifactCloneIn,
 } from '@/types'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
@@ -36,7 +34,6 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
   const activeWorkspace = ref<WorkspaceDetail | null>(null)
   const loading = ref(false)
   const error = ref<string | null>(null)
-  const imageArtifacts = ref<ImageArtifact[]>([])
   const pendingCaptures = ref<
     Record<string, { requesting: boolean; observed: boolean; completed: boolean }>
   >({})
@@ -685,14 +682,6 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
 
   // --- Image capture actions ---
 
-  async function fetchImageArtifacts(workspaceId: string): Promise<void> {
-    try {
-      imageArtifacts.value = await workspacesApi.listWorkspaceImageArtifacts(workspaceId)
-    } catch {
-      imageArtifacts.value = []
-    }
-  }
-
   async function createImageArtifact(
     workspaceId: string,
     data: ImageArtifactCreateIn,
@@ -712,50 +701,6 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to capture image'
       notifications.error('Image capture failed', msg)
-      return false
-    }
-  }
-
-  async function deleteImageArtifact(
-    workspaceId: string,
-    imageArtifactId: string,
-  ): Promise<boolean> {
-    const notifications = useNotificationStore()
-    const imageStore = useImageStore()
-    try {
-      await workspacesApi.deleteWorkspaceImageArtifact(workspaceId, imageArtifactId)
-      imageArtifacts.value = imageArtifacts.value.filter(
-        (artifact) => artifact.id !== imageArtifactId,
-      )
-      await imageStore.fetchImages()
-      notifications.success('Image deleted', 'The image was removed.')
-      return true
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to delete image'
-      notifications.error('Delete failed', msg)
-      return false
-    }
-  }
-
-  async function createWorkspaceFromImageArtifact(
-    workspaceId: string,
-    imageArtifactId: string,
-    data: ImageArtifactCloneIn,
-  ): Promise<boolean> {
-    const notifications = useNotificationStore()
-    try {
-      const result = await workspacesApi.createWorkspaceFromImageArtifact(
-        workspaceId,
-        imageArtifactId,
-        data,
-      )
-      setPendingWorkspaceOperation(result.workspace_id, 'create', WorkspaceStatus.RUNNING)
-      notifications.info('Cloning workspace', 'The cloned workspace is being provisioned.')
-      await fetchWorkspaces()
-      return true
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to clone workspace'
-      notifications.error('Clone failed', msg)
       return false
     }
   }
@@ -863,7 +808,6 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     activeWorkspace,
     loading,
     error,
-    imageArtifacts,
     pendingWorkspaceOperations,
     pendingCaptures,
     // Getters
@@ -880,10 +824,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     removeWorkspace,
     recreateWorkspace,
     // Image artifact actions
-    fetchImageArtifacts,
     createImageArtifact,
-    deleteImageArtifact,
-    createWorkspaceFromImageArtifact,
     // Real-time
     isWorkspaceTransitioning,
     canUseWorkspace,

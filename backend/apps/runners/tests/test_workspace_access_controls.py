@@ -118,8 +118,29 @@ def test_admin_only_sees_own_workspaces(workspace_access_setup):
     ]
 
 
+def test_workspace_image_artifact_api_only_exposes_capture():
+    from config.urls import api
+
+    assert {
+        path: set(operations)
+        for path, operations in api.get_openapi_schema()["paths"].items()
+        if path.startswith("/api/v1/workspaces/") and "/image-artifacts/" in path
+    } == {"/api/v1/workspaces/{workspace_id}/image-artifacts/": {"post"}}
+
+
 @pytest.mark.django_db
-def test_owner_can_clone_workspace_image_artifact(workspace_access_setup, monkeypatch):
+@pytest.mark.parametrize(
+    ("actor_key", "can_clone", "expected_status"),
+    [
+        ("owner", True, 202),
+        ("owner", False, 403),
+        ("foreign_admin", True, 403),
+        ("foreign_member", True, 403),
+    ],
+)
+def test_global_image_clone_access(
+    workspace_access_setup, monkeypatch, actor_key, can_clone, expected_status
+):
     from apps.runners.services import get_runner_service
 
     async def fake_emit(*args, **kwargs):
@@ -128,23 +149,23 @@ def test_owner_can_clone_workspace_image_artifact(workspace_access_setup, monkey
     monkeypatch.setattr(get_runner_service(), "_emit_to_runner", fake_emit)
 
     client = _make_client(
-        user=workspace_access_setup["owner"],
+        user=workspace_access_setup[actor_key],
         org=workspace_access_setup["org"],
-        permissions=[APIKeyPermission.IMAGES_CLONE.value],
+        permissions=[APIKeyPermission.IMAGES_CLONE.value] if can_clone else [],
     )
-    workspace = workspace_access_setup["owner_workspace"]
     artifact = workspace_access_setup["artifact"]
     response = client.post(
-        f"/api/v1/workspaces/{workspace.id}/image-artifacts/{artifact.id}/workspaces/",
+        f"/api/v1/image-artifacts/{artifact.id}/workspaces/",
         data=json.dumps({"name": "owner-clone"}),
         content_type="application/json",
     )
 
-    assert response.status_code == 202, response.content[:500]
-    body = response.json()
-    assert "workspace_id" in body
-    assert "task_id" in body
-    assert body["plugin_ids"] == []
+    assert response.status_code == expected_status, response.content[:500]
+    if expected_status == 202:
+        body = response.json()
+        assert "workspace_id" in body
+        assert "task_id" in body
+        assert body["plugin_ids"] == []
 
 
 @pytest.mark.django_db
@@ -242,28 +263,10 @@ def test_global_image_artifact_create_requires_images_create_permission(
             [APIKeyPermission.WORKSPACES_DELETE.value],
         ),
         (
-            "get",
-            "/api/v1/workspaces/{workspace_id}/image-artifacts/",
-            None,
-            [APIKeyPermission.IMAGES_READ.value],
-        ),
-        (
             "post",
             "/api/v1/workspaces/{workspace_id}/image-artifacts/",
             {"name": "snapshot"},
             [APIKeyPermission.IMAGES_CREATE.value],
-        ),
-        (
-            "delete",
-            "/api/v1/workspaces/{workspace_id}/image-artifacts/{artifact_id}/",
-            None,
-            [APIKeyPermission.IMAGES_DELETE.value],
-        ),
-        (
-            "post",
-            "/api/v1/workspaces/{workspace_id}/image-artifacts/{artifact_id}/workspaces/",
-            {"name": "clone"},
-            [APIKeyPermission.IMAGES_CLONE.value],
         ),
     ],
 )
@@ -282,7 +285,6 @@ def test_foreign_workspace_endpoints_return_not_found(
     )
     path = path_template.format(
         workspace_id=workspace_access_setup["owner_workspace"].id,
-        artifact_id=workspace_access_setup["artifact"].id,
     )
 
     request = getattr(client, method)
@@ -295,14 +297,7 @@ def test_foreign_workspace_endpoints_return_not_found(
             content_type="application/json",
         )
 
-    if method == 'delete' and '/image-artifacts/' in path_template:
-        expected = 204 if actor_key == 'foreign_admin' else 403
-        assert response.status_code == expected
-        workspace_access_setup['artifact'].refresh_from_db()
-        assert workspace_access_setup['artifact'].status == (
-            'pending_deletion' if expected == 204 else 'ready')
-    else:
-        assert response.status_code == 404
+    assert response.status_code == 404
 
 
 @pytest.mark.django_db

@@ -522,10 +522,6 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         )
         self._forward_workspace_operation(workspace_id, None)
 
-    def list_image_artifacts_for_workspace(self, workspace_id: uuid.UUID) -> list:
-        """Return all artifacts captured from a workspace."""
-        return list(self.image_instances.list_by_workspace(workspace_id))
-
     def list_image_artifacts_for_user(self, user) -> list:
         """Return all artifacts created by a specific user."""
         return list(self.image_instances.list_by_user(user))

@@ -557,35 +557,11 @@ List sessions within a specific chat thread.
 
 ---
 
-#### `GET /workspaces/{workspace_id}/image-artifacts/` [org]
-
-List image artifacts for a workspace.
-
-**Response 200:** Array of image artifact objects.
-
----
-
 #### `POST /workspaces/{workspace_id}/image-artifacts/` [org]
 
 Capture an image artifact from the current workspace state.
 
-**Response 201:** Image artifact object.
-
----
-
-#### `DELETE /workspaces/{workspace_id}/image-artifacts/{image_artifact_id}/` [org]
-
-Delete an image artifact.
-
-**Response 204:** No content.
-
----
-
-#### `POST /workspaces/{workspace_id}/image-artifacts/{image_artifact_id}/workspaces/` [org]
-
-Create a workspace from an image artifact.
-
-**Response 202:** Task object with new workspace info.
+**Response 202:** Task ID and source workspace ID.
 
 ---
 
