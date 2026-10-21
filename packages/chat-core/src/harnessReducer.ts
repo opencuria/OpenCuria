@@ -710,6 +710,10 @@ export function applyPartDelta(
       existing.type = "patch";
       existing.state = "completed";
       if (delta.patch) existing.title = delta.patch;
+      if (delta.display) {
+        existing.display = delta.display;
+        existing.detail_loaded = false;
+      }
     } else {
       message.parts.push({
         id: opts.partId ?? nextLocalPartId(sessionId),
@@ -719,6 +723,10 @@ export function applyPartDelta(
         state: "completed",
         title: delta.patch || "Patch",
         output: "",
+        // The bounded preview renders the card; the full diff loads on expand.
+        ...(delta.display
+          ? { display: delta.display, detail_loaded: false }
+          : {}),
         meta: opts.step !== undefined ? { step: opts.step } : {},
       });
     }

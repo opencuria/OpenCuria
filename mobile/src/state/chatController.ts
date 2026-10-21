@@ -1976,7 +1976,7 @@ export class ChatController {
       this.commitEventMessages(data.session_id, messages);
     }
     if (
-      (data.delta.patch || data.delta.compaction) &&
+      ((data.delta.patch && !data.delta.display) || data.delta.compaction) &&
       this.isInActiveLineage(data.session_id)
     ) {
       const context = this.captureSelection();

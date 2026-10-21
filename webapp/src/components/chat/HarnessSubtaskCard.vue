@@ -28,15 +28,16 @@ const harness = useHarnessStore()
 
 /** The child session id links parent/child (backend `parent` FK). */
 const childId = computed(() => {
-  const map = buildChildSessionIdMap(harness.sessions, harness.messagesBySession)
   const subtaskId = String(props.part.meta?.['subtask_id'] ?? '')
-  const fromProp = props.childSessionId
+  // The panel passes its shared map entry. Rebuilding the map per card would
+  // rescan every loaded transcript on each streamed part of any subagent.
+  const known = props.childSessionId
     ? {
         [props.part.id]: props.childSessionId,
         ...(subtaskId ? { [subtaskId]: props.childSessionId } : {}),
       }
-    : {}
-  return resolveChildSessionId(props.part, harness.sessions, { ...map, ...fromProp })
+    : buildChildSessionIdMap(harness.sessions, harness.messagesBySession)
+  return resolveChildSessionId(props.part, harness.sessions, known)
 })
 
 const catalog = ref<ProviderModel[]>(props.models ?? [])

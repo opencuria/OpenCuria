@@ -280,6 +280,41 @@ describe("ChatController", () => {
     controller.dispose();
   });
 
+  it("refetches the timeline only for patch deltas without a preview", async () => {
+    const root = session("root");
+    const { client, realtime } = makeClient([root]);
+    vi.mocked(client.harness.timeline).mockResolvedValue(timeline(root));
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    const event = {
+      workspace_id: "workspace-a",
+      session_id: "root",
+      message_id: "assistant-1",
+    };
+    realtime.emit("harness.session_status", { ...event, status: "busy" });
+    const loads = vi.mocked(client.harness.timeline).mock.calls.length;
+
+    realtime.emit("harness.part_updated", {
+      ...event,
+      part_id: "patch-1",
+      delta: { patch: "a.ts", display: { path: "a.ts", preview: [] } },
+    });
+    expect(client.harness.timeline).toHaveBeenCalledTimes(loads);
+    expect(controller.getSnapshot().messages[0]?.parts[0]?.display?.path).toBe(
+      "a.ts",
+    );
+
+    realtime.emit("harness.part_updated", {
+      ...event,
+      part_id: "patch-2",
+      delta: { patch: "b.ts" },
+    });
+    await vi.waitFor(() =>
+      expect(client.harness.timeline).toHaveBeenCalledTimes(loads + 1),
+    );
+    controller.dispose();
+  });
+
   it("loads child session timelines and exposes child gates with parent breadcrumbs", async () => {
     const root = session("root");
     const child = session("child", {

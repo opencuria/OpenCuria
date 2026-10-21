@@ -1758,6 +1758,41 @@ async def test_patch_event_persists_unified_diff(harness_workspace) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_patch_event_emits_bounded_display(harness_workspace) -> None:
+    """Patch deltas carry the timeline preview so clients need no refetch."""
+    service, _, events = _service()
+    session = await _db_create_session(harness_workspace)
+    assistant = await sync_to_async(HarnessMessageRepository.create)(
+        session_id=session.id, role="assistant"
+    )
+    diff = "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n"
+    await service._on_runner_event(
+        session,
+        assistant,
+        {
+            "type": "patch",
+            "call_id": "c1",
+            "title": "Patch a.txt",
+            "path": "/workspace/a.txt",
+            "unified_diff": diff,
+            "tool": "edit",
+            "step": 1,
+        },
+    )
+    [event] = [
+        item
+        for item in events
+        if item["event"] == "harness.part_updated" and "patch" in item["delta"]
+    ]
+    display = event["delta"]["display"]
+    assert event["delta"]["patch"] == "/workspace/a.txt"
+    assert display["path"] == "/workspace/a.txt"
+    assert (display["additions"], display["deletions"]) == (1, 1)
+    assert [line["type"] for line in display["preview"]] == ["context", "del", "add"]
+    assert "output" not in event["delta"]
+
+
+@pytest.mark.django_db(transaction=True)
 def test_ensure_user_promptable_rejects_child_session(harness_workspace) -> None:
     """Users cannot prompt subagent child sessions; root sessions stay open."""
     service, _, _ = _service()

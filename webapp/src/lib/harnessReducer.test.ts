@@ -76,6 +76,32 @@ describe('harnessReducer', () => {
     expect(assistant.parts.map((part) => part.position)).toEqual([0, 1])
   })
 
+  it('keeps live patch previews from the delta display and legacy patches without one', () => {
+    const messages = makeMessages()
+    const display = {
+      path: 'src/a.ts',
+      additions: 1,
+      deletions: 0,
+      preview: [{ type: 'add' as const, oldNo: null, newNo: 1, content: 'x' }],
+    }
+    applyPartDelta(
+      messages,
+      'session-1',
+      { patch: 'src/a.ts', display },
+      { partId: 'patch-live', step: 1 },
+    )
+    applyPartDelta(messages, 'session-1', { patch: 'src/b.ts' }, { partId: 'patch-legacy' })
+    const assistant = ensureAssistantMessage(messages, 'session-1')
+
+    const live = findPart(assistant, { partId: 'patch-live' })!
+    expect(live.display).toEqual(display)
+    expect(live.detail_loaded).toBe(false)
+    expect(live.output).toBe('')
+    const legacy = findPart(assistant, { partId: 'patch-legacy' })!
+    expect(legacy.display).toBeUndefined()
+    expect(legacy.detail_loaded).toBeUndefined()
+  })
+
   it('keeps compact live tool projections unloaded while preserving legacy full deltas', () => {
     const messages = makeMessages()
     applyPartDelta(

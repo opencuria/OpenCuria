@@ -4432,7 +4432,12 @@ class HarnessService:
                     "workspace_id": workspace_id,
                     "session_id": session_id,
                     "message_id": message_id,
-                    "delta": {"patch": event.get("path", "")},
+                    # The bounded preview lets clients render the card without
+                    # refetching the whole timeline for every file edit.
+                    "delta": {
+                        "patch": event.get("path", ""),
+                        "display": dict(part.display or {}),
+                    },
                     "step": event.get("step"),
                     "part_id": str(part.id),
                 },

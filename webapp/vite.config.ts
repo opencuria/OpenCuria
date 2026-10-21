@@ -5,9 +5,13 @@ import vue from '@vitejs/plugin-vue'
 import vueDevTools from 'vite-plugin-vue-devtools'
 import tailwindcss from '@tailwindcss/vite'
 
+// Vue DevTools makes Pinia deep-watch every store synchronously, which stalls
+// busy chats with many subagents. Opt in with VITE_VUE_DEVTOOLS=true.
+const enableVueDevTools = process.env.VITE_VUE_DEVTOOLS === 'true'
+
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [vue(), vueDevTools(), tailwindcss()],
+  plugins: [vue(), ...(enableVueDevTools ? [vueDevTools()] : []), tailwindcss()],
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

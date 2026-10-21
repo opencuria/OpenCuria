@@ -522,23 +522,21 @@ class HarnessSessionRepository:
 
     @staticmethod
     def list_descendant_ids(session_id: uuid.UUID) -> list[uuid.UUID]:
-        """Return *session_id* followed by descendant ids (breadth-first)."""
+        """Return *session_id* followed by descendant ids (breadth-first).
+
+        Reads one tree level per query: every timeline load walks the tree,
+        and wide subagent fan-outs must not cost one query per session.
+        """
         ids: list[uuid.UUID] = [session_id]
-        queue: list[uuid.UUID] = [session_id]
         seen: set[uuid.UUID] = {session_id}
-        while queue:
-            current = queue.pop(0)
-            children = list(
-                HarnessSession.objects.filter(parent_id=current).values_list(
-                    "id", flat=True
-                )
+        level: list[uuid.UUID] = [session_id]
+        while level:
+            children = HarnessSession.objects.filter(parent_id__in=level).values_list(
+                "id", flat=True
             )
-            for child_id in children:
-                if child_id in seen:
-                    continue
-                seen.add(child_id)
-                ids.append(child_id)
-                queue.append(child_id)
+            level = [child_id for child_id in children if child_id not in seen]
+            seen.update(level)
+            ids.extend(level)
         return ids
 
     @staticmethod

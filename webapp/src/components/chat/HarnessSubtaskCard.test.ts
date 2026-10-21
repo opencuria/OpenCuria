@@ -4,7 +4,15 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import HarnessSubtaskCard from './HarnessSubtaskCard.vue'
 import { useHarnessStore } from '@/stores/harness'
+import { buildChildSessionIdMap } from '@/lib/harnessSubtaskActivity'
 import type { HarnessPart } from '@/types/harness'
+
+vi.mock('@/lib/harnessSubtaskActivity', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/harnessSubtaskActivity')>(
+    '@/lib/harnessSubtaskActivity',
+  )
+  return { ...actual, buildChildSessionIdMap: vi.fn(actual.buildChildSessionIdMap) }
+})
 
 vi.mock('./HarnessDesktopMini.vue', () => ({
   default: { template: '<div data-testid="harness-desktop-mini" />' },
@@ -119,6 +127,18 @@ describe('HarnessSubtaskCard', () => {
     expect(wrapper.get('[data-testid="harness-subtask-activity"]').text()).toBe(
       'Read renderer.ts',
     )
+  })
+
+  it('reuses the passed child id instead of rescanning every transcript', async () => {
+    const store = useHarnessStore()
+    const wrapper = mount(HarnessSubtaskCard, {
+      props: { part: makeSubtaskPart({ state: 'running' }), childSessionId: 'session-child' },
+    })
+    store.messagesBySession['session-other'] = []
+    await wrapper.get('[data-testid="harness-subtask-row"]').trigger('click')
+
+    expect(wrapper.emitted('openSubtask')).toEqual([['session-child']])
+    expect(buildChildSessionIdMap).not.toHaveBeenCalled()
   })
 
   it('opens the only child session even when titles differ', async () => {

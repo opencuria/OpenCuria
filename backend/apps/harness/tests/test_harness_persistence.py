@@ -220,6 +220,36 @@ def test_timeline_query_defers_heavy_part_fields(
 
 
 @pytest.mark.django_db
+def test_descendant_ids_query_per_level_not_per_session(
+    harness_workspace, django_assert_num_queries
+) -> None:
+    """Wide subagent fan-outs cost one query per tree level."""
+
+    def create(parent: HarnessSession | None = None) -> HarnessSession:
+        return HarnessSessionRepository.create(
+            workspace_id=harness_workspace.id,
+            organization_id=harness_workspace.runner.organization_id,
+            parent_id=parent.id if parent else None,
+        )
+
+    root = create()
+    children = [create(root) for _ in range(6)]
+    grandchildren = [create(children[0]), create(children[3])]
+    create()  # an unrelated root stays out of the tree
+
+    # One query each for children, grandchildren and the empty level below.
+    with django_assert_num_queries(3):
+        ids = HarnessSessionRepository.list_descendant_ids(root.id)
+
+    assert ids[0] == root.id
+    assert set(ids[1:7]) == {child.id for child in children}
+    assert set(ids[7:]) == {grandchild.id for grandchild in grandchildren}
+    assert HarnessSessionRepository.list_descendant_ids(children[1].id) == [
+        children[1].id
+    ]
+
+
+@pytest.mark.django_db
 def test_django_todo_repository_replaces_list(harness_workspace) -> None:
     """TodoRepositoryDjango persists via the Todo model (M3 seam)."""
     workspace = harness_workspace

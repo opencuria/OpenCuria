@@ -35,6 +35,10 @@ npm install
 npm run dev
 ```
 
+The Vue DevTools overlay is opt-in (`VITE_VUE_DEVTOOLS=true npm run dev`): while
+DevTools are attached (overlay or browser extension), Pinia deep-watches every
+store on each change, which makes busy chats with many subagents lag heavily.
+
 ### Type-Check, Compile and Minify for Production
 
 ```sh

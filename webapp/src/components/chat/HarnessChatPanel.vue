@@ -350,7 +350,9 @@ function setupSocketListeners(): void {
           partPosition: data.part_position,
           messageId: data.message_id,
         })
-        if (data.delta?.patch || data.delta?.compaction) {
+        // Patch deltas carry their bounded preview; only legacy patch events
+        // without it and compactions need the authoritative timeline.
+        if ((data.delta?.patch && !data.delta.display) || data.delta?.compaction) {
           void harness.fetchParts(data.session_id)
         }
       }
