@@ -104,12 +104,7 @@ export function notifyProviderAccountsChanged(): void {
   window.dispatchEvent(new Event(PROVIDER_ACCOUNTS_CHANGED_EVENT))
 }
 
-export interface HarnessEngine {
-  id: HarnessId
-  name: 'OpenCuria' | 'Claude Agent'
-  modes: HarnessSessionMode[]
-  connected: boolean
-}
+export type HarnessEngine = import('@opencuria/chat-core/harnessModels').HarnessEngine
 
 export type HarnessEngineOut = HarnessEngine
 
@@ -188,6 +183,10 @@ export interface HarnessPermissionOut {
 
 export function listHarnessEngines(): Promise<HarnessEngine[]> {
   return get<HarnessEngine[]>('/harness/engines/')
+}
+
+export function listEngineModels(engineId: string): Promise<ProviderModel[]> {
+  return get<ProviderModel[]>(`/harness/engines/${encodeURIComponent(engineId)}/models/`)
 }
 
 export function listClaudeModels(): Promise<ProviderModel[]> {

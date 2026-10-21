@@ -54,6 +54,7 @@ function mountDialog() {
                 data-testid="select-claude"
                 @click="$emit('update:harnessId', 'claude')"
               />
+              <button data-testid="select-codex" @click="$emit('update:harnessId', 'codex')" />
               <button
                 data-testid="send-prompt"
                 @click="$emit('send', 'hello', 'build', '', [], '', harnessId)"
@@ -103,6 +104,24 @@ describe('StartNewHarnessChatDialog', () => {
       params: { id: 'ws-1' },
       query: { session: 'session-1' },
     })
+  })
+
+  it('passes Codex through the existing new-chat dialog without a separate workflow', async () => {
+    const wrapper = await openPromptStep()
+    await wrapper.get('[data-testid="select-codex"]').trigger('click')
+    await wrapper.get('[data-testid="send-prompt"]').trigger('click')
+    await flushPromises()
+    expect(harnessStore.createSession).toHaveBeenCalledWith(
+      'ws-1',
+      'hello',
+      'build',
+      '',
+      [],
+      '',
+      'codex',
+    )
+    expect(routerPush).toHaveBeenCalled()
+    wrapper.unmount()
   })
 
   it('keeps the native harness as the default', async () => {

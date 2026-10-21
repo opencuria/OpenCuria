@@ -3,6 +3,7 @@ import * as api from './api'
 import {
   createHarnessSession,
   listClaudeModels,
+  listEngineModels,
   listHarnessEngines,
   createProviderAccount,
   deleteProviderAccount,
@@ -34,6 +35,27 @@ const models = [
 afterEach(() => vi.restoreAllMocks())
 
 describe('harness engine API', () => {
+  it('loads a generic engine catalog and sends the Codex selection unchanged', async () => {
+    const get = vi.spyOn(api, 'get').mockResolvedValue(models)
+    await expect(listEngineModels('codex')).resolves.toEqual(models)
+    expect(get).toHaveBeenCalledWith('/harness/engines/codex/models/')
+    const post = vi.spyOn(api, 'post').mockResolvedValue({ id: 'codex-session' })
+    await createHarnessSession('ws-1', {
+      prompt: 'hello',
+      harness_id: 'codex',
+      model: 'chatgpt/gpt-6.1-sol',
+      reasoning_effort: 'ultra',
+    })
+    expect(post).toHaveBeenCalledWith(
+      '/workspaces/ws-1/harness/sessions/',
+      expect.objectContaining({
+        harness_id: 'codex',
+        model: 'chatgpt/gpt-6.1-sol',
+        reasoning_effort: 'ultra',
+      }),
+    )
+  })
+
   it('lists engines and keeps Claude models on their dedicated catalog endpoint', async () => {
     const get = vi.spyOn(api, 'get').mockResolvedValueOnce(engines).mockResolvedValueOnce(models)
     await expect(listHarnessEngines()).resolves.toEqual(engines)

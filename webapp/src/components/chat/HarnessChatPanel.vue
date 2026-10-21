@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { harnessEngineDefaults } from '@/lib/harnessModels'
 import { computed, onMounted, onUnmounted, provide, ref, toRef, watch } from 'vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { pinHarnessPartDetailKey, requestHarnessPartDetailKey } from '@/lib/harnessPartDetail'
@@ -560,11 +561,10 @@ function syncSessionComposer(sessionId: string): void {
   composerMode.value = session.mode
   const harnessId = session.harness_id ?? 'native'
   composerHarnessId.value = harnessId
-  const defaultClaudeModel = harnessId === 'claude' ? 'sonnet' : ''
-  const defaultClaudeEffort = harnessId === 'claude' ? 'high' : ''
+  const defaults = harnessEngineDefaults(harnessId)
   harness.loadSessionIntoComposer(
-    session.model || defaultClaudeModel,
-    session.reasoning_effort || defaultClaudeEffort,
+    session.model || defaults.model,
+    session.reasoning_effort ?? defaults.effort,
   )
 }
 
@@ -796,6 +796,7 @@ async function handleForkMessage(messageId: string): Promise<void> {
           :mode="composerMode"
           :harness-id="composerHarnessId"
           :engine-locked="Boolean(harness.activeSessionId)"
+          :session-model="activeSession?.model"
           :model="harness.modelInput"
           :effort="harness.effortInput"
           :workspace-id="props.workspaceId"

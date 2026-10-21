@@ -342,29 +342,56 @@ class HarnessEngineRepository:
     ) -> bool:
         """Persist one external binding while this run still owns writes."""
         external_id = (external_session_id or "").strip()
-        if not external_id or len(external_id) > 64:
-            raise ValueError("external_session_id must be 1..64 characters")
+        if len(external_id) > 64:
+            raise ValueError("external_session_id must be at most 64 characters")
         with transaction.atomic():
-            run = HarnessRun.objects.filter(
-                id=run_id,
-                owner_token=owner_token,
-                status__in=(HarnessRunStatus.STARTING, HarnessRunStatus.RUNNING),
-            ).first()
+            run = (
+                HarnessRun.objects.select_for_update()
+                .filter(
+                    id=run_id,
+                    owner_token=owner_token,
+                    status__in=(
+                        HarnessRunStatus.STARTING,
+                        HarnessRunStatus.RUNNING,
+                        HarnessRunStatus.CLOSING,
+                    ),
+                )
+                .first()
+            )
             if run is None or run.session_id != session_id:
                 return False
             session = HarnessSession.objects.select_for_update().get(id=session_id)
+            if session.harness_id != "codex" and (
+                not external_id or run.status == HarnessRunStatus.CLOSING
+            ):
+                if not external_id:
+                    raise ValueError("external_session_id must be 1..64 characters")
+                return False
             current = (session.external_session_id or "").strip()
             if current and current != external_id:
                 return False
             session.external_session_id = external_id
-            session.engine_state = dict(engine_state or {})
+            previous = dict(session.engine_state or {})
+            incoming = dict(engine_state or {})
+            if session.harness_id == "codex":
+                from .codex.catalog import codex_provider
+
+                provider_id = codex_provider(session.model, previous)
+                if incoming.get("provider_id", provider_id) != provider_id:
+                    raise ValueError("Codex conversation provider cannot be changed")
+                incoming["provider_id"] = provider_id
+            session.engine_state = {**previous, **incoming}
             session.save(
                 update_fields=["external_session_id", "engine_state", "updated_at"]
             )
             HarnessRun.objects.filter(
                 id=run_id,
                 owner_token=owner_token,
-                status__in=(HarnessRunStatus.STARTING, HarnessRunStatus.RUNNING),
+                status__in=(
+                    HarnessRunStatus.STARTING,
+                    HarnessRunStatus.RUNNING,
+                    HarnessRunStatus.CLOSING,
+                ),
             ).update(external_session_id=external_id)
             return True
 
@@ -516,6 +543,58 @@ class HarnessEngineRepository:
                 if attempts >= 5:
                     raise
         raise RuntimeError("Unable to allocate transcript position after retries")
+
+    @staticmethod
+    def replace_owned_checkpoint(
+        session_id: uuid.UUID,
+        *,
+        run_id: uuid.UUID | str,
+        owner_token: uuid.UUID | str,
+        external_session_id: str,
+        subpath: str,
+        generation: str,
+        snapshot: dict[str, Any],
+    ) -> None:
+        """Atomically replace one encrypted checkpoint under the durable owner.
+
+        Lock order matches owner-fenced binding updates (run before session).
+        The no-op UPDATE also serializes SQLite writers, where SELECT FOR UPDATE
+        is inert. The owner fence is checked under that write lock.
+        Deletion, encryption and insertion share a transaction, so any failure
+        preserves the previous generation. Domain snapshot validation belongs
+        to the engine's store; this boundary validates persistence identifiers.
+        """
+        uuid.UUID(str(generation))
+        uuid.UUID(str(external_session_id))
+        with transaction.atomic():
+            live_owner = HarnessRun.objects.filter(
+                id=run_id, owner_token=owner_token, session_id=session_id,
+                status__in=(
+                    HarnessRunStatus.STARTING,
+                    HarnessRunStatus.RUNNING,
+                    HarnessRunStatus.CLOSING,
+                ),
+            )
+            if not live_owner.update(heartbeat_at=F("heartbeat_at")):
+                raise RuntimeError("Codex checkpoint ownership superseded")
+            if not live_owner.select_for_update().exists():
+                raise RuntimeError("Codex checkpoint ownership superseded")
+            HarnessSession.objects.select_for_update().get(id=session_id)
+            HarnessEngineRepository.clear_transcript(
+                session_id, external_session_id=external_session_id, subpath=subpath
+            )
+            HarnessEngineRepository.append_transcript_entries(
+                session_id,
+                external_session_id=external_session_id,
+                subpath=subpath,
+                entries=[
+                    {
+                        "uuid": generation,
+                        "generation": generation,
+                        "snapshot": snapshot,
+                    }
+                ],
+            )
 
     @staticmethod
     def list_transcript_subpaths(

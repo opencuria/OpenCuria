@@ -55,12 +55,24 @@ def test_engine_availability_follows_provider_account_selection(
             "name": "OpenCuria",
             "modes": ["build", "plan"],
             "connected": True,
+            "default_model": None,
+            "default_effort": None,
         },
         {
             "id": "claude",
             "name": "Claude Agent",
             "modes": ["build", "plan"],
             "connected": False,
+            "default_model": "sonnet",
+            "default_effort": "high",
+        },
+        {
+            "id": "codex",
+            "name": "Codex",
+            "modes": ["build", "plan"],
+            "connected": False,
+            "default_model": "chatgpt/gpt-6.1-sol",
+            "default_effort": "low",
         },
     ]
     token = "safe-claude-api-token"
@@ -95,7 +107,9 @@ def test_engine_availability_follows_provider_account_selection(
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("path", ["", "claude/models/"])
+@pytest.mark.parametrize(
+    "path", ["", "native/models/", "claude/models/", "codex/models/"]
+)
 def test_engine_catalog_permissions_and_organization_scope(
     engine_api_setup, path
 ) -> None:

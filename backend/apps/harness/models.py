@@ -964,4 +964,5 @@ class HarnessTranscriptBatch(models.Model):
 
 # Imported last to keep the turn sidecar separate from core/domain models.
 from .provider_oauth_models import ProviderOAuthFlow  # noqa: E402,F401
+from .provider_refresh_models import ProviderRefreshLease  # noqa: E402,F401
 from .provider_turn_models import ProviderTurn, ProviderTurnMutex  # noqa: E402,F401

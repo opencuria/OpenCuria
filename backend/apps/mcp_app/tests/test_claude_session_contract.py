@@ -364,7 +364,11 @@ async def _wait_for_messages(
 def test_mcp_session_tools_publish_engine_and_connection_selector():
     tools = {tool.name: tool for tool in _TOOLS}
     create_schema = tools["create_harness_session"].inputSchema
-    assert create_schema["properties"]["harness_id"]["enum"] == ["native", "claude"]
+    assert create_schema["properties"]["harness_id"]["enum"] == [
+        "native",
+        "claude",
+        "codex",
+    ]
     assert create_schema["properties"]["connection_id"]["format"] == "uuid"
     assert _TOOL_PERMISSIONS["create_harness_session"] == APIKeyPermission.HARNESS_RUN
     assert _TOOL_PERMISSIONS["send_harness_message"] == APIKeyPermission.HARNESS_RUN

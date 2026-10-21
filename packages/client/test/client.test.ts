@@ -880,15 +880,37 @@ describe("provider model defaults", () => {
       small_effort: "low",
       computer_use_effort: "",
     };
-    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
-      jsonResponse(defaults),
+    const fetch = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        jsonResponse(defaults),
     );
     const client = clientOptions().create(fetch);
     await expect(client.harness.getDefaultConfig()).resolves.toEqual(defaults);
-    await expect(client.harness.saveDefaultConfig(defaults)).resolves.toEqual(defaults);
+    await expect(client.harness.saveDefaultConfig(defaults)).resolves.toEqual(
+      defaults,
+    );
     expect(fetch.mock.calls[1]).toMatchObject([
       "https://api.example/api/v1/provider-config/",
       { method: "PUT", body: JSON.stringify(defaults) },
     ]);
+  });
+});
+
+describe("engine catalog API", () => {
+  it("supports generic Codex catalogs alongside the legacy Claude API and preserves authorization context", async () => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse([]));
+    const options = clientOptions();
+    const client = options.create(fetch);
+    await client.harness.listEngineModels("codex");
+    await client.harness.listClaudeModels();
+    expect(fetch.mock.calls[0]?.[0]).toContain(
+      "/harness/engines/codex/models/",
+    );
+    expect(fetch.mock.calls[1]?.[0]).toContain(
+      "/harness/engines/claude/models/",
+    );
+    expect(
+      new Headers(fetch.mock.calls[0]?.[1]?.headers).get("X-Organization-Id"),
+    ).toBe("org-a");
   });
 });

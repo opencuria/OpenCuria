@@ -17,6 +17,7 @@ from apps.mcp_app.server import (
     _TOOLS,
     _call_get_provider_config,
     _call_list_claude_engine_models,
+    _call_list_engine_models,
     _call_list_harness_engines,
     _call_save_provider_account,
 )
@@ -41,7 +42,7 @@ def engine_mcp_setup(db):
 
 
 def test_engine_catalog_tools_require_read_permission() -> None:
-    names = {"list_harness_engines", "list_claude_engine_models"}
+    names = {"list_harness_engines", "list_claude_engine_models", "list_engine_models"}
     assert names <= {tool.name for tool in _TOOLS}
     assert names <= _TOOL_HANDLERS.keys()
     assert all(
@@ -94,10 +95,19 @@ def test_engine_and_provider_config_payloads_match_rest(engine_mcp_setup) -> Non
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    "handler", [_call_list_harness_engines, _call_list_claude_engine_models]
+    ("handler", "args"),
+    [
+        (_call_list_harness_engines, {}),
+        (_call_list_claude_engine_models, {}),
+        (_call_list_engine_models, {"engine_id": "native"}),
+        (_call_list_engine_models, {"engine_id": "claude"}),
+        (_call_list_engine_models, {"engine_id": "codex"}),
+    ],
 )
-def test_engine_catalog_rejects_foreign_organization(engine_mcp_setup, handler) -> None:
+def test_engine_catalog_rejects_foreign_organization(
+    engine_mcp_setup, handler, args
+) -> None:
     _org, api_key = engine_mcp_setup
-    response = handler(api_key, uuid.uuid4(), {})
+    response = handler(api_key, uuid.uuid4(), args)
     assert response[0].text.startswith("Error:")
     assert "Organization" in response[0].text

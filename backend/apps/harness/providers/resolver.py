@@ -18,6 +18,7 @@ from ..repositories import ProviderConnectionRepository
 from .base import ChatOptions, Delta, LLMMessage, ProviderAdapter, ToolSchema
 from .bedrock import DEFAULT_REGION, BedrockAdapter, resolve_bedrock_model_id
 from .chatgpt import ChatGPTAdapter
+from .chatgpt_credentials import get_fresh_chatgpt_credentials
 from .model_ref import namespaced_model_id, parse_model_ref
 from .models_catalog import (
     ProviderModel,
@@ -115,6 +116,7 @@ class ProviderResolver:
         on_account_used: Callable | None = None,
     ) -> None:
         self._organization_id = organization_id
+        self._user_id = user_id
         self._registry = registry or default_registry
         self._connections = connection_repository or ProviderConnectionRepository
         connections = selected_catalog_connections(
@@ -189,7 +191,7 @@ class ProviderResolver:
         elif provider_id == "chatgpt":
             adapter = ChatGPTAdapter(
                 credentials=credentials,
-                on_tokens_refreshed=self._chatgpt_tokens_refreshed,
+                fresh_credentials=self._chatgpt_credentials_callback(connection),
             )
         elif provider_id == "amazon-bedrock":
             if config.get("auth_method") == "access_keys":
@@ -212,6 +214,27 @@ class ProviderResolver:
         if not isinstance(adapter, ProviderAdapter):
             raise TypeError(f"Provider {provider_id!r} did not build an adapter")
         return adapter
+
+    def _chatgpt_credentials_callback(self, connection: Any) -> Callable:
+        """Freeze exact account identity and initiating authority, not selection."""
+        organization_id = self._organization_id
+        user_id = self._user_id
+        account_id = connection.id
+
+        async def fresh_credentials(**kwargs: Any) -> dict[str, Any]:
+            # Legacy internal org-only resolution may use shared accounts, but
+            # cannot refresh without a live initiating member's authority.
+            if user_id is None:
+                from .base import ProviderAuthError
+
+                raise ProviderAuthError(
+                    "ChatGPT refresh requires an initiating user", provider="chatgpt"
+                )
+            return await get_fresh_chatgpt_credentials(
+                organization_id, user_id, account_id, **kwargs
+            )
+
+        return fresh_credentials
 
     async def _chatgpt_tokens_refreshed(self, credentials: dict[str, Any]) -> None:
         connection = self._connection_by_provider.get("chatgpt")

@@ -2,6 +2,8 @@
  * Multi-provider catalog helpers for the composer model/effort picker.
  */
 
+import type { HarnessId, HarnessSession } from "./harness";
+
 export type ProviderId =
   | "openrouter"
   | "chatgpt"
@@ -41,6 +43,7 @@ export const EFFORT_LABELS: Record<string, string> = {
   high: "High",
   xhigh: "Extra High",
   max: "Max",
+  ultra: "Ultra",
 };
 
 /** Human-readable label for a reasoning effort token. */
@@ -104,4 +107,110 @@ export function formatHarnessModelEffort(
     resolveCatalogModel(models, trimmedModel)?.name ?? trimmedModel;
   const effortLabel = effort.trim() ? formatEffort(effort) : "";
   return effortLabel ? `${modelName} ${effortLabel}` : modelName;
+}
+
+/** Engine discovery DTO shared by web and mobile; defaults are nullable on older servers. */
+export interface HarnessEngine {
+  id: string;
+  name: string;
+  modes: string[];
+  connected: boolean;
+  default_model?: string | null;
+  default_effort?: string | null;
+}
+
+/** Compatibility labels/defaults, not a model catalog or availability claim. */
+export const HARNESS_ENGINES: ReadonlyArray<HarnessEngine & { id: HarnessId }> =
+  [
+    {
+      id: "native",
+      name: "OpenCuria",
+      modes: ["build", "plan"],
+      connected: true,
+    },
+    {
+      id: "claude",
+      name: "Claude Agent",
+      modes: ["build", "plan"],
+      connected: false,
+      default_model: "sonnet",
+      default_effort: "high",
+    },
+    {
+      id: "codex",
+      name: "Codex",
+      modes: ["build", "plan"],
+      connected: false,
+      default_model: "chatgpt/gpt-6.1-sol",
+      default_effort: "low",
+    },
+  ];
+
+export function harnessEngineChoices(engines: HarnessEngine[]) {
+  return HARNESS_ENGINES.map((fallback) => ({
+    ...fallback,
+    ...engines.find((engine) => engine.id === fallback.id),
+    id: fallback.id,
+  }));
+}
+
+export function harnessEngineLabel(
+  id: string,
+  engines: HarnessEngine[] = [],
+): string {
+  return (
+    engines.find((engine) => engine.id === id)?.name ??
+    HARNESS_ENGINES.find((engine) => engine.id === id)?.name ??
+    id
+  );
+}
+
+/** Native defaults always come from the current mode's agent config. */
+export function harnessEngineDefaults(
+  id: HarnessId,
+  engines: HarnessEngine[] = [],
+  native: { model: string; effort: string } = { model: "", effort: "" },
+): { model: string; effort: string } {
+  if (id === "native") return native;
+  const fallback = HARNESS_ENGINES.find((engine) => engine.id === id);
+  const engine = engines.find((engine) => engine.id === id);
+  return {
+    model: engine?.default_model ?? fallback?.default_model ?? "",
+    effort: engine?.default_effort ?? fallback?.default_effort ?? "",
+  };
+}
+
+/** The session model is the public routing binding; never derive it from a draft model. */
+export function sessionProvider(model: string): string {
+  const separator = model.indexOf("/");
+  return separator > 0 ? model.slice(0, separator) : "";
+}
+
+/** Compatibility is supplied by the engine catalog, not guessed from model names. */
+export function harnessSessionModels(
+  models: ProviderModel[],
+  engine: HarnessId,
+  boundModel?: string | null,
+): ProviderModel[] {
+  if (engine !== "codex" || boundModel == null) return models;
+  const provider = sessionProvider(boundModel);
+  return provider ? models.filter((model) => model.provider === provider) : [];
+}
+
+/** Reject routing changes before sending/editing an existing conversation. */
+export function assertHarnessSessionSelection(
+  session: Pick<HarnessSession, "harness_id" | "model">,
+  selection: { harnessId?: HarnessId; model?: string },
+): void {
+  const engine = session.harness_id ?? "native";
+  if (selection.harnessId && selection.harnessId !== engine) {
+    throw new Error("Conversation harness cannot be changed");
+  }
+  if (
+    engine === "codex" &&
+    selection.model &&
+    sessionProvider(selection.model) !== sessionProvider(session.model)
+  ) {
+    throw new Error("Codex conversation provider cannot be changed");
+  }
 }

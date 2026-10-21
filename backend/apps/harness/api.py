@@ -121,11 +121,11 @@ def _non_empty(value: str) -> str | None:
 
 def _require_claude_session_owner(session, user_id: object) -> None:
     """Prevent another workspace collaborator from using personal Claude auth."""
-    if getattr(session, "harness_id", "native") == "claude" and str(
+    if getattr(session, "harness_id", "native") != "native" and str(
         getattr(session, "created_by_id", "")
     ) != str(user_id):
         raise AuthenticationError(
-            "Only the session owner may use its Claude connection"
+            "Only the session owner may use its external engine connection"
         )
 
 

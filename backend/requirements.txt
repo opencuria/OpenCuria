@@ -69,3 +69,6 @@ ruff>=0.8
 
 # Shared Socket.IO ASGI/independent lifecycle-worker transport.
 redis>=5.0,<7.0
+
+# Bounded PDF text extraction in an isolated resource-limited subprocess.
+pypdf==6.21.1

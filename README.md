@@ -330,6 +330,15 @@ OAuth-capable HTTP MCP plugins (including the seeded Notion plugin) can connect 
 
 OpenCuria can run the pinned Claude Code CLI as a separate harness inside a workspace, using your own Anthropic API or authorized subscription token. See the [Claude Agent guide](./docs/claude-agent.md) for setup, runtime details, data handling, and test coverage.
 
+## Codex
+
+Run the pinned Codex app-server inside a workspace with a **ChatGPT subscription**
+or **OpenRouter** account. Engine and provider stay fixed per chat; OpenCuria
+manages permissions, account refresh, tools, subagents and encrypted checkpoints.
+Direct OpenAI API keys and generic compatible providers are not in the initial
+scope. See the [Codex guide](./docs/codex.md) for setup, Plan/Build behavior,
+trust boundaries, matching backend/runner deployment and optional real-runtime tests.
+
 ## Managed desktop resources
 
 See [Managed desktop resources](./docs/managed-desktop-resources.md) for plugin policy and rollout, and the [backend](./backend/README.md) and [runner](./runner/README.md) component guides.

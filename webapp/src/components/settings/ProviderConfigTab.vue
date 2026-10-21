@@ -10,7 +10,7 @@ import SettingsRow from './SettingsRow.vue'
 import SettingsSection from './SettingsSection.vue'
 import { PROVIDER_META, type ProviderMeta, type SettingsProviderId } from './providerMeta'
 import type { ProviderModel } from '@/lib/harnessModels'
-import { invalidateProviderCatalog, loadProviderModelsCached } from '@/lib/providerCatalog'
+import { invalidateProviderCatalog, loadProviderModelsCached, loadEngineModelsCached } from '@/lib/providerCatalog'
 import { ApiRequestError } from '@/services/api'
 import { useNotificationStore } from '@/stores/notifications'
 import { useAuthStore } from '@/stores/auth'
@@ -38,7 +38,7 @@ const error = ref<string | null>(null)
 const config = ref<HarnessProviderConfig | null>(null)
 const accounts = ref<ProviderAccount[]>([])
 const catalog = ref<ProviderModel[]>([])
-const claudeCatalog = ref<ProviderModel[]>([])
+const externalCatalog = ref<ProviderModel[]>([])
 const smallModel = ref('')
 const smallEffort = ref('')
 const activeProvider = ref<SettingsProviderId | null>(null)
@@ -69,8 +69,10 @@ function currentContextKey(): string {
 
 const modelCountByProvider = computed(() => {
   const counts = new Map<string, number>()
-  for (const model of [...catalog.value, ...claudeCatalog.value]) {
-    if (!model.provider) continue
+  const seen = new Set<string>()
+  for (const model of [...catalog.value, ...externalCatalog.value]) {
+    if (!model.provider || seen.has(`${model.provider}:${model.id}`)) continue
+    seen.add(`${model.provider}:${model.id}`)
     counts.set(model.provider, (counts.get(model.provider) ?? 0) + 1)
   }
   return counts
@@ -98,20 +100,23 @@ async function refreshAll(): Promise<void> {
   const context = currentContextKey()
   const revision = ++loadRevision
   invalidateProviderCatalog()
-  const [configRes, accountRes, modelsRes, claudeModels] = await Promise.all([
+  const [configRes, accountRes, modelsRes, externalModels] = await Promise.all([
     getProviderConfig().catch((error: unknown) => {
       if (isNotFoundError(error)) return null
       throw error
     }),
     listProviderAccounts(),
     loadProviderModelsCached().catch(() => [] as ProviderModel[]),
-    listClaudeModels().catch(() => [] as ProviderModel[]),
+    Promise.all([
+      listClaudeModels().catch(() => [] as ProviderModel[]),
+      loadEngineModelsCached('codex').catch(() => [] as ProviderModel[]),
+    ]).then((rows) => rows.flat()),
   ])
   if (context !== currentContextKey() || revision !== loadRevision) return
   applyConfig(configRes)
   accounts.value = accountRes
   catalog.value = modelsRes
-  claudeCatalog.value = claudeModels
+  externalCatalog.value = externalModels
 }
 
 async function loadState(): Promise<void> {
@@ -127,7 +132,7 @@ async function loadState(): Promise<void> {
     config.value = null
     accounts.value = []
     catalog.value = []
-    claudeCatalog.value = []
+    externalCatalog.value = []
     smallModel.value = ''
     smallEffort.value = ''
     const message = e instanceof Error ? e.message : 'Failed to load provider settings'

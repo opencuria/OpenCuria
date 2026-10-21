@@ -678,6 +678,7 @@ class DockerRuntime(RuntimeBackend):
                 list(command),
                 expected_token=expected_token,
                 isolated_home=isolated_home,
+                env=env,
             )
         elif control_path:
             argv = managed_argv(

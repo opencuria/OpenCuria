@@ -316,3 +316,45 @@ DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 OTHER DEALINGS IN THE FONT SOFTWARE.
 ```
+
+## OpenAI Codex
+
+OpenCuria integrates the unmodified official **Codex 0.163.0** standalone
+app-server package, released by **OpenAI**, **Copyright 2025 OpenAI**, under the
+**Apache License, Version 2.0**. Source and release:
+https://github.com/openai/codex/releases/tag/rust-v0.163.0.
+
+- Full upstream license: [codex-0.163.0-LICENSE.txt](docs/licenses/codex-0.163.0-LICENSE.txt).
+- Upstream attribution notice: [codex-0.163.0-NOTICE.txt](docs/licenses/codex-0.163.0-NOTICE.txt).
+- The notice identifies code derived from **Ratatui** (MIT): Copyright (c)
+  2016–2022 Florian Dehau; Copyright (c) 2023–2025 The Ratatui Developers.
+
+`backend/apps/harness/engines/codex/models.json` records capability metadata
+extracted from the pinned runtime's unauthenticated `model/list` response. This
+metadata is attributed to OpenAI Codex under the same upstream license; it is not
+a live subscription-entitlement catalog. The integration/transport code is
+independently written OpenCuria code, not vendored Codex source. Runtime release
+bytes are downloaded on demand, not bundled in the repository.
+
+Redistributors of the downloaded package or images containing it must retain the
+applicable license texts and notices, including upstream NOTICE, Ratatui's MIT
+notice/license and all separate helper/dependency licensing. The package includes
+`codex-app-server`, `codex-code-mode-host`, `codex-path/rg` (ripgrep) and
+`codex-resources/bwrap` (bubblewrap); Codex's Apache license alone is not a license
+for every dependency/helper. Consult and preserve the release and corresponding
+source dependency notices/licenses (including ripgrep's MIT/Unlicense and
+bubblewrap's LGPL-2.0-or-later obligations, with corresponding source as required).
+The two upstream Codex files copied here are not a complete third-party license
+bundle for a redistributed runtime image. See the [Codex guide](docs/codex.md)
+for exact pins and runtime boundaries. OpenCuria's AGPL-3.0-only license is unchanged.
+
+## pypdf
+
+The backend requires the unmodified **pypdf 6.21.1** distribution for isolated,
+bounded PDF text extraction. Upstream: https://github.com/py-pdf/pypdf. It uses
+the **BSD 3-Clause License**, with copyright notices for Mathieu Fenniak, Ashish
+Kulkarni and Steve Witham. The full license, copied from the installed pinned
+distribution's `pypdf-6.21.1.dist-info/licenses/LICENSE`, is retained in
+[pypdf-6.21.1-LICENSE.txt](docs/licenses/pypdf-6.21.1-LICENSE.txt). Retain it when
+redistributing source or binaries as required by that license. No pypdf source
+is vendored; the dependency does not change OpenCuria's project license.

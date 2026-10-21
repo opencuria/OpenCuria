@@ -64,6 +64,8 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/python -m pip install -r requirements.txt
+      - name: Install pinned Codex test runtime
+        run: python ../scripts/fetch-codex-test-runtime.py
       - name: Run tests
         run: .venv/bin/pytest -q --junitxml=test-results.xml
       - name: Annotate Python test failures

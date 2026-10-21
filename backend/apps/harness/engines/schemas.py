@@ -16,10 +16,12 @@ class HarnessEngineOut(Schema):
     name: str
     modes: list[str]
     connected: bool
+    default_model: str | None = None
+    default_effort: str | None = None
 
 
-class ClaudeModelOut(Schema):
-    """Claude engine model using the shared picker model shape."""
+class EngineModelOut(Schema):
+    """Harness model using the shared picker model shape."""
 
     id: str
     name: str
@@ -29,6 +31,9 @@ class ClaudeModelOut(Schema):
     supports_tools: bool = True
     context_length: int = 0
     max_output_tokens: int = 0
+
+
+ClaudeModelOut = EngineModelOut  # Compatibility for existing Claude clients.
 
 
 def claude_model_to_out(model) -> ClaudeModelOut:  # type: ignore[no-untyped-def]
@@ -43,3 +48,6 @@ def claude_model_to_out(model) -> ClaudeModelOut:  # type: ignore[no-untyped-def
         context_length=model.context_length,
         max_output_tokens=model.max_output_tokens,
     )
+
+
+engine_model_to_out = claude_model_to_out

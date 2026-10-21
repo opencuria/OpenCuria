@@ -21,7 +21,7 @@ from common.utils import decrypt_value
 
 def test_claude_catalog_is_separate_and_constrained() -> None:
     models = list_claude_models()
-    assert ENGINE_IDS == ("native", "claude")
+    assert ENGINE_IDS == ("native", "claude", "codex")
     assert {model.id for model in models} == {"sonnet", "opus", "haiku"}
     assert all(model.provider == "claude" for model in models)
     assert all(model.supports_tools for model in models)

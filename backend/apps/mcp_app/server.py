@@ -50,7 +50,7 @@ Tools and their required permissions
 - update_workspace plugin_ids → plugins:write; credential_ids → credentials:read
 - get_provider_config → harness:read
 - list_provider_models → harness:read
-- list_harness_engines / list_claude_engine_models → harness:read
+- list_harness_engines / list_engine_models / list_claude_engine_models → harness:read
 - list_provider_accounts / save_provider_account /
   delete_provider_account / select_provider_account → harness:providers
 - save_provider_config → harness:run
@@ -681,8 +681,20 @@ _TOOLS: list[Tool] = [
     ),
     Tool(
         name="list_harness_engines",
-        description="List native and Claude harness engines and connection status.",
+        description="List harness engines, defaults and connection status.",
         inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="list_engine_models",
+        description="List selected-account models for a harness engine.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "engine_id": {"type": "string", "enum": ["native", "claude", "codex"]}
+            },
+            "required": ["engine_id"],
+            "additionalProperties": False,
+        },
     ),
     Tool(
         name="list_claude_engine_models",
@@ -870,7 +882,7 @@ _TOOLS: list[Tool] = [
                 "workspace_id": {"type": "string"},
                 "name": {"type": "string"},
                 "prompt": {"type": "string"},
-                "harness_id": {"type": "string", "enum": ["native", "claude"]},
+                "harness_id": {"type": "string", "enum": ["native", "claude", "codex"]},
                 "mode": {"type": "string"},
                 "model": {"type": "string"},
                 "reasoning_effort": {"type": "string"},
@@ -898,7 +910,7 @@ _TOOLS: list[Tool] = [
                 "workspace_id": {"type": "string"},
                 "name": {"type": "string"},
                 "prompt": {"type": "string"},
-                "harness_id": {"type": "string", "enum": ["native", "claude"]},
+                "harness_id": {"type": "string", "enum": ["native", "claude", "codex"]},
                 "mode": {"type": "string"},
                 "model": {"type": "string"},
                 "reasoning_effort": {"type": "string"},
@@ -972,7 +984,7 @@ _TOOLS: list[Tool] = [
                 "workspace_id": {"type": "string"},
                 "prompt": {"type": "string"},
                 "agent_name": {"type": "string"},
-                "harness_id": {"type": "string", "enum": ["native", "claude"]},
+                "harness_id": {"type": "string", "enum": ["native", "claude", "codex"]},
                 "connection_id": {"type": "string", "format": "uuid"},
                 "mode": {"type": "string"},
                 "model": {"type": "string"},
@@ -1664,6 +1676,7 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "list_provider_models": APIKeyPermission.HARNESS_READ,
     "list_harness_engines": APIKeyPermission.HARNESS_READ,
     "list_claude_engine_models": APIKeyPermission.HARNESS_READ,
+    "list_engine_models": APIKeyPermission.HARNESS_READ,
     "save_provider_config": APIKeyPermission.HARNESS_RUN,
     "delete_provider_config": APIKeyPermission.HARNESS_RUN,
     "list_provider_accounts": APIKeyPermission.HARNESS_PROVIDERS,
@@ -3220,7 +3233,7 @@ def _get_harness_service():
 
 def _is_claude_session_owner(session, user_id: object) -> bool:
     """Allow personal-engine actions only to the session's credential owner."""
-    return getattr(session, "harness_id", "native") != "claude" or str(
+    return getattr(session, "harness_id", "native") == "native" or str(
         getattr(session, "created_by_id", "")
     ) == str(user_id)
 
@@ -3284,42 +3297,41 @@ def _owned_harness_session_or_error(api_key, org_id, session_id):
 
 
 def _call_list_harness_engines(api_key, org_id, args: dict) -> list[TextContent]:
-    """List available harness engines and only the caller's Claude status."""
-    from apps.harness.engines.catalog import list_engines
-    from apps.harness.engines.connections import EngineConnectionService
+    """List available harness engines and the caller's connection status."""
+    from apps.harness.engines.service import EngineCatalogService
     from apps.organizations.services import OrganizationService
     from common.exceptions import NotFoundError
 
     try:
         OrganizationService().require_membership(api_key.user, org_id)
+        return _text(EngineCatalogService().list_engines(org_id, api_key.user.id))
     except NotFoundError as exc:
         return _error(exc.message)
-    return _text(
-        list_engines(
-            claude_connected=EngineConnectionService().is_connected(
-                org_id, api_key.user.id
-            )
+
+
+def _call_list_engine_models(api_key, org_id, args: dict) -> list[TextContent]:
+    """Expose the same shared, account-scoped catalog as REST."""
+    from apps.harness.engines.schemas import engine_model_to_out
+    from apps.harness.engines.service import EngineCatalogService
+    from apps.harness.providers.base import ProviderError
+    from apps.organizations.services import OrganizationService
+    from common.exceptions import AuthenticationError, NotFoundError
+
+    try:
+        OrganizationService().require_membership(api_key.user, org_id)
+        models = EngineCatalogService().list_models(
+            args.get("engine_id", ""), org_id, api_key.user.id
         )
-    )
+        return _text([engine_model_to_out(m).model_dump(mode="json") for m in models])
+    except (AuthenticationError, NotFoundError, ValueError) as exc:
+        return _error(str(exc))
+    except ProviderError:
+        return _error("Engine model catalog is temporarily unavailable")
 
 
 def _call_list_claude_engine_models(api_key, org_id, args: dict) -> list[TextContent]:
-    """List Claude-only model catalog, separate from provider adapters."""
-    from apps.harness.engines.catalog import list_claude_models
-    from apps.harness.engines.schemas import claude_model_to_out
-    from apps.organizations.services import OrganizationService
-    from common.exceptions import NotFoundError
-
-    try:
-        OrganizationService().require_membership(api_key.user, org_id)
-    except NotFoundError as exc:
-        return _error(exc.message)
-    return _text(
-        [
-            claude_model_to_out(model).model_dump(mode="json")
-            for model in list_claude_models()
-        ]
-    )
+    """Keep the existing Claude-only tool as a generic-catalog compatibility alias."""
+    return _call_list_engine_models(api_key, org_id, {"engine_id": "claude"})
 
 
 def _call_get_provider_config(api_key, org_id, args: dict) -> list[TextContent]:
@@ -3867,7 +3879,7 @@ async def _call_send_harness_message(api_key, org_id, args: dict) -> list[TextCo
 
     try:
         current = await sync_to_async(service.get_session)(session.id)
-        if getattr(current, "harness_id", "native") == "claude" and str(
+        if getattr(current, "harness_id", "native") != "native" and str(
             getattr(current, "created_by_id", "")
         ) != str(api_key.user.id):
             raise AuthenticationError(
@@ -3930,7 +3942,7 @@ async def _call_steer_harness_session(api_key, org_id, args: dict) -> list[TextC
     service = _get_harness_service()
     try:
         current = await sync_to_async(service.get_session)(session.id)
-        if getattr(current, "harness_id", "native") == "claude" and str(
+        if getattr(current, "harness_id", "native") != "native" and str(
             getattr(current, "created_by_id", "")
         ) != str(api_key.user.id):
             raise AuthenticationError(
@@ -3972,7 +3984,7 @@ async def _call_withdraw_harness_steer(
     service = _get_harness_service()
     try:
         current = await sync_to_async(service.get_session)(session.id)
-        if getattr(current, "harness_id", "native") == "claude" and str(
+        if getattr(current, "harness_id", "native") != "native" and str(
             getattr(current, "created_by_id", "")
         ) != str(api_key.user.id):
             raise AuthenticationError(
@@ -4066,7 +4078,7 @@ async def _call_edit_harness_message(api_key, org_id, args) -> list:  # type: ig
 
     try:
         current = await sync_to_async(service.get_session)(session.id)
-        if getattr(current, "harness_id", "native") == "claude" and str(
+        if getattr(current, "harness_id", "native") != "native" and str(
             getattr(current, "created_by_id", "")
         ) != str(api_key.user.id):
             raise AuthenticationError(
@@ -5460,6 +5472,7 @@ _TOOL_HANDLERS = {
     "list_provider_models": _call_list_provider_models,
     "list_harness_engines": _call_list_harness_engines,
     "list_claude_engine_models": _call_list_claude_engine_models,
+    "list_engine_models": _call_list_engine_models,
     "save_provider_config": _call_save_provider_config,
     "delete_provider_config": _call_delete_provider_config,
     "list_provider_accounts": _call_list_provider_accounts,

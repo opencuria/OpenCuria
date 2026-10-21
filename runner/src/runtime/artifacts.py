@@ -17,24 +17,30 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 import structlog
 
 from ..services.capture_fence import CaptureFence, live_interaction
+from . import codex_artifact
 from .base import RuntimeBackend
 
 logger = structlog.get_logger(__name__)
 
 ARTIFACT_MANIFEST_PATH = Path(__file__).with_name("artifact_manifest.json")
-ARTIFACT_DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(
-    total=600, connect=20, sock_read=60
-)
+ARTIFACT_DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=600, connect=20, sock_read=60)
 ARTIFACT_DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 ARTIFACT_MAX_DOWNLOAD_SIZE = 300 * 1024 * 1024
 ARTIFACT_GUEST_ROOT = "/opt/opencuria/runtimes"
-CLAUDE_RELEASE_MANIFEST_SHA256 = "64f5abe05a43151810acf8c25169872e41293c96d3ae73d6508733a8b336e2b1"
-CLAUDE_ARTIFACT_SPEC_SHA256 = "be1a957aeab980c02359264df859bcd78a7bbb45f70c2fd857b4a27a803eb0ed"
+CLAUDE_RELEASE_MANIFEST_SHA256 = (
+    "64f5abe05a43151810acf8c25169872e41293c96d3ae73d6508733a8b336e2b1"
+)
+# Deliberately repinned canonical manifest after adding the pinned Codex entry.
+# Claude release signatures, digests, sizes and URLs are unchanged.
+CLAUDE_ARTIFACT_SPEC_SHA256 = (
+    "742e3787874df558942c561b9884287fc4e610debd4cc63b28d1746a78f68d87"
+)
 CLAUDE_PLATFORM_PINS = {
     "linux-x64": (
         "a967e7b1d8b4e47ee421d5433027880347952b0c0857abf880e2c942a4ec93b3",
@@ -150,7 +156,6 @@ printf '%s\n' "$version"
 """
 
 
-
 class ArtifactProvisionError(RuntimeError):
     """Raised when a pinned runtime artifact cannot be provisioned safely."""
 
@@ -180,7 +185,9 @@ class RuntimeArtifactManager:
         if (
             not isinstance(guest_runtime_root, str)
             or not guest_runtime_root.startswith("/")
-            or any(part in {"", ".", ".."} for part in guest_runtime_root.split("/")[1:])
+            or any(
+                part in {"", ".", ".."} for part in guest_runtime_root.split("/")[1:]
+            )
             or not all(char.isalnum() or char in "/_-" for char in guest_runtime_root)
         ):
             raise ValueError("Invalid guest runtime root")
@@ -197,13 +204,17 @@ class RuntimeArtifactManager:
             raise RuntimeError("Runtime artifact manifest unavailable") from exc
         if self._manifest.get("schema_version") != 1:
             raise RuntimeError("Unsupported runtime artifact manifest")
+        if (
+            self._manifest.get("artifacts", {}).get("codex-agent")
+            != codex_artifact.manifest_entry()
+        ):
+            raise RuntimeError("Codex artifact manifest integrity check failed")
         manifest_entry = self._manifest.get("artifacts", {}).get("claude-agent", {})
         canonical_manifest = copy.deepcopy(self._manifest)
         canonical_manifest["artifacts"]["claude-agent"]["manifest_sha256"] = "x"
         canonical_bytes = (json.dumps(canonical_manifest, indent=2) + "\n").encode()
         if (
-            hashlib.sha256(canonical_bytes).hexdigest()
-            != CLAUDE_ARTIFACT_SPEC_SHA256
+            hashlib.sha256(canonical_bytes).hexdigest() != CLAUDE_ARTIFACT_SPEC_SHA256
             or manifest_entry.get("manifest_sha256") != CLAUDE_ARTIFACT_SPEC_SHA256
             or manifest_entry.get("release_manifest_sha256")
             != CLAUDE_RELEASE_MANIFEST_SHA256
@@ -247,7 +258,13 @@ class RuntimeArtifactManager:
             raise ArtifactRequestError("Unsupported workspace platform")
         return self._platform_key(output)
 
-    def _safe_cache_dirs(self, platform_key: str, digest: str) -> Path:
+    def _safe_cache_dirs(
+        self,
+        platform_key: str,
+        digest: str,
+        artifact_id: str = "claude-agent",
+        version: str = "2.1.292",
+    ) -> Path:
         """Create private cache directories, refusing symlinked components."""
         # The configured state directory is operator-controlled; the artifact
         # subtree is runner-owned and must not redirect writes through symlinks.
@@ -257,7 +274,7 @@ class RuntimeArtifactManager:
         current = self._state_dir
         if current.is_symlink() or not current.is_dir():
             raise ArtifactProvisionError("Artifact cache path is unsafe")
-        for piece in ("artifacts", "claude-agent", "2.1.292", platform_key, digest):
+        for piece in ("artifacts", artifact_id, version, platform_key, digest):
             current = current / piece
             try:
                 mode = current.lstat().st_mode
@@ -277,8 +294,16 @@ class RuntimeArtifactManager:
         self, url: str, expected_size: int, expected_digest: str, destination: Path
     ) -> None:
         """Stream one fixed URL to an atomic, checksum-verified cache file."""
-        if not url.startswith("https://downloads.claude.ai/claude-code-releases/"):
+        codex_urls = {
+            s["url"] for s in codex_artifact.manifest_entry()["platforms"].values()
+        }
+        if (
+            not url.startswith("https://downloads.claude.ai/claude-code-releases/")
+            and url not in codex_urls
+        ):
             raise ArtifactProvisionError("Artifact source is not approved")
+        if url in codex_urls and expected_size > codex_artifact.MAX_ARCHIVE_SIZE:
+            raise ArtifactProvisionError("Artifact size is outside the allowed limit")
         if expected_size <= 0 or expected_size > ARTIFACT_MAX_DOWNLOAD_SIZE:
             raise ArtifactProvisionError("Artifact size is outside the allowed limit")
         fd, temp_name = tempfile.mkstemp(prefix=".download-", dir=destination.parent)
@@ -289,7 +314,9 @@ class RuntimeArtifactManager:
             with os.fdopen(fd, "wb") as output:
                 async with (
                     aiohttp.ClientSession(timeout=ARTIFACT_DOWNLOAD_TIMEOUT) as session,
-                    session.get(url, allow_redirects=False) as response,
+                    self._download_response(
+                        session, url, url in codex_urls
+                    ) as response,
                 ):
                     if response.status != 200:
                         raise ArtifactProvisionError("Artifact download failed")
@@ -301,7 +328,9 @@ class RuntimeArtifactManager:
                     ):
                         received += len(chunk)
                         if received > expected_size:
-                            raise ArtifactProvisionError("Artifact download exceeded its size limit")
+                            raise ArtifactProvisionError(
+                                "Artifact download exceeded its size limit"
+                            )
                         digest.update(chunk)
                         output.write(chunk)
                 output.flush()
@@ -312,7 +341,9 @@ class RuntimeArtifactManager:
                 raise ArtifactProvisionError("Artifact checksum mismatch")
             os.chmod(temp_path, 0o600)
             os.replace(temp_path, destination)
-            dir_fd = os.open(destination.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            dir_fd = os.open(
+                destination.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
             try:
                 os.fsync(dir_fd)
             finally:
@@ -326,6 +357,27 @@ class RuntimeArtifactManager:
                 temp_path.unlink()
             except FileNotFoundError:
                 pass
+
+    @staticmethod
+    @asynccontextmanager
+    async def _download_response(session, url: str, codex: bool):
+        """Allow only GitHub's fixed HTTPS release-asset redirect for Codex."""
+        async with session.get(url, allow_redirects=False) as response:
+            if not codex or response.status != 302:
+                yield response
+                return
+            location = response.headers.get("Location", "")
+            parsed = urlparse(location)
+            if (
+                parsed.scheme != "https"
+                or parsed.hostname != "release-assets.githubusercontent.com"
+                or parsed.username
+                or parsed.password
+                or parsed.port not in {None, 443}
+            ):
+                raise ArtifactProvisionError("Artifact redirect is not approved")
+            async with session.get(location, allow_redirects=False) as asset:
+                yield asset
 
     @staticmethod
     def _hash_file(path: Path) -> str | None:
@@ -353,8 +405,7 @@ class RuntimeArtifactManager:
             tar.addfile(info, source)
         return archive.getvalue()
 
-    @staticmethod
-    async def _complete_guest_operation(awaitable, timeout: float):
+    async def _complete_guest_operation(self, awaitable, timeout: float):
         """Settle a guest-side-effect command before cancellation can orphan it."""
         operation = asyncio.create_task(awaitable)
 
@@ -389,7 +440,9 @@ class RuntimeArtifactManager:
         try:
             await asyncio.shield(upload)
         except Exception as exc:
-            logger.warning("runtime_artifact_upload_failed", error_type=type(exc).__name__)
+            logger.warning(
+                "runtime_artifact_upload_failed", error_type=type(exc).__name__
+            )
         await self._cleanup_guest_archive(runtime, instance_id, source)
 
     def _retain_background_task(self, task: asyncio.Task) -> None:
@@ -401,7 +454,10 @@ class RuntimeArtifactManager:
             try:
                 done.result()
             except Exception as exc:
-                logger.warning("runtime_artifact_background_cleanup_failed", error_type=type(exc).__name__)
+                logger.warning(
+                    "runtime_artifact_background_cleanup_failed",
+                    error_type=type(exc).__name__,
+                )
 
         task.add_done_callback(completed)
 
@@ -427,7 +483,10 @@ class RuntimeArtifactManager:
             lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             cache_dir = self._safe_cache_dirs(
-                key[2], self._manifest["artifacts"][key[0]]["platforms"][key[2]]["sha256"]
+                key[2],
+                self._manifest["artifacts"][key[0]]["platforms"][key[2]]["sha256"],
+                key[0],
+                key[1],
             )
             lock_path = cache_dir.parent / (cache_dir.name + ".lock")
 
@@ -467,6 +526,27 @@ class RuntimeArtifactManager:
                 finally:
                     os.close(fd)
 
+    def _codex_guest_command(
+        self,
+        action: str,
+        source: str,
+        digest: str,
+        platform: str,
+        hashes: dict[str, str],
+    ) -> list[str]:
+        """Send the trusted package installer and expected byte hashes, not policy."""
+        return [
+            "python3",
+            "-c",
+            Path(codex_artifact.__file__).read_text(),
+            action,
+            source,
+            digest,
+            self._guest_runtime_root,
+            codex_artifact.target_for_platform(platform),
+            json.dumps(hashes, sort_keys=True, separators=(",", ":")),
+        ]
+
     @live_interaction
     async def ensure_runtime_artifact(
         self,
@@ -482,7 +562,10 @@ class RuntimeArtifactManager:
         entry = self._manifest.get("artifacts", {}).get(artifact_id)
         if not entry or entry.get("version") != version:
             raise ArtifactRequestError("Unapproved runtime artifact or version")
-        if artifact_id != "claude-agent" or version != "2.1.292":
+        if (artifact_id, version) not in {
+            ("claude-agent", "2.1.292"),
+            ("codex-agent", "0.163.0"),
+        }:
             raise ArtifactRequestError("Unapproved runtime artifact or version")
         platforms = entry.get("platforms")
         if not isinstance(platforms, dict):
@@ -491,8 +574,9 @@ class RuntimeArtifactManager:
         info = self._get_cached(workspace_id)
         if not getattr(info, "instance_id", None):
             raise ArtifactRequestError("Workspace has no active instance")
+        instance_id = info.instance_id
         runtime = self._get_runtime(workspace_id)
-        platform_key = await self._guest_platform(runtime, info.instance_id)
+        platform_key = await self._guest_platform(runtime, instance_id)
         spec = platforms.get(platform_key)
         if not isinstance(spec, dict):
             raise ArtifactRequestError("Unsupported workspace platform")
@@ -508,17 +592,33 @@ class RuntimeArtifactManager:
             or not isinstance(size, int)
             or size <= 0
             or size > ARTIFACT_MAX_DOWNLOAD_SIZE
-            or CLAUDE_PLATFORM_PINS.get(platform_key) != (digest, size)
-            or url
-            != f"https://downloads.claude.ai/claude-code-releases/2.1.292/{platform_key}/claude"
+            or (
+                artifact_id == "claude-agent"
+                and (
+                    CLAUDE_PLATFORM_PINS.get(platform_key) != (digest, size)
+                    or url
+                    != f"https://downloads.claude.ai/claude-code-releases/2.1.292/{platform_key}/claude"
+                )
+            )
+            or (
+                artifact_id == "codex-agent"
+                and spec != codex_artifact.manifest_entry()["platforms"][platform_key]
+            )
         ):
             raise RuntimeError("Runtime artifact manifest is invalid")
         key = (artifact_id, version, platform_key)
         async with self._locked(key):
             try:
-                cache_dir = self._safe_cache_dirs(platform_key, digest)
-                binary = cache_dir / "claude"
-                if self._hash_file(binary) != digest:
+                is_codex = artifact_id == "codex-agent"
+                cache_dir = self._safe_cache_dirs(
+                    platform_key, digest, artifact_id, version
+                )
+                binary = cache_dir / ("package.tar.gz" if is_codex else "claude")
+                cached_size = binary.lstat().st_size if binary.exists() else -1
+                if (
+                    cached_size != size
+                    or await asyncio.to_thread(self._hash_file, binary) != digest
+                ):
                     try:
                         binary.unlink()
                     except FileNotFoundError:
@@ -527,14 +627,23 @@ class RuntimeArtifactManager:
                 if binary.stat().st_size != size:
                     raise ArtifactProvisionError("Artifact cache size mismatch")
 
-                archive_name = f"opencuria-claude-agent-{digest}-{uuid.uuid4().hex}"
+                hashes = None
+                if is_codex:
+                    if await asyncio.to_thread(self._hash_file, binary) != digest:
+                        raise ArtifactProvisionError("Artifact checksum mismatch")
+                    hashes = await asyncio.to_thread(
+                        codex_artifact.inspect_package,
+                        binary,
+                        codex_artifact.target_for_platform(platform_key),
+                    )
+                archive_name = f"opencuria-{artifact_id}-{digest}-{uuid.uuid4().hex}"
                 archive = await asyncio.to_thread(
                     self._make_archive, binary, archive_name
                 )
                 source = f"/tmp/{archive_name}"
                 upload = asyncio.create_task(
                     asyncio.wait_for(
-                        runtime.put_archive(info.instance_id, "/tmp", archive),
+                        runtime.put_archive(instance_id, "/tmp", archive),
                         timeout=600,
                     )
                 )
@@ -543,7 +652,7 @@ class RuntimeArtifactManager:
                 except asyncio.CancelledError:
                     cleanup = asyncio.create_task(
                         self._settle_cancelled_upload(
-                            upload, runtime, info.instance_id, source
+                            upload, runtime, instance_id, source
                         )
                     )
                     self._retain_background_task(cleanup)
@@ -562,21 +671,31 @@ class RuntimeArtifactManager:
                         stage_name,
                         guest_runtime_root,
                     ]
+                    if is_codex:
+                        install_command = self._codex_guest_command(
+                            "install", source, digest, platform_key, hashes
+                        )
                     code, output = await self._complete_guest_operation(
-                        runtime.exec_command_wait(info.instance_id, install_command),
-                        timeout=60,
+                        runtime.exec_command_wait(instance_id, install_command),
+                        timeout=180 if is_codex else 60,
                     )
                     if code != 0 or output.strip() != version:
-                        raise ArtifactProvisionError("Runtime artifact provisioning failed")
+                        raise ArtifactProvisionError(
+                            "Runtime artifact provisioning failed"
+                        )
                 except ArtifactProvisionError:
+                    await self._cleanup_guest_archive(runtime, instance_id, source)
                     raise
                 except Exception as exc:
+                    await self._cleanup_guest_archive(runtime, instance_id, source)
                     raise ArtifactProvisionError(
                         "Runtime artifact provisioning failed"
                     ) from exc
                 current = self._get_cached(workspace_id)
-                if current.instance_id != info.instance_id:
-                    raise ArtifactProvisionError("Workspace changed during artifact provisioning")
+                if current.instance_id != instance_id:
+                    raise ArtifactProvisionError(
+                        "Workspace changed during artifact provisioning"
+                    )
                 if self.capture_fence is not None:
                     self.capture_fence.check_current(workspace_id)
                 verify_command = [
@@ -588,9 +707,13 @@ class RuntimeArtifactManager:
                     digest,
                     version,
                 ]
+                if is_codex:
+                    verify_command = self._codex_guest_command(
+                        "verify", source, digest, platform_key, hashes
+                    )
                 try:
                     code, output = await asyncio.wait_for(
-                        runtime.exec_command_wait(info.instance_id, verify_command),
+                        runtime.exec_command_wait(instance_id, verify_command),
                         timeout=30,
                     )
                 except Exception as exc:
@@ -601,7 +724,10 @@ class RuntimeArtifactManager:
                     ) from exc
                 if code != 0 or output.strip() != version:
                     raise ArtifactProvisionError("Runtime artifact provisioning failed")
-                guest_path = f"{guest_runtime_root}/{artifact_id}/{version}/claude"
+                entrypoint = "bin/codex-app-server" if is_codex else "claude"
+                guest_path = (
+                    f"{guest_runtime_root}/{artifact_id}/{version}/{entrypoint}"
+                )
                 return {
                     "ok": True,
                     "path": guest_path,
@@ -621,5 +747,6 @@ class RuntimeArtifactManager:
                 raise ArtifactProvisionError(
                     "Runtime artifact provisioning failed"
                 ) from exc
+
 
 __all__ = ["ArtifactProvisionError", "RuntimeArtifactManager"]

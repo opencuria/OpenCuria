@@ -45,3 +45,36 @@ exit status is unknown, not exit 0; integer-only exec/build paths fail explicitl
 Requires AsyncSSH 2.15+ (the public connection-closed API). After updating runner
 code/dependencies, restart the runner when no agent run is active; restarting
 cannot migrate existing SSH streams. No guest/image changes are required.
+
+## Pinned external runtimes
+
+`ensure_runtime_artifact("codex-agent", "0.163.0")` provisions the official
+`rust-v0.163.0` **standalone app-server package**, not the single-binary release.
+The returned executable is
+`/opt/opencuria/runtimes/codex-agent/0.163.0/bin/codex-app-server`; the package
+also retains `bin/codex-code-mode-host`, `codex-resources/bwrap`, and
+`codex-path/rg`. Official x86_64 and aarch64 musl package SHA-256/size pins are
+in `src/runtime/codex_artifact.py` and `artifact_manifest.json`; the static musl
+packages serve both glibc and musl workspaces. Provisioning requires Linux
+Python 3.10+ and libc `renameat2` for atomic no-replace directory publication.
+
+The shared artifact manager retains cache locks, download limits, cancellation
+settlement and workspace fences. Codex extraction allows only the pinned
+package layout, caps decompressed bytes, and generates per-file hashes from the
+verified archive. The guest verifies every installed file before executing the
+version probe and again before returning. Existing altered artifacts fail;
+they are not repaired or replaced. The combined manifest was deliberately
+repinned; Claude release signature and platform pins remain unchanged.
+
+Managed processes with an `agent` owner select the Codex isolated environment
+by an explicit `CODEX_HOME` under
+`/workspace/.opencuria/harness/codex/<session-uuid>/config` (optionally followed
+by `/resume-<16 lowercase hex characters>`). All config components must already
+exist and must not be symlinks. Only `CODEX_HOME` and an optional
+`OPENCURIA_CODEX_API_KEY` are accepted. The runner supplies a disposable HOME
+and a fixed PATH including the packaged ripgrep. Ambient credentials and
+caller-supplied HOME/PATH are excluded. Explicit environment values travel only
+in a length-framed private stdin preamble, never process argv or durable records.
+Subscription authentication can subsequently use app-server stdin, without an
+authentication environment variable. Model, tool, approval and prompt policy
+remain outside the runner.

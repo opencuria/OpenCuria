@@ -16,7 +16,7 @@ from django.utils import timezone
 from apps.harness.harness_service import HarnessService, get_harness_service
 from apps.runners.enums import WorkspaceOperation, WorkspaceStatus
 from apps.runners.services import get_runner_service
-from common.exceptions import ConflictError, NotFoundError
+from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .models import ScheduledTask, ScheduledTaskRun
 from .recurrence import next_occurrence, normalize_cron_expression, valid_timezone
@@ -72,10 +72,10 @@ class ScheduledTaskService:
         from apps.harness.engines.catalog import ENGINE_IDS
 
         if not isinstance(value, str):
-            raise ValueError("harness_id must be native or claude")
+            raise ValueError("harness_id must be native, claude or codex")
         harness_id = value.strip().lower()
         if harness_id not in ENGINE_IDS:
-            raise ValueError("harness_id must be native or claude")
+            raise ValueError("harness_id must be native, claude or codex")
         return harness_id
 
     def _validate_engine_config(
@@ -107,8 +107,8 @@ class ScheduledTaskService:
             )
 
         if harness_id == "native":
-            from apps.harness.providers.models_catalog import normalize_reasoning_effort
             from apps.harness.harness_service import HarnessSession
+            from apps.harness.providers.models_catalog import normalize_reasoning_effort
 
             effort = normalize_reasoning_effort(raw_effort)
             validation_session = HarnessSession(
@@ -124,6 +124,20 @@ class ScheduledTaskService:
                 organization_id, validation_session
             )
             return harness_id, raw_model, effort, skills
+
+        if harness_id == "codex":
+            from apps.harness.engines.service import EngineCatalogService
+
+            try:
+                normalized_model, effort = EngineCatalogService().validate_codex_config(
+                    organization_id, owner_id, raw_model, raw_effort
+                )
+            except (AuthenticationError, NotFoundError) as exc:
+                raise ValueError(
+                    "Connect your selected ChatGPT or OpenRouter account "
+                    "before scheduling Codex tasks"
+                ) from exc
+            return harness_id, normalized_model, effort, skills
 
         from apps.harness.engines.catalog import (
             normalize_claude_effort,
@@ -307,7 +321,7 @@ class ScheduledTaskService:
         validate_engine = (
             workspace_changed
             or bool({"mode", "model", "reasoning_effort", "harness_id"} & changes.keys())
-            or ("skill_ids" in changes and combined["harness_id"] == "claude")
+            or ("skill_ids" in changes and combined["harness_id"] != "native")
         )
         if validate_engine:
             harness_id, model, effort, skills = self._validate_engine_config(

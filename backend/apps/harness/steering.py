@@ -60,6 +60,7 @@ class SteeringChannel:
 
     deliver: DeliverFn
     _pending: list[SteerEntry] = field(default_factory=list)
+    _reserved: set[str] = field(default_factory=set)
     _closed: bool = False
     _feed_ended: bool = False
     _wakeup: asyncio.Event = field(default_factory=asyncio.Event)
@@ -99,14 +100,45 @@ class SteeringChannel:
 
     def withdraw(self, steer_id: str) -> SteerEntry | None:
         """Remove a still-pending entry; ``None`` when already taken."""
+        if steer_id in self._reserved:
+            raise ConflictError(
+                "The message is already being delivered", code="steer_in_flight"
+            )
         for index, entry in enumerate(self._pending):
             if entry.id == steer_id:
                 return self._pending.pop(index)
         return None
 
+    def reserve(self, steer_id: str) -> SteerEntry | None:
+        """Fence withdrawal while an external engine waits for acceptance."""
+        if self._closed or self._feed_ended or steer_id in self._reserved:
+            return None
+        entry = next((row for row in self._pending if row.id == steer_id), None)
+        if entry is not None:
+            self._reserved.add(steer_id)
+        return entry
+
+    def release(self, steer_id: str, *, uncertain: bool = False) -> None:
+        """Release a rejected steer; uncertain delivery must never be replayed."""
+        self._reserved.discard(steer_id)
+        if uncertain:
+            self._pending = [row for row in self._pending if row.id != steer_id]
+
+    async def acknowledge(self, steer_id: str) -> None:
+        """Persist only an accepted steer; never requeue after an uncertain ACK."""
+        if steer_id not in self._reserved:
+            return  # Explicit Stop may already have discarded the queue.
+        self._reserved.remove(steer_id)
+        entry = next((row for row in self._pending if row.id == steer_id), None)
+        self._pending = [row for row in self._pending if row.id != steer_id]
+        if entry is not None:
+            await self.deliver([entry])
+
     def discard(self) -> list[SteerEntry]:
         """Drop and return every pending entry (user stop)."""
-        dropped, self._pending = self._pending, []
+        dropped = [row for row in self._pending if row.id not in self._reserved]
+        self._pending = []
+        self._reserved.clear()
         return dropped
 
     def close(self) -> list[SteerEntry]:

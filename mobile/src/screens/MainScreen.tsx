@@ -47,8 +47,13 @@ import {
   formatEffort,
   resolveCatalogModel,
   snapEffort,
+  harnessEngineChoices,
+  harnessEngineLabel,
+  harnessEngineDefaults,
+  harnessSessionModels,
 } from "@opencuria/chat-core/harnessModels";
 import type {
+  HarnessId,
   HarnessSession,
   HarnessSessionMode,
 } from "@opencuria/chat-core/harness";
@@ -143,7 +148,9 @@ export function MainScreen(): React.JSX.Element {
   const [skills, setSkills] = useState<Skill[]>([]);
   const [engines, setEngines] = useState<HarnessEngine[]>([]);
   const [models, setModels] = useState<ProviderModel[]>([]);
-  const [claudeModels, setClaudeModels] = useState<ProviderModel[]>([]);
+  const [engineModels, setEngineModels] = useState<
+    Record<string, ProviderModel[]>
+  >({});
   const [agentConfigs, setAgentConfigs] = useState<AgentConfig[]>([]);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [recentModels, setRecentModels] = useState<
@@ -165,7 +172,7 @@ export function MainScreen(): React.JSX.Element {
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [skillIds, setSkillIds] = useState<string[]>([]);
   const [mode, setMode] = useState<HarnessSessionMode>("build");
-  const [harness, setHarness] = useState<"native" | "claude">("native");
+  const [harness, setHarness] = useState<HarnessId>("native");
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -181,6 +188,7 @@ export function MainScreen(): React.JSX.Element {
   const generation = useRef(0);
   const overviewGeneration = useRef(0);
   const catalogGeneration = useRef(0);
+  const selectionDirty = useRef(false);
   const mountedRef = useRef(false);
   const clientRef = useRef(client);
   const loadOverviewRef = useRef<(background?: boolean) => Promise<void>>(
@@ -203,7 +211,13 @@ export function MainScreen(): React.JSX.Element {
   const workspaceInUse = Boolean(workspace?.has_active_session);
   const occupiedElsewhere = workspaceInUse && !currentBusy;
   const canStart = ready && !workspaceInUse;
-  const modelsForEngine = harness === "claude" ? claudeModels : models;
+  const catalogForEngine = (id: HarnessId) =>
+    id === "native" ? models : (engineModels[id] ?? []);
+  const modelsForEngine = harnessSessionModels(
+    catalogForEngine(harness),
+    harness,
+    chat.activeSessionId ? (chat.activeSession?.model ?? "") : undefined,
+  );
   const selectedModel = resolveCatalogModel(modelsForEngine, model);
   const modeConfig = agentConfigs.find(
     (item) => item.mode === mode || item.agent === mode,
@@ -354,11 +368,40 @@ export function MainScreen(): React.JSX.Element {
 
   const loadCatalogs = useCallback(async () => {
     if (!client || !mountedRef.current || clientRef.current !== client) return;
-    const requestGeneration = catalogGeneration.current;
+    const requestGeneration = ++catalogGeneration.current;
+    const engineRequest = client.harness.listEngines();
     const results = await Promise.allSettled([
-      client.harness.listEngines(),
+      engineRequest,
       client.harness.listProviderModels(),
-      client.harness.listClaudeModels(),
+      engineRequest.then(async (rows) => {
+        const external = harnessEngineChoices(rows).filter(
+          (engine) =>
+            engine.id !== "native" &&
+            (engine.id === "claude" ||
+              rows.some((row) => row.id === engine.id)),
+        );
+        const results = await Promise.allSettled(
+          external.map(async (engine) => {
+            // Compatibility for clients embedding the legacy Claude-only API.
+            const entries = client.harness.listEngineModels
+              ? await client.harness.listEngineModels(engine.id)
+              : engine.id === "claude"
+                ? await client.harness.listClaudeModels()
+                : await Promise.reject(
+                    new Error(`${engine.name} catalog is unavailable`),
+                  );
+            return [engine.id, entries] as const;
+          }),
+        );
+        return {
+          catalogs: Object.fromEntries(
+            results.flatMap((result) =>
+              result.status === "fulfilled" ? [result.value] : [],
+            ),
+          ),
+          failed: results.some((result) => result.status === "rejected"),
+        };
+      }),
       client.harness.listAgentConfigs(),
       client.harness.listRecentModels(),
     ]);
@@ -371,14 +414,16 @@ export function MainScreen(): React.JSX.Element {
     const [
       engineResult,
       modelResult,
-      claudeResult,
+      externalResult,
       configResult,
       recentResult,
     ] = results;
     setEngines(engineResult.status === "fulfilled" ? engineResult.value : []);
     setModels(modelResult.status === "fulfilled" ? modelResult.value : []);
-    setClaudeModels(
-      claudeResult.status === "fulfilled" ? claudeResult.value : [],
+    setEngineModels(
+      externalResult.status === "fulfilled"
+        ? externalResult.value.catalogs
+        : {},
     );
     setAgentConfigs(
       configResult.status === "fulfilled" ? configResult.value : [],
@@ -387,7 +432,8 @@ export function MainScreen(): React.JSX.Element {
       recentResult.status === "fulfilled" ? recentResult.value : [],
     );
     setCatalogError(
-      results.some((result) => result.status === "rejected")
+      results.some((result) => result.status === "rejected") ||
+        (externalResult.status === "fulfilled" && externalResult.value.failed)
         ? "Some model settings are unavailable. Workspace chat and history are still available."
         : null,
     );
@@ -409,6 +455,10 @@ export function MainScreen(): React.JSX.Element {
     setConversations([]);
     setWorkspaces([]);
     setCatalogError(null);
+    setEngines([]);
+    setModels([]);
+    setEngineModels({});
+    selectionDirty.current = false;
     if (client) {
       void loadOverview();
       void loadCatalogs();
@@ -428,9 +478,13 @@ export function MainScreen(): React.JSX.Element {
     () =>
       registerForegroundRefresh(async () => {
         if (!client || !controller) return;
-        await Promise.allSettled([loadOverview(true), controller.refresh()]);
+        await Promise.allSettled([
+          loadOverview(true),
+          controller.refresh(),
+          loadCatalogs(),
+        ]);
       }),
-    [client, controller, loadOverview, registerForegroundRefresh],
+    [client, controller, loadOverview, loadCatalogs, registerForegroundRefresh],
   );
 
   const workspaceScopeKey = workspaces
@@ -500,6 +554,7 @@ export function MainScreen(): React.JSX.Element {
   }, [controller, navigation]);
 
   useEffect(() => {
+    selectionDirty.current = false;
     const selected = chat.activeSession;
     if (selected) {
       setMode(selected.mode);
@@ -507,24 +562,42 @@ export function MainScreen(): React.JSX.Element {
       setModel(selected.model ?? "");
       setEffort(selected.reasoning_effort ?? "");
       setSkillIds(selected.skill_ids ?? []);
-      return;
+    } else {
+      setModel("");
+      setEffort("");
     }
-    const config = agentConfigs.find(
-      (item) => item.mode === mode || item.agent === mode,
-    );
-    const catalog = harness === "claude" ? claudeModels : models;
-    const preferred = config?.model ?? "";
-    const defaultModel = catalog.some((item) => item.id === preferred)
-      ? preferred
-      : (catalog[0]?.id ?? "");
-    setModel(defaultModel);
+  }, [
+    chat.activeSessionId,
+    workspaceId,
+    chat.activeSession?.model,
+    chat.activeSession?.reasoning_effort,
+    chat.activeSession?.mode,
+    chat.activeSession?.harness_id,
+  ]);
+
+  useEffect(() => {
+    if (chat.activeSessionId || selectionDirty.current) return;
+    const defaults = harnessEngineDefaults(harness, engines, {
+      model: modeConfig?.model ?? "",
+      effort: modeConfig?.effort ?? "",
+    });
+    const catalog = catalogForEngine(harness);
+    const selected =
+      catalog.find((item) => item.id === defaults.model) ?? catalog[0];
+    setModel(selected?.id ?? defaults.model);
     setEffort(
-      snapEffort(
-        resolveCatalogModel(catalog, defaultModel),
-        config?.effort ?? "",
-      ),
+      selected ? snapEffort(selected, defaults.effort) : defaults.effort,
     );
-  }, [chat.activeSessionId, agentConfigs, harness, claudeModels, models]);
+  }, [
+    chat.activeSessionId,
+    workspaceId,
+    agentConfigs,
+    harness,
+    engineModels,
+    models,
+    engines,
+    mode,
+  ]);
 
   const refresh = useCallback(async () => {
     if (!client) return;
@@ -535,36 +608,40 @@ export function MainScreen(): React.JSX.Element {
 
   const selectMode = (next: HarnessSessionMode) => {
     setMode(next);
+    if (harness !== "native" || selectionDirty.current) return;
     const config = agentConfigs.find(
       (item) => item.mode === next || item.agent === next,
     );
-    const catalog = harness === "claude" ? claudeModels : models;
-    const preferred = config?.model ?? "";
-    const nextModel = catalog.some((item) => item.id === preferred)
-      ? preferred
-      : catalog.some((item) => item.id === model)
-        ? model
-        : (catalog[0]?.id ?? "");
-    setModel(nextModel);
+    const nextModel =
+      modelsForEngine.find((item) => item.id === config?.model) ??
+      modelsForEngine[0];
+    setModel(nextModel?.id ?? "");
+    setEffort(snapEffort(nextModel, config?.effort ?? ""));
+  };
+  const selectHarness = (next: HarnessId) => {
+    if (
+      chat.activeSessionId ||
+      (next !== "native" &&
+        !engines.find((engine) => engine.id === next)?.connected)
+    )
+      return;
+    selectionDirty.current = false;
+    setHarness(next);
+    const defaults = harnessEngineDefaults(next, engines, {
+      model: modeConfig?.model ?? "",
+      effort: modeConfig?.effort ?? "",
+    });
+    const catalog = catalogForEngine(next);
+    const selected =
+      catalog.find((item) => item.id === defaults.model) ?? catalog[0];
+    setModel(selected?.id ?? defaults.model);
     setEffort(
-      snapEffort(
-        resolveCatalogModel(catalog, nextModel),
-        config?.effort ?? effort,
-      ),
+      selected ? snapEffort(selected, defaults.effort) : defaults.effort,
     );
   };
-  const selectHarness = (next: "native" | "claude") => {
-    setHarness(next);
-    const catalog = next === "claude" ? claudeModels : models;
-    const preferredModel = modeConfig?.model || model || "";
-    const selectedModel =
-      catalog.find((item) => item.id === preferredModel)?.id ??
-      catalog[0]?.id ??
-      "";
-    setModel(selectedModel);
-    setEffort(snapEffort(resolveCatalogModel(catalog, selectedModel), effort));
-  };
   const selectModel = (next: string) => {
+    if (!modelsForEngine.some((item) => item.id === next)) return;
+    selectionDirty.current = true;
     setModel(next);
     setEffort(snapEffort(resolveCatalogModel(modelsForEngine, next), effort));
   };
@@ -886,7 +963,7 @@ export function MainScreen(): React.JSX.Element {
     }
   };
 
-  const chosenModels = harness === "claude" ? claudeModels : models;
+  const chosenModels = modelsForEngine;
   const visibleWorkspaces = workspaces.filter(
     (item) => !HIDDEN.has(item.status),
   );
@@ -1180,7 +1257,7 @@ export function MainScreen(): React.JSX.Element {
               : undefined
           }
           settings={{
-            harness: harness === "claude" ? "Claude" : "OpenCuria",
+            harness: harnessEngineLabel(harness, engines),
             mode,
             model: selectedModel?.name ?? model,
             effort: effort ? formatEffort(effort) : "",
@@ -1460,39 +1537,36 @@ export function MainScreen(): React.JSX.Element {
               key={item}
               title={item === "build" ? "Build" : "Plan"}
               selected={item === mode}
+              disabled={Boolean(
+                engines.find((engine) => engine.id === harness) &&
+                !engines
+                  .find((engine) => engine.id === harness)
+                  ?.modes.includes(item),
+              )}
               onPress={() => selectMode(item)}
             />
           ))}
         </View>
         <SectionTitle title="ENGINE" />
         <View style={styles.chips}>
-          {(["native", "claude"] as const)
-            .filter(
-              (id) =>
-                !engines.length || engines.some((engine) => engine.id === id),
-            )
-            .map((id) => {
-              const item = engines.find((engine) => engine.id === id);
-              return (
-                <Choice
-                  key={id}
-                  title={
-                    item?.name ?? (id === "native" ? "OpenCuria" : "Claude")
-                  }
-                  selected={harness === id}
-                  disabled={Boolean(
-                    chat.activeSessionId ||
-                    (item && (!item.connected || !item.modes.includes(mode))),
-                  )}
-                  onPress={() => selectHarness(id)}
-                />
-              );
-            })}
+          {harnessEngineChoices(engines).map((item) => (
+            <Choice
+              key={item.id}
+              title={item.name}
+              selected={harness === item.id}
+              disabled={Boolean(
+                chat.activeSessionId ||
+                !item.connected ||
+                !item.modes.includes(mode),
+              )}
+              onPress={() => selectHarness(item.id)}
+            />
+          ))}
         </View>
         <SectionTitle title="MODEL" />
         {!chosenModels.length ? (
           <Text style={{ color: theme.mutedText }}>
-            No models are available for this engine.
+            {`${harnessEngineLabel(harness, engines)} models unavailable. Check the selected provider account in Settings and retry.`}
           </Text>
         ) : (
           <ScrollView style={{ maxHeight: 250 }} nestedScrollEnabled>
@@ -1543,7 +1617,10 @@ export function MainScreen(): React.JSX.Element {
                 key={item}
                 title={formatEffort(item)}
                 selected={effort === item}
-                onPress={() => setEffort(item)}
+                onPress={() => {
+                  selectionDirty.current = true;
+                  setEffort(item);
+                }}
               />
             ))}
           </View>

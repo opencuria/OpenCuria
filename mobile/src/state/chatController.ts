@@ -9,6 +9,7 @@
 
 import type { OpenCuriaClient } from "@opencuria/client";
 import type {
+  HarnessId,
   HarnessMessage,
   HarnessPart,
   HarnessPartDelta,
@@ -42,6 +43,7 @@ import {
   collectAncestorSessions,
   collectDescendantSessionIds,
 } from "@opencuria/chat-core/harnessSubtaskActivity";
+import { assertHarnessSessionSelection } from "@opencuria/chat-core/harnessModels";
 import { hydrateHarnessPart } from "@opencuria/chat-core/toolDisplay";
 
 const EMPTY_MESSAGES = Object.freeze([]) as unknown as HarnessMessage[];
@@ -51,7 +53,7 @@ const INACTIVE_TRANSCRIPT_BUDGET_BYTES = 16 * 1024 * 1024;
 
 /** Options used when creating a conversation or sending/editing a turn. */
 export interface ChatRunOptions {
-  harnessId?: "native" | "claude";
+  harnessId?: HarnessId;
   mode?: HarnessSessionMode;
   model?: string;
   reasoningEffort?: string;
@@ -879,7 +881,7 @@ export class ChatController {
     prompt: string,
     options: ChatRunOptions & {
       mode: HarnessSessionMode;
-      harnessId: "native" | "claude";
+      harnessId: HarnessId;
     },
   ): Promise<HarnessSession> {
     this.pendingSends.add(`new:${workspaceId}`);
@@ -986,6 +988,7 @@ export class ChatController {
   ): Promise<HarnessSession> {
     const session = this.sessions.find((row) => row.id === sessionId);
     if (!session) throw new Error("The active session no longer exists");
+    assertHarnessSessionSelection(session, options);
     const context = this.captureSelection()!;
     this.pendingSends.add(sessionId);
     this.publish();
@@ -1069,6 +1072,8 @@ export class ChatController {
     if (!prompt.trim()) throw new Error("Prompt cannot be empty");
     const context = this.captureSelection();
     if (!context) throw new Error("Open a workspace before editing a message");
+    const session = this.sessions.find(row => row.id === sessionId);
+    if (session) assertHarnessSessionSelection(session, options);
     const details = this.editOptions(options);
     this.invalidatePartDetails(sessionId);
     try {
