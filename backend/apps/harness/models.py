@@ -28,7 +28,6 @@ from .permissions.models import PermissionAllowlist, PermissionRequest
 __all__ = [
     "AgentConfig",
     "AgentSConfig",
-    "HarnessConnection",
     "HarnessMessage",
     "HarnessPart",
     "HarnessRun",
@@ -437,14 +436,6 @@ class HarnessSession(models.Model):
         max_length=16,
         default="native",
         help_text="Execution engine that owns this session.",
-    )
-    connection = models.ForeignKey(
-        "HarnessConnection",
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="sessions",
-        help_text="Personal engine connection selected when this session was created.",
     )
     created_by = models.ForeignKey(
         "accounts.User",
@@ -880,51 +871,6 @@ class RecentModel(models.Model):
     def __str__(self) -> str:
         """Return a short representation of the recent-model row."""
         return f"RecentModel(org={self.organization_id}, {self.model})"
-
-
-class HarnessConnection(models.Model):
-    """Personal Claude authorization associated with one organization context."""
-
-    class AuthType(models.TextChoices):
-        API_TOKEN = "api_token", "API token"
-        SUBSCRIPTION_TOKEN = "subscription_token", "Subscription token"
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    organization = models.ForeignKey(
-        "organizations.Organization",
-        on_delete=models.CASCADE,
-        related_name="harness_connections",
-    )
-    user = models.ForeignKey(
-        "accounts.User",
-        on_delete=models.CASCADE,
-        related_name="harness_connections",
-    )
-    credential = models.ForeignKey(
-        "credentials.Credential",
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="harness_connections",
-    )
-    auth_type = models.CharField(max_length=32, choices=AuthType.choices)
-    label = models.CharField(max_length=255, blank=True, default="Claude")
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = "harness_connection"
-        ordering = ["-updated_at"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["organization", "user"],
-                name="harness_connection_org_user_uniq",
-            ),
-        ]
-
-    def __str__(self) -> str:
-        """Return a secret-free description of the connection."""
-        return f"HarnessConnection(org={self.organization_id}, user={self.user_id})"
 
 
 class HarnessTranscriptBatch(models.Model):

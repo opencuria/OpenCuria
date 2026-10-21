@@ -134,7 +134,6 @@ def test_create_setters_and_direct_run_reject_provider_switch(codex_setup):
     session = create_session(data)
     assert session.harness_id == "codex"
     assert session.engine_state == {"provider_id": "chatgpt"}
-    assert session.connection_id is None
     assert session.created_by_id == data.owner.id
     assert session.model == DEFAULT_CODEX_MODEL
     assert session.reasoning_effort == "low"

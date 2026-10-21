@@ -686,8 +686,6 @@ async def test_claude_run_persists_engine_binding_and_secret_free_result(
     session = await _new_session(service, harness_workspace)
 
     assert session.harness_id == "claude"
-    # The session stores no mutable account pin; each answer freezes selection.
-    assert session.connection_id is None
     assert session.created_by_id == harness_workspace.created_by_id
     assert session.model == "sonnet"
     assert session.reasoning_effort == "high"
@@ -741,7 +739,6 @@ async def test_claude_fork_and_edit_never_resume_stale_cli_suffix(
     forked = await service.fork_session(session.id)
     forked.refresh_from_db()
     assert forked.harness_id == "claude"
-    assert forked.connection_id == session.connection_id
     assert forked.created_by_id == session.created_by_id
     assert forked.external_session_id == ""
     assert forked.engine_state == {}

@@ -1,4 +1,4 @@
-"""ORM repositories for engine connections and opaque transcripts."""
+"""ORM repository for engine state and opaque transcripts."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from django.db.models import F, Max
 from common.utils import decrypt_value, encrypt_value
 
 from ..models import (
-    HarnessConnection,
     HarnessMessage,
     HarnessPart,
     HarnessRun,
@@ -22,107 +21,6 @@ from ..models import (
     HarnessSessionStatus,
     HarnessTranscriptBatch,
 )
-
-
-class HarnessConnectionRepository:
-    """Database access for personal engine connections."""
-
-    @staticmethod
-    def list_by_org_user(
-        organization_id: uuid.UUID, user_id: object
-    ) -> list[HarnessConnection]:
-        """Return a user's connections in one organization, newest updated first."""
-        return list(
-            HarnessConnection.objects.filter(
-                organization_id=organization_id, user_id=user_id
-            ).order_by("-updated_at")
-        )
-
-    @staticmethod
-    def fetch_connections(
-        organization_id: uuid.UUID, user_id: object
-    ) -> list[HarnessConnection]:
-        """Alias for caller-facing list terminology."""
-        return HarnessConnectionRepository.list_by_org_user(organization_id, user_id)
-
-    @staticmethod
-    def get_by_org_user(
-        organization_id: uuid.UUID, user_id: object
-    ) -> HarnessConnection | None:
-        """Fetch the unique connection owned by this user in this org."""
-        return (
-            HarnessConnection.objects.filter(
-                organization_id=organization_id, user_id=user_id
-            )
-            .select_related("user", "credential__service")
-            .first()
-        )
-
-    @staticmethod
-    def get_by_id_for_owner(
-        connection_id: uuid.UUID | str,
-        *,
-        organization_id: uuid.UUID,
-        user_id: object,
-    ) -> HarnessConnection | None:
-        """Fetch a connection only within its owner's exact scope."""
-        return (
-            HarnessConnection.objects.filter(
-                id=connection_id,
-                organization_id=organization_id,
-                user_id=user_id,
-            )
-            .select_related("user", "credential__service")
-            .first()
-        )
-
-    @staticmethod
-    def upsert(
-        *,
-        organization_id: uuid.UUID,
-        user_id: object,
-        credential_id: uuid.UUID,
-        auth_type: str,
-        label: str,
-    ) -> HarnessConnection:
-        """Create or update a personal connection without storing secrets."""
-        connection, _ = HarnessConnection.objects.update_or_create(
-            organization_id=organization_id,
-            user_id=user_id,
-            defaults={
-                "credential_id": credential_id,
-                "auth_type": auth_type,
-                "label": label,
-            },
-        )
-        return connection
-
-    @staticmethod
-    def update(
-        connection: HarnessConnection,
-        *,
-        credential_id: uuid.UUID | None = None,
-        auth_type: str | None = None,
-        label: str | None = None,
-    ) -> HarnessConnection:
-        """Update only supplied connection fields."""
-        update_fields = ["updated_at"]
-        if credential_id is not None:
-            connection.credential_id = credential_id
-            update_fields.append("credential")
-        if auth_type is not None:
-            connection.auth_type = auth_type
-            update_fields.append("auth_type")
-        if label is not None:
-            connection.label = label
-            update_fields.append("label")
-        connection.save(update_fields=update_fields)
-        return connection
-
-    @staticmethod
-    def delete(connection: HarnessConnection) -> None:
-        """Delete a connection row."""
-        connection.delete()
 
 
 class HarnessEngineRepository:

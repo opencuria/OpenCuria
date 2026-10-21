@@ -475,7 +475,7 @@ class HarnessService:
                         "External child sessions require an owner"
                     )
                 user_id = created_by_id
-                connection_id = getattr(parent_session, "connection_id", None)
+                connection_id = None
                 if harness_id == "codex":
                     model = model or parent_session.model
                     if skill_ids is None:
@@ -617,7 +617,6 @@ class HarnessService:
                     raise NotFoundError("ProviderAccount", str(user_id))
             session_kwargs.update(
                 harness_id=engine_id,
-                connection_id=None,
                 created_by_id=user_id,
                 external_session_id="",
                 engine_state={"provider_id": codex_provider_id}
@@ -859,7 +858,6 @@ class HarnessService:
         if getattr(session, "harness_id", "native") != "native":
             fork_kwargs.update(
                 harness_id=session.harness_id,
-                connection_id=None,
                 created_by_id=getattr(session, "created_by_id", None),
                 external_session_id="",
                 engine_state=(
@@ -3339,7 +3337,6 @@ class HarnessService:
                 parent_id=session.id,
                 skill_ids=list(session.skill_ids or []),
                 harness_id="claude",
-                connection_id=None,
                 created_by_id=getattr(session, "created_by_id", None),
             )
             child_user = await sync_to_async(
