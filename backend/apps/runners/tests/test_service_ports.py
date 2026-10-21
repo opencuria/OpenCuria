@@ -192,7 +192,6 @@ def test_repository_delegation_methods_mocked():
     svc.image_instances = MagicMock()
     svc.image_instances.get_by_id.return_value = "artifact"
     svc.image_instances.update_name.return_value = True
-    svc.image_instances.timeout_stale.return_value = 3
     svc.workspaces = MagicMock()
     svc.workspaces.get_by_id.return_value = "workspace"
 
@@ -200,8 +199,6 @@ def test_repository_delegation_methods_mocked():
     svc.image_instances.get_by_id.assert_called_with(artifact_id)
     assert svc.rename_image_artifact(artifact_id, "new-name") is True
     svc.image_instances.update_name.assert_called_with(artifact_id, "new-name")
-    assert svc.timeout_stale_image_artifacts(timeout_hours=2) == 3
-    svc.image_instances.timeout_stale.assert_called_with(timeout_hours=2)
     assert svc.get_workspace_or_none(artifact_id) == "workspace"
     svc.workspaces.get_by_id.assert_called_with(artifact_id)
 

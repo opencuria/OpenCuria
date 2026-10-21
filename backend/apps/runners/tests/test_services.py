@@ -18,7 +18,6 @@ from django.utils import timezone
 from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
 from apps.credentials.services import (
     CredentialSvc,
-    ResolvedCredentialFile,
     ResolvedCredentials,
 )
 from apps.organizations.models import Organization
@@ -1407,13 +1406,13 @@ class TestCreateWorkspace:
 @pytest.mark.django_db(transaction=True)
 class TestRemoveWorkspace:
     @pytest.mark.asyncio
-    async def test_runner_without_sid_fails_remove_dispatch_and_rolls_back(
+    async def test_runner_without_sid_keeps_durable_remove_intent(
         self,
         service,
         runner,
         workspace,
     ):
-        """Removing must fail fast when the runner has no active socket session."""
+        """A missing socket leaves removal queued for durable delivery."""
         runner.sid = ""
         runner.save(update_fields=["sid"])
 
@@ -1426,7 +1425,7 @@ class TestRemoveWorkspace:
         assert workspace.status == WorkspaceStatus.DELETING
 
     @pytest.mark.asyncio
-    async def test_remove_workspace_tracks_delete_metadata_and_offline_retry_state(
+    async def test_remove_workspace_tracks_offline_delete_request(
         self,
         service,
         runner,
@@ -1444,56 +1443,6 @@ class TestRemoveWorkspace:
         assert workspace.delete_requested_at is not None
         assert workspace.delete_started_at is None
         assert workspace.delete_attempt_count == 0
-
-        runner.status = RunnerStatus.ONLINE
-        runner.sid = "runner-remove-retry"
-        runner.save(update_fields=["status", "sid"])
-
-        dispatched = await service.dispatch_pending_workspace_deletions(runner)
-
-        assert [item.id for item in dispatched] == [workspace.id]
-        workspace.refresh_from_db()
-        task.refresh_from_db()
-        assert workspace.status == WorkspaceStatus.DELETING
-        assert workspace.delete_started_at is not None
-        assert workspace.delete_attempt_count == 1
-        assert task.status == TaskStatus.IN_PROGRESS
-
-    @pytest.mark.asyncio
-    async def test_dispatch_pending_workspace_deletion_reuses_attempt_metadata(
-        self,
-        service,
-        runner,
-        workspace,
-    ):
-        task = Task.objects.create(
-            runner=runner,
-            workspace=workspace,
-            type=TaskType.REMOVE_WORKSPACE,
-            status=TaskStatus.IN_PROGRESS,
-        )
-        started_at = timezone.now()
-        workspace.status = WorkspaceStatus.DELETING
-        workspace.delete_requested_at = started_at
-        workspace.delete_started_at = started_at
-        workspace.delete_attempt_count = 1
-        workspace.save(
-            update_fields=[
-                "status",
-                "delete_requested_at",
-                "delete_started_at",
-                "delete_attempt_count",
-                "updated_at",
-            ]
-        )
-
-        await service.dispatch_pending_workspace_deletions(runner)
-
-        workspace.refresh_from_db()
-        task.refresh_from_db()
-        assert workspace.delete_started_at == started_at
-        assert workspace.delete_attempt_count == 1
-        assert task.status == TaskStatus.IN_PROGRESS
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1712,148 +1661,6 @@ class TestImageDeletionLifecycle:
         assert image.status == ImageInstance.Status.PENDING_DELETION
         assert build.deleting_task_id is None
         assert image.deleting_task_id == build.deleting_task_id
-
-    @pytest.mark.asyncio
-    async def test_dispatch_pending_image_deletions_marks_task_in_progress(
-        self, service, runner, user
-    ):
-        image = ImageInstance.objects.create(
-            is_legacy=True,
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-            name="Pending Delete",
-            runner_ref="opencuria/custom/pending-delete:1",
-            status=ImageInstance.Status.DELETING,
-            created_by=user,
-            deleting_task_id=str(
-                Task.objects.create(
-                    runner=runner,
-                    type=TaskType.DELETE_IMAGE,
-                    status=TaskStatus.PENDING,
-                ).id
-            ),
-        )
-
-        dispatched = await service.dispatch_pending_image_deletions(runner)
-
-        assert dispatched == []
-        task = Task.objects.get(id=image.deleting_task_id)
-        assert task.status == TaskStatus.PENDING
-
-    @pytest.mark.asyncio
-    async def test_dispatch_pending_image_deletion_creates_task_when_missing(
-        self, service, runner, user
-    ):
-        image = ImageInstance.objects.create(
-            is_legacy=True,
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-            name="Pending Delete Without Task",
-            runner_ref="opencuria/custom/pending-delete-missing-task:1",
-            status=ImageInstance.Status.PENDING_DELETION,
-            created_by=user,
-        )
-
-        dispatched = await service.dispatch_pending_image_deletions(runner)
-
-        assert dispatched == []
-        image.refresh_from_db()
-        assert image.status == ImageInstance.Status.PENDING_DELETION
-        assert image.deleting_task_id is None
-        assert not Task.objects.filter(type=TaskType.DELETE_IMAGE).exists()
-
-    @pytest.mark.asyncio
-    async def test_dispatch_pending_image_deletion_reuses_attempt_metadata(
-        self, service, runner, user
-    ):
-        task = Task.objects.create(
-            runner=runner,
-            type=TaskType.DELETE_IMAGE,
-            status=TaskStatus.IN_PROGRESS,
-        )
-        started_at = timezone.now()
-        image = ImageInstance.objects.create(
-            is_legacy=True,
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-            name="Deleting Image",
-            runner_ref="opencuria/custom/reused-delete:1",
-            status=ImageInstance.Status.DELETING,
-            created_by=user,
-            deleting_task_id=str(task.id),
-            delete_requested_at=started_at,
-            delete_started_at=started_at,
-            delete_attempt_count=1,
-        )
-
-        await service.dispatch_pending_image_deletions(runner)
-
-        image.refresh_from_db()
-        task.refresh_from_db()
-        assert image.delete_started_at == started_at
-        assert image.delete_attempt_count == 1
-        assert task.status == TaskStatus.IN_PROGRESS
-
-    @pytest.mark.asyncio
-    async def test_dispatch_pending_build_deletion_reuses_attempt_metadata(
-        self, service, runner, user
-    ):
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name=f"Build Delete Retry {uuid.uuid4().hex[:6]}",
-            runtime_type="docker",
-            base_distro="ubuntu:24.04",
-            status=ImageDefinition.Status.DELETING,
-            delete_attempt_count=1,
-        )
-        task = Task.objects.create(
-            runner=runner,
-            type=TaskType.DELETE_IMAGE,
-            status=TaskStatus.IN_PROGRESS,
-        )
-        started_at = timezone.now()
-        build = ImageBuildJob.objects.create(
-            image_definition=definition,
-            runner=runner,
-            status=ImageBuildJob.Status.DELETING,
-            deleting_task_id=str(task.id),
-            delete_requested_at=started_at,
-            delete_started_at=started_at,
-            delete_attempt_count=1,
-        )
-        image = ImageInstance.objects.create(
-            is_legacy=True,
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-            origin_definition=definition,
-            build_job=build,
-            name="Build Delete Retry Artifact",
-            runner_ref="opencuria/custom/build-reused-delete:1",
-            status=ImageInstance.Status.DELETING,
-            created_by=user,
-            deleting_task_id=str(task.id),
-            delete_requested_at=started_at,
-            delete_started_at=started_at,
-            delete_attempt_count=1,
-        )
-        build.current_generation = image
-        build.save()
-
-        await service.dispatch_pending_build_job_deletions(runner)
-
-        build.refresh_from_db()
-        image.refresh_from_db()
-        task.refresh_from_db()
-        assert build.delete_started_at == started_at
-        assert build.delete_attempt_count == 1
-        assert image.delete_started_at == started_at
-        assert image.delete_attempt_count == 1
-        assert task.status == TaskStatus.IN_PROGRESS
 
     def test_handle_image_artifact_deleted_marks_image_deleted(
         self, service, runner, user
@@ -2915,94 +2722,6 @@ class TestStartTerminal:
         assert "files" not in payload
 
 
-@pytest.mark.django_db(transaction=True)
-class TestDispatchPendingImageBuilds:
-    """Tests for dispatching pending image builds when a runner comes online."""
-
-    @pytest.mark.asyncio
-    async def test_dispatches_pending_builds(self, service, sio_mock, runner, user):
-        """Pending builds without a task should be dispatched."""
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name="Pending Build Test",
-            runtime_type="docker",
-            base_distro="ubuntu:22.04",
-        )
-        build = ImageBuildJob.objects.create(
-            image_definition=definition,
-            runner=runner,
-            status=ImageBuildJob.Status.PENDING,
-            build_task=None,
-        )
-
-        dispatched = await service.dispatch_pending_image_builds(runner)
-
-        assert len(dispatched) == 1
-        assert dispatched[0].id == build.id
-
-        # Build should now have a task and the SIO mock should have been called
-        build.refresh_from_db()
-        assert build.build_task is not None
-        assert build.status == ImageBuildJob.Status.PENDING
-        sio_mock.emit.assert_called()
-
-        # An artifact should have been created (in CREATING status)
-        artifact = ImageInstance.objects.filter(build_job=build).first()
-        assert artifact is not None
-        assert artifact.status == ImageInstance.Status.BUILDING
-
-    @pytest.mark.asyncio
-    async def test_skips_builds_with_task(self, service, sio_mock, runner, user):
-        """Builds that already have a task should not be re-dispatched."""
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name="Has Task Test",
-            runtime_type="docker",
-            base_distro="ubuntu:22.04",
-        )
-        task = Task.objects.create(
-            runner=runner,
-            type=TaskType.BUILD_IMAGE,
-            status=TaskStatus.IN_PROGRESS,
-        )
-        ImageBuildJob.objects.create(
-            image_definition=definition,
-            runner=runner,
-            status=ImageBuildJob.Status.PENDING,
-            build_task=task,
-        )
-
-        dispatched = await service.dispatch_pending_image_builds(runner)
-        assert len(dispatched) == 0
-
-    @pytest.mark.asyncio
-    async def test_skips_active_builds(self, service, sio_mock, runner, user):
-        """Already active builds should not be dispatched."""
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name="Active Build Test",
-            runtime_type="docker",
-            base_distro="ubuntu:22.04",
-        )
-        ImageBuildJob.objects.create(
-            image_definition=definition,
-            runner=runner,
-            status=ImageBuildJob.Status.ACTIVE,
-        )
-
-        dispatched = await service.dispatch_pending_image_builds(runner)
-        assert len(dispatched) == 0
-
-    @pytest.mark.asyncio
-    async def test_no_pending_builds_returns_empty(self, service, runner):
-        """When there are no pending builds, return an empty list."""
-        dispatched = await service.dispatch_pending_image_builds(runner)
-        assert dispatched == []
-
-
 @pytest.mark.django_db
 class TestHarnessReplyRouting:
     def test_owner_reply_is_routed(self, service, runner, workspace, monkeypatch):
@@ -3422,43 +3141,6 @@ class TestImageDefinitionLifecycle:
                 runner=runner,
                 activate=True,
             )
-
-    def test_timeout_stale_builds_marks_jobs_failed(self, service, runner, user):
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name="Stale Build",
-            runtime_type="docker",
-            base_distro="ubuntu:24.04",
-        )
-        build = ImageBuildJob.objects.create(
-            image_definition=definition,
-            runner=runner,
-            status=ImageBuildJob.Status.BUILDING,
-        )
-        legacy_image = ImageInstance.objects.create(
-            is_legacy=True,
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-            origin_definition=definition,
-            build_job=build,
-            created_by=user,
-            name="Stale Instance",
-            status=ImageInstance.Status.BUILDING,
-        )
-        build.pending_generation = legacy_image
-        build.save()
-        ImageBuildJob.objects.filter(id=build.id).update(
-            updated_at=timezone.now() - timedelta(hours=2)
-        )
-
-        service.timeout_stale_image_operations(timeout_hours=1)
-
-        build.refresh_from_db()
-        instance = ImageInstance.objects.get(build_job=build)
-        assert build.status == ImageBuildJob.Status.FAILED
-        assert instance.status == ImageInstance.Status.FAILED
 
     @pytest.mark.asyncio
     async def test_restore_delete_failed_definition(self, service, runner, user):

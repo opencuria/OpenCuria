@@ -1310,34 +1310,12 @@ class ImageInstanceRepository:
         )
 
     @staticmethod
-    def mark_failed(image_id) -> None:
-        """Mark an image instance as failed."""
-        ImageInstance.objects.filter(id=image_id).update(
-            status=ImageInstance.Status.FAILED,
-        )
-
-    @staticmethod
     def mark_failed_by_task_id(task_id: str) -> None:
         """Mark any creating image instance associated with task_id as failed."""
         ImageInstance.objects.filter(
             creating_task_id=task_id,
             status__in=[ImageInstance.Status.BUILDING, ImageInstance.Status.CAPTURING],
         ).update(status=ImageInstance.Status.FAILED)
-
-    @staticmethod
-    def timeout_stale(*, timeout_hours: int = 1) -> int:
-        """Mark stale creating image instances as failed.
-
-        Returns the number of image instances that were timed out.
-        """
-        from datetime import timedelta
-
-        cutoff = timezone.now() - timedelta(hours=timeout_hours)
-        count = ImageInstance.objects.filter(
-            status__in=[ImageInstance.Status.BUILDING, ImageInstance.Status.CAPTURING],
-            created_at__lt=cutoff,
-        ).update(status=ImageInstance.Status.FAILED)
-        return count
 
     @staticmethod
     def update_name(image_id: uuid.UUID, name: str) -> bool:
@@ -1491,26 +1469,6 @@ class ImageInstanceRepository:
         ImageInstance.objects.filter(id=image_id).update(
             status=ImageInstance.Status.DELETE_FAILED,
             delete_last_error=error,
-        )
-
-    @staticmethod
-    def list_pending_delete_for_runner(runner_id: uuid.UUID) -> QuerySet[ImageInstance]:
-        """Return image instances that still need runner-side deletion."""
-        return (
-            ImageInstance.objects.filter(
-                runner_id=runner_id,
-                status__in=[
-                    ImageInstance.Status.DELETING,
-                    ImageInstance.Status.PENDING_DELETION,
-                ],
-            )
-            .exclude(runner_ref="")
-            .select_related(
-                "runner",
-                "origin_definition",
-                "origin_workspace",
-                "build_job",
-            )
         )
 
 
@@ -1756,20 +1714,6 @@ class ImageBuildJobRepository:
         return ImageBuildJobRepository.get_by_id(job_id)
 
     @staticmethod
-    def list_queued(runner_id):
-        return ImageBuildJob.objects.filter(
-            runner_id=runner_id, pending_generation__creating_task__status="pending"
-        ).select_related(
-            "pending_generation__revision", "pending_generation__creating_task"
-        )
-
-    @staticmethod
-    def list_unallocated_pending(runner_id):
-        return ImageBuildJob.objects.filter(
-            runner_id=runner_id, status="pending", build_task__isnull=True
-        ).select_related("image_definition", "runner")
-
-    @staticmethod
     def ensure_inactive(definition, runner):
         """Create or deactivate an assignment without requesting a build."""
         from common.exceptions import ConflictError
@@ -1800,10 +1744,6 @@ class ImageBuildJobRepository:
         return ImageInstance.objects.filter(
             build_job_id=job_id, status__in=["building", "capturing"]
         ).exists()
-
-    @staticmethod
-    def get_by_delete_task(task_id):
-        return ImageBuildJob.objects.filter(deleting_task_id=task_id).first()
 
     @staticmethod
     def list_for_definition(
@@ -1950,46 +1890,6 @@ class ImageBuildJobRepository:
         )
 
     @staticmethod
-    def mark_failed(build_job_id: uuid.UUID, *, error: str = "") -> None:
-        """Mark a hung or failed build job as failed."""
-        ImageBuildJob.objects.filter(
-            id=build_job_id, current_generation__isnull=True
-        ).update(
-            status=ImageBuildJob.Status.FAILED,
-            delete_last_error=error or "",
-        )
-
-    @staticmethod
-    def list_stale_builds(*, cutoff: datetime) -> QuerySet[ImageBuildJob]:
-        """Return build jobs stuck in pending/building past the cutoff."""
-        return ImageBuildJob.objects.filter(
-            status__in=[
-                ImageBuildJob.Status.PENDING,
-                ImageBuildJob.Status.BUILDING,
-            ],
-            updated_at__lt=cutoff,
-        ).select_related("current_generation", "pending_generation", "image_definition")
-
-    @staticmethod
-    def list_stale_deletes(*, cutoff: datetime) -> QuerySet[ImageBuildJob]:
-        """Return build jobs stuck in deletion past the cutoff."""
-        return (
-            ImageBuildJob.objects.filter(
-                status__in=[
-                    ImageBuildJob.Status.PENDING_DELETION,
-                    ImageBuildJob.Status.DELETING,
-                ],
-            )
-            .filter(
-                Q(delete_requested_at__lt=cutoff)
-                | Q(delete_requested_at__isnull=True, updated_at__lt=cutoff)
-            )
-            .select_related(
-                "current_generation", "pending_generation", "image_definition"
-            )
-        )
-
-    @staticmethod
     def list_in_progress_deletes_for_definition(
         definition_id: uuid.UUID,
     ) -> QuerySet[ImageBuildJob]:
@@ -2001,51 +1901,6 @@ class ImageBuildJobRepository:
                 ImageBuildJob.Status.DELETING,
             ],
         )
-
-    @staticmethod
-    def list_pending_delete_for_runner(runner_id: uuid.UUID) -> QuerySet[ImageBuildJob]:
-        """Return build jobs that need runner-side deletion."""
-        return ImageBuildJob.objects.filter(
-            runner_id=runner_id,
-            status__in=[
-                ImageBuildJob.Status.PENDING_DELETION,
-                ImageBuildJob.Status.DELETING,
-            ],
-        ).select_related("runner", "image_definition", "current_generation")
-
-    @staticmethod
-    def list_non_deleted_for_definition(
-        definition_id: uuid.UUID,
-    ) -> QuerySet[ImageBuildJob]:
-        """Return all build jobs for a definition that aren't deleted."""
-        return ImageBuildJob.objects.filter(
-            image_definition_id=definition_id,
-        ).exclude(status=ImageBuildJob.Status.DELETED)
-
-    @staticmethod
-    def has_dependent_workspaces(build_job_id: uuid.UUID) -> tuple[bool, int]:
-        """Check if any non-deleted workspaces depend on this build's image instance."""
-        from .models import ImageInstance as II
-
-        instances = II.objects.filter(
-            build_job_id=build_job_id,
-        ).exclude(status__in=[II.Status.DELETED])
-        count = 0
-        for instance in instances:
-            ws_count = (
-                Workspace.objects.filter(
-                    base_image_instance=instance,
-                )
-                .exclude(
-                    status__in=[
-                        WorkspaceStatus.REMOVED,
-                        WorkspaceStatus.DELETED,
-                    ],
-                )
-                .count()
-            )
-            count += ws_count
-        return count > 0, count
 
 
 class ImageGenerationRepository:

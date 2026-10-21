@@ -17,25 +17,18 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from asgiref.sync import sync_to_async
-from django.utils import timezone
 
 from common.exceptions import ConflictError
-from common.utils import generate_uuid
 
-from ...enums import RuntimeType, TaskStatus, TaskType, WorkspaceStatus
-from ...exceptions import (
-    RunnerOfflineError,
-    WorkspaceNotFoundError,
-    WorkspaceStateError,
-)
+from ...enums import RuntimeType
+from ...exceptions import WorkspaceNotFoundError
 
 if TYPE_CHECKING:
-    from ...models import Runner, Task, Workspace
+    from ...models import Task, Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -232,28 +225,6 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         ]
         return "\n".join(lines).strip() + "\n"
 
-    def timeout_stale_image_operations(self, *, timeout_hours: int = 1) -> None:
-        """Fail hung builds and stuck deletions so the UI can retry."""
-        from ...models import ImageDefinition, ImageInstance
-
-        cutoff = timezone.now() - timedelta(hours=timeout_hours)
-        stale_message = f"Timed out after {timeout_hours}h without progress"
-
-        def _instance_or_none(build):
-            try:
-                return build.pending_generation or build.current_generation
-            except ImageInstance.DoesNotExist:
-                return None
-
-        for build in self.build_jobs.list_stale_builds(cutoff=cutoff):
-            self.build_jobs.mark_failed(build.id, error=stale_message)
-            instance = _instance_or_none(build)
-            if instance is not None and instance.status in {
-                ImageInstance.Status.BUILDING,
-                ImageInstance.Status.CAPTURING,
-            }:
-                self.image_instances.mark_failed(instance.id)
-
     def _ensure_definition_mutable(self, definition) -> None:
         """Reject runner mutations while a definition is deleted or being removed."""
         from ...models import ImageDefinition
@@ -281,10 +252,6 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
     def rename_image_artifact(self, artifact_id: uuid.UUID, name: str) -> bool:
         """Rename an image artifact. Returns True if updated."""
         return self.image_instances.update_name(artifact_id, name)
-
-    def timeout_stale_image_artifacts(self, *, timeout_hours: int = 1) -> int:
-        """Mark stale creating image artifacts as failed; return count."""
-        return self.image_instances.timeout_stale(timeout_hours=timeout_hours)
 
     def deactivate_runner_image(self, build):
         """Disable assignment selection without mutating any generation."""
@@ -595,7 +562,7 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
                 runner_id=runner_id,
             )
             return
-        image = ImageGenerationRepository.delete_result(
+        ImageGenerationRepository.delete_result(
             task_id=task_id,
             runner_id=runner_id,
             image_id=image_instance_id,
@@ -648,28 +615,6 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         """
         self.handle_image_artifact_deleted(task_id=task_id, runner_id=runner_id)
 
-    def _check_definition_deletion_complete(self, definition_id: uuid.UUID) -> None:
-        """Check if all builds for a definition are deleted and finalize."""
-        from ...models import ImageDefinition
-
-        definition = self.image_definitions.get_by_id(definition_id)
-        if definition is None:
-            return
-        if definition.status not in (
-            ImageDefinition.Status.PENDING_DELETION,
-            ImageDefinition.Status.DELETING,
-        ):
-            return
-
-        remaining = self.build_jobs.list_non_deleted_for_definition(definition_id)
-        if not remaining.exists():
-            self.image_definitions.mark_deleted(definition_id)
-            logger.info("Definition fully deleted: %s", definition_id)
-
-    def _get_build_by_delete_task(self, task_id: str):
-        """Return the build job currently linked to a delete task, if any."""
-        return self.build_jobs.get_by_delete_task(task_id)
-
     def _mark_definition_delete_failed(
         self,
         definition_id: uuid.UUID | None,
@@ -689,21 +634,6 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         }:
             return
         self.image_definitions.mark_delete_failed(definition_id, error=error)
-
-    def _mark_definition_deleting_if_needed(
-        self, definition_id: uuid.UUID | None
-    ) -> None:
-        """Promote a pending definition delete to deleting once runner cleanup starts."""
-        if definition_id is None:
-            return
-        definition = self.image_definitions.get_by_id(definition_id)
-        if definition is None:
-            return
-        if definition.status in {
-            definition.Status.PENDING_DELETION,
-            definition.Status.DELETE_FAILED,
-        }:
-            self.image_definitions.mark_deleting(definition_id)
 
     async def deactivate_image_definition(self, definition_id: uuid.UUID) -> None:
         """Deactivate a definition — immediately not selectable for new workspaces."""
@@ -760,7 +690,3 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
             raise ConflictError('Global recipes are read-only')
         return await sync_to_async(DeletionRepository.request)(
             obj.organization_id, None, 'definition', obj.id)
-
-    async def dispatch_pending_build_job_deletions(self, runner: "Runner") -> list:
-        """Dispatch pending build job deletions that accumulated while runner was offline."""
-        return []  # Independent coordinator owns release.

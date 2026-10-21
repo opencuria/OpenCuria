@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import textwrap
 
+from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 
@@ -12,7 +13,8 @@ from apps.credentials.models import CredentialService
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.organizations.services import OrganizationService
 from apps.runners.enums import RuntimeType
-from apps.runners.models import ImageDefinition, Runner, ImageBuildJob
+from apps.runners.models import ImageBuildJob, ImageDefinition, Runner
+from apps.runners.services import RunnerService
 from common.utils import hash_token
 
 # Default packages installed in the workspace image.
@@ -251,11 +253,10 @@ class Command(BaseCommand):
         runner: Runner,
         definition_name: str,
     ) -> ImageBuildJob:
-        """Seed the default image definition and a pending build record.
+        """Seed the default definition and request a durable image generation.
 
-        The build is created with status ``pending`` and **no** task or
-        artifact.  Once the runner comes online it will pick up the pending
-        build, execute it, and create the artifact on success.
+        The lifecycle outbox delivers its build task when the runner is online.
+        Preserve successful builds and generations already awaiting completion.
         """
         definition, _ = ImageDefinition.objects.get_or_create(
             organization=organization,
@@ -297,32 +298,17 @@ class Command(BaseCommand):
         if definition_updates:
             definition.save(update_fields=definition_updates)
 
-        build, created = ImageBuildJob.objects.get_or_create(
+        build = ImageBuildJob.objects.filter(
             image_definition=definition,
             runner=runner,
-            defaults={
-                "status": ImageBuildJob.Status.PENDING,
-            },
-        )
-
-        # If the build already exists and is active (from a previous
-        # successful run), leave it alone so workspaces keep working.
-        if not created and build.status == ImageBuildJob.Status.ACTIVE:
+        ).first()
+        if build and (
+            build.status == ImageBuildJob.Status.ACTIVE or build.pending_generation_id
+        ):
             return build
 
-        # For new or non-active builds, ensure they are in pending state
-        # so the runner will pick them up.
-        if not created and build.status != ImageBuildJob.Status.PENDING:
-            build.status = ImageBuildJob.Status.PENDING
-            build.build_task = None
-            build.built_at = None
-            build.save(
-                update_fields=[
-                    "status",
-                    "build_task",
-                    "built_at",
-                    "updated_at",
-                ]
-            )
-
-        return build
+        return async_to_sync(RunnerService().trigger_build_job)(
+            image_definition=definition,
+            runner=runner,
+            created_by=user,
+        )

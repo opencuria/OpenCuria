@@ -1234,66 +1234,6 @@ class WorkspaceLifecycleMixin:
         )
         self._forward_workspace_operation(workspace_id, None)
 
-    async def dispatch_pending_workspace_deletions(self, runner: Runner) -> list:
-        """Dispatch pending workspace deletions that accumulated while runner was offline."""
-        from ...models import Workspace
-
-        pending = await sync_to_async(
-            lambda: list(
-                Workspace.objects.filter(
-                    runner=runner,
-                    status__in=[
-                        WorkspaceStatus.PENDING_DELETION,
-                        WorkspaceStatus.DELETING,
-                    ],
-                )
-            )
-        )()
-
-        dispatched = []
-        for ws in pending:
-            try:
-                # Find existing task
-                from ...models import Task as TaskModel
-
-                task = await sync_to_async(
-                    lambda: TaskModel.objects.filter(
-                        workspace=ws,
-                        type=TaskType.REMOVE_WORKSPACE,
-                        status__in=[TaskStatus.PENDING, TaskStatus.IN_PROGRESS],
-                    ).first()
-                )()
-                reused_active_task = (
-                    task is not None and ws.status == WorkspaceStatus.DELETING
-                )
-                if task is None:
-                    task_id = generate_uuid()
-                    task = await sync_to_async(self.tasks.create)(
-                        task_id=task_id,
-                        runner=runner,
-                        task_type=TaskType.REMOVE_WORKSPACE,
-                        workspace=ws,
-                    )
-                if not reused_active_task:
-                    await sync_to_async(self.workspaces.mark_deleting)(ws.id)
-                await self._emit_to_runner(
-                    runner,
-                    "task:remove_workspace",
-                    {
-                        "task_id": str(task.id),
-                        "workspace_id": str(ws.id),
-                    },
-                )
-                await sync_to_async(self.tasks.mark_in_progress)(task)
-                dispatched.append(ws)
-            except Exception:
-                logger.exception(
-                    "Failed to dispatch pending workspace deletion %s for runner %s",
-                    ws.id,
-                    runner.id,
-                )
-        return dispatched
-
     async def create_workspace_from_image_artifact(
         self,
         image_artifact_id: uuid.UUID,

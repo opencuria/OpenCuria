@@ -9,17 +9,25 @@ from django.core.management import call_command
 
 from apps.credentials.models import CredentialService
 from apps.organizations.models import Membership, MembershipRole, Organization
-from apps.runners.enums import RuntimeType
+from apps.runners.enums import RuntimeType, TaskStatus, TaskType
 from apps.runners.management.commands.bootstrap_local_deploy import (
     DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE,
     DEFAULT_WORKSPACE_PACKAGES,
 )
-from apps.runners.models import ImageDefinition, ImageInstance, Runner, ImageBuildJob
+from apps.runners.models import (
+    ImageBuildJob,
+    ImageDefinition,
+    ImageInstance,
+    LifecycleCommand,
+    Runner,
+    Task,
+)
+from apps.runners.repositories import ImageGenerationRepository
 from common.utils import hash_token
 
 
 def test_bootstrap_creates_pending_build(db) -> None:
-    """Fresh bootstrap seeds a pending build, not a ready artifact."""
+    """Fresh bootstrap queues a durable generation, not a ready artifact."""
     out = StringIO()
 
     call_command(
@@ -53,13 +61,25 @@ def test_bootstrap_creates_pending_build(db) -> None:
     assert runner.api_token_hash == hash_token("runner-secret")
     assert runner.available_runtimes == [RuntimeType.DOCKER]
 
-    # Build should be pending (not active) — the runner will build it
+    # The immutable generation and its task are queued for the offline runner.
     assert build.status == ImageBuildJob.Status.PENDING
-    assert build.build_task is None
+    assert build.build_task.type == TaskType.BUILD_IMAGE
+    assert build.build_task.status == TaskStatus.PENDING
     assert build.built_at is None
-
-    # No artifact should exist yet
-    assert not ImageInstance.objects.filter(build_job=build).exists()
+    assert build.current_generation_id is None
+    generation = build.pending_generation
+    assert generation.status == ImageInstance.Status.BUILDING
+    assert generation.creating_task_id == build.build_task_id
+    assert generation.created_by_id == user.id
+    assert generation.generation == 1
+    assert generation.revision.recipe["packages"] == DEFAULT_WORKSPACE_PACKAGES
+    command = LifecycleCommand.objects.get(task=build.build_task)
+    assert command.event == "task:build_image"
+    assert command.payload["image_instance_id"] == str(generation.id)
+    assert command.payload["image_tag"] == generation.runner_ref
+    assert command.payload["_revision_id"] == str(generation.revision_id)
+    assert generation.revision.rendered_input["dockerfile_content"]
+    assert command.deliveries == 0
 
     # Image definition should have the correct packages and Dockerfile
     assert definition.packages == DEFAULT_WORKSPACE_PACKAGES
@@ -92,6 +112,9 @@ def test_bootstrap_is_idempotent(db) -> None:
         "--runner-token",
         "runner-secret",
     )
+    first_build = ImageBuildJob.objects.get()
+    generation_id = first_build.pending_generation_id
+    task_id = first_build.build_task_id
     call_command(
         "bootstrap_local_deploy",
         "--admin-email",
@@ -116,13 +139,16 @@ def test_bootstrap_is_idempotent(db) -> None:
     assert builds.count() == 1
     build = builds.first()
     assert build.status == ImageBuildJob.Status.PENDING
+    assert build.pending_generation_id == generation_id
+    assert build.build_task_id == task_id
+    assert build.generations.count() == 1
+    assert Task.objects.count() == 1
+    assert LifecycleCommand.objects.count() == 1
     assert runner.api_token_hash == hash_token("new-token")
 
 
 def test_bootstrap_preserves_active_build(db) -> None:
     """If a build already succeeded, bootstrap should not reset it to pending."""
-    from django.utils import timezone
-
     call_command(
         "bootstrap_local_deploy",
         "--admin-email",
@@ -144,24 +170,16 @@ def test_bootstrap_preserves_active_build(db) -> None:
         image_definition=definition, runner=runner
     )
 
-    # Simulate a successful build
-    build.status = ImageBuildJob.Status.ACTIVE
-    build.built_at = timezone.now()
-    build.save(update_fields=["status", "built_at"])
-    image = ImageInstance.objects.create(
-        is_legacy=True,
-        runner=runner,
-        runtime_type=RuntimeType.DOCKER,
-        origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-        origin_definition=definition,
-        build_job=build,
-        runner_ref="opencuria/custom/local-docker-workspace:test",
-        name="Local Docker Workspace (active-runner)",
-        status=ImageInstance.Status.READY,
+    image = build.pending_generation
+    task_id = build.build_task_id
+    assert ImageGenerationRepository.finish(
+        task_id=str(task_id),
+        build_job_id=str(build.id),
+        runner_id=str(runner.id),
+        runner_ref=image.runner_ref,
     )
-
-    build.current_generation = image
-    build.save(update_fields=["current_generation"])
+    build.refresh_from_db()
+    built_at = build.built_at
 
     # Run bootstrap again
     call_command(
@@ -180,11 +198,18 @@ def test_bootstrap_preserves_active_build(db) -> None:
 
     build.refresh_from_db()
     assert build.status == ImageBuildJob.Status.ACTIVE
-    assert build.image_instance.runner_ref == "opencuria/custom/local-docker-workspace:test"
+    assert build.current_generation_id == image.id
+    assert build.image_instance.runner_ref == image.runner_ref
+    assert build.pending_generation_id is None
+    assert build.build_task_id == task_id
+    assert build.built_at == built_at
+    assert build.generations.count() == 1
+    assert Task.objects.count() == 1
+    assert LifecycleCommand.objects.count() == 1
 
 
-def test_bootstrap_resets_failed_build_to_pending(db) -> None:
-    """A failed build should be reset to pending on next bootstrap."""
+def test_bootstrap_retries_failed_build(db) -> None:
+    """A failed build gets a new generation and task on next bootstrap."""
     call_command(
         "bootstrap_local_deploy",
         "--admin-email",
@@ -206,9 +231,17 @@ def test_bootstrap_resets_failed_build_to_pending(db) -> None:
         image_definition=definition, runner=runner
     )
 
-    # Simulate a failed build
-    build.status = ImageBuildJob.Status.FAILED
-    build.save(update_fields=["status"])
+    failed_image = build.pending_generation
+    failed_task = build.build_task
+    assert ImageGenerationRepository.finish(
+        task_id=str(failed_task.id),
+        build_job_id=str(build.id),
+        runner_id=str(runner.id),
+        error="Build failed",
+    )
+    build.refresh_from_db()
+    assert build.status == ImageBuildJob.Status.FAILED
+    assert build.pending_generation_id is None
 
     # Run bootstrap again
     call_command(
@@ -227,5 +260,19 @@ def test_bootstrap_resets_failed_build_to_pending(db) -> None:
 
     build.refresh_from_db()
     assert build.status == ImageBuildJob.Status.PENDING
-    assert build.build_task is None
+    assert build.build_task_id != failed_task.id
+    assert build.build_task.status == TaskStatus.PENDING
+    assert build.pending_generation_id != failed_image.id
+    assert build.pending_generation.generation == 2
+    assert build.pending_generation.creating_task_id == build.build_task_id
+    assert build.pending_generation.status == ImageInstance.Status.BUILDING
+    assert build.current_generation_id is None
     assert build.built_at is None
+    failed_image.refresh_from_db()
+    failed_task.refresh_from_db()
+    assert failed_image.status == ImageInstance.Status.FAILED
+    assert failed_task.status == TaskStatus.FAILED
+    assert build.generations.count() == 2
+    assert Task.objects.count() == 2
+    assert LifecycleCommand.objects.count() == 2
+    assert LifecycleCommand.objects.filter(task=build.build_task).exists()

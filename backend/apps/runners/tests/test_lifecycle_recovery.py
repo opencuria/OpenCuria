@@ -2,14 +2,19 @@
 
 import uuid
 from datetime import timedelta
+from unittest.mock import AsyncMock
+
 import pytest
 from django.utils import timezone
-from common.exceptions import ConflictError
-from apps.runners.repositories import TaskRepository
-from apps.runners.operations import OperationRepository, apply_result
-from apps.runners.models import LifecycleCommand, Task
+
 from apps.runners.enums import TaskType
-from apps.runners.tests.test_services import service, sio_mock
+from apps.runners.models import ImageDefinition, LifecycleCommand, Task
+from apps.runners.operations import OperationRepository, apply_result
+from apps.runners.repositories import TaskRepository
+from apps.runners.services.recovery import RecoveryService
+from apps.runners.tests.test_services import service as service
+from apps.runners.tests.test_services import sio_mock as sio_mock
+from common.exceptions import ConflictError
 
 pytestmark = pytest.mark.django_db
 
@@ -109,7 +114,6 @@ def test_sanitized_outbox_and_offline_expiry(runner, workspace):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_old_session_heartbeat_callback_fenced(runner):
-    from unittest.mock import AsyncMock
     from apps.runners.sio_server import _require_runner_id
 
     transport = AsyncMock()
@@ -125,7 +129,7 @@ def test_fresh_execution_heartbeat_suppresses_duplicate_delivery(runner, workspa
     runner.last_heartbeat_at = timezone.now()
     runner.save()
     task = allocate(runner, workspace)
-    row = OperationRepository.prepare(
+    OperationRepository.prepare(
         str(task.id),
         "task:stop_workspace",
         {"task_id": str(task.id), "workspace_id": str(workspace.id)},
@@ -236,3 +240,86 @@ def test_resume_envelope_applies_exact_credential_acknowledgement(
     assert workspace.credentials_present is expected
     assert workspace.current_task_id == new.id
     assert len(forwarded) == count
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("kind", ["build_image", "remove_workspace"])
+async def test_worker_recovers_offline_intent_after_registration(
+    service, sio_mock, runner, workspace, user, kind
+):
+    """Reconnect updates presence; the worker delivers the original durable intent."""
+    runner.status, runner.sid = "offline", ""
+    runner.save(update_fields=["status", "sid"])
+    if kind == "build_image":
+        definition = ImageDefinition.objects.create(
+            organization=runner.organization,
+            name="Offline recipe",
+            runtime_type="docker",
+        )
+        build = await service.trigger_build_job(
+            image_definition=definition, runner=runner, created_by=user
+        )
+        image, task = build.pending_generation, build.build_task
+        rendered = dict(image.revision.rendered_input)
+        # Recovery must use the queued revision, not subsequently edited input.
+        definition.packages = ["curl"]
+        definition.save(update_fields=["packages"])
+    else:
+        task = await service.remove_workspace(workspace.id)
+    command = LifecycleCommand.objects.get(task=task)
+    assert command.event == f"task:{kind}"
+    sio_mock.emit.assert_not_awaited()
+
+    transport = AsyncMock()
+    await RecoveryService().tick(transport)
+    transport.emit.assert_not_awaited()
+    service.register_runner(runner, sid="reconnected", available_runtimes=["docker"])
+    sio_mock.emit.assert_not_awaited()
+
+    await RecoveryService().tick(transport)
+    transport.emit.assert_awaited_once()
+    event, payload = transport.emit.await_args.args
+    assert event == command.event
+    assert transport.emit.await_args.kwargs == {"room": "reconnected"}
+    assert payload["task_id"] == payload["operation_id"] == str(task.id)
+    assert payload["attempt"] == command.attempt
+    assert payload["target"] == command.target
+    assert payload["runner_id"] == str(runner.id)
+    if kind == "build_image":
+        assert payload["image_instance_id"] == str(image.id)
+        assert payload["image_tag"] == image.runner_ref
+        assert payload["dockerfile_content"] == rendered["dockerfile_content"]
+        result_event = "image:built"
+        result = payload
+    else:
+        assert payload["workspace_id"] == str(workspace.id)
+        result_event = "workspace:removed"
+        result = {**payload, "result": "deleted"}
+    await RecoveryService().tick(transport)
+    transport.emit.assert_awaited_once()  # Delivery is leased, not reallocated.
+    assert Task.objects.count() == LifecycleCommand.objects.count() == 1
+    assert not apply_result(
+        service,
+        str(runner.id),
+        result_event,
+        {**result, "attempt": command.attempt + 1},
+    )
+    assert apply_result(service, str(runner.id), result_event, result)
+    # Terminal replay is acknowledged without reallocating or rewriting state.
+    assert apply_result(service, str(runner.id), result_event, result)
+    task.refresh_from_db()
+    assert task.status == "completed"
+    if kind == "build_image":
+        build.refresh_from_db()
+        image.refresh_from_db()
+        assert build.current_generation_id == image.id
+        assert build.pending_generation_id is None
+        assert image.status == "ready"
+        assert build.generations.count() == 1
+    else:
+        workspace.refresh_from_db()
+        assert workspace.status == "deleted"
+        assert workspace.current_task_id is None
+    await RecoveryService().tick(transport)
+    transport.emit.assert_awaited_once()

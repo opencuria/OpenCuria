@@ -1,15 +1,7 @@
-"""Runner presence & queries (Phase 3 domain mixin).
+"""Runner presence and workspace queries shared by RunnerService.
 
-Byte-identical method bodies extracted from the former monolithic
-``apps/runners/services/__init__.py``. No logic changes; the mixin relies
-on the facade (``RunnerService``) providing ``self.runners``,
-``self.workspaces``, ``self.tasks``, ``self.image_instances``,
-``self.build_jobs`` plus sibling helpers (``trigger_build_job`` /
-``timeout_stale_image_operations`` via :class:`ImageLifecycleMixin`,
-``fail_streams_for_runner`` via :class:`StreamTransportMixin`,
-``_forward_runner_status_to_frontend`` via ``FrontendBusMixin``,
-``_ensure_runner_supports_runtime`` / ``_validate_runner_qemu_limits``).
-Lazy ``from ...models import ...`` imports keep their relative depth.
+Lifecycle delivery belongs to the independent durable recovery worker,
+not runner registration.
 """
 
 from __future__ import annotations
@@ -18,12 +10,10 @@ import logging
 import uuid
 from typing import TYPE_CHECKING
 
-from asgiref.sync import sync_to_async
-
 from common.exceptions import AuthenticationError
-from common.utils import generate_uuid, hash_token
+from common.utils import hash_token
 
-from ...enums import RunnerStatus, RuntimeType, TaskStatus, TaskType
+from ...enums import RunnerStatus, RuntimeType
 from ...exceptions import RunnerNotFoundError, WorkspaceNotFoundError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
@@ -74,64 +64,6 @@ class RunnerLifecycleMixin:
             runner.id,
         )
         return runner
-
-    async def dispatch_pending_image_builds(self, runner: "Runner") -> list:
-        """Dispatch pending image builds that were created while the runner was offline.
-
-        This is called after a runner registers online.  It queries for
-        ``ImageBuildJob`` records with status ``pending`` and no associated
-        build task, then triggers the regular build pipeline for each.
-
-        Returns the list of dispatched ImageBuildJob records.
-        """
-        queued = await sync_to_async(
-            lambda: list(self.build_jobs.list_queued(runner.id))
-        )()
-        dispatched = []
-        for build in queued:
-            image = build.pending_generation
-            task = image.creating_task
-            payload = {
-                **image.revision.rendered_input,
-                "task_id": str(task.id),
-                "build_job_id": str(build.id),
-                "image_instance_id": str(image.id),
-                "runtime_type": image.runtime_type,
-            }
-            payload["image_tag" if image.runtime_type == "docker" else "image_path"] = (
-                image.runner_ref
-            )
-            await self._emit_to_runner(runner, "task:build_image", payload)
-            await sync_to_async(self.tasks.mark_in_progress)(task)
-            dispatched.append(build)
-        pending_builds = await sync_to_async(
-            lambda: list(self.build_jobs.list_unallocated_pending(runner.id))
-        )()
-
-        for build in pending_builds:
-            try:
-                await self.trigger_build_job(
-                    image_definition=build.image_definition,
-                    runner=runner,
-                    activate=True,
-                )
-                dispatched.append(build)
-                logger.info(
-                    "Dispatched pending image build %s for runner %s",
-                    build.id,
-                    runner.id,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to dispatch pending image build %s for runner %s",
-                    build.id,
-                    runner.id,
-                )
-        return dispatched
-
-    async def dispatch_pending_image_deletions(self, runner: "Runner") -> list:
-        """Dispatch pending image deletions that accumulated while runner was offline."""
-        return []  # Recovery coordinator exclusively owns image deletion.
 
     def unregister_runner(self, sid: str) -> None:
         """

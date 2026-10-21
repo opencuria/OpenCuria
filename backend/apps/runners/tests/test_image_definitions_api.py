@@ -1395,19 +1395,35 @@ def test_global_recipe_lifecycle_is_read_only_for_org_admin(client, action):
 
 
 @pytest.mark.django_db
-def test_image_artifact_get_does_not_run_timeout_recovery(client, monkeypatch):
-    from apps.runners.services import get_runner_service
+def test_image_artifact_reads_do_not_run_lifecycle_recovery(client, runner, user):
+    """REST and MCP reads leave old in-flight generations and tasks untouched."""
+    from datetime import timedelta
 
-    user = get_user_model().objects.create_user(email="readonly-capture@test.com", password="secret")
-    org = Organization.objects.create(name="Read only", slug="readonly-capture")
+    from apps.mcp_app.server import _call_list_image_artifacts
+    from apps.runners.repositories import ImageGenerationRepository
+
+    org = runner.organization
     Membership.objects.create(user=user, organization=org, role=MembershipRole.ADMIN)
     token = _create_api_key(user=user, permissions=[APIKeyPermission.IMAGES_READ.value])
-    def forbidden(*args, **kwargs):
-        raise AssertionError("GET must not execute lifecycle timeout recovery")
-    monkeypatch.setattr(get_runner_service(), "timeout_stale_image_artifacts", forbidden)
+    definition = ImageDefinition.objects.create(organization=org, name="Read only")
+    build, image, task = ImageGenerationRepository.request(
+        definition=definition, runner=runner, rendered_input={}, created_by=user
+    )
+    old = timezone.now() - timedelta(hours=2)
+    ImageInstance.objects.filter(pk=image.id).update(created_at=old)
+    ImageBuildJob.objects.filter(pk=build.id).update(updated_at=old)
+
     response = client.get("/api/v1/image-artifacts/", **_auth_headers(token, str(org.id)))
     assert response.status_code == 200
-    from apps.mcp_app.server import _call_list_image_artifacts
-    # The MCP read shares the same independent-recovery contract.
     key = APIKey.objects.get(user=user)
-    assert _call_list_image_artifacts(key, org.id, {})
+    mcp_result = json.loads(_call_list_image_artifacts(key, org.id, {})[0].text)
+    for payload in (response.json(), mcp_result):
+        assert [(row["id"], row["status"]) for row in payload] == [
+            (str(image.id), "building")
+        ]
+    build.refresh_from_db()
+    image.refresh_from_db()
+    task.refresh_from_db()
+    assert build.status == "pending"
+    assert image.status == "building"
+    assert task.status == "pending"
