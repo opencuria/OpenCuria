@@ -16,7 +16,7 @@ from apps.accounts.api_auth import JWTAuth
 from apps.accounts.auth_backends import DjangoJWTBackend, get_auth_backend
 from apps.accounts.sso import KeycloakSsoService, get_sso_provider_config
 from apps.organizations.services import OrganizationService
-from common.exceptions import AuthenticationError
+from common.exceptions import AuthenticationError, NotFoundError, ServiceError
 
 from .schemas import (
     APIKeyCreatedOut,
@@ -33,6 +33,7 @@ from .schemas import (
     UserOrgOut,
     UserWithOrgsOut,
 )
+from .services import APIKeyService
 
 auth_router = Router(tags=["auth"])
 
@@ -187,9 +188,7 @@ def me(request: HttpRequest):
 )
 def list_api_keys(request: HttpRequest):
     """Return all API keys for the authenticated user. Raw tokens are never returned."""
-    from .models import APIKey
-
-    keys = APIKey.objects.filter(user=request.user).order_by("-created_at")
+    keys = APIKeyService().list_keys(request.user)
     return [
         APIKeyOut(
             id=k.id,
@@ -218,32 +217,15 @@ def create_api_key(request: HttpRequest, payload: APIKeyCreateIn):
     The raw token is returned **once** in the response and cannot be retrieved again.
     Store it securely — opencuria only stores a SHA-256 hash.
     """
-    from common.utils import generate_api_token, hash_token
-
-    from .models import APIKey
-
-    raw_token = f"kai_{generate_api_token()}"
-    token_hash = hash_token(raw_token)
-    key_prefix = raw_token[:12]
-
-    from .models import APIKeyPermission
-
-    # Validate permissions
-    valid_perms = APIKeyPermission.all_values()
-    invalid = [p for p in (payload.permissions or []) if p not in valid_perms]
-    if invalid:
-        return 400, {"detail": f"Invalid permissions: {invalid}", "code": "invalid_permissions"}
-
-    permissions = payload.permissions or valid_perms
-
-    api_key = APIKey.objects.create(
-        user=request.user,
-        name=payload.name,
-        key_hash=token_hash,
-        key_prefix=key_prefix,
-        expires_at=payload.expires_at,
-        permissions=permissions,
-    )
+    try:
+        api_key, raw_token = APIKeyService().create_key(
+            user=request.user,
+            name=payload.name,
+            expires_at=payload.expires_at,
+            permissions=payload.permissions,
+        )
+    except ServiceError as e:
+        return 400, {"detail": e.message, "code": e.code}
 
     return 201, APIKeyCreatedOut(
         id=api_key.id,
@@ -268,20 +250,14 @@ def update_api_key(request: HttpRequest, key_id: uuid.UUID, payload: APIKeyUpdat
     """
     Update the permissions of an existing API key.
     """
-    from .models import APIKey, APIKeyPermission
-
     try:
-        api_key = APIKey.objects.get(id=key_id, user=request.user)
-    except APIKey.DoesNotExist:
+        api_key = APIKeyService().update_permissions(
+            user=request.user, key_id=key_id, permissions=payload.permissions
+        )
+    except NotFoundError:
         return 404, {"detail": "API key not found.", "code": "not_found"}
-
-    valid_perms = APIKeyPermission.all_values()
-    invalid = [p for p in (payload.permissions or []) if p not in valid_perms]
-    if invalid:
-        return 400, {"detail": f"Invalid permissions: {invalid}", "code": "invalid_permissions"}
-
-    api_key.permissions = payload.permissions or valid_perms
-    api_key.save(update_fields=["permissions"])
+    except ServiceError as e:
+        return 400, {"detail": e.message, "code": e.code}
 
     return 200, APIKeyOut(
         id=api_key.id,
@@ -308,15 +284,10 @@ def delete_api_key(request: HttpRequest, key_id: uuid.UUID):
     Sets ``is_active=False`` immediately. The key can no longer be used
     for authentication. Only the owner can revoke their own keys.
     """
-    from .models import APIKey
-
     try:
-        api_key = APIKey.objects.get(id=key_id, user=request.user)
-    except APIKey.DoesNotExist:
+        APIKeyService().revoke(user=request.user, key_id=key_id)
+    except NotFoundError:
         return 404, {"detail": "API key not found.", "code": "not_found"}
-
-    api_key.is_active = False
-    api_key.save(update_fields=["is_active"])
     return 204, None
 
 

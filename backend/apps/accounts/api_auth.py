@@ -2,7 +2,7 @@
 Django Ninja authentication classes for JWT-based and API key-based protection.
 
 Uses the pluggable AuthBackend to validate JWT tokens. API key auth
-looks up hashed tokens in the APIKey model.
+delegates to ``APIKeyService``, the same service the MCP adapter uses.
 
 Pass all three to NinjaAPI(auth=[JWTAuth(), APIKeyBearer(), APIKeyInHeader()])
 so Django Ninja tries each in order and accepts the first that succeeds.
@@ -11,15 +11,13 @@ so Django Ninja tries each in order and accepts the first that succeeds.
 from __future__ import annotations
 
 import logging
-from datetime import timezone as dt_timezone
 
 from django.http import HttpRequest
-from django.utils import timezone
 from ninja.security import APIKeyHeader, HttpBearer
 
-logger = logging.getLogger(__name__)
+from .services import API_KEY_TOKEN_PREFIX, APIKeyService
 
-_KAI_PREFIX = "kai_"
+logger = logging.getLogger(__name__)
 
 
 class JWTAuth(HttpBearer):
@@ -40,7 +38,7 @@ class JWTAuth(HttpBearer):
         Returns the User instance on success, None on failure
         (Django Ninja converts None to 401).
         """
-        if token.startswith(_KAI_PREFIX):
+        if token.startswith(API_KEY_TOKEN_PREFIX):
             return None
 
         from apps.accounts.auth_backends import get_auth_backend
@@ -72,7 +70,7 @@ class APIKeyBearer(HttpBearer):
 
         Returns the User instance on success, None on failure.
         """
-        if not token.startswith(_KAI_PREFIX):
+        if not token.startswith(API_KEY_TOKEN_PREFIX):
             return None
 
         return _authenticate_api_key(request, token)
@@ -103,35 +101,13 @@ def _authenticate_api_key(request: HttpRequest, token: str):
     """
     Shared API key validation logic used by both APIKeyBearer and APIKeyInHeader.
 
-    Hashes the token, looks up the APIKey record, checks active/expiry,
-    updates last_used_at, sets request.user, and attaches the APIKey instance
-    to ``request.api_key`` for permission checking downstream.
+    Authenticates the token via ``APIKeyService``, sets request.user, and
+    attaches the APIKey instance to ``request.api_key`` for permission
+    checking downstream.
     """
-    from common.utils import hash_token
-
-    from .models import APIKey
-
-    token_hash = hash_token(token)
-
-    try:
-        api_key = APIKey.objects.select_related("user").get(
-            key_hash=token_hash,
-            is_active=True,
-        )
-    except APIKey.DoesNotExist:
+    api_key = APIKeyService().authenticate(token)
+    if api_key is None:
         return None
-
-    if api_key.expires_at is not None:
-        now = timezone.now()
-        if api_key.expires_at.tzinfo is None:
-            # Make naive datetimes comparable
-            from datetime import datetime
-            now = now.replace(tzinfo=None)  # type: ignore[assignment]
-        if now > api_key.expires_at:
-            return None
-
-    api_key.last_used_at = timezone.now()
-    api_key.save(update_fields=["last_used_at"])
 
     request.user = api_key.user
     # Attach the full APIKey object so downstream code can check permissions

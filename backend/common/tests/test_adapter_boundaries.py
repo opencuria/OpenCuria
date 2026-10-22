@@ -14,7 +14,8 @@ run events (``apps.harness.run_events``). Likewise the foundational contexts
 them; apps built on them subscribe to ``apps.organizations.events`` and
 ``apps.credentials.deletion_guards`` and share ``common.schemas``. Workspaces
 compose plugins, so workspace-scoped plugin endpoints and guards live in
-``apps.runners``.
+``apps.runners``. REST and MCP adapters never query the ORM themselves; e.g.
+both authenticate API keys through ``apps.accounts.services.APIKeyService``.
 """
 
 from __future__ import annotations
@@ -148,6 +149,31 @@ def test_adapters_reach_image_recipes_only_through_their_service():
         "Use apps.runners.services.image_definitions.ImageDefinitionService "
         "instead of image recipe models/repositories in adapters:\n"
         + "\n".join(violations)
+    )
+
+
+def test_rest_and_mcp_adapters_never_query_the_orm():
+    """Adapters call services; only repositories touch model managers."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    adapters = {
+        path
+        for path, tree in trees.items()
+        if _defines_ninja_router(tree)
+        or _module_name(path) == "apps.accounts.api_auth"
+        or _module_name(path).startswith("apps.mcp_app")
+    }
+    assert APPS_ROOT / "accounts" / "api.py" in adapters  # discovery sanity check
+
+    violations = sorted(
+        f"{_module_name(path)}:{node.lineno}"
+        for path in adapters
+        for node in ast.walk(trees[path])
+        if isinstance(node, ast.Attribute)
+        and node.attr in {"objects", "_default_manager"}
+    )
+    assert violations == [], (
+        "Move ORM access into the app's repositories and call it through its "
+        "service from REST and MCP alike:\n" + "\n".join(violations)
     )
 
 
