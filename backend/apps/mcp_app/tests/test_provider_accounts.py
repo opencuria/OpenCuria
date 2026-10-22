@@ -21,7 +21,6 @@ from apps.mcp_app.server import (
     _call_chatgpt_oauth_status,
     _call_delete_provider_account,
     _call_list_provider_accounts,
-    _call_list_provider_models,
     _call_save_provider_account,
     _call_select_provider_account,
 )
@@ -125,47 +124,6 @@ def test_mcp_provider_accounts_save_list_select_and_delete(
     )
     assert deleted == {"deleted": True, "account_id": saved["id"]}
     assert _parse_text(_call_list_provider_accounts(api_key, org_id, {})) == []
-
-
-@pytest.mark.django_db
-def test_mcp_provider_models_include_provider_field(provider_mcp_setup, monkeypatch):
-    """list_provider_models includes the provider field on each model row."""
-    from apps.harness.providers.models_catalog import ProviderModel
-
-    class FakeService:
-        def list_models(self, _org_id, **kwargs):
-            return [
-                ProviderModel(
-                    id="openrouter/model-a",
-                    name="Model A",
-                    provider="openrouter",
-                    reasoning_efforts=(),
-                    default_effort="",
-                    supports_tools=True,
-                    context_length=128000,
-                    max_output_tokens=8192,
-                ),
-                ProviderModel(
-                    id="amazon-bedrock/model-b",
-                    name="Model B",
-                    provider="amazon-bedrock",
-                    reasoning_efforts=("low",),
-                    default_effort="low",
-                    supports_tools=False,
-                    context_length=64000,
-                    max_output_tokens=4096,
-                ),
-            ]
-
-    monkeypatch.setattr(
-        "apps.harness.services.ProviderConfigService", lambda: FakeService()
-    )
-    payload = _parse_text(
-        _call_list_provider_models(
-            provider_mcp_setup["api_key"], provider_mcp_setup["org"].id, {}
-        )
-    )
-    assert {row["provider"] for row in payload} == {"openrouter", "amazon-bedrock"}
 
 
 @pytest.mark.django_db(transaction=True)

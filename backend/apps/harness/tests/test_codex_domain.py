@@ -384,8 +384,9 @@ def test_openrouter_models_are_normalized_scoped_and_metadata_validated(
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("engine_id", ["native", "claude", "codex"])
 def test_generic_catalog_provider_failures_do_not_leak_secrets(
-    codex_setup, monkeypatch
+    codex_setup, monkeypatch, engine_id
 ):
     from apps.accounts.models import APIKey, APIKeyPermission
     from apps.harness.providers.base import ProviderAuthError
@@ -407,11 +408,11 @@ def test_generic_catalog_provider_failures_do_not_leak_secrets(
         raise ProviderAuthError("upstream echoed access-secret", provider="openrouter")
 
     monkeypatch.setattr(EngineCatalogService, "list_models", fail)
-    response = client.get("/api/v1/harness/engines/codex/models/")
+    response = client.get(f"/api/v1/harness/engines/{engine_id}/models/")
     assert response.status_code == 502
     assert "access-secret" not in response.content.decode()
     mcp = _call_list_engine_models(
-        SimpleNamespace(user=data.owner), data.org, {"engine_id": "codex"}
+        SimpleNamespace(user=data.owner), data.org, {"engine_id": engine_id}
     )
     assert "access-secret" not in mcp[0].text
     assert "temporarily unavailable" in mcp[0].text

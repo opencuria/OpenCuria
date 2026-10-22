@@ -13,10 +13,8 @@ from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, NotFoundError
 
 from .schemas import (
-    ClaudeModelOut,
     EngineModelOut,
     HarnessEngineOut,
-    claude_model_to_out,
     engine_model_to_out,
 )
 from .service import EngineCatalogService
@@ -63,27 +61,6 @@ def list_harness_engines(request: HttpRequest):
         organization_id = _require_membership(request)
         rows = EngineCatalogService().list_engines(organization_id, request.user.id)
         return 200, [HarnessEngineOut(**row) for row in rows]
-    except AuthenticationError as exc:
-        return 401, {"detail": exc.message, "code": exc.code}
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-
-
-@engines_router.get(
-    "/harness/engines/claude/models/",
-    response={200: list[ClaudeModelOut], 401: dict, 403: dict, 404: dict},
-    summary="List the Claude engine model catalog",
-)
-def list_claude_engine_models(request: HttpRequest):
-    """Return constrained Claude models independently of provider adapters."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _permission_denied(APIKeyPermission.HARNESS_READ)
-    try:
-        organization_id = _require_membership(request)
-        models = EngineCatalogService().list_models(
-            "claude", organization_id, request.user.id
-        )
-        return 200, [claude_model_to_out(model) for model in models]
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:

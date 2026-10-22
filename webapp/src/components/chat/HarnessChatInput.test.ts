@@ -40,8 +40,6 @@ vi.mock('@/services/harness.api', async () => {
     await vi.importActual<typeof import('@/services/harness.api')>('@/services/harness.api')
   return {
     ...actual,
-    listProviderModels: vi.fn(),
-    listClaudeModels: vi.fn(),
     listEngineModels: vi.fn(),
     listHarnessEngines: vi.fn(),
     listAgentConfigs: vi.fn(),
@@ -50,8 +48,9 @@ vi.mock('@/services/harness.api', async () => {
   }
 })
 
-const listProviderModelsMock = vi.mocked(harnessApi.listProviderModels)
-const listClaudeModelsMock = vi.mocked(harnessApi.listClaudeModels)
+const nativeModelsMock = vi.fn<() => Promise<ProviderModel[]>>()
+const claudeModelsMock = vi.fn<() => Promise<ProviderModel[]>>()
+const codexModelsMock = vi.fn<() => Promise<ProviderModel[]>>()
 const listHarnessEnginesMock = vi.mocked(harnessApi.listHarnessEngines)
 const listAgentConfigsMock = vi.mocked(harnessApi.listAgentConfigs)
 
@@ -177,12 +176,17 @@ describe('HarnessChatInput', () => {
         effort_strategy: 'fixed',
       },
     ])
-    listProviderModelsMock.mockResolvedValue(catalog)
+    vi.mocked(harnessApi.listEngineModels).mockImplementation((engine) => {
+      if (engine === 'native') return nativeModelsMock()
+      if (engine === 'claude') return claudeModelsMock()
+      return codexModelsMock()
+    })
+    nativeModelsMock.mockResolvedValue(catalog)
     listHarnessEnginesMock.mockResolvedValue([
       { id: 'native', name: 'OpenCuria', modes: ['build', 'plan'], connected: true },
       { id: 'claude', name: 'Claude Agent', modes: ['build', 'plan'], connected: true },
     ])
-    listClaudeModelsMock.mockResolvedValue([
+    claudeModelsMock.mockResolvedValue([
       {
         id: 'sonnet',
         name: 'Claude Sonnet',
@@ -220,7 +224,7 @@ describe('HarnessChatInput', () => {
         default_effort: 'low',
       },
     ])
-    vi.mocked(harnessApi.listEngineModels).mockResolvedValue(codexModels)
+    codexModelsMock.mockResolvedValue(codexModels)
   }
 
   it('creates a Codex chat with backend defaults through the existing mode/model menus', async () => {
@@ -347,13 +351,13 @@ describe('HarnessChatInput', () => {
 
   it('reports external auth/catalog failure explicitly instead of using native models', async () => {
     enableCodex()
-    vi.mocked(harnessApi.listEngineModels).mockRejectedValue(new Error('Unauthorized'))
+    codexModelsMock.mockRejectedValue(new Error('Unauthorized'))
     const wrapper = mountInput({ harnessId: 'codex', model: 'chatgpt/gpt-6.1-sol' })
     await flushPromises()
     expect(wrapper.get('[data-testid="composer-provider-cta"]').text()).toContain(
       'Codex unavailable',
     )
-    expect(listProviderModelsMock).not.toHaveBeenCalled()
+    expect(nativeModelsMock).not.toHaveBeenCalled()
     expect(wrapper.find('[data-testid="composer-model-openrouter/model-big"]').exists()).toBe(false)
     wrapper.unmount()
   })
@@ -361,10 +365,10 @@ describe('HarnessChatInput', () => {
   it('loads the provider catalog into the model picker', async () => {
     const wrapper = mountInput()
     await vi.waitFor(() => {
-      expect(listProviderModelsMock).toHaveBeenCalled()
+      expect(nativeModelsMock).toHaveBeenCalled()
     })
     await wrapper.vm.$nextTick()
-    expect(listProviderModelsMock).toHaveBeenCalled()
+    expect(nativeModelsMock).toHaveBeenCalled()
     expect(wrapper.text()).not.toContain('Skills')
     expect(wrapper.text()).not.toContain('Fast')
   })
@@ -379,7 +383,7 @@ describe('HarnessChatInput', () => {
     expect(wrapper.find('[data-testid="composer-mode-claude-plan"]').exists()).toBe(true)
 
     await wrapper.find('[data-testid="composer-mode-claude-build"]').trigger('click')
-    await vi.waitFor(() => expect(listClaudeModelsMock).toHaveBeenCalled())
+    await vi.waitFor(() => expect(claudeModelsMock).toHaveBeenCalled())
     expect(wrapper.emitted('update:harnessId')?.slice(-1)[0]).toEqual(['claude'])
     expect(wrapper.find('[data-testid="composer-mode-trigger"]').text()).toContain(
       'Claude Agent Build',
@@ -442,12 +446,12 @@ describe('HarnessChatInput', () => {
 
   it('invalidates cached native models when provider account selection changes', async () => {
     const wrapper = mountInput()
-    await vi.waitFor(() => expect(listProviderModelsMock).toHaveBeenCalledTimes(1))
-    listProviderModelsMock.mockResolvedValueOnce([
+    await vi.waitFor(() => expect(nativeModelsMock).toHaveBeenCalledTimes(1))
+    nativeModelsMock.mockResolvedValueOnce([
       { ...catalog[0]!, id: 'openrouter/new-account-model', name: 'New account model' },
     ])
     window.dispatchEvent(new Event(harnessApi.PROVIDER_ACCOUNTS_CHANGED_EVENT))
-    await vi.waitFor(() => expect(listProviderModelsMock).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(nativeModelsMock).toHaveBeenCalledTimes(2))
     await flushPromises()
     expect(
       wrapper.find('[data-testid="composer-model-openrouter/new-account-model"]').exists(),
@@ -594,7 +598,7 @@ describe('HarnessChatInput', () => {
   })
 
   it('shows settings CTA when the model catalog has no available models', async () => {
-    listProviderModelsMock.mockResolvedValue([])
+    nativeModelsMock.mockResolvedValue([])
     const wrapper = mountInput()
     await vi.waitFor(() =>
       expect(wrapper.find('[data-testid="composer-provider-cta"]').exists()).toBe(true),
@@ -612,9 +616,9 @@ describe('HarnessChatInput', () => {
 
   it('loads models and agent defaults without fetching provider settings', async () => {
     const wrapper = mountInput()
-    await vi.waitFor(() => expect(listProviderModelsMock).toHaveBeenCalled())
+    await vi.waitFor(() => expect(nativeModelsMock).toHaveBeenCalled())
     await vi.waitFor(() => expect(listAgentConfigsMock).toHaveBeenCalled())
-    expect(listProviderModelsMock).toHaveBeenCalled()
+    expect(nativeModelsMock).toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -666,7 +670,7 @@ describe('HarnessChatInput', () => {
       filesAvailable: false,
     })
     await vi.waitFor(() => {
-      expect(listProviderModelsMock).toHaveBeenCalled()
+      expect(nativeModelsMock).toHaveBeenCalled()
       expect(wrapper.get('[data-testid="composer-model-trigger"]').text()).not.toContain('Loading')
     })
     expect(listAgentConfigsMock).not.toHaveBeenCalled()
@@ -710,10 +714,10 @@ describe('HarnessChatInput', () => {
     })
     expect(wrapper.find('[data-testid="composer-skill-remove-skill-hidden"]').exists()).toBe(true)
     await wrapper.setProps({ skillOptions: [], model: 'catalog/model-b' })
-    listProviderModelsMock.mockResolvedValueOnce([])
+    nativeModelsMock.mockResolvedValueOnce([])
     resetProviderCatalogCache()
     auth.activeOrganizationId = 'org-catalog-refresh'
-    await vi.waitFor(() => expect(listProviderModelsMock).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(nativeModelsMock).toHaveBeenCalledTimes(2))
     expect(wrapper.find('[data-testid="composer-skill-remove-skill-hidden"]').exists()).toBe(false)
     expect(wrapper.emitted('update:skillIds')).toBeUndefined()
     await wrapper.setProps({ skillOptions: skills })
@@ -966,7 +970,7 @@ describe('HarnessChatInput', () => {
       ],
     })
     await vi.waitFor(() => {
-      expect(listProviderModelsMock).toHaveBeenCalled()
+      expect(nativeModelsMock).toHaveBeenCalled()
     })
 
     const textarea = wrapper.get('[data-testid="composer-textarea"]')
@@ -1119,7 +1123,7 @@ describe('HarnessChatInput', () => {
     expect(stop.classes()).toContain('bg-primary')
     await stop.trigger('click')
     expect(wrapper.emitted('stop')).toHaveLength(1)
-    expect(listProviderModelsMock).not.toHaveBeenCalled()
+    expect(nativeModelsMock).not.toHaveBeenCalled()
   })
 
   it('styles the stop button with primary accent colors when stoppable', () => {
@@ -1365,7 +1369,7 @@ describe('HarnessChatInput chat upload', () => {
         effort_strategy: 'fixed',
       },
     ])
-    listProviderModelsMock.mockResolvedValue(catalog)
+    nativeModelsMock.mockResolvedValue(catalog)
   })
 
   /** Resolve the tracked upload the way a backend `files:upload_result` would. */

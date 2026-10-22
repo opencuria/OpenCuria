@@ -25,7 +25,6 @@ vi.mock('@/services/harness.api', async () => {
     getProviderConfig: vi.fn(),
     saveProviderConfig: vi.fn(),
     listProviderAccounts: vi.fn(),
-    listClaudeModels: vi.fn(),
   }
 })
 
@@ -87,7 +86,6 @@ describe('ProviderConfigTab', () => {
     vi.mocked(harnessApi.getProviderConfig).mockResolvedValue(config)
     vi.mocked(harnessApi.saveProviderConfig).mockResolvedValue(config)
     vi.mocked(harnessApi.listProviderAccounts).mockResolvedValue([account])
-    vi.mocked(harnessApi.listClaudeModels).mockResolvedValue([])
   })
 
   it('shows account counts and active label while keeping the shared model picker', async () => {

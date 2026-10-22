@@ -14,12 +14,11 @@ vi.mock('@/services/harness.api', async () => {
     await vi.importActual<typeof import('@/services/harness.api')>('@/services/harness.api')
   return {
     ...actual,
-    listProviderModels: vi.fn(),
     listEngineModels: vi.fn(),
   }
 })
 
-const listProviderModelsMock = vi.mocked(harnessApi.listProviderModels)
+const listEngineModelsMock = vi.mocked(harnessApi.listEngineModels)
 
 const catalog: ProviderModel[] = [
   {
@@ -60,42 +59,42 @@ describe('loadProviderModelsCached', () => {
   })
 
   it('coalesces concurrent callers onto one request', async () => {
-    listProviderModelsMock.mockResolvedValue(catalog)
+    listEngineModelsMock.mockResolvedValue(catalog)
     const [first, second] = await Promise.all([
       loadProviderModelsCached(),
       loadProviderModelsCached(),
     ])
     expect(first).toEqual(catalog)
     expect(second).toEqual(catalog)
-    expect(listProviderModelsMock).toHaveBeenCalledTimes(1)
+    expect(listEngineModelsMock).toHaveBeenCalledTimes(1)
   })
 
   it('retries after a failed fetch', async () => {
-    listProviderModelsMock.mockRejectedValueOnce(new Error('down'))
-    listProviderModelsMock.mockResolvedValueOnce(catalog)
+    listEngineModelsMock.mockRejectedValueOnce(new Error('down'))
+    listEngineModelsMock.mockResolvedValueOnce(catalog)
     await expect(loadProviderModelsCached()).rejects.toThrow('down')
     await expect(loadProviderModelsCached()).resolves.toEqual(catalog)
-    expect(listProviderModelsMock).toHaveBeenCalledTimes(2)
+    expect(listEngineModelsMock).toHaveBeenCalledTimes(2)
   })
 
   it('invalidates the cached promise so the next load refetches', async () => {
-    listProviderModelsMock.mockResolvedValue(catalog)
+    listEngineModelsMock.mockResolvedValue(catalog)
     await loadProviderModelsCached()
     invalidateProviderCatalog()
     await loadProviderModelsCached()
-    expect(listProviderModelsMock).toHaveBeenCalledTimes(2)
+    expect(listEngineModelsMock).toHaveBeenCalledTimes(2)
   })
 
   it('does not reuse cached catalog data after logout or when the active user changes', async () => {
     localStorage.setItem('kern_user', JSON.stringify({ id: 1 }))
     localStorage.setItem('kern_active_org_id', 'org-a')
-    listProviderModelsMock.mockResolvedValue(catalog)
+    listEngineModelsMock.mockResolvedValue(catalog)
     await loadProviderModelsCached()
     localStorage.setItem('kern_user', JSON.stringify({ id: 2 }))
     await loadProviderModelsCached()
     resetProviderCatalogCache()
     localStorage.removeItem('kern_user')
     await loadProviderModelsCached()
-    expect(listProviderModelsMock).toHaveBeenCalledTimes(3)
+    expect(listEngineModelsMock).toHaveBeenCalledTimes(3)
   })
 })

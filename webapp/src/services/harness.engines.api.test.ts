@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as api from './api'
 import {
   createHarnessSession,
-  listClaudeModels,
   listEngineModels,
   listHarnessEngines,
   createProviderAccount,
@@ -56,10 +55,10 @@ describe('harness engine API', () => {
     )
   })
 
-  it('lists engines and keeps Claude models on their dedicated catalog endpoint', async () => {
+  it('lists engines and loads Claude through the generic catalog', async () => {
     const get = vi.spyOn(api, 'get').mockResolvedValueOnce(engines).mockResolvedValueOnce(models)
     await expect(listHarnessEngines()).resolves.toEqual(engines)
-    await expect(listClaudeModels()).resolves.toEqual(models)
+    await expect(listEngineModels('claude')).resolves.toEqual(models)
     expect(get).toHaveBeenNthCalledWith(1, '/harness/engines/')
     expect(get).toHaveBeenNthCalledWith(2, '/harness/engines/claude/models/')
   })

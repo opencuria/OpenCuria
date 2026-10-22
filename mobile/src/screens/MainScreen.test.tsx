@@ -170,10 +170,10 @@ function mockClient() {
         modes: ["build", "plan"],
       },
     ]),
-    listProviderModels: jest.fn().mockResolvedValue([nativeModel]),
-    listClaudeModels: jest
-      .fn()
-      .mockRejectedValue(new Error("Claude catalog unavailable")),
+    listEngineModels: jest.fn(async (engine: string) => {
+      if (engine === "native") return [nativeModel];
+      throw new Error("Catalog unavailable");
+    }),
     listAgentConfigs: jest.fn().mockResolvedValue([
       {
         agent: "build",
@@ -280,8 +280,8 @@ it("selects the initial ready workspace, creates a new chat and accepts the firs
   await waitFor(() =>
     expect(mockController.newChat).toHaveBeenCalledWith(runningWorkspace.id),
   );
-  expect(client.harness.listClaudeModels).toHaveBeenCalled();
-  expect(client.harness.listProviderModels).toHaveBeenCalled();
+  expect(client.harness.listEngineModels).toHaveBeenCalledWith("claude");
+  expect(client.harness.listEngineModels).toHaveBeenCalledWith("native");
   expect(client.harness.listAgentConfigs).toHaveBeenCalled();
   await waitFor(() =>
     expect(screen.getByTestId("chat-settings").props.children).toMatch(
@@ -308,7 +308,6 @@ it("selects the initial ready workspace, creates a new chat and accepts the firs
 it("keeps a ready workspace and sendable chat if the engine catalog fails", async () => {
   const client = mockClient();
   client.harness.listEngines.mockRejectedValue(new Error("Forbidden"));
-  client.harness.listClaudeModels.mockRejectedValue(new Error("Forbidden"));
   mockUseSession.mockReturnValue(sessionValue(client) as never);
   const tree = render(
     <ThemeProvider>

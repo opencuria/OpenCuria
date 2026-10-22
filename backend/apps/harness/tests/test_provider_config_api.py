@@ -14,7 +14,6 @@ from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.models import ProviderConfig
 from apps.harness.provider_accounts import ProviderAccountService
 from apps.harness.providers.chatgpt_oauth import DeviceFlowStart, OAuthTokens
-from apps.harness.services import ProviderConfigService
 from apps.organizations.models import Membership, MembershipRole, Organization
 from common.utils import generate_api_token, hash_token
 
@@ -191,7 +190,7 @@ def test_provider_models_use_the_callers_selected_account(provider_setup, monkey
         payload={"label": "Router", "api_key": "sk-models"},
     )
 
-    def fake_list(self, organization_id, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_list(*, organization_id, **kwargs):  # type: ignore[no-untyped-def]
         assert organization_id == org.id
         assert kwargs["user_id"] == owner.id
         return [
@@ -207,13 +206,16 @@ def test_provider_models_use_the_callers_selected_account(provider_setup, monkey
             )
         ]
 
-    monkeypatch.setattr(ProviderConfigService, "list_models", fake_list)
+    monkeypatch.setattr(
+        "apps.harness.engines.service.list_merged_provider_models", fake_list
+    )
     client = _client(user=owner, org=org, permissions=READ)
-    response = client.get("/api/v1/provider-config/models/")
+    response = client.get("/api/v1/harness/engines/native/models/")
     assert response.status_code == 200, response.content[:500]
     assert response.json()[0]["id"] == "openrouter/acme/fast"
     assert response.json()[0]["provider"] == "openrouter"
     assert response.json()[0]["reasoning_efforts"] == ["high"]
+    assert client.get("/api/v1/provider-config/models/").status_code == 404
 
 
 @pytest.mark.django_db(transaction=True)

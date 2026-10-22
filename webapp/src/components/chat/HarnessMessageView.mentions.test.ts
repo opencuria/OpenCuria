@@ -19,7 +19,7 @@ vi.mock('@/services/harness.api', async () => {
     await vi.importActual<typeof import('@/services/harness.api')>('@/services/harness.api')
   return {
     ...actual,
-    listProviderModels: vi.fn().mockResolvedValue([]),
+    listEngineModels: vi.fn().mockResolvedValue([]),
   }
 })
 

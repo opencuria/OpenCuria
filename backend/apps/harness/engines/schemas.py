@@ -25,20 +25,17 @@ class EngineModelOut(Schema):
 
     id: str
     name: str
-    provider: str = "claude"
+    provider: str = ""
     reasoning_efforts: list[str] = []
     default_effort: str = ""
-    supports_tools: bool = True
+    supports_tools: bool = False
     context_length: int = 0
     max_output_tokens: int = 0
 
 
-ClaudeModelOut = EngineModelOut  # Compatibility for existing Claude clients.
-
-
-def claude_model_to_out(model) -> ClaudeModelOut:  # type: ignore[no-untyped-def]
+def engine_model_to_out(model) -> EngineModelOut:  # type: ignore[no-untyped-def]
     """Convert the shared provider-model shape into this engine's API schema."""
-    return ClaudeModelOut(
+    return EngineModelOut(
         id=model.id,
         name=model.name,
         provider=model.provider,
@@ -48,6 +45,3 @@ def claude_model_to_out(model) -> ClaudeModelOut:  # type: ignore[no-untyped-def
         context_length=model.context_length,
         max_output_tokens=model.max_output_tokens,
     )
-
-
-engine_model_to_out = claude_model_to_out

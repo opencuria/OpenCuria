@@ -372,7 +372,7 @@ export function MainScreen(): React.JSX.Element {
     const engineRequest = client.harness.listEngines();
     const results = await Promise.allSettled([
       engineRequest,
-      client.harness.listProviderModels(),
+      client.harness.listEngineModels("native"),
       engineRequest.then(async (rows) => {
         const external = harnessEngineChoices(rows).filter(
           (engine) =>
@@ -382,14 +382,7 @@ export function MainScreen(): React.JSX.Element {
         );
         const results = await Promise.allSettled(
           external.map(async (engine) => {
-            // Compatibility for clients embedding the legacy Claude-only API.
-            const entries = client.harness.listEngineModels
-              ? await client.harness.listEngineModels(engine.id)
-              : engine.id === "claude"
-                ? await client.harness.listClaudeModels()
-                : await Promise.reject(
-                    new Error(`${engine.name} catalog is unavailable`),
-                  );
+            const entries = await client.harness.listEngineModels(engine.id);
             return [engine.id, entries] as const;
           }),
         );

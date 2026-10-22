@@ -61,7 +61,6 @@ from .schemas import (
     ProviderAccountOut,
     ProviderConfigIn,
     ProviderConfigOut,
-    ProviderModelOut,
     ProviderSelectionIn,
     RecentModelOut,
     RecentModelSaveIn,
@@ -69,7 +68,6 @@ from .schemas import (
     SubagentConfigOut,
     agent_s_config_to_out,
     provider_config_to_out,
-    provider_model_to_out,
     session_to_out,
     session_to_out_with_unread,
 )
@@ -1205,42 +1203,6 @@ def get_org_provider_config(request: HttpRequest):
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
-
-
-@harness_router.get(
-    "/provider-config/models/",
-    response={200: list[ProviderModelOut], 401: dict, 403: dict, 404: dict, 502: dict},
-    summary="List models from all connected org providers",
-)
-def list_org_provider_models(request: HttpRequest):
-    """Return the merged model catalog for connected org providers."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
-        return _perm_denied(APIKeyPermission.HARNESS_READ)
-    try:
-        org_id = _get_org_id(request)
-        OrganizationService().require_membership(request.user, org_id)
-        from apps.harness.services import ProviderConfigService
-
-        models = ProviderConfigService().list_models(
-            org_id, user_id=int(request.user.id)
-        )
-        return 200, [provider_model_to_out(model) for model in models]
-    except AuthenticationError as exc:
-        return 401, {"detail": exc.message, "code": exc.code}
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-    except Exception as exc:
-        from apps.harness.providers.base import (
-            ProviderAuthError,
-            ProviderResponseError,
-            ProviderTimeoutError,
-        )
-
-        if isinstance(
-            exc, (ProviderAuthError, ProviderResponseError, ProviderTimeoutError)
-        ):
-            return 502, {"detail": str(exc), "code": "provider_error"}
-        raise
 
 
 @harness_router.put(

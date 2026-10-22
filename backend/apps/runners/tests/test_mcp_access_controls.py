@@ -119,7 +119,6 @@ def test_mcp_harness_tools_require_permissions():
         _TOOL_PERMISSIONS["mark_harness_session_unread"]
         == APIKeyPermission.HARNESS_READ
     )
-    assert _TOOL_PERMISSIONS["list_provider_models"] == APIKeyPermission.HARNESS_READ
     for provider_account_tool in (
         "list_provider_accounts",
         "save_provider_account",

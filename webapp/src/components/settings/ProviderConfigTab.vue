@@ -18,7 +18,6 @@ import {
   getProviderConfig,
   listProviderAccounts,
   saveProviderConfig,
-  listClaudeModels,
   type HarnessProviderConfig,
   type ProviderAccount,
 } from '@/services/harness.api'
@@ -108,7 +107,7 @@ async function refreshAll(): Promise<void> {
     listProviderAccounts(),
     loadProviderModelsCached().catch(() => [] as ProviderModel[]),
     Promise.all([
-      listClaudeModels().catch(() => [] as ProviderModel[]),
+      loadEngineModelsCached('claude').catch(() => [] as ProviderModel[]),
       loadEngineModelsCached('codex').catch(() => [] as ProviderModel[]),
     ]).then((rows) => rows.flat()),
   ])

@@ -318,19 +318,6 @@ class AgentSConfigOut(Schema):
     wait_delay: float = 5.0
 
 
-class ProviderModelOut(Schema):
-    """One model from the org provider catalog."""
-
-    id: str
-    name: str
-    provider: str = ""
-    reasoning_efforts: list[str] = []
-    default_effort: str = ""
-    supports_tools: bool = False
-    context_length: int = 0
-    max_output_tokens: int = 0
-
-
 class ProviderAccountOut(Schema):
     """Safe metadata for one provider account."""
 
@@ -416,20 +403,6 @@ def provider_config_to_out(config) -> ProviderConfigOut:  # type: ignore[no-unty
         return ProviderConfigOut()
     return ProviderConfigOut(
         **{name: getattr(config, name) or "" for name in ProviderConfigOut.model_fields}
-    )
-
-
-def provider_model_to_out(model) -> ProviderModelOut:  # type: ignore[no-untyped-def]
-    """Map a catalog ``ProviderModel`` to its response schema."""
-    return ProviderModelOut(
-        id=model.id,
-        name=model.name,
-        provider=model.provider,
-        reasoning_efforts=list(model.reasoning_efforts),
-        default_effort=model.default_effort,
-        supports_tools=model.supports_tools,
-        context_length=model.context_length,
-        max_output_tokens=model.max_output_tokens,
     )
 
 

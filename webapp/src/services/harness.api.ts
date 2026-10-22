@@ -189,10 +189,6 @@ export function listEngineModels(engineId: string): Promise<ProviderModel[]> {
   return get<ProviderModel[]>(`/harness/engines/${encodeURIComponent(engineId)}/models/`)
 }
 
-export function listClaudeModels(): Promise<ProviderModel[]> {
-  return get<ProviderModel[]>('/harness/engines/claude/models/')
-}
-
 export function listHarnessSessions(workspaceId: string): Promise<HarnessSession[]> {
   return get<HarnessSession[]>(`/workspaces/${workspaceId}/harness/sessions/`)
 }
@@ -367,10 +363,6 @@ export function listRecentModels(): Promise<RecentModelUsage[]> {
  */
 export function saveRecentModel(model: string, effort = ''): Promise<RecentModelUsage> {
   return put<RecentModelUsage>('/recent-models/', { model, effort })
-}
-
-export function listProviderModels(): Promise<ProviderModel[]> {
-  return get<ProviderModel[]>('/provider-config/models/')
 }
 
 export function listAgentConfigs(): Promise<AgentConfig[]> {

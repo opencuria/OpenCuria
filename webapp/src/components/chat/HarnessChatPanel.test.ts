@@ -33,7 +33,7 @@ vi.mock('@/services/harness.api', async () => {
       small_effort: '',
       computer_use_effort: '',
     }),
-    listProviderModels: vi.fn().mockResolvedValue([]),
+    listEngineModels: vi.fn().mockResolvedValue([]),
     listRecentModels: vi.fn().mockResolvedValue([]),
     saveRecentModel: vi.fn(),
     markHarnessSessionRead: vi.fn().mockResolvedValue(undefined),

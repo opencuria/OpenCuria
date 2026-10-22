@@ -15,7 +15,7 @@ vi.mock('@/services/harness.api', async () => {
     await vi.importActual<typeof import('@/services/harness.api')>('@/services/harness.api')
   return {
     ...actual,
-    listProviderModels: vi.fn().mockResolvedValue([
+    listEngineModels: vi.fn().mockResolvedValue([
       { id: 'acme/think', name: 'Think', provider: 'acme', reasoning_efforts: ['low', 'high'] },
       { id: 'acme/other', name: 'Other', provider: 'acme', reasoning_efforts: ['low', 'high'] },
     ]),

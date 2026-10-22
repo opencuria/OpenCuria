@@ -49,8 +49,7 @@ Tools and their required permissions
   credential_ids → credentials:read
 - update_workspace plugin_ids → plugins:write; credential_ids → credentials:read
 - get_provider_config → harness:read
-- list_provider_models → harness:read
-- list_harness_engines / list_engine_models / list_claude_engine_models → harness:read
+- list_harness_engines / list_engine_models → harness:read
 - list_provider_accounts / save_provider_account /
   delete_provider_account / select_provider_account → harness:providers
 - save_provider_config → harness:run
@@ -675,11 +674,6 @@ _TOOLS: list[Tool] = [
         inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
-        name="list_provider_models",
-        description="List models from all connected org providers (merged catalog).",
-        inputSchema={"type": "object", "properties": {}},
-    ),
-    Tool(
         name="list_harness_engines",
         description="List harness engines, defaults and connection status.",
         inputSchema={"type": "object", "properties": {}},
@@ -695,11 +689,6 @@ _TOOLS: list[Tool] = [
             "required": ["engine_id"],
             "additionalProperties": False,
         },
-    ),
-    Tool(
-        name="list_claude_engine_models",
-        description="List Claude models for the Claude harness engine.",
-        inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
         name="save_provider_config",
@@ -1673,9 +1662,7 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "toggle_org_plugin_activation": APIKeyPermission.PLUGINS_WRITE,
     "list_workspace_plugins": APIKeyPermission.PLUGINS_READ,
     "get_provider_config": APIKeyPermission.HARNESS_READ,
-    "list_provider_models": APIKeyPermission.HARNESS_READ,
     "list_harness_engines": APIKeyPermission.HARNESS_READ,
-    "list_claude_engine_models": APIKeyPermission.HARNESS_READ,
     "list_engine_models": APIKeyPermission.HARNESS_READ,
     "save_provider_config": APIKeyPermission.HARNESS_RUN,
     "delete_provider_config": APIKeyPermission.HARNESS_RUN,
@@ -3329,11 +3316,6 @@ def _call_list_engine_models(api_key, org_id, args: dict) -> list[TextContent]:
         return _error("Engine model catalog is temporarily unavailable")
 
 
-def _call_list_claude_engine_models(api_key, org_id, args: dict) -> list[TextContent]:
-    """Keep the existing Claude-only tool as a generic-catalog compatibility alias."""
-    return _call_list_engine_models(api_key, org_id, {"engine_id": "claude"})
-
-
 def _call_get_provider_config(api_key, org_id, args: dict) -> list[TextContent]:
     from apps.harness.schemas import provider_config_to_out
     from apps.harness.services import ProviderConfigService
@@ -3343,21 +3325,6 @@ def _call_get_provider_config(api_key, org_id, args: dict) -> list[TextContent]:
     org_service.require_membership(api_key.user, org_id)
     config = ProviderConfigService().find_config(org_id)
     return _text(provider_config_to_out(config).model_dump(mode="json"))
-
-
-def _call_list_provider_models(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.harness.schemas import provider_model_to_out
-    from apps.harness.services import ProviderConfigService
-    from apps.organizations.services import OrganizationService
-
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    models = ProviderConfigService().list_models(
-        org_id, user_id=int(api_key.user.id)
-    )
-    return _text(
-        [provider_model_to_out(model).model_dump(mode="json") for model in models]
-    )
 
 
 def _call_save_provider_config(api_key, org_id, args: dict) -> list[TextContent]:
@@ -5469,9 +5436,7 @@ _TOOL_HANDLERS = {
     "toggle_org_plugin_activation": _call_toggle_org_plugin_activation,
     "list_workspace_plugins": _call_list_workspace_plugins,
     "get_provider_config": _call_get_provider_config,
-    "list_provider_models": _call_list_provider_models,
     "list_harness_engines": _call_list_harness_engines,
-    "list_claude_engine_models": _call_list_claude_engine_models,
     "list_engine_models": _call_list_engine_models,
     "save_provider_config": _call_save_provider_config,
     "delete_provider_config": _call_delete_provider_config,

@@ -897,18 +897,16 @@ describe("provider model defaults", () => {
 });
 
 describe("engine catalog API", () => {
-  it("supports generic Codex catalogs alongside the legacy Claude API and preserves authorization context", async () => {
+  it("loads every engine catalog with the current authorization context", async () => {
     const fetch = vi.fn().mockResolvedValue(jsonResponse([]));
     const options = clientOptions();
     const client = options.create(fetch);
-    await client.harness.listEngineModels("codex");
-    await client.harness.listClaudeModels();
-    expect(fetch.mock.calls[0]?.[0]).toContain(
-      "/harness/engines/codex/models/",
-    );
-    expect(fetch.mock.calls[1]?.[0]).toContain(
-      "/harness/engines/claude/models/",
-    );
+    for (const engine of ["native", "claude", "codex"]) {
+      await client.harness.listEngineModels(engine);
+      expect(fetch.mock.lastCall?.[0]).toContain(
+        `/harness/engines/${engine}/models/`,
+      );
+    }
     expect(
       new Headers(fetch.mock.calls[0]?.[1]?.headers).get("X-Organization-Id"),
     ).toBe("org-a");

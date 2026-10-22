@@ -8,7 +8,7 @@ import { resetProviderCatalogCache } from '@/lib/providerCatalog'
 vi.mock('@/services/harness.api', async () => {
   const actual =
     await vi.importActual<typeof import('@/services/harness.api')>('@/services/harness.api')
-  return { ...actual, listProviderModels: vi.fn().mockResolvedValue([]) }
+  return { ...actual, listEngineModels: vi.fn().mockResolvedValue([]) }
 })
 
 vi.mock('@/components/common/CopyButton.vue', () => ({

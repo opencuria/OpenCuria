@@ -2,12 +2,7 @@
  * Shared provider catalog fetch so chat surfaces reuse one in-flight request.
  */
 
-import {
-  HARNESS_ENGINE_CONNECTION_CHANGED_EVENT,
-  listProviderModels,
-  listClaudeModels,
-  listEngineModels,
-} from '@/services/harness.api'
+import { HARNESS_ENGINE_CONNECTION_CHANGED_EVENT, listEngineModels } from '@/services/harness.api'
 import type { ProviderModel } from './harnessModels'
 
 interface CatalogCacheEntry {
@@ -43,12 +38,7 @@ export function loadEngineModelsCached(engineId: string): Promise<ProviderModel[
 
   const entry: CatalogCacheEntry = {
     context,
-    promise:
-      engineId === 'native'
-        ? listProviderModels()
-        : engineId === 'claude'
-          ? listClaudeModels()
-          : listEngineModels(engineId),
+    promise: listEngineModels(engineId),
   }
   cached.set(context, entry)
   entry.promise = entry.promise.catch((error: unknown) => {
