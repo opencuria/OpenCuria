@@ -289,6 +289,14 @@ class OperationRepository:
             and (not task.workspace_id or task.workspace.current_task_id == task.id)
         )
 
+    @staticmethod
+    def record_heartbeat(runner_id: str, data: dict) -> None:
+        """Mark the bound, still-open attempt as executing on its runner."""
+        if OperationRepository.validate_result(runner_id, data):
+            LifecycleCommand.objects.filter(
+                task_id=data["task_id"], task__status__in=["pending", "in_progress"]
+            ).update(heartbeat_at=timezone.now(), phase="executing")
+
 
 RESULT_METHODS = {
     "workspace:created": (

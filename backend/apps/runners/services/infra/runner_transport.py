@@ -1,6 +1,8 @@
 """Runner Socket.IO transport and ownership-checked harness reply routing.
 
-Request/response calls use Socket.IO ACKs. Harness reply events are validated
+Request/response calls use Socket.IO ACKs. Durable lifecycle commands are
+delivered from the operation journal, and their heartbeats and results are
+accepted only for the bound attempt. Harness reply events are validated
 fail-closed and dispatched through the HarnessGateway port.
 """
 
@@ -12,6 +14,7 @@ import uuid
 from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 from ...exceptions import RunnerOfflineError
+from ...operations import LIFECYCLE_TYPES, OperationRepository, apply_result
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +29,6 @@ class RunnerTransportMixin:
         data: dict,
     ) -> None:
         """Send a Socket.IO event to a specific runner by its SID."""
-        from ...operations import LIFECYCLE_TYPES, OperationRepository
         from asgiref.sync import sync_to_async
 
         lifecycle_type = event.removeprefix("task:")
@@ -65,6 +67,14 @@ class RunnerTransportMixin:
 
         await self.sio.emit(event, data, to=runner.sid)
         logger.debug("Emitted %s to runner %s", event, runner.id)
+
+    def record_operation_heartbeat(self, runner_id: str, data: dict) -> None:
+        """Record that the runner is executing the bound lifecycle attempt."""
+        OperationRepository.record_heartbeat(runner_id, data)
+
+    def apply_operation_result(self, runner_id: str, event: str, data: dict) -> bool:
+        """Apply a runner's journaled lifecycle result; True when ACK-eligible."""
+        return apply_result(self, runner_id, event, data)
 
     async def _call_runner(
         self,

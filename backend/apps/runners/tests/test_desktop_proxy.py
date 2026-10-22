@@ -6,7 +6,7 @@ import asyncio
 import base64
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -15,19 +15,23 @@ from django.contrib.auth import get_user_model
 from apps.accounts.auth_backends import get_auth_backend
 from apps.organizations.models import Membership, MembershipRole
 from apps.runners.desktop_proxy import (
-    _WS_TUNNELS,
+    _get_desktop_proxy_target,
     _proxy_websocket,
-    _register_ws_tunnel,
-    _unregister_ws_tunnel,
+    _user_can_access_workspace,
     _ws_proxy_loop,
     apply_vnc_client_patches,
     build_vnc_redirect_url,
     desktop_proxy_app,
     inject_kasm_idle_guard,
-    push_runner_ws_closed,
-    push_runner_ws_frame,
 )
 from apps.runners.models import Runner
+from apps.runners.services.infra.desktop_tunnels import (
+    _WS_TUNNELS,
+    push_runner_ws_closed,
+    push_runner_ws_frame,
+    register_ws_tunnel,
+    unregister_ws_tunnel,
+)
 from common.utils import hash_token
 
 
@@ -125,6 +129,70 @@ async def test_proxy_returns_not_found_for_member_without_workspace_access(
     assert events[1]["type"] == "http.response.body"
     assert events[1]["body"] == b"Not Found"
     proxy_http.assert_not_awaited()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_desktop_access_is_limited_to_owner_and_organization_admins(
+    organization,
+):
+    user_model = get_user_model()
+    owner, admin, member, outsider = (
+        user_model.objects.create_user(
+            email=f"desktop-{role}-{uuid.uuid4().hex[:8]}@example.com",
+            password="secret",
+        )
+        for role in ("owner", "admin", "member", "outsider")
+    )
+    for user, role in (
+        (owner, MembershipRole.MEMBER),
+        (admin, MembershipRole.ADMIN),
+        (member, MembershipRole.MEMBER),
+    ):
+        Membership.objects.create(user=user, organization=organization, role=role)
+    runner = Runner.objects.create(
+        name="desktop-access-runner",
+        api_token_hash=hash_token(f"desktop-access-{uuid.uuid4().hex}"),
+        status="online",
+        organization=organization,
+        available_runtimes=["docker"],
+    )
+    workspace = runner.workspaces.create(
+        name="desktop-access-workspace", status="running", created_by=owner
+    )
+    workspace_id = str(workspace.id)
+
+    assert await _user_can_access_workspace(str(owner.id), workspace_id) is True
+    assert await _user_can_access_workspace(str(admin.id), workspace_id) is True
+    assert await _user_can_access_workspace(str(member.id), workspace_id) is False
+    assert await _user_can_access_workspace(str(outsider.id), workspace_id) is False
+    assert await _user_can_access_workspace("not-a-user", workspace_id) is False
+    assert await _user_can_access_workspace(str(owner.id), "not-a-uuid") is False
+    assert await _user_can_access_workspace(str(owner.id), str(uuid.uuid4())) is False
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_proxy_target_needs_an_active_desktop_and_a_connected_runner(
+    workspace, monkeypatch
+):
+    from apps.runners.services import get_runner_service
+
+    workspace_id = str(workspace.id)
+    assert await _get_desktop_proxy_target(workspace_id) is None
+
+    desktops = dict(get_runner_service()._active_desktops)
+    desktops[workspace_id] = {"port": 6901}
+    monkeypatch.setattr(get_runner_service(), "_active_desktops", desktops)
+    assert await _get_desktop_proxy_target(workspace_id) == {
+        "runner_id": str(workspace.runner_id),
+        "runner_sid": workspace.runner.sid,
+        "desktop_info": {"port": 6901},
+    }
+
+    Runner.objects.filter(pk=workspace.runner_id).update(sid="")
+    assert await _get_desktop_proxy_target(workspace_id) is None
+    assert await _get_desktop_proxy_target("not-a-uuid") is None
 
 
 @pytest.mark.asyncio
@@ -241,7 +309,7 @@ async def test_proxy_root_redirects_with_local_scale_not_remote_resize(
 @pytest.mark.asyncio
 async def test_runner_frames_are_forwarded_to_registered_websocket_tunnel():
     tunnel_id = uuid.uuid4().hex
-    queue = _register_ws_tunnel(
+    queue = register_ws_tunnel(
         tunnel_id,
         workspace_id=str(uuid.uuid4()),
         runner_id="runner-1",
@@ -261,13 +329,13 @@ async def test_runner_frames_are_forwarded_to_registered_websocket_tunnel():
         assert first == {"type": "binary", "data": b"hello"}
         assert second == {"type": "close", "code": 1001}
     finally:
-        _unregister_ws_tunnel(tunnel_id)
+        unregister_ws_tunnel(tunnel_id)
 
 
 @pytest.mark.asyncio
 async def test_runner_frames_from_wrong_runner_are_ignored():
     tunnel_id = uuid.uuid4().hex
-    queue = _register_ws_tunnel(
+    queue = register_ws_tunnel(
         tunnel_id,
         workspace_id=str(uuid.uuid4()),
         runner_id="runner-1",
@@ -282,7 +350,7 @@ async def test_runner_frames_from_wrong_runner_are_ignored():
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(queue.get(), timeout=0.05)
     finally:
-        _unregister_ws_tunnel(tunnel_id)
+        unregister_ws_tunnel(tunnel_id)
 
 
 @pytest.mark.asyncio
@@ -601,8 +669,12 @@ async def test_manual_tunnel_renews_existing_lease_and_closes_without_release(
     workspace_id, client_id = str(uuid.uuid4()), str(uuid.uuid4())
     service = get_runner_service()
     renewed = asyncio.Event()
+    viewer, organization_id = SimpleNamespace(id=1), uuid.uuid4()
 
     async def renew(*args, **kwargs):
+        assert args == (uuid.UUID(workspace_id),)
+        assert kwargs["user"] is viewer
+        assert kwargs["organization_id"] == organization_id
         assert kwargs["viewer_client_id"] == uuid.UUID(client_id)
         assert kwargs["intent_revision"] == 3
         renewed.set()
@@ -611,16 +683,8 @@ async def test_manual_tunnel_renews_existing_lease_and_closes_without_release(
     monkeypatch.setattr(service, "renew_desktop", renew)
     stop = AsyncMock()
     monkeypatch.setattr(service, "stop_desktop", stop)
-    monkeypatch.setattr(
-        service,
-        "get_workspace",
-        lambda *args: SimpleNamespace(
-            runner=SimpleNamespace(organization_id=uuid.uuid4())
-        ),
-    )
-    monkeypatch.setattr(
-        get_user_model().objects, "get", lambda **kwargs: SimpleNamespace(id=1)
-    )
+    resolve = Mock(return_value=(viewer, organization_id))
+    monkeypatch.setattr(service, "resolve_desktop_viewer", resolve)
     sio = SimpleNamespace(emit=AsyncMock())
     monkeypatch.setattr(
         "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
@@ -643,26 +707,25 @@ async def test_manual_tunnel_renews_existing_lease_and_closes_without_release(
         ),
         2,
     )
+    assert renewed.is_set()
+    resolve.assert_called_once_with("1", workspace_id)
     stop.assert_not_awaited()
     assert sio.emit.await_args.args[0] == "desktop:proxy_ws_close"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["user", "workspace"])
-async def test_renew_lookup_failure_explicitly_closes_browser(monkeypatch, failure):
+async def test_renew_lookup_failure_explicitly_closes_browser(monkeypatch):
+    from apps.runners.exceptions import WorkspaceNotFoundError
     from apps.runners.services import get_runner_service
 
     service = get_runner_service()
-
-    def fail(*args, **kwargs):
-        raise RuntimeError("lookup failed")
-
+    renew = AsyncMock()
+    monkeypatch.setattr(service, "renew_desktop", renew)
     monkeypatch.setattr(
-        get_user_model().objects,
-        "get",
-        fail if failure == "user" else lambda **kwargs: SimpleNamespace(id=1),
+        service,
+        "resolve_desktop_viewer",
+        Mock(side_effect=WorkspaceNotFoundError("gone")),
     )
-    monkeypatch.setattr(service, "get_workspace", fail)
     sio = SimpleNamespace(emit=AsyncMock())
     monkeypatch.setattr(
         "apps.runners.services.infra.realtime.get_sio_server", lambda: sio
@@ -689,3 +752,4 @@ async def test_renew_lookup_failure_explicitly_closes_browser(monkeypatch, failu
         call.args[0]["type"] == "websocket.close" for call in send.await_args_list
     )
     assert sio.emit.await_args.args[0] == "desktop:proxy_ws_close"
+    renew.assert_not_awaited()

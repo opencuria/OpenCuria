@@ -1,6 +1,6 @@
 """Domain mixins for the runners service (Phase 3).
 
-Re-exports the nine domain mixins so the facade (``services/__init__.py``)
+Re-exports the domain mixins so the facade (``services/__init__.py``)
 can import them from a single place. No logic lives here.
 """
 
@@ -13,6 +13,7 @@ from .interactive_sessions import InteractiveSessionsMixin
 from .process_manager import ProcessManagerMixin
 from .runner_lifecycle import RunnerLifecycleMixin
 from .stream_transport import StreamTransportMixin
+from .workspace_access import WorkspaceAccessMixin
 from .workspace_lifecycle import WorkspaceLifecycleMixin
 
 __all__ = [
@@ -25,5 +26,6 @@ __all__ = [
     "ProcessManagerMixin",
     "RunnerLifecycleMixin",
     "StreamTransportMixin",
+    "WorkspaceAccessMixin",
     "WorkspaceLifecycleMixin",
 ]

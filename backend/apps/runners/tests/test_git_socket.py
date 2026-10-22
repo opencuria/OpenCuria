@@ -12,6 +12,7 @@ import socketio
 from apps.runners import sio_server
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
+from apps.runners.services import RunnerService
 from common.utils import hash_token
 
 
@@ -25,7 +26,10 @@ def fresh_sio(monkeypatch):
     """
     server = socketio.AsyncServer(async_mode="asgi")
     sio_server._register_event_handlers(server)
-    service = SimpleNamespace(handle_git_reply=MagicMock())
+    service = SimpleNamespace(
+        is_current_runner_session=RunnerService().is_current_runner_session,
+        handle_git_reply=MagicMock(),
+    )
     monkeypatch.setattr(sio_server, "get_runner_service", lambda: service)
     return server, service
 

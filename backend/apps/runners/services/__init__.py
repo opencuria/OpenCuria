@@ -36,6 +36,7 @@ from ..repositories import (
     ImageDefinitionRepository,
     ImageInstanceRepository,
     RunnerRepository,
+    RunnerSystemMetricsRepository,
     TaskRepository,
     WorkspaceProcessRepository,
     WorkspaceRepository,
@@ -52,6 +53,7 @@ from .domains.interactive_sessions import InteractiveSessionsMixin
 from .domains.process_manager import ProcessManagerMixin
 from .domains.runner_lifecycle import RunnerLifecycleMixin
 from .domains.stream_transport import StreamTransportMixin
+from .domains.workspace_access import WorkspaceAccessMixin
 from .domains.workspace_lifecycle import WorkspaceLifecycleMixin
 from .infra.frontend_bus import FrontendBusMixin
 from .infra.harness_gateway import get_harness_gateway
@@ -98,6 +100,7 @@ class RunnerService(
     HeartbeatReconcilerMixin,
     ImageLifecycleMixin,
     RunnerLifecycleMixin,
+    WorkspaceAccessMixin,
 ):
     """
     Central business logic for runner management and task dispatching.
@@ -141,6 +144,7 @@ class RunnerService(
         self._harness_gateway = harness_gateway
         self._frontend_bus = frontend_bus
         self.runners = RunnerRepository
+        self.runner_metrics = RunnerSystemMetricsRepository
         self.workspaces = WorkspaceRepository
         self.tasks = TaskRepository
         self.image_instances = ImageInstanceRepository

@@ -10,6 +10,7 @@ import pytest
 import socketio
 
 from apps.runners import sio_server
+from apps.runners.services import RunnerService
 
 
 @pytest.fixture
@@ -17,6 +18,7 @@ def fresh_sio(monkeypatch):
     server = socketio.AsyncServer(async_mode="asgi")
     sio_server._register_event_handlers(server)
     service = SimpleNamespace(
+        is_current_runner_session=RunnerService().is_current_runner_session,
         handle_stream_reply=MagicMock(),
         handle_harness_reply=MagicMock(),
         handle_process_reply=MagicMock(),

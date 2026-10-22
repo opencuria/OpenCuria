@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime
 from typing import TYPE_CHECKING
+
+from django.utils import timezone
 
 from common.exceptions import AuthenticationError
 from common.utils import hash_token
@@ -91,6 +94,40 @@ class RunnerLifecycleMixin:
         # Notify frontend about runner going offline so it can update display.
         self._forward_runner_status_to_frontend(runner, "offline")
 
+    def is_current_runner_session(
+        self, runner_id: str, sid: str, *, require_online: bool = True
+    ) -> bool:
+        """Return whether *sid* is still the runner's authenticated session.
+
+        Events from superseded sessions are fenced. Liveness reports pass
+        ``require_online=False`` so an offline runner can come back online.
+        """
+        return self.runners.has_session(runner_id, sid, online_only=require_online)
+
+    def record_runner_heartbeat(self, runner: Runner) -> Runner:
+        """Refresh transport liveness of the runner's current session."""
+        return self.runners.update_heartbeat(runner)
+
+    def record_runner_system_metrics(self, runner: Runner, metrics: dict) -> None:
+        """Persist one host metrics sample and prune samples older than 24 h."""
+        reported_at = metrics.get("timestamp")
+        vm_metrics = metrics.get("vm_metrics")
+        self.runner_metrics.create(
+            runner=runner,
+            timestamp=(
+                datetime.fromisoformat(reported_at.replace("Z", "+00:00"))
+                if reported_at
+                else timezone.now()
+            ),
+            cpu_usage_percent=float(metrics.get("cpu_usage_percent", 0.0)),
+            ram_used_bytes=int(metrics.get("ram_used_bytes", 0)),
+            ram_total_bytes=int(metrics.get("ram_total_bytes", 0)),
+            disk_used_bytes=int(metrics.get("disk_used_bytes", 0)),
+            disk_total_bytes=int(metrics.get("disk_total_bytes", 0)),
+            vm_metrics=vm_metrics if isinstance(vm_metrics, dict) else None,
+        )
+        self.runner_metrics.purge_old(runner_id=runner.id)
+
     def update_runner_qemu_settings(
         self,
         runner_id: uuid.UUID,
@@ -122,6 +159,10 @@ class RunnerLifecycleMixin:
         if runner is None:
             raise RunnerNotFoundError(str(runner_id))
         return runner
+
+    def get_runner_or_none(self, runner_id: uuid.UUID) -> Runner | None:
+        """Return a runner by ID or None (no raise)."""
+        return self.runners.get_by_id(runner_id)
 
     def list_workspaces(
         self,
@@ -160,18 +201,3 @@ class RunnerLifecycleMixin:
         service doubles (see its ``_service_workspace_lookup`` helper).
         """
         return self.workspaces.get_by_id(workspace_id)
-
-    def get_workspace_for_user(
-        self,
-        workspace_id: uuid.UUID,
-        *,
-        user,
-        organization_id: uuid.UUID,
-    ) -> "Workspace":
-        """Return a workspace only when it belongs to the active org and owner."""
-        workspace = self.get_workspace(workspace_id)
-        if workspace.runner.organization_id != organization_id:
-            raise WorkspaceNotFoundError(str(workspace_id))
-        if workspace.created_by_id != user.id:
-            raise WorkspaceNotFoundError(str(workspace_id))
-        return workspace

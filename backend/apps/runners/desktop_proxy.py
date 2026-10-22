@@ -21,13 +21,15 @@ import logging
 import re
 import time
 import uuid
-from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlencode
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from socketio.exceptions import TimeoutError as SocketIOTimeoutError
+
+from .services import get_runner_service
+from .services.infra.desktop_tunnels import register_ws_tunnel, unregister_ws_tunnel
 
 logger = logging.getLogger(__name__)
 
@@ -167,18 +169,6 @@ def apply_vnc_client_patches(
     return headers, patched
 
 
-@dataclass
-class _RunnerWebSocketTunnel:
-    """Backend-side state for a browser<->runner desktop tunnel."""
-
-    workspace_id: str
-    runner_id: str
-    queue: asyncio.Queue[dict]
-
-
-_WS_TUNNELS: dict[str, _RunnerWebSocketTunnel] = {}
-
-
 def _sign_cookie(workspace_id: str, user_id: str, ts: int) -> str:
     """Create an HMAC-signed cookie value."""
     secret = settings.SECRET_KEY.encode()
@@ -210,49 +200,13 @@ def _verify_cookie(value: str) -> tuple[str, str] | None:
 @sync_to_async
 def _user_can_access_workspace(user_id: str, workspace_id: str) -> bool:
     """Return whether the authenticated user may access the workspace desktop."""
-    from apps.organizations.models import Membership, MembershipRole
-
-    from .repositories import WorkspaceRepository
-
-    try:
-        workspace_uuid = uuid.UUID(workspace_id)
-        user_id_int = int(user_id)
-    except (TypeError, ValueError):
-        return False
-
-    workspace = WorkspaceRepository.get_by_id(workspace_uuid)
-    if workspace is None:
-        return False
-
-    membership = Membership.objects.filter(
-        user_id=user_id_int,
-        organization_id=workspace.runner.organization_id,
-    ).first()
-    if membership is None:
-        return False
-
-    if membership.role == MembershipRole.ADMIN:
-        return True
-
-    return workspace.created_by_id == user_id_int
+    return get_runner_service().can_user_view_workspace_desktop(user_id, workspace_id)
 
 
 @sync_to_async
 def _desktop_workspace_available(workspace_id: str) -> bool:
     """Check the shared lifecycle gate without changing desktop authorization."""
-    from common.exceptions import ConflictError
-
-    from .repositories import WorkspaceRepository
-    from .services import get_runner_service
-
-    workspace = WorkspaceRepository.get_by_id(uuid.UUID(workspace_id))
-    if workspace is None:
-        return False
-    try:
-        get_runner_service()._ensure_workspace_available(workspace)
-    except ConflictError:
-        return False
-    return True
+    return get_runner_service().is_workspace_available(uuid.UUID(workspace_id))
 
 
 async def _reject_unavailable_desktop(scope, send) -> None:
@@ -494,7 +448,7 @@ async def _proxy_websocket(
         p.decode() if isinstance(p, bytes) else p for p in scope.get("subprotocols", [])
     ]
     tunnel_id = uuid.uuid4().hex
-    queue = _register_ws_tunnel(tunnel_id, workspace_id, runner_id)
+    queue = register_ws_tunnel(tunnel_id, workspace_id, runner_id)
 
     try:
         from .services.infra.realtime import get_sio_server
@@ -541,7 +495,7 @@ async def _proxy_websocket(
         except Exception:
             pass
     finally:
-        _unregister_ws_tunnel(tunnel_id)
+        unregister_ws_tunnel(tunnel_id)
 
 
 def _sanitize_websocket_close_code(value) -> int:
@@ -683,21 +637,16 @@ async def _ws_proxy_loop(
         association = _viewer_query(query_string)
         if not association or not user_id:
             return
-        from django.contrib.auth import get_user_model
-
-        from .services import get_runner_service
-
         service = get_runner_service()
         try:
-            user = await sync_to_async(get_user_model().objects.get)(pk=user_id)
-            workspace = await sync_to_async(service.get_workspace)(
-                uuid.UUID(workspace_id)
-            )
+            user, organization_id = await sync_to_async(
+                service.resolve_desktop_viewer
+            )(user_id, workspace_id)
             while True:
                 await service.renew_desktop(
                     uuid.UUID(workspace_id),
                     user=user,
-                    organization_id=workspace.runner.organization_id,
+                    organization_id=organization_id,
                     viewer_client_id=uuid.UUID(association["viewer_client_id"]),
                     intent_revision=association["intent_revision"],
                 )
@@ -771,80 +720,7 @@ async def _validate_token(token: str):
 @sync_to_async
 def _get_desktop_proxy_target(workspace_id: str) -> dict | None:
     """Resolve the active desktop state and online runner socket for a workspace."""
-    from .repositories import WorkspaceRepository
-    from .services import get_runner_service
-
     try:
-        service = get_runner_service()
-        desktop_info = service.get_desktop_info(workspace_id)
-        if desktop_info is None:
-            return None
-
-        workspace = WorkspaceRepository.get_by_id(uuid.UUID(workspace_id))
-        if workspace is None or not workspace.runner.sid:
-            return None
-
-        return {
-            "runner_id": str(workspace.runner_id),
-            "runner_sid": workspace.runner.sid,
-            "desktop_info": desktop_info,
-        }
+        return get_runner_service().get_desktop_proxy_target(workspace_id)
     except Exception:
         return None
-
-
-def _register_ws_tunnel(
-    tunnel_id: str,
-    workspace_id: str,
-    runner_id: str,
-) -> asyncio.Queue[dict]:
-    """Register a backend-side queue for a live desktop WebSocket tunnel."""
-    queue: asyncio.Queue[dict] = asyncio.Queue()
-    _WS_TUNNELS[tunnel_id] = _RunnerWebSocketTunnel(
-        workspace_id=workspace_id,
-        runner_id=runner_id,
-        queue=queue,
-    )
-    return queue
-
-
-def _unregister_ws_tunnel(tunnel_id: str) -> None:
-    """Drop backend-side state for a desktop WebSocket tunnel."""
-    _WS_TUNNELS.pop(tunnel_id, None)
-
-
-async def push_runner_ws_frame(
-    tunnel_id: str,
-    runner_id: str,
-    *,
-    text: str | None = None,
-    data: str | None = None,
-    encoding: str | None = None,
-) -> None:
-    """Deliver a runner-emitted desktop frame into the browser-facing queue."""
-    tunnel = _WS_TUNNELS.get(tunnel_id)
-    if tunnel is None or tunnel.runner_id != runner_id:
-        return
-
-    if text is not None:
-        await tunnel.queue.put({"type": "text", "data": text})
-        return
-
-    if data is None:
-        return
-
-    payload = base64.b64decode(data) if encoding == "base64" else data.encode()
-    await tunnel.queue.put({"type": "binary", "data": payload})
-
-
-async def push_runner_ws_closed(
-    tunnel_id: str,
-    runner_id: str,
-    *,
-    code: int = 1000,
-) -> None:
-    """Notify the browser-facing side that the runner tunnel closed."""
-    tunnel = _WS_TUNNELS.get(tunnel_id)
-    if tunnel is None or tunnel.runner_id != runner_id:
-        return
-    await tunnel.queue.put({"type": "close", "code": code})

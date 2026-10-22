@@ -344,3 +344,39 @@ def test_take_desktop_control_aborts_computeruse(workspace_access_setup, monkeyp
     assert response.status_code == 200, response.content[:500]
     assert response.json() == {"aborted_session_ids": [str(aborted_id)]}
     assert calls == [workspace_access_setup["owner_workspace"].id]
+
+
+@pytest.mark.django_db
+def test_realtime_access_rules_share_one_membership_lookup(workspace_access_setup):
+    """Owners reach their workspace; org admins additionally reach desktops."""
+    from apps.runners.exceptions import WorkspaceNotFoundError
+    from apps.runners.services import RunnerService
+
+    service = RunnerService(sio_server=None)
+    workspace_id = str(workspace_access_setup["owner_workspace"].id)
+    owner = workspace_access_setup["owner"]
+    admin = workspace_access_setup["foreign_admin"]
+    member = workspace_access_setup["foreign_member"]
+    outsider = get_user_model().objects.create_user(
+        email=f"outsider-{uuid.uuid4().hex[:6]}@example.com", password="secret"
+    )
+
+    assert [
+        service.can_user_access_workspace(user.id, workspace_id)
+        for user in (owner, admin, member, outsider)
+    ] == [True, False, False, False]
+    assert [
+        service.can_user_view_workspace_desktop(str(user.id), workspace_id)
+        for user in (owner, admin, member, outsider)
+    ] == [True, True, False, False]
+    assert service.resolve_desktop_viewer(str(admin.id), workspace_id) == (
+        admin,
+        workspace_access_setup["org"].id,
+    )
+    for user_id, target in (
+        (str(outsider.id), workspace_id),
+        (str(owner.id), str(uuid.uuid4())),
+        ("not-a-user", workspace_id),
+    ):
+        with pytest.raises(WorkspaceNotFoundError):
+            service.resolve_desktop_viewer(user_id, target)

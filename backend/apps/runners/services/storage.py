@@ -1,4 +1,7 @@
-"""Organization-admin storage inspection shared by REST and MCP."""
+"""Runner storage inventory: runner scan intake and admin inspection.
+
+Runners report scans over Socket.IO; REST and MCP share the admin views.
+"""
 
 from asgiref.sync import sync_to_async
 
@@ -12,6 +15,11 @@ from .activity import ActivityService
 
 class StorageService:
     """Read cached observations and explicitly request a fresh full scan."""
+
+    @staticmethod
+    def record_inventory(runner_id: str, session: str, scan: dict) -> bool:
+        """Persist a runner scan unless its session or sequence is obsolete."""
+        return InventoryRepository.record(runner_id, session, scan)
 
     @staticmethod
     def authorized_runner(user, organization_id, runner_id):

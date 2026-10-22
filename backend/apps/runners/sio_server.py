@@ -24,12 +24,14 @@ from common.exceptions import ConflictError
 from common.utils import hash_token
 
 from .services import get_runner_service
+from .services.infra.desktop_tunnels import push_runner_ws_closed, push_runner_ws_frame
 from .services.infra.realtime import (
     drop_frontend,
     get_sio_server,
     subscribe_frontend,
     unsubscribe_frontend,
 )
+from .services.storage import StorageService
 
 logger = logging.getLogger(__name__)
 
@@ -38,30 +40,9 @@ logger = logging.getLogger(__name__)
 def _frontend_user_can_access_workspace(user_id: int, workspace_id: str) -> bool:
     """Return whether a frontend user may access a workspace.
 
-    Access rules mirror REST API behavior:
-    - user must be member of the workspace runner's organization
-    - every user may only access their own workspaces
+    Same rule as the REST API: members may only access their own workspaces.
     """
-    from apps.organizations.models import Membership
-    from .repositories import WorkspaceRepository
-
-    try:
-        workspace_uuid = uuid.UUID(workspace_id)
-    except (TypeError, ValueError):
-        return False
-
-    workspace = WorkspaceRepository.get_by_id(workspace_uuid)
-    if workspace is None:
-        return False
-
-    membership = Membership.objects.filter(
-        user_id=user_id,
-        organization_id=workspace.runner.organization_id,
-    ).first()
-    if membership is None:
-        return False
-
-    return workspace.created_by_id == user_id
+    return get_runner_service().can_user_access_workspace(user_id, workspace_id)
 
 
 async def _ensure_frontend_workspace_access(
@@ -129,15 +110,9 @@ async def _require_runner_id(
     if not runner_id:
         logger.warning("%s from unauthenticated session (sid=%s)", event, sid)
     if runner_id:
-        from .models import Runner
-
-        current = await sync_to_async(
-            lambda: Runner.objects.filter(
-                pk=runner_id,
-                sid=sid,
-                **({} if event == "runner:heartbeat" else {"status": "online"}),
-            ).exists()
-        )()
+        current = await sync_to_async(get_runner_service().is_current_runner_session)(
+            runner_id, sid, require_online=event != "runner:heartbeat"
+        )
         if not current:
             return None
     return runner_id
@@ -150,26 +125,16 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
     async def runner_inventory(sid: str, data: dict):
         runner_id = await _require_runner_id(sio, sid, "runner:inventory")
         if runner_id:
-            from .inventory_repository import InventoryRepository
-
-            await sync_to_async(InventoryRepository.record)(runner_id, sid, data)
+            await sync_to_async(StorageService.record_inventory)(runner_id, sid, data)
 
     @sio.on("operation:heartbeat")
     async def operation_heartbeat(sid: str, data: dict):
         runner_id = await _require_runner_id(sio, sid, "operation:heartbeat")
         if not runner_id:
             return
-        from .operations import OperationRepository
-        from .models import LifecycleCommand
-        from django.utils import timezone
-
-        def record():
-            if OperationRepository.validate_result(runner_id, data):
-                LifecycleCommand.objects.filter(
-                    task_id=data["task_id"], task__status__in=["pending", "in_progress"]
-                ).update(heartbeat_at=timezone.now(), phase="executing")
-
-        await sync_to_async(record)()
+        await sync_to_async(get_runner_service().record_operation_heartbeat)(
+            runner_id, data
+        )
 
     @sio.on("operation:inspection")
     async def operation_inspection(sid: str, evidence: dict):
@@ -183,10 +148,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             or not evidence.get("execution_finished")
         ):
             return
-        from .operations import apply_result
-
-        await sync_to_async(apply_result)(
-            get_runner_service(),
+        await sync_to_async(get_runner_service().apply_operation_result)(
             runner_id,
             evidence.get("event", ""),
             evidence.get("result", {}),
@@ -197,11 +159,9 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "operation:result")
         if not runner_id:
             return
-        from .operations import apply_result
-
         data = packet.get("data", {})
-        accepted = await sync_to_async(apply_result)(
-            get_runner_service(), runner_id, packet.get("event", ""), data
+        accepted = await sync_to_async(get_runner_service().apply_operation_result)(
+            runner_id, packet.get("event", ""), data
         )
         if accepted:
             await sio.emit(
@@ -276,10 +236,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             logger.warning("runner:register from unknown session (sid=%s)", sid)
             return
 
-        from .repositories import RunnerRepository
-        import uuid
-
-        runner = await sync_to_async(RunnerRepository.get_by_id)(uuid.UUID(runner_id))
+        runner = await sync_to_async(service.get_runner_or_none)(uuid.UUID(runner_id))
         if runner is None:
             logger.warning(
                 "runner:register for deleted runner %s (sid=%s)",
@@ -338,10 +295,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             )
             return
 
-        from .repositories import RunnerRepository
-        import uuid as _uuid
-
-        runner = await sync_to_async(RunnerRepository.get_by_id)(_uuid.UUID(runner_id))
+        runner = await sync_to_async(service.get_runner_or_none)(uuid.UUID(runner_id))
         if runner is None:
             logger.warning(
                 "workspace:cleanup_unknown_done for deleted runner %s (sid=%s)",
@@ -369,10 +323,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             )
             return
 
-        from .repositories import RunnerRepository
-        import uuid as _uuid
-
-        runner = await sync_to_async(RunnerRepository.get_by_id)(_uuid.UUID(runner_id))
+        runner = await sync_to_async(service.get_runner_or_none)(uuid.UUID(runner_id))
         if runner is None:
             logger.warning(
                 "workspace:cleanup_unknown_failed for deleted runner %s (sid=%s)",
@@ -721,8 +672,6 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         if not runner_id:
             return
 
-        from .desktop_proxy import push_runner_ws_frame
-
         await push_runner_ws_frame(
             data["tunnel_id"],
             runner_id,
@@ -737,8 +686,6 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         runner_id = await _require_runner_id(sio, sid, "desktop:proxy_ws_closed")
         if not runner_id:
             return
-
-        from .desktop_proxy import push_runner_ws_closed
 
         await push_runner_ws_closed(
             data["tunnel_id"],
@@ -844,6 +791,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
     @sio.on("runner:system_metrics")
     async def on_runner_system_metrics(sid: str, data: dict):
         """Persist host system metrics reported by a runner once per minute."""
+        service = get_runner_service()
         if not await _require_runner_id(sio, sid, "runner:system_metrics"):
             return
         session = await sio.get_session(sid)
@@ -853,11 +801,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             logger.warning("runner:system_metrics from unknown session (sid=%s)", sid)
             return
 
-        from .repositories import RunnerRepository, RunnerSystemMetricsRepository
-        from django.utils import timezone
-        import uuid as _uuid
-
-        runner = await sync_to_async(RunnerRepository.get_by_id)(_uuid.UUID(runner_id))
+        runner = await sync_to_async(service.get_runner_or_none)(uuid.UUID(runner_id))
         if runner is None:
             logger.warning(
                 "runner:system_metrics for deleted runner %s (sid=%s)",
@@ -867,30 +811,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             return
 
         try:
-            ts_raw = data.get("timestamp")
-            if ts_raw:
-                from datetime import datetime, timezone as dt_tz
-
-                timestamp = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
-            else:
-                timestamp = timezone.now()
-
-            await sync_to_async(RunnerSystemMetricsRepository.create)(
-                runner=runner,
-                timestamp=timestamp,
-                cpu_usage_percent=float(data.get("cpu_usage_percent", 0.0)),
-                ram_used_bytes=int(data.get("ram_used_bytes", 0)),
-                ram_total_bytes=int(data.get("ram_total_bytes", 0)),
-                disk_used_bytes=int(data.get("disk_used_bytes", 0)),
-                disk_total_bytes=int(data.get("disk_total_bytes", 0)),
-                vm_metrics=data.get("vm_metrics")
-                if isinstance(data.get("vm_metrics"), dict)
-                else None,
-            )
-            # Prune entries older than 24 h in the background
-            await sync_to_async(RunnerSystemMetricsRepository.purge_old)(
-                runner_id=runner.id
-            )
+            await sync_to_async(service.record_runner_system_metrics)(runner, data)
             logger.debug(
                 "System metrics stored for runner %s: cpu=%.1f%%",
                 runner_id,
@@ -916,10 +837,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             logger.warning("runner:heartbeat from unknown session (sid=%s)", sid)
             return
 
-        from .repositories import RunnerRepository
-        import uuid as _uuid
-
-        runner = await sync_to_async(RunnerRepository.get_by_id)(_uuid.UUID(runner_id))
+        runner = await sync_to_async(service.get_runner_or_none)(uuid.UUID(runner_id))
         if runner is None:
             logger.warning(
                 "runner:heartbeat for deleted runner %s (sid=%s)",
@@ -929,7 +847,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             return
 
         # Refresh transport liveness before potentially slow reconciliation.
-        await sync_to_async(RunnerRepository.update_heartbeat)(runner)
+        await sync_to_async(service.record_runner_heartbeat)(runner)
         if data.get("workspace_states_observed") is False:
             return
 

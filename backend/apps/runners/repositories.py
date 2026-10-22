@@ -59,6 +59,14 @@ class RunnerRepository:
         return Runner.objects.filter(api_token_hash=token_hash).first()
 
     @staticmethod
+    def has_session(runner_id: str, sid: str, *, online_only: bool = True) -> bool:
+        """Return whether *sid* is the runner's current Socket.IO session."""
+        query = Runner.objects.filter(pk=runner_id, sid=sid)
+        if online_only:
+            query = query.filter(status=RunnerStatus.ONLINE)
+        return query.exists()
+
+    @staticmethod
     def list_all() -> QuerySet[Runner]:
         """Return all runners ordered by creation date."""
         return Runner.objects.all()

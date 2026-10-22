@@ -4,8 +4,9 @@ REST (``api.py``) and MCP (``apps.mcp_app``) are sibling adapters over the
 same services. Shared request/response shapes live in ``schemas`` /
 presenter modules, so no application module may import a REST router
 module; only the URL composition root (``config/urls.py``) mounts them.
-Likewise the Socket.IO handler module is mounted only by ``config/asgi.py``;
-services and adapters resolve the runner service and frontend fan-out from
+Likewise the realtime adapters (the Socket.IO handler module and the desktop
+proxy) are mounted only by ``config/asgi.py``; services and adapters resolve
+the runner service, frontend fan-out and desktop tunnels from
 ``apps.runners.services``. The runner service itself never imports the
 harness; the harness plugs in through the ``HarnessGateway`` port. The
 harness in turn never imports the apps built on it; they subscribe to its
@@ -14,8 +15,10 @@ run events (``apps.harness.run_events``). Likewise the foundational contexts
 them; apps built on them subscribe to ``apps.organizations.events`` and
 ``apps.credentials.deletion_guards`` and share ``common.schemas``. Workspaces
 compose plugins, so workspace-scoped plugin endpoints and guards live in
-``apps.runners``. REST and MCP adapters never query the ORM themselves; e.g.
-both authenticate API keys through ``apps.accounts.services.APIKeyService``.
+``apps.runners``. REST, MCP and realtime adapters never query the ORM
+themselves; e.g. REST and MCP both authenticate API keys through
+``apps.accounts.services.APIKeyService``, and the realtime adapters reach
+models and repositories only through services.
 """
 
 from __future__ import annotations
@@ -25,6 +28,9 @@ from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 APPS_ROOT = BACKEND_ROOT / "apps"
+
+#: ASGI adapters for runner/frontend Socket.IO traffic and desktop streams.
+REALTIME_ADAPTERS = ("apps.runners.sio_server", "apps.runners.desktop_proxy")
 
 #: Foundational bounded contexts and the only other apps each may import.
 FOUNDATION_DEPENDENCIES = {
@@ -106,23 +112,58 @@ def test_no_application_module_imports_a_rest_router_module():
     )
 
 
-def test_no_application_module_imports_the_socketio_adapter():
-    """Only the ASGI entry point mounts the Socket.IO handler module."""
-    adapter = "apps.runners.sio_server"
-    violations = sorted(
+def _persistence_modules(trees: dict[Path, ast.Module]) -> set[str]:
+    """Return ``models`` modules and modules defining a ``*Repository`` class."""
+    return {
         _module_name(path)
+        for path, tree in trees.items()
+        if _module_name(path).rsplit(".", 1)[-1] == "models"
+        or any(
+            isinstance(node, ast.ClassDef) and node.name.endswith("Repository")
+            for node in tree.body
+        )
+    }
+
+
+def test_no_application_module_imports_a_realtime_adapter():
+    """Only the ASGI entry point mounts the Socket.IO and desktop proxy adapters."""
+    violations = sorted(
+        f"{_module_name(path)} -> {adapter}"
         for path in _source_files()
+        for module in _imported_modules(path, ast.parse(path.read_text()))
+        for adapter in REALTIME_ADAPTERS
         if _module_name(path) != adapter
-        and any(
-            module == adapter or module.startswith(f"{adapter}.")
-            for module in _imported_modules(path, ast.parse(path.read_text()))
+        and (module == adapter or module.startswith(f"{adapter}."))
+    )
+    assert violations == [], (
+        "Import get_runner_service from apps.runners.services, "
+        "emit_to_frontend/get_sio_server from "
+        "apps.runners.services.infra.realtime and desktop tunnels from "
+        "apps.runners.services.infra.desktop_tunnels instead of a realtime "
+        "adapter:\n" + "\n".join(violations)
+    )
+
+
+def test_realtime_adapters_reach_persistence_only_through_services():
+    """Access rules, presence and telemetry live in services, not in adapters."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    persistence = _persistence_modules(trees)
+    assert {"apps.runners.models", "apps.runners.operations"} <= persistence
+
+    violations = sorted(
+        f"{_module_name(path)} -> {module}"
+        for path, tree in trees.items()
+        if _module_name(path) in REALTIME_ADAPTERS
+        for module in _imported_modules(path, tree)
+        if any(
+            module == owner or module.startswith(f"{owner}.")
+            for owner in persistence
         )
     )
     assert violations == [], (
-        "Import get_runner_service from apps.runners.services and "
-        "emit_to_frontend/get_sio_server from "
-        "apps.runners.services.infra.realtime instead of the Socket.IO "
-        "adapter:\n" + "\n".join(violations)
+        "Realtime adapters must call apps.runners.services (RunnerService, "
+        "StorageService) instead of importing models or repositories:\n"
+        + "\n".join(violations)
     )
 
 
@@ -152,8 +193,8 @@ def test_adapters_reach_image_recipes_only_through_their_service():
     )
 
 
-def test_rest_and_mcp_adapters_never_query_the_orm():
-    """Adapters call services; only repositories touch model managers."""
+def test_adapters_never_query_the_orm():
+    """REST, MCP and realtime adapters call services; only repositories query."""
     trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     adapters = {
         path
@@ -161,8 +202,10 @@ def test_rest_and_mcp_adapters_never_query_the_orm():
         if _defines_ninja_router(tree)
         or _module_name(path) == "apps.accounts.api_auth"
         or _module_name(path).startswith("apps.mcp_app")
+        or _module_name(path) in REALTIME_ADAPTERS
     }
     assert APPS_ROOT / "accounts" / "api.py" in adapters  # discovery sanity check
+    assert APPS_ROOT / "runners" / "desktop_proxy.py" in adapters
 
     violations = sorted(
         f"{_module_name(path)}:{node.lineno}"

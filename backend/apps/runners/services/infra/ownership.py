@@ -42,6 +42,17 @@ class OwnershipMixin:
                 f"Workspace '{workspace.id}' is currently {self._workspace_operation_label(workspace.active_operation)}"
             )
 
+    def is_workspace_available(self, workspace_id: uuid.UUID) -> bool:
+        """Return whether the workspace exists and no lifecycle hold owns it."""
+        workspace = self.workspaces.get_by_id(workspace_id)
+        if workspace is None:
+            return False
+        try:
+            self._ensure_workspace_available(workspace)
+        except ConflictError:
+            return False
+        return True
+
     @staticmethod
     def _ensure_runner_supports_runtime(
         *,

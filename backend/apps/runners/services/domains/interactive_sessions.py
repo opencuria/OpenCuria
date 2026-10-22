@@ -384,6 +384,20 @@ class InteractiveSessionsMixin:
             )
         return result
 
+    def get_desktop_proxy_target(self, workspace_id: str) -> dict | None:
+        """Return the connected runner serving the workspace's active desktop."""
+        desktop_info = self.get_desktop_info(workspace_id)
+        if desktop_info is None:
+            return None
+        workspace = self.workspaces.get_by_id(uuid.UUID(workspace_id))
+        if workspace is None or not workspace.runner.sid:
+            return None
+        return {
+            "runner_id": str(workspace.runner_id),
+            "runner_sid": workspace.runner.sid,
+            "desktop_info": desktop_info,
+        }
+
     async def renew_desktop(
         self,
         workspace_id: uuid.UUID,
