@@ -8,7 +8,6 @@ lookups are injected by the runner composition.
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import uuid
 from collections.abc import Callable
@@ -223,14 +222,10 @@ class GitService:
 
         *repo_root* is an already containment-checked ``/workspace`` path
         used as ``workdir`` and as the only path echoed in errors.  All
-        rev-parse outputs must be single-line; empty/multiline/unexpected
-        values reject.  ``--absolute-git-dir`` must be absolute; common-dir
-        prefers ``--path-format=absolute`` with a plain ``--git-common-dir``
-        fallback (relative values resolve against the verified git dir —
-        see below — never against the worktree root).  Both values are
-        passed through ``realpath -m`` containment.  Returns the verified
-        (realpath) git dir.  No shell concatenation: all probes are fixed
-        argv lists.
+        rev-parse outputs must be single-line absolute paths; empty,
+        multiline or relative values reject. Both metadata paths are
+        passed through ``realpath -m`` containment. Returns the verified
+        (realpath) git dir. All probes use fixed argv lists.
         """
         exit_code, output = await self._git_exec(
             runtime,
@@ -259,22 +254,6 @@ class GitService:
             runtime, instance_id, git_dir_raw, env,
             context="metadata", display=repo_root,
         )
-        # Common dir: absolute preferred, plain fallback for older git.
-        # ``--path-format`` only affects following args, so it must precede
-        # ``--git-common-dir``.  The plain (no --path-format) output is
-        # relative to the *process cwd* on old git (prefix-relative per
-        # setup.c/relative_path: "../.git" observed from a subdir of a
-        # normal repo, "../../external-gitdir" from a separate-git-dir
-        # root).  The cwd git ran in is *repo_root* — the worktree root
-        # here, so prefix is empty — but when the plain fallback engages,
-        # a relative value may also encode the in-gitdir ``commondir``
-        # indirection ("../.." inside a linked worktree gitdir).  Git
-        # resolves the commondir file relative to the git dir (see
-        # get_common_dir_noenv: "%s/commondir" + "%s/<data>" joined onto
-        # gitdir), never relative to the worktree root, so both candidate
-        # bases (cwd + git dir) are checked: either both must resolve
-        # under /workspace (fail-closed) or the candidate rejects.
-        common_candidate: str | None = None
         exit_code_c, output_c = await self._git_exec(
             runtime,
             instance_id,
@@ -283,80 +262,12 @@ class GitService:
             env=env,
             timeout=git_ops.GIT_READ_TIMEOUT_S,
         )
-        if exit_code_c == 0:
-            parsed = git_ops.parse_single_path_output(output_c)
-            if parsed is None:
-                raise git_ops.GitError(
-                    "not_a_repo",
-                    f"Path is not a git repository: {repo_root}",
-                    exit_code=exit_code_c,
-                    stderr="",
-                )
-            if parsed.startswith("/"):
-                common_candidate = parsed
-            else:
-                # Explicit --path-format=absolute must yield an absolute
-                # path; anything else is unexpected (or hostile) output.
-                raise git_ops.GitError(
-                    "not_a_repo",
-                    f"Path is not a git repository: {repo_root}",
-                    exit_code=exit_code_c,
-                    stderr="",
-                )
-        else:
-            exit_code_f, output_f = await self._git_exec(
-                runtime,
-                instance_id,
-                ["git", "rev-parse", "--git-common-dir"],
-                workdir=repo_root,
-                env=env,
-                timeout=git_ops.GIT_READ_TIMEOUT_S,
-            )
-            if exit_code_f != 0:
-                raise git_ops.GitError(
-                    "not_a_repo",
-                    f"Path is not a git repository: {repo_root}",
-                    exit_code=exit_code_f,
-                    stderr="",
-                )
-            parsed_f = git_ops.parse_single_path_output(output_f)
-            if parsed_f is None:
-                raise git_ops.GitError(
-                    "not_a_repo",
-                    f"Path is not a git repository: {repo_root}",
-                    exit_code=exit_code_f,
-                    stderr="",
-                )
-            if parsed_f.startswith("/"):
-                common_candidate = os.path.normpath(parsed_f)
-            else:
-                # Old-git plain fallback: the value is cwd-relative (the
-                # cwd being *repo_root*), but the same ".."-shaped value
-                # can also encode a gitdir-relative commondir indirection
-                # (git joins commondir content onto the git dir, see
-                # get_common_dir_noenv).  Resolve against BOTH bases and
-                # require both contained: realpath containment below still
-                # runs on the chosen candidate, and the extra base check
-                # here closes the gap where resolving only against
-                # repo_root would normalise "../.." to "/".
-                cwd_candidate = os.path.normpath(
-                    os.path.join(repo_root, parsed_f)
-                )
-                gitdir_candidate = os.path.normpath(
-                    os.path.join(git_dir, parsed_f)
-                )
-                if not (
-                    git_ops.is_workspace_path(cwd_candidate)
-                    and git_ops.is_workspace_path(gitdir_candidate)
-                ):
-                    raise git_ops.GitError(
-                        "unsafe_repository",
-                        f"Repository metadata outside workspace: {repo_root}",
-                        exit_code=exit_code_f,
-                        stderr="",
-                    )
-                common_candidate = cwd_candidate
-        if common_candidate is None or not common_candidate.startswith("/"):
+        common_candidate = git_ops.parse_single_path_output(output_c)
+        if (
+            exit_code_c != 0
+            or common_candidate is None
+            or not common_candidate.startswith("/")
+        ):
             raise git_ops.GitError(
                 "not_a_repo",
                 f"Path is not a git repository: {repo_root}",
@@ -579,41 +490,14 @@ class GitService:
             env=env,
             timeout=timeout,
         )
-        changes: list[dict[str, Any]] = []
-        branch_header: dict[str, Any] = {
-            "oid": None, "head": None, "upstream": None, "ahead": 0, "behind": 0,
-        }
-        status_ok = exit_code == 0
-        if status_ok:
-            changes, branch_header = git_ops.changes_from_status_v2(status_out)
-        else:
-            # Fall back to v1 when v2 is unavailable (old git).
-            exit_code1, v1_out = await self._git_exec(
-                runtime,
-                instance_id,
-                ["git", "status", "--porcelain=v1", "-b", "-z"],
-                workdir=repo_root,
-                env=env,
-                timeout=timeout,
+        if exit_code != 0:
+            raise git_ops.GitError(
+                "git_failed",
+                "git status failed",
+                exit_code=exit_code,
+                stderr=status_out,
             )
-            if exit_code1 != 0:
-                raise git_ops.GitError(
-                    "git_failed",
-                    "git status failed",
-                    exit_code=exit_code,
-                    stderr=status_out,
-                )
-            exit_code_h, head_out = await self._git_exec(
-                runtime,
-                instance_id,
-                ["git", "rev-parse", "HEAD"],
-                workdir=repo_root,
-                env=env,
-                timeout=timeout,
-            )
-            head_hash = head_out.strip().splitlines()[0].strip() if exit_code_h == 0 else ""
-            changes, branch_header = git_ops.parse_status_v1(v1_out, head_hash)
-            branch_header["oid"] = head_hash or None
+        changes, branch_header = git_ops.changes_from_status_v2(status_out)
 
         if branch_header.get("oid") is None:
             exit_code_h, head_out = await self._git_exec(

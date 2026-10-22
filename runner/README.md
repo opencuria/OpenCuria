@@ -19,6 +19,12 @@ executables and display `:1`; arbitrary argv text such as the agent wrapper's
 `profile` must never match `rofi`. Image helper copies are checked against this
 canonical script. Restart the runner after updating; no image rebuild is needed.
 
+## Workspace Git
+
+Git integration requires Git 2.31+ inside the workspace (`--porcelain=v2` and
+`rev-parse --path-format=absolute`). The Ubuntu 22.04/24.04 images already
+provide this; custom images must provide a current Git as well.
+
 ## QEMU image bootstrap
 
 Each newly provisioned VM gets a fresh

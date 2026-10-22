@@ -847,109 +847,6 @@ def changes_from_status_v2(output: str) -> tuple[list[dict[str, Any]], dict[str,
     return changes, parsed["branch"]
 
 
-# --- porcelain v1 -z fallback -------------------------------------------------
-
-
-def parse_status_v1(output: str, branch_output: str = "") -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Parse ``git status --porcelain=v1 -b -z`` output (fallback parser).
-
-    Returns ``(changes, branch)`` with the same change shape as
-    :func:`changes_from_status_v2`.  Rename/copy entries consume the
-    following NUL record as the source path.
-    """
-    branch: dict[str, Any] = {
-        "oid": None,
-        "head": None,
-        "upstream": None,
-        "ahead": 0,
-        "behind": 0,
-    }
-    records = _split_nul(output)
-    changes: list[dict[str, Any]] = []
-    index = 0
-    while index < len(records):
-        record = records[index]
-        index += 1
-        if not record:
-            continue
-        if record.startswith("## "):
-            header = record[3:]
-            if header.startswith("No commits yet on "):
-                branch["head"] = header[len("No commits yet on "):].split("...")[0].strip() or None
-                branch["oid"] = None
-            else:
-                head_part = header.split("...")[0].strip()
-                if head_part == "HEAD (no branch)":
-                    branch["head"] = None
-                else:
-                    branch["head"] = head_part or None
-                if "..." in header:
-                    rest = header.split("...", 1)[1]
-                    upstream = rest.split(" ")[0].strip()
-                    branch["upstream"] = upstream.strip("[]") or None
-                    ahead_match = re.search(r"ahead (\d+)", rest)
-                    behind_match = re.search(r"behind (\d+)", rest)
-                    if ahead_match:
-                        branch["ahead"] = int(ahead_match.group(1))
-                    if behind_match:
-                        branch["behind"] = int(behind_match.group(1))
-            continue
-        if len(record) < 4:
-            continue
-        x, y = record[0], record[1]
-        path = record[3:]
-        old_path: str | None = None
-        if x in {"R", "C"} or y in {"R", "C"}:
-            # "R  new\x00old\x00"
-            if index < len(records):
-                old_path, path = path, records[index]
-                index += 1
-        xy = f"{x}{y}"
-        if xy == "??":
-            changes.append(
-                {
-                    "path": path,
-                    "old_path": None,
-                    "status": "A",
-                    "staged": None,
-                    "unstaged": "untracked",
-                    "conflict": None,
-                }
-            )
-        elif xy == "!!":
-            continue
-        elif xy in _CONFLICT_XY or x == "U" or y == "U":
-            changes.append(
-                {
-                    "path": path,
-                    "old_path": None,
-                    "status": "U",
-                    "staged": "U",
-                    "unstaged": "U",
-                    "conflict": xy,
-                }
-            )
-        else:
-            staged = None if x in {" ", "?"} else ("R" if x == "R" else ("C" if x == "C" else x))
-            unstaged = None if y in {" ", "?"} else ("R" if y == "R" else ("C" if y == "C" else y))
-            if staged is None and unstaged is None:
-                continue
-            changes.append(
-                {
-                    "path": path,
-                    "old_path": old_path if staged in {"R", "C"} else None,
-                    "status": staged or unstaged or "M",
-                    "staged": staged,
-                    "unstaged": unstaged,
-                    "conflict": None,
-                }
-            )
-    if branch_output:
-        branch["oid"] = branch_output.strip() or None
-    changes.sort(key=lambda item: item["path"])
-    return changes, branch
-
-
 # --- log / refs parsing -------------------------------------------------------
 
 
@@ -1504,32 +1401,6 @@ def _resolve_section_path(header_rest: str, section: list[str]) -> str | None:
     return _fallback_from_diff_git_header(header_rest)
 
 
-def parse_numstat_plain(output: str) -> dict[str, dict[str, Any]]:
-    """Parse non-``-z`` ``--numstat`` output (fallback, no NUL support)."""
-    stats: dict[str, dict[str, Any]] = {}
-    for line in output.splitlines():
-        parts = line.split("\t")
-        if len(parts) != 3:
-            continue
-        added_raw, deleted_raw, path = parts
-        # Rename arrows ``old => new`` cannot round-trip; key on display.
-        try:
-            added = int(added_raw)
-        except ValueError:
-            added = 0
-        try:
-            deleted = int(deleted_raw)
-        except ValueError:
-            deleted = 0
-        stats[path] = {
-            "additions": added,
-            "deletions": deleted,
-            "binary": added_raw.strip() == "-" or deleted_raw.strip() == "-",
-            "old_path": None,
-        }
-    return stats
-
-
 # --- file entry assembly ------------------------------------------------------
 
 
@@ -1669,11 +1540,9 @@ __all__ = [
     "parse_ahead_behind",
     "parse_for_each_ref",
     "parse_log_us_rs",
-    "parse_numstat_plain",
     "parse_numstat_z",
     "parse_patch_hunks",
     "parse_raw_z",
-    "parse_status_v1",
     "parse_status_v2",
     "split_patch_per_file",
     "unwrap_git_exec_argv",

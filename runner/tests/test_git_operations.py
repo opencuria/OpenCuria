@@ -403,39 +403,6 @@ def _had_data_command(
     return False
 
 
-class _OldGitCommonDirRuntime(FakeGitRuntime):
-    """Fake git<2.34: ``--path-format`` unknown, plain common-dir served.
-
-    Fails ``--path-format=absolute --git-common-dir`` like git without
-    ``--path-format`` support (exit 129) and answers the plain
-    ``--git-common-dir`` fallback with the canned *plain_common* value.
-    All other argv delegate to :class:`FakeGitRuntime` (real git).
-    """
-
-    def __init__(self, workspace_root: str, plain_common: str) -> None:
-        super().__init__(workspace_root)
-        self.plain_common = plain_common
-
-    async def exec_command_wait(
-        self,
-        instance_id: str,
-        command: list[str],
-        workdir: str | None = None,
-        env: dict[str, str] | None = None,
-    ) -> tuple[int, str]:
-        argv = [str(c) for c in command]
-        inner = git_ops.unwrap_git_exec_argv(argv) or argv
-        if inner[:2] == ["git", "rev-parse"] and "--path-format=absolute" in inner:
-            self.calls.append((argv, workdir, dict(env or {})))
-            return 129, "error: unknown option `path-format'\n"
-        if inner == ["git", "rev-parse", "--git-common-dir"]:
-            self.calls.append((argv, workdir, dict(env or {})))
-            return 0, self.plain_common
-        return await super().exec_command_wait(
-            instance_id, command, workdir, env
-        )
-
-
 class _ScriptedMetadataRuntime(FakeGitRuntime):
     """Fake with scripted rev-parse metadata outputs (pure escape tests).
 
@@ -453,13 +420,13 @@ class _ScriptedMetadataRuntime(FakeGitRuntime):
         *,
         git_dir_output: str | None = None,
         common_output: str | None = None,
-        serve_plain_common: str | None = None,
+        common_exit_code: int = 0,
         realpath_fail_prefixes: tuple[str, ...] = (),
     ) -> None:
         super().__init__(workspace_root)
         self.git_dir_output = git_dir_output
         self.common_output = common_output
-        self.serve_plain_common = serve_plain_common
+        self.common_exit_code = common_exit_code
         self.realpath_fail_prefixes = realpath_fail_prefixes
 
     async def exec_command_wait(
@@ -481,17 +448,9 @@ class _ScriptedMetadataRuntime(FakeGitRuntime):
             "--path-format=absolute",
             "--git-common-dir",
         ]:
-            if self.common_output is not None:
+            if self.common_output is not None or self.common_exit_code:
                 self.calls.append((argv, workdir, dict(env or {})))
-                return 0, self.common_output
-            # Simulate old git when only a plain value is scripted.
-            if self.serve_plain_common is not None:
-                self.calls.append((argv, workdir, dict(env or {})))
-                return 129, "error: unknown option `path-format'\n"
-        if inner == ["git", "rev-parse", "--git-common-dir"]:
-            if self.serve_plain_common is not None:
-                self.calls.append((argv, workdir, dict(env or {})))
-                return 0, self.serve_plain_common
+                return self.common_exit_code, self.common_output or ""
         if inner[:2] == ["realpath", "-m"]:
             target = inner[2] if len(inner) > 2 else ""
             if target.startswith(self.realpath_fail_prefixes):
@@ -1996,6 +1955,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                 {"common_output": ""},
                 {"common_output": "/workspace/repo/.git\n/evil\n"},
                 {"common_output": "relative/path\n"},
+                {"common_exit_code": 129},
             ]
             for kwargs in cases:
                 with self.subTest(kwargs=kwargs):
@@ -2067,55 +2027,6 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(result2["ok"])
             self.assertEqual(result2["code"], "unsafe_repository")
             self.assertIn("/workspace/repo", str(result2.get("message", "")))
-
-    async def test_old_git_common_dir_fallback_semantics(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            _make_repo(os.path.join(tmp, "repo"))
-            # Relative ".git" resolves under the workspace: accepted.
-            runtime = _OldGitCommonDirRuntime(tmp, ".git\n")
-            service = WorkspaceService(
-                runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
-            )
-            ws_id = uuid.uuid4()
-            service.registry._cache[ws_id] = WorkspaceInfo(
-                workspace_id=ws_id,
-                instance_id="instance-1",
-                status="running",
-                runtime_type="docker",
-            )
-            result = await service.git.execute_git_operation(
-                ws_id, "working_diff", "/workspace/repo", {}
-            )
-            self.assertTrue(result["ok"], result)
-            # Relative escapes and absolute external values reject with
-            # unsafe_repository and leak no host path.
-            for plain in (
-                "../../external-gitdir\n",
-                "/tmp/oc-ext-evil.git\n",
-            ):
-                with self.subTest(plain=plain):
-                    runtime_bad = _OldGitCommonDirRuntime(tmp, plain)
-                    service_bad = WorkspaceService(
-                        runtimes={"docker": runtime_bad},
-                        settings=RunnerSettings(state_dir=tempfile.mkdtemp()),
-                    )
-                    ws_bad = uuid.uuid4()
-                    service_bad.registry._cache[ws_bad] = WorkspaceInfo(
-                        workspace_id=ws_bad,
-                        instance_id="instance-1",
-                        status="running",
-                        runtime_type="docker",
-                    )
-                    before = len(runtime_bad.calls)
-                    bad = await service_bad.git.execute_git_operation(
-                        ws_bad, "working_diff", "/workspace/repo", {}
-                    )
-                    self.assertFalse(bad["ok"])
-                    self.assertEqual(bad["code"], "unsafe_repository")
-                    self.assertTrue(_no_external_leak(bad, "/tmp/oc-ext-evil.git"))
-                    self.assertFalse(
-                        _had_data_command(runtime_bad, after=before)
-                    )
 
     async def test_internal_local_submodule_accepted_and_discovered(
         self,
@@ -2294,6 +2205,20 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(paths["new-staged.txt"]["staged"])
             self.assertFalse(paths["untracked.txt"]["staged"])
             self.assertIn("merge_state", snap)
+
+    async def test_repo_snapshot_status_failure_stops_without_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service, runtime, _ws_id = _service_for(tmp)
+            service.git._git_exec = AsyncMock(return_value=(129, "status failed"))
+            with self.assertRaises(git_ops.GitError) as raised:
+                await service.git._git_repo_snapshot_no_log(
+                    runtime, "instance-1", "/workspace/repo", {}
+                )
+            self.assertEqual(raised.exception.code, "git_failed")
+            self.assertEqual(raised.exception.exit_code, 129)
+            service.git._git_exec.assert_awaited_once()
+            command = service.git._git_exec.call_args.args[2]
+            self.assertEqual(command[:3], ["git", "status", "--porcelain=v2"])
 
     async def test_repo_snapshot_needs_repo_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
