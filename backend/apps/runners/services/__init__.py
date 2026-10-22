@@ -21,10 +21,8 @@ Phase 4: the constructor additionally accepts optional injected ports
 keyword-only, default ``None``). An unset ``harness_gateway`` resolves to
 the gateway the harness app registered at startup; the other ports keep
 their previous lazy-import behaviour when unset. The
-in-memory ``PendingMap`` dict-subclasses live in
-``services/infra/state.py`` (ownership documentation + dict-compatible
-stores); the shared terminal/desktop maps intentionally stay class
-attributes (tests read/write them directly on the class facade).
+pending RPC registries are plain per-instance dictionaries; terminal/desktop
+maps remain shared class attributes.
 """
 
 from __future__ import annotations
@@ -34,25 +32,14 @@ import logging
 from dataclasses import dataclass
 
 from ..repositories import (
+    ImageBuildJobRepository,
     ImageDefinitionRepository,
     ImageInstanceRepository,
     RunnerRepository,
-    ImageBuildJobRepository,
     TaskRepository,
     WorkspaceProcessRepository,
     WorkspaceRepository,
 )
-
-from .infra.ownership import OwnershipMixin
-from .infra.task_dispatch import TaskDispatchMixin
-from .infra.rpc_registry import RpcRegistryMixin
-from .infra.runner_transport import RunnerTransportMixin
-from .infra.frontend_bus import FrontendBusMixin
-from .infra.session_store import SessionStoreMixin
-from .infra.harness_gateway import get_harness_gateway
-from .infra.realtime import get_sio_server
-from .infra.state import PendingMap
-from .ports import HarnessGateway
 from .domains.credential_sync import (
     _CREDENTIAL_INJECT_TIMEOUT_SECONDS,
     CredentialSyncMixin,
@@ -66,6 +53,15 @@ from .domains.process_manager import ProcessManagerMixin
 from .domains.runner_lifecycle import RunnerLifecycleMixin
 from .domains.stream_transport import StreamTransportMixin
 from .domains.workspace_lifecycle import WorkspaceLifecycleMixin
+from .infra.frontend_bus import FrontendBusMixin
+from .infra.harness_gateway import get_harness_gateway
+from .infra.ownership import OwnershipMixin
+from .infra.realtime import get_sio_server
+from .infra.rpc_registry import RpcRegistryMixin
+from .infra.runner_transport import RunnerTransportMixin
+from .infra.session_store import SessionStoreMixin
+from .infra.task_dispatch import TaskDispatchMixin
+from .ports import HarnessGateway
 
 logger = logging.getLogger(__name__)
 
@@ -159,21 +155,17 @@ class RunnerService(
         # In-flight background-process RPCs: request_id -> Future[dict].
         # Runner harness:process_* handlers only emit *_result events (no
         # Socket.IO ACK), so correlation uses request_id futures.
-        # Phase 4: PendingMap is a dict subclass (ownership documentation
-        # only — direct dict syntax used by tests keeps working).
-        self._process_pending: dict[str, asyncio.Future] = PendingMap()
+        self._process_pending: dict[str, asyncio.Future] = {}
         # In-flight git RPCs: request_id -> _PendingGitRequest. Runner
         # git:operation handlers only emit git:operation_result events
         # (no Socket.IO ACK), so correlation uses request_id futures plus
         # fail-closed workspace_id/operation matching (trust boundary).
-        # Phase 4: PendingMap is a dict subclass (see above).
-        self._git_pending: dict[str, _PendingGitRequest] = PendingMap()
+        self._git_pending: dict[str, _PendingGitRequest] = {}
         # Heartbeat-vanished process rows awaiting async verify against
         # the runner (workspace_id -> rows). Stashed by the sync
         # ``handle_heartbeat`` (which cannot do RPCs) and drained by
         # ``reconcile_vanished_processes`` (async, Socket.IO handler).
-        # Phase 4: PendingMap is a dict subclass (see above).
-        self._pending_process_verify: dict[str, list] = PendingMap()
+        self._pending_process_verify: dict[str, list] = {}
         # Per workspace/repo serialisation guards for git operations.
         self._git_locks: dict[str, asyncio.Lock] = {}
         self._git_locks_guard = asyncio.Lock()
