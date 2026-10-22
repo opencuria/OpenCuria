@@ -17,6 +17,7 @@ import { useHarnessStore } from '@/stores/harness'
 import { useAuthStore } from '@/stores/auth'
 import { sendFilesUpload } from '@/services/socket'
 import { CHAT_UPLOAD_DIR } from '@/lib/chatUpload'
+import type { FileEntryRaw } from '@/types'
 
 vi.mock('@/services/socket', async () => {
   const actual = await vi.importActual<typeof import('@/services/socket')>('@/services/socket')
@@ -1377,6 +1378,19 @@ describe('HarnessChatInput chat upload', () => {
     useFileExplorerStore().handleUploadResult(requestId, path, 'success', 'ws-1')
   }
 
+  /** Serve fresh workspace listings: root → `.opencuria` → upload dir. */
+  function mockUploadDirListing(uploaded: FileEntryRaw[] = []) {
+    const store = useFileExplorerStore()
+    vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+    return vi.spyOn(store, 'fetchDirectoryEntries').mockImplementation(async (_ws, path) => {
+      if (path === '/workspace')
+        return [{ name: '.opencuria', path: '/workspace/.opencuria', type: 'directory', size: 0 }]
+      if (path === '/workspace/.opencuria')
+        return [{ name: 'user-uploaded', path: CHAT_UPLOAD_DIR, type: 'directory', size: 0 }]
+      return uploaded
+    })
+  }
+
   function uploadRequest(index = 0) {
     const calls = vi.mocked(sendFilesUpload).mock.calls
     return {
@@ -1387,8 +1401,7 @@ describe('HarnessChatInput chat upload', () => {
   }
 
   it('uploads a picked file and inserts an @file: token', async () => {
-    const store = useFileExplorerStore()
-    vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+    mockUploadDirListing()
     const file = new File(['hello'], 'my notes.txt', { type: 'text/plain' })
     resetProviderCatalogCache()
     const wrapper = mountInput()
@@ -1419,6 +1432,8 @@ describe('HarnessChatInput chat upload', () => {
 
   it('deduplicates against existing upload-dir files instead of overwriting', async () => {
     const store = useFileExplorerStore()
+    // A stale explorer tree (e.g. another client uploaded since) must not
+    // decide the name; the fresh listing does.
     store.setTree('/workspace', [
       { name: '.opencuria', path: '/workspace/.opencuria', type: 'directory', size: 0 },
     ])
@@ -1428,7 +1443,10 @@ describe('HarnessChatInput chat upload', () => {
     store.setTree(CHAT_UPLOAD_DIR, [
       { name: 'a.txt', path: `${CHAT_UPLOAD_DIR}/a.txt`, type: 'file', size: 1 },
     ])
-    const fetchSpy = vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+    mockUploadDirListing([
+      { name: 'a.txt', path: `${CHAT_UPLOAD_DIR}/a.txt`, type: 'file', size: 1 },
+      { name: 'a_1.txt', path: `${CHAT_UPLOAD_DIR}/a_1.txt`, type: 'file', size: 1 },
+    ])
     const wrapper = mountInput()
 
     const input = wrapper.find('[data-testid="composer-file-input"]')
@@ -1442,17 +1460,42 @@ describe('HarnessChatInput chat upload', () => {
     })
 
     const { requestId, filename } = uploadRequest()
-    expect(filename).toBe('a_1.txt')
-    expect(fetchSpy).not.toHaveBeenCalledWith('ws-1', CHAT_UPLOAD_DIR)
+    expect(filename).toBe('a_2.txt')
     succeedUpload(requestId)
     await vi.waitFor(() => {
-      expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/a_1.txt `)
+      expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/a_2.txt `)
     })
   })
 
-  it('uploads dropped files on the composer card', async () => {
+  it('deduplicates against the workspace upload dir when the explorer never loaded it', async () => {
     const store = useFileExplorerStore()
-    vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+    // Typical tree: the hidden `.opencuria` folder is listed but collapsed,
+    // so a nested upload-dir listing has no tree node to attach to.
+    store.setTree('/workspace', [
+      { name: '.opencuria', path: '/workspace/.opencuria', type: 'directory', size: 0 },
+    ])
+    const uploaded: FileEntryRaw[] = [
+      { name: 'image.png', path: `${CHAT_UPLOAD_DIR}/image.png`, type: 'file', size: 1 },
+    ]
+    mockUploadDirListing(uploaded)
+    // Mirror the real tree update, which drops listings without a parent node.
+    vi.spyOn(store, 'fetchDirectory').mockImplementation(async (_ws, path) => {
+      if (path === CHAT_UPLOAD_DIR) store.setTree(path, uploaded)
+    })
+    const wrapper = mountInput()
+    const vm = wrapper.vm as unknown as { uploadChatFiles: (files: File[]) => Promise<void> }
+
+    const upload = vm.uploadChatFiles([new File(['new'], 'image.png', { type: 'image/png' })])
+    await vi.waitFor(() => expect(vi.mocked(sendFilesUpload)).toHaveBeenCalledTimes(1))
+
+    expect(uploadRequest().filename).toBe('image_1.png')
+    succeedUpload(uploadRequest().requestId)
+    await upload
+    expect(editorText(wrapper)).toContain(`@file:${CHAT_UPLOAD_DIR}/image_1.png `)
+  })
+
+  it('uploads dropped files on the composer card', async () => {
+    mockUploadDirListing()
     const wrapper = mountInput()
     const card = wrapper.find('[data-testid="composer-card"]')
 
@@ -1476,7 +1519,7 @@ describe('HarnessChatInput chat upload', () => {
 
   it('uploads a doubly-handled drop only once (composer card + parent zone)', async () => {
     const store = useFileExplorerStore()
-    vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+    mockUploadDirListing()
     // Keep the tracked upload pending so the second batch runs strictly
     // while the first is still in flight (reproduces the double drop).
     const pending: Array<(data: unknown) => void> = []
@@ -1538,8 +1581,7 @@ describe('HarnessChatInput chat upload', () => {
   })
 
   it('skips >10 MiB files before arrayBuffer() with a visible toast and no send', async () => {
-    const store = useFileExplorerStore()
-    vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+    mockUploadDirListing()
     const wrapper = mountInput()
     const big = new File(['x'], 'big.bin', { type: 'application/octet-stream' })
     Object.defineProperty(big, 'size', { value: 10 * 1024 * 1024 + 1 })
@@ -1569,7 +1611,7 @@ describe('HarnessChatInput chat upload', () => {
 
   it('a synchronous sendFilesUpload throw fails visibly without inserting a token', async () => {
     const store = useFileExplorerStore()
-    vi.spyOn(store, 'fetchDirectory').mockResolvedValue(undefined)
+    mockUploadDirListing()
     vi.mocked(sendFilesUpload).mockImplementationOnce(() => {
       throw new Error('Upload exceeds the 10 MB limit.')
     })

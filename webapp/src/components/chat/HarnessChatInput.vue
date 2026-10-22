@@ -56,10 +56,8 @@ import WorkspaceFileIcon from '@/components/files/WorkspaceFileIcon.vue'
 import {
   appendUploadMentions,
   CHAT_UPLOAD_DIR,
-  collectUploadDirFilenames,
   fileToBase64,
   getDroppedFiles,
-  hasTreePath,
   hasUploadMention,
   isFileDrag,
   nextChatUploadRequestId,
@@ -769,7 +767,8 @@ watch(
  * selection: space-separated, one trailing space).
  *
  * Uploads never overwrite: file names are sanitized (`[^a-zA-Z0-9._-] →
- * _`) and deduplicated against the explorer tree (`_1`, `_2`, … suffix).
+ * _`) and deduplicated against a fresh listing of the upload directory
+ * (`_1`, `_2`, … suffix); a failed listing aborts the upload.
  * The runner `mkdir -p`s the upload directory on upload; the explorer tree
  * is refreshed afterwards so the files show up under Files and `@` search.
  *
@@ -815,52 +814,43 @@ async function runChatUpload(
   const notify = useNotificationStore()
   const reserved: string[] = []
   try {
-    let taken: Set<string>
-    if (isScheduledTask.value) {
-      if (!releaseMentionSubscription)
-        releaseMentionSubscription = subscribeToWorkspace(workspaceId)
-      const abortController = new AbortController()
-      uploadDirectoryAbortController = abortController
-      const options = { signal: abortController.signal }
-      const root = await fileExplorer.fetchDirectoryEntries(workspaceId, '/workspace', options)
-      if (uploadDisposed || generation !== uploadGeneration || workspaceId !== props.workspaceId)
-        return
-      if (!root) {
-        notify.error('Upload failed', 'Could not check workspace upload filenames. Please retry.')
-        return
-      }
-      const metadata = root.some(
-        (entry) => entry.name === '.opencuria' && entry.type === 'directory',
-      )
-        ? await fileExplorer.fetchDirectoryEntries(workspaceId, '/workspace/.opencuria', options)
-        : []
-      if (uploadDisposed || generation !== uploadGeneration || workspaceId !== props.workspaceId)
-        return
-      if (metadata === null) {
-        notify.error('Upload failed', 'Could not check workspace upload filenames. Please retry.')
-        return
-      }
-      const uploadDirectoryExists = metadata.some(
-        (entry) => entry.name === 'user-uploaded' && entry.type === 'directory',
-      )
-      const directory = uploadDirectoryExists
-        ? await fileExplorer.fetchDirectoryEntries(workspaceId, CHAT_UPLOAD_DIR, options)
-        : []
-      if (uploadDisposed || generation !== uploadGeneration || workspaceId !== props.workspaceId)
-        return
-      if (directory === null) {
-        notify.error('Upload failed', 'Could not check workspace upload filenames. Please retry.')
-        return
-      }
-      taken = new Set(directory.map((entry) => entry.name))
-    } else {
-      if (!hasTreePath(fileExplorer.tree, CHAT_UPLOAD_DIR)) {
-        await fileExplorer.fetchDirectory(workspaceId, CHAT_UPLOAD_DIR).catch(() => undefined)
-      }
-      taken = collectUploadDirFilenames(fileExplorer.tree)
-    }
+    if (isScheduledTask.value && !releaseMentionSubscription)
+      releaseMentionSubscription = subscribeToWorkspace(workspaceId)
+    // List the upload directory itself: the shared explorer tree only holds
+    // it once `.opencuria` was expanded and may be stale, which would let a
+    // same-named upload silently overwrite an earlier chat attachment.
+    const abortController = new AbortController()
+    uploadDirectoryAbortController = abortController
+    const options = { signal: abortController.signal }
+    const root = await fileExplorer.fetchDirectoryEntries(workspaceId, '/workspace', options)
     if (uploadDisposed || generation !== uploadGeneration || workspaceId !== props.workspaceId)
       return
+    if (!root) {
+      notify.error('Upload failed', 'Could not check workspace upload filenames. Please retry.')
+      return
+    }
+    const metadata = root.some((entry) => entry.name === '.opencuria' && entry.type === 'directory')
+      ? await fileExplorer.fetchDirectoryEntries(workspaceId, '/workspace/.opencuria', options)
+      : []
+    if (uploadDisposed || generation !== uploadGeneration || workspaceId !== props.workspaceId)
+      return
+    if (metadata === null) {
+      notify.error('Upload failed', 'Could not check workspace upload filenames. Please retry.')
+      return
+    }
+    const uploadDirectoryExists = metadata.some(
+      (entry) => entry.name === 'user-uploaded' && entry.type === 'directory',
+    )
+    const directory = uploadDirectoryExists
+      ? await fileExplorer.fetchDirectoryEntries(workspaceId, CHAT_UPLOAD_DIR, options)
+      : []
+    if (uploadDisposed || generation !== uploadGeneration || workspaceId !== props.workspaceId)
+      return
+    if (directory === null) {
+      notify.error('Upload failed', 'Could not check workspace upload filenames. Please retry.')
+      return
+    }
+    const taken = new Set(directory.map((entry) => entry.name))
     // Per-file transfer outcome; resolves to the workspace path on success,
     // null on failure (failures are toasted via the store already).
     // Every reserved path is released below, on success and on failure.
@@ -946,11 +936,7 @@ async function runChatUpload(
       if (!isScheduledTask.value) fileExplorer.fetchDirectory(workspaceId, '/workspace')
     }
   } finally {
-    if (uploadDirectoryAbortController?.signal.aborted || generation !== uploadGeneration) {
-      uploadDirectoryAbortController = null
-    } else if (isScheduledTask.value) {
-      uploadDirectoryAbortController = null
-    }
+    uploadDirectoryAbortController = null
     for (const path of reserved) inFlightUploadPaths.delete(path)
     if (generation === uploadGeneration) {
       isUploading.value = false
