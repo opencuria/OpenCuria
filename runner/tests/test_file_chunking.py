@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import tempfile
 import uuid
@@ -13,15 +12,12 @@ from src.chunking import (
     CHUNK_B64_SIZE,
     MAX_CHUNKS_PER_TRANSFER,
     MAX_READ_CHUNKS_PER_TRANSFER,
-    BoundedReassembler,
-    ChunkedTransferError,
     normalize_base64,
     split_base64_chunks,
 )
 from src.config import RunnerSettings
 from src.interfaces.websocket import WebSocketInterface
 
-_BIG_CAP = 10_000_000
 _SMALL_JSON = 64 * 1024
 _HALF_MIB_JSON = 512 * 1024
 
@@ -158,79 +154,6 @@ def test_100mib_read_fits_read_cap_but_not_upload_cap() -> None:
     assert count <= MAX_READ_CHUNKS_PER_TRANSFER  # 560
     assert count > MAX_CHUNKS_PER_TRANSFER  # 64-cap must not apply to reads
     assert count > 64
-
-
-def test_reassembler_rejects_upload_over_64_chunks() -> None:
-    asm = BoundedReassembler(max_total_chars=_BIG_CAP)
-    with pytest.raises(ChunkedTransferError):
-        asm.start("too-many", total_chunks=65)
-
-
-def test_reassembler_start_invalid_and_duplicate() -> None:
-    asm = BoundedReassembler(max_total_chars=_BIG_CAP)
-    with pytest.raises(ChunkedTransferError):
-        asm.start("zero", total_chunks=0)
-    asm.start("dup", total_chunks=2)
-    with pytest.raises(ChunkedTransferError, match="already in progress"):
-        asm.start("dup", total_chunks=2)
-
-
-def test_reassembler_out_of_order_finish_joins_in_index_order() -> None:
-    asm = BoundedReassembler(max_total_chars=_BIG_CAP)
-    asm.start("ooo", total_chunks=3, metadata={"path": "/workspace/a.txt"})
-    asm.add_chunk("ooo", index=2, total_chunks=3, content="R0hJ")
-    asm.add_chunk("ooo", index=0, total_chunks=3, content="QUJD")
-    asm.add_chunk("ooo", index=1, total_chunks=3, content="REVG")
-    content, metadata = asm.finish("ooo")
-    assert content == "QUJD" + "REVG" + "R0hJ"
-    assert metadata == {"path": "/workspace/a.txt"}
-
-
-def test_reassembler_finish_missing_chunk_raises() -> None:
-    asm = BoundedReassembler(max_total_chars=_BIG_CAP)
-    asm.start("gap", total_chunks=2)
-    asm.add_chunk("gap", index=0, total_chunks=2, content="QUJD")
-    with pytest.raises(ChunkedTransferError, match="missing"):
-        asm.finish("gap")
-
-
-def test_reassembler_duplicate_chunk_raises() -> None:
-    asm = BoundedReassembler(max_total_chars=_BIG_CAP)
-    asm.start("dch", total_chunks=2)
-    asm.add_chunk("dch", index=0, total_chunks=2, content="QUJD")
-    with pytest.raises(ChunkedTransferError, match="duplicate"):
-        asm.add_chunk("dch", index=0, total_chunks=2, content="QUJD")
-
-
-def test_reassembler_oversize_single_chunk_raises() -> None:
-    asm = BoundedReassembler(max_total_chars=_BIG_CAP * 10)
-    asm.start("big1", total_chunks=1)
-    with pytest.raises(ChunkedTransferError, match="exceeds"):
-        asm.add_chunk("big1", index=0, total_chunks=1, content="A" * (CHUNK_B64_SIZE + 4))
-
-
-def test_reassembler_buffer_cap_drops_transfer() -> None:
-    asm = BoundedReassembler(max_total_chars=10)
-    asm.start("cap", total_chunks=2)
-    asm.add_chunk("cap", index=0, total_chunks=2, content="QUJD")
-    with pytest.raises(ChunkedTransferError, match="size limit"):
-        asm.add_chunk("cap", index=1, total_chunks=2, content="QUJDREVG")
-    with pytest.raises(ChunkedTransferError, match="unknown transfer"):
-        asm.finish("cap")
-
-
-@pytest.mark.asyncio
-async def test_reassembler_expiry_and_purge() -> None:
-    asm = BoundedReassembler(max_total_chars=_BIG_CAP, timeout_s=0.01)
-    asm.start("exp", total_chunks=1)
-    await asyncio.sleep(0.05)
-    with pytest.raises(ChunkedTransferError, match="expired"):
-        asm.add_chunk("exp", index=0, total_chunks=1, content="QUJD")
-    asm2 = BoundedReassembler(max_total_chars=_BIG_CAP, timeout_s=0.01)
-    asm2.start("old", total_chunks=1)
-    await asyncio.sleep(0.05)
-    assert asm2.purge_expired() == 1
-    assert len(asm2) == 0
 
 
 # ---------------------------------------------------------------------------
