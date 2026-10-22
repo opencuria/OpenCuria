@@ -17,8 +17,8 @@ from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.credentials.repositories import CredentialServiceRepository
 from apps.organizations.services import OrganizationService
-from apps.runners.schemas import ErrorOut
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
+from common.schemas import ErrorOut
 
 from .schemas import (
     CredentialCreateIn,

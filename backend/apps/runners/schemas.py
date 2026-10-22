@@ -408,21 +408,6 @@ class ProcessOut(Schema):
 
 
 # ---------------------------------------------------------------------------
-# Error schemas
-# ---------------------------------------------------------------------------
-
-
-class ErrorOut(Schema):
-    """Standard error response with optional safe dependency-gap details."""
-
-    detail: str
-    code: str = "error"
-    # For missing_plugin_credentials: plugin_id, plugin_name, key, service_id,
-    # service_name, credential_type. Contains metadata only; never secret data.
-    gaps: list[dict] | None = None
-
-
-# ---------------------------------------------------------------------------
 # Image schemas
 # ---------------------------------------------------------------------------
 

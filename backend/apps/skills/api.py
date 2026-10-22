@@ -13,8 +13,8 @@ from ninja import Router
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
-from apps.runners.schemas import ErrorOut
 from common.exceptions import AuthenticationError, NotFoundError
+from common.schemas import ErrorOut
 
 from .schemas import SkillCreateIn, SkillOut, SkillUpdateIn
 from .services import SkillService

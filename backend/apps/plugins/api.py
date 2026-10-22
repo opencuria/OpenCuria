@@ -20,9 +20,9 @@ from ninja import Router
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
-from apps.runners.schemas import ErrorOut
 from apps.runners.services import get_runner_service
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
+from common.schemas import ErrorOut
 
 from .schemas import (
     PluginActivationIn,

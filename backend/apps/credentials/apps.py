@@ -11,3 +11,7 @@ class CredentialsConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.credentials"
     verbose_name = "Credentials"
+
+    def ready(self) -> None:
+        """Seed service activations for organizations as they are created."""
+        from . import signals  # noqa: F401

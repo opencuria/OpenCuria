@@ -543,6 +543,17 @@ class OrgCredentialServiceActivationRepository:
             )
 
     @staticmethod
+    def activate_all_global(org_id: uuid.UUID) -> None:
+        """Activate every global service for the org, provider secrets included."""
+        OrgCredentialServiceActivationRepository.ensure_activated(
+            org_id,
+            list(
+                CredentialService.objects.filter(organization__isnull=True)
+                .values_list("id", flat=True)
+            ),
+        )
+
+    @staticmethod
     def active_in_org(service_id: uuid.UUID, org_id: uuid.UUID) -> bool:
         """Return whether this org has activated the given service."""
         from .models import OrgCredentialServiceActivation

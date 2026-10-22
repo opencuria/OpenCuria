@@ -17,6 +17,7 @@ from django.utils.text import slugify
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.utils import decrypt_value, encrypt_value, generate_ssh_keypair
 
+from .deletion_guards import collect_deletion_blockers
 from .enums import CredentialType
 from .models import Credential
 from .repositories import CredentialRepository, CredentialServiceRepository
@@ -229,6 +230,10 @@ class OrgCredentialServiceActivationSvc:
         """Return activated service IDs for the org."""
         return self.activations.activated_service_ids(org_id)
 
+    def activate_global_services(self, org_id: uuid.UUID) -> None:
+        """Activate all global services, including OAuth services (idempotent)."""
+        self.activations.activate_all_global(org_id)
+
     def set_activation(self, *, org_id: uuid.UUID, service, active: bool) -> bool:
         """Activate/deactivate a service for the org. Returns new state.
 
@@ -425,15 +430,13 @@ class CredentialSvc:
         - Personal credential: only the owner may delete.
         - Org credential: only org admins may delete.
 
-        Deletion is blocked (409 ``plugin_credentials_in_use``) when the
-        credential is required for an *effective* plugin activation of
-        any workspace it is attached to — deleting would silently break
-        the runtime. Re-attach-free personal credentials and unused
-        credentials delete normally. Updating the value (PATCH) never
-        blocks: the attachment stays intact.
+        Deletion is blocked (409 ``plugin_credentials_in_use``) when a
+        deletion guard reports the credential as required for an
+        *effective* plugin activation of any workspace it is attached to —
+        deleting would silently break the runtime. Re-attach-free personal
+        credentials and unused credentials delete normally. Updating the
+        value (PATCH) never blocks: the attachment stays intact.
         """
-        from apps.plugins.services import PluginService as _PluginService
-
         cred = self.credentials.get_by_id(credential_id)
         if (
             cred is None
@@ -443,7 +446,7 @@ class CredentialSvc:
             raise NotFoundError("Credential", str(credential_id))
 
         self._assert_can_edit(cred, user=user, org_id=org_id, is_admin=is_admin)
-        gaps = _PluginService().blocking_plugin_gaps_for_credential(cred, org_id=org_id)
+        gaps = collect_deletion_blockers(cred, org_id=org_id)
         if gaps:
             raise ConflictError(
                 "Cannot delete credential required by active workspace "

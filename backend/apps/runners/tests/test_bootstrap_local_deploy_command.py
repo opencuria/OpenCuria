@@ -7,7 +7,7 @@ from io import StringIO
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 
-from apps.credentials.models import CredentialService
+from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RuntimeType, TaskStatus, TaskType
 from apps.runners.management.commands.bootstrap_local_deploy import (
@@ -145,6 +145,10 @@ def test_bootstrap_is_idempotent(db) -> None:
     assert Task.objects.count() == 1
     assert LifecycleCommand.objects.count() == 1
     assert runner.api_token_hash == hash_token("new-token")
+    # Re-running activates global services created after the organization.
+    assert OrgCredentialServiceActivation.objects.filter(
+        organization=org, credential_service__slug="github-token"
+    ).exists()
 
 
 def test_bootstrap_preserves_active_build(db) -> None:

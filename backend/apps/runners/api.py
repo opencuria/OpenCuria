@@ -29,6 +29,7 @@ from apps.accounts.models import APIKeyPermission
 from apps.credentials.services import CredentialSvc
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
+from common.schemas import ErrorOut
 from common.utils import generate_api_token, hash_token
 
 from .enums import WorkspaceStatus
@@ -55,7 +56,6 @@ from .schemas import (
     DesktopStopOut,
     DesktopTakeControlOut,
     DesktopViewerIntentIn,
-    ErrorOut,
     GitCommitQuery,
     GitDiffQuery,
     GitHistoryQuery,

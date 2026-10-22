@@ -11,3 +11,7 @@ class PluginsConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.plugins"
     verbose_name = "Plugins"
+
+    def ready(self) -> None:
+        """Guard credentials that workspace plugins require against deletion."""
+        from . import signals  # noqa: F401

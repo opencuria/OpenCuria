@@ -11,6 +11,7 @@ import re
 
 from common.exceptions import ConflictError, NotFoundError
 
+from .events import publish_organization_created
 from .models import MembershipRole, Organization
 from .repositories import MembershipRepository, OrganizationRepository
 
@@ -47,9 +48,7 @@ class OrganizationService:
             role=MembershipRole.ADMIN,
         )
 
-        # Seed activations: activate all credential services for the new
-        # organization.
-        self._seed_activations(org)
+        publish_organization_created(org)
 
         logger.info(
             "Organization created: %s (slug=%s, admin=%s)",
@@ -58,23 +57,6 @@ class OrganizationService:
             user.email,
         )
         return org
-
-    @staticmethod
-    def _seed_activations(org) -> None:
-        """Activate all visible global services, including OAuth services."""
-        from apps.credentials.models import (
-            CredentialService,
-            OrgCredentialServiceActivation,
-        )
-
-        all_services = CredentialService.objects.filter(organization__isnull=True)
-        svc_activations = [
-            OrgCredentialServiceActivation(organization=org, credential_service=svc)
-            for svc in all_services
-        ]
-        OrgCredentialServiceActivation.objects.bulk_create(
-            svc_activations, ignore_conflicts=True
-        )
 
     def list_user_organizations(self, user) -> list[dict]:
         """

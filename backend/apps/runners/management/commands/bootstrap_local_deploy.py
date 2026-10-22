@@ -10,6 +10,7 @@ from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 
 from apps.credentials.models import CredentialService
+from apps.credentials.services import OrgCredentialServiceActivationSvc
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.organizations.services import OrganizationService
 from apps.runners.enums import RuntimeType
@@ -208,7 +209,7 @@ class Command(BaseCommand):
             user=user,
             organization=org,
         ).exclude(role=MembershipRole.ADMIN).update(role=MembershipRole.ADMIN)
-        org_service._seed_activations(org)
+        OrgCredentialServiceActivationSvc().activate_global_services(org.id)
         return org
 
     def _ensure_credential_services(self) -> None:

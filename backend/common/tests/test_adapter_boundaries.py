@@ -9,7 +9,10 @@ services and adapters resolve the runner service and frontend fan-out from
 ``apps.runners.services``. The runner service itself never imports the
 harness; the harness plugs in through the ``HarnessGateway`` port. The
 harness in turn never imports the apps built on it; they subscribe to its
-run events (``apps.harness.run_events``).
+run events (``apps.harness.run_events``). Likewise the foundational contexts
+(organizations, credentials, skills) only import the contexts below them;
+apps built on them subscribe to ``apps.organizations.events`` and
+``apps.credentials.deletion_guards`` and share ``common.schemas``.
 """
 
 from __future__ import annotations
@@ -19,6 +22,13 @@ from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 APPS_ROOT = BACKEND_ROOT / "apps"
+
+#: Foundational bounded contexts and the only other apps each may import.
+FOUNDATION_DEPENDENCIES = {
+    "apps.organizations": {"apps.accounts"},
+    "apps.credentials": {"apps.accounts", "apps.organizations"},
+    "apps.skills": {"apps.accounts", "apps.organizations"},
+}
 
 
 def _module_name(path: Path) -> str:
@@ -169,4 +179,25 @@ def test_harness_never_imports_the_apps_built_on_it():
         "Connect a receiver to apps.harness.run_events from the consuming "
         "app's AppConfig.ready() instead of importing it from the harness:\n"
         + "\n".join(violations)
+    )
+
+
+def test_foundational_apps_never_import_the_apps_built_on_them():
+    """Dependencies point from feature apps down to the foundation only."""
+    violations = []
+    for path in _source_files():
+        app = ".".join(_module_name(path).split(".")[:2])
+        allowed = FOUNDATION_DEPENDENCIES.get(app)
+        if allowed is None:
+            continue
+        violations.extend(
+            f"{_module_name(path)} -> {module}"
+            for module in _imported_modules(path, ast.parse(path.read_text()))
+            if module.startswith("apps.")
+            and ".".join(module.split(".")[:2]) not in {app, *allowed}
+        )
+    assert violations == [], (
+        "Foundational apps must not import the apps built on them; publish an "
+        "event or guard signal they subscribe to, and put shared schemas in "
+        "common.schemas:\n" + "\n".join(sorted(violations))
     )
