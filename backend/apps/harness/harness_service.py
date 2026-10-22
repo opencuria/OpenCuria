@@ -2429,9 +2429,13 @@ class HarnessService:
                 self._tasks.get(attempt_key) is None
                 and self._admissions.get(attempt_key) is None
             ):
-                raise ConflictError(
-                    "An external engine run is active on another worker; "
-                    "wait for its ownership lease to expire before aborting"
+                # Retry detached cleanup; recovery still fences fresh owners
+                # and requires the runner to confirm process termination.
+                detached_session = await sync_to_async(self.get_session)(
+                    attempt.session_id
+                )
+                await self._ensure_external_attempt_reconciled(
+                    detached_session, force=True
                 )
         # Cancel and join before any further database work. Cleanup writes
         # the terminal message; overlapping reads deadlock SQLite.

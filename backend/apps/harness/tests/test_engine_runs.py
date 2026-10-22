@@ -22,12 +22,12 @@ from apps.harness.repositories import HarnessMessageRepository, HarnessSessionRe
 from common.exceptions import ConflictError
 
 
-def _make_attempt(harness_workspace, *, user=None):
+def _make_attempt(harness_workspace, *, user=None, harness_id="claude"):
     session = HarnessSessionRepository.create(
         workspace_id=harness_workspace.id,
         organization_id=harness_workspace.runner.organization_id,
     )
-    session.harness_id = "claude"
+    session.harness_id = harness_id
     session.status = HarnessSessionStatus.BUSY
     session.save(update_fields=["harness_id", "status"])
     assistant = HarnessMessageRepository.create(
@@ -35,13 +35,13 @@ def _make_attempt(harness_workspace, *, user=None):
         role=HarnessMessageRole.ASSISTANT,
         model="sonnet",
     )
-    assistant.harness_id = "claude"
+    assistant.harness_id = harness_id
     assistant.save(update_fields=["harness_id"])
     owner = HarnessRunService().create_attempt(
         session_id=session.id,
         assistant_message_id=assistant.id,
         user_id=user.id if user else None,
-        harness_id="claude",
+        harness_id=harness_id,
     )
     return session, assistant, owner
 
