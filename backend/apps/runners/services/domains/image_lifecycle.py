@@ -600,18 +600,6 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         return await sync_to_async(DeletionRepository.request)(
             obj.runner.organization_id, None, 'assignment', obj.id)
 
-    def handle_build_job_deleted(
-        self,
-        task_id: str,
-        runner_id: str | None = None,
-    ) -> None:
-        """Handle successful build job deletion from runner.
-
-        Marks both the build job and its image instance as deleted.
-        Also checks if the parent definition can be marked deleted.
-        """
-        self.handle_image_artifact_deleted(task_id=task_id, runner_id=runner_id)
-
     def _mark_definition_delete_failed(
         self,
         definition_id: uuid.UUID | None,

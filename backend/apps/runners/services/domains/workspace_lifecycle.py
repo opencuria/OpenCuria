@@ -1069,6 +1069,20 @@ class WorkspaceLifecycleMixin:
         logger.info("Workspace updated: %s", workspace_id)
         self._forward_workspace_operation(workspace_id, None)
 
+    def handle_workspace_rpc_error(
+        self,
+        task_id: str,
+        error: str,
+        runner_id: str | None = None,
+    ) -> None:
+        """Fail an RPC task; lifecycle errors require a bound operation result."""
+        from ...operations import LIFECYCLE_TYPES
+
+        task = self.tasks.get_by_id(uuid.UUID(task_id))
+        if task is None or task.type in LIFECYCLE_TYPES:
+            return
+        self.handle_workspace_error(task_id=task_id, error=error, runner_id=runner_id)
+
     def handle_workspace_error(
         self,
         task_id: str,

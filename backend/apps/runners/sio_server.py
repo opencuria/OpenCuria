@@ -104,40 +104,11 @@ def create_sio_app() -> socketio.ASGIApp:
     """
     sio = get_sio_server()
     _register_event_handlers(sio)
-    _fence_durable_results(sio)
     _register_frontend_handlers(sio)
     return socketio.ASGIApp(
         sio,
         socketio_path="/ws/runner",
     )
-
-
-def _fence_durable_results(sio: socketio.AsyncServer) -> None:
-    """Route durable terminal results exclusively through the envelope.
-
-    Legacy direct callbacks cannot bypass target/attempt/session fencing.
-    """
-    from .operations import RESULT_METHODS, LifecycleCommand
-
-    for event in RESULT_METHODS:
-        original = sio.handlers["/"].get(event)
-        if original is None:
-            continue
-
-        def fenced(handler):
-            async def receive(sid, data):
-                durable = await sync_to_async(
-                    lambda: LifecycleCommand.objects.filter(
-                        task_id=data.get("task_id")
-                    ).exists()
-                )()
-                if durable:
-                    return
-                return await handler(sid, data)
-
-            return receive
-
-        sio.on(event, fenced(original))
 
 
 # ---------------------------------------------------------------------------
@@ -175,8 +146,6 @@ async def _require_runner_id(
 def _register_event_handlers(sio: socketio.AsyncServer) -> None:
     """Register all Socket.IO event handlers."""
 
-    # Existing legacy callbacks remain for non-lifecycle RPC; durable lifecycle
-    # terminal events are admitted exclusively through operation:result.
     @sio.on("runner:inventory")
     async def runner_inventory(sid: str, data: dict):
         runner_id = await _require_runner_id(sio, sid, "runner:inventory")
@@ -329,48 +298,6 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         # DB worker owns lifecycle delivery. Result replay from runner runs
         # before its first heartbeat; reconnect never authorizes cleanup.
 
-    @sio.on("workspace:created")
-    async def on_workspace_created(sid: str, data: dict):
-        """Handle workspace creation confirmation from runner."""
-        runner_id = await _require_runner_id(sio, sid, "workspace:created")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_workspace_created)(
-            task_id=data["task_id"],
-            workspace_id=data["workspace_id"],
-            status=data.get("status", "created"),
-            runner_id=runner_id,
-            credentials_present=data.get("credentials_present"),
-        )
-
-    @sio.on("workspace:stopped")
-    async def on_workspace_stopped(sid: str, data: dict):
-        """Handle workspace stop confirmation from runner."""
-        runner_id = await _require_runner_id(sio, sid, "workspace:stopped")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_workspace_stopped)(
-            task_id=data["task_id"],
-            workspace_id=data["workspace_id"],
-            runner_id=runner_id,
-        )
-
-    @sio.on("workspace:resumed")
-    async def on_workspace_resumed(sid: str, data: dict):
-        """Handle workspace resume confirmation from runner."""
-        runner_id = await _require_runner_id(sio, sid, "workspace:resumed")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_workspace_resumed)(
-            task_id=data["task_id"],
-            workspace_id=data["workspace_id"],
-            runner_id=runner_id,
-            credentials_present=data.get("credentials_present"),
-        )
-
     @sio.on("workspace:credentials_injected")
     async def on_workspace_credentials_injected(sid: str, data: dict):
         """Handle persistent credential injection confirmation from runner."""
@@ -385,48 +312,17 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             runner_id=runner_id,
         )
 
-    @sio.on("workspace:updated")
-    async def on_workspace_updated(sid: str, data: dict):
-        """Handle workspace resource update confirmation from runner."""
-        runner_id = await _require_runner_id(sio, sid, "workspace:updated")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_workspace_updated)(
-            task_id=data["task_id"],
-            workspace_id=data["workspace_id"],
-            runner_id=runner_id,
-        )
-
     @sio.on("workspace:error")
     async def on_workspace_error(sid: str, data: dict):
-        """Handle workspace error from runner."""
+        """Handle direct RPC errors; lifecycle failures require operation:result."""
         runner_id = await _require_runner_id(sio, sid, "workspace:error")
         if not runner_id:
             return
         service = get_runner_service()
-        await sync_to_async(service.handle_workspace_error)(
+        await sync_to_async(service.handle_workspace_rpc_error)(
             task_id=data["task_id"],
             error=data["error"],
             runner_id=runner_id,
-        )
-
-    @sio.on("workspace:removed")
-    async def on_workspace_removed(sid: str, data: dict):
-        """Handle workspace removal confirmation from runner."""
-        runner_id = await _require_runner_id(sio, sid, "workspace:removed")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_workspace_removed)(
-            task_id=data["task_id"],
-            workspace_id=data["workspace_id"],
-            runner_id=runner_id,
-            result=data.get(
-                "result",
-                "already_absent" if data.get("already_absent", False) else "deleted",
-            ),
-            already_absent=data.get("already_absent", False),
         )
 
     @sio.on("workspace:cleanup_unknown_done")
@@ -929,76 +825,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             "files:download_chunk", data, runner_id=runner_id
         )
 
-    # --- Image artifact events from runner ---
-
-    @sio.on("image_artifact:created")
-    async def on_image_artifact_created(sid: str, data: dict):
-        """Handle image_artifact:created event from runner."""
-        runner_id = await _require_runner_id(sio, sid, "image_artifact:created")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_image_artifact_created)(
-            task_id=data["task_id"],
-            workspace_id=data["workspace_id"],
-            artifact_id=data["image_artifact_id"],
-            name=data.get("name", ""),
-            size_bytes=data.get("size_bytes", 0),
-            runner_id=runner_id,
-        )
-
-    @sio.on("image_artifact:deleted")
-    async def on_image_artifact_deleted(sid: str, data: dict):
-        """Handle image_artifact:deleted or already_absent confirmation from runner."""
-        runner_id = await _require_runner_id(sio, sid, "image_artifact:deleted")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        # Both 'deleted' and 'already_absent' result in the same handler
-        await sync_to_async(service.handle_image_artifact_deleted)(
-            task_id=data.get("task_id", ""),
-            image_instance_id=data.get("image_instance_id", ""),
-            runner_ref=data.get("image_artifact_id", ""),
-            result=data.get(
-                "result",
-                "already_absent" if data.get("already_absent", False) else "deleted",
-            ),
-            runner_id=runner_id,
-        )
-        # Also check if this was a build job deletion
-        task_id = data.get("task_id", "")
-        if task_id:
-            await sync_to_async(service.handle_build_job_deleted)(
-                task_id=task_id,
-                runner_id=runner_id,
-            )
-
-    @sio.on("image_artifact:delete_failed")
-    async def on_image_artifact_delete_failed(sid: str, data: dict):
-        """Handle image artifact deletion failure from runner."""
-        runner_id = await _require_runner_id(sio, sid, "image_artifact:delete_failed")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_image_artifact_delete_failed)(
-            task_id=data.get("task_id", ""),
-            error=data.get("error", ""),
-            runner_id=runner_id,
-        )
-
-    @sio.on("image_artifact:failed")
-    async def on_image_artifact_failed(sid: str, data: dict):
-        """Handle image_artifact:failed by marking the pending artifact as failed."""
-        runner_id = await _require_runner_id(sio, sid, "image_artifact:failed")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_image_artifact_failed)(
-            task_id=data.get("task_id", ""),
-            workspace_id=data.get("workspace_id", ""),
-            error=data.get("error", ""),
-            runner_id=runner_id,
-        )
+    # --- Image build progress from runner ---
 
     @sio.on("image:build_progress")
     async def on_image_build_progress(sid: str, data: dict):
@@ -1011,35 +838,6 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             build_job_id=data.get("build_job_id", ""),
             line=data.get("line", ""),
             task_id=data.get("task_id", ""),
-            runner_id=runner_id,
-        )
-
-    @sio.on("image:built")
-    async def on_image_built(sid: str, data: dict):
-        """Handle successful image build event."""
-        runner_id = await _require_runner_id(sio, sid, "image:built")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_image_built)(
-            task_id=data.get("task_id", ""),
-            build_job_id=data.get("build_job_id", ""),
-            image_tag=data.get("image_tag", ""),
-            image_path=data.get("image_path", ""),
-            runner_id=runner_id,
-        )
-
-    @sio.on("image:build_failed")
-    async def on_image_build_failed(sid: str, data: dict):
-        """Handle failed image build event."""
-        runner_id = await _require_runner_id(sio, sid, "image:build_failed")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_image_build_failed)(
-            task_id=data.get("task_id", ""),
-            build_job_id=data.get("build_job_id", ""),
-            error=data.get("error", ""),
             runner_id=runner_id,
         )
 
