@@ -304,12 +304,14 @@ export async function existingUploadNames(
 }
 
 function isExplicitMissingUploadDirectory(error: unknown): boolean {
-  const message =
+  // Runner errors carry raw `find` stderr including its trailing newline.
+  const message = (
     error instanceof Error
       ? error.message
       : typeof error === "string"
         ? error
-        : "";
+        : ""
+  ).trim();
   return (
     /^failed to list files:.*(?:no such file or directory|enoent).*$/i.test(
       message,

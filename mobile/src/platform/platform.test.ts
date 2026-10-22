@@ -3,6 +3,7 @@ import { File, __directories, __files } from "./test-mocks/expo-file-system";
 import { __setNextSize } from "./test-mocks/expo-image-manipulator";
 import { __setNextResult } from "./test-mocks/expo-image-picker";
 import { UPLOAD_MAX_BYTES } from "@opencuria/chat-core/fileChunks";
+import { FileTransferError } from "@opencuria/client";
 import { NativeSessionStorage } from "./storage";
 import {
   MediaCache,
@@ -404,6 +405,29 @@ describe("native picker upload adapter", () => {
       ),
     ).rejects.toThrow("socket disconnected");
     expect(uploadFile).not.toHaveBeenCalled();
+  });
+
+  it("uploads into a fresh workspace when the runner reports the missing upload directory", async () => {
+    // The shared client rejects with the runner's raw `find` stderr, which
+    // ends with a newline.
+    const listFiles = vi.fn(async () => {
+      throw new FileTransferError(
+        "Failed to list files: find: ‘/workspace/.opencuria/user-uploaded’: No such file or directory\n",
+      );
+    });
+    const uploadFile = vi.fn(async () => ({ status: "success" }));
+    const file = new File("file:///cache/source.txt");
+    file.create();
+    file.write(btoa("x"), { encoding: "base64" });
+    const paths = await uploadAttachments(
+      { files: { listFiles, uploadFile } } as never,
+      "workspace",
+      [{ id: "a", uri: file.uri, name: "source.txt" }],
+    );
+    expect(uploadFile).toHaveBeenCalledOnce();
+    expect(paths[0]).toMatch(
+      /^\/workspace\/\.opencuria\/user-uploaded\/[^/]+_source\.txt$/,
+    );
   });
 });
 
