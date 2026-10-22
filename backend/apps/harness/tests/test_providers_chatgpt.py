@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import time
 from typing import Any
+from unittest.mock import AsyncMock
+from unittest.mock import call as mock_call
 
 import httpx
 import pytest
@@ -34,19 +34,18 @@ def _responses_sse(events: list[dict[str, Any]]) -> bytes:
     return ("\n".join(lines) + "\n").encode()
 
 
-def _credentials(
-    *,
-    access: str = "access-token",
-    refresh: str = "refresh-token",
-    expires: int | None = None,
-    account_id: str = "acc-123",
-) -> dict[str, Any]:
-    return {
-        "access": access,
-        "refresh": refresh,
-        "expires": expires if expires is not None else int(time.time() * 1000) + 3600_000,
-        "account_id": account_id,
-    }
+def _credentials() -> dict[str, Any]:
+    return {"access": "access-token", "account_id": "acc-123"}
+
+
+def _adapter(
+    credentials: dict[str, Any], *, client: httpx.AsyncClient
+) -> ChatGPTAdapter:
+    return ChatGPTAdapter(
+        credentials,
+        client=client,
+        fresh_credentials=AsyncMock(return_value=credentials),
+    )
 
 
 def _mock_client(
@@ -104,7 +103,7 @@ async def test_chat_stream_happy_path_text_toolcall_reasoning_usage(
             },
         ]
     )
-    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
     deltas = [
         d
         async for d in adapter.chat_stream(
@@ -173,7 +172,7 @@ async def test_chat_stream_separates_reasoning_summary_parts() -> None:
             {"type": "response.completed", "response": {"status": "completed"}},
         ]
     )
-    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
     deltas = [
         d
         async for d in adapter.chat_stream(
@@ -203,7 +202,7 @@ async def test_chat_stream_separates_summary_index_without_part_added() -> None:
             {"type": "response.completed", "response": {"status": "completed"}},
         ]
     )
-    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
     deltas = [
         d
         async for d in adapter.chat_stream(
@@ -231,7 +230,7 @@ async def test_happy_path_toolcall_without_item_id_still_emits_index() -> None:
             },
         ]
     )
-    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
     deltas = [
         d
         async for d in adapter.chat_stream(
@@ -290,7 +289,7 @@ async def test_parallel_function_calls_keep_distinct_stream_keys() -> None:
         },
     ]
     payload = _responses_sse(events)
-    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
     deltas = [
         d
         async for d in adapter.chat_stream(
@@ -348,7 +347,7 @@ async def test_fragmented_arguments_concatenate_without_duplication() -> None:
         },
     ]
     payload = _responses_sse(events)
-    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
     deltas = [
         d
         async for d in adapter.chat_stream(
@@ -374,7 +373,7 @@ async def test_build_payload_shaping() -> None:
     payload = _responses_sse(
         [{"type": "response.completed", "response": {"usage": {"input_tokens": 1}}}]
     )
-    adapter = ChatGPTAdapter(
+    adapter = _adapter(
         _credentials(),
         client=_mock_client(payload, capture=capture),
     )
@@ -394,7 +393,11 @@ async def test_build_payload_shaping() -> None:
             ),
             LLMMessage(role="tool", content="ok", tool_call_id="call_1"),
         ],
-        [ToolSchema(name="read", description="read files", parameters={"type": "object"})],
+        [
+            ToolSchema(
+                name="read", description="read files", parameters={"type": "object"}
+            )
+        ],
         ChatOptions(max_tokens=999, reasoning_effort="high"),
     ):
         pass
@@ -407,7 +410,9 @@ async def test_build_payload_shaping() -> None:
     assert body["reasoning"] == {"effort": "high", "summary": "auto"}
     assert "max_output_tokens" not in body
     assert body["tools"][0]["strict"] is False
-    roles = [item.get("role") for item in body["input"] if item.get("type") == "message"]
+    roles = [
+        item.get("role") for item in body["input"] if item.get("type") == "message"
+    ]
     assert "system" not in roles
     assert body["input"][-1]["type"] == "function_call_output"
 
@@ -420,7 +425,7 @@ async def test_request_headers_include_account_and_residency() -> None:
     )
     creds = _credentials()
     creds["residency"] = "eu"
-    adapter = ChatGPTAdapter(creds, client=_mock_client(payload, capture=capture))
+    adapter = _adapter(creds, client=_mock_client(payload, capture=capture))
     async for _ in adapter.chat_stream("gpt-5.4", [], []):
         pass
 
@@ -432,77 +437,27 @@ async def test_request_headers_include_account_and_residency() -> None:
     assert headers["user-agent"] == "opencuria"
 
 
-async def test_expiry_refresh_dedup_and_callback() -> None:
-    """Expired tokens refresh once and invoke on_tokens_refreshed."""
-    refresh_calls = 0
-    refreshed: list[dict[str, Any]] = []
+async def test_persistent_401_retries_once_then_raises_auth_error() -> None:
+    """A second rejection surfaces reconnect guidance without a retry loop."""
+    requests = []
+    credentials = _credentials()
+    fresh = AsyncMock(return_value=credentials)
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal refresh_calls
-        if request.url.path == "/oauth/token":
-            refresh_calls += 1
-            return httpx.Response(
-                200,
-                json={
-                    "access_token": "access-new",
-                    "refresh_token": "refresh-new",
-                    "expires_in": 3600,
-                },
-            )
-        return httpx.Response(
-            200,
-            content=_responses_sse(
-                [{"type": "response.completed", "response": {"usage": {"input_tokens": 1}}}]
-            ),
-            headers={"Content-Type": "text/event-stream"},
-            request=request,
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    creds = _credentials(expires=0, access="")
-
-    async def _record_refresh(data: dict[str, Any]) -> None:
-        refreshed.append(dict(data))
-
-    adapter = ChatGPTAdapter(
-        creds,
-        on_tokens_refreshed=_record_refresh,
-        client=client,
-    )
-
-    first, second = await asyncio.gather(
-        _collect(adapter),
-        _collect(adapter),
-    )
-    assert refresh_calls == 1
-    assert refreshed and refreshed[0]["access"] == "access-new"
-    assert refreshed[0]["refresh"] == "refresh-new"
-    assert first == second == 1
-
-
-async def _collect(adapter: ChatGPTAdapter) -> int:
-    count = 0
-    async for _ in adapter.chat_stream("gpt-5.4", [], []):
-        count += 1
-    return count
-
-
-async def test_401_maps_to_provider_auth_error_without_refresh() -> None:
-    """HTTP 401 tells the user to reconnect; no refresh attempt."""
-    refresh_calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal refresh_calls
-        if request.url.path == "/oauth/token":
-            refresh_calls += 1
+        assert str(request.url) == CODEX_API_ENDPOINT
+        requests.append(request)
         return httpx.Response(401, content=b"unauthorized", request=request)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    adapter = ChatGPTAdapter(_credentials(), client=client)
+    adapter = ChatGPTAdapter(credentials, client=client, fresh_credentials=fresh)
     with pytest.raises(ProviderAuthError, match=RECONNECT_MESSAGE):
         async for _ in adapter.chat_stream("gpt-5.4", [], []):
             pass
-    assert refresh_calls == 0
+    assert len(requests) == 2
+    assert fresh.call_args_list == [
+        mock_call(),
+        mock_call(rejected_access_token="access-token", force=True),
+    ]
 
 
 async def test_usage_not_included_maps_to_provider_auth_error() -> None:
@@ -518,7 +473,7 @@ async def test_usage_not_included_maps_to_provider_auth_error() -> None:
             }
         ]
     )
-    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
     with pytest.raises(ProviderAuthError, match=USAGE_NOT_INCLUDED_MESSAGE):
         async for _ in adapter.chat_stream("gpt-5.4", [], []):
             pass
@@ -526,7 +481,7 @@ async def test_usage_not_included_maps_to_provider_auth_error() -> None:
 
 async def test_429_raises_rate_limit_error() -> None:
     """HTTP 429 raises ProviderRateLimitError with retry hint."""
-    adapter = ChatGPTAdapter(
+    adapter = _adapter(
         _credentials(),
         client=_mock_client(b"slow down", status_code=429),
     )
@@ -546,7 +501,7 @@ async def test_response_failed_raises_provider_response_error() -> None:
             }
         ]
     )
-    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
     with pytest.raises(ProviderResponseError, match="upstream failed"):
         async for _ in adapter.chat_stream("gpt-5.4", [], []):
             pass
@@ -567,7 +522,7 @@ async def test_context_length_exceeded_stream_error_code_message_format() -> Non
             }
         ]
     )
-    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
     with pytest.raises(ProviderResponseError) as exc_info:
         async for _ in adapter.chat_stream("gpt-5.4", [], []):
             pass
@@ -600,7 +555,7 @@ async def test_incomplete_max_output_tokens_maps_to_length_and_total(
             },
         ]
     )
-    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
     deltas = [
         d
         async for d in adapter.chat_stream(
@@ -631,7 +586,7 @@ async def test_incomplete_content_filter_maps_to_content_filter(
             },
         ]
     )
-    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
     deltas = [
         d
         async for d in adapter.chat_stream(
@@ -658,7 +613,7 @@ async def test_failed_status_in_terminal_event_raises_response_error(
             },
         ]
     )
-    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
     with pytest.raises(ProviderResponseError, match="boom"):
         async for _ in adapter.chat_stream("gpt-5.4", [], []):
             pass
@@ -668,7 +623,7 @@ async def test_failed_status_in_terminal_event_raises_response_error(
 async def test_done_without_usage_still_finishes(response: Any) -> None:
     """Missing usage does not prevent a terminal event from finishing the step."""
     payload = _responses_sse([{"type": "response.done", "response": response}])
-    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
     deltas = [d async for d in adapter.chat_stream("gpt-5.4", [], [])]
     assert len(deltas) == 1
     assert deltas[0].finish_reason == "stop"
@@ -688,7 +643,7 @@ async def test_done_with_failed_authorization_raises_auth_error() -> None:
             }
         ]
     )
-    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(payload))
+    adapter = _adapter(_credentials(), client=_mock_client(payload))
     with pytest.raises(ProviderAuthError, match=USAGE_NOT_INCLUDED_MESSAGE):
         async for _ in adapter.chat_stream("gpt-5.4", [], []):
             pass
@@ -700,9 +655,7 @@ async def test_tool_schema_projection_anyof_in_chatgpt() -> None:
     payload = _responses_sse(
         [{"type": "response.completed", "response": {"usage": {"input_tokens": 1}}}]
     )
-    adapter = ChatGPTAdapter(
-        _credentials(), client=_mock_client(payload, capture=capture)
-    )
+    adapter = _adapter(_credentials(), client=_mock_client(payload, capture=capture))
     async for _ in adapter.chat_stream(
         "gpt-5.4",
         [LLMMessage(role="user", content="hi")],
@@ -727,9 +680,7 @@ async def test_function_call_replay_authoritative_arguments() -> None:
     payload = _responses_sse(
         [{"type": "response.completed", "response": {"usage": {"input_tokens": 1}}}]
     )
-    adapter = ChatGPTAdapter(
-        _credentials(), client=_mock_client(payload, capture=capture)
-    )
+    adapter = _adapter(_credentials(), client=_mock_client(payload, capture=capture))
     async for _ in adapter.chat_stream(
         "gpt-5.4",
         [
@@ -752,7 +703,7 @@ async def test_function_call_replay_authoritative_arguments() -> None:
 
 def test_assistant_text_with_function_call_replays_text_first() -> None:
     """Assistant text plus function_call replays text before the call."""
-    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
+    adapter = _adapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
     _, items = adapter._convert_messages(
         [
             LLMMessage(
@@ -771,7 +722,7 @@ def test_assistant_text_with_function_call_replays_text_first() -> None:
 
 def test_missing_call_id_gets_best_effort_id() -> None:
     """tool_call_id-less tool roles never send an empty call_id."""
-    adapter = ChatGPTAdapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
+    adapter = _adapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
     _, items = adapter._convert_messages(
         [LLMMessage(role="tool", content="ok", tool_call_id=None)]
     )
@@ -784,9 +735,7 @@ async def test_user_image_url_parts_become_input_image() -> None:
     payload = _responses_sse(
         [{"type": "response.completed", "response": {"usage": {"input_tokens": 1}}}]
     )
-    adapter = ChatGPTAdapter(
-        _credentials(), client=_mock_client(payload, capture=capture)
-    )
+    adapter = _adapter(_credentials(), client=_mock_client(payload, capture=capture))
     png_url = "data:image/png;base64,iVBORw0KGgo="
     async for _ in adapter.chat_stream(
         "gpt-5.4",
@@ -813,9 +762,7 @@ async def test_user_image_url_parts_become_input_image() -> None:
 
 def test_user_image_parts_become_input_image() -> None:
     """Hydrated image_url parts lower to Responses input_image items."""
-    adapter = ChatGPTAdapter(
-        _credentials(), client=_mock_client(b"data: [DONE]\n")
-    )
+    adapter = _adapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
     _, items = adapter._convert_messages(
         [
             LLMMessage(
@@ -851,7 +798,7 @@ class _RaiseTransport(httpx.AsyncBaseTransport):
 async def test_chat_stream_read_error_is_retryable() -> None:
     """Mid-stream httpx.ReadError maps to Connection reset by server."""
     client = httpx.AsyncClient(transport=_RaiseTransport(httpx.ReadError("")))
-    adapter = ChatGPTAdapter(_credentials(), client=client)
+    adapter = _adapter(_credentials(), client=client)
     with pytest.raises(
         ProviderResponseError, match="Connection reset by server"
     ) as exc_info:
@@ -864,9 +811,7 @@ async def test_chat_stream_read_error_is_retryable() -> None:
 
 def test_tool_image_parts_become_multimodal_output() -> None:
     """Tool image_url parts ride inside function_call_output."""
-    adapter = ChatGPTAdapter(
-        _credentials(), client=_mock_client(b"data: [DONE]\n")
-    )
+    adapter = _adapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
     _, items = adapter._convert_messages(
         [
             LLMMessage(
@@ -895,9 +840,7 @@ def test_tool_image_parts_become_multimodal_output() -> None:
 
 def test_tool_text_only_stays_string_output() -> None:
     """Image-less tool output keeps the legacy string format."""
-    adapter = ChatGPTAdapter(
-        _credentials(), client=_mock_client(b"data: [DONE]\n")
-    )
+    adapter = _adapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
     _, items = adapter._convert_messages(
         [LLMMessage(role="tool", content="ok", tool_call_id="call_1")]
     )
@@ -906,9 +849,7 @@ def test_tool_text_only_stays_string_output() -> None:
 
 def test_tool_pdf_file_part_becomes_input_file_output() -> None:
     """Tool PDF file parts ride inside function_call_output as input_file."""
-    adapter = ChatGPTAdapter(
-        _credentials(), client=_mock_client(b"data: [DONE]\n")
-    )
+    adapter = _adapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
     _, items = adapter._convert_messages(
         [
             LLMMessage(
@@ -927,9 +868,7 @@ def test_tool_pdf_file_part_becomes_input_file_output() -> None:
         ]
     )
     assert items[0]["type"] == "function_call_output"
-    assert {"type": "input_text", "text": "PDF read successfully"} in items[0][
-        "output"
-    ]
+    assert {"type": "input_text", "text": "PDF read successfully"} in items[0]["output"]
     assert {
         "type": "input_file",
         "filename": "doc.pdf",
@@ -939,9 +878,7 @@ def test_tool_pdf_file_part_becomes_input_file_output() -> None:
 
 def test_user_pdf_file_part_becomes_input_file() -> None:
     """User PDF file parts lower to Responses input_file items."""
-    adapter = ChatGPTAdapter(
-        _credentials(), client=_mock_client(b"data: [DONE]\n")
-    )
+    adapter = _adapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
     _, items = adapter._convert_messages(
         [
             LLMMessage(
@@ -967,9 +904,7 @@ def test_user_pdf_file_part_becomes_input_file() -> None:
 
 def test_tool_unknown_file_mime_does_not_crash() -> None:
     """Unknown file MIMEs are dropped; text output survives."""
-    adapter = ChatGPTAdapter(
-        _credentials(), client=_mock_client(b"data: [DONE]\n")
-    )
+    adapter = _adapter(_credentials(), client=_mock_client(b"data: [DONE]\n"))
     _, items = adapter._convert_messages(
         [
             LLMMessage(

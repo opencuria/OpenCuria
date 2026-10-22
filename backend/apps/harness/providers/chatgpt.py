@@ -30,11 +30,7 @@ from .base import (
     ToolSchema,
     Usage,
 )
-from .chatgpt_oauth import (
-    CODEX_API_ENDPOINT,
-    OAuthTokens,
-    refresh_tokens,
-)
+from .chatgpt_oauth import CODEX_API_ENDPOINT
 from .openrouter import (
     RESPONSE_BODY_MAX_CHARS,
     effective_timeout,
@@ -63,24 +59,21 @@ class ChatGPTAdapter(ProviderAdapter):
     def __init__(
         self,
         credentials: dict[str, Any],
-        on_tokens_refreshed: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        *,
+        fresh_credentials: Callable[..., Awaitable[dict[str, Any]]],
         client: httpx.AsyncClient | None = None,
-        fresh_credentials: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         """Create an adapter backed by OAuth credentials.
 
         Args:
             credentials: Dict with ``access``, ``refresh``, ``expires``,
                 ``account_id``, and optional ``residency``.
-            on_tokens_refreshed: Async callback invoked after token refresh.
-            client: Optional shared httpx client (mainly for tests).
             fresh_credentials: Central account-scoped OAuth coordinator.
+            client: Optional shared httpx client (mainly for tests).
         """
         self._credentials = dict(credentials)
-        self._on_tokens_refreshed = on_tokens_refreshed
         self._fresh_credentials = fresh_credentials
         self._client = client
-        self._refresh_lock = asyncio.Lock()
 
     async def chat_stream(
         self,
@@ -104,7 +97,7 @@ class ChatGPTAdapter(ProviderAdapter):
             ProviderResponseError: On other HTTP errors or malformed SSE.
         """
         options = opts or ChatOptions()
-        await self._ensure_fresh_tokens()
+        self._credentials = dict(await self._fresh_credentials())
         payload = self._build_payload(model, messages, tools, options)
         headers = self._build_headers()
         timeout = httpx_stream_timeout(options)
@@ -497,72 +490,6 @@ class ChatGPTAdapter(ProviderAdapter):
 
         return "\n".join(system_parts), input_items
 
-    async def _ensure_fresh_tokens(self) -> None:
-        """Revalidate live account credentials, or refresh a standalone adapter."""
-        if self._fresh_credentials is not None:
-            self._credentials = dict(await self._fresh_credentials())
-            return
-        access = str(self._credentials.get("access", "") or "")
-        expires = int(self._credentials.get("expires") or 0)
-        if access and expires > int(time.time() * 1000):
-            return
-
-        async with self._refresh_lock:
-            access = str(self._credentials.get("access", "") or "")
-            expires = int(self._credentials.get("expires") or 0)
-            if access and expires > int(time.time() * 1000):
-                return
-            await self._refresh_credentials()
-
-    async def _refresh_credentials(
-        self, *, rejected_access_token: str | None = None
-    ) -> None:
-        """Use central refresh, or the legacy standalone test/client callback."""
-        if self._fresh_credentials is not None:
-            self._credentials = dict(
-                await self._fresh_credentials(
-                    rejected_access_token=rejected_access_token, force=True
-                )
-            )
-            return
-        refresh = str(self._credentials.get("refresh", "") or "")
-        if not refresh:
-            raise ProviderAuthError(
-                RECONNECT_MESSAGE,
-                provider=self.name,
-            )
-        client = self._client
-        try:
-            tokens = await refresh_tokens(refresh, client=client)
-        except Exception:
-            raise ProviderAuthError(RECONNECT_MESSAGE, provider=self.name) from None
-        updated = self._credentials_from_tokens(tokens)
-        if tokens.account_id:
-            updated["account_id"] = tokens.account_id
-        elif self._credentials.get("account_id"):
-            updated["account_id"] = self._credentials["account_id"]
-        if tokens.residency:
-            updated["residency"] = tokens.residency
-        elif self._credentials.get("residency"):
-            updated["residency"] = self._credentials["residency"]
-        self._credentials.update(updated)
-        if self._on_tokens_refreshed is not None:
-            await self._on_tokens_refreshed(dict(self._credentials))
-
-    @staticmethod
-    def _credentials_from_tokens(tokens: OAuthTokens) -> dict[str, Any]:
-        """Convert :class:`OAuthTokens` into the stored credentials dict."""
-        data: dict[str, Any] = {
-            "access": tokens.access,
-            "refresh": tokens.refresh,
-            "expires": tokens.expires,
-        }
-        if tokens.account_id:
-            data["account_id"] = tokens.account_id
-        if tokens.residency:
-            data["residency"] = tokens.residency
-        return data
-
     async def _stream_request(
         self,
         client: httpx.AsyncClient,
@@ -598,16 +525,16 @@ class ChatGPTAdapter(ProviderAdapter):
                 raise self._header_or_total_timeout(
                     options, deadline, header_timeout
                 ) from exc
-            if (
-                response.status_code == 401
-                and _auth_retry
-                and self._fresh_credentials is not None
-            ):
+            if response.status_code == 401 and _auth_retry:
                 # Close the rejected response before awaiting the coordinator.
                 await stream_cm.__aexit__(None, None, None)
                 closed = True
                 rejected = headers.get("Authorization", "").removeprefix("Bearer ")
-                await self._refresh_credentials(rejected_access_token=rejected)
+                self._credentials = dict(
+                    await self._fresh_credentials(
+                        rejected_access_token=rejected, force=True
+                    )
+                )
                 async for delta in self._stream_request(
                     client,
                     payload,

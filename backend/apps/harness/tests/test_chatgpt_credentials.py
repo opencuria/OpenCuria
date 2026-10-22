@@ -301,7 +301,13 @@ async def test_resolver_captures_exact_authority(refresh_account, monkeypatch):
     monkeypatch.setattr(
         "apps.harness.providers.resolver.get_fresh_chatgpt_credentials", fresh
     )
-    await resolved.adapter._ensure_fresh_tokens()
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, text="data: [DONE]\n\n")
+        )
+    ) as client:
+        resolved.adapter._client = client
+        _ = [delta async for delta in resolved.adapter.chat_stream("gpt", [], [])]
     assert calls == [((org.id, user.id, account.id), {})]
 
 

@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -70,14 +71,16 @@ async def test_chatgpt_terminal_usage_persisted_and_emitted(
         model="chatgpt/gpt-6.1-sol",
     )
     async with httpx.AsyncClient(transport=httpx.MockTransport(serve)) as client:
+        credentials = {
+            "access": "test-access",
+            "refresh": "test-refresh",
+            "expires": int(time.time() * 1000) + 3_600_000,
+            "account_id": "test-account",
+        }
         adapter = ChatGPTAdapter(
-            {
-                "access": "test-access",
-                "refresh": "test-refresh",
-                "expires": int(time.time() * 1000) + 3_600_000,
-                "account_id": "test-account",
-            },
+            credentials,
             client=client,
+            fresh_credentials=AsyncMock(return_value=credentials),
         )
         service = HarnessService(
             emit=emit,

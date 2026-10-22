@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
-from apps.harness.provider_accounts import ProviderAccountService
 from apps.harness.providers.bedrock import BedrockAdapter
-from apps.harness.providers.chatgpt import ChatGPTAdapter
 from apps.harness.providers.openrouter import OpenRouterAdapter
 from apps.harness.providers.resolver import StaticModelResolver
 from apps.harness.runner import HarnessRunner, RunOptions
@@ -63,36 +59,6 @@ def test_provider_resolver_bedrock_region_model_id(
     assert isinstance(resolved.adapter, BedrockAdapter)
     assert resolved.model_id.startswith("us.")
     assert resolved.provider == "amazon-bedrock"
-
-
-@pytest.mark.django_db(transaction=True)
-def test_provider_resolver_chatgpt_token_refresh_persists(
-    organization, provider_account_factory
-) -> None:
-    """ChatGPT on_tokens_refreshed re-encrypts and stores updated credentials."""
-    service = ProviderConfigService()
-    account = provider_account_factory(
-        "chatgpt",
-        access="old",
-        refresh="refresh-token",
-        expires=1,
-        account_id="acct",
-    )
-    resolver = service.build_resolver(organization.id)
-    resolved = resolver.resolve("chatgpt/gpt-5.5")
-    assert isinstance(resolved.adapter, ChatGPTAdapter)
-
-    refreshed = {
-        "access": "new-access",
-        "refresh": "refresh-token",
-        "expires": 999,
-        "account_id": "acct",
-    }
-    asyncio.run(resolver._chatgpt_tokens_refreshed(refreshed))
-    account.refresh_from_db()
-    stored = ProviderAccountService().get_credentials(account)
-    assert stored["access"] == "new-access"
-    assert stored["expires"] == 999
 
 
 @pytest.mark.asyncio

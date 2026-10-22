@@ -7,7 +7,6 @@ authorization-code exchange, refresh, and JWT claim extraction.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import time
@@ -17,7 +16,7 @@ from typing import Any
 import httpx
 import structlog
 
-from .base import ProviderError, ProviderTimeoutError
+from .base import ProviderError
 
 log = structlog.get_logger(__name__)
 
@@ -26,10 +25,7 @@ ISSUER = "https://auth.openai.com"
 VERIFICATION_URL = "https://auth.openai.com/codex/device"
 CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
 REDIRECT_URI = "https://auth.openai.com/deviceauth/callback"
-OAUTH_POLLING_SAFETY_MARGIN_SECONDS = 3.0
 USER_AGENT = "opencuria"
-
-DEFAULT_DEVICE_FLOW_TIMEOUT_SECONDS = 300.0
 
 
 class OAuthError(RuntimeError):
@@ -335,62 +331,6 @@ async def poll_device_flow_once(
         raise OAuthError(
             f"Device authorization failed ({response.status_code}): {detail}"
         )
-    finally:
-        if owns_client:
-            await http.aclose()
-
-
-async def poll_device_flow(
-    device_auth_id: str,
-    user_code: str,
-    interval: int,
-    timeout: float = DEFAULT_DEVICE_FLOW_TIMEOUT_SECONDS,
-    client: httpx.AsyncClient | None = None,
-) -> OAuthTokens:
-    """Poll until the user completes device authorization or *timeout* expires.
-
-    On HTTP 403/404 the poll continues every ``interval`` plus a safety margin.
-    Other non-success statuses raise :class:`OAuthError`.
-    """
-    url = f"{ISSUER}/api/accounts/deviceauth/token"
-    owns_client = client is None
-    http = client or httpx.AsyncClient()
-    deadline = time.monotonic() + timeout
-    poll_interval = max(interval, 1) + OAUTH_POLLING_SAFETY_MARGIN_SECONDS
-    try:
-        while True:
-            if time.monotonic() >= deadline:
-                raise ProviderTimeoutError(
-                    "Device authorization timed out",
-                    provider="chatgpt",
-                )
-            response = await http.post(
-                url,
-                headers={
-                    "Content-Type": "application/json",
-                    "User-Agent": USER_AGENT,
-                },
-                json={
-                    "device_auth_id": device_auth_id,
-                    "user_code": user_code,
-                },
-            )
-            if response.is_success:
-                data = response.json()
-                if not isinstance(data, dict):
-                    raise OAuthError("Unexpected device token response type")
-                code = str(data.get("authorization_code", "") or "")
-                verifier = str(data.get("code_verifier", "") or "")
-                if not code or not verifier:
-                    raise OAuthError("Device token response missing code fields")
-                return await exchange_code(code, verifier, client=http)
-            if response.status_code in (403, 404):
-                await asyncio.sleep(poll_interval)
-                continue
-            detail = response.text[:500] if response.text else ""
-            raise OAuthError(
-                f"Device authorization failed ({response.status_code}): {detail}"
-            )
     finally:
         if owns_client:
             await http.aclose()

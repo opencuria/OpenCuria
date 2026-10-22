@@ -5,30 +5,32 @@ from __future__ import annotations
 import base64
 import json
 import time
-from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
-from apps.harness.providers.base import ProviderTimeoutError
 from apps.harness.providers.chatgpt_oauth import (
     CLIENT_ID,
     ISSUER,
-    OAuthError,
     VERIFICATION_URL,
+    OAuthError,
     exchange_code,
     extract_account_id,
     extract_account_id_from_claims,
     extract_residency,
     parse_jwt_claims,
-    poll_device_flow,
+    poll_device_flow_once,
     refresh_tokens,
     start_device_flow,
 )
 
 
 def _jwt(payload: dict) -> str:
-    header = base64.urlsafe_b64encode(json.dumps({"alg": "none"}).encode()).decode().rstrip("=")
+    header = (
+        base64.urlsafe_b64encode(json.dumps({"alg": "none"}).encode())
+        .decode()
+        .rstrip("=")
+    )
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
     return f"{header}.{body}.sig"
 
@@ -73,7 +75,7 @@ async def test_start_device_flow_happy_path() -> None:
 
 
 async def test_poll_device_flow_happy_path() -> None:
-    """Polling eventually exchanges authorization code for tokens."""
+    """Each request polls once; completion exchanges the code for tokens."""
     poll_count = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -94,43 +96,43 @@ async def test_poll_device_flow_happy_path() -> None:
         raise AssertionError(f"unexpected url {request.url}")
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    with patch(
-        "apps.harness.providers.chatgpt_oauth.asyncio.sleep",
-        new_callable=AsyncMock,
-    ):
-        tokens = await poll_device_flow(
-            "auth-1",
-            "ABCD-1234",
-            interval=0,
-            timeout=2.0,
-            client=client,
-        )
+    pending = await poll_device_flow_once("auth-1", "ABCD-1234", client=client)
+    assert pending.status == "pending" and pending.tokens is None
+    assert poll_count == 1
+    result = await poll_device_flow_once("auth-1", "ABCD-1234", client=client)
     assert poll_count == 2
+    assert result.status == "complete"
+    tokens = result.tokens
+    assert tokens is not None
     assert tokens.access
     assert tokens.refresh == "refresh-token"
     assert tokens.account_id == "acc-123"
     assert tokens.expires > int(time.time() * 1000)
 
 
-async def test_poll_device_flow_timeout() -> None:
-    """Polling past the deadline raises ProviderTimeoutError."""
+@pytest.mark.parametrize(
+    ("status_code", "status"),
+    [
+        (403, "pending"),
+        (404, "pending"),
+        (400, "expired"),
+        (410, "expired"),
+        (401, "denied"),
+        (429, "denied"),
+    ],
+)
+async def test_poll_device_flow_status(status_code: int, status: str) -> None:
+    """Pending and terminal responses return without retrying or exchanging."""
+    requests = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(404)
+        requests.append(request)
+        return httpx.Response(status_code)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    with patch(
-        "apps.harness.providers.chatgpt_oauth.asyncio.sleep",
-        new_callable=AsyncMock,
-    ):
-        with pytest.raises(ProviderTimeoutError, match="timed out"):
-            await poll_device_flow(
-                "auth-1",
-                "ABCD-1234",
-                interval=0,
-                timeout=0.05,
-                client=client,
-            )
+    result = await poll_device_flow_once("auth-1", "ABCD-1234", client=client)
+    assert result.status == status and result.tokens is None
+    assert len(requests) == 1
 
 
 async def test_exchange_code_and_refresh_tokens() -> None:
@@ -196,7 +198,10 @@ def test_parse_jwt_claims_variants() -> None:
     assert extract_residency(nested) == "us"
 
     org_only = _jwt({"organizations": [{"id": "org-fallback"}]})
-    assert extract_account_id_from_claims(parse_jwt_claims(org_only) or {}) == "org-fallback"
+    assert (
+        extract_account_id_from_claims(parse_jwt_claims(org_only) or {})
+        == "org-fallback"
+    )
 
     assert parse_jwt_claims("bad.token") is None
     assert parse_jwt_claims("a.!!!invalid!!!.b") is None
@@ -209,15 +214,5 @@ async def test_poll_device_flow_unexpected_status_raises_oauth_error() -> None:
         return httpx.Response(500, text="server error")
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    with patch(
-        "apps.harness.providers.chatgpt_oauth.asyncio.sleep",
-        new_callable=AsyncMock,
-    ):
-        with pytest.raises(OAuthError, match="500"):
-            await poll_device_flow(
-                "auth-1",
-                "ABCD-1234",
-                interval=0,
-                timeout=1.0,
-                client=client,
-            )
+    with pytest.raises(OAuthError, match="500"):
+        await poll_device_flow_once("auth-1", "ABCD-1234", client=client)

@@ -236,15 +236,6 @@ class ProviderResolver:
 
         return fresh_credentials
 
-    async def _chatgpt_tokens_refreshed(self, credentials: dict[str, Any]) -> None:
-        connection = self._connection_by_provider.get("chatgpt")
-        if connection is None:
-            return
-        await sync_to_async(ProviderAccountService().update_credentials)(
-            connection.id,
-            credentials,
-        )
-
 
 def wrap_provider_adapter(provider: ProviderAdapter) -> Callable[[str], ResolvedModel]:
     """Return a resolver callable for a single injected adapter (tests)."""
