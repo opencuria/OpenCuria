@@ -1020,7 +1020,23 @@ def test_credential_delete_blocked_while_plugin_active(client: Client):
     )
     assert response.status_code == 409, response.content[:500]
     assert response.json()["code"] == "plugin_credentials_in_use"
+    assert response.json()["detail"] == (
+        "Cannot delete credential required by active workspace plugins: "
+        f"{workspace.id}:{plugin_id}:token"
+    )
     assert _Credential.objects.filter(id=credential.id).exists()
+    from apps.credentials.deletion_guards import collect_deletion_blockers
+
+    assert collect_deletion_blockers(credential, org_id=admin_ctx["org"].id) == [
+        {
+            "workspace_id": str(workspace.id),
+            "plugin_id": plugin_id,
+            "plugin_name": "DelGuard",
+            "key": "token",
+            "service_id": service_id,
+            "service_name": "DelGuard Service",
+        }
+    ]
 
     # Clearing the workspace activation first unblocks the delete.
     cleared = _put(

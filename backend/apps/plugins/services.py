@@ -699,44 +699,37 @@ class PluginService:
             )
         return result
 
-    # -- Credential deletion guard -------------------------------------------
+    # -- Credential removal guard --------------------------------------------
 
-    def blocking_plugin_gaps_for_credential(
-        self, credential, *, org_id: uuid.UUID
+    def credential_removal_gaps(
+        self, credential, *, workspace_id: uuid.UUID, org_id: uuid.UUID
     ) -> list[dict]:
-        """Return required selected-plugin dependencies for a credential."""
-        from apps.runners.repositories import WorkspaceRepository
+        """Return a workspace's effective plugin requirements *credential* backs.
 
+        ``org_id`` is the workspace's organization; the caller enumerates the
+        workspaces that have *credential* attached.
+        """
+        selected = self.workspace_activations.enabled_plugin_ids(workspace_id)
+        effective = selected & self.org_activations.enabled_plugin_ids(org_id)
         gaps = []
-        for workspace_id in WorkspaceRepository.list_ids_for_credential(credential.id):
-            workspace = WorkspaceRepository.get_by_id(workspace_id)
-            if workspace is None or workspace.runner.organization_id is None:
+        for plugin in self.plugins.list_visible_to_org(org_id):
+            if plugin.id not in effective or not (plugin.enabled and plugin.published):
                 continue
-            workspace_org_id = workspace.runner.organization_id
-            selected = self.workspace_activations.enabled_plugin_ids(workspace.id)
-            effective = selected & self.org_activations.enabled_plugin_ids(
-                workspace_org_id
-            )
-            for plugin in self.plugins.list_visible_to_org(workspace_org_id):
-                if plugin.id not in effective or not (
-                    plugin.enabled and plugin.published
+            for requirement in self.requirements.list_for_plugin(plugin.id):
+                if (
+                    requirement.required
+                    and requirement.credential_service_id == credential.service_id
                 ):
-                    continue
-                for requirement in self.requirements.list_for_plugin(plugin.id):
-                    if (
-                        requirement.required
-                        and requirement.credential_service_id == credential.service_id
-                    ):
-                        gaps.append(
-                            {
-                                "workspace_id": str(workspace.id),
-                                "plugin_id": str(plugin.id),
-                                "plugin_name": plugin.name,
-                                "key": requirement.key,
-                                "service_id": str(requirement.credential_service_id),
-                                "service_name": requirement.credential_service.name,
-                            }
-                        )
+                    gaps.append(
+                        {
+                            "workspace_id": str(workspace_id),
+                            "plugin_id": str(plugin.id),
+                            "plugin_name": plugin.name,
+                            "key": requirement.key,
+                            "service_id": str(requirement.credential_service_id),
+                            "service_name": requirement.credential_service.name,
+                        }
+                    )
         return gaps
 
     # -- Internal helpers ----------------------------------------------------

@@ -987,6 +987,7 @@ def test_disconnect_preserves_attachment_and_allows_workspace_detach(context):
         credentials=[credential],
         plugin_ids=[plugin.id],
     )
+    from apps.credentials.deletion_guards import collect_deletion_blockers
     from apps.credentials.mcp_oauth import disconnect_credential
 
     assert disconnect_credential(credential.id)
@@ -994,9 +995,7 @@ def test_disconnect_preserves_attachment_and_allows_workspace_detach(context):
     assert credential.encrypted_value == ""
     assert credential.oauth_status == "disconnected"
     assert workspace.credentials.filter(pk=credential.pk).exists()
-    gaps = PluginService().blocking_plugin_gaps_for_credential(
-        credential, org_id=org.id
-    )
+    gaps = collect_deletion_blockers(credential, org_id=org.id)
     assert gaps
     asyncio.run(
         RunnerService().update_workspace(

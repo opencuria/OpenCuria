@@ -173,6 +173,26 @@ class WorkspaceConfigurationService:
                 )
             return workspace
 
+    def credential_deletion_blockers(self, credential) -> list[dict]:
+        """Return effective plugin requirements that still need *credential*.
+
+        Covers every workspace with the credential attached, each evaluated
+        against its own organization's plugin activations.
+        """
+        gaps = []
+        for workspace_id in self.workspaces.list_ids_for_credential(credential.id):
+            workspace = self.workspaces.get_by_id(workspace_id)
+            if workspace is None or workspace.runner.organization_id is None:
+                continue
+            gaps.extend(
+                self.plugins.credential_removal_gaps(
+                    credential,
+                    workspace_id=workspace.id,
+                    org_id=workspace.runner.organization_id,
+                )
+            )
+        return gaps
+
     @staticmethod
     def _resolve_final_credentials(
         credentials: list, *, owner, org_id: uuid.UUID

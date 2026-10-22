@@ -1,13 +1,9 @@
-"""REST API endpoints for the plugins app.
-
-Two routers:
-
-- plugin_router      -> /api/v1/plugins/
-- workspace_plugin_router -> /api/v1/workspaces/{workspace_id}/plugins/
+"""REST API endpoints for the plugins app (``/api/v1/plugins/``).
 
 Thin adapter layer — validates input, delegates to PluginService, and
-formats responses. No business logic or direct ORM access here (outside
-workspace lookups that mirror the existing workspace API behavior).
+formats responses. No business logic or direct ORM access here. The
+workspace-scoped plugin listing lives with the other workspace routers in
+``apps.runners.api``.
 """
 
 from __future__ import annotations
@@ -20,7 +16,6 @@ from ninja import Router
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
-from apps.runners.services import get_runner_service
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.schemas import ErrorOut
 
@@ -32,7 +27,6 @@ from .schemas import (
     PluginOut,
     PluginSkillOut,
     PluginUpdateIn,
-    WorkspacePluginOut,
 )
 from .services import PluginService
 
@@ -64,21 +58,6 @@ def _get_plugin_service() -> PluginService:
     return PluginService()
 
 
-def _get_owned_workspace(
-    request: HttpRequest, org_id: uuid.UUID, workspace_id: uuid.UUID
-):
-    """Mirror the workspace API: owner-scoped lookup (admin sees no more)."""
-    service = get_runner_service()
-    try:
-        return service.get_workspace_for_user(
-            workspace_id,
-            user=request.user,
-            organization_id=org_id,
-        )
-    except NotFoundError:
-        raise NotFoundError("Workspace", str(workspace_id))
-
-
 def _plugin_to_out(payload: dict) -> PluginOut:
     """Map a serialized plugin dict to its output schema."""
     return PluginOut(
@@ -100,10 +79,6 @@ def _plugin_to_out(payload: dict) -> PluginOut:
         created_at=payload["created_at"],
         updated_at=payload["updated_at"],
     )
-
-
-def _workspace_plugin_to_out(payload: dict) -> WorkspacePluginOut:
-    return WorkspacePluginOut(**payload)
 
 
 # ===========================================================================
@@ -321,36 +296,3 @@ def toggle_plugin_activation(
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
-
-
-# ===========================================================================
-# Workspace Plugin Router — /api/v1/workspaces/{workspace_id}/plugins/
-# ===========================================================================
-
-workspace_plugin_router = Router(tags=["workspace-plugins"])
-
-
-@workspace_plugin_router.get(
-    "/{workspace_id}/plugins/",
-    response={200: list[WorkspacePluginOut], 403: ErrorOut, 404: ErrorOut},
-    summary="List org-enabled plugins for a workspace",
-)
-def list_workspace_plugins(request: HttpRequest, workspace_id: uuid.UUID):
-    """List org-enabled plugins with workspace state and credential gaps."""
-    if not check_api_key_permission(request, APIKeyPermission.PLUGINS_READ):
-        return _perm_denied(APIKeyPermission.PLUGINS_READ)
-    org_id = _get_org_id(request)
-    _get_org_service().require_membership(request.user, org_id)
-    try:
-        workspace = _get_owned_workspace(request, org_id, workspace_id)
-        payloads = _get_plugin_service().list_workspace_plugins(
-            workspace=workspace, org_id=org_id
-        )
-        return 200, [_workspace_plugin_to_out(p) for p in payloads]
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-
-
-# ===========================================================================
-# Workspace Plugin Router — /api/v1/workspaces/{workspace_id}/plugins/
-# ===========================================================================

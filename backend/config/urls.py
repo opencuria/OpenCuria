@@ -22,7 +22,7 @@ from apps.credentials.oauth_api import credential_oauth_router, service_oauth_ro
 from apps.harness.api import harness_router
 from apps.harness.engines.api import engines_router
 from apps.organizations.api import org_router
-from apps.plugins.api import plugin_router, workspace_plugin_router
+from apps.plugins.api import plugin_router
 from apps.runners.api import (
     captured_image_router,
     git_router,
@@ -30,6 +30,7 @@ from apps.runners.api import (
     image_definition_router,
     runner_router,
     workspace_image_artifact_router,
+    workspace_plugin_router,
     workspace_router,
 )
 from apps.scheduled_tasks.api import scheduled_task_router

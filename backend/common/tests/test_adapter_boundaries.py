@@ -10,9 +10,11 @@ services and adapters resolve the runner service and frontend fan-out from
 harness; the harness plugs in through the ``HarnessGateway`` port. The
 harness in turn never imports the apps built on it; they subscribe to its
 run events (``apps.harness.run_events``). Likewise the foundational contexts
-(organizations, credentials, skills) only import the contexts below them;
-apps built on them subscribe to ``apps.organizations.events`` and
-``apps.credentials.deletion_guards`` and share ``common.schemas``.
+(organizations, credentials, skills, plugins) only import the contexts below
+them; apps built on them subscribe to ``apps.organizations.events`` and
+``apps.credentials.deletion_guards`` and share ``common.schemas``. Workspaces
+compose plugins, so workspace-scoped plugin endpoints and guards live in
+``apps.runners``.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ FOUNDATION_DEPENDENCIES = {
     "apps.organizations": {"apps.accounts"},
     "apps.credentials": {"apps.accounts", "apps.organizations"},
     "apps.skills": {"apps.accounts", "apps.organizations"},
+    "apps.plugins": {"apps.accounts", "apps.organizations", "apps.credentials"},
 }
 
 

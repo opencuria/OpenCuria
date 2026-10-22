@@ -18,6 +18,8 @@ from django.db.models import Count, Exists, F, OuterRef, Q, QuerySet, Value
 from django.db.models.functions import Coalesce, Length
 from django.utils import timezone
 
+from apps.plugins.repositories import WorkspacePluginActivationRepository
+
 from .enums import (
     RunnerStatus,
     TaskStatus,
@@ -398,8 +400,6 @@ class WorkspaceRepository:
                 update_fields=["desktop_width", "desktop_height", "updated_at"]
             )
         if plugin_ids is not None:
-            from apps.plugins.repositories import WorkspacePluginActivationRepository
-
             WorkspacePluginActivationRepository.replace_for_workspace(
                 workspace, list(dict.fromkeys(plugin_ids)), enabled_by=enabled_by
             )
