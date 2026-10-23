@@ -297,8 +297,10 @@ class GitOperationsMixin:
         runner = self._ensure_git_dispatchable(workspace)
 
         safe_args = self._sanitize_git_args(operation, dict(args or {}), user=user)
+        if operation != "list_repos" and repo_path is None:
+            raise ValueError(f"repo_path is required for operation {operation!r}")
         if repo_path is not None:
-            self._validate_git_repo_path(repo_path)
+            repo_path = self._validate_git_repo_path(repo_path)
 
         request_id = uuid.uuid4().hex
         payload: dict = {

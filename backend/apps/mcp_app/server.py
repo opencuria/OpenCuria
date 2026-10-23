@@ -95,8 +95,7 @@ Tools and their required permissions
 - get_git_state          → workspaces:git_read
 - get_git_diff           → workspaces:git_read
 - get_git_commit         → workspaces:git_read
-- git_operation          → workspaces:git_write (read-only ops via this tool
-  still require workspaces:git_read — enforced per-operation at call time)
+- git_operation          → workspaces:git_write (mutations only)
 """
 
 from __future__ import annotations
@@ -104,8 +103,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import re
 import uuid
 
 from asgiref.sync import sync_to_async
@@ -123,7 +120,7 @@ from starlette.routing import Mount
 
 from apps.accounts.models import APIKeyPermission
 from apps.harness.constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
-from apps.runners.services import get_runner_service
+from apps.runners.services import RunnerService, get_runner_service
 from apps.runners.services.image_definitions import ImageDefinitionService
 from common.exceptions import ServiceError
 
@@ -139,6 +136,12 @@ CRON_EXPRESSION_HELP = (
     "timezone_name, e.g. '*/30 8-17 * * 1-5'. Lists, ranges, steps, names "
     "and @hourly/@daily/@weekly/@monthly are supported; separate several "
     "expressions with ';'."
+)
+
+_GIT_MUTATION_OPERATIONS = tuple(
+    op
+    for op in RunnerService.GIT_OPERATIONS
+    if op not in RunnerService.GIT_READ_OPERATIONS
 )
 
 _TOOLS: list[Tool] = [
@@ -1517,29 +1520,7 @@ _TOOLS: list[Tool] = [
                 "workspace_id": {"type": "string", "description": "Workspace UUID."},
                 "operation": {
                     "type": "string",
-                    "enum": [
-                        "stage",
-                        "unstage",
-                        "discard",
-                        "commit",
-                        "fetch",
-                        "pull",
-                        "push",
-                        "sync",
-                        "checkout_branch",
-                        "checkout_commit",
-                        "checkout_remote_branch",
-                        "create_branch",
-                        "rename_branch",
-                        "delete_branch",
-                        "merge_into_current",
-                        "merge_current_into",
-                        "merge_abort",
-                        "stash_apply",
-                        "stash_pop",
-                        "stash_drop",
-                        "stash_branch",
-                    ],
+                    "enum": list(_GIT_MUTATION_OPERATIONS),
                     "description": (
                         "Whitelisted mutation-only git operation. Reads use "
                         "get_git_state/get_git_diff/get_git_commit instead."
@@ -1547,7 +1528,7 @@ _TOOLS: list[Tool] = [
                 },
                 "repo_path": {
                     "type": "string",
-                    "description": "Absolute repo path under /workspace (not needed for list_repos).",
+                    "description": "Absolute repo path under /workspace.",
                 },
                 "paths": {
                     "type": "array",
@@ -4482,488 +4463,83 @@ def _call_mark_harness_session_unread(api_key, org_id, args: dict) -> list[TextC
 
 
 # ---------------------------------------------------------------------------
-# Git tools (productive git integration, whitelisted RPC parity)
+# Git tools
 # ---------------------------------------------------------------------------
-
-#: Whitelisted git operations accepted by the ``git_operation`` MCP tool.
-#: NOTE: ``_GIT_OPERATIONS`` is the full whitelist (reads + mutations) used
-#: for argument validation and the per-call permission guard. The generic
-#: ``git_operation`` *tool schema* intentionally exposes only
-#: ``_GIT_MUTATION_OPERATIONS`` — dedicated ``get_git_*`` tools cover reads.
-_GIT_OPERATIONS: tuple[str, ...] = (
-    "list_repos",
-    "repo_snapshot",
-    "repo_history",
-    "working_diff",
-    "commit_details",
-    "stage",
-    "unstage",
-    "discard",
-    "commit",
-    "fetch",
-    "pull",
-    "push",
-    "sync",
-    "checkout_branch",
-    "checkout_commit",
-    "checkout_remote_branch",
-    "create_branch",
-    "rename_branch",
-    "delete_branch",
-    "merge_into_current",
-    "merge_current_into",
-    "merge_abort",
-    "stash_apply",
-    "stash_pop",
-    "stash_drop",
-    "stash_branch",
-)
-
-#: Read-only git operations — callable via ``git_operation`` with only
-#: ``workspaces:git_read`` (mutations always need ``workspaces:git_write``).
-#: Kept as defense-in-depth even though the tool schema no longer advertises
-#: reads (dedicated ``get_git_*`` tools cover them).
-_GIT_READ_OPERATIONS = frozenset(
-    {"list_repos", "repo_snapshot", "repo_history", "working_diff", "commit_details"}
-)
-
-#: Mutation-only operations advertised by the generic ``git_operation`` tool
-#: schema. Dedicated ``get_git_state``/``get_git_diff``/``get_git_commit``
-#: cover reads, so a write-only key never sees a read op as an option.
-_GIT_MUTATION_OPERATIONS: tuple[str, ...] = tuple(
-    op for op in _GIT_OPERATIONS if op not in _GIT_READ_OPERATIONS
-)
-
-_GIT_HASH_RE = re.compile(r"^[0-9a-fA-F]{4,64}$")
-
-_GIT_STASH_SELECTOR_RE = re.compile(r"^stash@\{\d{1,9}\}$")
-
-#: Allowed arg keys per git operation (excludes envelope keys
-#: ``workspace_id``/``operation``/``repo_path`` handled separately).
-#: Mirrors ``RunnerService._GIT_ALLOWED_ARGS``; the service re-validates,
-#: so MCP and REST can never bypass the whitelist.
-_GIT_MCP_ALLOWED_ARGS: dict[str, frozenset] = {
-    "list_repos": frozenset(),
-    "repo_snapshot": frozenset(),
-    "repo_history": frozenset({"history_limit", "history_skip", "branch"}),
-    "working_diff": frozenset(),
-    "commit_details": frozenset({"commit"}),
-    "stage": frozenset({"paths"}),
-    "unstage": frozenset({"paths"}),
-    "discard": frozenset({"paths"}),
-    "commit": frozenset({"message"}),
-    "fetch": frozenset({"remote"}),
-    "pull": frozenset({"remote", "branch"}),
-    "push": frozenset({"remote", "set_upstream"}),
-    "sync": frozenset({"remote"}),
-    "checkout_branch": frozenset({"branch"}),
-    "checkout_commit": frozenset({"commit"}),
-    "checkout_remote_branch": frozenset({"remote_ref", "local_name"}),
-    "create_branch": frozenset({"branch", "start_point", "checkout"}),
-    "rename_branch": frozenset({"new_branch", "old_branch"}),
-    "delete_branch": frozenset({"branch"}),
-    "merge_into_current": frozenset({"branch", "message"}),
-    "merge_current_into": frozenset({"target", "message"}),
-    "merge_abort": frozenset(),
-    "stash_apply": frozenset({"stash"}),
-    "stash_pop": frozenset({"stash"}),
-    "stash_drop": frozenset({"stash"}),
-    "stash_branch": frozenset({"stash", "branch"}),
-}
-
-#: Envelope keys accepted by ``git_operation`` (everything else rejected).
-_GIT_MCP_ENVELOPE_KEYS = frozenset({"workspace_id", "operation", "repo_path"})
-
-#: Rejected caller-controlled keys (defence in depth with explicit errors).
-_GIT_MCP_FORBIDDEN_KEYS = frozenset(
-    {"env", "author_name", "author_email", "args", "argv"}
-)
-
-
-def _parse_git_workspace(args: dict) -> tuple:
-    """Parse workspace_id from MCP args or return an error."""
-    raw = args.get("workspace_id")
-    if not raw:
-        return None, _error("workspace_id is required")
-    try:
-        return uuid.UUID(str(raw)), None
-    except ValueError:
-        return None, _error("Invalid workspace_id UUID")
-
-
-def _validate_git_repo_path(repo_path: str | None) -> tuple[str | None, object]:
-    """Basic backend check for absolute repo paths (runner re-validates)."""
-    if repo_path is None:
-        return None, None
-    cleaned = str(repo_path).strip()
-    if not cleaned:
-        return None, _error("repo_path must be a non-empty string")
-    if "\x00" in cleaned or "\n" in cleaned or "\r" in cleaned:
-        return None, _error("Invalid repo_path")
-    normalized = os.path.normpath(cleaned)
-    if normalized != "/workspace" and not normalized.startswith("/workspace/"):
-        return None, _error("repo_path must be under /workspace")
-    if len(cleaned) > 512:
-        return None, _error("repo_path too long (max 512 chars)")
-    return cleaned, None
-
-
-def _check_git_tool_permission(api_key, operation: str) -> object | None:
-    """Enforce per-operation permissions for the generic git tool."""
-    from apps.accounts.models import APIKeyPermission
-
-    if operation in _GIT_READ_OPERATIONS:
-        if not api_key.has_permission(APIKeyPermission.WORKSPACES_GIT_READ):
-            return _error(
-                "Permission denied: "
-                f"{APIKeyPermission.WORKSPACES_GIT_READ.value} required"
-            )
-        return None
-    if not api_key.has_permission(APIKeyPermission.WORKSPACES_GIT_WRITE):
-        return _error(
-            f"Permission denied: {APIKeyPermission.WORKSPACES_GIT_WRITE.value} required"
-        )
-    return None
-
-
-def _git_mcp_args(operation: str, args: dict) -> tuple[dict | None, object]:
-    """Build the service args dict field-by-field from MCP args.
-
-    Only explicitly known fields per operation are forwarded — there is
-    no ``args`` dict passthrough and no ``env`` field. Unknown keys
-    (``env``, ``author_*``, ``args``/``argv``, aliases, typos) are
-    rejected, never silently dropped. Returns ``(args, None)`` or
-    ``(None, error)``. The webapp/API sends plain ``message`` only.
-    """
-    if operation not in _GIT_OPERATIONS:
-        return None, _error(
-            f"Unknown git operation: {operation!r}. "
-            f"Must be one of: {', '.join(_GIT_OPERATIONS)}"
-        )
-    for forbidden in sorted(_GIT_MCP_FORBIDDEN_KEYS):
-        if forbidden in args:
-            if forbidden == "env":
-                return None, _error("env is not accepted for git operations")
-            if forbidden in {"author_name", "author_email"}:
-                return None, _error(
-                    "author_name/author_email are set server-side "
-                    "from the API key account"
-                )
-            return None, _error(f"{forbidden} is not accepted for git operations")
-    allowed = _GIT_MCP_ALLOWED_ARGS.get(operation, frozenset())
-    for key in args:
-        if key in _GIT_MCP_ENVELOPE_KEYS:
-            continue
-        if key not in allowed:
-            return None, _error(
-                f"Unknown argument {key!r} for git operation {operation!r}"
-            )
-    out: dict = {}
-    if operation in {"list_repos", "repo_snapshot"}:
-        return {}, None
-    if operation == "repo_history":
-        if args.get("history_limit") is not None:
-            try:
-                limit = int(args["history_limit"])
-            except (TypeError, ValueError):
-                return None, _error("history_limit must be an integer (1-500)")
-            if limit < 1 or limit > 500:
-                return None, _error("history_limit must be an integer (1-500)")
-            out["history_limit"] = limit
-        if args.get("history_skip") is not None:
-            try:
-                skip = int(args["history_skip"])
-            except (TypeError, ValueError):
-                return None, _error("history_skip must be an integer (>= 0)")
-            if skip < 0:
-                return None, _error("history_skip must be >= 0")
-            out["history_skip"] = skip
-        if args.get("branch") not in (None, ""):
-            branch = str(args["branch"]).strip()
-            if not branch or len(branch) > 255:
-                return None, _error("Invalid branch")
-            out["branch"] = branch
-        return out, None
-    if operation in {"stage", "unstage", "discard"}:
-        raw = args.get("paths")
-        if isinstance(raw, str):
-            raw = [raw]
-        if not isinstance(raw, list) or not raw:
-            return None, _error(f"paths is required for operation {operation!r}")
-        if len(raw) > 256:
-            return None, _error("Too many paths (max 256)")
-        for item in raw:
-            text = str(item)
-            if not text.strip() or len(text) > 256:
-                return None, _error("Invalid path entry (must be 1-256 chars)")
-            if "\x00" in text or "\n" in text or "\r" in text:
-                return None, _error(f"Invalid path: {item!r}")
-        out["paths"] = [str(item) for item in raw]
-        return out, None
-    if operation == "commit":
-        message = str(args.get("message", "") or "")
-        if not message.strip():
-            return None, _error("message is required for commit")
-        if len(message) > 10000:
-            return None, _error("message too long (max 10000 chars)")
-        out["message"] = message
-        return out, None
-    if operation == "commit_details":
-        commit = str(args.get("commit", "") or "").strip()
-        if not commit:
-            return None, _error("commit is required for commit_details")
-        if not _GIT_HASH_RE.match(commit.lower()):
-            return None, _error("Invalid commit hash (must be 4-64 hex chars)")
-        out["commit"] = commit
-        return out, None
-    if operation in {"fetch", "pull", "push", "sync"}:
-        if args.get("remote") not in (None, ""):
-            remote = str(args["remote"]).strip()
-            if not remote or len(remote) > 255:
-                return None, _error("Invalid remote")
-            out["remote"] = remote
-        if operation == "pull" and args.get("branch") not in (None, ""):
-            if args.get("remote") in (None, ""):
-                return None, _error("remote is required when branch is set for pull")
-            branch = str(args["branch"]).strip()
-            if not branch or len(branch) > 255:
-                return None, _error("Invalid branch")
-            out["branch"] = branch
-        if operation == "push" and args.get("set_upstream") is not None:
-            out["set_upstream"] = bool(args["set_upstream"])
-        return out, None
-    if operation == "checkout_branch":
-        branch = str(args.get("branch", "") or "").strip()
-        if not branch or len(branch) > 255:
-            return None, _error("branch is required for checkout_branch")
-        out["branch"] = branch
-        return out, None
-    if operation == "checkout_commit":
-        commit = str(args.get("commit", "") or "").strip()
-        if not commit:
-            return None, _error("commit is required for checkout_commit")
-        if not _GIT_HASH_RE.match(commit.lower()):
-            return None, _error("Invalid commit hash (must be 4-64 hex chars)")
-        out["commit"] = commit
-        return out, None
-    if operation == "checkout_remote_branch":
-        remote_ref = str(args.get("remote_ref", "") or "").strip()
-        if not remote_ref:
-            return None, _error("remote_ref is required for checkout_remote_branch")
-        if len(remote_ref) > 255:
-            return None, _error("Invalid remote_ref")
-        remote, sep, branch_part = remote_ref.partition("/")
-        if not sep or not remote or not branch_part:
-            return None, _error("Invalid remote_ref")
-        out["remote_ref"] = remote_ref
-        if args.get("local_name") not in (None, ""):
-            local = str(args["local_name"]).strip()
-            if not local or len(local) > 255:
-                return None, _error("Invalid local_name")
-            out["local_name"] = local
-        return out, None
-    if operation == "create_branch":
-        branch = str(args.get("branch", "") or "").strip()
-        if not branch or len(branch) > 255:
-            return None, _error("branch is required for create_branch")
-        out["branch"] = branch
-        if args.get("start_point") not in (None, ""):
-            start = str(args["start_point"]).strip()
-            if not start or len(start) > 255:
-                return None, _error("Invalid start_point")
-            out["start_point"] = start
-        if args.get("checkout") is not None:
-            out["checkout"] = bool(args["checkout"])
-        return out, None
-    if operation == "rename_branch":
-        new = str(args.get("new_branch", "") or "").strip()
-        if not new or len(new) > 255:
-            return None, _error("new_branch is required for rename_branch")
-        out["new_branch"] = new
-        old = str(args.get("old_branch", "") or "").strip()
-        if old:
-            if len(old) > 255:
-                return None, _error("Invalid old_branch")
-            out["old_branch"] = old
-        return out, None
-    if operation == "delete_branch":
-        branch = str(args.get("branch", "") or "").strip()
-        if not branch or len(branch) > 255:
-            return None, _error("branch is required for delete_branch")
-        out["branch"] = branch
-        return out, None
-    if operation == "merge_into_current":
-        branch = str(args.get("branch", "") or "").strip()
-        if not branch or len(branch) > 255:
-            return None, _error("branch is required for merge_into_current")
-        out["branch"] = branch
-        if args.get("message") not in (None, ""):
-            message = str(args["message"])
-            if len(message) > 4096:
-                return None, _error("message too long (max 4096 chars)")
-            out["message"] = message
-        return out, None
-    if operation == "merge_current_into":
-        target = str(args.get("target", "") or "").strip()
-        if not target or len(target) > 255:
-            return None, _error("target is required for merge_current_into")
-        out["target"] = target
-        if args.get("message") not in (None, ""):
-            message = str(args["message"])
-            if len(message) > 4096:
-                return None, _error("message too long (max 4096 chars)")
-            out["message"] = message
-        return out, None
-    if operation == "merge_abort":
-        return {}, None
-    if operation in {"stash_apply", "stash_pop", "stash_drop"}:
-        stash = str(args.get("stash", "") or "").strip()
-        if not stash or not _GIT_STASH_SELECTOR_RE.match(stash):
-            return None, _error(f"stash is required for {operation} (stash@{{n}})")
-        out["stash"] = stash
-        return out, None
-    if operation == "stash_branch":
-        stash = str(args.get("stash", "") or "").strip()
-        if not stash or not _GIT_STASH_SELECTOR_RE.match(stash):
-            return None, _error("stash is required for stash_branch (stash@{n})")
-        branch = str(args.get("branch", "") or "").strip()
-        if not branch or len(branch) > 255:
-            return None, _error("branch is required for stash_branch")
-        out["stash"] = stash
-        out["branch"] = branch
-        return out, None
-    if operation == "working_diff":
-        return {}, None
-    return None, _error(f"Unknown git operation: {operation!r}")
 
 
 async def _run_git_operation_mcp(
-    api_key, org_id, workspace_id, operation: str, repo_path, svc_args: dict
-):
-    """Validate ownership then dispatch one git operation via RunnerService.
+    api_key, org_id, args: dict, operation: str
+) -> list[TextContent]:
+    """Authorize the workspace, then let RunnerService validate and dispatch.
 
-    Commit identity always comes from ``api_key.user``; no caller sends
-    ``author_*`` (rejected in :func:`_git_mcp_args` and the service).
+    Only MCP envelope fields are removed. All operation arguments, including
+    unknown or caller-controlled keys, reach the service's strict whitelist.
+    Commit identity is derived there from the API key user, never MCP input.
     """
-    from asgiref.sync import sync_to_async
-
-    from apps.runners.exceptions import RunnerTimeoutError
-    from common.exceptions import ConflictError, NotFoundError
-
+    raw_workspace_id = args.get("workspace_id")
+    if not raw_workspace_id:
+        return _error("workspace_id is required")
+    try:
+        workspace_id = uuid.UUID(str(raw_workspace_id))
+    except ValueError:
+        return _error("Invalid workspace_id UUID")
     workspace, owned_error = await sync_to_async(_get_owned_workspace_or_error)(
         api_key, org_id, workspace_id
     )
     if owned_error is not None:
         return owned_error
 
-    svc = _runner_service()
     try:
-        result = await svc.run_git_operation(
+        result = await _runner_service().run_git_operation(
             workspace.id,
             operation,
-            repo_path=repo_path,
-            args=svc_args,
+            repo_path=args.get("repo_path"),
+            args={
+                key: value
+                for key, value in args.items()
+                if key not in {"workspace_id", "repo_path"}
+            },
             user=api_key.user,
         )
-    except (NotFoundError, RunnerTimeoutError, ConflictError, ValueError) as exc:
-        return _error(str(exc))
     except Exception as exc:
         return _error(str(exc))
     return _text(result)
 
 
 async def _call_get_git_state(api_key, org_id, args: dict) -> list[TextContent]:
-    """List light git repo summaries under /workspace (lazy loading)."""
-    workspace_id, error = _parse_git_workspace(args)
-    if error is not None:
-        return error
-    svc_args, args_error = _git_mcp_args(
-        "list_repos",
-        {"workspace_id": args.get("workspace_id"), **args},
-    )
-    if args_error is not None:
-        return args_error
-    assert svc_args is not None
-    return await _run_git_operation_mcp(
-        api_key, org_id, workspace_id, "list_repos", None, svc_args
-    )
+    """List light git repo summaries under /workspace."""
+    return await _run_git_operation_mcp(api_key, org_id, args, "list_repos")
 
 
 async def _call_get_git_diff(api_key, org_id, args: dict) -> list[TextContent]:
     """Return staged/unstaged diff entries for one repo."""
-    workspace_id, error = _parse_git_workspace(args)
-    if error is not None:
-        return error
-    if not args.get("repo_path"):
-        return _error("repo_path is required")
-    repo_path, repo_error = _validate_git_repo_path(args.get("repo_path"))
-    if repo_error is not None:
-        return repo_error
-    assert repo_path is not None
-    return await _run_git_operation_mcp(
-        api_key, org_id, workspace_id, "working_diff", repo_path, {}
-    )
+    return await _run_git_operation_mcp(api_key, org_id, args, "working_diff")
 
 
 async def _call_get_git_commit(api_key, org_id, args: dict) -> list[TextContent]:
     """Return full details for one commit."""
-    workspace_id, error = _parse_git_workspace(args)
-    if error is not None:
-        return error
-    if not args.get("repo_path"):
-        return _error("repo_path is required")
-    repo_path, repo_error = _validate_git_repo_path(args.get("repo_path"))
-    if repo_error is not None:
-        return repo_error
-    commit = str(args.get("commit", "") or "").strip()
-    if not commit:
-        return _error("commit is required")
-    if not _GIT_HASH_RE.match(commit.lower()):
-        return _error("Invalid commit hash (must be 4-64 hex chars)")
-    assert repo_path is not None
-    return await _run_git_operation_mcp(
-        api_key, org_id, workspace_id, "commit_details", repo_path, {"commit": commit}
-    )
+    return await _run_git_operation_mcp(api_key, org_id, args, "commit_details")
 
 
 async def _call_git_operation(api_key, org_id, args: dict) -> list[TextContent]:
-    """Run one whitelisted git operation with per-operation permissions."""
-    workspace_id, error = _parse_git_workspace(args)
-    if error is not None:
-        return error
+    """Run a git mutation; reads use the dedicated get_git_* tools."""
     operation = str(args.get("operation", "") or "").strip()
     if not operation:
         return _error("operation is required")
-    if operation not in _GIT_OPERATIONS:
-        return _error(
-            f"Unknown git operation: {operation!r}. "
-            f"Must be one of: {', '.join(_GIT_OPERATIONS)}"
-        )
-    if operation in _GIT_READ_OPERATIONS:
+    if operation not in _GIT_MUTATION_OPERATIONS:
         return _error(
             f"Unknown git operation: {operation!r}. "
             "Reads use get_git_state/get_git_diff/get_git_commit instead."
         )
-    perm_error = _check_git_tool_permission(api_key, operation)
-    if perm_error is not None:
-        return perm_error
-    repo_path = None
-    if operation != "list_repos":
-        if not args.get("repo_path"):
-            return _error(f"repo_path is required for operation {operation!r}")
-        repo_path, repo_error = _validate_git_repo_path(args.get("repo_path"))
-        if repo_error is not None:
-            return repo_error
-    elif args.get("repo_path") not in (None, ""):
-        repo_path, repo_error = _validate_git_repo_path(args.get("repo_path"))
-        if repo_error is not None:
-            return repo_error
-    svc_args, args_error = _git_mcp_args(operation, args)
-    if args_error is not None:
-        return args_error
-    assert svc_args is not None
+    if not api_key.has_permission(APIKeyPermission.WORKSPACES_GIT_WRITE):
+        return _error(
+            f"Permission denied: {APIKeyPermission.WORKSPACES_GIT_WRITE.value} required"
+        )
     return await _run_git_operation_mcp(
-        api_key, org_id, workspace_id, operation, repo_path, svc_args
+        api_key,
+        org_id,
+        {key: value for key, value in args.items() if key != "operation"},
+        operation,
     )
 
 

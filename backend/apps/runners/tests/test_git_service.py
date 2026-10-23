@@ -103,10 +103,11 @@ class TestRunGitOperationHappyPath:
         assert "env" not in payload.get("args", {})
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("repo_path", ["/workspace/repo", " /workspace/repo "])
     async def test_repo_snapshot_dispatch_includes_repo_path(
-        self, service, runner, workspace
+        self, service, runner, workspace, repo_path
     ):
-        """repo_snapshot forwards repo_path top-level with empty args."""
+        """repo_snapshot forwards the validated repo path with empty args."""
         seen = _emit_ok(
             service, runner, workspace, payload_extra={"snapshot": {"path": "x"}}
         )
@@ -114,7 +115,7 @@ class TestRunGitOperationHappyPath:
         result = await service.run_git_operation(
             workspace.id,
             "repo_snapshot",
-            repo_path="/workspace/repo",
+            repo_path=repo_path,
             args={},
         )
 
@@ -363,12 +364,15 @@ class TestStrictGitArgs:
         service._emit_to_runner.assert_not_called()  # type: ignore[attr-defined]
 
     @pytest.mark.asyncio
-    async def test_invalid_repo_path_rejected(self, service, runner, workspace):
-        """Repo paths outside /workspace fail before dispatch."""
+    @pytest.mark.parametrize("repo_path", [None, "", "   ", 123, "/etc/passwd"])
+    async def test_invalid_repo_path_rejected(
+        self, service, runner, workspace, repo_path
+    ):
+        """Missing, malformed or external repo paths fail before dispatch."""
         service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
-        with pytest.raises(ValueError, match="under /workspace"):
+        with pytest.raises(ValueError, match="repo_path|Repo path"):
             await service.run_git_operation(
-                workspace.id, "stage", repo_path="/etc/passwd", args={"paths": ["a"]}
+                workspace.id, "stage", repo_path=repo_path, args={"paths": ["a"]}
             )
         service._emit_to_runner.assert_not_called()  # type: ignore[attr-defined]
 
