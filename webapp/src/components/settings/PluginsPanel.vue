@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, Pencil, Plus, Puzzle, Trash2 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
+import DetailHeader from '@/components/common/DetailHeader.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import SettingsSection from './SettingsSection.vue'
@@ -22,6 +23,7 @@ import {
 } from '@/components/ui/dialog'
 
 const props = defineProps<{ initialPluginId?: string; contextVersion?: number }>()
+const emit = defineEmits<{ 'detail-change': [open: boolean] }>()
 const pluginStore = usePluginStore()
 const authStore = useAuthStore()
 const router = useRouter()
@@ -40,6 +42,9 @@ const detailUnavailable = computed(
     pluginStore.loadedOrgId === authStore.activeOrganizationId &&
     !selectedPlugin.value,
 )
+const detailOpen = computed(() => Boolean(selectedPlugin.value) && !pluginStore.error)
+watch(detailOpen, (open) => emit('detail-change', open), { immediate: true })
+onUnmounted(() => emit('detail-change', false))
 const editorOpen = ref(false)
 const editingPlugin = ref<Plugin | null>(null)
 const deletingPlugin = ref<Plugin | null>(null)
@@ -141,13 +146,155 @@ function credentialTypeLabel(type: string): string {
 </script>
 
 <template>
-  <div class="space-y-6">
+  <div class="min-w-0 space-y-6">
+    <div v-if="detailOpen && selectedPlugin" class="min-w-0 space-y-5" data-testid="plugin-detail">
+      <DetailHeader
+        :title="selectedPlugin.name"
+        back-label="Back to plugins"
+        :icon="Puzzle"
+        :description="selectedPlugin.description"
+        @back="backToList"
+      >
+        <template #meta>
+          <span class="inline-flex items-center gap-1.5"
+            ><span
+              class="size-1.5 rounded-full"
+              :class="selectedPlugin.org_enabled ? 'bg-success' : 'bg-muted-foreground'"
+            />{{ availabilityLabel(selectedPlugin) }}</span
+          >
+          <span>{{ selectedPlugin.is_global ? 'Global' : 'Organization' }}</span>
+        </template>
+        <template v-if="isAdmin" #actions>
+          <Switch
+            :model-value="selectedPlugin.org_enabled"
+            :disabled="
+              (!selectedPlugin.org_enabled &&
+                (!selectedPlugin.enabled || !selectedPlugin.published)) ||
+              pluginStore.togglingIds.includes(selectedPlugin.id)
+            "
+            :aria-label="
+              selectedPlugin.org_enabled
+                ? `Disable ${selectedPlugin.name}`
+                : `Enable ${selectedPlugin.name}`
+            "
+            :data-testid="`plugin-toggle-${selectedPlugin.id}`"
+            @update:model-value="(value) => handleToggle(selectedPlugin!, Boolean(value))"
+          />
+          <template v-if="!selectedPlugin.is_global">
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="plugin-edit-detail"
+              @click="openEdit(selectedPlugin!)"
+              ><Pencil /> Edit</Button
+            >
+            <Button
+              variant="destructive"
+              size="sm"
+              data-testid="plugin-delete-detail"
+              @click="deletingPlugin = selectedPlugin"
+              ><Trash2 /> Delete</Button
+            >
+          </template>
+        </template>
+      </DetailHeader>
+
+      <section aria-label="Skills" class="space-y-2">
+        <h3 class="text-sm font-semibold">Skills ({{ selectedPlugin.skills.length }})</h3>
+        <div
+          v-if="!selectedPlugin.skills.length"
+          class="rounded-md border border-dashed p-3 text-sm text-muted-foreground"
+        >
+          No skills.
+        </div>
+        <div
+          v-for="skill in [...selectedPlugin.skills].sort((a, b) => a.position - b.position)"
+          :key="skill.id"
+          class="rounded-md border border-border"
+        >
+          <button
+            type="button"
+            class="flex w-full items-center justify-between gap-3 p-3 text-left text-sm font-medium"
+            :aria-expanded="expandedSkills.includes(skill.id)"
+            @click="toggleSkill(skill.id)"
+          >
+            <span>{{ skill.name }}</span
+            ><span class="text-xs text-muted-foreground">{{
+              expandedSkills.includes(skill.id) ? 'Hide' : 'Show'
+            }}</span>
+          </button>
+          <pre
+            v-if="expandedSkills.includes(skill.id)"
+            class="whitespace-pre-wrap break-words border-t border-border px-3 py-3 font-sans text-sm text-muted-foreground"
+            >{{ skill.body }}</pre
+          >
+        </div>
+      </section>
+
+      <section aria-label="MCP servers" class="space-y-2">
+        <h3 class="text-sm font-semibold">MCP servers ({{ selectedPlugin.mcp_servers.length }})</h3>
+        <div
+          v-if="!selectedPlugin.mcp_servers.length"
+          class="rounded-md border border-dashed p-3 text-sm text-muted-foreground"
+        >
+          No MCP servers.
+        </div>
+        <div
+          v-for="server in selectedPlugin.mcp_servers"
+          :key="server.id"
+          class="rounded-md border border-border p-3"
+        >
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-sm font-medium">{{ server.name }}</span
+            ><Badge variant="outline">{{ transportLabel(server.transport) }}</Badge
+            ><Badge v-if="server.auth_type === 'oauth'" variant="secondary">OAuth</Badge>
+          </div>
+          <p class="mt-1 break-all font-mono text-xs text-muted-foreground">
+            {{ mcpEndpoint(server) }}
+          </p>
+        </div>
+      </section>
+
+      <section aria-label="Credential services" class="space-y-2">
+        <h3 class="text-sm font-semibold">
+          Credential services ({{ selectedPlugin.credential_requirements.length }})
+        </h3>
+        <div
+          v-if="!selectedPlugin.credential_requirements.length"
+          class="rounded-md border border-dashed p-3 text-sm text-muted-foreground"
+        >
+          No credential services required.
+        </div>
+        <div
+          v-for="requirement in selectedPlugin.credential_requirements"
+          :key="requirement.id"
+          class="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border p-3"
+        >
+          <div class="min-w-0 space-y-1">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-sm font-medium">{{ requirement.service_name }}</span
+              ><Badge variant="outline">{{ credentialTypeLabel(requirement.credential_type) }}</Badge
+              ><Badge :variant="requirement.required ? 'secondary' : 'outline'">{{
+                requirement.required ? 'Required' : 'Optional'
+              }}</Badge>
+            </div>
+            <p v-if="requirement.description" class="text-sm text-muted-foreground">
+              {{ requirement.description }}
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            :data-testid="`plugin-add-credential-${requirement.service_id}`"
+            @click="addCredential(requirement.service_id)"
+            >Add Credential</Button
+          >
+        </div>
+      </section>
+    </div>
     <SettingsSection
-      :description="
-        selectedPlugin
-          ? 'Plugin capabilities and credential dependencies.'
-          : 'Browse reusable skills and MCP server bundles available to this organization.'
-      "
+      v-else
+      description="Browse reusable skills and MCP server bundles available to this organization."
     >
       <template v-if="isAdmin && !selectedPlugin" #actions>
         <Button size="sm" data-testid="plugin-create" @click="createPlugin"
@@ -167,168 +314,6 @@ function credentialTypeLabel(type: string): string {
         data-testid="plugins-error"
       >
         {{ pluginStore.error }}
-      </div>
-      <div v-else-if="selectedPlugin" class="space-y-6" data-testid="plugin-detail">
-        <div class="flex flex-wrap items-start justify-between gap-3">
-          <div class="flex min-w-0 items-start gap-3">
-            <Button
-              variant="outline"
-              size="sm"
-              aria-label="Back to plugins"
-              data-testid="plugin-back"
-              @click="backToList"
-              ><ArrowLeft /> Back</Button
-            >
-            <div class="min-w-0 space-y-1">
-              <div class="flex flex-wrap items-center gap-2">
-                <h2 class="text-lg font-semibold">{{ selectedPlugin.name }}</h2>
-                <Badge variant="secondary">{{
-                  selectedPlugin.is_global ? 'Global' : 'Organization'
-                }}</Badge>
-              </div>
-              <p class="whitespace-pre-wrap text-sm text-muted-foreground">
-                {{ selectedPlugin.description || 'No description provided.' }}
-              </p>
-            </div>
-          </div>
-          <div v-if="isAdmin" class="flex items-center gap-2">
-            <span class="text-xs text-muted-foreground">{{
-              selectedPlugin.org_enabled ? 'Active for organization' : 'Inactive for organization'
-            }}</span>
-            <Switch
-              :model-value="selectedPlugin.org_enabled"
-              :disabled="
-                (!selectedPlugin.org_enabled &&
-                  (!selectedPlugin.enabled || !selectedPlugin.published)) ||
-                pluginStore.togglingIds.includes(selectedPlugin.id)
-              "
-              :aria-label="
-                selectedPlugin.org_enabled
-                  ? `Disable ${selectedPlugin.name}`
-                  : `Enable ${selectedPlugin.name}`
-              "
-              :data-testid="`plugin-toggle-${selectedPlugin.id}`"
-              @update:model-value="(value) => handleToggle(selectedPlugin!, Boolean(value))"
-            />
-            <template v-if="!selectedPlugin.is_global">
-              <Button
-                variant="outline"
-                size="sm"
-                data-testid="plugin-edit-detail"
-                @click="openEdit(selectedPlugin!)"
-                ><Pencil /> Edit</Button
-              >
-              <Button
-                variant="destructive"
-                size="sm"
-                data-testid="plugin-delete-detail"
-                @click="deletingPlugin = selectedPlugin"
-                ><Trash2 /> Delete</Button
-              >
-            </template>
-          </div>
-        </div>
-        <p
-          v-if="!selectedPlugin.enabled || !selectedPlugin.published"
-          class="text-xs text-muted-foreground"
-        >
-          This plugin is not currently published for workspace use.
-        </p>
-
-        <section aria-label="Skills" class="space-y-2">
-          <h3 class="text-sm font-semibold">Skills ({{ selectedPlugin.skills.length }})</h3>
-          <div
-            v-if="!selectedPlugin.skills.length"
-            class="rounded-md border border-dashed p-3 text-sm text-muted-foreground"
-          >
-            No skills.
-          </div>
-          <div
-            v-for="skill in [...selectedPlugin.skills].sort((a, b) => a.position - b.position)"
-            :key="skill.id"
-            class="rounded-md border border-border"
-          >
-            <button
-              type="button"
-              class="flex w-full items-center justify-between gap-3 p-3 text-left text-sm font-medium"
-              :aria-expanded="expandedSkills.includes(skill.id)"
-              @click="toggleSkill(skill.id)"
-            >
-              <span>{{ skill.name }}</span
-              ><span class="text-xs text-muted-foreground">{{
-                expandedSkills.includes(skill.id) ? 'Hide' : 'Show'
-              }}</span>
-            </button>
-            <pre
-              v-if="expandedSkills.includes(skill.id)"
-              class="whitespace-pre-wrap break-words border-t border-border px-3 py-3 font-sans text-sm text-muted-foreground"
-              >{{ skill.body }}</pre
-            >
-          </div>
-        </section>
-
-        <section aria-label="MCP servers" class="space-y-2">
-          <h3 class="text-sm font-semibold">
-            MCP servers ({{ selectedPlugin.mcp_servers.length }})
-          </h3>
-          <div
-            v-if="!selectedPlugin.mcp_servers.length"
-            class="rounded-md border border-dashed p-3 text-sm text-muted-foreground"
-          >
-            No MCP servers.
-          </div>
-          <div
-            v-for="server in selectedPlugin.mcp_servers"
-            :key="server.id"
-            class="rounded-md border border-border p-3"
-          >
-            <div class="flex flex-wrap items-center gap-2">
-              <span class="text-sm font-medium">{{ server.name }}</span
-              ><Badge variant="outline">{{ transportLabel(server.transport) }}</Badge
-              ><Badge v-if="server.auth_type === 'oauth'" variant="secondary">OAuth</Badge>
-            </div>
-            <p class="mt-1 break-all font-mono text-xs text-muted-foreground">
-              {{ mcpEndpoint(server) }}
-            </p>
-          </div>
-        </section>
-
-        <section aria-label="Credential services" class="space-y-2">
-          <h3 class="text-sm font-semibold">
-            Credential services ({{ selectedPlugin.credential_requirements.length }})
-          </h3>
-          <div
-            v-if="!selectedPlugin.credential_requirements.length"
-            class="rounded-md border border-dashed p-3 text-sm text-muted-foreground"
-          >
-            No credential services required.
-          </div>
-          <div
-            v-for="requirement in selectedPlugin.credential_requirements"
-            :key="requirement.id"
-            class="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border p-3"
-          >
-            <div class="min-w-0 space-y-1">
-              <div class="flex flex-wrap items-center gap-2">
-                <span class="text-sm font-medium">{{ requirement.service_name }}</span
-                ><Badge variant="outline">{{ credentialTypeLabel(requirement.credential_type) }}</Badge
-                ><Badge :variant="requirement.required ? 'secondary' : 'outline'">{{
-                  requirement.required ? 'Required' : 'Optional'
-                }}</Badge>
-              </div>
-              <p v-if="requirement.description" class="text-sm text-muted-foreground">
-                {{ requirement.description }}
-              </p>
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              :data-testid="`plugin-add-credential-${requirement.service_id}`"
-              @click="addCredential(requirement.service_id)"
-              >Add Credential</Button
-            >
-          </div>
-        </section>
       </div>
       <div
         v-else-if="detailUnavailable"

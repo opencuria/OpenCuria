@@ -55,7 +55,8 @@ layer, one implementation per behavior, composition over duplication.
 - Keep one design language. Reuse existing components and interaction patterns
   before creating anything new. Use the shared `ModelPicker` in webapp composers
   and settings; mobile may present a native picker but must reuse shared model
-  rules instead of duplicating business logic.
+  rules instead of duplicating business logic. Webapp detail views opened from a
+  list (e.g. runner, plugin) start with the shared `DetailHeader`.
 - Docs/setup details live in `README.md` and component READMEs; do not
   duplicate them here.
 

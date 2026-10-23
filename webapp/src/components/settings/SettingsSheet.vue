@@ -118,10 +118,17 @@ function clearCredentialsContext(kind: 'service' | 'credential' | 'finished'): v
 
 const selectedRunnerId = ref<string | undefined>()
 const selectedRunnerActivity = ref(false)
-const runnerDetailOpen = ref(false)
+// Tab whose panel currently shows a detail view; detail views use the full width.
+const detailTab = ref<SettingsTabId | null>(null)
+
+function setDetailOpen(tab: SettingsTabId, isOpen: boolean): void {
+  // A previous panel may report its unmount after the next panel opened a detail.
+  if (isOpen) detailTab.value = tab
+  else if (detailTab.value === tab) detailTab.value = null
+}
 
 watch(activeTab, (tab, previous) => {
-  runnerDetailOpen.value = false
+  detailTab.value = null
   if (previous === 'runners' && tab !== 'runners') {
     selectedRunnerId.value = undefined
     selectedRunnerActivity.value = false
@@ -131,7 +138,7 @@ watch(open, (isOpen) => {
   if (!isOpen) {
     selectedRunnerId.value = undefined
     selectedRunnerActivity.value = false
-    runnerDetailOpen.value = false
+    detailTab.value = null
     settingsContext.value = { version: settingsContext.value.version + 1 }
   }
 })
@@ -276,7 +283,7 @@ watch(isAdmin, (admin) => {
         <ScrollArea class="min-h-0 min-w-0 flex-1">
           <div
             class="mx-auto min-w-0 w-full p-4 lg:p-6"
-            :class="activeTab === 'runners' && runnerDetailOpen ? 'max-w-none' : 'max-w-3xl'"
+            :class="detailTab === activeTab ? 'max-w-none' : 'max-w-3xl'"
             role="tabpanel"
             :aria-label="activeLabel"
           >
@@ -296,6 +303,7 @@ watch(isAdmin, (admin) => {
               v-else-if="open && activeTab === 'plugins'"
               :initial-plugin-id="settingsContext.pluginId"
               :context-version="settingsContext.version"
+              @detail-change="setDetailOpen('plugins', $event)"
             />
             <ApiKeysPanel v-else-if="open && activeTab === 'api-keys'" />
             <CapturedImagesPanel v-else-if="open && activeTab === 'images'" />
@@ -304,7 +312,7 @@ watch(isAdmin, (admin) => {
               :runner-id="selectedRunnerId"
               :runner-activity="selectedRunnerActivity"
               :context-version="settingsContext.version"
-              @detail-change="runnerDetailOpen = $event"
+              @detail-change="setDetailOpen('runners', $event)"
             />
             <CredentialServicesTab v-else-if="open && activeTab === 'credential-services'" />
             <ImageDefinitionsTab v-else-if="open && activeTab === 'image-definitions'" />

@@ -2,7 +2,6 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { useNow } from '@vueuse/core'
 import {
-  ArrowLeft,
   Camera,
   ChevronDown,
   Clock,
@@ -49,6 +48,7 @@ import {
 } from '@/components/ui/select'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Skeleton } from '@/components/ui/skeleton'
+import DetailHeader from '@/components/common/DetailHeader.vue'
 import ImageDeletionDialog from '@/components/images/ImageDeletionDialog.vue'
 import EditRunnerResourcesDialog from './EditRunnerResourcesDialog.vue'
 import RunnerResourceOverview from './RunnerResourceOverview.vue'
@@ -302,55 +302,37 @@ async function rebuild(definition: string) {
 
 <template>
   <div class="min-w-0 space-y-5 text-sm" data-testid="runner-cockpit" ref="cockpit">
-    <header class="space-y-3">
-      <Button
-        variant="ghost"
-        size="sm"
-        class="-ml-2 text-xs text-muted-foreground"
-        @click="emit('back')"
-        ><ArrowLeft />Back to runners</Button
-      >
-      <div class="flex min-w-0 flex-wrap items-start justify-between gap-3">
-        <div class="flex min-w-0 flex-1 basis-64 items-center gap-3">
-          <div
-            class="flex size-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary"
-          >
-            <Server :size="21" />
-          </div>
-          <div class="min-w-0 space-y-1">
-            <h2 class="truncate text-xl font-semibold tracking-tight">
-              {{ runner.name || runner.id.slice(0, 8) }}
-            </h2>
-            <div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-              <span class="inline-flex items-center gap-1.5"
-                ><span
-                  class="size-1.5 rounded-full"
-                  :class="online ? 'bg-success' : 'bg-muted-foreground'"
-                />{{ online ? 'Online' : 'Offline' }}</span
-              >
-              <span v-for="type in runtimeTypes" :key="type">{{ type.toUpperCase() }}</span>
-              <span
-                >{{ online ? 'Connected' : 'Last seen' }}
-                {{
-                  formatRelativeTime(online ? runner.connected_at : runner.disconnected_at)
-                }}</span
-              >
-            </div>
-          </div>
-        </div>
-        <div class="flex flex-wrap items-center gap-2">
-          <EditRunnerResourcesDialog
-            v-if="auth.isAdmin && runnerSupportsRuntime(runner, 'qemu')"
-            :runner="runner"
-          />
-          <Button variant="outline" size="sm" :disabled="scanBusy || refreshPending" @click="scan"
-            ><RefreshCw :class="{ 'animate-spin': scanBusy || refreshPending }" />{{
-              refreshPending ? 'Scan queued' : 'Refresh inventory'
-            }}</Button
-          >
-        </div>
-      </div>
-    </header>
+    <DetailHeader
+      :title="runner.name || runner.id.slice(0, 8)"
+      back-label="Back to runners"
+      :icon="Server"
+      @back="emit('back')"
+    >
+      <template #meta>
+        <span class="inline-flex items-center gap-1.5"
+          ><span
+            class="size-1.5 rounded-full"
+            :class="online ? 'bg-success' : 'bg-muted-foreground'"
+          />{{ online ? 'Online' : 'Offline' }}</span
+        >
+        <span v-for="type in runtimeTypes" :key="type">{{ type.toUpperCase() }}</span>
+        <span
+          >{{ online ? 'Connected' : 'Last seen' }}
+          {{ formatRelativeTime(online ? runner.connected_at : runner.disconnected_at) }}</span
+        >
+      </template>
+      <template #actions>
+        <EditRunnerResourcesDialog
+          v-if="auth.isAdmin && runnerSupportsRuntime(runner, 'qemu')"
+          :runner="runner"
+        />
+        <Button variant="outline" size="sm" :disabled="scanBusy || refreshPending" @click="scan"
+          ><RefreshCw :class="{ 'animate-spin': scanBusy || refreshPending }" />{{
+            refreshPending ? 'Scan queued' : 'Refresh inventory'
+          }}</Button
+        >
+      </template>
+    </DetailHeader>
     <div
       v-if="error"
       role="alert"

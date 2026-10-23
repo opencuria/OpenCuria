@@ -3,6 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { reactive } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import PluginsPanel from './PluginsPanel.vue'
+import DetailHeader from '@/components/common/DetailHeader.vue'
 import type { Plugin } from '@/types'
 
 const routerPush = vi.fn()
@@ -172,6 +173,28 @@ describe('PluginsPanel overview and details', () => {
     await wrapper.find('button[aria-expanded="false"]').trigger('click')
     expect(wrapper.find('pre').text()).toContain('# Search')
     expect(wrapper.find('pre').element.innerHTML).not.toContain('<h1>')
+  })
+  it('uses the shared detail header and reports detail state while opening and leaving', async () => {
+    const p = plugin({ published: false, org_enabled: false })
+    pluginStore.plugins = [p]
+    const wrapper = mountPanel()
+    await flushPromises()
+    expect(wrapper.emitted('detail-change')).toEqual([[false]])
+    await wrapper.find('[data-testid="plugin-open-p-1"]').trigger('click')
+    const header = wrapper.findComponent(DetailHeader)
+    expect(header.props()).toMatchObject({
+      title: 'Notion tools',
+      backLabel: 'Back to plugins',
+      description: 'Connect Notion to your workspace.',
+    })
+    expect(header.text()).toContain('Unpublished')
+    expect(header.text()).toContain('Global')
+    expect(wrapper.emitted('detail-change')).toEqual([[false], [true]])
+    routerReplace.mockClear()
+    await wrapper.get('[data-testid="detail-back"]').trigger('click')
+    expect(routerReplace).toHaveBeenCalledWith({ path: '/', query: {} })
+    expect(wrapper.find('[data-testid="plugin-catalog"]').exists()).toBe(true)
+    expect(wrapper.emitted('detail-change')).toEqual([[false], [true], [false]])
   })
   it('only admins see org activation and org-plugin edit/delete inside details', async () => {
     const orgPlugin = plugin({

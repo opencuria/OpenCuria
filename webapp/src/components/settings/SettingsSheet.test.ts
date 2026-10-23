@@ -175,6 +175,12 @@ function mountSheet() {
           emits: ['detail-change'],
           template: '<div />',
         },
+        PluginsPanel: {
+          name: 'PluginsPanel',
+          props: ['initialPluginId', 'contextVersion'],
+          emits: ['detail-change'],
+          template: '<div />',
+        },
       },
     },
   })
@@ -329,7 +335,7 @@ describe('SettingsSheet', () => {
     expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Plugins')
   })
 
-  it('widens only runner detail and resets context on tab switch and close', async () => {
+  it('widens runner detail and resets context on tab switch and close', async () => {
     const wrapper = mountSheet()
     const openRunner = () =>
       window.dispatchEvent(
@@ -364,6 +370,32 @@ describe('SettingsSheet', () => {
     expect(runners().exists()).toBe(false)
     expect(wrapper.get('[data-testid="settings-sheet"]').classes()).toContain('min-w-0')
     expect(wrapper.get('nav').classes()).toContain('min-w-0')
+  })
+
+  it('widens plugin detail and ignores a late close from the previous panel', async () => {
+    const wrapper = mountSheet()
+    window.dispatchEvent(
+      new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'runners', runnerId: 'r' } }),
+    )
+    await settleAsyncComponents()
+    const panel = () => wrapper.get('[role="tabpanel"]')
+    const runners = wrapper.findComponent({ name: 'RunnersPanel' })
+    runners.vm.$emit('detail-change', true)
+    await wrapper.vm.$nextTick()
+    expect(panel().classes()).toContain('max-w-none')
+
+    window.dispatchEvent(
+      new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'plugins', pluginId: 'p-1' } }),
+    )
+    await settleAsyncComponents()
+    expect(panel().classes()).toContain('max-w-3xl')
+    wrapper.findComponent({ name: 'PluginsPanel' }).vm.$emit('detail-change', true)
+    runners.vm.$emit('detail-change', false)
+    await wrapper.vm.$nextTick()
+    expect(panel().classes()).toContain('max-w-none')
+    wrapper.findComponent({ name: 'PluginsPanel' }).vm.$emit('detail-change', false)
+    await wrapper.vm.$nextTick()
+    expect(panel().classes()).toContain('max-w-3xl')
   })
 
   it('pins the 80rem dialog width with the Tailwind v4 important modifier', () => {
