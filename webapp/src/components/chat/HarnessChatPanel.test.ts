@@ -338,6 +338,41 @@ describe('HarnessChatPanel', () => {
       reasoningEffort: 'high',
     })
     expect(create).not.toHaveBeenCalled()
+    expect(wrapper.findComponent(HarnessChatInputStub).emitted('prefill')).toBeUndefined()
+  })
+
+  it('puts the draft back into the composer when a follow-up send failed', async () => {
+    vi.mocked(listHarnessSessions).mockResolvedValueOnce([makeSession()])
+    await router.push('/workspaces/ws-1?session=session-root')
+    const wrapper = mount(HarnessChatPanel, {
+      props: { workspaceId: 'ws-1', canPrompt: true },
+      global: { plugins: [router], stubs },
+    })
+    await flushPromises()
+    vi.spyOn(useHarnessStore(), 'sendMessage').mockResolvedValue(false)
+    const input = wrapper.findComponent(HarnessChatInputStub)
+
+    input.vm.$emit('send', 'Refactor auth', 'build', 'm', ['skill-1'], '', 'native')
+    await flushPromises()
+
+    expect(input.emitted('prefill')).toEqual([
+      ['Refactor auth', { append: true, skillIds: ['skill-1'] }],
+    ])
+  })
+
+  it('puts the draft back into the composer when creating the chat failed', async () => {
+    const wrapper = mount(HarnessChatPanel, {
+      props: { workspaceId: 'ws-1', canPrompt: true },
+      global: { plugins: [router], stubs },
+    })
+    await flushPromises()
+    vi.spyOn(useHarnessStore(), 'createSession').mockResolvedValue(null)
+    const input = wrapper.findComponent(HarnessChatInputStub)
+
+    input.vm.$emit('send', 'New chat prompt', 'build', 'm', [], '', 'native')
+    await flushPromises()
+
+    expect(input.emitted('prefill')).toEqual([['New chat prompt', { append: true, skillIds: [] }]])
   })
 
   it('clears Claude model state when starting a new native conversation', async () => {
@@ -1385,7 +1420,7 @@ describe('HarnessChatPanel', () => {
       input.vm.$emit('send', 'Use pnpm', 'build', 'm', [], '', 'native')
       await flushPromises()
 
-      expect(input.emitted('prefill')).toEqual([['Use pnpm', { append: true }]])
+      expect(input.emitted('prefill')).toEqual([['Use pnpm', { append: true, skillIds: [] }]])
     })
 
     it('does not restore into another session after the user switched away', async () => {

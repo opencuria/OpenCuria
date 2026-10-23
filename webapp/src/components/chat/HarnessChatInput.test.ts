@@ -1304,6 +1304,39 @@ describe('HarnessChatInput', () => {
       expect(editorText(wrapper)).toBe('replaced')
     })
 
+    it('restores a sent draft with its skills after the parent reports a failed send', async () => {
+      const wrapper = mountInput({
+        sessionId: 'session-1',
+        skillOptions: [
+          {
+            id: 'skill-1',
+            name: 'Linear',
+            body: '',
+            scope: 'personal',
+            created_by_email: null,
+            created_at: '',
+            updated_at: '',
+          },
+        ],
+      })
+      const vm = wrapper.vm as unknown as {
+        setPrompt(text: string, options?: { append?: boolean; skillIds?: string[] }): void
+      }
+      vm.setPrompt('Refactor auth', { skillIds: ['skill-1'] })
+      await wrapper.vm.$nextTick()
+      await editor(wrapper).trigger('keydown', { key: 'Enter' })
+      expect(wrapper.emitted('send')?.[0]?.[0]).toBe('Refactor auth')
+      expect(editorText(wrapper)).toBe('')
+      expect(wrapper.find('[data-testid="composer-skill-chip-skill-1"]').exists()).toBe(false)
+
+      vm.setPrompt('Refactor auth', { append: true, skillIds: ['skill-1'] })
+      await wrapper.vm.$nextTick()
+
+      expect(editorText(wrapper)).toBe('Refactor auth')
+      expect(sessionStorage.getItem('chat-input-ws-1-session-1')).toBe('Refactor auth')
+      expect(wrapper.findAll('[data-testid="composer-skill-chip-skill-1"]')).toHaveLength(1)
+    })
+
     it('appending onto an empty composer just sets the text', async () => {
       const wrapper = mountInput({ stoppable: true })
       const vm = wrapper.vm as unknown as {

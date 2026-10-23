@@ -991,14 +991,23 @@ function clearInput(): void {
  * Prefill the composer without sending (OpenCode fork parity: navigate
  * with prompt). Persists to the per-session cache so it survives remounts.
  * `append` keeps existing text and adds `text` after a blank line (restoring
- * withdrawn or stopped steers); `focus` moves the caret to the end.
+ * withdrawn or stopped steers or a failed send); `skillIds` reselects skills;
+ * `focus` moves the caret to the end.
  */
-function setPrompt(text: string, options: { append?: boolean; focus?: boolean } = {}): void {
+function setPrompt(
+  text: string,
+  options: { append?: boolean; focus?: boolean; skillIds?: string[] } = {},
+): void {
   // Appending keeps what the user already typed; restored text follows after
   // a blank line.
   const current = prompt.value.replace(/\s+$/, '')
   const next = options.append && current ? `${current}\n\n${text}` : text
   prompt.value = next
+  const missingSkillIds = (options.skillIds ?? []).filter(
+    (id) => !selectedSkillIds.value.includes(id),
+  )
+  if (missingSkillIds.length)
+    selectedSkillIds.value = [...selectedSkillIds.value, ...missingSkillIds]
   if (!isScheduledTask.value) saveToCache(next)
   void nextTick(resizeTextarea)
   if (options.focus) focusTextarea()

@@ -167,6 +167,7 @@ async function mountHome(settle = true) {
       stubs: {
         CreateWorkspaceDialog: { template: '<div />' },
         HarnessChatInput: {
+          name: 'HarnessChatInput',
           props: ['harnessId'],
           template: `
             <div data-testid="chat-home-composer">
@@ -180,6 +181,13 @@ async function mountHome(settle = true) {
           `,
           methods: {
             chooseMention() {},
+            setPrompt(text: string, options?: { append?: boolean; skillIds?: string[] }) {
+              ;(this as unknown as { $emit: (event: string, ...args: unknown[]) => void }).$emit(
+                'prefill',
+                text,
+                options,
+              )
+            },
           },
         },
         HarnessSheetStack: {
@@ -392,13 +400,17 @@ describe('ChatHomeView', () => {
         harnessId?: 'native' | 'claude',
       ) => Promise<void>
     }
-    await vm.handleSend('hello', 'build', '', [], '')
+    await vm.handleSend('hello', 'build', '', ['skill-1'], '')
     await flushPromises()
 
     expect(pushSpy).not.toHaveBeenCalled()
     expect(isComposerTransitionPending()).toBe(false)
     expect(workspaceStore.activeWorkspace).toBeNull()
     expect(wrapper.get('[data-testid="chat-home-hero"]').classes()).not.toContain('opacity-0')
+    // The composer cleared itself on send: the draft must come back.
+    expect(wrapper.findComponent({ name: 'HarnessChatInput' }).emitted('prefill')).toEqual([
+      ['hello', { append: true, skillIds: ['skill-1'] }],
+    ])
   })
 
   it('shows an empty state when no workspaces exist', async () => {

@@ -155,7 +155,10 @@ const composerSheets = computed(() =>
 
 const chatInputRef = ref<{
   chooseMention: (candidate: MentionCandidate) => void
-  setPrompt: (text: string, options?: { append?: boolean; focus?: boolean }) => void
+  setPrompt: (
+    text: string,
+    options?: { append?: boolean; focus?: boolean; skillIds?: string[] },
+  ) => void
   uploadChatFiles: (files: File[] | FileList) => Promise<void>
 } | null>(null)
 
@@ -629,10 +632,13 @@ async function handleSend(
   if (!props.canPrompt || isSubagentSession.value) return
   sending.value = true
   try {
+    const workspaceId = props.workspaceId
     const sessionId = harness.activeSessionId
+    const options = { mode, model, skillIds, reasoningEffort: effort }
+    let accepted: boolean
     if (!sessionId) {
-      await harness.createSession(
-        props.workspaceId,
+      const session = await harness.createSession(
+        workspaceId,
         prompt,
         mode,
         model,
@@ -640,24 +646,16 @@ async function handleSend(
         effort,
         harnessId,
       )
+      accepted = session !== null
     } else if (activeSession.value?.status === 'busy') {
-      // The composer already cleared itself; give the text back on failure.
-      const accepted = await harness.steerSession(sessionId, prompt, {
-        mode,
-        model,
-        skillIds,
-        reasoningEffort: effort,
-      })
-      if (!accepted && harness.activeSessionId === sessionId) {
-        chatInputRef.value?.setPrompt(prompt, { append: true })
-      }
+      accepted = await harness.steerSession(sessionId, prompt, options)
     } else {
-      await harness.sendMessage(sessionId, prompt, {
-        mode,
-        model,
-        skillIds,
-        reasoningEffort: effort,
-      })
+      accepted = await harness.sendMessage(sessionId, prompt, options)
+    }
+    // The composer already cleared itself; give the draft back on failure
+    // unless the user moved on to another chat meanwhile.
+    if (!accepted && harness.activeSessionId === sessionId && props.workspaceId === workspaceId) {
+      chatInputRef.value?.setPrompt(prompt, { append: true, skillIds })
     }
   } finally {
     sending.value = false

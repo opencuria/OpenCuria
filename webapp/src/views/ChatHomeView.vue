@@ -56,6 +56,7 @@ const leaving = ref(false)
 const composerWrapRef = ref<HTMLElement | null>(null)
 const homeChatInputRef = ref<{
   chooseMention: (candidate: MentionCandidate) => void
+  setPrompt: (text: string, options?: { append?: boolean; skillIds?: string[] }) => void
   uploadChatFiles: (files: File[] | FileList) => Promise<void>
 } | null>(null)
 
@@ -295,6 +296,8 @@ async function handleSend(
     const sessionId = session?.id ?? harnessStore.activeSessionId
     if (!sessionId) {
       leaving.value = false
+      // The composer already cleared itself; give the draft back.
+      homeChatInputRef.value?.setPrompt(prompt, { append: true, skillIds })
       return
     }
     if (animate) {
