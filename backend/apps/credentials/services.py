@@ -19,7 +19,7 @@ from common.utils import decrypt_value, encrypt_value, generate_ssh_keypair
 
 from .deletion_guards import collect_deletion_blockers
 from .enums import CredentialType
-from .models import Credential
+from .models import Credential, CredentialService
 from .repositories import CredentialRepository, CredentialServiceRepository
 
 logger = structlog.get_logger(__name__)
@@ -839,11 +839,62 @@ class CredentialOAuthSvc:
         self.oauth = McpOAuthRepository
         self.activations = OrgCredentialServiceActivationRepository
 
+    def resolve_connection_target(
+        self,
+        *,
+        user,
+        organization_id: uuid.UUID,
+        service_id: uuid.UUID | None = None,
+        credential_id: uuid.UUID | None = None,
+    ) -> tuple[CredentialService, Credential | None]:
+        """Return the OAuth service and, for a reconnect, the owned credential.
+
+        A fresh connection needs a visible OAuth service activated for the
+        organization; a reconnect needs the user's own or this organization's
+        OAuth credential of a visible service. Membership and admin checks
+        remain with the caller.
+
+        Raises:
+            NotFoundError: The service or credential is not a visible OAuth target.
+            ConflictError: The service is inactive for the organization.
+        """
+        if credential_id is None:
+            if service_id is None:
+                raise NotFoundError("CredentialService", "")
+            service = self.services.get_visible_by_id(service_id, organization_id)
+            if service is None or service.credential_type != CredentialType.MCP_OAUTH:
+                raise NotFoundError("CredentialService", str(service_id))
+            if service.id not in self.activations.activated_service_ids(
+                organization_id
+            ):
+                raise ConflictError(
+                    "Credential service is inactive for this organization",
+                    code="service_inactive",
+                )
+            return service, None
+        credential = self.oauth.get_reconnect_target(credential_id)
+        if (
+            credential is None
+            or credential.service.credential_type != CredentialType.MCP_OAUTH
+        ):
+            raise NotFoundError("Credential", str(credential_id))
+        service = self.services.get_visible_by_id(
+            credential.service_id, organization_id
+        )
+        if service is None:
+            raise NotFoundError("Credential", str(credential_id))
+        if credential.user_id is not None:
+            if credential.user_id != user.id:
+                raise NotFoundError("Credential", str(credential_id))
+        elif credential.organization_id != organization_id:
+            raise NotFoundError("Credential", str(credential_id))
+        return service, credential
+
     def start_connection(
         self,
         *,
         user,
-        organization,
+        organization_id: uuid.UUID,
         organization_credential: bool,
         request_scheme: str,
         request_host: str,
@@ -852,50 +903,30 @@ class CredentialOAuthSvc:
         name: str = "",
     ) -> tuple[str, str, str]:
         """Start fresh authorization or reconnect one explicitly selected row."""
-        from apps.organizations.repositories import MembershipRepository
+        from apps.organizations.repositories import (
+            MembershipRepository,
+            OrganizationRepository,
+        )
 
         from .mcp_oauth import start_flow, validate_browser_request_origin
 
+        organization = OrganizationRepository.get_by_id(organization_id)
+        if organization is None:
+            raise NotFoundError("Organization", str(organization_id))
         if credential_id is None:
             membership = MembershipRepository.get_for_user_and_org(
                 user.id, organization.id
             )
             if membership is None or not membership.user.is_active:
                 raise AuthenticationError("Active organization membership required")
-            if service_id is None:
-                raise NotFoundError("CredentialService", "")
-            service = self.services.get_visible_by_id(service_id, organization.id)
-            if service is None or service.credential_type != CredentialType.MCP_OAUTH:
-                raise NotFoundError("CredentialService", str(service_id))
-            if service.id not in self.activations.activated_service_ids(
-                organization.id
-            ):
-                raise ConflictError(
-                    "Credential service is inactive for this organization",
-                    code="service_inactive",
-                )
-            credential = None
-        else:
-            credential = self.oauth.get_reconnect_target(credential_id)
-            if (
-                credential is None
-                or credential.service.credential_type != CredentialType.MCP_OAUTH
-            ):
-                raise NotFoundError("Credential", str(credential_id))
-            service = self.services.get_visible_by_id(
-                credential.service_id, organization.id
-            )
-            if service is None:
-                raise NotFoundError("Credential", str(credential_id))
-            if credential.user_id is not None:
-                if credential.user_id != user.id:
-                    raise NotFoundError("Credential", str(credential_id))
-                organization_credential = False
-            elif credential.organization_id == organization.id:
-                organization_credential = True
-            else:
-                raise NotFoundError("Credential", str(credential_id))
-        if credential_id is not None:
+        service, credential = self.resolve_connection_target(
+            user=user,
+            organization_id=organization.id,
+            service_id=service_id,
+            credential_id=credential_id,
+        )
+        if credential is not None:
+            organization_credential = credential.user_id is None
             membership = MembershipRepository.get_for_user_and_org(
                 user.id, organization.id
             )

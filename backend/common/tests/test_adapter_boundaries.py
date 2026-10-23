@@ -16,9 +16,9 @@ them; apps built on them subscribe to ``apps.organizations.events`` and
 ``apps.credentials.deletion_guards`` and share ``common.schemas``. Workspaces
 compose plugins, so workspace-scoped plugin endpoints and guards live in
 ``apps.runners``. REST, MCP and realtime adapters never query the ORM
-themselves; e.g. REST and MCP both authenticate API keys through
-``apps.accounts.services.APIKeyService``, and the realtime adapters reach
-models and repositories only through services.
+themselves and never import repositories; e.g. REST and MCP both
+authenticate API keys through ``apps.accounts.services.APIKeyService``, and
+the realtime adapters reach models and repositories only through services.
 """
 
 from __future__ import annotations
@@ -112,16 +112,36 @@ def test_no_application_module_imports_a_rest_router_module():
     )
 
 
-def _persistence_modules(trees: dict[Path, ast.Module]) -> set[str]:
-    """Return ``models`` modules and modules defining a ``*Repository`` class."""
+def _repository_modules(trees: dict[Path, ast.Module]) -> set[str]:
+    """Return modules defining a module-level ``*Repository`` class."""
     return {
         _module_name(path)
         for path, tree in trees.items()
-        if _module_name(path).rsplit(".", 1)[-1] == "models"
-        or any(
+        if any(
             isinstance(node, ast.ClassDef) and node.name.endswith("Repository")
             for node in tree.body
         )
+    }
+
+
+def _persistence_modules(trees: dict[Path, ast.Module]) -> set[str]:
+    """Return ``models`` modules and modules defining a ``*Repository`` class."""
+    return _repository_modules(trees) | {
+        _module_name(path)
+        for path in trees
+        if _module_name(path).rsplit(".", 1)[-1] == "models"
+    }
+
+
+def _adapter_modules(trees: dict[Path, ast.Module]) -> set[Path]:
+    """Return REST router, API-key auth, MCP and realtime adapter modules."""
+    return {
+        path
+        for path, tree in trees.items()
+        if _defines_ninja_router(tree)
+        or _module_name(path) == "apps.accounts.api_auth"
+        or _module_name(path).startswith("apps.mcp_app")
+        or _module_name(path) in REALTIME_ADAPTERS
     }
 
 
@@ -196,14 +216,7 @@ def test_adapters_reach_image_recipes_only_through_their_service():
 def test_adapters_never_query_the_orm():
     """REST, MCP and realtime adapters call services; only repositories query."""
     trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    adapters = {
-        path
-        for path, tree in trees.items()
-        if _defines_ninja_router(tree)
-        or _module_name(path) == "apps.accounts.api_auth"
-        or _module_name(path).startswith("apps.mcp_app")
-        or _module_name(path) in REALTIME_ADAPTERS
-    }
+    adapters = _adapter_modules(trees)
     assert APPS_ROOT / "accounts" / "api.py" in adapters  # discovery sanity check
     assert APPS_ROOT / "runners" / "desktop_proxy.py" in adapters
 
@@ -217,6 +230,32 @@ def test_adapters_never_query_the_orm():
     assert violations == [], (
         "Move ORM access into the app's repositories and call it through its "
         "service from REST and MCP alike:\n" + "\n".join(violations)
+    )
+
+
+def test_adapters_reach_repositories_only_through_services():
+    """REST and MCP call the owning service; neither imports a repository."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    adapters = _adapter_modules(trees)
+    repositories = _repository_modules(trees)
+    assert APPS_ROOT / "mcp_app" / "server.py" in adapters  # discovery sanity check
+    assert {
+        "apps.credentials.repositories",
+        "apps.runners.disposition_repository",
+    } <= repositories
+
+    violations = sorted(
+        f"{_module_name(path)} -> {module}"
+        for path in adapters
+        for module in _imported_modules(path, trees[path])
+        if any(
+            module == repository or module.startswith(f"{repository}.")
+            for repository in repositories
+        )
+    )
+    assert violations == [], (
+        "Call the owning app's service instead of its repository, so REST and "
+        "MCP share one implementation:\n" + "\n".join(violations)
     )
 
 

@@ -898,9 +898,9 @@ def list_recent_models(request: HttpRequest):
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        from apps.harness.repositories import RecentModelRepository
+        from apps.harness.services import RecentModelService
 
-        rows = RecentModelRepository.list_by_user(org_id, request.user.id)
+        rows = RecentModelService().list_for_user(org_id, request.user.id)
         return 200, [_recent_model_to_out(row) for row in rows]
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
@@ -920,12 +920,12 @@ def save_recent_model(request: HttpRequest, payload: RecentModelSaveIn):
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        from apps.harness.repositories import RecentModelRepository
+        from apps.harness.services import RecentModelService
 
         model_id = (payload.model or "").strip()
         if not model_id:
             return 400, {"detail": "model is required", "code": "validation_error"}
-        row = RecentModelRepository.record_usage(
+        row = RecentModelService().record_usage(
             org_id,
             request.user,
             model=model_id,

@@ -145,6 +145,90 @@ def test_rest_mcp_owner_admin_cross_org_and_scopes(runner, workspace, user):
     assert "unknown" in result[0].text
 
 
+@pytest.mark.django_db(transaction=True)
+def test_rest_and_mcp_retry_require_the_task_specific_scope(runner, workspace, user):
+    import json
+    from types import SimpleNamespace
+
+    from apps.accounts.models import APIKeyPermission
+    from apps.mcp_app.server import (
+        _call_dispose_lifecycle_operation,
+        _call_list_lifecycle_operations,
+    )
+    from apps.organizations.models import Membership
+    from apps.runners.tests.test_workspace_access_controls import _make_client
+
+    Membership.objects.create(
+        user=user, organization=runner.organization, role="member"
+    )
+    runner.status = "offline"
+    runner.save()
+    task = TaskRepository.create(
+        task_id=uuid.uuid4(),
+        runner=runner,
+        workspace=workspace,
+        task_type="stop_workspace",
+    )
+    retry_url = f"/api/v1/runners/operations/{task.id}/retry/"
+    update = APIKeyPermission.WORKSPACES_UPDATE
+    unscoped = _make_client(user=user, org=runner.organization, permissions=[update])
+    response = unscoped.post(retry_url)
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Operation-specific lifecycle scope required"
+    # With the stop scope the request passes the scope gate; the offline runner
+    # then blocks the retry itself.
+    scoped = _make_client(
+        user=user,
+        org=runner.organization,
+        permissions=[update, APIKeyPermission.WORKSPACES_STOP],
+    )
+    assert scoped.post(retry_url).status_code == 409
+
+    def mcp_key(*permissions):
+        return SimpleNamespace(
+            user=user, has_permission=lambda permission: permission in permissions
+        )
+
+    args = {"operation_id": str(task.id), "action": "retry"}
+    with pytest.raises(PermissionError, match="Operation-specific"):
+        _call_dispose_lifecycle_operation(mcp_key(), runner.organization_id, args)
+    with pytest.raises(ConflictError):
+        _call_dispose_lifecycle_operation(
+            mcp_key(APIKeyPermission.WORKSPACES_STOP), runner.organization_id, args
+        )
+
+    listed = json.loads(
+        _call_list_lifecycle_operations(mcp_key(), runner.organization_id, {})[0].text
+    )
+    assert [row["operation_id"] for row in listed["operations"]] == [str(task.id)]
+    assert listed["operations"][0]["task_type"] == "stop_workspace"
+
+
+def test_retry_permission_maps_task_types(runner, workspace, user):
+    from apps.accounts.models import APIKeyPermission
+    from apps.organizations.models import Membership
+
+    Membership.objects.create(
+        user=user, organization=runner.organization, role="member"
+    )
+    for task_type, permission in [
+        ("create_workspace", None),
+        ("resume_workspace", APIKeyPermission.WORKSPACES_RESUME),
+    ]:
+        task = TaskRepository.create(
+            task_id=uuid.uuid4(),
+            runner=runner,
+            workspace=workspace,
+            task_type=task_type,
+        )
+        assert (
+            DispositionService.retry_permission(user, runner.organization_id, task.id)
+            == permission
+        )
+        workspace.current_task = None
+        workspace.save(update_fields=["current_task"])
+
+
 def test_concrete_workspace_stop_payload_committed_at_allocation(runner, workspace):
     task = TaskRepository.create(
         task_id=uuid.uuid4(),

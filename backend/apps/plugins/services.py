@@ -319,6 +319,10 @@ class PluginService:
             raise NotFoundError("Plugin", str(plugin_id))
         return plugin
 
+    def workspace_plugin_ids(self, workspace_id: uuid.UUID) -> set[uuid.UUID]:
+        """Return the plugin IDs selected for a workspace."""
+        return self.workspace_activations.enabled_plugin_ids(workspace_id)
+
     # -- Create / update / delete -------------------------------------------
 
     @transaction.atomic

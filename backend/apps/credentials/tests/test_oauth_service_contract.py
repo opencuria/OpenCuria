@@ -417,3 +417,48 @@ def test_connect_without_plugin_creates_independent_named_accounts_and_reconnect
     )
     assert reconnect.status_code == 200
     assert Credential.objects.filter(service=service).count() == 1
+
+
+@pytest.mark.django_db
+def test_connect_resolves_the_header_organization_before_membership():
+    """Unknown organizations are 404; existing ones without membership are 403."""
+    import uuid
+
+    user = get_user_model().objects.create_user(
+        email="oauth-org-lookup@test.local", password="x"
+    )
+    org = Organization.objects.create(name="Lookup org", slug="oauth-lookup-org")
+    service = CredentialService.objects.create(
+        name="Lookup MCP",
+        slug="lookup-mcp",
+        credential_type=CredentialType.MCP_OAUTH,
+        oauth_server_url="https://mcp.example.test/mcp",
+    )
+    token = DjangoJWTBackend().generate_tokens(user).access_token
+    unknown_org_id = uuid.uuid4()
+
+    def connect(org_id) -> tuple[int, dict]:
+        response = Client().post(
+            f"/api/v1/credential-services/{service.id}/oauth/connect/",
+            data=json.dumps({"name": "Account"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+            HTTP_X_ORGANIZATION_ID=str(org_id),
+            HTTP_HOST="127.0.0.1:8000",
+        )
+        return response.status_code, response.json()
+
+    assert connect(unknown_org_id) == (
+        404,
+        {
+            "detail": f"Organization '{unknown_org_id}' not found",
+            "code": "not_found",
+        },
+    )
+    assert connect(org.id) == (
+        403,
+        {
+            "detail": "Active organization membership required",
+            "code": "authentication_error",
+        },
+    )

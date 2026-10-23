@@ -20,7 +20,6 @@ from datetime import timedelta
 from asgiref.sync import sync_to_async
 from django.core.exceptions import ObjectDoesNotExist, SynchronousOnlyOperation
 from django.http import HttpRequest
-from django.utils import timezone
 from ninja import Body, Schema, Router
 from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
@@ -32,7 +31,6 @@ from apps.plugins.schemas import WorkspacePluginOut
 from apps.plugins.services import PluginService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.schemas import ErrorOut
-from common.utils import generate_api_token, hash_token
 
 from .enums import WorkspaceStatus
 from .exceptions import (
@@ -47,7 +45,6 @@ from .image_presenters import (
     image_artifacts_to_out,
 )
 from .storage_schemas import RunnerStorageOut
-from .repositories import RunnerRepository, RunnerSystemMetricsRepository
 from .schemas import (
     DesktopClipboardReadIn,
     DesktopClipboardReadOut,
@@ -287,12 +284,14 @@ runner_router = Router(tags=["runners"])
 @runner_router.get("/operations/", response={200: dict, 403: ErrorOut})
 def list_lifecycle_operations(request: HttpRequest):
     """List sanitized lifecycle state visible to the current owner/admin."""
-    from .disposition_repository import DispositionRepository
+    from .services.disposition import DispositionService
 
     if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
         return _perm_denied(APIKeyPermission.RUNNERS_READ)
     return {
-        "operations": DispositionRepository.listing(request.user, _get_org_id(request))
+        "operations": DispositionService.list_operations(
+            request.user, _get_org_id(request)
+        )
     }
 
 
@@ -330,14 +329,7 @@ def create_runner(request: HttpRequest, payload: RunnerCreateIn):
     except AuthenticationError as e:
         return 403, ErrorOut(detail=e.message, code=e.code)
 
-    token = generate_api_token()
-    token_hash = hash_token(token)
-
-    runner = RunnerRepository.create(
-        name=payload.name,
-        api_token_hash=token_hash,
-        organization=org,
-    )
+    runner, token = _get_service().create_runner(name=payload.name, organization=org)
 
     return 201, RunnerCreateOut(
         id=runner.id,
@@ -395,11 +387,12 @@ def get_runner_metrics_latest(request: HttpRequest, runner_id: uuid.UUID):
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
-    runner = RunnerRepository.get_by_id(runner_id)
+    service = _get_service()
+    runner = service.get_runner_or_none(runner_id)
     if runner is None or runner.organization_id != org_id:
         return 404, ErrorOut(detail="Runner not found", code="not_found")
 
-    metrics = RunnerSystemMetricsRepository.get_latest(runner_id)
+    metrics = service.get_latest_runner_metrics(runner_id)
     if metrics is None:
         return 404, ErrorOut(detail="No metrics available yet", code="not_found")
 
@@ -428,12 +421,12 @@ def get_runner_metrics_history(
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
-    runner = RunnerRepository.get_by_id(runner_id)
+    service = _get_service()
+    runner = service.get_runner_or_none(runner_id)
     if runner is None or runner.organization_id != org_id:
         return 404, ErrorOut(detail="Runner not found", code="not_found")
 
-    since = timezone.now() - timedelta(hours=hours)
-    metrics = RunnerSystemMetricsRepository.get_history(runner_id, since)
+    metrics = service.list_runner_metrics(runner_id, hours=hours)
 
     return 200, [
         RunnerSystemMetricsOut(
@@ -2584,16 +2577,9 @@ async def dispose_lifecycle_operation(
         return _perm_denied(APIKeyPermission.WORKSPACES_UPDATE)
     try:
         if action == "retry":
-            from .disposition_repository import DispositionRepository
-
-            row = await sync_to_async(DispositionRepository.authorized)(
+            permission = await sync_to_async(DispositionService.retry_permission)(
                 request.user, _get_org_id(request), operation_id
             )
-            permission = {
-                "stop_workspace": APIKeyPermission.WORKSPACES_STOP,
-                "resume_workspace": APIKeyPermission.WORKSPACES_RESUME,
-                "remove_workspace": APIKeyPermission.WORKSPACES_DELETE,
-            }.get(row.task.type)
             if permission is None or not check_api_key_permission(request, permission):
                 return 403, ErrorOut(
                     detail="Operation-specific lifecycle scope required",

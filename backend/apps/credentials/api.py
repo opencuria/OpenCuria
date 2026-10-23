@@ -15,7 +15,6 @@ from ninja import Router
 
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
-from apps.credentials.repositories import CredentialServiceRepository
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.schemas import ErrorOut
@@ -54,6 +53,14 @@ def _get_org_id(request: HttpRequest) -> uuid.UUID:
 
 def _get_org_service() -> OrganizationService:
     return OrganizationService()
+
+
+def _visible_service_or_none(service_id: uuid.UUID, org_id: uuid.UUID):
+    """Return the credential service visible in the org, or None."""
+    try:
+        return CredentialServiceSvc().get_service(service_id, org_id=org_id)
+    except NotFoundError:
+        return None
 
 
 def _oauth_safe_status(cred) -> dict:
@@ -202,9 +209,7 @@ def create_credential(request: HttpRequest, payload: CredentialCreateIn):
 
     svc = CredentialSvc()
     try:
-        service = CredentialServiceRepository.get_visible_by_id(
-            payload.service_id, org_id
-        )
+        service = _visible_service_or_none(payload.service_id, org_id)
         if service is None or service.credential_type == "mcp_oauth":
             return 404, ErrorOut(
                 detail="Credential service not found", code="not_found"
@@ -369,7 +374,6 @@ org_credential_service_router = Router(tags=["org-credential-services"])
 )
 def list_org_credential_services(request: HttpRequest):
     """Return visible credential services with activation status for the org."""
-    from .repositories import CredentialServiceRepository
     from .services import OrgCredentialServiceActivationSvc
 
     if not check_api_key_permission(
@@ -384,7 +388,7 @@ def list_org_credential_services(request: HttpRequest):
 
     activated_ids = OrgCredentialServiceActivationSvc().activated_service_ids(org_id)
 
-    services = CredentialServiceRepository.list_visible_to_org(org_id)
+    services = CredentialServiceSvc().list_services(org_id=org_id)
     return 200, [
         _credential_service_to_out(s, is_active=s.id in activated_ids) for s in services
     ]
@@ -451,7 +455,6 @@ def toggle_org_credential_service_activation(
 
     Credential service activation is independent of plugin activation.
     """
-    from .repositories import CredentialServiceRepository
     from .services import OrgCredentialServiceActivationSvc
 
     if not check_api_key_permission(
@@ -463,7 +466,7 @@ def toggle_org_credential_service_activation(
     org_service.require_membership(request.user, org_id)
     if org_service.get_user_role(request.user, org_id) != "admin":
         return 403, ErrorOut(detail="Admin role required", code="forbidden")
-    svc = CredentialServiceRepository.get_visible_by_id(service_id, org_id)
+    svc = _visible_service_or_none(service_id, org_id)
     if svc is None:
         return 404, ErrorOut(detail="Credential service not found", code="not_found")
 

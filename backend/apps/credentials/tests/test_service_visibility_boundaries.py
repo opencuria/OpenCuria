@@ -194,3 +194,86 @@ def test_mcp_oauth_link_uses_settings_contract_and_scopes_reconnect() -> None:
         assert "not found" in _call_connect_credential_oauth(
             ApiKey(user), org.id, {"credential_id": str(foreign_credential.id)}
         )[0].text
+
+
+@pytest.mark.django_db
+def test_mcp_credential_service_tools_only_reach_visible_services() -> None:
+    """MCP lists and toggles services visible in the active organization only."""
+    import json
+    from types import SimpleNamespace
+
+    from apps.credentials.models import OrgCredentialServiceActivation
+    from apps.mcp_app.server import (
+        _call_list_credential_services,
+        _call_list_org_credential_services,
+        _call_toggle_org_credential_service_activation,
+    )
+
+    admin = get_user_model().objects.create_user(
+        email=f"mcp-tools-{uuid.uuid4().hex[:8]}@example.test", password="secret"
+    )
+    org, foreign_org = _org("ToolsCurrent"), _org("ToolsForeign")
+    Membership.objects.create(user=admin, organization=org, role="admin")
+    active = _service(None, "Active Tool")
+    inactive = _service(org, "Inactive Tool")
+    hidden = _service(foreign_org, "Hidden Tool")
+    OrgCredentialServiceActivation.objects.create(
+        organization=org, credential_service=active
+    )
+    api_key = SimpleNamespace(user=admin)
+
+    def listed(handler) -> dict[str, bool]:
+        rows = json.loads(handler(api_key, org.id, {})[0].text)
+        return {row["id"]: row["is_active"] for row in rows}
+
+    for handler in (_call_list_credential_services, _call_list_org_credential_services):
+        rows = listed(handler)
+        assert rows[str(active.id)] is True
+        assert rows[str(inactive.id)] is False
+        assert str(hidden.id) not in rows
+
+    toggled = json.loads(
+        _call_toggle_org_credential_service_activation(
+            api_key, org.id, {"service_id": str(inactive.id), "active": True}
+        )[0].text
+    )
+    assert toggled["id"] == str(inactive.id)
+    assert toggled["is_active"] is True
+    assert listed(_call_list_org_credential_services)[str(inactive.id)] is True
+    assert _call_toggle_org_credential_service_activation(
+        api_key, org.id, {"service_id": str(hidden.id), "active": True}
+    )[0].text == "Error: Credential service not found"
+
+
+@pytest.mark.django_db
+def test_mcp_oauth_link_keeps_tool_error_messages() -> None:
+    """Shared OAuth target resolution keeps the MCP tool's error contract."""
+    from types import SimpleNamespace
+
+    user = get_user_model().objects.create_user(
+        email=f"mcp-oauth-errors-{uuid.uuid4().hex[:8]}@example.test",
+        password="secret",
+    )
+    other = get_user_model().objects.create_user(
+        email=f"mcp-oauth-other-{uuid.uuid4().hex[:8]}@example.test",
+        password="secret",
+    )
+    org = _org("OAuthErrors")
+    Membership.objects.create(user=user, organization=org, role="admin")
+    service = _service(None, "OAuth Errors Service")
+    others = _credential(other, service, "Not mine")
+    api_key = SimpleNamespace(user=user)
+
+    def text(args: dict) -> str:
+        return _call_connect_credential_oauth(api_key, org.id, args)[0].text
+
+    assert text({"service_id": str(uuid.uuid4())}) == "Error: OAuth service not found"
+    assert text({"service_id": str(service.id)}) == (
+        "Error: OAuth service is inactive for this organization"
+    )
+    assert text({"credential_id": str(others.id)}) == (
+        "Error: OAuth credential not found"
+    )
+    assert text({"credential_id": "not-a-uuid"}) == (
+        "Error: Invalid OAuth service or credential ID"
+    )

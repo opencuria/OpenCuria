@@ -12,7 +12,6 @@ from ninja import Router, Schema
 
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
-from apps.organizations.repositories import OrganizationRepository
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .mcp_oauth import OAuthError, frontend_return_url, state_cookie_name
@@ -67,14 +66,6 @@ def _deny_interactive_api_key(request: HttpRequest):
     return None
 
 
-def _get_organization(request: HttpRequest, org_id: uuid.UUID):
-    """Load selected organization; OAuth service authorizes membership."""
-    organization = OrganizationRepository.get_by_id(org_id)
-    if organization is None:
-        raise NotFoundError("Organization", str(org_id))
-    return organization
-
-
 def _start_response(
     authorization_url: str, binding: str, cookie_name: str
 ) -> HttpResponse:
@@ -100,11 +91,9 @@ def _start_response(
 
 def _begin_response(request: HttpRequest, *, service_id, credential_id, payload):
     """Call the OAuth service and format its interactive response."""
-    org_id = _org_id(request)
-    organization = _get_organization(request, org_id)
     authorization_url, binding, cookie_name = CredentialOAuthSvc().start_connection(
         user=request.user,
-        organization=organization,
+        organization_id=_org_id(request),
         organization_credential=payload.organization_credential,
         service_id=service_id,
         credential_id=credential_id,

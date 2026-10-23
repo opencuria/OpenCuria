@@ -18,7 +18,7 @@ from common.exceptions import NotFoundError
 from .agent_s.config import AgentSRunConfig
 from .agents.definitions import AGENT_DEFINITIONS
 from .constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
-from .models import AgentSConfig, ProviderConfig
+from .models import AgentSConfig, ProviderConfig, RecentModel
 from .providers.bedrock import BedrockAdapter
 from .providers.chatgpt import ChatGPTAdapter
 from .providers.model_ref import parse_model_ref
@@ -37,6 +37,7 @@ from .repositories import (
     AgentSConfigRepository,
     ProviderConfigRepository,
     ProviderConnectionRepository,
+    RecentModelRepository,
     SubagentConfigRepository,
 )
 
@@ -550,3 +551,20 @@ class ProviderConfigService:
         from .providers.openai_compatible import validate_base_url
 
         return validate_base_url(base_url)
+
+
+class RecentModelService:
+    """Per-user recently used composer models (LRU, org-scoped)."""
+
+    def __init__(self, repository: type[RecentModelRepository] | None = None) -> None:
+        self.repository = repository or RecentModelRepository
+
+    def list_for_user(self, org_id: uuid.UUID, user_id: object) -> list[RecentModel]:
+        """Return the user's recent models, newest first."""
+        return self.repository.list_by_user(org_id, user_id)
+
+    def record_usage(
+        self, org_id: uuid.UUID, user, *, model: str, effort: str = ""
+    ) -> RecentModel | None:
+        """Record one used model; None when the model id is blank."""
+        return self.repository.record_usage(org_id, user, model=model, effort=effort)

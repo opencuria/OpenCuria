@@ -8,25 +8,35 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from django.utils import timezone
 
 from common.exceptions import AuthenticationError
-from common.utils import hash_token
+from common.utils import generate_api_token, hash_token
 
 from ...enums import RunnerStatus, RuntimeType
 from ...exceptions import RunnerNotFoundError, WorkspaceNotFoundError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
-    from ...models import Runner, Workspace
+    from ...models import Runner, RunnerSystemMetrics, Workspace
 
 logger = logging.getLogger(__name__)
 
 
 class RunnerLifecycleMixin:
     """Runner lifecycle and read queries shared by RunnerService."""
+
+    def create_runner(self, *, name: str, organization) -> tuple[Runner, str]:
+        """Create a runner and return it with its one-time plaintext API token."""
+        token = generate_api_token()
+        runner = self.runners.create(
+            name=name,
+            api_token_hash=hash_token(token),
+            organization=organization,
+        )
+        return runner, token
 
     def authenticate_runner(self, token: str) -> "Runner":
         """
@@ -127,6 +137,19 @@ class RunnerLifecycleMixin:
             vm_metrics=vm_metrics if isinstance(vm_metrics, dict) else None,
         )
         self.runner_metrics.purge_old(runner_id=runner.id)
+
+    def get_latest_runner_metrics(
+        self, runner_id: uuid.UUID
+    ) -> RunnerSystemMetrics | None:
+        """Return the newest host metrics sample of a runner, if any."""
+        return self.runner_metrics.get_latest(runner_id)
+
+    def list_runner_metrics(
+        self, runner_id: uuid.UUID, *, hours: int
+    ) -> list[RunnerSystemMetrics]:
+        """Return the host metrics samples of the last *hours*, oldest first."""
+        since = timezone.now() - timedelta(hours=hours)
+        return list(self.runner_metrics.get_history(runner_id, since))
 
     def update_runner_qemu_settings(
         self,

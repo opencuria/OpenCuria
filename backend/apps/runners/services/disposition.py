@@ -5,14 +5,35 @@ from typing import Any
 
 from asgiref.sync import sync_to_async
 
+from apps.accounts.models import APIKeyPermission
 from common.exceptions import ConflictError
 
 from ..disposition_repository import DispositionRepository
 from ..operations import OperationRepository, apply_result
 
+#: API-key scope a retry needs, per retryable lifecycle task type.
+RETRY_PERMISSIONS = {
+    "stop_workspace": APIKeyPermission.WORKSPACES_STOP,
+    "resume_workspace": APIKeyPermission.WORKSPACES_RESUME,
+    "remove_workspace": APIKeyPermission.WORKSPACES_DELETE,
+}
+
 
 class DispositionService:
     """Inspect is non-destructive, including offline; disposition requires proof."""
+
+    @staticmethod
+    def list_operations(user: Any, organization_id: uuid.UUID) -> list[dict]:
+        """List sanitized operations visible to an owner or organization admin."""
+        return DispositionRepository.listing(user, organization_id)
+
+    @staticmethod
+    def retry_permission(
+        user: Any, organization_id: uuid.UUID, operation_id: uuid.UUID
+    ) -> APIKeyPermission | None:
+        """Return the API-key scope retrying the operation needs, if retryable."""
+        row = DispositionRepository.authorized(user, organization_id, operation_id)
+        return RETRY_PERMISSIONS.get(row.task.type)
 
     async def inspect(
         self,

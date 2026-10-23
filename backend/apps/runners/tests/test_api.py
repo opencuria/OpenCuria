@@ -5,6 +5,7 @@ Tests for the runners REST API.
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -14,7 +15,7 @@ from django.utils import timezone
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import WorkspaceStatus
-from apps.runners.models import Runner, Workspace
+from apps.runners.models import Runner, RunnerSystemMetrics, Workspace
 from common.utils import generate_api_token, hash_token
 
 
@@ -112,6 +113,78 @@ class TestCreateRunner:
         assert "api_token" in data
         assert data["name"] == "my-runner"
         assert Runner.objects.filter(id=data["id"]).exists()
+
+    def test_token_is_stored_hashed_in_the_active_org(self, client, auth_context):
+        """Only the token hash is persisted; the plaintext authenticates once."""
+        response = client.post(
+            "/api/v1/runners/",
+            data={"name": "hashed-runner"},
+            content_type="application/json",
+        )
+        data = response.json()
+        runner = Runner.objects.get(id=data["id"])
+        assert runner.organization_id == auth_context["organization"].id
+        assert runner.api_token_hash == hash_token(data["api_token"])
+        assert runner.api_token_hash != data["api_token"]
+
+
+def _metrics(runner: Runner, *, minutes_ago: int, cpu: float) -> None:
+    """Persist one host metrics sample *minutes_ago* minutes in the past."""
+    RunnerSystemMetrics.objects.create(
+        runner=runner,
+        timestamp=timezone.now() - timedelta(minutes=minutes_ago),
+        cpu_usage_percent=cpu,
+        ram_used_bytes=1,
+        ram_total_bytes=2,
+        disk_used_bytes=3,
+        disk_total_bytes=4,
+    )
+
+
+@pytest.mark.django_db
+class TestRunnerMetrics:
+    @pytest.fixture
+    def runner(self, auth_context) -> Runner:
+        return Runner.objects.create(
+            name="metrics-runner",
+            api_token_hash=hash_token(f"metrics-{uuid.uuid4().hex}"),
+            organization=auth_context["organization"],
+        )
+
+    def test_latest_returns_newest_sample(self, client, runner):
+        url = f"/api/v1/runners/{runner.id}/metrics/latest/"
+        response = client.get(url)
+        assert response.status_code == 404
+        assert response.json()["detail"] == "No metrics available yet"
+
+        _metrics(runner, minutes_ago=10, cpu=10.0)
+        _metrics(runner, minutes_ago=1, cpu=20.0)
+        response = client.get(url)
+        assert response.status_code == 200
+        assert response.json()["cpu_usage_percent"] == 20.0
+
+    def test_history_is_windowed_and_oldest_first(self, client, runner):
+        _metrics(runner, minutes_ago=5 * 60, cpu=1.0)
+        _metrics(runner, minutes_ago=90, cpu=2.0)
+        _metrics(runner, minutes_ago=30, cpu=3.0)
+
+        response = client.get(f"/api/v1/runners/{runner.id}/metrics/history/?hours=2")
+        assert response.status_code == 200
+        assert [row["cpu_usage_percent"] for row in response.json()] == [2.0, 3.0]
+
+    def test_foreign_org_runner_is_not_found(self, client):
+        foreign = Runner.objects.create(
+            name="foreign-runner",
+            api_token_hash=hash_token(f"foreign-{uuid.uuid4().hex}"),
+            organization=Organization.objects.create(
+                name="Foreign Metrics Org", slug=f"foreign-{uuid.uuid4().hex[:10]}"
+            ),
+        )
+        _metrics(foreign, minutes_ago=1, cpu=5.0)
+        for suffix in ("latest", "history"):
+            response = client.get(f"/api/v1/runners/{foreign.id}/metrics/{suffix}/")
+            assert response.status_code == 404
+            assert response.json()["detail"] == "Runner not found"
 
 
 @pytest.mark.django_db

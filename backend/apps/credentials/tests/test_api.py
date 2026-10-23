@@ -213,3 +213,53 @@ def test_non_staff_admin_can_toggle_org_credential_service_activation(client: Cl
 
     assert response.status_code == 200
     assert response.json()["is_active"] is True
+
+
+@pytest.mark.django_db
+def test_credential_endpoints_hide_invisible_and_oauth_services(client: Client):
+    admin = get_user_model().objects.create_user(
+        email="hidden-services@org.test", password="secret"
+    )
+    org = Organization.objects.create(name="Echo", slug="echo")
+    foreign = Organization.objects.create(name="Foxtrot", slug="foxtrot")
+    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
+    token = _create_api_key(
+        user=admin,
+        permissions=[
+            APIKeyPermission.CREDENTIALS_WRITE.value,
+            APIKeyPermission.ORG_CREDENTIAL_SERVICES_WRITE.value,
+        ],
+    )
+    foreign_service = CredentialService.objects.create(
+        name="Foreign Token",
+        slug="foreign-token-test",
+        credential_type="env",
+        env_var_name="FOREIGN_TOKEN",
+        organization=foreign,
+    )
+    oauth_service = CredentialService.objects.create(
+        name="OAuth MCP",
+        slug="oauth-mcp-test",
+        credential_type="mcp_oauth",
+        oauth_server_url="https://mcp.example.test/mcp",
+    )
+    not_found = ("Credential service not found", "not_found")
+
+    for service in (foreign_service, oauth_service):
+        response = client.post(
+            "/api/v1/credentials/",
+            data=json.dumps({"service_id": str(service.id), "value": "secret"}),
+            content_type="application/json",
+            **_auth_headers(token, str(org.id)),
+        )
+        assert response.status_code == 404
+        assert (response.json()["detail"], response.json()["code"]) == not_found
+
+    response = client.post(
+        f"/api/v1/org-credential-services/{foreign_service.id}/activation/",
+        data=json.dumps({"active": True}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+    assert response.status_code == 404
+    assert (response.json()["detail"], response.json()["code"]) == not_found

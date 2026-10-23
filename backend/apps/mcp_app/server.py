@@ -1929,13 +1929,10 @@ def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         loop = asyncio.new_event_loop()
         workspace, task = loop.run_until_complete(_create())
         loop.close()
-        from apps.plugins.repositories import WorkspacePluginActivationRepository
+        from apps.plugins.services import PluginService
 
         plugin_ids_out = [
-            str(value)
-            for value in WorkspacePluginActivationRepository.enabled_plugin_ids(
-                workspace.id
-            )
+            str(value) for value in PluginService().workspace_plugin_ids(workspace.id)
         ]
         return _text(
             {
@@ -2029,9 +2026,7 @@ def _call_update_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         loop = asyncio.new_event_loop()
         updated = loop.run_until_complete(_update())
         loop.close()
-        from apps.runners.repositories import WorkspaceRepository
-
-        persisted = WorkspaceRepository.get_by_id(updated.id)
+        persisted = _runner_service().get_workspace_or_none(updated.id)
         return _text(
             {
                 "id": str(updated.id),
@@ -2201,9 +2196,11 @@ def _call_list_image_deletions(api_key, org_id, args: dict) -> list[TextContent]
 def _call_list_lifecycle_operations(
     api_key, org_id: uuid.UUID, args: dict
 ) -> list[TextContent]:
-    from apps.runners.disposition_repository import DispositionRepository
+    from apps.runners.services.disposition import DispositionService
 
-    return _text({"operations": DispositionRepository.listing(api_key.user, org_id)})
+    return _text(
+        {"operations": DispositionService.list_operations(api_key.user, org_id)}
+    )
 
 
 def _call_inspect_lifecycle_operation(
@@ -2229,16 +2226,9 @@ def _call_dispose_lifecycle_operation(
     from apps.runners.services.disposition import DispositionService
 
     if args["action"] == "retry":
-        from apps.runners.disposition_repository import DispositionRepository
-
-        row = DispositionRepository.authorized(
+        scope = DispositionService.retry_permission(
             api_key.user, org_id, uuid.UUID(args["operation_id"])
         )
-        scope = {
-            "stop_workspace": APIKeyPermission.WORKSPACES_STOP,
-            "resume_workspace": APIKeyPermission.WORKSPACES_RESUME,
-            "remove_workspace": APIKeyPermission.WORKSPACES_DELETE,
-        }.get(row.task.type)
         if scope is None or not api_key.has_permission(scope):
             raise PermissionError("Operation-specific lifecycle scope required")
     return _text(
@@ -2811,12 +2801,14 @@ def _call_list_credentials(api_key, org_id, args: dict) -> list[TextContent]:
 
 
 def _call_list_credential_services(api_key, org_id, args: dict):
-    from apps.credentials.repositories import OrgCredentialServiceActivationRepository
-    from apps.credentials.services import CredentialServiceSvc
+    from apps.credentials.services import (
+        CredentialServiceSvc,
+        OrgCredentialServiceActivationSvc,
+    )
     from apps.organizations.services import OrganizationService
 
     OrganizationService().require_membership(api_key.user, org_id)
-    active = OrgCredentialServiceActivationRepository.activated_service_ids(org_id)
+    active = OrgCredentialServiceActivationSvc().activated_service_ids(org_id)
     return _text(
         [
             {
@@ -2969,14 +2961,10 @@ def _call_connect_credential_oauth(api_key, org_id, args: dict):
     import uuid as _uuid
     from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-    from apps.credentials.enums import CredentialType
     from apps.credentials.mcp_oauth import frontend_return_url
-    from apps.credentials.repositories import (
-        CredentialRepository,
-        CredentialServiceRepository,
-        OrgCredentialServiceActivationRepository,
-    )
+    from apps.credentials.services import CredentialOAuthSvc
     from apps.organizations.services import OrganizationService
+    from common.exceptions import ConflictError, NotFoundError
 
     organizations = OrganizationService()
     organizations.require_membership(api_key.user, org_id)
@@ -2987,41 +2975,20 @@ def _call_connect_credential_oauth(api_key, org_id, args: dict):
         return _error("Provide exactly one of service_id or credential_id")
 
     try:
-        if credential_id:
-            credential = CredentialRepository.get_by_id(_uuid.UUID(str(credential_id)))
-            if (
-                credential is None
-                or credential.service.credential_type != CredentialType.MCP_OAUTH
-                or CredentialServiceRepository.get_visible_by_id(
-                    credential.service_id, org_id
-                )
-                is None
-            ):
-                return _error("OAuth credential not found")
-            if credential.user_id is not None:
-                if credential.user_id != api_key.user.id:
-                    return _error("OAuth credential not found")
-            elif credential.organization_id != org_id:
-                return _error("OAuth credential not found")
-            elif role != "admin":
-                return _error("Admin role required for organization credentials")
-            action = "reconnect_credential"
-            action_id = str(credential.id)
-            response_service_id = str(credential.service_id)
-        else:
-            service = CredentialServiceRepository.get_visible_by_id(
-                _uuid.UUID(str(service_id)), org_id
-            )
-            if service is None or service.credential_type != CredentialType.MCP_OAUTH:
-                return _error("OAuth service not found")
-            active_service_ids = (
-                OrgCredentialServiceActivationRepository.activated_service_ids(org_id)
-            )
-            if service.id not in active_service_ids:
-                return _error("OAuth service is inactive for this organization")
+        service, credential = CredentialOAuthSvc().resolve_connection_target(
+            user=api_key.user,
+            organization_id=org_id,
+            service_id=_uuid.UUID(str(service_id)) if service_id else None,
+            credential_id=_uuid.UUID(str(credential_id)) if credential_id else None,
+        )
+        if credential is None:
             action = "add_credential"
             action_id = str(service.id)
-            response_service_id = str(service.id)
+        elif credential.user_id is None and role != "admin":
+            return _error("Admin role required for organization credentials")
+        else:
+            action = "reconnect_credential"
+            action_id = str(credential.id)
 
         parsed = urlsplit(frontend_return_url())
         query = dict(parse_qsl(parsed.query, keep_blank_values=True))
@@ -3034,10 +3001,16 @@ def _call_connect_credential_oauth(api_key, org_id, args: dict):
             {
                 "url": link,
                 "credential_settings": True,
-                "service_id": response_service_id,
+                "service_id": str(service.id),
                 "credential_id": str(credential_id) if credential_id else None,
             }
         )
+    except NotFoundError:
+        return _error(
+            "OAuth credential not found" if credential_id else "OAuth service not found"
+        )
+    except ConflictError:
+        return _error("OAuth service is inactive for this organization")
     except (TypeError, ValueError):
         return _error("Invalid OAuth service or credential ID")
     except Exception as exc:
@@ -4887,9 +4860,9 @@ async def _call_delete_process(api_key, org_id, args: dict) -> list[TextContent]
 def _call_list_org_credential_services(
     api_key, org_id, args: dict
 ) -> list[TextContent]:
-    from apps.credentials.repositories import (
-        CredentialServiceRepository,
-        OrgCredentialServiceActivationRepository,
+    from apps.credentials.services import (
+        CredentialServiceSvc,
+        OrgCredentialServiceActivationSvc,
     )
     from apps.organizations.services import OrganizationService
 
@@ -4901,10 +4874,8 @@ def _call_list_org_credential_services(
     if org_service.get_user_role(api_key.user, org_id) != "admin":
         return _error("Admin role required")
 
-    activated_ids = OrgCredentialServiceActivationRepository.activated_service_ids(
-        org_id
-    )
-    services = CredentialServiceRepository.list_visible_to_org(org_id)
+    activated_ids = OrgCredentialServiceActivationSvc().activated_service_ids(org_id)
+    services = CredentialServiceSvc().list_services(org_id=org_id)
     return _text(
         [
             {
@@ -4930,9 +4901,12 @@ def _call_list_org_credential_services(
 def _call_toggle_org_credential_service_activation(
     api_key, org_id, args: dict
 ) -> list[TextContent]:
-    from apps.credentials.repositories import CredentialServiceRepository
-    from apps.credentials.services import OrgCredentialServiceActivationSvc
+    from apps.credentials.services import (
+        CredentialServiceSvc,
+        OrgCredentialServiceActivationSvc,
+    )
     from apps.organizations.services import OrganizationService
+    from common.exceptions import NotFoundError
 
     try:
         org_service = OrganizationService()
@@ -4943,8 +4917,9 @@ def _call_toggle_org_credential_service_activation(
         if "active" not in args:
             raise ValueError("active is required")
         active = bool(args.get("active"))
-        service = CredentialServiceRepository.get_visible_by_id(service_id, org_id)
-        if service is None:
+        try:
+            service = CredentialServiceSvc().get_service(service_id, org_id=org_id)
+        except NotFoundError:
             return _error("Credential service not found")
 
         OrgCredentialServiceActivationSvc().set_activation(
