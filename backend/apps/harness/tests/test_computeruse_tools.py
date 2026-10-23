@@ -31,7 +31,6 @@ from apps.harness.tools.subagents import (
     ALLOWED_SUBAGENT_TYPES,
     TaskArgs,
     TaskTool,
-    _child_registry,
 )
 
 
@@ -216,24 +215,6 @@ def test_filtered_schemas_hide_legacy_names_from_build_agent(
     assert "bash" in names
 
 
-def test_task_child_registry_computeruse_empty_and_hooks_copied() -> None:
-    """Computeruse child gets an empty registry; build child keeps tools."""
-    parent = default_tool_registry()
-    seen: list[str] = []
-
-    async def _before(tool_name: str, args: Any, ctx: Any) -> None:
-        seen.append(tool_name)
-
-    parent.add_before_hook(_before)
-    build_child = _child_registry(parent, "general")
-    assert "read" in build_child.names()
-    assert "view_screen" not in build_child.names()
-
-    cu_child = _child_registry(parent, "computeruse")
-    assert cu_child.names() == []
-    assert list(cu_child.before_hooks) == [_before]
-
-
 async def test_task_accepts_computeruse_subagent(fake_accessor) -> None:
     """task(subagent_type=computeruse) passes agent validation."""
     ctx = ToolContext(
@@ -241,7 +222,6 @@ async def test_task_accepts_computeruse_subagent(fake_accessor) -> None:
         workspace_id="ws-1",
         accessor=fake_accessor,
         model="parent-model",
-        provider=object(),
         registry=default_tool_registry(),
         depth=1,
         max_depth=1,
@@ -264,7 +244,6 @@ async def test_task_rejects_unknown_subagent(fake_accessor) -> None:
         workspace_id="ws-1",
         accessor=fake_accessor,
         model="parent-model",
-        provider=object(),
         registry=default_tool_registry(),
     )
     with pytest.raises(ToolError, match="Unknown subagent"):

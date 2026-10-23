@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 from collections.abc import AsyncIterator
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -20,8 +23,12 @@ from apps.harness.providers.base import (
 from apps.harness.runner import HarnessRunner, RunOptions
 from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.tools import TaskTool, default_tool_registry
-from apps.harness.tools.base import ToolContext, ToolError
-from apps.harness.tools.subagents import TASK_OUTPUT_MAX_CHARS, build_task_result
+from apps.harness.tools.base import ToolContext, ToolError, ToolResult
+from apps.harness.tools.subagents import (
+    TASK_OUTPUT_MAX_CHARS,
+    TaskArgs,
+    build_task_result,
+)
 
 
 class FakeProvider(ProviderAdapter):
@@ -70,67 +77,12 @@ def _tool_step(tool: str, args: dict[str, Any], call_id: str = "c1") -> list[Del
     ]
 
 
-def _ctx(
-    accessor: FakeAccessor, events: list[dict[str, Any]], **kwargs: Any
-) -> ToolContext:
-    async def _emit(event: dict[str, Any]) -> None:
-        events.append(event)
-
-    params: dict[str, Any] = {
-        "session_id": "sess-parent",
-        "workspace_id": "ws-1",
-        "accessor": accessor,
-        "model": "parent-model",
-        "parent_emit": _emit,
-        "provider": kwargs.pop("provider", None),
-        "registry": kwargs.pop("registry", None),
-        "evaluator": kwargs.pop("evaluator", None),
-    }
-    params.update(kwargs)
-    return ToolContext(**params)
-
-
-def _task_ctx(
-    accessor: FakeAccessor,
-    events: list[dict[str, Any]],
-    child_steps: list[list[Delta]],
-    **kwargs: Any,
-) -> tuple[ToolContext, FakeProvider]:
-    provider = FakeProvider(child_steps)
-    registry = kwargs.pop("registry", None) or default_tool_registry()
-    ctx = _ctx(
-        accessor,
-        events,
-        provider=provider,
-        registry=registry,
-        evaluator=PermissionEvaluator(),
-        **kwargs,
-    )
-    return ctx, provider
-
-
-async def _collect_emit(events: list[dict[str, Any]], event: dict[str, Any]) -> None:
-    """Append *event* to *events* (awaitable emitter for runner tests)."""
-    events.append(event)
-
-
-def _runner_with_events(
-    provider: FakeProvider,
-    accessor: FakeAccessor,
-    events: list[dict[str, Any]],
-    registry=None,
-) -> HarnessRunner:
-    """Build a HarnessRunner wired to an awaitable list emitter."""
-
-    async def _emit(event: dict[str, Any]) -> None:
-        events.append(event)
-
-    return HarnessRunner(
-        provider=provider,
-        tools=registry or default_tool_registry(),
-        evaluator=PermissionEvaluator(),
+def _ctx(accessor: FakeAccessor, **kwargs: Any) -> ToolContext:
+    return ToolContext(
+        session_id="sess-parent",
+        workspace_id="ws-1",
         accessor=accessor,
-        emit=_emit,
+        **kwargs,
     )
 
 
@@ -140,35 +92,53 @@ def test_task_tool_description_mentions_parallel_calls() -> None:
     assert "parallel" in TaskTool.description
 
 
-async def test_task_happy_path_returns_child_text(fake_accessor) -> None:
-    """Parent task call returns the child run text as tool output."""
-    events: list[dict[str, Any]] = []
-    ctx, _ = _task_ctx(fake_accessor, events, [_text_step("child says hi")])
-    result = await TaskTool().execute(
-        {"description": "research", "prompt": "look around"}, ctx
+async def test_task_dispatches_callback(fake_accessor: FakeAccessor) -> None:
+    """Validated arguments and the service result pass through unchanged."""
+    expected = ToolResult(output="child says hi", metadata={"task_id": "child"})
+    callback = AsyncMock(return_value=expected)
+    ctx = _ctx(fake_accessor, run_subagent=callback)
+    args = TaskArgs(
+        description="research",
+        prompt="look around",
+        agent="explore",
+        task_id="existing-child",
+        model_override="child-model",
     )
-    assert "child says hi" in result.output
-    assert f'<task id="{result.metadata["subtask_id"]}" state="completed">' in (
-        result.output
-    )
-    assert result.metadata["task_id"] == result.metadata["subtask_id"]
-    kinds = [event["type"] for event in events]
-    assert "subtask_started" in kinds
-    assert "subtask_finished" in kinds
-    started = next(e for e in events if e["type"] == "subtask_started")
-    assert started["model"] == "parent-model"
-    finished = next(e for e in events if e["type"] == "subtask_finished")
-    assert finished["status"] == "completed"
-    assert finished["agent"] == "general"
-    assert result.truncated is False
-    assert "output_path" not in result.metadata
-    assert not fake_accessor.written
+
+    result = await TaskTool().execute(args.model_dump(), ctx)
+
+    assert result is expected
+    callback.assert_awaited_once()
+    dispatched_args, dispatched_ctx, subtask_id = callback.await_args.args
+    assert dispatched_args == args
+    assert dispatched_ctx is ctx
+    assert re.fullmatch(r"[0-9a-f]+", subtask_id)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("child exploded"),
+        ToolError("service refused"),
+        asyncio.CancelledError(),
+    ],
+)
+async def test_task_callback_exceptions_propagate(
+    fake_accessor: FakeAccessor, error: BaseException
+) -> None:
+    """The service owns error handling, including cancellation semantics."""
+    callback = AsyncMock(side_effect=error)
+    ctx = _ctx(fake_accessor, run_subagent=callback)
+    with pytest.raises(type(error)) as raised:
+        await TaskTool().execute({"description": "d", "prompt": "p"}, ctx)
+    assert raised.value is error
+    callback.assert_awaited_once()
 
 
 async def test_task_rejects_unknown_and_primary_agents(fake_accessor) -> None:
     """Unknown, primary, and hidden agent names are rejected."""
-    events: list[dict[str, Any]] = []
-    ctx, _ = _task_ctx(fake_accessor, events, [_text_step("x")])
+    callback = AsyncMock()
+    ctx = _ctx(fake_accessor, run_subagent=callback)
     tool = TaskTool()
     for bad in ("build", "plan", "title", "compaction", "nope"):
         with pytest.raises(ToolError, match="Unknown subagent"):
@@ -177,15 +147,16 @@ async def test_task_rejects_unknown_and_primary_agents(fake_accessor) -> None:
             )
     with pytest.raises(ToolError, match="Unknown subagent"):
         await tool.execute({"description": "d", "prompt": "p", "agent": "build"}, ctx)
+    callback.assert_not_awaited()
 
 
 async def test_task_depth_limit_blocks_nested_task(fake_accessor) -> None:
     """Direct calls at depth >= max_depth are rejected (no recursion)."""
-    events: list[dict[str, Any]] = []
-    ctx, _ = _task_ctx(fake_accessor, events, [_text_step("x")], depth=1, max_depth=1)
+    callback = AsyncMock()
+    ctx = _ctx(fake_accessor, run_subagent=callback, depth=1, max_depth=1)
     with pytest.raises(ToolError, match="depth limit"):
         await TaskTool().execute({"description": "d", "prompt": "p"}, ctx)
-    assert not [e for e in events if e["type"] == "subtask_started"]
+    callback.assert_not_awaited()
 
 
 async def test_task_in_task_blocked_by_runner_loop(fake_accessor) -> None:
@@ -216,20 +187,6 @@ async def test_task_in_task_blocked_by_runner_loop(fake_accessor) -> None:
     assert errors and "depth limit" in errors[0]["error"]
 
 
-async def test_task_allows_nested_task_but_withholds_todowrite_from_child(
-    fake_accessor,
-) -> None:
-    """A child below the default depth limit offers task but not todowrite."""
-    events: list[dict[str, Any]] = []
-    ctx, provider = _task_ctx(fake_accessor, events, [_text_step("researched")])
-    await TaskTool().execute(
-        {"description": "d", "prompt": "p", "subagent_type": "explore"}, ctx
-    )
-    offered = provider.calls[0]["tools"]
-    assert "task" in offered
-    assert "todowrite" not in offered
-
-
 async def test_explore_child_is_read_only(fake_accessor) -> None:
     """Explore child denies edit via permissions (deny path, no ask)."""
     events: list[dict[str, Any]] = []
@@ -258,60 +215,15 @@ async def test_explore_child_is_read_only(fake_accessor) -> None:
     assert "read" in provider.calls[0]["tools"]
 
 
-async def test_task_child_failure_is_tool_error(fake_accessor) -> None:
-    """Child provider errors surface as ToolError, not a parent crash."""
-
-    class _BoomProvider(FakeProvider):
-        async def chat_stream(  # type: ignore[no-untyped-def]
-            self, model, messages, tools, opts=None
-        ):  # noqa: ANN001, ANN202
-            raise RuntimeError("child exploded")
-            yield Delta(text="never")
-
-    events: list[dict[str, Any]] = []
-    ctx = _ctx(
-        fake_accessor,
-        events,
-        provider=_BoomProvider([_text_step("x")]),
-        registry=default_tool_registry(),
-        evaluator=PermissionEvaluator(),
-    )
-    with pytest.raises(ToolError, match="failed"):
-        await TaskTool().execute({"description": "d", "prompt": "p"}, ctx)
-    finished = [e for e in events if e["type"] == "subtask_finished"]
-    assert finished and finished[0]["status"] == "error"
-
-
-async def test_task_inherits_parent_model(fake_accessor) -> None:
-    """Child runs use the parent model unless model_override is given."""
-    events: list[dict[str, Any]] = []
-    ctx, provider = _task_ctx(fake_accessor, events, [_text_step("ok")])
-    assert ctx.model == "parent-model"
-    await TaskTool().execute({"description": "d", "prompt": "p"}, ctx)
-    assert provider.calls[0]["model"] == "parent-model"
-    events2: list[dict[str, Any]] = []
-    ctx2, provider2 = _task_ctx(fake_accessor, events2, [_text_step("ok")])
-    await TaskTool().execute(
-        {"description": "d", "prompt": "p", "model_override": "child-model"},
-        ctx2,
-    )
-    assert provider2.calls[0]["model"] == "child-model"
-
-
-@pytest.mark.parametrize("registered", [False, True])
 @pytest.mark.parametrize("many_lines", [False, True])
 async def test_task_long_output_spills_full_answer(
-    fake_accessor: FakeAccessor, registered: bool, many_lines: bool
+    fake_accessor: FakeAccessor, many_lines: bool
 ) -> None:
-    """Both result caps retain one complete, readable UTF-8 answer on disk."""
+    """Long answers retain one complete, readable UTF-8 copy on disk."""
     output = ("ä\n" * 6000 if many_lines else "ä" * 9000) + "\nmissing conclusion"
-    events: list[dict[str, Any]] = []
-    ctx, _ = _task_ctx(fake_accessor, events, [_text_step(output)])
-    args = {"description": "d", "prompt": "p"}
-    if registered:
-        result = await ctx.registry.execute("task", args, ctx)
-    else:
-        result = await TaskTool().execute(args, ctx)
+    result = await build_task_result(
+        "child", output, _ctx(fake_accessor), agent="general", metadata={}
+    )
     assert result.truncated is True
     assert result.metadata["truncated"] is True
     assert "truncated" in result.output
@@ -333,15 +245,12 @@ async def test_task_spill_failure_keeps_preview(
 
     async def fail_write(path: str, content: bytes, mode: int = 0o644) -> None:
         attempts.append(content)
-        if len(attempts) == 1:
-            raise PermissionError("write denied")
-        await FakeAccessor.write_file(fake_accessor, path, content, mode)
+        raise PermissionError("write denied")
 
     monkeypatch.setattr(fake_accessor, "write_file", fail_write)
     output = ("x\n" * 6000 if many_lines else "x" * 9000) + "\nconclusion"
-    ctx, _ = _task_ctx(fake_accessor, [], [_text_step(output)])
-    result = await ctx.registry.execute(
-        "task", {"description": "d", "prompt": "p"}, ctx
+    result = await build_task_result(
+        "child", output, _ctx(fake_accessor), agent="general", metadata={}
     )
     assert result.truncated is True
     assert '<task id="' in result.output
@@ -360,7 +269,7 @@ async def test_task_spill_preserves_computeruse_recording(
     marker = "![Computer use](/workspace/.opencuria/computeruse/child/session.mp4)"
     output = "x" * 9000 + (f"\n\n{marker}" if recorded else "")
     result = await build_task_result(
-        "child", output, _ctx(fake_accessor, []), agent="computeruse", metadata={}
+        "child", output, _ctx(fake_accessor), agent="computeruse", metadata={}
     )
     assert result.truncated is True
     assert result.output.count(marker) == int(recorded)
@@ -369,12 +278,18 @@ async def test_task_spill_preserves_computeruse_recording(
 
 
 async def test_task_envelope_carries_resumable_task_id(fake_accessor) -> None:
-    """Direct task output embeds the task_id for resume (OpenCode parity)."""
-    events: list[dict[str, Any]] = []
-    ctx, _ = _task_ctx(fake_accessor, events, [_text_step("hello")])
-    result = await TaskTool().execute({"description": "d", "prompt": "p"}, ctx)
-    task_id = result.metadata["task_id"]
-    assert task_id == result.metadata["subtask_id"]
+    """Bounded task output embeds the persistent task_id for resume."""
+    task_id = "persisted-child"
+    result = await build_task_result(
+        task_id,
+        "hello",
+        _ctx(fake_accessor),
+        agent="general",
+        metadata={"task_id": task_id},
+    )
+    assert result.metadata["task_id"] == task_id
+    assert result.truncated is False
+    assert not fake_accessor.written
     assert f'<task id="{task_id}" state="completed">' in result.output
     assert "<task_result>" in result.output
     assert "hello" in result.output
@@ -517,35 +432,3 @@ async def test_runner_denies_todowrite_in_child(fake_accessor) -> None:
     errors = [e for e in events if e["type"] == "tool_error"]
     assert errors and "todowrite" in errors[0]["error"]
     assert not [e for e in events if e["type"] == "todo_updated"]
-
-
-async def test_parent_deny_edit_inherited_by_child(fake_accessor) -> None:
-    """Parent edit deny hides edit from the child schema (permission)."""
-    from apps.harness.tools.subagents import _child_evaluator, _child_registry
-
-    parent_registry = default_tool_registry()
-    parent_evaluator = PermissionEvaluator(global_rules={"edit": "deny"})
-    child_registry = _child_registry(parent_registry, "general")
-    child_evaluator = _child_evaluator(parent_evaluator)
-    assert child_evaluator.evaluate("edit", "", mode="build") == "deny"
-
-    async def _emit(event: dict[str, Any]) -> None:
-        events.append(event)
-
-    events: list[dict[str, Any]] = []
-    child = HarnessRunner(
-        provider=FakeProvider([_text_step("done")]),
-        tools=child_registry,
-        evaluator=child_evaluator,
-        accessor=fake_accessor,
-        emit=_emit,
-    )
-    from apps.harness.agents.definitions import get_agent
-
-    schemas = child._filtered_schemas(
-        get_agent("general"), "build", depth=1, max_depth=2
-    )
-    names = [schema.name for schema in schemas]
-    assert "edit" not in names
-    assert "write" not in names
-    assert "read" in names

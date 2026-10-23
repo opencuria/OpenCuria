@@ -574,10 +574,13 @@ async def test_todowrite_invalid_status_rejected(fake_accessor) -> None:
 
 
 async def test_task_tool_without_wiring_rejected(fake_accessor) -> None:
-    """TaskTool without provider/registry in ctx fails loudly (no wiring)."""
+    """TaskTool requires the persistent service callback in its context."""
     ctx = _ctx(fake_accessor)
-    with pytest.raises(ToolError, match="not wired"):
+    with pytest.raises(ToolError) as raised:
         await TaskTool().execute({"description": "d", "prompt": "p"}, ctx)
+    assert str(raised.value) == (
+        "Subagent execution is not wired (no run_subagent in ToolContext)."
+    )
 
 
 async def test_read_missing_file_is_tool_error(fake_accessor) -> None:

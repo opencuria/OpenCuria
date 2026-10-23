@@ -50,8 +50,7 @@ def agent_s_tool_registry() -> ToolRegistry:
 
     Agent-S plans never see OpenCuria tool schemas: the registry is
     intentionally empty so ``HarnessRunner._filtered_schemas`` offers
-    ``tools=[]`` and the Agent-S wire uses no function calls. Hooks are
-    copied by the caller (see ``tools.subagents._child_registry``).
+    ``tools=[]`` and the Agent-S wire uses no function calls.
     """
     return ToolRegistry()
 

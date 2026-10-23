@@ -1,4 +1,4 @@
-"""Depth regression tests for persistent sessions and in-memory child runs."""
+"""Depth and read-only delegation regressions for persistent sessions."""
 
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ from apps.harness.runner import HarnessRunner, RunOptions
 from apps.harness.services import SubagentConfigService
 from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.tests.test_tools_task import FakeProvider, _text_step, _tool_step
-from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import ToolContext, ToolError
 from apps.harness.tools.subagents import TaskArgs
 from apps.organizations.models import Organization
@@ -252,32 +251,6 @@ async def test_over_limit_existing_child_rejected_before_run(harness_workspace):
     assert not await sync_to_async(service.messages.list_for_session)(grandchild.id)
 
 
-@pytest.mark.parametrize("max_depth", [1, 2, 3])
-async def test_in_memory_child_tree_uses_same_depth_limit(fake_accessor, max_depth):
-    """The nonpersistent path keeps task below the limit, never above it."""
-    provider = RecursiveProvider()
-    events: list[dict[str, Any]] = []
-
-    async def emit(event: dict[str, Any]) -> None:
-        events.append(event)
-
-    runner = HarnessRunner(
-        provider=provider,
-        tools=default_tool_registry(),
-        evaluator=PermissionEvaluator(),
-        accessor=fake_accessor,
-        emit=emit,
-    )
-    await runner.run(
-        "spawn", "build", "fake-model", "build", RunOptions(max_depth=max_depth)
-    )
-    assert len(provider.calls) == max_depth + 1
-    assert all("task" in c["tools"] for c in provider.calls[:-1])
-    assert "task" not in provider.calls[-1]["tools"]
-    assert all("todowrite" not in c["tools"] for c in provider.calls[1:])
-    assert any("depth limit" in e.get("error", "") for e in events)
-
-
 @pytest.mark.django_db
 @pytest.mark.parametrize("invalid", ["cycle", "cross_org"])
 def test_invalid_ancestry_fails_closed(harness_workspace, invalid):
@@ -300,25 +273,6 @@ def test_invalid_ancestry_fails_closed(harness_workspace, invalid):
         HarnessSession.objects.filter(id=root.id).update(organization_id=org.id)
     with pytest.raises(ValueError, match="ancestry"):
         HarnessSessionRepository.get_depth(child.id)
-
-
-@pytest.mark.parametrize("target", ["general", "computeruse"])
-async def test_read_only_child_cannot_delegate_to_writable_agent(fake_accessor, target):
-    """Retaining task must not allow explore to bypass its read-only contract."""
-    from apps.harness.tools.subagents import TaskTool
-
-    ctx = ToolContext(
-        session_id="explore-child",
-        workspace_id="ws-1",
-        accessor=fake_accessor,
-        agent_name="explore",
-        depth=1,
-        max_depth=2,
-    )
-    with pytest.raises(ToolError, match="Read-only explore"):
-        await TaskTool().execute(
-            TaskArgs(description="writable", prompt="edit", subagent_type=target), ctx
-        )
 
 
 @pytest.mark.django_db(transaction=True)

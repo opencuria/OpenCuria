@@ -46,12 +46,9 @@ class ToolContext:
     nesting cannot recurse without a bound. ``todowrite`` is additionally
     withheld from any child (``depth > 0``).
 
-    ``model`` carries the parent's effective model for inheritance,
-    ``parent_emit`` forwards child events to the parent emitter,
-    ``provider``/``registry``/``evaluator`` give the ``task`` tool what
-    it needs to spawn a real :class:`HarnessRunner` child (kept as
-    ``Any`` here to avoid a tools<->runner import cycle; populated by
-    the runner, ``None`` for direct unit-test use).
+    ``model`` carries the parent's effective model for inheritance.
+    ``run_subagent`` delegates child execution to the persistent harness
+    service; ``registry`` supplies the active todo repository for events.
     """
 
     session_id: str
@@ -62,11 +59,7 @@ class ToolContext:
     depth: int = 0
     max_depth: int = DEFAULT_MAX_DEPTH
     model: str = ""
-    parent_emit: Callable[[dict[str, Any]], Awaitable[None]] | None = None
-    provider: Any | None = None
-    model_resolver: Any | None = None
     registry: ToolRegistry | None = None
-    evaluator: Any | None = None
     run_subagent: Any | None = None
     call_id: str = ""
     on_question: Callable[..., Awaitable[list[Any]]] | None = None

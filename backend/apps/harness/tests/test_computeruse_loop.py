@@ -29,7 +29,7 @@ from apps.harness.tools import (
     computeruse_tool_registry,
     default_tool_registry,
 )
-from apps.harness.tools.subagents import TASK_OUTPUT_MAX_CHARS, _child_registry
+from apps.harness.tools.subagents import TASK_OUTPUT_MAX_CHARS
 
 
 def test_video_helper_appends_exactly_once() -> None:
@@ -108,25 +108,6 @@ def test_computeruse_agent_definition_uses_agent_s_prompt_budget() -> None:
     assert agent.system_prompt == ""
     assert agent.steps == 15
     assert "Agent-S" in agent.description
-
-
-def test_child_registry_computeruse_empty_with_hooks_copied() -> None:
-    """Computeruse children get an empty registry that keeps parent hooks."""
-    parent = default_tool_registry()
-    seen: list[str] = []
-
-    async def _before(tool_name: str, args: Any, ctx: Any) -> None:
-        seen.append(tool_name)
-
-    async def _after(tool_name: str, args: Any, ctx: Any, result: Any) -> Any:
-        return result
-
-    parent.add_before_hook(_before)
-    parent.add_after_hook(_after)
-    child = _child_registry(parent, "computeruse")
-    assert child.names() == []
-    assert list(child.before_hooks) == [_before]
-    assert list(child.after_hooks) == [_after]
 
 
 async def test_harness_runner_computeruse_completion_sees_no_tools() -> None:
