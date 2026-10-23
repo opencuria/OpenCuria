@@ -305,6 +305,9 @@ const isSubagentSession = computed(() => Boolean(activeSession.value?.parent_id)
 const messageActionsDisabled = computed(() => !props.canPrompt || isSubagentSession.value)
 /** A running session hides fork; edit stays available and stops the run first. */
 const sessionBusy = computed(() => activeSession.value?.status === 'busy')
+const stopping = computed(() =>
+  Boolean(harness.activeSessionId && harness.stoppingSessionIds.includes(harness.activeSessionId)),
+)
 
 /** A running session keeps its composer: new messages steer the run. */
 const inputDisabled = computed(() => !props.canPrompt)
@@ -812,6 +815,7 @@ async function handleForkMessage(messageId: string): Promise<void> {
           :disabled="inputDisabled"
           :sending="sending"
           :stoppable="inputStoppable"
+          :stopping="stopping"
           :busy-message="busyMessage"
           :mode="composerMode"
           :harness-id="composerHarnessId"
@@ -850,6 +854,7 @@ async function handleForkMessage(messageId: string): Promise<void> {
       <HarnessChatInput
         :stop-only="true"
         :stoppable="inputStoppable"
+        :stopping="stopping"
         :disabled="true"
         @stop="handleStop"
       />

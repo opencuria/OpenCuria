@@ -106,6 +106,7 @@ const props = defineProps<{
    * Stop. Model/mode pickers lock because they only apply at run start.
    */
   stoppable?: boolean
+  stopping?: boolean
   /** Reason the composer is unavailable (shown below the card). */
   busyMessage?: string
   workspaceId?: string
@@ -240,15 +241,20 @@ const selectedSkills = computed(() =>
 )
 
 const hasText = computed(() => prompt.value.trim().length > 0)
-const canSend = computed(() => hasText.value && !props.disabled && !props.sending)
-const canStop = computed(() => Boolean(props.stoppable) && !props.sending)
+const canSend = computed(
+  () => hasText.value && !props.disabled && !props.sending && !props.stopping,
+)
+const canStop = computed(() => Boolean(props.stoppable) && !props.sending && !props.stopping)
+const stopTitle = computed(() => (props.stopping ? 'Stopping…' : 'Stop current run'))
 /** A run is active in a chat composer: sends steer it instead of starting one. */
-const steering = computed(() => Boolean(props.stoppable) && !isScheduledTask.value)
+const steering = computed(
+  () => Boolean(props.stoppable || props.stopping) && !isScheduledTask.value,
+)
 /** Empty composer while steering: the primary action is Stop. */
 const primaryIsStop = computed(() => steering.value && !hasText.value)
 const primaryEnabled = computed(() => (primaryIsStop.value ? canStop.value : canSend.value))
 const primaryTitle = computed(() => {
-  if (primaryIsStop.value) return 'Stop current run'
+  if (primaryIsStop.value) return stopTitle.value
   return steering.value ? 'Steer the agent' : 'Send'
 })
 const pickersLocked = computed(() => Boolean(props.disabled) || steering.value)
@@ -1310,11 +1316,14 @@ function onComposerKeydown(e: KeyboardEvent): void {
           ? 'bg-primary text-primary-foreground hover:bg-primary/90'
           : 'bg-muted text-muted-foreground'
       "
-      title="Stop current run"
+      :title="stopTitle"
+      :aria-label="stopTitle"
+      :aria-busy="stopping"
       data-testid="composer-stop"
       @click="emit('stop')"
     >
-      <Square :size="14" />
+      <Loader2 v-if="stopping" :size="14" class="animate-spin" />
+      <Square v-else :size="14" />
     </Button>
   </div>
   <div
@@ -1581,12 +1590,14 @@ function onComposerKeydown(e: KeyboardEvent): void {
                 size="icon"
                 class="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
                 :disabled="!canStop"
-                title="Stop current run"
-                aria-label="Stop current run"
+                :title="stopTitle"
+                :aria-label="stopTitle"
+                :aria-busy="stopping"
                 data-testid="composer-stop"
                 @click="emit('stop')"
               >
-                <Square :size="14" />
+                <Loader2 v-if="stopping" :size="14" class="animate-spin" />
+                <Square v-else :size="14" />
               </Button>
               <Button
                 v-if="!isScheduledTask"
@@ -1599,10 +1610,13 @@ function onComposerKeydown(e: KeyboardEvent): void {
                     : 'bg-muted text-muted-foreground'
                 "
                 :title="primaryTitle"
+                :aria-label="primaryTitle"
+                :aria-busy="primaryIsStop && stopping"
                 :data-testid="primaryIsStop ? 'composer-stop' : 'composer-send'"
                 @click="primaryIsStop ? emit('stop') : handleSend()"
               >
-                <Square v-if="primaryIsStop" :size="14" />
+                <Loader2 v-if="primaryIsStop && stopping" :size="14" class="animate-spin" />
+                <Square v-else-if="primaryIsStop" :size="14" />
                 <Send v-else :size="16" />
               </Button>
             </div>

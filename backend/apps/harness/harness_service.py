@@ -3144,6 +3144,8 @@ class HarnessService:
             result = await loop_runner.run(
                 prompt, session.agent_name or "build", model, session.mode, opts
             )
+            if self._user_abort_requested(session):
+                raise asyncio.CancelledError()
             # Text deltas were already appended to the assistant message
             # incrementally (see _persist_part_updated); only genuinely new
             # tail content still needs persisting. The runner's final
@@ -4012,6 +4014,14 @@ class HarnessService:
         event: dict[str, Any],
     ) -> None:
         """Persist a runner event; preflight and monitor own account revocation."""
+        advances_run = event.get("type") in {
+            "step_start",
+            "tool_queued",
+            "tool_started",
+            "part_updated",
+        }
+        if advances_run and self._user_abort_requested(session):
+            raise asyncio.CancelledError()
         context = self._provider_turn_context(session)
         if context.get("provider_revocation_message"):
             from .provider_turns import ProviderAccountRevokedError
@@ -4019,6 +4029,10 @@ class HarnessService:
             raise ProviderAccountRevokedError()
         async with self._event_lock(str(session.id)):
             await self._persist_runner_event(session, assistant, event)
+        # A dependency can consume Task.cancel() while persisting or emitting.
+        # Keep explicit stop intent authoritative before control returns to the loop.
+        if advances_run and self._user_abort_requested(session):
+            raise asyncio.CancelledError()
 
     async def _persist_runner_event(
         self,

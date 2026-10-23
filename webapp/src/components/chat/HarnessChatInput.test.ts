@@ -1136,6 +1136,30 @@ describe('HarnessChatInput', () => {
     expect(stop.classes()).not.toContain('bg-destructive')
   })
 
+  it.each([false, true])('shows pending stop feedback (stopOnly: %s)', async (stopOnly) => {
+    const wrapper = mountInput({ stoppable: true, stopping: true, stopOnly })
+    const stop = wrapper.get('[data-testid="composer-stop"]')
+    expect(stop.attributes('disabled')).toBeDefined()
+    expect(stop.attributes('aria-label')).toBe('Stopping…')
+    expect(stop.attributes('aria-busy')).toBe('true')
+    expect(stop.find('.animate-spin').exists()).toBe(true)
+    await stop.trigger('click')
+    expect(wrapper.emitted('stop')).toBeUndefined()
+  })
+
+  it('blocks steering while stopping and preserves the draft', async () => {
+    const wrapper = mountInput({ stoppable: true })
+    await setEditorText(wrapper, 'keep this draft')
+    await wrapper.setProps({ stopping: true })
+
+    expect(wrapper.get('[data-testid="composer-stop"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="composer-send"]').attributes('disabled')).toBeDefined()
+    expect(editorText(wrapper)).toBe('keep this draft')
+
+    await wrapper.setProps({ stopping: false })
+    expect(wrapper.get('[data-testid="composer-send"]').attributes('disabled')).toBeUndefined()
+  })
+
   it('opens the native file dialog when the paperclip is clicked', async () => {
     const wrapper = mountInput()
     const input = wrapper.find('[data-testid="composer-file-input"]')

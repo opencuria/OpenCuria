@@ -573,6 +573,83 @@ async def test_abort_marks_message_and_parts(harness_workspace) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("boundary", ["provider", "event", "tool", "completion"])
+async def test_abort_stops_progress_when_dependency_swallows_cancellation(
+    harness_workspace: Any, boundary: str
+) -> None:
+    """A swallowed cancellation must not allow another model or tool step."""
+    entered = asyncio.Event()
+    continued = asyncio.Event()
+    provider_calls = 0
+
+    class CancellationSwallowingProvider(FakeProvider):
+        async def chat_stream(  # type: ignore[no-untyped-def]
+            self, model, messages, tools, opts=None
+        ):
+            nonlocal provider_calls
+            provider_calls += 1
+            if boundary in {"provider", "completion"}:
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    pass
+            if boundary == "tool":
+                for delta in _tool_step("bash", {"command": "must not execute"}):
+                    yield delta
+            elif boundary != "completion":
+                yield Delta(text="streamed text")
+                continued.set()
+            yield Delta(usage=Usage(1, 1, 2))
+
+    provider = CancellationSwallowingProvider([])
+    service, _, events = _service(provider=provider)
+    if boundary in {"event", "tool"}:
+        original_emit = service._emit
+        assert original_emit is not None
+
+        async def swallow_cancel(event: str, data: dict[str, Any]) -> None:
+            key = "tool_started" if boundary == "tool" else "text"
+            if event == FRONTEND_EVENT_PART and data.get("delta", {}).get(key):
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    pass
+            await original_emit(event, data)
+
+        service._emit = swallow_cancel
+    if boundary == "tool":
+        from apps.harness.tests.conftest import FakeAccessor
+
+        accessor = FakeAccessor()
+
+        async def get_accessor(_workspace_id: str) -> FakeAccessor:
+            return accessor
+
+        service._accessor_factory = get_accessor
+    session = await _db_create_session(harness_workspace)
+    assistant = await service.start_run(
+        session,
+        "stop this run",
+        organization_id=session.organization_id,
+        workspace_id=str(session.workspace_id),
+    )
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    await asyncio.wait_for(service.abort_run(session.id), timeout=2)
+
+    assistant.refresh_from_db()
+    assert assistant.finish == "aborted"
+    assert assistant.error == "aborted by user"
+    assert not continued.is_set()
+    assert provider_calls == 1
+    if boundary == "tool":
+        assert accessor.exec_calls == []
+    assert not service.is_running(session.id)
+    assert events[-2]["status"] == "idle"
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_abort_rejects_pending_permission_and_question(
     harness_workspace,
 ) -> None:

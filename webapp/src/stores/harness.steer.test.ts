@@ -305,6 +305,26 @@ describe('harness store steering', () => {
   })
 
   describe('abortSession', () => {
+    it('reports a pending stop immediately and sends only one request per session', async () => {
+      const store = ready()
+      let finish!: (session: HarnessSession) => void
+      abortMock.mockReturnValueOnce(
+        new Promise((resolve) => {
+          finish = resolve
+        }),
+      )
+
+      const stopping = store.abortSession('session-1')
+      expect(store.stoppingSessionIds).toEqual(['session-1'])
+      await expect(store.abortSession('session-1')).resolves.toEqual([])
+      expect(abortMock).toHaveBeenCalledTimes(1)
+      expect(store.sessions[0]?.status).toBe('busy')
+
+      finish(makeSession({ status: 'idle' }))
+      await stopping
+      expect(store.stoppingSessionIds).toEqual([])
+    })
+
     it('hands the queued texts back after a successful abort and clears the queue', async () => {
       const store = ready()
       store.handleSteerQueue('session-1', [makeSteer('a', 'first'), makeSteer('b', 'second')])
@@ -342,6 +362,11 @@ describe('harness store steering', () => {
 
       expect(notifyError).toHaveBeenCalledWith('Abort failed', 'nope')
       expect(store.activeQueuedSteers).toHaveLength(1)
+      expect(store.stoppingSessionIds).toEqual([])
+
+      abortMock.mockResolvedValueOnce(makeSession({ status: 'idle' }))
+      await expect(store.abortSession('session-1')).resolves.toEqual(['Steer a'])
+      expect(abortMock).toHaveBeenCalledTimes(2)
     })
   })
 

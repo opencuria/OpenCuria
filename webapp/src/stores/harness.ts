@@ -93,6 +93,7 @@ export const useHarnessStore = defineStore('harness', () => {
   const pendingQuestions = ref<Record<string, HarnessQuestionRequest>>({})
   /** Queued (not yet delivered) steers keyed by session id, FIFO. */
   const queuedSteers = ref<Record<string, HarnessSteer[]>>({})
+  const stoppingSessionIds = ref<string[]>([])
   const activeSessionId = ref<string | null>(null)
   /** Session currently open in the chat panel; cleared when the panel unmounts. */
   const viewingSessionId = ref<string | null>(null)
@@ -1081,9 +1082,10 @@ export const useHarnessStore = defineStore('harness', () => {
    * composer can restore them. Resolves empty when the abort failed.
    */
   async function abortSession(sessionId: string): Promise<string[]> {
-    if (sessionTransitioning(sessionId)) return []
+    if (sessionTransitioning(sessionId) || stoppingSessionIds.value.includes(sessionId)) return []
     const notifications = useNotificationStore()
     const queued = [...(queuedSteers.value[sessionId] ?? [])]
+    stoppingSessionIds.value = [...stoppingSessionIds.value, sessionId]
     try {
       const session = await abortHarnessSession(sessionId)
       upsertSession(session)
@@ -1095,6 +1097,8 @@ export const useHarnessStore = defineStore('harness', () => {
     } catch (e: unknown) {
       notifications.error('Abort failed', e instanceof Error ? e.message : 'Unknown error')
       return []
+    } finally {
+      stoppingSessionIds.value = stoppingSessionIds.value.filter((id) => id !== sessionId)
     }
   }
 
@@ -1606,6 +1610,7 @@ export const useHarnessStore = defineStore('harness', () => {
     pendingPermissions,
     pendingQuestions,
     queuedSteers,
+    stoppingSessionIds,
     activeSessionId,
     viewingSessionId,
     loading,

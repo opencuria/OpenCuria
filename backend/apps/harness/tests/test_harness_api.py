@@ -366,6 +366,15 @@ def test_timeline_todos_abort_flow(harness_setup, fake_harness_service):
     assert todos.status_code == 200
     assert todos.json() == []
 
+    denied = read_client.post(f"/api/v1/harness/sessions/{session_id}/abort")
+    assert denied.status_code == 403
+
+    stranger_client = _client(
+        user=harness_setup["stranger"], org=harness_setup["org"], permissions=RUN
+    )
+    foreign = stranger_client.post(f"/api/v1/harness/sessions/{session_id}/abort")
+    assert foreign.status_code == 404
+
     abort = run_client.post(f"/api/v1/harness/sessions/{session_id}/abort")
     assert abort.status_code == 200
 

@@ -57,6 +57,7 @@ const HarnessChatInputStub = {
     'sessionId',
     'uploadDrag',
     'stoppable',
+    'stopping',
     'stopOnly',
     'harnessId',
     'engineLocked',
@@ -473,6 +474,9 @@ describe('HarnessChatPanel', () => {
     expect(input.props('stopOnly')).toBe(true)
     expect(input.props('stoppable')).toBe(true)
     expect(input.props('disabled')).toBe(true)
+    store.stoppingSessionIds = ['session-child']
+    await wrapper.vm.$nextTick()
+    expect(input.props('stopping')).toBe(true)
     const stop = vi.spyOn(store, 'abortSession').mockResolvedValue([])
     input.vm.$emit('stop')
     await flushPromises()
@@ -481,6 +485,7 @@ describe('HarnessChatPanel', () => {
     store.setActiveSession('session-root')
     await wrapper.vm.$nextTick()
     const rootInput = wrapper.findComponent(HarnessChatInputStub)
+    expect(rootInput.props('stopping')).toBe(false)
     expect(rootInput.props('stopOnly')).toBeFalsy()
     expect(rootInput.props('stoppable')).toBe(true)
     rootInput.vm.$emit('stop')
