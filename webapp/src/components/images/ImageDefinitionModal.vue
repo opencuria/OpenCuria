@@ -20,27 +20,26 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import type { ImageDefinition } from '@/types'
-import { updateImageDefinition } from '@/services/workspaces.api'
-import { useAutosave } from '@/composables/useAutosave'
-import AutosaveStatus from '@/components/settings/AutosaveStatus.vue'
 
 const props = withDefaults(
   defineProps<{
     open: boolean
     imageDefinition?: ImageDefinition | null
+    saving?: boolean
+    error?: string | null
   }>(),
   {
     imageDefinition: null,
+    saving: false,
+    error: null,
   },
 )
 
 const emit = defineEmits<{
   'update:open': [value: boolean]
   saved: [payload: Partial<ImageDefinition>]
-  updated: []
 }>()
 
-const savedDefinition = ref('')
 const name = ref('')
 const description = ref('')
 const activeTab = ref<'definition' | 'advanced'>('definition')
@@ -137,37 +136,16 @@ watch(
       .join('\n')
     customDockerfile.value = src?.custom_dockerfile || ''
     customInitScript.value = src?.custom_init_script || ''
-    savedDefinition.value = JSON.stringify(payload())
   },
   { immediate: true },
 )
 
-const autosave = useAutosave({
-  source: payload,
-  dirty: () => !isValid.value || JSON.stringify(payload()) !== savedDefinition.value,
-  enabled: () => props.open && !!props.imageDefinition,
-  valid: () => isValid.value,
-  scope: () => props.imageDefinition?.id,
-  errorMessage: 'Failed to update image definition',
-  save: async (isCurrent) => {
-    const data = payload()
-    await updateImageDefinition(props.imageDefinition!.id, data)
-    if (!isCurrent()) return
-    savedDefinition.value = JSON.stringify(data)
-    emit('updated')
-  },
-})
-
 function handleSave(): void {
-  if (props.imageDefinition) {
-    void autosave.flush()
-    return
-  }
-  if (isValid.value) emit('saved', payload())
+  if (isValid.value && !props.saving) emit('saved', payload())
 }
 
-async function setOpen(value: boolean): Promise<void> {
-  if (value || (await autosave.flush())) emit('update:open', value)
+function setOpen(value: boolean): void {
+  if (!props.saving) emit('update:open', value)
 }
 </script>
 
@@ -185,7 +163,9 @@ async function setOpen(value: boolean): Promise<void> {
       </DialogHeader>
 
       <DialogBody>
+      <p v-if="error" class="text-sm text-destructive" role="alert">{{ error }}</p>
       <form id="image-definition-form" class="space-y-4" @submit.prevent="handleSave">
+        <fieldset :disabled="saving" class="contents">
         <div class="rounded-md border border-border bg-muted/50 p-1">
           <div class="grid grid-cols-2 gap-1">
             <Button type="button" size="sm" :variant="activeTab === 'definition' ? 'secondary' : 'ghost'" @click="activeTab = 'definition'">
@@ -280,13 +260,13 @@ async function setOpen(value: boolean): Promise<void> {
           </div>
         </template>
 
+        </fieldset>
       </form>
       </DialogBody>
 
       <DialogFooter>
-        <AutosaveStatus v-if="imageDefinition" :state="autosave" />
-        <Button variant="outline" type="button" @click="setOpen(false)">{{ imageDefinition ? 'Close' : 'Cancel' }}</Button>
-        <Button v-if="!imageDefinition" type="submit" form="image-definition-form" :disabled="!isValid">Create</Button>
+        <Button variant="outline" type="button" :disabled="saving" @click="setOpen(false)">Cancel</Button>
+        <Button type="submit" form="image-definition-form" :disabled="saving || !isValid">{{ saving ? 'Saving…' : 'Save' }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

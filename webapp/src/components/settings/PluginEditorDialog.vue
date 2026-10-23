@@ -29,8 +29,6 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
-import { useAutosave } from '@/composables/useAutosave'
-import AutosaveStatus from './AutosaveStatus.vue'
 import { useCredentialStore } from '@/stores/credentials'
 import { useAuthStore } from '@/stores/auth'
 import { usePluginStore } from '@/stores/plugins'
@@ -65,7 +63,6 @@ const servicesError = ref<string | null>(null)
 
 const form: PluginFormModel = reactive(emptyPluginForm())
 const submitting = ref(false)
-const savedForm = ref('')
 const serverError = ref<string | null>(null)
 const expandedSkill = ref<string | null>(null)
 const expandedMcp = ref<string | null>(null)
@@ -103,7 +100,6 @@ function resetForm(): void {
   form.skills = fresh.skills
   form.mcps = fresh.mcps
   form.requirements = fresh.requirements
-  savedForm.value = JSON.stringify(formToUpdateIn(form))
   submitting.value = false
   serverError.value = null
   expandedSkill.value = form.skills[0]?.uid ?? null
@@ -214,33 +210,12 @@ function setMcpTransport(mcpUid: string, transport: PluginMcpTransportOption): v
   }
 }
 
-const autosave = useAutosave({
-  source: () => form,
-  dirty: () => JSON.stringify(formToUpdateIn(form)) !== savedForm.value,
-  enabled: () => open.value && !!props.plugin,
-  valid: () =>
-    validationErrors.value.length === 0 &&
-    credentialStore.servicesLoaded &&
-    !credentialStore.servicesError,
-  scope: () => props.plugin?.id,
-  errorMessage: 'Failed to update plugin',
-  save: async (isCurrent) => {
-    const payload = formToUpdateIn(form)
-    const updated = await pluginStore.updatePlugin(props.plugin!.id, payload, { silent: true })
-    if (!updated) throw new Error('Failed to update plugin')
-    if (isCurrent()) savedForm.value = JSON.stringify(payload)
-  },
-})
-
-async function setOpen(value: boolean): Promise<void> {
-  if (value || !isEdit.value || (await autosave.flush())) open.value = value
+function setOpen(value: boolean): void {
+  if (!submitting.value) open.value = value
 }
 
 async function handleSubmit(): Promise<void> {
-  if (isEdit.value) {
-    await autosave.flush()
-    return
-  }
+  if (submitting.value) return
   if (!credentialStore.servicesLoaded || credentialStore.servicesError) return
   const errors = validatePluginForm({
     ...form,
@@ -250,9 +225,15 @@ async function handleSubmit(): Promise<void> {
   submitting.value = true
   serverError.value = null
   try {
-    const created = await pluginStore.createPlugin(formToCreateIn(form))
-    if (created) open.value = false
-    else serverError.value = 'Failed to create plugin.'
+    if (isEdit.value && props.plugin) {
+      const updated = await pluginStore.updatePlugin(props.plugin.id, formToUpdateIn(form))
+      if (updated) open.value = false
+      else serverError.value = 'Failed to update plugin.'
+    } else {
+      const created = await pluginStore.createPlugin(formToCreateIn(form))
+      if (created) open.value = false
+      else serverError.value = 'Failed to create plugin.'
+    }
   } finally {
     submitting.value = false
   }
@@ -860,19 +841,17 @@ async function handleSubmit(): Promise<void> {
       </DialogBody>
 
       <DialogFooter>
-        <AutosaveStatus v-if="isEdit" :state="autosave" />
-        <Button variant="outline" type="button" :disabled="submitting" @click="setOpen(false)">
-          {{ isEdit ? 'Close' : 'Cancel' }}
+        <Button variant="outline" type="button" :disabled="submitting" @click="open = false">
+          Cancel
         </Button>
         <Button
           type="submit"
           form="plugin-editor-form"
-          v-if="!isEdit"
-          data-testid="plugin-editor-create"
+          data-testid="plugin-editor-save"
           :disabled="!canSubmit"
         >
           <LoadingSpinner v-if="submitting" :size="12" />
-          <span v-else>Create Plugin</span>
+          <span v-else>{{ isEdit ? 'Save Changes' : 'Create Plugin' }}</span>
         </Button>
       </DialogFooter>
     </DialogContent>

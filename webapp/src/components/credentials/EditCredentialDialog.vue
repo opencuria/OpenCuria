@@ -14,8 +14,6 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { useCredentialStore } from '@/stores/credentials'
 import type { Credential } from '@/types'
-import { useAutosave } from '@/composables/useAutosave'
-import AutosaveStatus from '@/components/settings/AutosaveStatus.vue'
 
 const props = defineProps<{
   credential: Credential | null
@@ -30,7 +28,8 @@ const credentialStore = useCredentialStore()
 const open = ref(false)
 const name = ref('')
 const value = ref('')
-const saved = ref({ name: '', value: '' })
+const submitting = ref(false)
+const error = ref<string | null>(null)
 
 function credentialDescriptor(credential: Credential): string {
   if (credential.credential_type === 'mcp_oauth') return 'OAuth'
@@ -46,39 +45,42 @@ watch(
       open.value = true
       name.value = cred.name
       value.value = ''
-      saved.value = { name: cred.name, value: '' }
+      error.value = null
     }
   },
   { immediate: true },
 )
 
-const autosave = useAutosave({
-  source: () => [name.value, value.value],
-  dirty: () => name.value.trim() !== saved.value.name || value.value !== saved.value.value,
-  enabled: () => open.value && !!props.credential,
-  valid: () => !!name.value.trim(),
-  scope: () => props.credential?.id,
-  errorMessage: 'Failed to update credential',
-  save: async (isCurrent) => {
-    const snapshot = { name: name.value.trim(), value: value.value }
-    const data: { name?: string; value?: string } = {}
-    if (snapshot.name !== saved.value.name) data.name = snapshot.name
-    if (snapshot.value && snapshot.value !== saved.value.value) data.value = snapshot.value
-    if (
-      Object.keys(data).length &&
-      !(await credentialStore.updateCredential(props.credential!.id, data, { silent: true }))
-    )
-      throw new Error('Failed to update credential')
-    if (isCurrent()) saved.value = snapshot
-  },
-})
+async function handleSubmit(): Promise<void> {
+  const credential = props.credential
+  if (!credential || submitting.value || !name.value.trim()) return
+  const data: { name?: string; value?: string } = {}
+  if (name.value.trim() !== credential.name) data.name = name.value.trim()
+  if (value.value) data.value = value.value
+  if (!Object.keys(data).length) {
+    handleClose()
+    return
+  }
+  submitting.value = true
+  error.value = null
+  let saved = false
+  try {
+    saved = await credentialStore.updateCredential(credential.id, data)
+    if (!saved) error.value = 'Failed to update credential.'
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : 'Failed to update credential.'
+  } finally {
+    submitting.value = false
+  }
+  if (saved) handleClose()
+}
 
-async function handleClose(): Promise<void> {
-  if (!(await autosave.flush())) return
+function handleClose(): void {
+  if (submitting.value) return
   open.value = false
   name.value = ''
   value.value = ''
-  saved.value = { name: '', value: '' }
+  error.value = null
   emit('close')
 }
 </script>
@@ -96,7 +98,8 @@ async function handleClose(): Promise<void> {
       </DialogHeader>
 
       <DialogBody>
-        <form id="edit-credential-form" class="flex flex-col gap-4" @submit.prevent="autosave.flush()">
+        <p v-if="error" class="text-sm text-destructive" role="alert">{{ error }}</p>
+        <form id="edit-credential-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
           <div v-if="credential">
             <p class="text-sm text-muted-foreground mb-3">
               {{ credential.service_name }} — {{ credentialDescriptor(credential) }}
@@ -105,7 +108,7 @@ async function handleClose(): Promise<void> {
 
           <div>
             <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
-            <Input v-model="name" placeholder="Credential name" />
+            <Input v-model="name" :disabled="submitting" placeholder="Credential name" />
           </div>
 
           <div v-if="credential?.credential_type !== 'mcp_oauth'">
@@ -113,12 +116,14 @@ async function handleClose(): Promise<void> {
             <Textarea
               v-if="credential?.credential_type === 'file'"
               v-model="value"
+              :disabled="submitting"
               :rows="6"
               placeholder="Leave empty to keep current file contents"
             />
             <Input
               v-else
               v-model="value"
+              :disabled="submitting"
               type="password"
               placeholder="Leave empty to keep current value"
             />
@@ -130,8 +135,10 @@ async function handleClose(): Promise<void> {
       </DialogBody>
 
       <DialogFooter>
-        <AutosaveStatus :state="autosave" />
-        <Button variant="outline" type="button" @click="handleClose">Close</Button>
+        <Button variant="outline" type="button" :disabled="submitting" @click="handleClose">Cancel</Button>
+        <Button type="submit" form="edit-credential-form" :disabled="submitting || !name.trim()">
+          {{ submitting ? 'Saving…' : 'Save Changes' }}
+        </Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

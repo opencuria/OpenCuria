@@ -120,6 +120,40 @@ describe('PluginEditorDialog', () => {
     vi.clearAllMocks()
   })
 
+  it('keeps edits local until Save and discards cancelled drafts', async () => {
+    vi.useFakeTimers()
+    const wrapper = mountEditor(makePlugin())
+    try {
+      await wrapper.get('[data-testid="plugin-name"]').setValue('Draft name')
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(pluginStoreMock.updatePlugin).not.toHaveBeenCalled()
+      await wrapper
+        .findAll('button')
+        .find((button) => button.text() === 'Cancel')!
+        .trigger('click')
+      expect(wrapper.emitted('update:open')).toEqual([[false]])
+      wrapper.unmount()
+      expect(pluginStoreMock.updatePlugin).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('retains a failed edit for another Save attempt', async () => {
+    pluginStoreMock.updatePlugin.mockResolvedValueOnce(null).mockResolvedValue({ id: 'plugin-1' })
+    const wrapper = mountEditor(makePlugin())
+    await wrapper.get('[data-testid="plugin-name"]').setValue('Updated plugin')
+    await wrapper.get('#plugin-editor-form').trigger('submit')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="plugin-editor-error"]').text()).toContain('Failed to update')
+    expect(wrapper.emitted('update:open')).toBeUndefined()
+    await wrapper.get('#plugin-editor-form').trigger('submit')
+    await flushPromises()
+    expect(pluginStoreMock.updatePlugin).toHaveBeenCalledTimes(2)
+    expect(wrapper.emitted('update:open')).toEqual([[false]])
+  })
+
   it('normalizes a create payload with skills and placeholders', async () => {
     pluginStoreMock.createPlugin.mockResolvedValue({ id: 'new' })
     const wrapper = mountEditor(null)
@@ -162,7 +196,6 @@ describe('PluginEditorDialog', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="plugin-requirement-0"]').exists()).toBe(true)
-    await wrapper.find('[data-testid="plugin-name"]').setValue('Updated Playwright')
     await wrapper.find('#plugin-editor-form').trigger('submit')
     await flushPromises()
 
@@ -178,7 +211,6 @@ describe('PluginEditorDialog', () => {
           }),
         ],
       }),
-      { silent: true },
     )
   })
 
@@ -187,15 +219,13 @@ describe('PluginEditorDialog', () => {
     const wrapper = mountEditor(null)
     await flushPromises()
     // Empty name → invalid.
-    expect(
-      wrapper.find('[data-testid="plugin-editor-create"]').attributes('disabled'),
-    ).toBeDefined()
+    expect(wrapper.find('[data-testid="plugin-editor-save"]').attributes('disabled')).toBeDefined()
     expect(wrapper.find('[data-testid="plugin-editor-validation"]').exists()).toBe(true)
 
     await wrapper.find('[data-testid="plugin-name"]').setValue('Demo')
     await flushPromises()
     expect(
-      wrapper.find('[data-testid="plugin-editor-create"]').attributes('disabled'),
+      wrapper.find('[data-testid="plugin-editor-save"]').attributes('disabled'),
     ).toBeUndefined()
 
     await wrapper.find('#plugin-editor-form').trigger('submit')
@@ -323,5 +353,5 @@ it('offers one managed desktop selector and surfaces explicit env conflicts', as
   expect(wrapper.find('[data-testid="plugin-editor-validation"]').text()).toContain(
     'remove those env entries',
   )
-  expect(wrapper.find('[data-testid="plugin-editor-create"]').attributes('disabled')).toBeDefined()
+  expect(wrapper.find('[data-testid="plugin-editor-save"]').attributes('disabled')).toBeDefined()
 })

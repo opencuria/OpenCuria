@@ -53,6 +53,8 @@ const runners = ref<Runner[]>([])
 const buildsByDefinition = ref<Record<string, RunnerImageBuild[]>>({})
 const expanded = ref<string | null>(null)
 const modalOpen = ref(false)
+const modalSaving = ref(false)
+const modalError = ref<string | null>(null)
 const editing = ref<ImageDefinition | null>(null)
 const actionLoading = ref<string | null>(null)
 const logText = ref<string | null>(null)
@@ -143,16 +145,21 @@ function windowOpenRunner(runnerId: string) {
 }
 
 function openCreate() {
+  modalError.value = null
   editing.value = null
   modalOpen.value = true
 }
 
 function openEdit(definition: ImageDefinition) {
+  modalError.value = null
   editing.value = definition
   modalOpen.value = true
 }
 
 async function onModalSaved(payload: Partial<ImageDefinition>): Promise<void> {
+  if (modalSaving.value) return
+  modalSaving.value = true
+  modalError.value = null
   try {
     if (editing.value) {
       await workspacesApi.updateImageDefinition(editing.value.id, payload)
@@ -162,7 +169,9 @@ async function onModalSaved(payload: Partial<ImageDefinition>): Promise<void> {
     modalOpen.value = false
     await loadDefinitions()
   } catch (e) {
-    error.value = errorMessage(e, 'Failed to save image definition')
+    modalError.value = errorMessage(e, 'Failed to save image definition')
+  } finally {
+    modalSaving.value = false
   }
 }
 
@@ -685,9 +694,10 @@ onUnmounted(() => {
     <ImageDefinitionModal
       :open="modalOpen"
       :image-definition="editing"
+      :saving="modalSaving"
+      :error="modalError"
       @update:open="(v) => (modalOpen = v)"
       @saved="onModalSaved"
-      @updated="loadDefinitions({ quiet: true })"
     />
 
     <Dialog :open="Boolean(confirmDialog)" @update:open="(open) => (open ? null : cancelConfirm())">

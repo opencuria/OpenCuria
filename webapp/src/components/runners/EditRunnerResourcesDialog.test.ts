@@ -56,7 +56,9 @@ type DialogVm = typeof EditRunnerResourcesDialog extends never
       minVcpus: number
       minMemoryMb: number | string
       open: boolean
-      autosave: { flush: () => Promise<boolean> }
+      handleSubmit: () => Promise<void>
+      setOpen: (value: boolean) => void
+      formError: string | null
     }
 
 describe('EditRunnerResourcesDialog', () => {
@@ -88,10 +90,13 @@ describe('EditRunnerResourcesDialog', () => {
     expect(vm.isValid).toBe(true)
 
     vm.open = true
+    await wrapper.vm.$nextTick()
     vm.minVcpus = 2
     await wrapper.vm.$nextTick()
     await vi.advanceTimersByTimeAsync(500)
     await flushPromises()
+    expect(updateRunner).not.toHaveBeenCalled()
+    await vm.handleSubmit()
 
     expect(updateRunner).toHaveBeenCalledWith(
       'runner-1',
@@ -103,7 +108,6 @@ describe('EditRunnerResourcesDialog', () => {
         qemu_max_active_memory_mb: null,
         qemu_max_active_disk_size_gb: null,
       }),
-      { silent: true },
     )
   })
 
@@ -113,13 +117,14 @@ describe('EditRunnerResourcesDialog', () => {
     })
     const vm = wrapper.vm as unknown as DialogVm
 
+    vm.open = true
+    await wrapper.vm.$nextTick()
     vm.minVcpus = 0
     await wrapper.vm.$nextTick()
 
     expect(vm.isValid).toBe(false)
 
-    vm.open = true
-    await vm.autosave.flush()
+    await vm.handleSubmit()
     expect(updateRunner).not.toHaveBeenCalled()
   })
 
@@ -129,11 +134,55 @@ describe('EditRunnerResourcesDialog', () => {
     })
     const vm = wrapper.vm as unknown as DialogVm
     vm.open = true
+    await wrapper.vm.$nextTick()
     vm.minMemoryMb = ''
     await wrapper.vm.$nextTick()
     await vi.advanceTimersByTimeAsync(500)
     expect(vm.minMemoryMb).toBe('')
-    expect(await vm.autosave.flush()).toBe(false)
+    await vm.handleSubmit()
+    expect(updateRunner).not.toHaveBeenCalled()
+  })
+  it('discards a cancelled draft before the dialog is reopened', async () => {
+    const wrapper = shallowMount(EditRunnerResourcesDialog, { props: { runner: makeRunner() } })
+    const vm = wrapper.vm as unknown as DialogVm
+    vm.setOpen(true)
+    await wrapper.vm.$nextTick()
+    vm.minVcpus = 3
+    await wrapper.vm.$nextTick()
+    await vi.advanceTimersByTimeAsync(1000)
+    vm.setOpen(false)
+    await wrapper.vm.$nextTick()
+    vm.setOpen(true)
+    await wrapper.vm.$nextTick()
+    expect(vm.minVcpus).toBe(1)
+    expect(updateRunner).not.toHaveBeenCalled()
+    wrapper.unmount()
+    expect(updateRunner).not.toHaveBeenCalled()
+  })
+
+  it('keeps the limits dialog open after a failed Save', async () => {
+    updateRunner.mockResolvedValueOnce(false)
+    const wrapper = shallowMount(EditRunnerResourcesDialog, { props: { runner: makeRunner() } })
+    const vm = wrapper.vm as unknown as DialogVm
+    vm.setOpen(true)
+    await wrapper.vm.$nextTick()
+    vm.minVcpus = 3
+    await wrapper.vm.$nextTick()
+    await vm.handleSubmit()
+    expect(vm.open).toBe(true)
+    expect(vm.formError).toContain('Failed to update')
+    expect(vm.minVcpus).toBe(3)
+    await vm.handleSubmit()
+    expect(vm.open).toBe(false)
+    expect(updateRunner).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not save QEMU limits for a runner without QEMU support', async () => {
+    const wrapper = shallowMount(EditRunnerResourcesDialog, {
+      props: { runner: makeRunner({ available_runtimes: ['docker'] }) },
+    })
+    const vm = wrapper.vm as unknown as DialogVm
+    await vm.handleSubmit()
     expect(updateRunner).not.toHaveBeenCalled()
   })
 })

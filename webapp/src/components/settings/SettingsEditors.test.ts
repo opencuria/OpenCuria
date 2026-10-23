@@ -3,6 +3,7 @@ import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ApiKeyCard from '@/components/api-keys/ApiKeyCard.vue'
 import ImageDefinitionModal from '@/components/images/ImageDefinitionModal.vue'
+import ImageDefinitionsTab from '@/components/images/ImageDefinitionsTab.vue'
 import SkillsPanel from './SkillsPanel.vue'
 import { updateImageDefinition } from '@/services/workspaces.api'
 import type { APIKey, ImageDefinition, Skill } from '@/types'
@@ -30,7 +31,16 @@ const stores = vi.hoisted(() => ({
 }))
 vi.mock('@/stores/skills', () => ({ useSkillStore: () => stores.skills }))
 vi.mock('@/stores/apiKeys', () => ({ useApiKeyStore: () => stores.keys }))
-vi.mock('@/services/workspaces.api', () => ({ updateImageDefinition: vi.fn() }))
+vi.mock('@/services/workspaces.api', () => ({
+  updateImageDefinition: vi.fn(),
+  createImageDefinition: vi.fn(),
+  listImageDefinitions: vi.fn(async () => []),
+  listRunnerImageBuilds: vi.fn(async () => []),
+}))
+vi.mock('@/services/api', async () => ({
+  ...(await vi.importActual<typeof import('@/services/api')>('@/services/api')),
+  get: vi.fn(async () => []),
+}))
 vi.mock('vue-sonner', () => ({ toast: { error: vi.fn() } }))
 
 const dialogStubs = Object.fromEntries(
@@ -102,37 +112,51 @@ async function autosave() {
   await flushPromises()
 }
 
-describe('skill autosave', () => {
-  it('keeps the editor open and saves edits after a pause', async () => {
+describe('skill editor', () => {
+  it('writes only after Save and closes the editor on success', async () => {
     const wrapper = mount(SkillsPanel, { global })
     await wrapper.get('[title="Edit skill"]').trigger('click')
-    await autosave()
-    expect(stores.skills.updateSkill).not.toHaveBeenCalled()
     await wrapper.get('#edit-skill-name').setValue('Updated')
     await autosave()
-    expect(stores.skills.updateSkill).toHaveBeenCalledExactlyOnceWith(
-      'skill-1',
-      { name: 'Updated', body: skill.body },
-      { silent: true },
-    )
-    expect(wrapper.find('#edit-skill-name').exists()).toBe(true)
-    expect(wrapper.text()).not.toContain('Save Changes')
+    expect(stores.skills.updateSkill).not.toHaveBeenCalled()
+    await wrapper.get('#edit-skill-form').trigger('submit')
+    await flushPromises()
+    expect(stores.skills.updateSkill).toHaveBeenCalledExactlyOnceWith('skill-1', {
+      name: 'Updated',
+      body: skill.body,
+    })
+    expect(wrapper.find('#edit-skill-name').exists()).toBe(false)
   })
 
-  it('keeps invalid or failed changes visible and allows a retry', async () => {
+  it('keeps invalid or failed changes visible for another Save attempt', async () => {
     const wrapper = mount(SkillsPanel, { global })
     await wrapper.get('[title="Edit skill"]').trigger('click')
     await wrapper.get('#edit-skill-body').setValue('')
-    await autosave()
+    await wrapper.get('#edit-skill-form').trigger('submit')
     expect(stores.skills.updateSkill).not.toHaveBeenCalled()
     stores.skills.updateSkill.mockResolvedValueOnce(false)
     await wrapper.get('#edit-skill-body').setValue('Updated body')
-    await autosave()
-    expect(wrapper.text()).toContain('Changes not saved')
-    await wrapper.get('[role="status"] button').trigger('click')
+    await wrapper.get('#edit-skill-form').trigger('submit')
+    await flushPromises()
+    expect(wrapper.get('[role="alert"]').text()).toContain('Failed to update')
+    expect(wrapper.find('#edit-skill-body').exists()).toBe(true)
+    await wrapper.get('#edit-skill-form').trigger('submit')
     await flushPromises()
     expect(stores.skills.updateSkill).toHaveBeenCalledTimes(2)
-    expect(wrapper.text()).toContain('All changes saved')
+    expect(wrapper.find('#edit-skill-body').exists()).toBe(false)
+  })
+
+  it('discards invalid edits on Cancel without writes on dismissal', async () => {
+    const wrapper = mount(SkillsPanel, { global })
+    await wrapper.get('[title="Edit skill"]').trigger('click')
+    await wrapper.get('#edit-skill-name').setValue('')
+    await autosave()
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === 'Cancel')!
+      .trigger('click')
+    wrapper.unmount()
+    expect(stores.skills.updateSkill).not.toHaveBeenCalled()
   })
 
   it('does not expose organization skill editing to members', () => {
@@ -175,46 +199,55 @@ describe('API key permission autosave', () => {
   })
 })
 
-describe('image definition autosave', () => {
-  it('updates an existing definition without closing or writing initial values', async () => {
+describe('image definition editor', () => {
+  it('emits a save payload only on explicit submission', async () => {
     const wrapper = mount(ImageDefinitionModal, {
       props: { open: true, imageDefinition: definition },
       global,
     })
-    await autosave()
-    expect(updateImageDefinition).not.toHaveBeenCalled()
     await wrapper.findAll('input')[0]!.setValue('Updated image')
     await autosave()
-    expect(updateImageDefinition).toHaveBeenCalledWith(
-      'image-1',
-      expect.objectContaining({ name: 'Updated image' }),
-    )
-    expect(wrapper.emitted('updated')).toHaveLength(1)
+    expect(updateImageDefinition).not.toHaveBeenCalled()
+    expect(wrapper.emitted('saved')).toBeUndefined()
+    await wrapper.get('#image-definition-form').trigger('submit')
+    expect(wrapper.emitted('saved')).toEqual([[expect.objectContaining({ name: 'Updated image' })]])
     expect(wrapper.emitted('update:open')).toBeUndefined()
-    expect(wrapper.findAll('button').some((button) => /^Save/.test(button.text()))).toBe(false)
   })
 
-  it('blocks invalid environment lines and retries failed updates', async () => {
+  it('allows invalid drafts to be cancelled without saving on close', async () => {
     const wrapper = mount(ImageDefinitionModal, {
       props: { open: true, imageDefinition: definition },
       global,
     })
-    const environment = wrapper.findAll('textarea')[1]!
-    await environment.setValue('INCOMPLETE')
-    await autosave()
+    await wrapper.findAll('textarea')[1]!.setValue('INCOMPLETE')
+    await wrapper.get('#image-definition-form').trigger('submit')
+    expect(wrapper.emitted('saved')).toBeUndefined()
     await wrapper
       .findAll('button')
-      .find((button) => button.text() === 'Close')!
+      .find((button) => button.text() === 'Cancel')!
       .trigger('click')
+    expect(wrapper.emitted('update:open')).toEqual([[false]])
+    wrapper.unmount()
     expect(updateImageDefinition).not.toHaveBeenCalled()
-    expect(wrapper.emitted('update:open')).toBeUndefined()
+  })
+
+  it('retains failed edits inside the dialog and closes after a successful retry', async () => {
+    const wrapper = mount(ImageDefinitionsTab, { global })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { openEdit: (value: ImageDefinition) => void }
+    vm.openEdit(definition)
+    await flushPromises()
+    const modal = wrapper.getComponent(ImageDefinitionModal)
+    await modal.findAll('input')[0]!.setValue('Updated image')
     vi.mocked(updateImageDefinition).mockRejectedValueOnce(new Error('offline'))
-    await environment.setValue('NODE_ENV=development')
-    await autosave()
-    expect(wrapper.text()).toContain('offline')
-    await wrapper.get('[role="status"] button').trigger('click')
+    await modal.get('#image-definition-form').trigger('submit')
+    await flushPromises()
+    expect(modal.get('[role="alert"]').text()).toContain('offline')
+    expect(modal.props('open')).toBe(true)
+    expect((modal.findAll('input')[0]!.element as HTMLInputElement).value).toBe('Updated image')
+    await modal.get('#image-definition-form').trigger('submit')
     await flushPromises()
     expect(updateImageDefinition).toHaveBeenCalledTimes(2)
-    expect(wrapper.text()).toContain('All changes saved')
+    expect(modal.props('open')).toBe(false)
   })
 })

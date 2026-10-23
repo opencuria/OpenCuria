@@ -13,8 +13,6 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import SettingsSection from './SettingsSection.vue'
 import SettingsRow from './SettingsRow.vue'
-import AutosaveStatus from './AutosaveStatus.vue'
-import { useAutosave } from '@/composables/useAutosave'
 import {
   Dialog,
   DialogBody,
@@ -43,26 +41,8 @@ const createSubmitting = ref(false)
 
 const editName = ref('')
 const editBody = ref('')
-const savedEdit = ref({ name: '', body: '' })
-const editPayload = () => ({ name: editName.value.trim(), body: editBody.value.trim() })
-const editAutosave = useAutosave({
-  source: editPayload,
-  dirty: () => JSON.stringify(editPayload()) !== JSON.stringify(savedEdit.value),
-  enabled: () => !!editingSkill.value && canEdit(editingSkill.value),
-  valid: () => !!editName.value.trim() && !!editBody.value.trim(),
-  scope: () => editingSkill.value?.id,
-  errorMessage: 'Failed to update skill',
-  save: async (isCurrent) => {
-    const payload = editPayload()
-    if (!(await skillStore.updateSkill(editingSkill.value!.id, payload, { silent: true })))
-      throw new Error('Failed to update skill')
-    if (isCurrent()) savedEdit.value = payload
-  },
-})
-
-async function closeEdit(): Promise<void> {
-  if (await editAutosave.flush()) editingSkill.value = null
-}
+const editSubmitting = ref(false)
+const editError = ref<string | null>(null)
 
 onMounted(() => {
   skillStore.fetchSkills()
@@ -84,7 +64,7 @@ function openEdit(skill: Skill): void {
   editingSkill.value = skill
   editName.value = skill.name
   editBody.value = skill.body
-  savedEdit.value = editPayload()
+  editError.value = null
 }
 
 async function handleCreate(): Promise<void> {
@@ -98,6 +78,36 @@ async function handleCreate(): Promise<void> {
   createSubmitting.value = false
   if (ok) {
     showCreateDialog.value = false
+  }
+}
+
+function closeEdit(): void {
+  if (!editSubmitting.value) editingSkill.value = null
+}
+
+async function handleEdit(): Promise<void> {
+  const skill = editingSkill.value
+  if (
+    !skill ||
+    !canEdit(skill) ||
+    editSubmitting.value ||
+    !editName.value.trim() ||
+    !editBody.value.trim()
+  )
+    return
+  editSubmitting.value = true
+  editError.value = null
+  try {
+    const ok = await skillStore.updateSkill(skill.id, {
+      name: editName.value.trim(),
+      body: editBody.value.trim(),
+    })
+    if (ok) editingSkill.value = null
+    else editError.value = 'Failed to update skill.'
+  } catch (error: unknown) {
+    editError.value = error instanceof Error ? error.message : 'Failed to update skill.'
+  } finally {
+    editSubmitting.value = false
   }
 }
 
@@ -254,20 +264,30 @@ async function handleDelete(): Promise<void> {
           <DialogDescription>Update the name or body of this skill.</DialogDescription>
         </DialogHeader>
         <DialogBody>
-        <form id="edit-skill-form" class="flex flex-col gap-4" @submit.prevent="editAutosave.flush()">
+        <p v-if="editError" class="text-sm text-destructive" role="alert">{{ editError }}</p>
+        <form id="edit-skill-form" class="flex flex-col gap-4" @submit.prevent="handleEdit">
           <div class="space-y-2">
             <Label for="edit-skill-name">Name</Label>
-            <Input id="edit-skill-name" v-model="editName" />
+            <Input id="edit-skill-name" v-model="editName" :disabled="editSubmitting" />
           </div>
           <div class="space-y-2">
             <Label for="edit-skill-body">Body (Markdown)</Label>
-            <Textarea id="edit-skill-body" v-model="editBody" :rows="6" />
+            <Textarea id="edit-skill-body" v-model="editBody" :rows="6" :disabled="editSubmitting" />
           </div>
         </form>
         </DialogBody>
         <DialogFooter>
-          <AutosaveStatus :state="editAutosave" />
-          <Button variant="outline" type="button" @click="closeEdit">Close</Button>
+          <Button
+            variant="outline"
+            type="button"
+            :disabled="editSubmitting"
+            @click="closeEdit"
+          >
+            Cancel
+          </Button>
+          <Button type="submit" form="edit-skill-form" :disabled="editSubmitting || !editName.trim() || !editBody.trim()">
+            {{ editSubmitting ? 'Saving…' : 'Save Changes' }}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

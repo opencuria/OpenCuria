@@ -1,4 +1,3 @@
-import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
@@ -63,7 +62,6 @@ function mountDialog(
 
 describe('ProviderConnectionDialog account management', () => {
   beforeEach(() => {
-    setActivePinia(createPinia())
     vi.clearAllMocks()
     vi.mocked(harnessApi.createProviderAccount).mockResolvedValue(personal)
     vi.mocked(harnessApi.updateProviderAccount).mockResolvedValue(personal)
@@ -97,6 +95,45 @@ describe('ProviderConnectionDialog account management', () => {
     expect(harnessApi.selectProviderAccount).toHaveBeenLastCalledWith('openrouter', null)
   })
 
+  it('waits for Save and discards edits on Back or dismissal', async () => {
+    vi.useFakeTimers()
+    const wrapper = mountDialog('openrouter', [personal])
+    try {
+      await wrapper.get('[data-testid="edit-account-private-uuid"]').trigger('click')
+      await wrapper.get('#account-label').setValue('Draft label')
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(harnessApi.updateProviderAccount).not.toHaveBeenCalled()
+      await wrapper
+        .findAll('button')
+        .find((button) => button.text() === 'Back')!
+        .trigger('click')
+      await wrapper.get('[data-testid="edit-account-private-uuid"]').trigger('click')
+      expect((wrapper.get('#account-label').element as HTMLInputElement).value).toBe(personal.label)
+      await wrapper.get('#account-label').setValue('Another draft')
+      wrapper.unmount()
+      expect(harnessApi.updateProviderAccount).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps failed account edits visible for another Save attempt', async () => {
+    vi.mocked(harnessApi.updateProviderAccount).mockRejectedValueOnce(new Error('offline'))
+    const wrapper = mountDialog('openrouter', [personal])
+    await wrapper.get('[data-testid="edit-account-private-uuid"]').trigger('click')
+    await wrapper.get('#account-label').setValue('Updated label')
+    await wrapper.get('[data-testid="save-provider-account"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('offline')
+    expect((wrapper.get('#account-label').element as HTMLInputElement).value).toBe('Updated label')
+    expect(wrapper.emitted('changed')).toBeUndefined()
+    await wrapper.get('[data-testid="save-provider-account"]').trigger('click')
+    await flushPromises()
+    expect(harnessApi.updateProviderAccount).toHaveBeenCalledTimes(2)
+    expect(wrapper.emitted('changed')).toHaveLength(1)
+  })
+
   it('creates named personal accounts and leaves blank secrets blank to preserve them', async () => {
     const wrapper = mountDialog('openrouter')
     await wrapper.find('[data-testid="add-provider-account"]').trigger('click')
@@ -116,10 +153,7 @@ describe('ProviderConnectionDialog account management', () => {
     const wrapper = mountDialog('openrouter', [personal], true)
     await wrapper.find('[data-testid="edit-account-private-uuid"]').trigger('click')
     await wrapper.find('#account-label').setValue('Personal 2')
-    await wrapper
-      .findAll('button')
-      .find((button) => button.text() === 'Back')!
-      .trigger('click')
+    await wrapper.find('[data-testid="save-provider-account"]').trigger('click')
     await flushPromises()
     expect(harnessApi.updateProviderAccount).toHaveBeenCalledWith('openrouter', 'private-uuid', {
       label: 'Personal 2',
@@ -160,40 +194,6 @@ describe('ProviderConnectionDialog account management', () => {
     expect(harnessApi.deleteProviderAccount).not.toHaveBeenCalled()
   })
 
-  it('autosaves successive edits without overwriting input or closing the account form', async () => {
-    vi.useFakeTimers()
-    const wrapper = mountDialog('openrouter', [personal])
-    try {
-      let finishFirst!: (value: ProviderAccount) => void
-      vi.mocked(harnessApi.updateProviderAccount).mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            finishFirst = resolve
-          }),
-      )
-      await wrapper.get('[data-testid="edit-account-private-uuid"]').trigger('click')
-      expect(wrapper.find('[data-testid="save-provider-account"]').exists()).toBe(false)
-      await wrapper.get('#account-label').setValue('First')
-      await vi.advanceTimersByTimeAsync(500)
-      await wrapper.get('#account-label').setValue('Latest')
-      await vi.advanceTimersByTimeAsync(500)
-      expect(harnessApi.updateProviderAccount).toHaveBeenCalledTimes(1)
-      finishFirst({ ...personal, label: 'First' })
-      await flushPromises()
-      expect(harnessApi.updateProviderAccount).toHaveBeenCalledTimes(2)
-      expect(harnessApi.updateProviderAccount).toHaveBeenLastCalledWith(
-        'openrouter',
-        personal.id,
-        expect.objectContaining({ label: 'Latest' }),
-      )
-      expect((wrapper.get('#account-label').element as HTMLInputElement).value).toBe('Latest')
-      expect(wrapper.text()).toContain('All changes saved')
-    } finally {
-      wrapper.unmount()
-      vi.useRealTimers()
-    }
-  })
-
   it('normalizes compatible model lists while retaining a blank saved API key', async () => {
     const compatible: ProviderAccount = {
       ...personal,
@@ -205,10 +205,7 @@ describe('ProviderConnectionDialog account management', () => {
     const wrapper = mountDialog('openai-compatible', [compatible])
     await wrapper.find('[data-testid="edit-account-compatible-uuid"]').trigger('click')
     await wrapper.find('#compat-models').setValue(' model-a  \nmodel-a\nmodel-b \n')
-    await wrapper
-      .findAll('button')
-      .find((button) => button.text() === 'Back')!
-      .trigger('click')
+    await wrapper.find('[data-testid="save-provider-account"]').trigger('click')
     await flushPromises()
 
     expect(harnessApi.updateProviderAccount).toHaveBeenCalledWith(
@@ -222,41 +219,6 @@ describe('ProviderConnectionDialog account management', () => {
         models: ['model-a', 'model-b'],
       },
     )
-  })
-
-  it('retains invalid edits on an account that still needs authentication', async () => {
-    vi.useFakeTimers()
-    const account: ProviderAccount = {
-      ...personal,
-      provider: 'claude-agent',
-      connected: false,
-      auth_type: 'api_token',
-    }
-    const wrapper = mountDialog('claude-agent', [account])
-    try {
-      await wrapper.get('[data-testid="edit-account-private-uuid"]').trigger('click')
-      await wrapper.get('#account-label').setValue('Pending connection')
-      await vi.advanceTimersByTimeAsync(500)
-      expect(wrapper.text()).toContain('Check your input')
-      expect(harnessApi.updateProviderAccount).not.toHaveBeenCalled()
-      await wrapper
-        .findAll('button')
-        .find((button) => button.text() === 'Back')!
-        .trigger('click')
-      expect(wrapper.find('#account-label').exists()).toBe(true)
-      await wrapper.get('#claude-token').setValue('replacement-token')
-      await vi.advanceTimersByTimeAsync(500)
-      await flushPromises()
-      expect(harnessApi.updateProviderAccount).toHaveBeenCalledWith('claude-agent', account.id, {
-        label: 'Pending connection',
-        shared: false,
-        auth_type: 'api_token',
-        token: 'replacement-token',
-      })
-    } finally {
-      wrapper.unmount()
-      vi.useRealTimers()
-    }
   })
 
   it('requires account labels and base URLs and never submits on invalid form', async () => {
@@ -311,14 +273,10 @@ describe('ProviderConnectionDialog account management', () => {
     vi.mocked(harnessApi.updateProviderAccount).mockResolvedValue(claude)
     const wrapper = mountDialog('claude-agent', [claude])
     await wrapper.find('[data-testid="edit-account-claude-uuid"]').trigger('click')
-    await wrapper.find('#account-label').setValue('Claude account')
-    await wrapper
-      .findAll('button')
-      .find((button) => button.text() === 'Back')!
-      .trigger('click')
+    await wrapper.find('[data-testid="save-provider-account"]').trigger('click')
     await flushPromises()
     expect(harnessApi.updateProviderAccount).toHaveBeenCalledWith('claude-agent', 'claude-uuid', {
-      label: 'Claude account',
+      label: 'Personal',
       shared: false,
       auth_type: 'api_token',
       token: '',
@@ -345,6 +303,21 @@ describe('ProviderConnectionDialog account management', () => {
       wrapper.unmount()
       vi.useRealTimers()
     }
+  })
+
+  it('saves existing ChatGPT account metadata without reconnecting', async () => {
+    const account: ProviderAccount = { ...personal, provider: 'chatgpt' }
+    const wrapper = mountDialog('chatgpt', [account])
+    await wrapper.get('[data-testid="edit-account-private-uuid"]').trigger('click')
+    await wrapper.get('#account-label').setValue('ChatGPT Work')
+    expect(harnessApi.updateProviderAccount).not.toHaveBeenCalled()
+    await wrapper.get('[data-testid="save-provider-account"]').trigger('click')
+    await flushPromises()
+    expect(harnessApi.updateProviderAccount).toHaveBeenCalledWith('chatgpt', account.id, {
+      label: 'ChatGPT Work',
+      shared: false,
+    })
+    expect(harnessApi.startChatGptOAuth).not.toHaveBeenCalled()
   })
 
   it('scopes OAuth start, polling and cancellation to this dialog flow and target account', async () => {

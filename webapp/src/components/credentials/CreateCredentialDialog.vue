@@ -266,7 +266,7 @@ function handleClose(): void {
                 : 'Saving…'
               : isOAuth
                 ? 'Connect'
-                : 'Add Credential'
+                : 'Save Credential'
           }}</Button
         ></DialogFooter
       >

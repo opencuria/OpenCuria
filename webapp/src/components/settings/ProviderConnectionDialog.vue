@@ -33,9 +33,6 @@ import {
   type ProviderAccountPayload,
 } from '@/services/harness.api'
 
-import { useAutosave } from '@/composables/useAutosave'
-import AutosaveStatus from './AutosaveStatus.vue'
-
 const DEFAULT_OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 const DEFAULT_BEDROCK_REGION = 'us-east-1'
 
@@ -54,7 +51,6 @@ const meta = computed(() => providerMeta(props.provider))
 const selectedAccount = ref<ProviderAccount | null>(null)
 const creating = ref(false)
 const saving = ref(false)
-const savedAccountForm = ref('')
 const dialogError = ref<string | null>(null)
 const confirmAction = ref<'delete' | 'unshare' | null>(null)
 const label = ref('')
@@ -117,7 +113,6 @@ function resetForm(account: ProviderAccount | null = null, isCreating = false): 
   oauthVerificationUrl.value = ''
   oauthAccountId.value = ''
   oauthError.value = null
-  savedAccountForm.value = JSON.stringify(accountFormSnapshot())
 }
 
 function openCreateForm(): void {
@@ -139,14 +134,14 @@ function parseModels(text: string): string[] {
   ]
 }
 
-function payloadForAccount(reportErrors = true): ProviderAccountPayload | null {
+function payloadForAccount(): ProviderAccountPayload | null {
   if (!props.provider) return null
   const base: ProviderAccountPayload = {
     label: label.value.trim(),
     shared: props.isAdmin && shared.value,
   }
   if (!base.label) {
-    if (reportErrors) dialogError.value = 'Account name is required.'
+    dialogError.value = 'Account name is required.'
     return null
   }
   switch (props.provider) {
@@ -158,7 +153,7 @@ function payloadForAccount(reportErrors = true): ProviderAccountPayload | null {
       }
     case 'openai-compatible':
       if (!compatBaseUrl.value.trim()) {
-        if (reportErrors) dialogError.value = 'Base URL is required.'
+        dialogError.value = 'Base URL is required.'
         return null
       }
       return {
@@ -186,7 +181,7 @@ function payloadForAccount(reportErrors = true): ProviderAccountPayload | null {
     case 'claude-agent': {
       const token = claudeToken.value.trim()
       if (!selectedAccount.value?.connected && !token) {
-        if (reportErrors) dialogError.value = 'Enter an Anthropic token to connect this account.'
+        dialogError.value = 'Enter an Anthropic token to connect this account.'
         return null
       }
       if (
@@ -194,7 +189,7 @@ function payloadForAccount(reportErrors = true): ProviderAccountPayload | null {
         selectedAccount.value.auth_type !== claudeAuthType.value &&
         !token
       ) {
-        if (reportErrors) dialogError.value = 'Enter a token when changing the authentication type.'
+        dialogError.value = 'Enter a token when changing the authentication type.'
         return null
       }
       return { ...base, auth_type: claudeAuthType.value, token }
@@ -204,71 +199,8 @@ function payloadForAccount(reportErrors = true): ProviderAccountPayload | null {
   }
 }
 
-function accountFormSnapshot() {
-  return [
-    label.value,
-    shared.value,
-    openRouterApiKey.value,
-    openRouterBaseUrl.value,
-    compatApiKey.value,
-    compatBaseUrl.value,
-    compatModelsText.value,
-    bedrockAuthMethod.value,
-    bedrockRegion.value,
-    bedrockAccessKeyId.value,
-    bedrockSecretAccessKey.value,
-    bedrockSessionToken.value,
-    bedrockBearerToken.value,
-    claudeAuthType.value,
-    claudeToken.value,
-  ]
-}
-
-const accountAutosave = useAutosave({
-  source: accountFormSnapshot,
-  dirty: () => JSON.stringify(accountFormSnapshot()) !== savedAccountForm.value,
-  enabled: () => open.value && !!selectedAccount.value && canEdit.value,
-  valid: () =>
-    !!payloadForAccount(false) &&
-    !confirmAction.value &&
-    !saving.value &&
-    !(selectedAccount.value?.scope === 'organization' && !shared.value) &&
-    (props.provider !== 'amazon-bedrock' ||
-      (bedrockAuthMethod.value === 'bearer'
-        ? !!bedrockBearerToken.value || selectedAccount.value?.auth_method === 'bearer'
-        : ((!bedrockAccessKeyId.value && !bedrockSecretAccessKey.value) ||
-            (!!bedrockAccessKeyId.value && !!bedrockSecretAccessKey.value)) &&
-          (selectedAccount.value?.auth_method !== 'bearer' || !!bedrockAccessKeyId.value))),
-  scope: () => [props.provider, selectedAccount.value?.id],
-  errorMessage: 'Failed to update provider account',
-  save: async (isCurrent) => {
-    const snapshot = JSON.stringify(accountFormSnapshot())
-    const payload = payloadForAccount(false)!
-    const updated = await updateProviderAccount(props.provider!, selectedAccount.value!.id, payload)
-    notifyProviderAccountsChanged()
-    if (!isCurrent()) return
-    savedAccountForm.value = snapshot
-    selectedAccount.value = updated
-    emit('changed')
-  },
-})
-
-async function backToAccounts(): Promise<void> {
-  if (await accountAutosave.flush()) resetForm()
-}
-
-watch(shared, (value) => {
-  if (!value && selectedAccount.value?.scope === 'organization' && props.isAdmin)
-    confirmAction.value = 'unshare'
-})
-
-function cancelAction(): void {
-  shared.value = selectedAccount.value?.scope === 'organization'
-  confirmAction.value = null
-}
-
 async function saveAccount(): Promise<void> {
-  if (!props.provider || !canEdit.value) return
+  if (!props.provider || !canEdit.value || saving.value) return
   dialogError.value = null
   if (selectedAccount.value?.scope === 'organization' && props.isAdmin && !shared.value) {
     confirmAction.value = 'unshare'
@@ -445,7 +377,7 @@ async function cancelOAuth(): Promise<void> {
 }
 
 async function closeDialog(nextOpen: boolean): Promise<void> {
-  if (!nextOpen && !(await accountAutosave.flush())) return
+  if (!nextOpen && saving.value) return
   open.value = nextOpen
   if (!nextOpen) {
     stopPolling()
@@ -547,7 +479,7 @@ onBeforeUnmount(() => {
         </template>
 
         <template v-else>
-          <Button size="sm" variant="ghost" class="-ml-2" @click="backToAccounts">← Accounts</Button>
+          <Button size="sm" variant="ghost" class="-ml-2" :disabled="saving" @click="resetForm()">← Accounts</Button>
           <div class="space-y-2">
             <Label for="account-label">Account name</Label>
             <Input
@@ -767,11 +699,11 @@ onBeforeUnmount(() => {
               <Button
                 size="sm"
                 variant="destructive"
+                :disabled="saving"
                 data-testid="confirm-account-action"
-                :disabled="saving || accountAutosave.saving"
                 @click="confirmAction === 'delete' ? deleteAccount() : confirmUnshare()"
                 >Confirm</Button
-              ><Button size="sm" variant="outline" @click="cancelAction">Cancel</Button>
+              ><Button size="sm" variant="outline" @click="confirmAction = null">Cancel</Button>
             </div>
           </div>
         </template>
@@ -784,7 +716,7 @@ onBeforeUnmount(() => {
             type="button"
             variant="ghost"
             class="text-destructive hover:text-destructive"
-            :disabled="saving || accountAutosave.saving"
+            :disabled="saving"
             data-testid="delete-account"
             @click="confirmAction = 'delete'"
             >Delete</Button
@@ -799,27 +731,29 @@ onBeforeUnmount(() => {
             "
             type="button"
             variant="ghost"
-            :disabled="saving || accountAutosave.saving"
+            :disabled="saving"
             data-testid="unshare-account"
             @click="askToUnshare"
             >Unshare</Button
           >
         </div>
-        <div class="flex flex-wrap items-center gap-2">
-          <AutosaveStatus v-if="selectedAccount && canEdit" :state="accountAutosave" />
+        <div class="flex gap-2">
           <Button
             type="button"
             variant="outline"
-            @click="isEditing ? backToAccounts() : closeDialog(false)"
+            :disabled="saving"
+            @click="isEditing ? resetForm() : closeDialog(false)"
             >{{ isEditing ? 'Back' : 'Close' }}</Button
           >
           <Button
-            v-if="creating && canEdit && provider !== 'chatgpt'"
+            v-if="isEditing && canEdit && (provider !== 'chatgpt' || selectedAccount)"
             type="button"
             :disabled="saving"
             data-testid="save-provider-account"
             @click="saveAccount"
-            ><LoadingSpinner v-if="saving" :size="12" /><span v-else>Add account</span></Button
+            ><LoadingSpinner v-if="saving" :size="12" /><span v-else>{{
+              selectedAccount ? 'Save changes' : 'Add account'
+            }}</span></Button
           >
         </div>
       </DialogFooter>

@@ -16,8 +16,6 @@ import {
 import { useRunnerStore } from '@/stores/runners'
 import { getRunnerMetricsLatest } from '@/services/runners.api'
 import { runnerSupportsRuntime } from '@/lib/runtimeSupport'
-import { useAutosave } from '@/composables/useAutosave'
-import AutosaveStatus from '@/components/settings/AutosaveStatus.vue'
 
 const props = defineProps<{
   runner: Runner
@@ -25,7 +23,8 @@ const props = defineProps<{
 
 const runnerStore = useRunnerStore()
 const open = ref(false)
-const savedLimits = ref('')
+const submitting = ref(false)
+const formError = ref<string | null>(null)
 const loadingMetrics = ref(false)
 
 const minVcpus = ref(1)
@@ -86,28 +85,31 @@ async function loadHostMetrics(): Promise<void> {
   }
 }
 
+function resetForm(runner: Runner = props.runner): void {
+  minVcpus.value = runner.qemu_min_vcpus
+  maxVcpus.value = runner.qemu_max_vcpus
+  defaultVcpus.value = runner.qemu_default_vcpus
+  minMemoryMb.value = runner.qemu_min_memory_mb
+  maxMemoryMb.value = runner.qemu_max_memory_mb
+  defaultMemoryMb.value = runner.qemu_default_memory_mb
+  minDiskSizeGb.value = runner.qemu_min_disk_size_gb
+  maxDiskSizeGb.value = runner.qemu_max_disk_size_gb
+  defaultDiskSizeGb.value = runner.qemu_default_disk_size_gb
+  unlimitedActiveVcpus.value = runner.qemu_max_active_vcpus == null
+  unlimitedActiveMemoryMb.value = runner.qemu_max_active_memory_mb == null
+  unlimitedActiveDiskSizeGb.value = runner.qemu_max_active_disk_size_gb == null
+  maxActiveVcpus.value = runner.qemu_max_active_vcpus ?? Math.max(runner.qemu_default_vcpus, 1)
+  maxActiveMemoryMb.value =
+    runner.qemu_max_active_memory_mb ?? Math.max(runner.qemu_default_memory_mb, RAM_STEP)
+  maxActiveDiskSizeGb.value =
+    runner.qemu_max_active_disk_size_gb ?? Math.max(runner.qemu_default_disk_size_gb, DISK_STEP)
+  formError.value = null
+}
+
 watch(
   () => props.runner,
   (runner) => {
-    if (open.value) return
-    minVcpus.value = runner.qemu_min_vcpus
-    maxVcpus.value = runner.qemu_max_vcpus
-    defaultVcpus.value = runner.qemu_default_vcpus
-    minMemoryMb.value = runner.qemu_min_memory_mb
-    maxMemoryMb.value = runner.qemu_max_memory_mb
-    defaultMemoryMb.value = runner.qemu_default_memory_mb
-    minDiskSizeGb.value = runner.qemu_min_disk_size_gb
-    maxDiskSizeGb.value = runner.qemu_max_disk_size_gb
-    defaultDiskSizeGb.value = runner.qemu_default_disk_size_gb
-    unlimitedActiveVcpus.value = runner.qemu_max_active_vcpus == null
-    unlimitedActiveMemoryMb.value = runner.qemu_max_active_memory_mb == null
-    unlimitedActiveDiskSizeGb.value = runner.qemu_max_active_disk_size_gb == null
-    maxActiveVcpus.value = runner.qemu_max_active_vcpus ?? Math.max(runner.qemu_default_vcpus, 1)
-    maxActiveMemoryMb.value =
-      runner.qemu_max_active_memory_mb ?? Math.max(runner.qemu_default_memory_mb, RAM_STEP)
-    maxActiveDiskSizeGb.value =
-      runner.qemu_max_active_disk_size_gb ?? Math.max(runner.qemu_default_disk_size_gb, DISK_STEP)
-    savedLimits.value = JSON.stringify(limits())
+    if (!open.value) resetForm(runner)
   },
   { immediate: true, deep: true },
 )
@@ -219,32 +221,37 @@ function limits() {
   }
 }
 
-const autosave = useAutosave({
-  source: limits,
-  dirty: () => JSON.stringify(limits()) !== savedLimits.value,
-  enabled: () => open.value && supportsQemu.value,
-  valid: () =>
+const limitsValid = computed(
+  () =>
     isValid.value &&
     Object.values(limits()).every(
       (value) => value === null || (Number.isSafeInteger(value) && value > 0),
     ),
-  scope: () => props.runner.id,
-  errorMessage: 'Failed to update runner limits',
-  save: async (isCurrent) => {
-    const payload = limits()
-    if (!(await runnerStore.updateRunner(props.runner.id, payload, { silent: true })))
-      throw new Error('Failed to update runner limits')
-    if (isCurrent()) savedLimits.value = JSON.stringify(payload)
-  },
-})
+)
 
-async function setOpen(value: boolean): Promise<void> {
-  if (value || (await autosave.flush())) open.value = value
+async function handleSubmit(): Promise<void> {
+  if (submitting.value || !limitsValid.value || !supportsQemu.value) return
+  submitting.value = true
+  formError.value = null
+  try {
+    const ok = await runnerStore.updateRunner(props.runner.id, limits())
+    if (ok) open.value = false
+    else formError.value = 'Failed to update runner limits.'
+  } catch (error: unknown) {
+    formError.value = error instanceof Error ? error.message : 'Failed to update runner limits.'
+  } finally {
+    submitting.value = false
+  }
+}
+
+function setOpen(value: boolean): void {
+  if (!submitting.value) open.value = value
 }
 
 watch(open, (value) => {
   if (value) {
-    loadHostMetrics()
+    resetForm()
+    void loadHostMetrics()
   }
 })
 </script>
@@ -267,10 +274,11 @@ watch(open, (value) => {
       </DialogHeader>
 
       <DialogBody>
+        <p v-if="formError" class="text-sm text-destructive" role="alert">{{ formError }}</p>
         <form
           id="runner-limits-form"
           class="grid grid-cols-1 gap-4 md:grid-cols-2"
-          @submit.prevent="autosave.flush()"
+          @submit.prevent="handleSubmit"
         >
           <!-- Per-workspace limits -->
           <section class="space-y-3 rounded-md border border-border bg-muted/50 p-3">
@@ -280,18 +288,18 @@ watch(open, (value) => {
               <p class="text-sm font-medium text-foreground">vCPU</p>
               <div class="grid grid-cols-[3.5rem_1fr_4.5rem] items-center gap-2">
                 <span class="text-xs text-muted-foreground">Min</span>
-                <input v-model.number="minVcpus" type="range" class="w-full accent-primary" min="1" :max="Math.max(1, maxVcpus)" step="1" />
-                <input v-model.number="minVcpus" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" min="1" :max="Math.max(1, maxVcpus)" step="1" />
+                <input :disabled="submitting" v-model.number="minVcpus" type="range" class="w-full accent-primary" min="1" :max="Math.max(1, maxVcpus)" step="1" />
+                <input :disabled="submitting" v-model.number="minVcpus" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" min="1" :max="Math.max(1, maxVcpus)" step="1" />
               </div>
               <div class="grid grid-cols-[3.5rem_1fr_4.5rem] items-center gap-2">
                 <span class="text-xs text-muted-foreground">Default</span>
-                <input v-model.number="defaultVcpus" type="range" class="w-full accent-primary" :min="minVcpus" :max="maxVcpus" step="1" />
-                <input v-model.number="defaultVcpus" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="minVcpus" :max="maxVcpus" step="1" />
+                <input :disabled="submitting" v-model.number="defaultVcpus" type="range" class="w-full accent-primary" :min="minVcpus" :max="maxVcpus" step="1" />
+                <input :disabled="submitting" v-model.number="defaultVcpus" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="minVcpus" :max="maxVcpus" step="1" />
               </div>
               <div class="grid grid-cols-[3.5rem_1fr_4.5rem] items-center gap-2">
                 <span class="text-xs text-muted-foreground">Max</span>
-                <input v-model.number="maxVcpus" type="range" class="w-full accent-primary" :min="Math.max(1, minVcpus)" max="128" step="1" />
-                <input v-model.number="maxVcpus" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="Math.max(1, minVcpus)" max="128" step="1" />
+                <input :disabled="submitting" v-model.number="maxVcpus" type="range" class="w-full accent-primary" :min="Math.max(1, minVcpus)" max="128" step="1" />
+                <input :disabled="submitting" v-model.number="maxVcpus" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="Math.max(1, minVcpus)" max="128" step="1" />
               </div>
             </div>
 
@@ -299,18 +307,18 @@ watch(open, (value) => {
               <p class="text-sm font-medium text-foreground">RAM (MiB)</p>
               <div class="grid grid-cols-[3.5rem_1fr_4.5rem] items-center gap-2">
                 <span class="text-xs text-muted-foreground">Min</span>
-                <input v-model.number="minMemoryMb" type="range" class="w-full accent-primary" :min="RAM_STEP" :max="Math.max(RAM_STEP, maxMemoryMb)" :step="RAM_STEP" />
-                <input v-model.number="minMemoryMb" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="RAM_STEP" :max="Math.max(RAM_STEP, maxMemoryMb)" :step="RAM_STEP" />
+                <input :disabled="submitting" v-model.number="minMemoryMb" type="range" class="w-full accent-primary" :min="RAM_STEP" :max="Math.max(RAM_STEP, maxMemoryMb)" :step="RAM_STEP" />
+                <input :disabled="submitting" v-model.number="minMemoryMb" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="RAM_STEP" :max="Math.max(RAM_STEP, maxMemoryMb)" :step="RAM_STEP" />
               </div>
               <div class="grid grid-cols-[3.5rem_1fr_4.5rem] items-center gap-2">
                 <span class="text-xs text-muted-foreground">Default</span>
-                <input v-model.number="defaultMemoryMb" type="range" class="w-full accent-primary" :min="minMemoryMb" :max="maxMemoryMb" :step="RAM_STEP" />
-                <input v-model.number="defaultMemoryMb" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="minMemoryMb" :max="maxMemoryMb" :step="RAM_STEP" />
+                <input :disabled="submitting" v-model.number="defaultMemoryMb" type="range" class="w-full accent-primary" :min="minMemoryMb" :max="maxMemoryMb" :step="RAM_STEP" />
+                <input :disabled="submitting" v-model.number="defaultMemoryMb" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="minMemoryMb" :max="maxMemoryMb" :step="RAM_STEP" />
               </div>
               <div class="grid grid-cols-[3.5rem_1fr_4.5rem] items-center gap-2">
                 <span class="text-xs text-muted-foreground">Max</span>
-                <input v-model.number="maxMemoryMb" type="range" class="w-full accent-primary" :min="Math.max(RAM_STEP, minMemoryMb)" max="262144" :step="RAM_STEP" />
-                <input v-model.number="maxMemoryMb" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="Math.max(RAM_STEP, minMemoryMb)" max="262144" :step="RAM_STEP" />
+                <input :disabled="submitting" v-model.number="maxMemoryMb" type="range" class="w-full accent-primary" :min="Math.max(RAM_STEP, minMemoryMb)" max="262144" :step="RAM_STEP" />
+                <input :disabled="submitting" v-model.number="maxMemoryMb" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="Math.max(RAM_STEP, minMemoryMb)" max="262144" :step="RAM_STEP" />
               </div>
             </div>
 
@@ -318,18 +326,18 @@ watch(open, (value) => {
               <p class="text-sm font-medium text-foreground">Storage (GiB)</p>
               <div class="grid grid-cols-[3.5rem_1fr_4.5rem] items-center gap-2">
                 <span class="text-xs text-muted-foreground">Min</span>
-                <input v-model.number="minDiskSizeGb" type="range" class="w-full accent-primary" :min="DISK_STEP" :max="Math.max(DISK_STEP, maxDiskSizeGb)" :step="DISK_STEP" />
-                <input v-model.number="minDiskSizeGb" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="DISK_STEP" :max="Math.max(DISK_STEP, maxDiskSizeGb)" :step="DISK_STEP" />
+                <input :disabled="submitting" v-model.number="minDiskSizeGb" type="range" class="w-full accent-primary" :min="DISK_STEP" :max="Math.max(DISK_STEP, maxDiskSizeGb)" :step="DISK_STEP" />
+                <input :disabled="submitting" v-model.number="minDiskSizeGb" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="DISK_STEP" :max="Math.max(DISK_STEP, maxDiskSizeGb)" :step="DISK_STEP" />
               </div>
               <div class="grid grid-cols-[3.5rem_1fr_4.5rem] items-center gap-2">
                 <span class="text-xs text-muted-foreground">Default</span>
-                <input v-model.number="defaultDiskSizeGb" type="range" class="w-full accent-primary" :min="minDiskSizeGb" :max="maxDiskSizeGb" :step="DISK_STEP" />
-                <input v-model.number="defaultDiskSizeGb" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="minDiskSizeGb" :max="maxDiskSizeGb" :step="DISK_STEP" />
+                <input :disabled="submitting" v-model.number="defaultDiskSizeGb" type="range" class="w-full accent-primary" :min="minDiskSizeGb" :max="maxDiskSizeGb" :step="DISK_STEP" />
+                <input :disabled="submitting" v-model.number="defaultDiskSizeGb" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="minDiskSizeGb" :max="maxDiskSizeGb" :step="DISK_STEP" />
               </div>
               <div class="grid grid-cols-[3.5rem_1fr_4.5rem] items-center gap-2">
                 <span class="text-xs text-muted-foreground">Max</span>
-                <input v-model.number="maxDiskSizeGb" type="range" class="w-full accent-primary" :min="Math.max(DISK_STEP, minDiskSizeGb)" max="4096" :step="DISK_STEP" />
-                <input v-model.number="maxDiskSizeGb" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="Math.max(DISK_STEP, minDiskSizeGb)" max="4096" :step="DISK_STEP" />
+                <input :disabled="submitting" v-model.number="maxDiskSizeGb" type="range" class="w-full accent-primary" :min="Math.max(DISK_STEP, minDiskSizeGb)" max="4096" :step="DISK_STEP" />
+                <input :disabled="submitting" v-model.number="maxDiskSizeGb" type="number" class="w-full rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="Math.max(DISK_STEP, minDiskSizeGb)" max="4096" :step="DISK_STEP" />
               </div>
             </div>
           </section>
@@ -345,14 +353,14 @@ watch(open, (value) => {
               <div class="flex items-center justify-between">
                 <p class="text-sm text-foreground">Total active vCPU</p>
                 <label class="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
-                  <Checkbox v-model="unlimitedActiveVcpus" />
+                  <Checkbox :disabled="submitting" v-model="unlimitedActiveVcpus" />
                   Unlimited
                 </label>
               </div>
               <template v-if="!unlimitedActiveVcpus">
                 <div class="flex items-center gap-2">
-                  <input v-model.number="maxActiveVcpus" type="range" class="w-full accent-primary" min="1" :max="activeVcpusSliderMax" step="1" />
-                  <input v-model.number="maxActiveVcpus" type="number" class="w-18 shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" min="1" :max="activeVcpusSliderMax" step="1" />
+                  <input :disabled="submitting" v-model.number="maxActiveVcpus" type="range" class="w-full accent-primary" min="1" :max="activeVcpusSliderMax" step="1" />
+                  <input :disabled="submitting" v-model.number="maxActiveVcpus" type="number" class="w-18 shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" min="1" :max="activeVcpusSliderMax" step="1" />
                 </div>
                 <div class="relative h-2 rounded bg-muted">
                   <div v-if="hostVcpus" class="absolute top-0 bottom-0 w-px bg-primary" :style="{ left: markerPosition(hostVcpus, activeVcpusSliderMax) }" />
@@ -369,14 +377,14 @@ watch(open, (value) => {
               <div class="flex items-center justify-between">
                 <p class="text-sm text-foreground">Total active RAM (MiB)</p>
                 <label class="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
-                  <Checkbox v-model="unlimitedActiveMemoryMb" />
+                  <Checkbox :disabled="submitting" v-model="unlimitedActiveMemoryMb" />
                   Unlimited
                 </label>
               </div>
               <template v-if="!unlimitedActiveMemoryMb">
                 <div class="flex items-center gap-2">
-                  <input v-model.number="maxActiveMemoryMb" type="range" class="w-full accent-primary" :min="RAM_STEP" :max="activeMemorySliderMax" :step="RAM_STEP" />
-                  <input v-model.number="maxActiveMemoryMb" type="number" class="w-18 shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="RAM_STEP" :max="activeMemorySliderMax" :step="RAM_STEP" />
+                  <input :disabled="submitting" v-model.number="maxActiveMemoryMb" type="range" class="w-full accent-primary" :min="RAM_STEP" :max="activeMemorySliderMax" :step="RAM_STEP" />
+                  <input :disabled="submitting" v-model.number="maxActiveMemoryMb" type="number" class="w-18 shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="RAM_STEP" :max="activeMemorySliderMax" :step="RAM_STEP" />
                 </div>
                 <div class="relative h-2 rounded bg-muted">
                   <div v-if="hostMemoryMb" class="absolute top-0 bottom-0 w-px bg-primary" :style="{ left: markerPosition(hostMemoryMb, activeMemorySliderMax) }" />
@@ -393,14 +401,14 @@ watch(open, (value) => {
               <div class="flex items-center justify-between">
                 <p class="text-sm text-foreground">Total active disk (GiB)</p>
                 <label class="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
-                  <Checkbox v-model="unlimitedActiveDiskSizeGb" />
+                  <Checkbox :disabled="submitting" v-model="unlimitedActiveDiskSizeGb" />
                   Unlimited
                 </label>
               </div>
               <template v-if="!unlimitedActiveDiskSizeGb">
                 <div class="flex items-center gap-2">
-                  <input v-model.number="maxActiveDiskSizeGb" type="range" class="w-full accent-primary" :min="DISK_STEP" :max="activeDiskSliderMax" :step="DISK_STEP" />
-                  <input v-model.number="maxActiveDiskSizeGb" type="number" class="w-18 shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="DISK_STEP" :max="activeDiskSliderMax" :step="DISK_STEP" />
+                  <input :disabled="submitting" v-model.number="maxActiveDiskSizeGb" type="range" class="w-full accent-primary" :min="DISK_STEP" :max="activeDiskSliderMax" :step="DISK_STEP" />
+                  <input :disabled="submitting" v-model.number="maxActiveDiskSizeGb" type="number" class="w-18 shrink-0 rounded border border-border bg-background px-1.5 py-0.5 text-xs font-mono text-foreground focus:outline-none focus:border-primary" :min="DISK_STEP" :max="activeDiskSliderMax" :step="DISK_STEP" />
                 </div>
                 <div class="relative h-2 rounded bg-muted">
                   <div v-if="hostDiskSizeGb" class="absolute top-0 bottom-0 w-px bg-primary" :style="{ left: markerPosition(hostDiskSizeGb, activeDiskSliderMax) }" />
@@ -419,8 +427,10 @@ watch(open, (value) => {
       </DialogBody>
 
       <DialogFooter>
-        <AutosaveStatus :state="autosave" />
-        <Button variant="outline" type="button" @click="setOpen(false)">Close</Button>
+        <Button variant="outline" type="button" :disabled="submitting" @click="setOpen(false)">Cancel</Button>
+        <Button type="submit" form="runner-limits-form" :disabled="submitting || !limitsValid">
+          {{ submitting ? 'Saving…' : 'Save' }}
+        </Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>
