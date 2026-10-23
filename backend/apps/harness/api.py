@@ -564,13 +564,6 @@ def list_harness_conversations(request: HttpRequest):
         organization_id=org_id,
         workspace_ids=workspace_ids,
     )
-    # ``list_conversations`` predates engine selection; resolve the public
-    # engine identifier separately rather than exposing the private connection.
-    harness_ids = {
-        str(session.id): getattr(session, "harness_id", "native") or "native"
-        for workspace_id in workspace_ids
-        for session in service.list_sessions(workspace_id)
-    }
     return 200, [
         HarnessConversationOut(
             session_id=uuid.UUID(row["session_id"]),
@@ -580,7 +573,7 @@ def list_harness_conversations(request: HttpRequest):
             status=row["status"],
             mode=row["mode"],
             agent_name=row["agent_name"],
-            harness_id=harness_ids.get(str(row["session_id"]), "native"),
+            harness_id=row["harness_id"],
             model=row.get("model") or "",
             reasoning_effort=row.get("reasoning_effort") or "",
             unread=row["unread"],

@@ -1087,6 +1087,7 @@ class HarnessService:
                 "status": session.status,
                 "mode": session.mode,
                 "agent_name": session.agent_name,
+                "harness_id": session.harness_id or "native",
                 "model": session.model or "",
                 "reasoning_effort": session.reasoning_effort or "",
                 "unread": unread_map.get(session.id, False),

@@ -4393,20 +4393,7 @@ def _call_list_harness_conversations(api_key, org_id, args: dict) -> list[TextCo
         organization_id=org_id,
         workspace_ids=workspace_ids,
     )
-    harness_ids = {
-        str(session.id): getattr(session, "harness_id", "native") or "native"
-        for workspace_id in workspace_ids
-        for session in service.list_sessions(workspace_id)
-    }
-    return _text(
-        [
-            {
-                **conversation,
-                "harness_id": harness_ids.get(conversation["session_id"], "native"),
-            }
-            for conversation in conversations
-        ]
-    )
+    return _text(conversations)
 
 
 def _call_mark_harness_session_read(api_key, org_id, args: dict) -> list[TextContent]:

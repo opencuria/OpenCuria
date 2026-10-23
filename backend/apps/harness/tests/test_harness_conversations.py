@@ -162,6 +162,7 @@ def test_list_conversations_returns_enriched_fields(conv_setup, fake_harness_ser
     assert row["status"] == HarnessSessionStatus.IDLE
     assert row["mode"] == "build"
     assert row["agent_name"] == "build"
+    assert row["harness_id"] == "native"
     assert row["model"] == "openrouter/test-model"
     assert row["reasoning_effort"] == "high"
     assert row["unread"] is False
@@ -170,6 +171,87 @@ def test_list_conversations_returns_enriched_fields(conv_setup, fake_harness_ser
     assert row["attention_kind"] == ""
     assert "updated_at" in row
     assert "last_message_at" in row
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("harness_id", ["native", "claude", "codex", ""])
+def test_list_conversations_service_projects_public_engine(
+    conv_setup, fake_harness_service, harness_id: str
+) -> None:
+    """The shared service owns engine projection without leaking private state."""
+    session = HarnessSession.objects.create(
+        workspace=conv_setup["owned"],
+        organization_id=conv_setup["org"].id,
+        harness_id=harness_id,
+        engine_state={"connection_id": "private-connection"},
+        external_session_id="private-external-session",
+    )
+
+    rows = fake_harness_service.list_conversations(
+        organization_id=conv_setup["org"].id,
+        workspace_ids=[conv_setup["owned"].id],
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["session_id"] == str(session.id)
+    assert rows[0]["harness_id"] == (harness_id or "native")
+    assert "private-connection" not in repr(rows)
+    assert "private-external-session" not in repr(rows)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("workspace_count", [1, 10])
+def test_list_conversations_query_count_is_independent_of_workspaces(
+    conv_setup, fake_harness_service, django_assert_num_queries, workspace_count: int
+) -> None:
+    """Engine enrichment must not re-read every workspace's root/child sessions."""
+    roots = {}
+    for index in range(workspace_count):
+        workspace = Workspace.objects.create(
+            runner=conv_setup["owned"].runner,
+            name=f"Feed workspace {index}",
+            created_by=conv_setup["owner"],
+        )
+        harness_id = ("native", "claude", "codex")[index % 3]
+        session = HarnessSessionRepository.create(
+            workspace_id=workspace.id,
+            organization_id=conv_setup["org"].id,
+            harness_id=harness_id,
+            engine_state={"connection_id": "private-connection"},
+        )
+        roots[str(session.id)] = harness_id
+        HarnessSessionRepository.create(
+            workspace_id=workspace.id,
+            organization_id=conv_setup["org"].id,
+            parent_id=session.id,
+            harness_id="codex",
+        )
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+
+    # Authentication/membership/workspaces: 5; root sessions/unread/attention: 6.
+    with django_assert_num_queries(11):
+        response = client.get("/api/v1/harness/conversations/")
+
+    assert response.status_code == 200
+    assert {
+        row["session_id"]: row["harness_id"] for row in response.json()
+    } == roots
+    assert "private-connection" not in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_list_conversations_empty_for_owner_without_workspaces(
+    conv_setup, fake_harness_service
+) -> None:
+    """A valid member with no owned workspace receives an empty feed."""
+    owner = get_user_model().objects.create_user(
+        email=f"conv-empty-{uuid.uuid4().hex[:6]}@example.com", password="secret"
+    )
+    Membership.objects.create(user=owner, organization=conv_setup["org"])
+    client = _client(user=owner, org=conv_setup["org"], permissions=READ)
+    response = client.get("/api/v1/harness/conversations/")
+    assert response.status_code == 200
+    assert response.json() == []
 
 
 @pytest.mark.django_db
