@@ -276,7 +276,9 @@ Scheduled tasks are personal
 recurring prompts in an IANA timezone: daily or selected weekdays at a local `HH:MM`,
 or `recurrence: "cron"` with five-field cron expressions (`cron_expression`, several
 joined by `;`) for multiple runs per day, intervals and monthly/yearly cadences. The
-UI offers set times, repeating intervals and a raw cron editor. DST gaps are skipped
+UI offers set times, repeating intervals and a raw cron editor; the `/scheduled-tasks`
+page shows past runs and upcoming occurrences per workspace in a week calendar
+(click a free slot to plan a task, drag a set-time run to move it). DST gaps are skipped
 and fall-back repeated times executed once. Each occurrence
 creates a new root harness session. REST endpoints are under
 `/api/v1/scheduled-tasks/` (`harness:read` for listing/history, `harness:run` for

@@ -21,6 +21,16 @@ export const WEEKDAYS = [
   { value: 6, label: 'Sun', full: 'Sunday' },
 ] as const
 
+/** Suggestions for time zone pickers; any valid IANA zone is accepted. */
+export const COMMON_TIME_ZONES = [
+  'UTC',
+  'Europe/London',
+  'Europe/Berlin',
+  'America/New_York',
+  'America/Los_Angeles',
+  'Asia/Tokyo',
+] as const
+
 export interface ScheduleValidation {
   valid: boolean
   errors: Partial<Record<'name' | 'workspace_id' | 'prompt' | 'weekdays' | 'timezone_name', string>>

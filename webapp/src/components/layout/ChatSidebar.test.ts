@@ -561,6 +561,16 @@ describe('ChatSidebar', () => {
     expect(row.classes()).toContain('min-h-11')
   })
 
+  it('opens the scheduled-task calendar from the section and the collapsed rail', async () => {
+    const wrapper = mountSidebar()
+    await wrapper.get('[data-testid="open-schedule-calendar"]').trigger('click')
+    expect(routerPush).toHaveBeenLastCalledWith('/scheduled-tasks')
+    routerPush.mockClear()
+    await wrapper.get('[data-testid="collapsed-scheduled-tasks"]').trigger('click')
+    expect(routerPush).toHaveBeenLastCalledWith('/scheduled-tasks')
+    expect(useScheduledTaskStore().dialogOpen).toBe(false)
+  })
+
   it('shows empty chat state for a running workspace', () => {
     conversationStore.conversations = []
     const wrapper = mountSidebar()

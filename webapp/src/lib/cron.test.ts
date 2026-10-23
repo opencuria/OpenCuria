@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { describeCron, nextCronOccurrences, parseCron, validateCronExpression } from './cron'
+import {
+  cronOccurrencesBetween,
+  describeCron,
+  nextCronOccurrences,
+  parseCron,
+  validateCronExpression,
+} from './cron'
 
 const iso = (dates: Date[]): string[] => dates.map((date) => date.toISOString())
 
@@ -34,6 +40,23 @@ describe('cron helpers', () => {
       '2025-01-06T18:00:00.000Z',
       '2025-01-07T09:00:00.000Z',
     ])
+  })
+
+  it('lists occurrences within a half-open range, capped and across DST', () => {
+    const start = new Date('2025-01-06T08:00:00Z') // Mon 09:00 Berlin
+    const end = new Date('2025-01-06T10:00:00Z')
+    expect(iso(cronOccurrencesBetween('0 * * * *', 'Europe/Berlin', start, end))).toEqual([
+      '2025-01-06T08:00:00.000Z',
+      '2025-01-06T09:00:00.000Z',
+    ])
+    expect(cronOccurrencesBetween('*/5 * * * *', 'UTC', start, end, 3)).toHaveLength(3)
+    // Monthly schedules do not scan years ahead to fill the cap.
+    expect(cronOccurrencesBetween('0 9 1 * *', 'UTC', start, end)).toEqual([])
+    // Berlin falls back on Oct 26 2025: 02:30 happens once, at the earlier instant.
+    expect(iso(cronOccurrencesBetween(
+      '30 2 * * *', 'Europe/Berlin', new Date('2025-10-25T00:00:00Z'), new Date('2025-10-27T00:00:00Z'),
+    ))).toEqual(['2025-10-25T00:30:00.000Z', '2025-10-26T00:30:00.000Z'])
+    expect(cronOccurrencesBetween('0 * * * *', 'UTC', new Date('invalid'), end)).toEqual([])
   })
 
   it('applies classic day-of-month OR day-of-week matching', () => {
