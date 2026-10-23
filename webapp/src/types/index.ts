@@ -754,7 +754,6 @@ export interface CapturedImage {
 
 export interface ImageArtifactCreateIn {
   name?: string
-  workspace_id?: string
   captured_image_id?: string | null
   message?: string
 }

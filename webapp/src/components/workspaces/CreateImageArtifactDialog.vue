@@ -25,14 +25,12 @@ import {
 import CaptureTargetFields from '@/components/images/CaptureTargetFields.vue'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
-import { useImageArtifactStore } from '@/stores/imageArtifacts'
 import { WorkspaceStatus, RuntimeType } from '@/types'
 import { NEW_IMAGE } from '@/lib/imageVersions'
 import { runnerSupportsRuntime } from '@/lib/runtimeSupport'
 
 const workspaceStore = useWorkspaceStore()
 const runnerStore = useRunnerStore()
-const imageArtifactStore = useImageArtifactStore()
 
 const open = ref(false)
 const target = ref(NEW_IMAGE)
@@ -100,10 +98,10 @@ onMounted(async () => {
 async function handleSubmit(): Promise<void> {
   if (!isValid.value || !fields.value) return
   submitting.value = true
-  const ok = await imageArtifactStore.createImageArtifact({
-    ...fields.value.payload(),
-    workspace_id: selectedWorkspaceId.value,
-  })
+  const ok = await workspaceStore.createImageArtifact(
+    selectedWorkspaceId.value,
+    fields.value.payload(),
+  )
   submitting.value = false
   if (ok) {
     handleClose()
@@ -137,9 +135,6 @@ function handleClose(): void {
       </DialogHeader>
 
       <DialogBody>
-        <p v-if="imageArtifactStore.error" role="alert" class="text-destructive">
-          {{ imageArtifactStore.error }}
-        </p>
         <form
           id="create-image-artifact-form"
           class="flex flex-col gap-4"

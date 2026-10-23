@@ -6,43 +6,31 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type {
   CapturedImage,
-  ImageArtifact,
-  ImageArtifactCreateIn,
   ImageArtifactCloneIn,
   ImageDefinition,
   RunnerImageBuild,
 } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
-import { useWorkspaceStore } from './workspaces'
 import { useNotificationStore } from './notifications'
 
 export const useImageStore = defineStore('images', () => {
   const notifications = useNotificationStore()
 
-  const images = ref<ImageArtifact[]>([])
   const capturedImages = ref<CapturedImage[]>([])
   const imageDefinitions = ref<ImageDefinition[]>([])
   const runnerBuildsByDefinition = ref<Record<string, RunnerImageBuild[]>>({})
   const loading = ref(false)
   const error = ref<string | null>(null)
 
-  async function fetchImages(): Promise<void> {
+  async function fetchCapturedImages(): Promise<void> {
     loading.value = true
     error.value = null
-    try {
-      images.value = await workspacesApi.listUserImageArtifacts()
-    } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to load images'
-    } finally {
-      loading.value = false
-    }
-  }
-
-  async function fetchCapturedImages(): Promise<void> {
     try {
       capturedImages.value = await workspacesApi.listCapturedImages()
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Failed to load images'
+    } finally {
+      loading.value = false
     }
   }
 
@@ -95,57 +83,15 @@ export const useImageStore = defineStore('images', () => {
     }
   }
 
-  async function createImageArtifact(data: ImageArtifactCreateIn): Promise<boolean> {
-    try {
-      if (
-        !data.workspace_id ||
-        !(await useWorkspaceStore().captureImage(data.workspace_id, () =>
-          workspacesApi.createImageArtifact(data),
-        ))
-      )
-        return false
-      await Promise.all([fetchImages(), fetchCapturedImages()])
-      notifications.success(
-        'Image creating',
-        'Image is being created. It will appear here when ready.',
-      )
-      return true
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Failed to create image'
-      error.value = msg
-      notifications.error('Image failed', msg)
-      return false
-    }
-  }
-
-  async function createWorkspaceFromImageArtifact(
-    imageArtifactId: string,
-    data: ImageArtifactCloneIn,
-  ): Promise<string | null> {
-    try {
-      const result = await workspacesApi.createWorkspaceFromUserImageArtifact(imageArtifactId, data)
-      notifications.success('Cloning workspace', 'New workspace is being created from image.')
-      return result.workspace_id
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Failed to clone workspace'
-      notifications.error('Clone failed', msg)
-      return null
-    }
-  }
-
   return {
-    images,
     capturedImages,
     imageDefinitions,
     runnerBuildsByDefinition,
     loading,
     error,
-    fetchImages,
     fetchCapturedImages,
     renameCapturedImage,
     createWorkspaceFromCapturedImage,
     fetchImageDefinitionsWithBuilds,
-    createImageArtifact,
-    createWorkspaceFromImageArtifact,
   }
 })

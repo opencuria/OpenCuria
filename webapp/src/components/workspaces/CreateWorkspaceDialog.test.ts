@@ -9,10 +9,10 @@ import { saveWorkspaceDraft } from '@/lib/workspaceDraft'
 const routerPush = vi.fn()
 const fetchCredentials = vi.fn()
 const fetchRunners = vi.fn()
-const fetchImages = vi.fn()
+const fetchCapturedImages = vi.fn()
 const fetchImageDefinitionsWithBuilds = vi.fn()
 const createWorkspace = vi.fn()
-const createWorkspaceFromImageArtifact = vi.fn()
+const createWorkspaceFromCapturedImage = vi.fn()
 
 const credentialStore = {
   credentials: [
@@ -64,27 +64,37 @@ const workspaceStore = {
 }
 
 const imageStore = {
-  images: [
+  capturedImages: [
     {
-      id: 'captured-image-1',
-      source_workspace_id: 'workspace-1',
-      runner_artifact_id: 'artifact-1',
+      id: 'image-line-1',
       name: 'Captured Workspace',
-      size_bytes: 123,
-      status: 'ready',
-      artifact_kind: 'captured',
-      source_runner_id: 'runner-1',
-      runtime_type: RuntimeType.QEMU,
-      source_runner_online: true,
-      created_at: '2026-04-01T10:00:00.000Z',
-      created_by_id: 1,
+      status: 'active',
+      latest_id: 'captured-image-1',
+      latest_version: 1,
+      runner_online: true,
+      versions: [
+        {
+          id: 'captured-image-1',
+          source_workspace_id: 'workspace-1',
+          runner_artifact_id: 'artifact-1',
+          name: 'Captured Workspace',
+          size_bytes: 123,
+          status: 'ready',
+          artifact_kind: 'captured',
+          source_runner_id: 'runner-1',
+          runtime_type: RuntimeType.QEMU,
+          source_runner_online: true,
+          created_at: '2026-04-01T10:00:00.000Z',
+          created_by_id: 1,
+        },
+      ],
     },
   ],
   imageDefinitions: [],
   runnerBuildsByDefinition: {},
-  fetchImages,
+  fetchCapturedImages,
   fetchImageDefinitionsWithBuilds,
-  createWorkspaceFromImageArtifact,
+  createWorkspaceFromCapturedImage,
 }
 
 vi.mock('vue-router', () => ({
@@ -124,10 +134,10 @@ describe('CreateWorkspaceDialog', () => {
     routerPush.mockReset()
     fetchCredentials.mockReset()
     fetchRunners.mockReset()
-    fetchImages.mockReset()
+    fetchCapturedImages.mockReset()
     fetchImageDefinitionsWithBuilds.mockReset()
     createWorkspace.mockReset()
-    createWorkspaceFromImageArtifact.mockReset()
+    createWorkspaceFromCapturedImage.mockReset()
     createWorkspace.mockResolvedValue(true)
   })
 
@@ -171,7 +181,7 @@ describe('CreateWorkspaceDialog', () => {
     expect(vm.selectedImageValue).toBe('captured:captured-image-1')
   })
 
-  it('creates a workspace from a captured image via the artifact clone flow', async () => {
+  it('creates a workspace from a captured image via its versioned image ID', async () => {
     const wrapper = shallowMount(CreateWorkspaceDialog)
     const vm = wrapper.vm as typeof wrapper.vm & {
       open: boolean
@@ -182,7 +192,7 @@ describe('CreateWorkspaceDialog', () => {
       handleSubmit: () => Promise<void>
     }
 
-    createWorkspaceFromImageArtifact.mockResolvedValue('workspace-created-from-image')
+    createWorkspaceFromCapturedImage.mockResolvedValue('workspace-created-from-image')
     vm.open = true
     vm.name = 'Captured Clone'
     vm.selectedImageValue = 'captured:captured-image-1'
@@ -193,7 +203,7 @@ describe('CreateWorkspaceDialog', () => {
 
     await vm.handleSubmit()
 
-    expect(createWorkspaceFromImageArtifact).toHaveBeenCalledWith('captured-image-1', {
+    expect(createWorkspaceFromCapturedImage).toHaveBeenCalledWith('image-line-1', {
       name: 'Captured Clone',
       credential_ids: ['cred-1'],
       plugin_ids: [],

@@ -115,10 +115,10 @@ vi.mock('@/stores/apiKeys', () => ({
 
 vi.mock('@/stores/images', () => ({
   useImageStore: () => ({
-    images: [],
+    capturedImages: [],
     loading: false,
     error: null,
-    fetchImages: vi.fn(),
+    fetchCapturedImages: vi.fn(),
   }),
 }))
 

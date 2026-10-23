@@ -18,7 +18,6 @@ Tools and their required permissions
 - remove_workspace       → workspaces:delete
 - list_runners           → runners:read
 - recreate_workspace     → workspaces:delete (reset/update; workspace data lost)
-- list_image_artifacts   → images:read
 - create_image_artifact  → images:create
 - list_captured_images   → images:read
 - update_captured_image  → images:create
@@ -398,11 +397,6 @@ _TOOLS: list[Tool] = [
     Tool(
         name="list_runners",
         description="List runners in the active organization.",
-        inputSchema={"type": "object", "properties": {}},
-    ),
-    Tool(
-        name="list_image_artifacts",
-        description="List image artifacts owned by the current user.",
         inputSchema={"type": "object", "properties": {}},
     ),
     Tool(
@@ -1613,7 +1607,6 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "dispose_lifecycle_operation": APIKeyPermission.WORKSPACES_UPDATE,
     "get_runner_storage": APIKeyPermission.RUNNERS_READ,
     "refresh_runner_storage": APIKeyPermission.RUNNERS_READ,
-    "list_image_artifacts": APIKeyPermission.IMAGES_READ,
     "create_image_artifact": APIKeyPermission.IMAGES_CREATE,
     "recreate_workspace": APIKeyPermission.WORKSPACES_DELETE,
     "list_captured_images": APIKeyPermission.IMAGES_READ,
@@ -2279,34 +2272,6 @@ def _call_list_runners(api_key, org_id, args: dict) -> list[TextContent]:
             "status": str(r.status),
         }
         for r in runners
-    ]
-    return _text(result)
-
-
-def _call_list_image_artifacts(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.organizations.services import OrganizationService
-
-    svc = _runner_service()
-    org_service = OrganizationService()
-    org_service.require_membership(api_key.user, org_id)
-    artifacts = svc.list_image_artifacts_for_user(user=api_key.user)
-    result = [
-        {
-            "id": str(s.id),
-            "source_workspace_id": (
-                str(s.origin_workspace_id) if s.origin_workspace_id else None
-            ),
-            "name": s.name,
-            "status": str(s.status),
-            "size_bytes": s.size_bytes,
-            "created_at": s.created_at.isoformat(),
-            "captured_image_id": (
-                str(s.captured_image_id) if s.captured_image_id else None
-            ),
-            "version": s.generation,
-            "message": s.message,
-        }
-        for s in artifacts
     ]
     return _text(result)
 
@@ -4958,7 +4923,6 @@ _TOOL_HANDLERS = {
     "dispose_lifecycle_operation": _call_dispose_lifecycle_operation,
     "get_runner_storage": _call_get_runner_storage,
     "refresh_runner_storage": _call_refresh_runner_storage,
-    "list_image_artifacts": _call_list_image_artifacts,
     "create_image_artifact": _call_create_image_artifact,
     "recreate_workspace": _call_recreate_workspace,
     "list_captured_images": _call_list_captured_images,

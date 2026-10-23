@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Button } from '@/components/ui/button'
 import {
@@ -13,7 +13,7 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { useImageArtifactStore } from '@/stores/imageArtifacts'
+import { useImageStore } from '@/stores/images'
 import { useAuthStore } from '@/stores/auth'
 import { useNotificationStore } from '@/stores/notifications'
 import WorkspacePluginCredentialSelection from './WorkspacePluginCredentialSelection.vue'
@@ -24,12 +24,12 @@ import type { ImageArtifact } from '@/types'
 const props = defineProps<{
   imageArtifact: ImageArtifact
   /** Create from the captured image so the backend always picks its latest version. */
-  capturedImageId?: string
+  capturedImageId: string
   disabled?: boolean
 }>()
 const route = useRoute()
 const router = useRouter()
-const imageArtifactStore = useImageArtifactStore()
+const imageStore = useImageStore()
 const authStore = useAuthStore()
 const notifications = useNotificationStore()
 const open = ref(false)
@@ -76,11 +76,6 @@ watch(
   { immediate: true },
 )
 
-onMounted(async () => {
-  await Promise.all([
-    imageArtifactStore.loading ? Promise.resolve() : imageArtifactStore.fetchImageArtifacts(),
-  ])
-})
 onUnmounted(() => {
   if (resetTimer) clearTimeout(resetTimer)
 })
@@ -94,9 +89,7 @@ async function handleSubmit(): Promise<void> {
     credential_ids: selectedCredentialIds.value,
     plugin_ids: selectedPluginIds.value,
   }
-  const workspaceId = props.capturedImageId
-    ? await imageArtifactStore.createWorkspaceFromCapturedImage(props.capturedImageId, data)
-    : await imageArtifactStore.createWorkspaceFromImageArtifact(props.imageArtifact.id, data)
+  const workspaceId = await imageStore.createWorkspaceFromCapturedImage(props.capturedImageId, data)
   submitting.value = false
   if (workspaceId) {
     if (previousDraftId) removeWorkspaceDraft(previousDraftId)

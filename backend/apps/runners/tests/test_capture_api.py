@@ -45,31 +45,24 @@ def _headers(user, organization, permissions):
     }
 
 
-def _capture_url(workspace, global_endpoint):
-    if global_endpoint:
-        return "/api/v1/image-artifacts/"
-    return f"/api/v1/workspaces/{workspace.id}/image-artifacts/"
-
-
-def _capture(client, workspace, headers, global_endpoint):
+def _capture(client, workspace, headers):
     return client.post(
-        _capture_url(workspace, global_endpoint),
-        data=json.dumps({"name": "Capture", "workspace_id": str(workspace.id)}),
+        f"/api/v1/workspaces/{workspace.id}/image-artifacts/",
+        data=json.dumps({"name": "Capture"}),
         content_type="application/json",
         **headers,
     )
 
 
-@pytest.mark.parametrize("global_endpoint", [False, True])
 @pytest.mark.parametrize("running", [False, True])
 def test_capture_without_flag_preserves_source_running_state(
-    capture_setup, global_endpoint, running
+    capture_setup, running
 ):
     user, org, workspace = capture_setup
     workspace.status = WorkspaceStatus.RUNNING if running else WorkspaceStatus.STOPPED
     workspace.save(update_fields=["status"])
     headers = _headers(user, org, [APIKeyPermission.IMAGES_CREATE])
-    response = _capture(Client(), workspace, headers, global_endpoint)
+    response = _capture(Client(), workspace, headers)
     assert response.status_code == 202, response.content
     capture = CaptureRequest.objects.get(workspace=workspace)
     assert capture.prior_running is running
@@ -78,28 +71,25 @@ def test_capture_without_flag_preserves_source_running_state(
     assert response.json()["workspace_id"] == str(workspace.id)
 
 
-@pytest.mark.parametrize("global_endpoint", [False, True])
-def test_busy_capture_returns_declared_conflict(capture_setup, global_endpoint):
+def test_busy_capture_returns_declared_conflict(capture_setup):
     user, org, workspace = capture_setup
     headers = _headers(user, org, [APIKeyPermission.IMAGES_CREATE])
     client = Client()
-    assert _capture(client, workspace, headers, global_endpoint).status_code == 202
-    response = _capture(client, workspace, headers, global_endpoint)
+    assert _capture(client, workspace, headers).status_code == 202
+    response = _capture(client, workspace, headers)
     assert response.status_code == 409, response.content
     assert response.json()["code"] == "conflict"
     assert CaptureRequest.objects.filter(workspace=workspace).count() == 1
 
 
-@pytest.mark.parametrize("global_endpoint", [False, True])
-def test_capture_requires_api_key_permission(capture_setup, global_endpoint):
+def test_capture_requires_api_key_permission(capture_setup):
     user, org, workspace = capture_setup
-    response = _capture(Client(), workspace, _headers(user, org, []), global_endpoint)
+    response = _capture(Client(), workspace, _headers(user, org, []))
     assert response.status_code == 403, response.content
     assert not CaptureRequest.objects.exists()
 
 
-@pytest.mark.parametrize("global_endpoint", [False, True])
-def test_capture_hides_another_members_workspace(capture_setup, global_endpoint):
+def test_capture_hides_another_members_workspace(capture_setup):
     _, org, workspace = capture_setup
     other = get_user_model().objects.create_user(
         email="capture-outsider@example.com", password="secret"
@@ -109,7 +99,6 @@ def test_capture_hides_another_members_workspace(capture_setup, global_endpoint)
         Client(),
         workspace,
         _headers(other, org, [APIKeyPermission.IMAGES_CREATE]),
-        global_endpoint,
     )
     assert response.status_code == 404, response.content
     assert not CaptureRequest.objects.exists()
@@ -117,7 +106,7 @@ def test_capture_hides_another_members_workspace(capture_setup, global_endpoint)
 
 def test_capture_rest_and_mcp_schemas_have_no_restart_flag():
     fields = {"name", "workspace_id", "captured_image_id", "message"}
-    assert set(ImageArtifactCreateIn.model_fields) == fields
+    assert set(ImageArtifactCreateIn.model_fields) == fields - {"workspace_id"}
     tool = next(tool for tool in _TOOLS if tool.name == "create_image_artifact")
     assert set(tool.inputSchema["properties"]) == fields
 

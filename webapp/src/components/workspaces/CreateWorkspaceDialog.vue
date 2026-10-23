@@ -43,6 +43,7 @@ interface SelectableImageOption {
   label: string
   runtimeType: RuntimeType
   imageArtifact?: ImageArtifact
+  capturedImageId?: string
   runnerBuilds?: RunnerImageBuild[]
 }
 
@@ -150,27 +151,30 @@ const imageOptions = computed(() => {
     })
   }
 
-  const capturedOptions: SelectableImageOption[] = imageStore.images
-    .filter((artifact) => {
-      const sourceRunner = artifact.source_runner_id
-        ? runnerStore.runners.find((runner) => runner.id === artifact.source_runner_id)
-        : null
-      return (
-        artifact.artifact_kind === 'captured' &&
-        artifact.status === 'ready' &&
-        (!artifact.captured_image_id || artifact.is_latest) &&
-        artifact.source_runner_online === true &&
-        runnerSupportsRuntime(sourceRunner, artifact.runtime_type || RuntimeType.QEMU)
-      )
-    })
-    .map((artifact) => ({
-      value: `captured:${artifact.id}`,
-      kind: 'captured',
-      label: `○ ${artifact.name}${artifact.version ? ` · v${artifact.version}` : ''} [${(artifact.runtime_type || 'qemu').toString()}]`,
-      runtimeType:
-        artifact.runtime_type === RuntimeType.DOCKER ? RuntimeType.DOCKER : RuntimeType.QEMU,
-      imageArtifact: artifact,
-    }))
+  const capturedOptions: SelectableImageOption[] = imageStore.capturedImages.flatMap((image) => {
+    const artifact = image.versions.find((version) => version.id === image.latest_id)
+    if (!artifact || image.status !== 'active') return []
+    const sourceRunner = artifact.source_runner_id
+      ? runnerStore.runners.find((runner) => runner.id === artifact.source_runner_id)
+      : null
+    if (
+      artifact.status !== 'ready' ||
+      !image.runner_online ||
+      !runnerSupportsRuntime(sourceRunner, artifact.runtime_type || RuntimeType.QEMU)
+    )
+      return []
+    return [
+      {
+        value: `captured:${artifact.id}`,
+        kind: 'captured' as const,
+        label: `○ ${image.name} · v${image.latest_version} [${artifact.runtime_type}]`,
+        runtimeType:
+          artifact.runtime_type === RuntimeType.DOCKER ? RuntimeType.DOCKER : RuntimeType.QEMU,
+        imageArtifact: artifact,
+        capturedImageId: image.id,
+      },
+    ]
+  })
 
   const options = [
     ...(definitionOptions.length
@@ -299,7 +303,10 @@ onMounted(async () => {
   if (!runnerStore.runners.length) {
     await runnerStore.fetchRunners()
   }
-  await Promise.all([imageStore.fetchImages(), imageStore.fetchImageDefinitionsWithBuilds()])
+  await Promise.all([
+    imageStore.fetchCapturedImages(),
+    imageStore.fetchImageDefinitionsWithBuilds(),
+  ])
   if (props.resumeDraftId) {
     await nextTick()
     restorationPending.value = false
@@ -421,13 +428,10 @@ async function handleSubmit(): Promise<void> {
       credential_ids: selectedCredentialIds.value,
       plugin_ids: selectedPluginIds.value,
     }
-    const capturedImageId = selectedOption.imageArtifact?.captured_image_id
-    const workspaceId = capturedImageId
-      ? await imageStore.createWorkspaceFromCapturedImage(capturedImageId, data)
-      : await imageStore.createWorkspaceFromImageArtifact(
-          selectedOption.imageArtifact?.id || '',
-          data,
-        )
+    const workspaceId = await imageStore.createWorkspaceFromCapturedImage(
+      selectedOption.capturedImageId!,
+      data,
+    )
     success = !!workspaceId
     createdWorkspaceId = workspaceId
   } else {

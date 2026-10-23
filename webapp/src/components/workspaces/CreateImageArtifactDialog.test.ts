@@ -4,7 +4,6 @@ import { createPinia, setActivePinia } from 'pinia'
 import CreateImageArtifactDialog from './CreateImageArtifactDialog.vue'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
-import { useImageArtifactStore } from '@/stores/imageArtifacts'
 import { WorkspaceOperation, WorkspaceStatus, RuntimeType, type Workspace } from '@/types'
 
 vi.mock('@/services/workspaces.api', async (importOriginal) => ({
@@ -36,8 +35,7 @@ it.each([WorkspaceStatus.RUNNING, WorkspaceStatus.STOPPED])(
       id: 'r',
       available_runtimes: ['qemu'],
     } as never)
-    const images = useImageArtifactStore()
-    const create = vi.spyOn(images, 'createImageArtifact').mockResolvedValue(true)
+    const create = vi.spyOn(workspaces, 'createImageArtifact').mockResolvedValue(true)
     const wrapper = mount(CreateImageArtifactDialog, {
       global: {
         stubs: {
@@ -74,7 +72,7 @@ it.each([WorkspaceStatus.RUNNING, WorkspaceStatus.STOPPED])(
     await wrapper.get('form').trigger('submit')
     await flushPromises()
     expect(wrapper.find('[role="checkbox"]').exists()).toBe(false)
-    expect(create).toHaveBeenCalledWith({ name: 'Snapshot', message: '', workspace_id: 'w' })
+    expect(create).toHaveBeenCalledWith('w', { name: 'Snapshot', message: '' })
     wrapper.unmount()
   },
 )
@@ -84,7 +82,7 @@ it('selects a workspace with the real Reka select', async () => {
   workspaces.workspaces = [{ id: 'w', name: 'Guest', runner_id: 'r', status: WorkspaceStatus.RUNNING, runtime_type: RuntimeType.QEMU, active_operation: null, credentials_present: false }] as Workspace[]
   const runners = useRunnerStore()
   runners.runners = [{ id: 'r', available_runtimes: ['qemu'] }] as never
-  const create = vi.spyOn(useImageArtifactStore(), 'createImageArtifact').mockResolvedValue(true)
+  const create = vi.spyOn(workspaces, 'createImageArtifact').mockResolvedValue(true)
   const wrapper = mount(CreateImageArtifactDialog, { attachTo: document.body })
   await wrapper.get('button').trigger('click')
   await flushPromises()
@@ -110,6 +108,6 @@ it('selects a workspace with the real Reka select', async () => {
   expect(submit.disabled).toBe(false)
   document.body.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
   await flushPromises()
-  expect(create).toHaveBeenCalledWith({ name: 'Snapshot', message: '', workspace_id: 'w' })
+  expect(create).toHaveBeenCalledWith('w', { name: 'Snapshot', message: '' })
   wrapper.unmount()
 })

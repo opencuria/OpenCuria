@@ -14,11 +14,9 @@ vi.mock('vue-router', () => ({
   useRoute: () => ({ path: '/workspaces', query: {} }),
   useRouter: () => ({ push: mocks.push }),
 }))
-vi.mock('@/stores/imageArtifacts', () => ({
-  useImageArtifactStore: () => ({
-    loading: false,
-    fetchImageArtifacts: vi.fn(),
-    createWorkspaceFromImageArtifact: mocks.clone,
+vi.mock('@/stores/images', () => ({
+  useImageStore: () => ({
+    createWorkspaceFromCapturedImage: mocks.clone,
   }),
 }))
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => mocks.auth }))
@@ -81,9 +79,9 @@ beforeEach(() => {
 })
 
 describe('CreateWorkspaceFromImageArtifactDialog', () => {
-  it('submits selected plugin and credential IDs to the image-clone API without inheriting artifact associations', async () => {
+  it('submits selected plugin and credential IDs to the versioned image API without inheriting artifact associations', async () => {
     const wrapper = mount(CreateWorkspaceFromImageArtifactDialog, {
-      props: { imageArtifact },
+      props: { imageArtifact, capturedImageId: 'image-1' },
       global: { stubs },
     })
     const vm = wrapper.vm as unknown as {
@@ -100,7 +98,7 @@ describe('CreateWorkspaceFromImageArtifactDialog', () => {
     vm.selectedPluginIds = ['plugin-1']
     vm.pluginSelectionValid = true
     await vm.handleSubmit()
-    expect(mocks.clone).toHaveBeenCalledWith('artifact-1', {
+    expect(mocks.clone).toHaveBeenCalledWith('image-1', {
       name: 'Image clone',
       credential_ids: ['credential-1'],
       plugin_ids: ['plugin-1'],
@@ -110,7 +108,7 @@ describe('CreateWorkspaceFromImageArtifactDialog', () => {
 
   it('does not dispatch clone creation while required dependencies are missing', async () => {
     const wrapper = mount(CreateWorkspaceFromImageArtifactDialog, {
-      props: { imageArtifact },
+      props: { imageArtifact, capturedImageId: 'image-1' },
       global: { stubs },
     })
     const vm = wrapper.vm as unknown as {

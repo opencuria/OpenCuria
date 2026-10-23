@@ -11,7 +11,6 @@ import type {
   WorkspaceUpdateOut,
   WorkspaceProcess,
   Task,
-  ImageArtifact,
   ImageArtifactCreateIn,
   ImageArtifactCreateOut,
   ImageArtifactCloneIn,
@@ -225,23 +224,6 @@ export function createWorkspaceImageArtifact(
   data: ImageArtifactCreateIn,
 ): Promise<ImageArtifactCreateOut> {
   return post<ImageArtifactCreateOut>(`/workspaces/${workspaceId}/image-artifacts/`, data)
-}
-
-// --- Global image artifact API ---
-
-export function listUserImageArtifacts(): Promise<ImageArtifact[]> {
-  return get<ImageArtifact[]>('/image-artifacts/')
-}
-
-export function createImageArtifact(data: ImageArtifactCreateIn): Promise<ImageArtifactCreateOut> {
-  return post<ImageArtifactCreateOut>('/image-artifacts/', data)
-}
-
-export function createWorkspaceFromUserImageArtifact(
-  imageArtifactId: string,
-  data: ImageArtifactCloneIn,
-): Promise<ImageArtifactCloneOut> {
-  return post<ImageArtifactCloneOut>(`/image-artifacts/${imageArtifactId}/workspaces/`, data)
 }
 
 // --- Captured image (versioned) API ---

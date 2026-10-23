@@ -8,10 +8,10 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
-from apps.runners import api as runners_api
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
-from apps.runners.models import ImageInstance, Runner, Workspace
+from apps.runners.models import Runner, Workspace
+from apps.runners.tests.test_image_versions import make_line
 from common.utils import generate_api_token, hash_token
 
 
@@ -67,7 +67,7 @@ def workspace_access_setup(db):
         status=RunnerStatus.ONLINE,
         sid="workspace-access-runner-sid",
         organization=org,
-        available_runtimes=["docker"],
+        available_runtimes=["qemu"],
     )
     owner_workspace = Workspace.objects.create(
         runner=runner,
@@ -81,16 +81,7 @@ def workspace_access_setup(db):
         status=WorkspaceStatus.RUNNING,
         created_by=foreign_admin,
     )
-    artifact = ImageInstance.objects.create(
-        is_legacy=True,
-        runner=runner,
-        origin_workspace=owner_workspace,
-        created_by=owner,
-        name="Owner Snapshot",
-        runner_ref="owner-snapshot-1",
-        status=ImageInstance.Status.READY,
-        origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-    )
+    line, _ = make_line(runner, owner)
     return {
         "org": org,
         "owner": owner,
@@ -98,7 +89,7 @@ def workspace_access_setup(db):
         "foreign_member": foreign_member,
         "owner_workspace": owner_workspace,
         "admin_workspace": admin_workspace,
-        "artifact": artifact,
+        "image": line,
     }
 
 
@@ -134,11 +125,11 @@ def test_workspace_image_artifact_api_only_exposes_capture():
     [
         ("owner", True, 202),
         ("owner", False, 403),
-        ("foreign_admin", True, 403),
-        ("foreign_member", True, 403),
+        ("foreign_admin", True, 404),
+        ("foreign_member", True, 404),
     ],
 )
-def test_global_image_clone_access(
+def test_captured_image_clone_access(
     workspace_access_setup, monkeypatch, actor_key, can_clone, expected_status
 ):
     from apps.runners.services import get_runner_service
@@ -153,9 +144,9 @@ def test_global_image_clone_access(
         org=workspace_access_setup["org"],
         permissions=[APIKeyPermission.IMAGES_CLONE.value] if can_clone else [],
     )
-    artifact = workspace_access_setup["artifact"]
+    image = workspace_access_setup["image"]
     response = client.post(
-        f"/api/v1/image-artifacts/{artifact.id}/workspaces/",
+        f"/api/v1/captured-images/{image.id}/workspaces/",
         data=json.dumps({"name": "owner-clone"}),
         content_type="application/json",
     )
@@ -166,59 +157,6 @@ def test_global_image_clone_access(
         assert "workspace_id" in body
         assert "task_id" in body
         assert body["plugin_ids"] == []
-
-
-@pytest.mark.django_db
-def test_global_image_artifact_create_requires_workspace_owner(workspace_access_setup):
-    client = _make_client(
-        user=workspace_access_setup["foreign_admin"],
-        org=workspace_access_setup["org"],
-        permissions=[APIKeyPermission.IMAGES_CREATE.value],
-    )
-
-    response = client.post(
-        "/api/v1/image-artifacts/",
-        data=json.dumps(
-            {
-                "workspace_id": str(workspace_access_setup["owner_workspace"].id),
-                "name": "forbidden-snapshot",
-            }
-        ),
-        content_type="application/json",
-    )
-
-    assert response.status_code == 404
-
-
-@pytest.mark.django_db
-def test_global_image_artifact_create_requires_images_create_permission(
-    workspace_access_setup,
-    monkeypatch,
-):
-    client = _make_client(
-        user=workspace_access_setup["owner"],
-        org=workspace_access_setup["org"],
-        permissions=[],
-    )
-
-    def _unexpected_service():
-        raise AssertionError("service should not be resolved without images:create")
-
-    monkeypatch.setattr(runners_api, "_get_service", _unexpected_service)
-
-    response = client.post(
-        "/api/v1/image-artifacts/",
-        data=json.dumps(
-            {
-                "workspace_id": str(workspace_access_setup["owner_workspace"].id),
-                "name": "blocked-snapshot",
-            }
-        ),
-        content_type="application/json",
-    )
-
-    assert response.status_code == 403
-    assert response.json()["code"] == "permission_denied"
 
 
 @pytest.mark.django_db

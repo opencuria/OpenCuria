@@ -695,7 +695,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
         ))
       )
         return false
-      await Promise.all([imageStore.fetchImages(), imageStore.fetchCapturedImages()])
+      await imageStore.fetchCapturedImages()
       notifications.success('Image capturing', 'Image is being captured.')
       return true
     } catch (e: unknown) {

@@ -239,16 +239,6 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
                 f"Cannot modify image definition in state '{definition.status}'"
             )
 
-    # -- Phase-4 public repository delegation (leak closure) ----------------
-    # Thin sync delegations over ``self.image_instances`` so production
-    # callers no longer reach into ``service.<repository>`` directly. No
-    # logic, no behaviour change; async callers keep wrapping them in
-    # ``sync_to_async``. Recipe CRUD lives in ``ImageDefinitionService``.
-
-    def get_image_artifact(self, artifact_id: uuid.UUID):
-        """Return an image artifact by ID or None."""
-        return self.image_instances.get_by_id(artifact_id)
-
     def deactivate_runner_image(self, build):
         """Disable assignment selection without mutating any generation."""
         self._ensure_definition_mutable(build.image_definition)
@@ -518,10 +508,6 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
             workspace_id,
         )
         self._forward_workspace_operation(workspace_id, None)
-
-    def list_image_artifacts_for_user(self, user) -> list:
-        """Return all artifacts created by a specific user."""
-        return list(self.image_instances.list_by_user(user))
 
     def handle_image_artifact_deleted(
         self,

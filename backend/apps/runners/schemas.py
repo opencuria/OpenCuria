@@ -458,7 +458,6 @@ class ImageArtifactCreateIn(Schema):
     """Capture a workspace as a new image or as the next version of one."""
 
     name: str = ""
-    workspace_id: uuid.UUID | None = None
     captured_image_id: uuid.UUID | None = None
     message: str = Field(default="", max_length=500)
 

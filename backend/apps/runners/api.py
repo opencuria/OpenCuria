@@ -63,7 +63,6 @@ from .schemas import (
     CapturedImageUpdateIn,
     ImageArtifactCreateIn,
     ImageArtifactCreateOut,
-    ImageArtifactOut,
     ImageBuildJobCreateIn,
     ImageBuildJobListOut,
     ImageBuildJobOut,
@@ -1770,131 +1769,6 @@ def image_deletion_status(request: HttpRequest, request_id: uuid.UUID):
 )
 def cancel_image_deletion(request: HttpRequest, request_id: uuid.UUID):
     return _deletion_response(request, "cancel", request_id)
-
-
-@image_artifact_router.get(
-    "/",
-    response=list[ImageArtifactOut],
-    summary="List image artifacts for the current user",
-)
-def list_image_artifacts(request: HttpRequest):
-    """Return all image artifacts owned by the current user in the active organization."""
-    if not check_api_key_permission(request, APIKeyPermission.IMAGES_READ):
-        return _perm_denied(APIKeyPermission.IMAGES_READ)
-    org_id = _get_org_id(request)
-    org_service = _get_org_service()
-    org_service.require_membership(request.user, org_id)
-
-    service = _get_service()
-    artifacts = service.list_image_artifacts_for_user(user=request.user)
-    return image_artifacts_to_out(artifacts)
-
-
-@image_artifact_router.post(
-    "/",
-    response={202: ImageArtifactCreateOut, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
-    summary="Create an image artifact from a workspace",
-)
-async def create_image_artifact_global(
-    request: HttpRequest, payload: ImageArtifactCreateIn
-):
-    """Create an image artifact from a workspace using the global endpoint."""
-    if not check_api_key_permission(request, APIKeyPermission.IMAGES_CREATE):
-        return _perm_denied(APIKeyPermission.IMAGES_CREATE)
-    org_id = _get_org_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    if not payload.workspace_id:
-        return 404, ErrorOut(detail="workspace_id is required", code="validation_error")
-
-    service = _get_service()
-    try:
-        await _get_owned_workspace_async(request, org_id, payload.workspace_id)
-        workspace, task = await service.create_image_artifact(
-            workspace_id=payload.workspace_id,
-            name=payload.name,
-            organization_id=org_id,
-            captured_image_id=payload.captured_image_id,
-            message=payload.message,
-        )
-        return 202, ImageArtifactCreateOut(task_id=task.id, workspace_id=workspace.id)
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code="conflict")
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code="not_found")
-    except ValueError as e:
-        return 404, ErrorOut(detail=str(e), code="not_found")
-
-
-@image_artifact_router.post(
-    "/{image_artifact_id}/workspaces/",
-    response={
-        202: WorkspaceFromImageArtifactOut,
-        404: ErrorOut,
-        403: ErrorOut,
-        409: ErrorOut,
-    },
-    summary="Create a workspace from an image artifact",
-)
-async def create_workspace_from_image_artifact_global(
-    request: HttpRequest,
-    image_artifact_id: uuid.UUID,
-    payload: WorkspaceFromImageArtifactIn,
-):
-    """Create a workspace from an image artifact."""
-    if not check_api_key_permission(request, APIKeyPermission.IMAGES_CLONE):
-        return _perm_denied(APIKeyPermission.IMAGES_CLONE)
-    if payload.plugin_ids and not check_api_key_permission(
-        request, APIKeyPermission.PLUGINS_WRITE
-    ):
-        return _perm_denied(APIKeyPermission.PLUGINS_WRITE)
-    org_id = _get_org_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    service = _get_service()
-    try:
-        artifact = await sync_to_async(service.get_image_artifact)(image_artifact_id)
-        if artifact is None:
-            return 404, ErrorOut(detail="Image artifact not found", code="not_found")
-        if artifact.created_by != request.user:
-            return 403, ErrorOut(
-                detail="Not authorized to use this image artifact",
-                code="forbidden",
-            )
-        resolved = await sync_to_async(CredentialSvc().resolve_credentials)(
-            payload.credential_ids,
-            org_id=org_id,
-            user=request.user,
-        )
-
-        workspace, task = await service.create_workspace_from_image_artifact(
-            image_artifact_id=image_artifact_id,
-            name=payload.name,
-            env_vars=resolved.env_vars,
-            files=resolved.files,
-            ssh_keys=resolved.ssh_keys,
-            credentials=resolved.credentials,
-            resolved_credentials=resolved,
-            user=request.user,
-            organization_id=org_id,
-            plugin_ids=payload.plugin_ids,
-        )
-        return 202, WorkspaceFromImageArtifactOut(
-            workspace_id=workspace.id,
-            task_id=task.id,
-            status=workspace.status,
-            plugin_ids=await sync_to_async(_workspace_plugin_ids)(workspace),
-        )
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-    except RunnerOfflineError as e:
-        return 409, ErrorOut(detail=str(e), code="runner_offline")
-    except ConflictError as e:
-        return 409, ErrorOut(
-            detail=e.message, code=e.code, gaps=getattr(e, "gaps", None)
-        )
-    except ValueError as e:
-        return 404, ErrorOut(detail=str(e), code="not_found")
 
 
 captured_image_router = Router(tags=["captured-images"])
