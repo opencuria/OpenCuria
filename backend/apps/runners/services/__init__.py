@@ -151,10 +151,6 @@ class RunnerService(
         self.image_definitions = ImageDefinitionRepository
         self.build_jobs = ImageBuildJobRepository
         self.processes = WorkspaceProcessRepository
-        # Tracks unknown runtime workspaces for which a cleanup request has
-        # already been sent, to avoid emitting duplicate cleanup tasks on every
-        # heartbeat while one is still in flight.
-        self._pending_unknown_workspace_cleanup: set[tuple[str, str]] = set()
         self._pending_credential_inject: set[tuple[str, str]] = set()
         # In-flight background-process RPCs: request_id -> Future[dict].
         # Runner harness:process_* handlers only emit *_result events (no

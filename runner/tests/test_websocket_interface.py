@@ -130,20 +130,16 @@ class DummyService:
         )
 
 
-class WebSocketLegacyPromptRemovedTests(unittest.IsolatedAsyncioTestCase):
-    async def test_run_prompt_handler_is_gone(self) -> None:
-        """Negative test: task:run_prompt no longer exists on the runner."""
+class WebSocketHandlerRegistrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retired_task_handlers_are_not_registered(self) -> None:
         interface = WebSocketInterface(
             DummyService(), RunnerSettings(state_dir=tempfile.mkdtemp())
         )
-        assert "task:run_prompt" not in interface._sio.handlers["/"]
-
-    async def test_cancel_prompt_handler_is_gone(self) -> None:
-        """Negative test: task:cancel_prompt no longer exists on the runner."""
-        interface = WebSocketInterface(
-            DummyService(), RunnerSettings(state_dir=tempfile.mkdtemp())
-        )
-        assert "task:cancel_prompt" not in interface._sio.handlers["/"]
+        assert {
+            "task:run_prompt",
+            "task:cancel_prompt",
+            "task:cleanup_unknown_workspace",
+        }.isdisjoint(interface._sio.handlers["/"])
 
 
 class WebSocketReconnectTests(unittest.IsolatedAsyncioTestCase):

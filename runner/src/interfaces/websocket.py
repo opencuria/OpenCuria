@@ -1396,12 +1396,6 @@ class WebSocketInterface(Interface):
                 )
                 log.exception("remove_failed")
 
-        @sio.on("task:cleanup_unknown_workspace")
-        async def on_cleanup_unknown_workspace(data: dict) -> None:
-            logger.warning(
-                "unknown_resource_preserved", workspace_id=data.get("workspace_id")
-            )
-
         @sio.on("task:start_terminal")
         async def on_start_terminal(data: dict) -> None:
             task_id = data.get("task_id", str(uuid.uuid4()))

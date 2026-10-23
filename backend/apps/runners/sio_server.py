@@ -282,63 +282,6 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             runner_id=runner_id,
         )
 
-    @sio.on("workspace:cleanup_unknown_done")
-    async def on_workspace_cleanup_unknown_done(sid: str, data: dict):
-        """Handle successful unknown-workspace cleanup reported by runner."""
-        service = get_runner_service()
-        session = await sio.get_session(sid)
-        runner_id = session.get("runner_id")
-        if not runner_id:
-            logger.warning(
-                "workspace:cleanup_unknown_done from unknown session (sid=%s)",
-                sid,
-            )
-            return
-
-        runner = await sync_to_async(service.get_runner_or_none)(uuid.UUID(runner_id))
-        if runner is None:
-            logger.warning(
-                "workspace:cleanup_unknown_done for deleted runner %s (sid=%s)",
-                runner_id,
-                sid,
-            )
-            return
-
-        await sync_to_async(service.handle_unknown_workspace_cleanup_result)(
-            runner=runner,
-            workspace_id=data.get("workspace_id", ""),
-            cleaned=bool(data.get("cleaned", False)),
-        )
-
-    @sio.on("workspace:cleanup_unknown_failed")
-    async def on_workspace_cleanup_unknown_failed(sid: str, data: dict):
-        """Handle failed unknown-workspace cleanup reported by runner."""
-        service = get_runner_service()
-        session = await sio.get_session(sid)
-        runner_id = session.get("runner_id")
-        if not runner_id:
-            logger.warning(
-                "workspace:cleanup_unknown_failed from unknown session (sid=%s)",
-                sid,
-            )
-            return
-
-        runner = await sync_to_async(service.get_runner_or_none)(uuid.UUID(runner_id))
-        if runner is None:
-            logger.warning(
-                "workspace:cleanup_unknown_failed for deleted runner %s (sid=%s)",
-                runner_id,
-                sid,
-            )
-            return
-
-        await sync_to_async(service.handle_unknown_workspace_cleanup_result)(
-            runner=runner,
-            workspace_id=data.get("workspace_id", ""),
-            cleaned=False,
-            error=data.get("error", "Unknown cleanup error"),
-        )
-
     # --- Harness workspace-access replies from runner ---
 
     @sio.on("harness:exec_wait_result")

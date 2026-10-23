@@ -531,13 +531,6 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(len(await self.store.list_unfinished(str(self.ws))), 2)
 
-    async def test_cleanup_unknown_confirms_before_forgetting_identity(self):
-        _manager, _runtime, lifecycle, registry, streams = await self.lifecycle_manager()
-        self.assertTrue(await lifecycle.cleanup_unknown_workspace(self.ws))
-        streams.confirm_workspace_ended.assert_awaited_once_with(self.ws, "guest")
-        self.assertNotIn(self.ws, registry._cache)
-        self.assertFalse(await self.store.list_unfinished(str(self.ws)))
-
     async def test_stop_preclose_errors_do_not_skip_physical_proof(self):
         manager, runtime, lifecycle, _registry, streams = await self.lifecycle_manager()
         streams.close_workspace_streams.side_effect = RuntimeError("streams unreachable")

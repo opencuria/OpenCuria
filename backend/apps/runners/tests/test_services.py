@@ -2456,27 +2456,8 @@ class TestHeartbeatReconciliation:
         workspace.refresh_from_db()
         assert workspace.status == WorkspaceStatus.DELETING
 
-    def test_unknown_runtime_workspace_triggers_cleanup_task(self, service, sio_mock):
-        """Heartbeat should request runner cleanup for unknown runtime workspaces."""
-        runner = self._create_runner()
-        unknown_workspace_id = str(uuid.uuid4())
-
-        service.handle_heartbeat(
-            runner=runner,
-            workspaces=[
-                {
-                    "workspace_id": unknown_workspace_id,
-                    "status": "running",
-                }
-            ],
-        )
-
-        sio_mock.emit.assert_not_awaited()
-
-    def test_unknown_cleanup_request_is_deduplicated_while_pending(
-        self, service, sio_mock
-    ):
-        """Repeated heartbeats should not spam duplicate cleanup requests."""
+    def test_unknown_runtime_workspace_is_preserved(self, service, sio_mock):
+        """Repeated heartbeats never authorize deleting unknown runtime workspaces."""
         runner = self._create_runner()
         unknown_workspace_id = str(uuid.uuid4())
         payload = [
@@ -2495,10 +2476,10 @@ class TestHeartbeatReconciliation:
         "terminal_state",
         [WorkspaceStatus.FAILED, WorkspaceStatus.REMOVED],
     )
-    def test_terminal_backend_state_triggers_cleanup(
+    def test_terminal_backend_state_does_not_authorize_cleanup(
         self, service, sio_mock, terminal_state
     ):
-        """Heartbeat should clean runner instances for FAILED/REMOVED workspaces."""
+        """Terminal backend state alone never authorizes deleting runner instances."""
         runner = self._create_runner()
         workspace = self._create_workspace(runner, terminal_state)
 

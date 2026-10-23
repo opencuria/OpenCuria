@@ -119,30 +119,6 @@ class WorkspaceLifecycle:
                     reason=reason,
                 )
 
-    async def _remove_managed_workspace(
-        self, workspace_id: uuid.UUID, reason: str
-    ) -> bool:
-        """Keep lookup metadata and durable ownership until actual removal succeeds."""
-        info = self._registry._cache.get(workspace_id)
-        if info is None:
-            raise RuntimeError(
-                "Managed workspace removal requires physical registry identity"
-            )
-        runtime = self._runtimes.get(info.runtime_type)
-        if runtime is None or not info.instance_id:
-            raise RuntimeError("Managed workspace removal requires runtime identity")
-        await self._background._kill_all_background_processes(
-            workspace_id, reason=reason
-        )
-        await self._close_managed_before_end(workspace_id, reason)
-        # Lifecycle's coordinated workspace lock fences replacement/start. Never
-        # publish successful death on exceptions, or remove cache before confirmation.
-        await runtime.remove_workspace(info.instance_id)
-        await self._confirm_workspace_ended(info, "remove")
-        self._registry._cache.pop(workspace_id, None)
-        self._unreachable_since.pop(workspace_id, None)
-        return True
-
     async def _inject_with_checkpoint(
         self,
         runtime: RuntimeBackend,
@@ -462,12 +438,24 @@ class WorkspaceLifecycle:
     @coordinated
     async def remove_workspace(self, workspace_id: uuid.UUID) -> None:
         """Remove the exact guest before finalizing durable owners and cache state."""
-        await self._remove_managed_workspace(workspace_id, "remove")
-
-    @coordinated
-    async def cleanup_unknown_workspace(self, workspace_id: uuid.UUID) -> bool:
-        """Remove a backend-unknown guest while retaining identity until confirmed."""
-        return await self._remove_managed_workspace(workspace_id, "cleanup_unknown")
+        info = self._registry._cache.get(workspace_id)
+        if info is None:
+            raise RuntimeError(
+                "Managed workspace removal requires physical registry identity"
+            )
+        runtime = self._runtimes.get(info.runtime_type)
+        if runtime is None or not info.instance_id:
+            raise RuntimeError("Managed workspace removal requires runtime identity")
+        await self._background._kill_all_background_processes(
+            workspace_id, reason="remove"
+        )
+        await self._close_managed_before_end(workspace_id, "remove")
+        # Lifecycle's coordinated workspace lock fences replacement/start. Never
+        # publish successful death on exceptions, or remove cache before confirmation.
+        await runtime.remove_workspace(info.instance_id)
+        await self._confirm_workspace_ended(info, "remove")
+        self._registry._cache.pop(workspace_id, None)
+        self._unreachable_since.pop(workspace_id, None)
 
     # -- self-healing SSH health check -------------------------------------
 

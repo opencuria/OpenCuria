@@ -4,7 +4,6 @@ Byte-identical method bodies extracted from the former monolithic
 ``apps/runners/services/__init__.py``. No logic changes; the mixin relies
 on the facade (``RunnerService``) providing ``self.runners``,
 ``self.workspaces``, ``self.processes``,
-``self._pending_unknown_workspace_cleanup`` /
 ``self._pending_process_verify`` plus sibling helpers (``stop_workspace``
 via :class:`WorkspaceLifecycleMixin`, ``_cleanup_desktop_state`` /
 ``_sync_desktop_state_from_heartbeat`` via ``SessionStoreMixin``,
@@ -166,19 +165,7 @@ class HeartbeatReconcilerMixin:
 
         # Check backend workspaces for this runner
         backend_workspaces = list(self.workspaces.list_by_runner(runner.id))
-        backend_workspace_ids = {str(ws.id) for ws in backend_workspaces}
         runner_id_str = str(runner.id)
-
-        # Drop stale pending cleanup entries that are no longer present on the
-        # runner heartbeat.
-        active_pending = {
-            key
-            for key in self._pending_unknown_workspace_cleanup
-            if key[0] == runner_id_str
-        }
-        for key in active_pending:
-            if key[1] not in runner_ws_states:
-                self._pending_unknown_workspace_cleanup.discard(key)
 
         # Unknown resources are inventory evidence, never cleanup authority.
 
@@ -190,7 +177,6 @@ class HeartbeatReconcilerMixin:
         pending_vanished: dict[str, list["WorkspaceProcess"]] = {}
         for ws in backend_workspaces:
             ws_id_str = str(ws.id)
-            cleanup_key = (runner_id_str, ws_id_str)
             runner_status = runner_ws_states.get(ws_id_str)
             runner_payload = runner_ws_payloads.get(ws_id_str, {})
 
@@ -201,7 +187,6 @@ class HeartbeatReconcilerMixin:
             ):
                 # The runtime is being removed and recreated under the same id;
                 # the recreate request, not the heartbeat, owns the status.
-                self._pending_unknown_workspace_cleanup.discard(cleanup_key)
                 continue
 
             if ws.status in (
@@ -212,9 +197,6 @@ class HeartbeatReconcilerMixin:
             ):
                 self._cleanup_desktop_state(ws_id_str)
                 continue
-
-            # This workspace is backend-managed and non-terminal.
-            self._pending_unknown_workspace_cleanup.discard(cleanup_key)
 
             if runner_status is None:
                 # Absence from a partial/failed scan proves nothing.
@@ -398,60 +380,6 @@ class HeartbeatReconcilerMixin:
                     ws_id_str,
                 )
         return changed
-
-    def handle_unknown_workspace_cleanup_result(
-        self,
-        runner: "Runner",
-        workspace_id: str,
-        *,
-        cleaned: bool,
-        error: str | None = None,
-    ) -> None:
-        """Handle result events for unknown-workspace cleanup requests."""
-        cleanup_key = (str(runner.id), workspace_id)
-        self._pending_unknown_workspace_cleanup.discard(cleanup_key)
-
-        if error:
-            logger.error(
-                "Unknown workspace cleanup failed on runner %s (workspace=%s): %s",
-                runner.id,
-                workspace_id,
-                error,
-            )
-            return
-
-        logger.info(
-            "Unknown workspace cleanup completed on runner %s "
-            "(workspace=%s, cleaned=%s)",
-            runner.id,
-            workspace_id,
-            cleaned,
-        )
-
-    def _request_workspace_cleanup(
-        self,
-        runner: "Runner",
-        *,
-        workspace_id: str,
-        reason: str,
-    ) -> None:
-        """Request runner cleanup for a runtime workspace ID, deduplicated."""
-        cleanup_key = (str(runner.id), workspace_id)
-        if cleanup_key in self._pending_unknown_workspace_cleanup:
-            return
-
-        logger.warning(
-            "Heartbeat: requesting cleanup for workspace %s on runner %s (%s)",
-            workspace_id,
-            runner.id,
-            reason,
-        )
-        self._pending_unknown_workspace_cleanup.add(cleanup_key)
-        async_to_sync(self._emit_to_runner)(
-            runner,
-            "task:cleanup_unknown_workspace",
-            {"workspace_id": workspace_id},
-        )
 
     @staticmethod
     def _map_instance_status(status: str) -> str | None:

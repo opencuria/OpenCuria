@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import timedelta
-from unittest.mock import ANY, AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import socketio
@@ -31,7 +31,12 @@ def test_runner_reply_registration() -> None:
     sio_server._register_event_handlers(sio)
     handlers = sio.handlers["/"]
     assert (RESULT_METHODS.keys() - {"workspace:error"}).isdisjoint(handlers)
-    assert {"harness:exec_chunk", "harness:exec_done"}.isdisjoint(handlers)
+    assert {
+        "harness:exec_chunk",
+        "harness:exec_done",
+        "workspace:cleanup_unknown_done",
+        "workspace:cleanup_unknown_failed",
+    }.isdisjoint(handlers)
     assert {
         "operation:result",
         "workspace:error",
@@ -324,33 +329,9 @@ async def test_operation_heartbeat_marks_only_the_bound_attempt_executing(
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_runner_register_and_cleanup_reports_resolve_the_session_runner(
-    runner_sio, runner, monkeypatch
-):
-    service = sio_server.get_runner_service()
-    cleanup = Mock()
-    monkeypatch.setattr(service, "handle_unknown_workspace_cleanup_result", cleanup)
+async def test_runner_register_resolves_the_session_runner(runner_sio, runner):
     handlers = runner_sio.handlers["/"]
 
     await handlers["runner:register"](runner.sid, {"supported_runtimes": ["qemu"]})
     runner.refresh_from_db()
     assert runner.available_runtimes == ["qemu"]
-
-    await handlers["workspace:cleanup_unknown_done"](
-        runner.sid, {"workspace_id": "gone-1", "cleaned": True}
-    )
-    await handlers["workspace:cleanup_unknown_failed"](
-        runner.sid, {"workspace_id": "gone-2"}
-    )
-    assert [call.kwargs for call in cleanup.call_args_list] == [
-        {"runner": ANY, "workspace_id": "gone-1", "cleaned": True},
-        {
-            "runner": ANY,
-            "workspace_id": "gone-2",
-            "cleaned": False,
-            "error": "Unknown cleanup error",
-        },
-    ]
-    assert {call.kwargs["runner"].id for call in cleanup.call_args_list} == {
-        runner.id
-    }

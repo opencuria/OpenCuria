@@ -442,10 +442,6 @@ class WorkspaceService:
         """Remove a workspace and clean up resources."""
         await self._lifecycle.remove_workspace(workspace_id)
 
-    async def cleanup_unknown_workspace(self, workspace_id: uuid.UUID) -> bool:
-        """Best-effort cleanup for a runtime workspace unknown to the backend."""
-        return await self._lifecycle.cleanup_unknown_workspace(workspace_id)
-
     async def run_health_check_loop(self) -> None:
         """Periodically probe running workspaces and restart unreachable ones."""
         await self._lifecycle.run_health_check_loop()
