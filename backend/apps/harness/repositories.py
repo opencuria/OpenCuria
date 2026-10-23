@@ -568,14 +568,19 @@ class HarnessSessionRepository:
 
     @staticmethod
     def list_for_workspaces(workspace_ids: list[uuid.UUID]) -> list[HarnessSession]:
-        """Return root sessions across *workspace_ids* (newest first)."""
+        """Return root sessions across *workspace_ids* (newest first).
+
+        Each row carries its owning workspace's name as ``workspace_name``.
+        """
         if not workspace_ids:
             return []
         return list(
             HarnessSession.objects.filter(
                 workspace_id__in=workspace_ids,
                 parent__isnull=True,
-            ).order_by("-last_message_at")
+            )
+            .annotate(workspace_name=F("workspace__name"))
+            .order_by("-last_message_at")
         )
 
     @staticmethod
@@ -1039,6 +1044,41 @@ class HarnessMessageRepository:
         return HarnessMessage.objects.filter(id=message_id).first()
 
     @staticmethod
+    def get_required(message_id: uuid.UUID) -> HarnessMessage:
+        """Fetch a fresh copy of a message that must exist.
+
+        Raises:
+            HarnessMessage.DoesNotExist: When the row is gone.
+        """
+        return HarnessMessage.objects.get(id=message_id)
+
+    @staticmethod
+    def refresh(message: HarnessMessage) -> HarnessMessage:
+        """Reload *message* in place from the database."""
+        message.refresh_from_db()
+        return message
+
+    @staticmethod
+    def count_for_session(session_id: uuid.UUID, *, role: str) -> int:
+        """Return how many *role* messages *session_id* holds."""
+        return HarnessMessage.objects.filter(session_id=session_id, role=role).count()
+
+    @staticmethod
+    def get_latest_assistant(
+        session_id: uuid.UUID, *, exclude_id: uuid.UUID
+    ) -> HarnessMessage | None:
+        """Return the newest assistant message of a session except *exclude_id*."""
+        return (
+            HarnessMessage.objects.filter(
+                session_id=session_id,
+                role=HarnessMessageRole.ASSISTANT,
+            )
+            .exclude(id=exclude_id)
+            .order_by("-position", "-created_at", "-id")
+            .first()
+        )
+
+    @staticmethod
     def list_for_summary(
         session_id: uuid.UUID, through_position: int
     ) -> list[HarnessMessage]:
@@ -1434,6 +1474,50 @@ class HarnessPartRepository:
         return part
 
     @staticmethod
+    def get_by_id(part_id: uuid.UUID | str) -> HarnessPart | None:
+        """Fetch a single part by ID."""
+        return HarnessPart.objects.filter(id=part_id).first()
+
+    @staticmethod
+    def get_position(part_id: uuid.UUID | str) -> int | None:
+        """Return the immutable timeline position of a part (None when missing)."""
+        return (
+            HarnessPart.objects.filter(id=part_id)
+            .values_list("position", flat=True)
+            .first()
+        )
+
+    @staticmethod
+    def find_by_call_id(
+        message_id: uuid.UUID,
+        call_id: str,
+        *,
+        type: str | None = None,
+        part_id: uuid.UUID | str | None = None,
+    ) -> HarnessPart | None:
+        """Return the part of *message_id* bound to *call_id*.
+
+        *type* and *part_id* narrow the match to one part type or row.
+        """
+        query = HarnessPart.objects.filter(message_id=message_id, call_id=call_id)
+        if type is not None:
+            query = query.filter(type=type)
+        if part_id is not None:
+            query = query.filter(id=part_id)
+        return query.first()
+
+    @staticmethod
+    def get_latest_for_message(
+        message_id: uuid.UUID, *, type: str
+    ) -> HarnessPart | None:
+        """Return the newest *type* part of one message."""
+        return (
+            HarnessPart.objects.filter(message_id=message_id, type=type)
+            .order_by("-position", "-created_at", "-id")
+            .first()
+        )
+
+    @staticmethod
     def list_for_message(message_id: uuid.UUID) -> list[HarnessPart]:
         """Return all parts of one message in timeline order."""
         return list(
@@ -1441,6 +1525,45 @@ class HarnessPartRepository:
                 "position", "created_at", "id"
             )
         )
+
+    @staticmethod
+    def list_for_messages(message_ids: list[uuid.UUID]) -> list[HarnessPart]:
+        """Return all parts of any of *message_ids*."""
+        return list(HarnessPart.objects.filter(message_id__in=message_ids))
+
+    @staticmethod
+    def list_open_for_message(
+        message_id: uuid.UUID, *, types: tuple[str, ...] | None = None
+    ) -> list[HarnessPart]:
+        """Return pending/running parts of one message, optionally by type."""
+        query = HarnessPart.objects.filter(
+            message_id=message_id, state__in=("pending", "running")
+        )
+        if types is not None:
+            query = query.filter(type__in=types)
+        return list(query)
+
+    @staticmethod
+    def list_pending_tools(message_id: uuid.UUID) -> list[HarnessPart]:
+        """Return pending tool parts of one message in timeline order."""
+        return list(
+            HarnessPart.objects.filter(
+                message_id=message_id, type="tool", state="pending"
+            ).order_by("position", "created_at", "id")
+        )
+
+    @staticmethod
+    def rebind_call_id(
+        part: HarnessPart, call_id: str, *, meta: dict | None = None
+    ) -> HarnessPart:
+        """Bind *part* to the engine's real *call_id* (optionally new ``meta``)."""
+        part.call_id = call_id
+        fields = ["call_id", "updated_at"]
+        if meta is not None:
+            part.meta = meta
+            fields = ["call_id", "meta", "updated_at"]
+        part.save(update_fields=fields)
+        return part
 
     @staticmethod
     def set_input(part: HarnessPart, input_data: dict) -> HarnessPart:

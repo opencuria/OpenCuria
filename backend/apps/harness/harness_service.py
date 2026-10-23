@@ -1048,9 +1048,7 @@ class HarnessService:
         self, suffix_ids: list[uuid.UUID]
     ) -> list[uuid.UUID]:
         """Return child session ids referenced by subtask parts in suffix."""
-        parts = await sync_to_async(
-            lambda: list(self.parts.model.objects.filter(message_id__in=suffix_ids))
-        )()
+        parts = await sync_to_async(self.parts.list_for_messages)(suffix_ids)
         child_ids: list[uuid.UUID] = []
         seen: set[str] = set()
         for part in parts:
@@ -1074,21 +1072,13 @@ class HarnessService:
     ) -> list[dict[str, Any]]:
         """List root sessions across owned workspaces (conversations feed)."""
         sessions = self.sessions.list_for_workspaces(workspace_ids)
-        workspace_names: dict[str, str] = {}
-        if sessions:
-            from apps.runners.models import Workspace
-
-            rows = Workspace.objects.filter(
-                id__in={session.workspace_id for session in sessions}
-            ).only("id", "name")
-            workspace_names = {str(row.id): row.name for row in rows}
         unread_map = self.unread_for_sessions(sessions)
         attention_map = self.attention_for_sessions(sessions)
         return [
             {
                 "session_id": str(session.id),
                 "workspace_id": str(session.workspace_id),
-                "workspace_name": workspace_names.get(str(session.workspace_id), ""),
+                "workspace_name": session.workspace_name or "",
                 "title": session.title or "",
                 "status": session.status,
                 "mode": session.mode,
@@ -1704,10 +1694,8 @@ class HarnessService:
                     raise NotFoundError("HarnessMessage", str(_edit_message_id))
                 edit_suffix_ids = [row.id for row in stored[index:]]
             prior_user_messages = await sync_to_async(
-                lambda: self.messages.model.objects.filter(
-                    session_id=session.id, role="user"
-                ).count()
-            )()
+                self.messages.count_for_session
+            )(session.id, role="user")
             user_message = await sync_to_async(self.messages.create)(
                 session_id=session.id,
                 role="user",
@@ -2824,24 +2812,13 @@ class HarnessService:
         session_id: uuid.UUID, exclude_message_id: uuid.UUID
     ) -> tuple[int, int, int]:
         """Return last-step prompt/completion/total from the prior assistant turn."""
-        prev = (
-            HarnessMessage.objects.filter(
-                session_id=session_id,
-                role="assistant",
-            )
-            .exclude(id=exclude_message_id)
-            .order_by("-position", "-created_at", "-id")
-            .first()
+        prev = HarnessMessageRepository.get_latest_assistant(
+            session_id, exclude_id=exclude_message_id
         )
         if prev is None:
             return 0, 0, 0
-        part = (
-            HarnessPart.objects.filter(
-                message_id=prev.id,
-                type="step-finish",
-            )
-            .order_by("-position", "-created_at", "-id")
-            .first()
+        part = HarnessPartRepository.get_latest_for_message(
+            prev.id, type="step-finish"
         )
         if part is not None:
             meta = dict(part.meta or {})
@@ -3171,7 +3148,7 @@ class HarnessService:
             # drifts when a rerun/continuation re-emits a prefix). When a
             # remainder exists it also gets its own text part so message
             # content and parts never drift apart.
-            await sync_to_async(assistant.refresh_from_db, thread_sensitive=True)()
+            await sync_to_async(self.messages.refresh, thread_sensitive=True)(assistant)
             existing = assistant.content or ""
             tail = result.output or ""
             remainder = _tail_remainder(existing, tail)
@@ -3436,7 +3413,7 @@ class HarnessService:
         session = child_ctx["session"]
         assistant = child_ctx["assistant"]
         status = str(event.get("status") or "completed")
-        await sync_to_async(assistant.refresh_from_db, thread_sensitive=True)()
+        await sync_to_async(self.messages.refresh, thread_sensitive=True)(assistant)
         if not assistant.content and event.get("summary"):
             text = str(event["summary"])
             await sync_to_async(self.messages.append_content)(assistant, text)
@@ -3775,12 +3752,8 @@ class HarnessService:
         rows stay ``running`` unless we persist the completed state.
         """
         open_parts = await sync_to_async(
-            lambda: list(
-                self.parts.model.objects.filter(
-                    message_id=assistant.id,
-                    type__in=("text", "reasoning"),
-                    state__in=("pending", "running"),
-                )
+            lambda: self.parts.list_open_for_message(
+                assistant.id, types=("text", "reasoning")
             )
         )()
         for part in open_parts:
@@ -3803,14 +3776,9 @@ class HarnessService:
         subtask parts are also published so the timeline leaves ``running``
         without waiting for a later refetch.
         """
-        open_parts = await sync_to_async(
-            lambda: list(
-                self.parts.model.objects.filter(
-                    message_id=assistant.id,
-                    state__in=("pending", "running"),
-                )
-            )
-        )()
+        open_parts = await sync_to_async(self.parts.list_open_for_message)(
+            assistant.id
+        )
         for part in open_parts:
             if part.type in ("text", "reasoning"):
                 await sync_to_async(self.parts.mark_state)(part, "completed")
@@ -3876,9 +3844,7 @@ class HarnessService:
         part_id = run_ctx.get("text_part_id")
         part = None
         if part_id is not None:
-            part = await sync_to_async(
-                self.parts.model.objects.filter(id=part_id).first
-            )()
+            part = await sync_to_async(self.parts.get_by_id)(part_id)
         if part is None:
             part = await sync_to_async(self.parts.create)(
                 message_id=assistant.id,
@@ -4161,9 +4127,7 @@ class HarnessService:
                 .pop(str(event.get("step")), None)
             )
             if step_part_id is not None:
-                step_part = await sync_to_async(
-                    self.parts.model.objects.filter(id=step_part_id).first
-                )()
+                step_part = await sync_to_async(self.parts.get_by_id)(step_part_id)
                 if step_part is not None:
                     await sync_to_async(self.parts.mark_state)(step_part, "completed")
             # Close the per-step reasoning and text parts (DB-side; the
@@ -4174,18 +4138,16 @@ class HarnessService:
             run_ctx = self._runs.get(session_id, {})
             reasoning_part_id = run_ctx.pop("reasoning_part_id", None)
             if reasoning_part_id is not None:
-                reasoning_part = await sync_to_async(
-                    self.parts.model.objects.filter(id=reasoning_part_id).first
-                )()
+                reasoning_part = await sync_to_async(self.parts.get_by_id)(
+                    reasoning_part_id
+                )
                 if reasoning_part is not None:
                     await sync_to_async(self.parts.mark_state)(
                         reasoning_part, "completed"
                     )
             text_part_id = run_ctx.pop("text_part_id", None)
             if text_part_id is not None:
-                text_part = await sync_to_async(
-                    self.parts.model.objects.filter(id=text_part_id).first
-                )()
+                text_part = await sync_to_async(self.parts.get_by_id)(text_part_id)
                 if text_part is not None:
                     await sync_to_async(self.parts.mark_state)(text_part, "completed")
             part = await sync_to_async(self.parts.create)(
@@ -4540,7 +4502,7 @@ class HarnessService:
         part_id = run_ctx.pop(slot, None)
         if part_id is None:
             return
-        part = await sync_to_async(self.parts.model.objects.filter(id=part_id).first)()
+        part = await sync_to_async(self.parts.get_by_id)(part_id)
         if part is not None:
             await sync_to_async(self.parts.mark_state)(part, "completed")
 
@@ -4569,20 +4531,15 @@ class HarnessService:
             part_id = tool_parts.get(call_id)
             if part_id:
                 part = await sync_to_async(
-                    self.parts.model.objects.filter(
-                        id=part_id,
-                        message_id=assistant.id,
-                        type="tool",
-                        call_id=call_id,
-                    ).first
+                    lambda: self.parts.find_by_call_id(
+                        assistant.id, call_id, type="tool", part_id=part_id
+                    )
                 )()
             if part is None:
                 part = await sync_to_async(
-                    self.parts.model.objects.filter(
-                        message_id=assistant.id,
-                        type="tool",
-                        call_id=call_id,
-                    ).first
+                    lambda: self.parts.find_by_call_id(
+                        assistant.id, call_id, type="tool"
+                    )
                 )()
 
         incoming_tool = str(event.get("tool", "") or "")
@@ -4671,12 +4628,10 @@ class HarnessService:
             run_ctx.get("tool_parts", {})[call_id] = str(part.id)
             return part
         if call_id and part.call_id != call_id:
-            part.call_id = call_id
             rebased_meta = dict(part.meta or {})
             rebased_meta["step"] = step
-            part.meta = rebased_meta
-            await sync_to_async(part.save)(
-                update_fields=["call_id", "meta", "updated_at"]
+            await sync_to_async(self.parts.rebind_call_id)(
+                part, call_id, meta=rebased_meta
             )
             # Rebind the run-context index to the real call id.
             tool_parts = run_ctx.get("tool_parts", {})
@@ -4711,15 +4666,11 @@ class HarnessService:
         part = None
         part_id = (run_ctx.get("tool_parts", {}) or {}).get(call_id)
         if part_id is not None:
-            part = await sync_to_async(
-                self.parts.model.objects.filter(id=part_id).first
-            )()
+            part = await sync_to_async(self.parts.get_by_id)(part_id)
         if part is None and call_id:
-            part = await sync_to_async(
-                self.parts.model.objects.filter(
-                    message_id=assistant.id, call_id=call_id
-                ).first
-            )()
+            part = await sync_to_async(self.parts.find_by_call_id)(
+                assistant.id, call_id
+            )
         return part
 
     async def _rebind_provisional_tool_part(
@@ -4739,15 +4690,7 @@ class HarnessService:
         """
         if not tool or not call_id:
             return None
-        candidate = await sync_to_async(
-            lambda: list(
-                self.parts.model.objects.filter(
-                    message_id=assistant.id,
-                    type="tool",
-                    state="pending",
-                ).order_by("position", "created_at", "id")
-            )
-        )()
+        candidate = await sync_to_async(self.parts.list_pending_tools)(assistant.id)
         for row in candidate:
             meta = dict(row.meta or {})
             row_tool = str((row.input or {}).get("tool", "") or row.title or "")
@@ -4780,23 +4723,18 @@ class HarnessService:
         )
         part = None
         if part_id is not None:
-            part = await sync_to_async(
-                self.parts.model.objects.filter(id=part_id).first
-            )()
+            part = await sync_to_async(self.parts.get_by_id)(part_id)
         if part is None and call_id:
-            part = await sync_to_async(
-                self.parts.model.objects.filter(
-                    message_id=assistant.id, call_id=call_id
-                ).first
-            )()
+            part = await sync_to_async(self.parts.find_by_call_id)(
+                assistant.id, call_id
+            )
         queued_id = str(event.get("queued_id", "") or "")
         if part is None and queued_id:
             part = await self._lookup_tool_part(
                 self._runs.get(str(assistant.session_id), {}), assistant, queued_id
             )
             if part is not None and call_id != part.call_id:
-                part.call_id = call_id
-                await sync_to_async(part.save)(update_fields=["call_id", "updated_at"])
+                await sync_to_async(self.parts.rebind_call_id)(part, call_id)
                 self._runs.get(str(assistant.session_id), {}).get("tool_parts", {})[
                     call_id
                 ] = str(part.id)
@@ -4834,9 +4772,7 @@ class HarnessService:
         )
         part = None
         if part_id is not None:
-            part = await sync_to_async(
-                self.parts.model.objects.filter(id=part_id).first
-            )()
+            part = await sync_to_async(self.parts.get_by_id)(part_id)
         if part is None:
             return
         state = "completed" if status == "completed" else "error"
@@ -5032,11 +4968,9 @@ class HarnessService:
             position = positions.get(str(part_id))
             if position is None:
                 try:
-                    position = await sync_to_async(
-                        self.parts.model.objects.filter(id=part_id)
-                        .values_list("position", flat=True)
-                        .first
-                    )()
+                    position = await sync_to_async(self.parts.get_position)(
+                        part_id
+                    )
                 except (ValueError, TypeError):
                     position = None
                 if position is not None:
@@ -5476,8 +5410,8 @@ class HarnessService:
                 "Parent assistant message missing for subagent run",
                 tool="task",
             )
-        parent_assistant = await sync_to_async(self.messages.model.objects.get)(
-            id=message_id
+        parent_assistant = await sync_to_async(self.messages.get_required)(
+            message_id
         )
         child = await self._resolve_resume_child(parent, args.task_id)
         resumed = child is not None
@@ -5589,8 +5523,8 @@ class HarnessService:
             # error the model can recover from by launching another subagent.
             if self._parent_stop_in_progress(parent):
                 raise asyncio.CancelledError()
-            assistant = await sync_to_async(self.messages.model.objects.get)(
-                id=assistant.id
+            assistant = await sync_to_async(self.messages.get_required)(
+                assistant.id
             )
             output = assistant.content or ""
             if assistant.finish in ("error", "aborted"):
@@ -5633,7 +5567,9 @@ class HarnessService:
                 raise
             error = "Subagent run aborted"
             if assistant is not None:
-                await sync_to_async(assistant.refresh_from_db, thread_sensitive=True)()
+                await sync_to_async(self.messages.refresh, thread_sensitive=True)(
+                    assistant
+                )
                 error = assistant.error or error
                 if assistant.content:
                     error += (

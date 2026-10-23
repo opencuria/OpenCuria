@@ -174,7 +174,7 @@ async def test_pending_question_cannot_resume_during_capture(harness_workspace):
 
 @pytest.mark.django_db(transaction=True)
 async def test_pending_permission_cannot_resume_during_capture(harness_workspace):
-    from apps.harness.permissions.service import PermissionRequestRepository
+    from apps.harness.permissions.repositories import PermissionRequestRepository
 
     session = session_for(harness_workspace)
     request = PermissionRequestRepository.create(
@@ -274,7 +274,7 @@ async def test_capture_between_abort_join_and_gate_cleanup_keeps_tree_cleanup(
     harness_workspace, monkeypatch
 ):
     """A capture winning after idle must not strand a stopped child's user gates."""
-    from apps.harness.permissions.service import PermissionRequestRepository
+    from apps.harness.permissions.repositories import PermissionRequestRepository
     from apps.harness.repositories import QuestionRequestRepository
     from apps.harness.tests.test_subagent_depth import _service
     from apps.harness.tests.test_subagent_lifecycle import checkpoint, start

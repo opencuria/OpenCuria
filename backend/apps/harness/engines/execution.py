@@ -259,7 +259,9 @@ async def execute_external_run(
                 context["provider_revocation_message"] = revocation_message
                 raise asyncio.CancelledError() from None
             raise
-        await sync_to_async(assistant.refresh_from_db, thread_sensitive=True)()
+        await sync_to_async(service.messages.refresh, thread_sensitive=True)(
+            assistant
+        )
         remainder = _tail_remainder(assistant.content or "", result.output or "")
         usage = result.usage or Usage()
         metadata = dict(getattr(result, "metadata", {}) or {})
@@ -311,7 +313,9 @@ async def execute_external_run(
             )
             public_error = safe_error
         if ownership is not None and await ownership.is_owner_for_finalization():
-            await sync_to_async(assistant.refresh_from_db, thread_sensitive=True)()
+            await sync_to_async(service.messages.refresh, thread_sensitive=True)(
+                assistant
+            )
             context["pending_assistant_content"] = assistant.content or ""
         else:
             cleanup_confirmed = False
@@ -338,7 +342,9 @@ async def execute_external_run(
         if not current_owner:
             cleanup_confirmed = False
         else:
-            await sync_to_async(assistant.refresh_from_db, thread_sensitive=True)()
+            await sync_to_async(service.messages.refresh, thread_sensitive=True)(
+                assistant
+            )
             context["pending_assistant_content"] = assistant.content or ""
             if public_recovery_error:
                 public_error = public_recovery_error
@@ -387,8 +393,8 @@ async def execute_external_run(
                 if cleanup_confirmed and await ownership.is_owner_for_finalization():
                     if result is not None:
                         await sync_to_async(
-                            assistant.refresh_from_db, thread_sensitive=True
-                        )()
+                            service.messages.refresh, thread_sensitive=True
+                        )(assistant)
                         assistant_content = assistant.content or ""
                         if remainder:
                             assistant_content += remainder
@@ -457,8 +463,8 @@ async def execute_external_run(
                 if finalized:
                     session.status = HarnessSessionStatus.IDLE
                     await sync_to_async(
-                        assistant.refresh_from_db, thread_sensitive=True
-                    )()
+                        service.messages.refresh, thread_sensitive=True
+                    )(assistant)
                 else:
                     # A replaced owner or unconfirmed process cleanup must
                     # not release durable admission or publish terminal UI.
@@ -466,8 +472,8 @@ async def execute_external_run(
                     if await ownership.is_owner_for_finalization():
                         if result is not None:
                             await sync_to_async(
-                                assistant.refresh_from_db, thread_sensitive=True
-                            )()
+                                service.messages.refresh, thread_sensitive=True
+                            )(assistant)
                             assistant_content = assistant.content or ""
                             if remainder:
                                 assistant_content += remainder

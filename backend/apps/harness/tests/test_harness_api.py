@@ -15,10 +15,8 @@ from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessSession
 from apps.harness.permissions.evaluator import PermissionEvaluator
-from apps.harness.permissions.service import (
-    PermissionRequestRepository,
-    PermissionService,
-)
+from apps.harness.permissions.repositories import PermissionRequestRepository
+from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import Delta, ProviderAdapter, Usage
 from apps.harness.repositories import (
     HarnessMessageRepository,

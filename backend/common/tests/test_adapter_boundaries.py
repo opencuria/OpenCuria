@@ -19,6 +19,9 @@ compose plugins, so workspace-scoped plugin endpoints and guards live in
 themselves and never import repositories; e.g. REST and MCP both
 authenticate API keys through ``apps.accounts.services.APIKeyService``, and
 the realtime adapters reach models and repositories only through services.
+Below the adapters, services, tools and engines of the repository-only apps
+never query the ORM either: model managers and instance reloads appear only
+in ``models`` and ``repositories`` modules.
 """
 
 from __future__ import annotations
@@ -39,6 +42,20 @@ FOUNDATION_DEPENDENCIES = {
     "apps.skills": {"apps.accounts", "apps.organizations"},
     "apps.plugins": {"apps.accounts", "apps.organizations", "apps.credentials"},
 }
+
+#: Apps whose non-persistence modules reach the ORM only through repositories.
+REPOSITORY_ONLY_APPS = {
+    "apps.credentials",
+    "apps.harness",
+    "apps.mcp_app",
+    "apps.organizations",
+    "apps.plugins",
+    "apps.scheduled_tasks",
+    "apps.skills",
+}
+
+#: Model manager and instance-reload attributes that issue queries.
+ORM_QUERY_ATTRIBUTES = {"objects", "_default_manager", "refresh_from_db"}
 
 
 def _module_name(path: Path) -> str:
@@ -230,6 +247,37 @@ def test_adapters_never_query_the_orm():
     assert violations == [], (
         "Move ORM access into the app's repositories and call it through its "
         "service from REST and MCP alike:\n" + "\n".join(violations)
+    )
+
+
+def _is_persistence_module(path: Path) -> bool:
+    """Return True for ``models``/``repositories``-style modules."""
+    return path.stem in {"models", "repositories"} or path.stem.endswith(
+        ("_models", "_repository")
+    )
+
+
+def test_services_query_the_orm_only_through_repositories():
+    """Services, tools and engines call repositories; only those query."""
+    checked = [
+        path
+        for path in _source_files()
+        if ".".join(_module_name(path).split(".")[:2]) in REPOSITORY_ONLY_APPS
+        and not _is_persistence_module(path)
+    ]
+    assert APPS_ROOT / "harness" / "harness_service.py" in checked  # sanity check
+    assert APPS_ROOT / "harness" / "permissions" / "service.py" in checked
+
+    violations = sorted(
+        f"{_module_name(path)}:{node.lineno}"
+        for path in checked
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.Attribute) and node.attr in ORM_QUERY_ATTRIBUTES
+    )
+    assert violations == [], (
+        "Query the ORM in the owning app's repositories module and call it "
+        "from the service (e.g. HarnessPartRepository, not "
+        "self.parts.model.objects):\n" + "\n".join(violations)
     )
 
 

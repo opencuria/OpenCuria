@@ -12,8 +12,9 @@ from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessMessage
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.models import PermissionAllowlist, PermissionRequest
+from apps.harness.permissions.repositories import PermissionRequestRepository
 from apps.harness.permissions.scopes import permission_scope
-from apps.harness.permissions.service import PermissionRequestRepository, PermissionService
+from apps.harness.permissions.service import PermissionService
 from apps.harness.repositories import (
     HarnessMessageRepository,
     HarnessSessionRepository,

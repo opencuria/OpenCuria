@@ -20,10 +20,8 @@ from apps.harness.harness_service import HarnessService, _forked_title
 from apps.harness.models import ProviderConnection, Todo
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.models import PermissionRequest
-from apps.harness.permissions.service import (
-    PermissionRequestRepository,
-    PermissionService,
-)
+from apps.harness.permissions.repositories import PermissionRequestRepository
+from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import (
     ChatOptions,
     Delta,

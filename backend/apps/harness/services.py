@@ -117,12 +117,8 @@ class AgentConfigService:
         self, org_id: uuid.UUID, items: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         """Validate and upsert per-agent configs, then return the list view."""
-        from apps.organizations.models import Organization
-
-        org = Organization.objects.filter(id=org_id).first()
+        org = OrganizationRepository.get_by_id(org_id)
         if org is None:
-            from common.exceptions import NotFoundError
-
             raise NotFoundError("Organization", str(org_id))
         for item in items:
             agent = str(item.get("agent") or "").strip().lower()
@@ -319,12 +315,7 @@ class AgentSConfigService:
         keys (``organization_id``/timestamps) are ignored. Validation is
         atomic: invalid values raise before any row is created/updated.
         """
-        from apps.organizations.models import Organization
-
-        org = Organization.objects.filter(id=org_id).first()
-        if org is None:
-            from common.exceptions import NotFoundError
-
+        if OrganizationRepository.get_by_id(org_id) is None:
             raise NotFoundError("Organization", str(org_id))
         allowed = set(self.DEFAULTS)
         current = self.get_or_default(org_id)

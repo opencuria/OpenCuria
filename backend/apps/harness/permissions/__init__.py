@@ -12,18 +12,14 @@ from .evaluator import (
     PermissionEvaluator,
     compile_rules,
 )
+from .repositories import AllowlistRepository, PermissionRequestRepository
 from .scopes import (
     is_permission_scope,
     permission_display_action,
     permission_scope,
     permission_scope_matches,
 )
-from .service import (
-    AllowlistRepository,
-    PermissionRequestRepository,
-    PermissionService,
-    ResolveResult,
-)
+from .service import PermissionService, ResolveResult
 
 __all__ = [
     "ALLOW",
