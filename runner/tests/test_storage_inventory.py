@@ -88,7 +88,6 @@ async def test_capture_self_contained_stopped_scrubbed_and_exclusive(tmp_path):
     target = r._snapshot_dir / (image_id + ".qcow2")
     assert not (await r._image_info(target)).get("backing-filename")
     assert artifact.name == "quoted\n=name"
-    assert (await r.list_image_artifacts("workspace"))[0].name == artifact.name
     with pytest.raises(FileExistsError):
         await r.create_image_artifact(
             "workspace",
@@ -97,7 +96,11 @@ async def test_capture_self_contained_stopped_scrubbed_and_exclusive(tmp_path):
             operation_id="op",
             credential_clean=True,
         )
-    assert (await r.inventory()).complete
+    scan = await r.inventory()
+    assert scan.complete
+    published = next(item for item in scan.resources if item.resource_id == str(target))
+    assert published.state == "ready"
+    assert published.metadata["name"] == artifact.name
 
 
 @pytest.mark.asyncio

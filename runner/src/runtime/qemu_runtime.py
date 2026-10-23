@@ -2520,38 +2520,6 @@ class QemuRuntime(RuntimeBackend):
                 metadata[key.strip()] = value.strip()
         return metadata
 
-    async def list_image_artifacts(self, instance_id: str) -> list[ImageArtifactInfo]:
-        """List all image artifacts for a given workspace instance."""
-        snapshots: list[ImageArtifactInfo] = []
-        for marker in self._snapshot_dir.glob("*.manifest.json"):
-            meta = json.loads(marker.read_text())
-            if (
-                meta.get("instance_id") == instance_id
-                and Path(meta["image_path"]).exists()
-            ):
-                snapshots.append(
-                    ImageArtifactInfo(
-                        meta["artifact_id"],
-                        instance_id,
-                        meta["name"],
-                        datetime.fromisoformat(meta["created_at"]),
-                        meta["size_bytes"],
-                    )
-                )
-        for meta_path in self._snapshot_dir.glob("*.meta"):
-            meta = await asyncio.to_thread(self._read_legacy_image_metadata, meta_path)
-            if meta.get("instance_id") == instance_id:
-                snapshots.append(
-                    ImageArtifactInfo(
-                        artifact_id=meta["snapshot_id"],
-                        workspace_id=instance_id,
-                        name=meta.get("name", ""),
-                        created_at=meta.get("created_at", ""),
-                        size_bytes=int(meta.get("size_bytes", 0)),
-                    )
-                )
-        return snapshots
-
     @storage_mutation
     async def create_workspace_from_image_artifact(
         self,
@@ -2654,48 +2622,3 @@ class QemuRuntime(RuntimeBackend):
     def _resolve_image_artifact_path(self, artifact_id: str) -> Path:
         """Resolve a clone source from either a snapshot id or a built image path."""
         return self._managed_image_path(artifact_id)
-
-    async def _find_snapshot_dependents(self, snapshot_path: Path) -> list[str]:
-        """Return workspace IDs whose QCOW2 overlays directly depend on a snapshot."""
-        if not snapshot_path.exists():
-            return []
-
-        target = snapshot_path.resolve()
-        dependents: list[str] = []
-        for disk_path in self._disk_dir.glob("*.qcow2"):
-            try:
-                backing_path = await self._get_qcow2_backing_path(disk_path)
-            except RuntimeError as exc:
-                logger.warning(
-                    "qcow2_backing_inspect_failed",
-                    disk_path=str(disk_path),
-                    error=str(exc),
-                )
-                raise RuntimeError("Incomplete backing inspection") from exc
-            if backing_path is None:
-                continue
-            if backing_path == target:
-                dependents.append(disk_path.stem)
-        return dependents
-
-    async def _get_qcow2_backing_path(self, disk_path: Path) -> Path | None:
-        """Read the fully resolved backing file path from a QCOW2 disk."""
-        proc = await asyncio.create_subprocess_exec(
-            "qemu-img",
-            "info",
-            "--output=json",
-            str(disk_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"Failed to inspect QCOW2 backing file for {disk_path}: {stderr.decode()}"
-            )
-
-        info = json.loads(stdout.decode() or "{}")
-        backing = info.get("full-backing-filename") or info.get("backing-filename")
-        if not backing:
-            return None
-        return Path(backing).resolve()

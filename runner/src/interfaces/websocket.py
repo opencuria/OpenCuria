@@ -3425,67 +3425,21 @@ class WebSocketInterface(Interface):
                 )
                 log.exception("create_image_artifact_failed")
 
-        @sio.on("task:list_image_artifacts")
-        async def on_list_image_artifacts(data: dict) -> None:
-            task_id = data.get("task_id", str(uuid.uuid4()))
-            workspace_id = uuid.UUID(data["workspace_id"])
-            log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
-            try:
-                artifacts = await self._service.images.list_image_artifacts(
-                    workspace_id
-                )
-                await sio.emit(
-                    "image_artifact:list",
-                    {
-                        "task_id": task_id,
-                        "workspace_id": str(workspace_id),
-                        "image_artifacts": [
-                            {
-                                "image_artifact_id": artifact.artifact_id,
-                                "name": artifact.name,
-                                "created_at": artifact.created_at,
-                                "size_bytes": artifact.size_bytes,
-                            }
-                            for artifact in artifacts
-                        ],
-                    },
-                )
-            except Exception as exc:
-                await sio.emit(
-                    "workspace:error",
-                    {"task_id": task_id, "error": str(exc)},
-                )
-                log.exception("list_image_artifacts_failed")
-
         @sio.on("task:delete_image_artifact")
         async def on_delete_image_artifact(data: dict) -> None:
             task_id = data.get("task_id", str(uuid.uuid4()))
             image_artifact_id = data["image_artifact_id"]
             image_instance_id = data.get("image_instance_id", "")
-            runtime_type = data.get("runtime_type", "")
-            raw_workspace_id = data.get("workspace_id")
-            workspace_id = uuid.UUID(raw_workspace_id) if raw_workspace_id else None
             log = logger.bind(task_id=task_id, image_artifact_id=image_artifact_id)
             try:
-                result = "deleted"
-                if runtime_type:
-                    result = await self._service.images.delete_image_reference(
-                        runtime_type=runtime_type,
-                        image_ref=image_artifact_id,
-                    )
-                elif workspace_id is not None:
-                    await self._service.images.delete_image_artifact(
-                        workspace_id, image_artifact_id
-                    )
-                else:
-                    raise RuntimeError(
-                        "Either runtime_type or workspace_id is required for image deletion"
-                    )
+                result = await self._service.images.delete_image_reference(
+                    runtime_type=data["runtime_type"],
+                    image_ref=image_artifact_id,
+                )
                 await sio.emit(
                     "image_artifact:deleted",
                     {
                         "task_id": task_id,
-                        "workspace_id": str(workspace_id) if workspace_id else "",
                         "image_instance_id": image_instance_id,
                         "image_artifact_id": image_artifact_id,
                         "result": result,

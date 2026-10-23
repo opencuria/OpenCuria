@@ -4,10 +4,12 @@ import sqlite3
 import tempfile
 import unittest
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import aiohttp
+import pytest
 from src.config import RunnerSettings
 from src.interfaces.websocket import SOCKETIO_MAX_HTTP_BUFFER_SIZE, WebSocketInterface
 from src.models import DesktopSession, WorkspaceInfo
@@ -890,6 +892,54 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             data="aGVsbG8=",
             encoding="base64",
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "runtime_type,outcome",
+    [
+        ("docker", "deleted"),
+        ("qemu", "already_absent"),
+        ("qemu", RuntimeError("blocked")),
+    ],
+)
+async def test_image_deletion_uses_runtime_reference(
+    tmp_path: Path, runtime_type: str, outcome: str | Exception
+) -> None:
+    """Image deletion has no workspace dependency and retains durable results."""
+    service = DummyService()
+    delete = service.images.delete_image_reference
+    delete.side_effect = outcome if isinstance(outcome, Exception) else None
+    delete.return_value = outcome
+    interface = WebSocketInterface(service, RunnerSettings(state_dir=str(tmp_path)))
+    interface._operations.emit = AsyncMock()
+    try:
+        await interface._sio.handlers["/"]["task:delete_image_artifact"](
+            {
+                "task_id": "delete",
+                "operation_id": "delete",
+                "attempt": 1,
+                "runner_id": "runner",
+                "target": "image",
+                "image_instance_id": "image",
+                "runtime_type": runtime_type,
+                "image_artifact_id": "physical-reference",
+            }
+        )
+        delete.assert_awaited_once_with(
+            runtime_type=runtime_type, image_ref="physical-reference"
+        )
+        event, result = interface._operations.journal.pending()[0]
+        assert result["execution_finished"]
+        if isinstance(outcome, Exception):
+            assert event == "image_artifact:delete_failed"
+            assert result["outcome_known"]
+        else:
+            assert event == "image_artifact:deleted"
+            assert result["image_instance_id"] == "image"
+            assert result["already_absent"] == (outcome == "already_absent")
+    finally:
+        interface._operations.journal.close()
 
 
 class WebSocketCloneWorkspaceTests(unittest.IsolatedAsyncioTestCase):

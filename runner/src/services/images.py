@@ -165,40 +165,6 @@ class ImageManager:
             )
             return artifact
 
-    async def list_image_artifacts(
-        self,
-        workspace_id: uuid.UUID,
-    ) -> list["ImageArtifactInfo"]:
-        """List all captured image artifacts for a workspace."""
-        if self._get_cached is None or self._get_runtime is None:
-            raise RuntimeError("ImageManager has no workspace lookup configured")
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not runtime.supports_image_artifacts:
-            return []
-        return await runtime.list_image_artifacts(info.instance_id)
-
-    async def delete_image_artifact(
-        self,
-        workspace_id: uuid.UUID,
-        image_artifact_id: str,
-    ) -> None:
-        """Delete a captured image artifact."""
-        if self._get_cached is None or self._get_runtime is None:
-            raise RuntimeError("ImageManager has no workspace lookup configured")
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not runtime.supports_image_artifacts:
-            raise RuntimeError(
-                f"Runtime '{info.runtime_type}' does not support image artifact deletion"
-            )
-        await runtime.delete_image_artifact(image_artifact_id)
-        logger.info(
-            "image_artifact_deleted",
-            workspace_id=str(workspace_id),
-            image_artifact_id=image_artifact_id,
-        )
-
     async def delete_image_reference(
         self,
         *,

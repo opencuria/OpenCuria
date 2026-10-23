@@ -407,14 +407,6 @@ class RuntimeBackend(abc.ABC):
             f"{self.__class__.__name__} does not support image artifacts"
         )
 
-    async def list_image_artifacts(
-        self, instance_id: str | None = None
-    ) -> list[ImageArtifactInfo]:
-        """List image artifacts, optionally filtered by workspace instance."""
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not support image artifacts"
-        )
-
     async def create_workspace_from_image_artifact(
         self, artifact_id: str, config: WorkspaceConfig
     ) -> str:
