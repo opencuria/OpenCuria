@@ -109,17 +109,17 @@ export const usePluginStore = defineStore('plugins', () => {
     }
   }
 
-  async function updatePlugin(id: string, data: PluginUpdateIn): Promise<Plugin | null> {
+  async function updatePlugin(id: string, data: PluginUpdateIn, options: { silent?: boolean } = {}): Promise<Plugin | null> {
     const notifications = useNotificationStore()
     try {
       const updated = await pluginsApi.updatePlugin(id, data)
       const idx = plugins.value.findIndex((p) => p.id === id)
       if (idx !== -1) plugins.value[idx] = updated
-      notifications.success('Plugin updated', `"${updated.name}" was saved.`)
+      if (!options.silent) notifications.success('Plugin updated', `"${updated.name}" was saved.`)
       return updated
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to update plugin'
-      notifications.error('Update failed', msg)
+      if (!options.silent) notifications.error('Update failed', msg)
       return null
     }
   }

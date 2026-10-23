@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { toast } from 'vue-sonner'
 
@@ -9,6 +9,13 @@ import * as providerCatalog from '@/lib/providerCatalog'
 import * as harnessApi from '@/services/harness.api'
 import type { AgentConfig } from '@/lib/harnessAgents'
 import type { ProviderModel } from '@/lib/harnessModels'
+
+enableAutoUnmount(afterEach)
+afterEach(() => vi.useRealTimers())
+async function autosave() {
+  await vi.advanceTimersByTimeAsync(500)
+  await flushPromises()
+}
 
 vi.mock('vue-sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
@@ -99,6 +106,7 @@ function mountTab() {
 
 describe('AgentConfigTab', () => {
   beforeEach(() => {
+    vi.useFakeTimers()
     vi.restoreAllMocks()
     vi.clearAllMocks()
     agentConfigs.resetAgentConfigsCache()
@@ -108,13 +116,11 @@ describe('AgentConfigTab', () => {
     vi.spyOn(harnessApi, 'getSubagentConfig').mockResolvedValue({ max_depth: 2 })
     vi.spyOn(harnessApi, 'saveSubagentConfig').mockImplementation(async (payload) => payload)
     vi.spyOn(harnessApi, 'saveAgentConfigs').mockImplementation(async (payload) =>
-      payload.map(
-        (c, i) =>
+      configs.map(
+        (config) =>
           ({
-            ...configs[i]!,
-            ...c,
-            mode: configs[i]!.mode,
-            description: configs[i]!.description,
+            ...config,
+            ...payload.find((item) => item.agent === config.agent),
           }) as AgentConfig,
       ),
     )
@@ -139,7 +145,7 @@ describe('AgentConfigTab', () => {
     expect(wrapper.find('[data-testid="agent-configs-status"]').text()).toBe('All changes saved')
   })
 
-  it('saves normalized inherit payload with success toast', async () => {
+  it('autosaves normalized inherit payload without success toast spam', async () => {
     const wrapper = mountTab()
     await flushPromises()
     // Make dirty: switch computeruse to inherit.
@@ -147,21 +153,18 @@ describe('AgentConfigTab', () => {
       .get('[data-testid="agent-row-computeruse"] [data-testid="composer-model-default"]')
       .trigger('click')
     await flushPromises()
-    expect(wrapper.find('[data-testid="agent-configs-status"]').text()).toBe('Unsaved changes')
-    await wrapper.find('[data-testid="save-agent-configs"]').trigger('click')
+    expect(wrapper.find('[data-testid="agent-configs-status"]').text()).toBe('Waiting to save…')
+    await autosave()
     await flushPromises()
     const save = vi.mocked(harnessApi.saveAgentConfigs)
     expect(save).toHaveBeenCalled()
     expect(harnessApi.saveSubagentConfig).not.toHaveBeenCalled()
     const payload = save.mock.calls[0]![0]
-    const general = payload.find((c) => c.agent === 'general')!
-    expect(general.model).toBe('')
-    expect(general.effort).toBe('')
-    expect(general.inherit_model).toBe(true)
+    expect(payload).toHaveLength(1)
     const cu = payload.find((c) => c.agent === 'computeruse')!
     expect(cu.model).toBe('')
     expect(cu.inherit_model).toBe(true)
-    expect(toast.success).toHaveBeenCalledWith('Agent models saved', { duration: 5000 })
+    expect(toast.success).not.toHaveBeenCalled()
   })
 
   it('surfaces save failures as error toast', async () => {
@@ -171,7 +174,7 @@ describe('AgentConfigTab', () => {
     await wrapper
       .get('[data-testid="agent-row-computeruse"] [data-testid="composer-model-default"]')
       .trigger('click')
-    await wrapper.find('[data-testid="save-agent-configs"]').trigger('click')
+    await autosave()
     await flushPromises()
     expect(toast.error).toHaveBeenCalledWith('Failed to save agent models', {
       description: 'boom',
@@ -192,7 +195,7 @@ describe('AgentConfigTab', () => {
     ).toBe('2')
     expect(wrapper.text()).toContain('Main agent is depth 0.')
     expect(wrapper.get('#subagent-depth-scope').text()).toBe('Default: 2 · New runs')
-    expect(wrapper.get('[data-testid="save-agent-configs"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="save-agent-configs"]').exists()).toBe(false)
   })
 
   it('integrates depth as the first row of the shared subagent group', async () => {
@@ -224,7 +227,7 @@ describe('AgentConfigTab', () => {
     const row = wrapper.get('[data-testid="agent-row-explore"]')
     await row.get('[data-testid="composer-effort-highest"]').trigger('click')
     await row.get('[data-testid="composer-model-openrouter/model-big"]').trigger('click')
-    await wrapper.get('[data-testid="save-agent-configs"]').trigger('click')
+    await autosave()
     await flushPromises()
     expect(vi.mocked(harnessApi.saveAgentConfigs).mock.calls[0]![0]).toContainEqual({
       agent: 'explore',
@@ -239,7 +242,7 @@ describe('AgentConfigTab', () => {
     await row.get('[data-testid="composer-effort-lowest"]').trigger('click')
     await row.get('[data-testid="composer-model-default"]').trigger('click')
     expect(row.get('[data-testid="composer-effort-row"]').text()).toContain('Lowest')
-    await wrapper.get('[data-testid="save-agent-configs"]').trigger('click')
+    await autosave()
     await flushPromises()
     expect(vi.mocked(harnessApi.saveAgentConfigs).mock.lastCall![0]).toContainEqual({
       agent: 'explore',
@@ -280,13 +283,12 @@ describe('AgentConfigTab', () => {
     const wrapper = mountTab()
     await flushPromises()
     await wrapper.get('[data-testid="subagent-max-depth"]').setValue('3')
-    expect(wrapper.get('[data-testid="agent-configs-status"]').text()).toBe('Unsaved changes')
-    expect(wrapper.get('[data-testid="save-agent-configs"]').attributes('disabled')).toBeUndefined()
-    await wrapper.get('[data-testid="save-agent-configs"]').trigger('click')
+    expect(wrapper.get('[data-testid="subagent-depth-status"]').text()).toBe('Waiting to save…')
+    await autosave()
     await flushPromises()
     expect(harnessApi.saveSubagentConfig).toHaveBeenCalledWith({ max_depth: 3 })
     expect(harnessApi.saveAgentConfigs).not.toHaveBeenCalled()
-    expect(wrapper.get('[data-testid="agent-configs-status"]').text()).toBe('All changes saved')
+    expect(wrapper.get('[data-testid="subagent-depth-status"]').text()).toBe('All changes saved')
     wrapper.unmount()
     const reloaded = mountTab()
     await flushPromises()
@@ -304,9 +306,9 @@ describe('AgentConfigTab', () => {
       expect(wrapper.get('[data-testid="subagent-depth-error"]').text()).toContain(
         'Enter an integer',
       )
-      expect(wrapper.get('[data-testid="agent-configs-status"]').text()).toBe('Unsaved changes')
-      expect(wrapper.get('[data-testid="save-agent-configs"]').attributes('disabled')).toBeDefined()
-      await wrapper.get('[data-testid="save-agent-configs"]').trigger('click')
+      expect(wrapper.get('[data-testid="subagent-depth-status"]').text()).toBe('Check your input')
+      expect(wrapper.find('[data-testid="save-agent-configs"]').exists()).toBe(false)
+      await autosave()
       expect(harnessApi.saveSubagentConfig).not.toHaveBeenCalled()
       expect(harnessApi.saveAgentConfigs).not.toHaveBeenCalled()
     },
@@ -316,7 +318,7 @@ describe('AgentConfigTab', () => {
     const wrapper = mountTab()
     await flushPromises()
     await wrapper.get('[data-testid="subagent-max-depth"]').setValue(String(value))
-    await wrapper.get('[data-testid="save-agent-configs"]').trigger('click')
+    await autosave()
     await flushPromises()
     expect(harnessApi.saveSubagentConfig).toHaveBeenCalledWith({ max_depth: value })
   })
@@ -326,12 +328,12 @@ describe('AgentConfigTab', () => {
     const wrapper = mountTab()
     await flushPromises()
     await wrapper.get('[data-testid="subagent-max-depth"]').setValue('5')
-    await wrapper.get('[data-testid="save-agent-configs"]').trigger('click')
+    await autosave()
     await flushPromises()
     expect(
       (wrapper.get('[data-testid="subagent-max-depth"]').element as HTMLInputElement).value,
     ).toBe('5')
-    expect(wrapper.get('[data-testid="agent-configs-status"]').text()).toBe('Unsaved changes')
+    expect(wrapper.get('[data-testid="subagent-depth-status"]').text()).toContain('depth failed')
     expect(toast.error).toHaveBeenCalledWith('Failed to save agent settings', {
       description: 'depth failed',
       duration: 8000,
@@ -350,11 +352,14 @@ describe('AgentConfigTab', () => {
       await wrapper
         .get('[data-testid="agent-row-computeruse"] [data-testid="composer-model-default"]')
         .trigger('click')
-      await wrapper.get('[data-testid="save-agent-configs"]').trigger('click')
+      await autosave()
       await flushPromises()
-      expect(wrapper.get('[data-testid="agent-configs-status"]').text()).toBe('Unsaved changes')
+      const status = wrapper.get(
+        `[data-testid="${failed === 'models' ? 'agent-configs-status' : 'subagent-depth-status'}"]`,
+      )
+      expect(status.text()).toContain('failed')
       expect(toast.error).toHaveBeenCalled()
-      await wrapper.get('[data-testid="save-agent-configs"]').trigger('click')
+      await status.get('button').trigger('click')
       await flushPromises()
       expect(harnessApi.saveAgentConfigs).toHaveBeenCalledTimes(failed === 'models' ? 2 : 1)
       expect(harnessApi.saveSubagentConfig).toHaveBeenCalledTimes(failed === 'depth' ? 2 : 1)
@@ -362,7 +367,7 @@ describe('AgentConfigTab', () => {
     },
   )
 
-  it('still requires primary models when model settings change', async () => {
+  it('saves a subagent model even when primary models are not configured', async () => {
     vi.mocked(agentConfigs.loadAgentConfigsCached).mockResolvedValue(
       configs.map((c) => ({ ...c, model: '' })),
     )
@@ -374,7 +379,28 @@ describe('AgentConfigTab', () => {
         '[data-testid="agent-row-computeruse"] [data-testid="composer-model-openrouter/model-big"]',
       )
       .trigger('click')
-    expect(wrapper.get('[data-testid="save-agent-configs"]').attributes('disabled')).toBeDefined()
-    expect(harnessApi.saveSubagentConfig).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="save-agent-configs"]').exists()).toBe(false)
+    await autosave()
+    expect(harnessApi.saveAgentConfigs).toHaveBeenCalledWith([
+      expect.objectContaining({ agent: 'computeruse', model: 'openrouter/model-big' }),
+    ])
+    expect(harnessApi.saveSubagentConfig).toHaveBeenCalledWith({ max_depth: 3 })
+  })
+
+  it('saves the first primary model without waiting for the other primary model', async () => {
+    vi.mocked(agentConfigs.loadAgentConfigsCached).mockResolvedValue([])
+    const wrapper = mountTab()
+    await flushPromises()
+    await wrapper
+      .get('[data-testid="agent-row-build"] [data-testid="composer-model-openrouter/model-big"]')
+      .trigger('click')
+    await autosave()
+    expect(harnessApi.saveAgentConfigs).toHaveBeenCalledWith([
+      expect.objectContaining({
+        agent: 'build',
+        model: 'openrouter/model-big',
+        inherit_model: false,
+      }),
+    ])
   })
 })

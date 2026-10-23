@@ -4,16 +4,21 @@
 
 import { listAgentConfigs } from '@/services/harness.api'
 import type { AgentConfig } from './harnessAgents'
+import { providerCatalogContext } from './providerCatalog'
 
 let inflight: Promise<AgentConfig[]> | null = null
+let cachedContext = ''
 
 /** Load agent configs, coalescing concurrent and repeat callers. */
 export function loadAgentConfigsCached(): Promise<AgentConfig[]> {
-  if (inflight == null) {
-    inflight = listAgentConfigs().catch((error: unknown) => {
-      inflight = null
+  const context = providerCatalogContext()
+  if (inflight == null || cachedContext !== context) {
+    cachedContext = context
+    const request = listAgentConfigs().catch((error: unknown) => {
+      if (inflight === request) inflight = null
       throw error
     })
+    inflight = request
   }
   return inflight
 }

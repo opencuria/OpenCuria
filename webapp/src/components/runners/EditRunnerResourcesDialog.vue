@@ -16,6 +16,8 @@ import {
 import { useRunnerStore } from '@/stores/runners'
 import { getRunnerMetricsLatest } from '@/services/runners.api'
 import { runnerSupportsRuntime } from '@/lib/runtimeSupport'
+import { useAutosave } from '@/composables/useAutosave'
+import AutosaveStatus from '@/components/settings/AutosaveStatus.vue'
 
 const props = defineProps<{
   runner: Runner
@@ -23,7 +25,7 @@ const props = defineProps<{
 
 const runnerStore = useRunnerStore()
 const open = ref(false)
-const submitting = ref(false)
+const savedLimits = ref('')
 const loadingMetrics = ref(false)
 
 const minVcpus = ref(1)
@@ -49,11 +51,7 @@ const RAM_STEP = 256
 const DISK_STEP = 5
 const supportsQemu = computed(() => runnerSupportsRuntime(props.runner, 'qemu'))
 
-function clamp(
-  value: number,
-  min: number,
-  max: number,
-): number {
+function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
 }
 
@@ -105,49 +103,61 @@ watch(
     unlimitedActiveMemoryMb.value = runner.qemu_max_active_memory_mb == null
     unlimitedActiveDiskSizeGb.value = runner.qemu_max_active_disk_size_gb == null
     maxActiveVcpus.value = runner.qemu_max_active_vcpus ?? Math.max(runner.qemu_default_vcpus, 1)
-    maxActiveMemoryMb.value = runner.qemu_max_active_memory_mb ?? Math.max(runner.qemu_default_memory_mb, RAM_STEP)
-    maxActiveDiskSizeGb.value = runner.qemu_max_active_disk_size_gb ?? Math.max(runner.qemu_default_disk_size_gb, DISK_STEP)
+    maxActiveMemoryMb.value =
+      runner.qemu_max_active_memory_mb ?? Math.max(runner.qemu_default_memory_mb, RAM_STEP)
+    maxActiveDiskSizeGb.value =
+      runner.qemu_max_active_disk_size_gb ?? Math.max(runner.qemu_default_disk_size_gb, DISK_STEP)
+    savedLimits.value = JSON.stringify(limits())
   },
   { immediate: true, deep: true },
 )
 
 watch(minVcpus, (value) => {
+  if (!Number.isFinite(value) || value <= 0) return
   if (defaultVcpus.value < value) defaultVcpus.value = value
   if (maxVcpus.value < value) maxVcpus.value = value
 })
 watch(maxVcpus, (value) => {
+  if (!Number.isFinite(value) || value <= 0) return
   if (defaultVcpus.value > value) defaultVcpus.value = value
   if (minVcpus.value > value) minVcpus.value = value
 })
 watch(defaultVcpus, (value) => {
+  if (!Number.isFinite(value) || value <= 0) return
   defaultVcpus.value = clamp(value, minVcpus.value, maxVcpus.value)
 })
 
 watch(minMemoryMb, (value) => {
+  if (!Number.isFinite(value) || value <= 0) return
   minMemoryMb.value = snap(value, RAM_STEP)
   if (defaultMemoryMb.value < minMemoryMb.value) defaultMemoryMb.value = minMemoryMb.value
   if (maxMemoryMb.value < minMemoryMb.value) maxMemoryMb.value = minMemoryMb.value
 })
 watch(maxMemoryMb, (value) => {
+  if (!Number.isFinite(value) || value <= 0) return
   maxMemoryMb.value = snap(value, RAM_STEP)
   if (defaultMemoryMb.value > maxMemoryMb.value) defaultMemoryMb.value = maxMemoryMb.value
   if (minMemoryMb.value > maxMemoryMb.value) minMemoryMb.value = maxMemoryMb.value
 })
 watch(defaultMemoryMb, (value) => {
+  if (!Number.isFinite(value) || value <= 0) return
   defaultMemoryMb.value = snap(clamp(value, minMemoryMb.value, maxMemoryMb.value), RAM_STEP)
 })
 
 watch(minDiskSizeGb, (value) => {
+  if (!Number.isFinite(value) || value <= 0) return
   minDiskSizeGb.value = snap(value, DISK_STEP)
   if (defaultDiskSizeGb.value < minDiskSizeGb.value) defaultDiskSizeGb.value = minDiskSizeGb.value
   if (maxDiskSizeGb.value < minDiskSizeGb.value) maxDiskSizeGb.value = minDiskSizeGb.value
 })
 watch(maxDiskSizeGb, (value) => {
+  if (!Number.isFinite(value) || value <= 0) return
   maxDiskSizeGb.value = snap(value, DISK_STEP)
   if (defaultDiskSizeGb.value > maxDiskSizeGb.value) defaultDiskSizeGb.value = maxDiskSizeGb.value
   if (minDiskSizeGb.value > maxDiskSizeGb.value) minDiskSizeGb.value = maxDiskSizeGb.value
 })
 watch(defaultDiskSizeGb, (value) => {
+  if (!Number.isFinite(value) || value <= 0) return
   defaultDiskSizeGb.value = snap(clamp(value, minDiskSizeGb.value, maxDiskSizeGb.value), DISK_STEP)
 })
 
@@ -155,10 +165,18 @@ const activeVcpusSliderMax = computed(() =>
   Math.max(maxVcpus.value * 4, hostVcpus.value ? hostVcpus.value * 2 : 1, maxActiveVcpus.value),
 )
 const activeMemorySliderMax = computed(() =>
-  Math.max(maxMemoryMb.value * 4, hostMemoryMb.value ? hostMemoryMb.value * 2 : RAM_STEP, maxActiveMemoryMb.value),
+  Math.max(
+    maxMemoryMb.value * 4,
+    hostMemoryMb.value ? hostMemoryMb.value * 2 : RAM_STEP,
+    maxActiveMemoryMb.value,
+  ),
 )
 const activeDiskSliderMax = computed(() =>
-  Math.max(maxDiskSizeGb.value * 4, hostDiskSizeGb.value ? hostDiskSizeGb.value * 2 : DISK_STEP, maxActiveDiskSizeGb.value),
+  Math.max(
+    maxDiskSizeGb.value * 4,
+    hostDiskSizeGb.value ? hostDiskSizeGb.value * 2 : DISK_STEP,
+    maxActiveDiskSizeGb.value,
+  ),
 )
 
 function markerPosition(hostMax: number | null, sliderMax: number): string {
@@ -166,25 +184,24 @@ function markerPosition(hostMax: number | null, sliderMax: number): string {
   return `${Math.min(100, (hostMax / sliderMax) * 100)}%`
 }
 
-const isValid = computed(() =>
-  minVcpus.value > 0 &&
-  maxVcpus.value >= minVcpus.value &&
-  defaultVcpus.value >= minVcpus.value &&
-  defaultVcpus.value <= maxVcpus.value &&
-  minMemoryMb.value > 0 &&
-  maxMemoryMb.value >= minMemoryMb.value &&
-  defaultMemoryMb.value >= minMemoryMb.value &&
-  defaultMemoryMb.value <= maxMemoryMb.value &&
-  minDiskSizeGb.value > 0 &&
-  maxDiskSizeGb.value >= minDiskSizeGb.value &&
-  defaultDiskSizeGb.value >= minDiskSizeGb.value &&
-  defaultDiskSizeGb.value <= maxDiskSizeGb.value,
+const isValid = computed(
+  () =>
+    minVcpus.value > 0 &&
+    maxVcpus.value >= minVcpus.value &&
+    defaultVcpus.value >= minVcpus.value &&
+    defaultVcpus.value <= maxVcpus.value &&
+    minMemoryMb.value > 0 &&
+    maxMemoryMb.value >= minMemoryMb.value &&
+    defaultMemoryMb.value >= minMemoryMb.value &&
+    defaultMemoryMb.value <= maxMemoryMb.value &&
+    minDiskSizeGb.value > 0 &&
+    maxDiskSizeGb.value >= minDiskSizeGb.value &&
+    defaultDiskSizeGb.value >= minDiskSizeGb.value &&
+    defaultDiskSizeGb.value <= maxDiskSizeGb.value,
 )
 
-async function handleSubmit(): Promise<void> {
-  if (!isValid.value || !supportsQemu.value) return
-  submitting.value = true
-  const ok = await runnerStore.updateRunner(props.runner.id, {
+function limits() {
+  return {
     qemu_min_vcpus: minVcpus.value,
     qemu_max_vcpus: maxVcpus.value,
     qemu_default_vcpus: defaultVcpus.value,
@@ -196,10 +213,33 @@ async function handleSubmit(): Promise<void> {
     qemu_default_disk_size_gb: defaultDiskSizeGb.value,
     qemu_max_active_vcpus: unlimitedActiveVcpus.value ? null : maxActiveVcpus.value,
     qemu_max_active_memory_mb: unlimitedActiveMemoryMb.value ? null : maxActiveMemoryMb.value,
-    qemu_max_active_disk_size_gb: unlimitedActiveDiskSizeGb.value ? null : maxActiveDiskSizeGb.value,
-  })
-  submitting.value = false
-  if (ok) open.value = false
+    qemu_max_active_disk_size_gb: unlimitedActiveDiskSizeGb.value
+      ? null
+      : maxActiveDiskSizeGb.value,
+  }
+}
+
+const autosave = useAutosave({
+  source: limits,
+  dirty: () => JSON.stringify(limits()) !== savedLimits.value,
+  enabled: () => open.value && supportsQemu.value,
+  valid: () =>
+    isValid.value &&
+    Object.values(limits()).every(
+      (value) => value === null || (Number.isSafeInteger(value) && value > 0),
+    ),
+  scope: () => props.runner.id,
+  errorMessage: 'Failed to update runner limits',
+  save: async (isCurrent) => {
+    const payload = limits()
+    if (!(await runnerStore.updateRunner(props.runner.id, payload, { silent: true })))
+      throw new Error('Failed to update runner limits')
+    if (isCurrent()) savedLimits.value = JSON.stringify(payload)
+  },
+})
+
+async function setOpen(value: boolean): Promise<void> {
+  if (value || (await autosave.flush())) open.value = value
 }
 
 watch(open, (value) => {
@@ -212,7 +252,7 @@ watch(open, (value) => {
 <template>
   <Dialog
     :open="open"
-    @update:open="(value) => (open = value)"
+    @update:open="setOpen"
   >
     <DialogTrigger as-child>
       <Button variant="outline" size="sm" :disabled="!supportsQemu">QEMU Limits</Button>
@@ -230,7 +270,7 @@ watch(open, (value) => {
         <form
           id="runner-limits-form"
           class="grid grid-cols-1 gap-4 md:grid-cols-2"
-          @submit.prevent="handleSubmit"
+          @submit.prevent="autosave.flush()"
         >
           <!-- Per-workspace limits -->
           <section class="space-y-3 rounded-md border border-border bg-muted/50 p-3">
@@ -379,10 +419,8 @@ watch(open, (value) => {
       </DialogBody>
 
       <DialogFooter>
-        <Button variant="outline" type="button" @click="open = false">Cancel</Button>
-        <Button type="submit" form="runner-limits-form" :disabled="submitting || !isValid">
-          {{ submitting ? 'Saving…' : 'Save' }}
-        </Button>
+        <AutosaveStatus :state="autosave" />
+        <Button variant="outline" type="button" @click="setOpen(false)">Close</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

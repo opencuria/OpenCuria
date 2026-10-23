@@ -162,6 +162,7 @@ describe('PluginEditorDialog', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="plugin-requirement-0"]').exists()).toBe(true)
+    await wrapper.find('[data-testid="plugin-name"]').setValue('Updated Playwright')
     await wrapper.find('#plugin-editor-form').trigger('submit')
     await flushPromises()
 
@@ -177,6 +178,7 @@ describe('PluginEditorDialog', () => {
           }),
         ],
       }),
+      { silent: true },
     )
   })
 
@@ -185,13 +187,15 @@ describe('PluginEditorDialog', () => {
     const wrapper = mountEditor(null)
     await flushPromises()
     // Empty name → invalid.
-    expect(wrapper.find('[data-testid="plugin-editor-save"]').attributes('disabled')).toBeDefined()
+    expect(
+      wrapper.find('[data-testid="plugin-editor-create"]').attributes('disabled'),
+    ).toBeDefined()
     expect(wrapper.find('[data-testid="plugin-editor-validation"]').exists()).toBe(true)
 
     await wrapper.find('[data-testid="plugin-name"]').setValue('Demo')
     await flushPromises()
     expect(
-      wrapper.find('[data-testid="plugin-editor-save"]').attributes('disabled'),
+      wrapper.find('[data-testid="plugin-editor-create"]').attributes('disabled'),
     ).toBeUndefined()
 
     await wrapper.find('#plugin-editor-form').trigger('submit')
@@ -319,5 +323,5 @@ it('offers one managed desktop selector and surfaces explicit env conflicts', as
   expect(wrapper.find('[data-testid="plugin-editor-validation"]').text()).toContain(
     'remove those env entries',
   )
-  expect(wrapper.find('[data-testid="plugin-editor-save"]').attributes('disabled')).toBeDefined()
+  expect(wrapper.find('[data-testid="plugin-editor-create"]').attributes('disabled')).toBeDefined()
 })

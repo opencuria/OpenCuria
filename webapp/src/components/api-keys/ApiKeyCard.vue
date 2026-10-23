@@ -15,10 +15,11 @@ import {
   XCircle,
   Shield,
   ChevronDown,
-  Check,
 } from '@lucide/vue'
 import { formatDate, formatRelativeTime } from '@/lib/utils'
 import { useApiKeyStore } from '@/stores/apiKeys'
+import { useAutosave } from '@/composables/useAutosave'
+import AutosaveStatus from '@/components/settings/AutosaveStatus.vue'
 
 const props = defineProps<{
   apiKey: APIKey
@@ -32,7 +33,7 @@ const apiKeyStore = useApiKeyStore()
 
 const editingPermissions = ref(false)
 const localPermissions = ref<string[]>([...props.apiKey.permissions])
-const savingPermissions = ref(false)
+const savedPermissions = ref([...props.apiKey.permissions])
 
 onMounted(() => {
   if (apiKeyStore.availablePermissions.length === 0) {
@@ -43,8 +44,9 @@ onMounted(() => {
 watch(
   () => props.apiKey.permissions,
   (next) => {
-    if (!editingPermissions.value) {
+    if (!autosave.dirty && !autosave.saving) {
       localPermissions.value = [...next]
+      savedPermissions.value = [...next]
     }
   },
 )
@@ -67,6 +69,8 @@ function setPermission(value: string, checked: boolean | 'indeterminate'): void 
     }
     return
   }
+  // An empty list grants full access. Require the explicit switch for that change.
+  if (localPermissions.value.length === 1 && localPermissions.value[0] === value) return
   localPermissions.value = localPermissions.value.filter((p) => p !== value)
 }
 
@@ -78,18 +82,25 @@ function toggleFullAccess(checked: boolean | 'indeterminate'): void {
   localPermissions.value = apiKeyStore.availablePermissions.map((p) => p.value)
 }
 
-function cancelEdit(): void {
-  localPermissions.value = [...props.apiKey.permissions]
-  editingPermissions.value = false
-}
+const autosave = useAutosave({
+  source: () => localPermissions.value,
+  dirty: () =>
+    JSON.stringify([...localPermissions.value].sort()) !==
+    JSON.stringify([...savedPermissions.value].sort()),
+  enabled: () => props.apiKey.is_active,
+  scope: () => props.apiKey.id,
+  errorMessage: 'Failed to update permissions',
+  save: async (isCurrent) => {
+    const permissions = [...localPermissions.value]
+    if (!(await apiKeyStore.updateKeyPermissions(props.apiKey.id, permissions, { silent: true })))
+      throw new Error('Failed to update permissions')
+    if (isCurrent()) savedPermissions.value = permissions
+  },
+})
 
-async function savePermissions(): Promise<void> {
-  savingPermissions.value = true
-  const ok = await apiKeyStore.updateKeyPermissions(props.apiKey.id, localPermissions.value)
-  savingPermissions.value = false
-  if (ok) {
-    editingPermissions.value = false
-  }
+async function toggleEditor(): Promise<void> {
+  if (!editingPermissions.value || (await autosave.flush()))
+    editingPermissions.value = !editingPermissions.value
 }
 </script>
 
@@ -158,7 +169,7 @@ async function savePermissions(): Promise<void> {
       <button
         type="button"
         class="flex w-full cursor-pointer items-center justify-between border-t border-border py-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
-        @click="editingPermissions = !editingPermissions"
+        @click="toggleEditor"
       >
         <span class="flex items-center gap-1.5">
           <Shield :size="12" />
@@ -203,6 +214,7 @@ async function savePermissions(): Promise<void> {
                 >
                   <Checkbox
                     :model-value="localPermissions.includes(perm.value)"
+                    :disabled="localPermissions.length === 1 && localPermissions[0] === perm.value"
                     @update:model-value="setPermission(perm.value, $event)"
                   />
                   <span class="min-w-0 font-mono text-xs text-foreground">{{ perm.value }}</span>
@@ -212,13 +224,7 @@ async function savePermissions(): Promise<void> {
           </template>
         </div>
 
-        <div class="flex justify-end gap-2 pt-1">
-          <Button size="sm" variant="outline" @click="cancelEdit">Cancel</Button>
-          <Button size="sm" :disabled="savingPermissions" @click="savePermissions">
-            <Check />
-            {{ savingPermissions ? 'Saving…' : 'Save' }}
-          </Button>
-        </div>
+        <AutosaveStatus :state="autosave" />
       </div>
     </template>
   </SettingsRow>

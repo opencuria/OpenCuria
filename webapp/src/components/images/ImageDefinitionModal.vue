@@ -20,6 +20,9 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import type { ImageDefinition } from '@/types'
+import { updateImageDefinition } from '@/services/workspaces.api'
+import { useAutosave } from '@/composables/useAutosave'
+import AutosaveStatus from '@/components/settings/AutosaveStatus.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -34,8 +37,10 @@ const props = withDefaults(
 const emit = defineEmits<{
   'update:open': [value: boolean]
   saved: [payload: Partial<ImageDefinition>]
+  updated: []
 }>()
 
+const savedDefinition = ref('')
 const name = ref('')
 const description = ref('')
 const activeTab = ref<'definition' | 'advanced'>('definition')
@@ -70,34 +75,18 @@ const qemuDistroOptions = [
 const distroOptions = computed(() =>
   runtimeType.value === 'qemu' ? qemuDistroOptions : dockerDistroOptions,
 )
-
-watch(
-  () => props.open,
-  (open) => {
-    if (!open) return
-    const src = props.imageDefinition
-    activeTab.value = 'definition'
-    name.value = src?.name || ''
-    description.value = src?.description || ''
-    runtimeType.value = (src?.runtime_type as 'docker' | 'qemu') || 'docker'
-    const currentBase = src?.base_distro || 'ubuntu:22.04'
-    const known = [...dockerDistroOptions, ...qemuDistroOptions].find((opt) => opt.value === currentBase)
-    baseDistroPreset.value = known ? currentBase : '__custom__'
-    customBaseDistro.value = known ? '' : currentBase
-    packages.value = (src?.packages || []).join(', ')
-    envVars.value = Object.entries(src?.env_vars || {})
-      .map(([k, v]) => `${k}=${v}`)
-      .join('\n')
-    customDockerfile.value = src?.custom_dockerfile || ''
-    customInitScript.value = src?.custom_init_script || ''
-  },
+const title = computed(() =>
+  props.imageDefinition ? 'Edit Image Definition' : 'Create Image Definition',
 )
-
-const title = computed(() => (props.imageDefinition ? 'Edit Image Definition' : 'Create Image Definition'))
 const baseDistro = computed(() =>
   baseDistroPreset.value === '__custom__' ? customBaseDistro.value.trim() : baseDistroPreset.value,
 )
-const isValid = computed(() => !!name.value.trim() && !!baseDistro.value.trim())
+const isValid = computed(
+  () =>
+    !!name.value.trim() &&
+    !!baseDistro.value.trim() &&
+    envVars.value.split('\n').every((line) => !line.trim() || line.indexOf('=') > 0),
+)
 
 function parseEnvVars(raw: string): Record<string, string> {
   const out: Record<string, string> = {}
@@ -111,9 +100,8 @@ function parseEnvVars(raw: string): Record<string, string> {
   return out
 }
 
-function handleSave(): void {
-  if (!isValid.value) return
-  emit('saved', {
+function payload(): Partial<ImageDefinition> {
+  return {
     name: name.value.trim(),
     description: description.value.trim(),
     runtime_type: runtimeType.value,
@@ -125,14 +113,68 @@ function handleSave(): void {
     env_vars: parseEnvVars(envVars.value),
     custom_dockerfile: customDockerfile.value,
     custom_init_script: customInitScript.value,
-  })
+  }
+}
+
+watch(
+  () => props.open,
+  (open) => {
+    if (!open) return
+    const src = props.imageDefinition
+    activeTab.value = 'definition'
+    name.value = src?.name || ''
+    description.value = src?.description || ''
+    runtimeType.value = (src?.runtime_type as 'docker' | 'qemu') || 'docker'
+    const currentBase = src?.base_distro || 'ubuntu:22.04'
+    const known = [...dockerDistroOptions, ...qemuDistroOptions].find(
+      (opt) => opt.value === currentBase,
+    )
+    baseDistroPreset.value = known ? currentBase : '__custom__'
+    customBaseDistro.value = known ? '' : currentBase
+    packages.value = (src?.packages || []).join(', ')
+    envVars.value = Object.entries(src?.env_vars || {})
+      .map(([k, v]) => `${k}=${v}`)
+      .join('\n')
+    customDockerfile.value = src?.custom_dockerfile || ''
+    customInitScript.value = src?.custom_init_script || ''
+    savedDefinition.value = JSON.stringify(payload())
+  },
+  { immediate: true },
+)
+
+const autosave = useAutosave({
+  source: payload,
+  dirty: () => !isValid.value || JSON.stringify(payload()) !== savedDefinition.value,
+  enabled: () => props.open && !!props.imageDefinition,
+  valid: () => isValid.value,
+  scope: () => props.imageDefinition?.id,
+  errorMessage: 'Failed to update image definition',
+  save: async (isCurrent) => {
+    const data = payload()
+    await updateImageDefinition(props.imageDefinition!.id, data)
+    if (!isCurrent()) return
+    savedDefinition.value = JSON.stringify(data)
+    emit('updated')
+  },
+})
+
+function handleSave(): void {
+  if (props.imageDefinition) {
+    void autosave.flush()
+    return
+  }
+  if (isValid.value) emit('saved', payload())
+}
+
+async function setOpen(value: boolean): Promise<void> {
+  if (value || (await autosave.flush())) emit('update:open', value)
 }
 </script>
 
 <template>
   <Dialog
     :open="open"
-    @update:open="(v) => emit('update:open', v)"
+    @update:open="setOpen"
   >
     <DialogContent class="sm:max-w-lg">
       <DialogHeader>
@@ -242,8 +284,9 @@ function handleSave(): void {
       </DialogBody>
 
       <DialogFooter>
-        <Button variant="outline" type="button" @click="emit('update:open', false)">Cancel</Button>
-        <Button type="submit" form="image-definition-form" :disabled="!isValid">Save</Button>
+        <AutosaveStatus v-if="imageDefinition" :state="autosave" />
+        <Button variant="outline" type="button" @click="setOpen(false)">{{ imageDefinition ? 'Close' : 'Cancel' }}</Button>
+        <Button v-if="!imageDefinition" type="submit" form="image-definition-form" :disabled="!isValid">Create</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

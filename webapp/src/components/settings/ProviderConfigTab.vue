@@ -10,9 +10,14 @@ import SettingsRow from './SettingsRow.vue'
 import SettingsSection from './SettingsSection.vue'
 import { PROVIDER_META, type ProviderMeta, type SettingsProviderId } from './providerMeta'
 import type { ProviderModel } from '@/lib/harnessModels'
-import { invalidateProviderCatalog, loadProviderModelsCached, loadEngineModelsCached } from '@/lib/providerCatalog'
+import {
+  invalidateProviderCatalog,
+  loadProviderModelsCached,
+  loadEngineModelsCached,
+} from '@/lib/providerCatalog'
 import { ApiRequestError } from '@/services/api'
-import { useNotificationStore } from '@/stores/notifications'
+import { useAutosave } from '@/composables/useAutosave'
+import AutosaveStatus from './AutosaveStatus.vue'
 import { useAuthStore } from '@/stores/auth'
 import {
   getProviderConfig,
@@ -22,7 +27,6 @@ import {
   type ProviderAccount,
 } from '@/services/harness.api'
 
-const notifications = useNotificationStore()
 const authStore = useAuthStore()
 const isAdmin = computed(() => authStore.isAdmin)
 const organizationId = computed(
@@ -32,7 +36,6 @@ const organizationId = computed(
 let loadRevision = 0
 let loadStateRevision = 0
 const loading = ref(true)
-const savingDefaults = ref(false)
 const error = ref<string | null>(null)
 const config = ref<HarnessProviderConfig | null>(null)
 const accounts = ref<ProviderAccount[]>([])
@@ -97,6 +100,7 @@ function isNotFoundError(error: unknown): boolean {
 
 async function refreshAll(): Promise<void> {
   const context = currentContextKey()
+  const previousConfig = config.value
   const revision = ++loadRevision
   invalidateProviderCatalog()
   const [configRes, accountRes, modelsRes, externalModels] = await Promise.all([
@@ -112,7 +116,11 @@ async function refreshAll(): Promise<void> {
     ]).then((rows) => rows.flat()),
   ])
   if (context !== currentContextKey() || revision !== loadRevision) return
-  applyConfig(configRes)
+  if (
+    loading.value ||
+    (config.value === previousConfig && !defaultsDirty.value && !autosave.saving)
+  )
+    applyConfig(configRes)
   accounts.value = accountRes
   catalog.value = modelsRes
   externalCatalog.value = externalModels
@@ -162,10 +170,12 @@ async function handleAccountsChanged(): Promise<void> {
   await refreshAll()
 }
 
-async function handleSaveDefaults(): Promise<void> {
-  if (savingDefaults.value || !defaultsDirty.value) return
-  savingDefaults.value = true
-  try {
+const autosave = useAutosave({
+  source: () => [smallModel.value, smallEffort.value],
+  dirty: () => defaultsDirty.value,
+  enabled: () => !loading.value && !error.value,
+  errorMessage: 'Failed to save default models',
+  save: async (isCurrent) => {
     const saved = await saveProviderConfig({
       small_model: smallModel.value.trim(),
       small_effort: smallEffort.value.trim(),
@@ -174,14 +184,9 @@ async function handleSaveDefaults(): Promise<void> {
       default_effort: config.value?.default_effort ?? '',
       computer_use_effort: config.value?.computer_use_effort ?? '',
     })
-    applyConfig(saved)
-    notifications.success('Default models saved')
-  } catch (e: unknown) {
-    notifications.error('Failed to save default models', e instanceof Error ? e.message : undefined)
-  } finally {
-    savingDefaults.value = false
-  }
-}
+    if (isCurrent()) config.value = saved
+  },
+})
 
 onMounted(() => void loadState())
 watch(organizationId, () => {
@@ -297,7 +302,6 @@ watch(organizationId, () => {
                 v-model:model="smallModel"
                 v-model:effort="smallEffort"
                 :models="catalog"
-                :disabled="savingDefaults"
                 variant="field"
                 manual-fallback
                 allow-default
@@ -311,20 +315,7 @@ watch(organizationId, () => {
           </div>
         </div>
 
-        <div class="flex items-center justify-between gap-3">
-          <p class="text-xs text-muted-foreground" data-testid="defaults-status">
-            {{ defaultsDirty ? 'Unsaved changes' : 'All changes saved' }}
-          </p>
-          <Button
-            size="sm"
-            :disabled="savingDefaults || !defaultsDirty"
-            data-testid="save-default-models"
-            @click="handleSaveDefaults"
-          >
-            <LoadingSpinner v-if="savingDefaults" :size="12" />
-            <span v-else>Save Defaults</span>
-          </Button>
-        </div>
+        <AutosaveStatus :state="autosave" data-testid="defaults-status" />
       </SettingsSection>
     </template>
 

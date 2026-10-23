@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
 import ProviderConfigTab from './ProviderConfigTab.vue'
@@ -12,6 +12,13 @@ import { ApiRequestError } from '@/services/api'
 import { toast } from 'vue-sonner'
 import type { ProviderAccount } from '@/services/harness.api'
 import type { ProviderModel } from '@/lib/harnessModels'
+
+enableAutoUnmount(afterEach)
+afterEach(() => vi.useRealTimers())
+async function autosave() {
+  await vi.advanceTimersByTimeAsync(500)
+  await flushPromises()
+}
 
 vi.mock('vue-sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
@@ -80,11 +87,15 @@ const config = {
 
 describe('ProviderConfigTab', () => {
   beforeEach(() => {
+    vi.useFakeTimers()
     vi.clearAllMocks()
     vi.spyOn(providerCatalog, 'loadProviderModelsCached').mockResolvedValue(catalog)
     vi.spyOn(providerCatalog, 'loadEngineModelsCached').mockResolvedValue([])
     vi.mocked(harnessApi.getProviderConfig).mockResolvedValue(config)
-    vi.mocked(harnessApi.saveProviderConfig).mockResolvedValue(config)
+    vi.mocked(harnessApi.saveProviderConfig).mockImplementation(async (payload) => ({
+      ...config,
+      ...payload,
+    }))
     vi.mocked(harnessApi.listProviderAccounts).mockResolvedValue([account])
   })
 
@@ -125,8 +136,8 @@ describe('ProviderConfigTab', () => {
     await picker.vm.$emit('update:model', 'openrouter/model-next')
     await flushPromises()
 
-    expect(wrapper.find('[data-testid="defaults-status"]').text()).toBe('Unsaved changes')
-    await wrapper.find('[data-testid="save-default-models"]').trigger('click')
+    expect(wrapper.find('[data-testid="defaults-status"]').text()).toBe('Waiting to save…')
+    await autosave()
     await flushPromises()
 
     expect(harnessApi.saveProviderConfig).toHaveBeenCalledWith({
@@ -180,6 +191,28 @@ describe('ProviderConfigTab', () => {
     expect(harnessApi.listProviderAccounts).toHaveBeenCalledTimes(2)
   })
 
+  it('does not replace a newer autosaved model with a stale account refresh', async () => {
+    const wrapper = mountTab()
+    await flushPromises()
+    let finishRefresh!: (value: typeof config) => void
+    vi.mocked(harnessApi.getProviderConfig).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishRefresh = resolve
+        }),
+    )
+    wrapper.findComponent(ProviderConnectionDialog).vm.$emit('changed')
+    await flushPromises()
+    wrapper.findComponent(ModelPicker).vm.$emit('update:model', 'openrouter/new-model')
+    await flushPromises()
+    await autosave()
+    finishRefresh(config)
+    await flushPromises()
+    expect(wrapper.findComponent(ModelPicker).props('model')).toBe('openrouter/new-model')
+    expect(wrapper.get('[data-testid="defaults-status"]').text()).toBe('All changes saved')
+    expect(harnessApi.saveProviderConfig).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps accounts visible when provider defaults have not been created yet', async () => {
     vi.mocked(harnessApi.getProviderConfig).mockRejectedValue(
       new ApiRequestError(404, 'Not Found', 'not_found'),
@@ -198,14 +231,15 @@ describe('ProviderConfigTab', () => {
     await flushPromises()
     const picker = wrapper.findComponent(ModelPicker)
     await picker.vm.$emit('update:model', 'openrouter/other')
-    await wrapper.find('[data-testid="save-default-models"]').trigger('click')
+    await autosave()
     await flushPromises()
 
     expect(toast.error).toHaveBeenCalledWith('Failed to save default models', {
       description: 'backend down',
       duration: 8000,
     })
-    expect(wrapper.find('[data-testid="defaults-status"]').text()).toBe('Unsaved changes')
+    expect(wrapper.find('[data-testid="defaults-status"]').text()).toContain('backend down')
+    expect(wrapper.find('[data-testid="defaults-status"] button').text()).toBe('Retry')
   })
 
   it('ignores stale organization loads when the user changes organization quickly', async () => {

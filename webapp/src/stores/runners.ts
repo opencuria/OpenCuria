@@ -61,17 +61,17 @@ export const useRunnerStore = defineStore('runners', () => {
     }
   }
 
-  async function updateRunner(id: string, data: RunnerUpdateIn): Promise<boolean> {
+  async function updateRunner(id: string, data: RunnerUpdateIn, options: { silent?: boolean } = {}): Promise<boolean> {
     const notifications = useNotificationStore()
     try {
       const updated = await runnersApi.updateRunner(id, data)
       const index = runners.value.findIndex((r) => r.id === id)
       if (index !== -1) runners.value[index] = updated
-      notifications.success('Runner updated', 'QEMU limits and defaults were saved.')
+      if (!options.silent) notifications.success('Runner updated', 'QEMU limits and defaults were saved.')
       return true
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to update runner'
-      notifications.error('Update failed', msg)
+      if (!options.silent) notifications.error('Update failed', msg)
       return false
     }
   }

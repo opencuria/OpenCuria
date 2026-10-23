@@ -687,6 +687,7 @@ onUnmounted(() => {
       :image-definition="editing"
       @update:open="(v) => (modalOpen = v)"
       @saved="onModalSaved"
+      @updated="loadDefinitions({ quiet: true })"
     />
 
     <Dialog :open="Boolean(confirmDialog)" @update:open="(open) => (open ? null : cancelConfirm())">

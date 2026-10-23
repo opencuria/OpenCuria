@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { defineComponent } from 'vue'
 import ModelPicker from '@/components/common/ModelPicker.vue'
 import { createPinia, setActivePinia } from 'pinia'
@@ -9,6 +9,13 @@ import AgentSConfigPanel from './AgentSConfigPanel.vue'
 import * as providerCatalog from '@/lib/providerCatalog'
 import * as harnessApi from '@/services/harness.api'
 import type { AgentSConfig } from '@/services/harness.api'
+
+enableAutoUnmount(afterEach)
+afterEach(() => vi.useRealTimers())
+async function autosave() {
+  await vi.advanceTimersByTimeAsync(500)
+  await flushPromises()
+}
 
 vi.mock('vue-sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
@@ -67,6 +74,7 @@ function mountPanel() {
 
 describe('AgentSConfigPanel', () => {
   beforeEach(() => {
+    vi.useFakeTimers()
     vi.restoreAllMocks()
     vi.clearAllMocks()
     vi.spyOn(providerCatalog, 'loadProviderModelsCached').mockResolvedValue([])
@@ -82,9 +90,9 @@ describe('AgentSConfigPanel', () => {
     expect(wrapper.find('[data-testid="agent-s-config-panel"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="agent-s-main-model-hint"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="agent-s-goto-computeruse"]').exists()).toBe(false)
-    expect(wrapper.findAll('button')).toHaveLength(4) // Three switches and Save only.
+    expect(wrapper.findAll('button')).toHaveLength(3) // Three switches.
     expect(wrapper.find('[data-testid="agent-s-config-status"]').text()).toBe('All changes saved')
-    expect(wrapper.find('[data-testid="save-agent-s-config"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="save-agent-s-config"]').exists()).toBe(false)
   })
 
   it('uses the shared grounding picker with inheritance and manual fallback', async () => {
@@ -107,7 +115,7 @@ describe('AgentSConfigPanel', () => {
       disabled: false,
     })
     await wrapper.find('#agent-s-grounding-model').setValue('anthropic/custom-model')
-    await wrapper.find('[data-testid="save-agent-s-config"]').trigger('click')
+    await autosave()
     await flushPromises()
     expect(saveAgentSConfigMock).toHaveBeenLastCalledWith({
       grounding_model: 'anthropic/custom-model',
@@ -115,7 +123,7 @@ describe('AgentSConfigPanel', () => {
 
     picker.vm.$emit('update:model', '')
     await flushPromises()
-    await wrapper.find('[data-testid="save-agent-s-config"]').trigger('click')
+    await autosave()
     await flushPromises()
     expect(saveAgentSConfigMock).toHaveBeenLastCalledWith({ grounding_model: '' })
     expect(wrapper.find('#agent-s-grounding-model').attributes('placeholder')).toBe('Inherit')
@@ -138,7 +146,7 @@ describe('AgentSConfigPanel', () => {
     }
     expect(wrapper.text()).not.toContain('Enable reflection')
     expect(wrapper.text()).not.toContain('Enable code agent')
-    await wrapper.find('[data-testid="save-agent-s-config"]').trigger('click')
+    await autosave()
     await flushPromises()
     expect(saveAgentSConfigMock).toHaveBeenCalledWith({
       enable_reflection: false,
@@ -151,13 +159,13 @@ describe('AgentSConfigPanel', () => {
     await flushPromises()
 
     await wrapper.find('[data-testid="agent-s-max-steps"]').setValue('20')
-    expect(wrapper.find('[data-testid="agent-s-config-status"]').text()).toBe('Unsaved changes')
+    expect(wrapper.find('[data-testid="agent-s-config-status"]').text()).toBe('Waiting to save…')
 
-    await wrapper.find('[data-testid="save-agent-s-config"]').trigger('click')
+    await autosave()
     await flushPromises()
 
     expect(saveAgentSConfigMock).toHaveBeenCalledWith({ max_steps: 20 })
-    expect(toast.success).toHaveBeenCalledWith('Agent-S settings saved', { duration: 5000 })
+    expect(toast.success).not.toHaveBeenCalled()
     expect(wrapper.find('[data-testid="agent-s-config-status"]').text()).toBe('All changes saved')
   })
 
@@ -167,7 +175,7 @@ describe('AgentSConfigPanel', () => {
 
     await wrapper.find('[data-testid="agent-s-temperature"]').setValue('0.7')
     await wrapper.find('[data-testid="agent-s-enable-reflection"]').trigger('click')
-    await wrapper.find('[data-testid="save-agent-s-config"]').trigger('click')
+    await autosave()
     await flushPromises()
 
     expect(saveAgentSConfigMock).toHaveBeenCalledWith({
@@ -182,7 +190,7 @@ describe('AgentSConfigPanel', () => {
     await flushPromises()
 
     await wrapper.find('[data-testid="agent-s-temperature"]').setValue('')
-    await wrapper.find('[data-testid="save-agent-s-config"]').trigger('click')
+    await autosave()
     await flushPromises()
 
     expect(saveAgentSConfigMock).toHaveBeenCalledWith({ model_temperature: null })
@@ -200,13 +208,13 @@ describe('AgentSConfigPanel', () => {
     expect(wrapper.find('[data-testid="agent-s-config-status"]').text()).toBe('All changes saved')
 
     await toggle.trigger('click')
-    expect(wrapper.find('[data-testid="agent-s-config-status"]').text()).toBe('Unsaved changes')
-    await wrapper.find('[data-testid="save-agent-s-config"]').trigger('click')
+    expect(wrapper.find('[data-testid="agent-s-config-status"]').text()).toBe('Waiting to save…')
+    await autosave()
     await flushPromises()
     expect(saveAgentSConfigMock).toHaveBeenCalledWith({ enable_recording: true })
 
     await toggle.trigger('click')
-    await wrapper.find('[data-testid="save-agent-s-config"]').trigger('click')
+    await autosave()
     await flushPromises()
     expect(saveAgentSConfigMock).toHaveBeenCalledWith({ enable_recording: false })
   })
@@ -218,7 +226,7 @@ describe('AgentSConfigPanel', () => {
     await wrapper.find('[data-testid="agent-s-max-steps"]').setValue('0')
     await wrapper.find('[data-testid="agent-s-temperature"]').setValue('9')
     await wrapper.find('[data-testid="agent-s-pre-delay"]').setValue('-1')
-    await wrapper.find('[data-testid="save-agent-s-config"]').trigger('click')
+    await autosave()
     await flushPromises()
 
     expect(wrapper.find('[data-testid="agent-s-error-max-steps"]').exists()).toBe(true)
@@ -237,7 +245,7 @@ describe('AgentSConfigPanel', () => {
     const wrapper = mountPanel()
     await flushPromises()
     await wrapper.find('[data-testid="agent-s-max-steps"]').setValue('21')
-    await wrapper.find('[data-testid="save-agent-s-config"]').trigger('click')
+    await autosave()
     await flushPromises()
 
     expect(toast.error).toHaveBeenCalledWith('Failed to save Agent-S settings', {

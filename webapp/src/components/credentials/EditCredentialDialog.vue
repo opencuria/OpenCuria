@@ -14,6 +14,8 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { useCredentialStore } from '@/stores/credentials'
 import type { Credential } from '@/types'
+import { useAutosave } from '@/composables/useAutosave'
+import AutosaveStatus from '@/components/settings/AutosaveStatus.vue'
 
 const props = defineProps<{
   credential: Credential | null
@@ -28,7 +30,7 @@ const credentialStore = useCredentialStore()
 const open = ref(false)
 const name = ref('')
 const value = ref('')
-const submitting = ref(false)
+const saved = ref({ name: '', value: '' })
 
 function credentialDescriptor(credential: Credential): string {
   if (credential.credential_type === 'mcp_oauth') return 'OAuth'
@@ -44,36 +46,40 @@ watch(
       open.value = true
       name.value = cred.name
       value.value = ''
+      saved.value = { name: cred.name, value: '' }
     }
   },
+  { immediate: true },
 )
 
-async function handleSubmit(): Promise<void> {
-  if (!props.credential) return
+const autosave = useAutosave({
+  source: () => [name.value, value.value],
+  dirty: () => name.value.trim() !== saved.value.name || value.value !== saved.value.value,
+  enabled: () => open.value && !!props.credential,
+  valid: () => !!name.value.trim(),
+  scope: () => props.credential?.id,
+  errorMessage: 'Failed to update credential',
+  save: async (isCurrent) => {
+    const snapshot = { name: name.value.trim(), value: value.value }
+    const data: { name?: string; value?: string } = {}
+    if (snapshot.name !== saved.value.name) data.name = snapshot.name
+    if (snapshot.value && snapshot.value !== saved.value.value) data.value = snapshot.value
+    if (
+      Object.keys(data).length &&
+      !(await credentialStore.updateCredential(props.credential!.id, data, { silent: true }))
+    )
+      throw new Error('Failed to update credential')
+    if (isCurrent()) saved.value = snapshot
+  },
+})
 
-  submitting.value = true
-  const data: { name?: string; value?: string } = {}
-  if (name.value.trim() && name.value.trim() !== props.credential.name) {
-    data.name = name.value.trim()
-  }
-  if (value.value) {
-    data.value = value.value
-  }
-
-  if (data.name || data.value) {
-    await credentialStore.updateCredential(props.credential.id, data)
-  }
-  submitting.value = false
-  handleClose()
-}
-
-function handleClose(): void {
+async function handleClose(): Promise<void> {
+  if (!(await autosave.flush())) return
   open.value = false
-  setTimeout(() => {
-    name.value = ''
-    value.value = ''
-    emit('close')
-  }, 200)
+  name.value = ''
+  value.value = ''
+  saved.value = { name: '', value: '' }
+  emit('close')
 }
 </script>
 
@@ -90,7 +96,7 @@ function handleClose(): void {
       </DialogHeader>
 
       <DialogBody>
-        <form id="edit-credential-form" class="flex flex-col gap-4" @submit.prevent="handleSubmit">
+        <form id="edit-credential-form" class="flex flex-col gap-4" @submit.prevent="autosave.flush()">
           <div v-if="credential">
             <p class="text-sm text-muted-foreground mb-3">
               {{ credential.service_name }} — {{ credentialDescriptor(credential) }}
@@ -124,10 +130,8 @@ function handleClose(): void {
       </DialogBody>
 
       <DialogFooter>
-        <Button variant="outline" type="button" @click="handleClose">Cancel</Button>
-        <Button type="submit" form="edit-credential-form" :disabled="submitting">
-          {{ submitting ? 'Saving…' : 'Save Changes' }}
-        </Button>
+        <AutosaveStatus :state="autosave" />
+        <Button variant="outline" type="button" @click="handleClose">Close</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

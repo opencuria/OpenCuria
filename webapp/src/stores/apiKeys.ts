@@ -53,17 +53,17 @@ export const useApiKeyStore = defineStore('apiKeys', () => {
     }
   }
 
-  async function updateKeyPermissions(id: string, permissions: string[]): Promise<boolean> {
+  async function updateKeyPermissions(id: string, permissions: string[], options: { silent?: boolean } = {}): Promise<boolean> {
     const notifications = useNotificationStore()
     try {
       const updated = await authApi.updateApiKey(id, { permissions })
       const idx = keys.value.findIndex((k) => k.id === id)
       if (idx !== -1) keys.value[idx] = updated
-      notifications.success('Permissions updated', 'API key permissions saved.')
+      if (!options.silent) notifications.success('Permissions updated', 'API key permissions saved.')
       return true
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to update permissions'
-      notifications.error('Update failed', msg)
+      if (!options.silent) notifications.error('Update failed', msg)
       return false
     }
   }

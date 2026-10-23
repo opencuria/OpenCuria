@@ -1,8 +1,12 @@
-import { shallowMount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
+import { enableAutoUnmount, flushPromises, shallowMount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import EditRunnerResourcesDialog from './EditRunnerResourcesDialog.vue'
 import type { Runner } from '@/types'
+
+enableAutoUnmount(afterEach)
+afterEach(() => vi.useRealTimers())
 
 const updateRunner = vi.fn()
 const getRunnerMetricsLatest = vi.fn()
@@ -50,11 +54,15 @@ type DialogVm = typeof EditRunnerResourcesDialog extends never
   : {
       isValid: boolean
       minVcpus: number
-      handleSubmit: () => Promise<void>
+      minMemoryMb: number | string
+      open: boolean
+      autosave: { flush: () => Promise<boolean> }
     }
 
 describe('EditRunnerResourcesDialog', () => {
   beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.useFakeTimers()
     updateRunner.mockReset()
     updateRunner.mockResolvedValue(true)
     getRunnerMetricsLatest.mockReset()
@@ -79,18 +87,23 @@ describe('EditRunnerResourcesDialog', () => {
 
     expect(vm.isValid).toBe(true)
 
-    await vm.handleSubmit()
+    vm.open = true
+    vm.minVcpus = 2
+    await wrapper.vm.$nextTick()
+    await vi.advanceTimersByTimeAsync(500)
+    await flushPromises()
 
     expect(updateRunner).toHaveBeenCalledWith(
       'runner-1',
       expect.objectContaining({
-        qemu_min_vcpus: 1,
+        qemu_min_vcpus: 2,
         qemu_max_vcpus: 8,
         qemu_default_vcpus: 2,
         qemu_max_active_vcpus: null,
         qemu_max_active_memory_mb: null,
         qemu_max_active_disk_size_gb: null,
       }),
+      { silent: true },
     )
   })
 
@@ -105,7 +118,22 @@ describe('EditRunnerResourcesDialog', () => {
 
     expect(vm.isValid).toBe(false)
 
-    await vm.handleSubmit()
+    vm.open = true
+    await vm.autosave.flush()
+    expect(updateRunner).not.toHaveBeenCalled()
+  })
+
+  it('keeps a cleared memory field local instead of saving a snapped intermediate value', async () => {
+    const wrapper = shallowMount(EditRunnerResourcesDialog, {
+      props: { runner: makeRunner() },
+    })
+    const vm = wrapper.vm as unknown as DialogVm
+    vm.open = true
+    vm.minMemoryMb = ''
+    await wrapper.vm.$nextTick()
+    await vi.advanceTimersByTimeAsync(500)
+    expect(vm.minMemoryMb).toBe('')
+    expect(await vm.autosave.flush()).toBe(false)
     expect(updateRunner).not.toHaveBeenCalled()
   })
 })

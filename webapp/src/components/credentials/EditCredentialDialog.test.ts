@@ -1,3 +1,4 @@
+import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import EditCredentialDialog from './EditCredentialDialog.vue'
@@ -45,6 +46,7 @@ async function mountDialog(values: Partial<Credential> = {}) {
 
 describe('EditCredentialDialog', () => {
   beforeEach(() => {
+    setActivePinia(createPinia())
     vi.clearAllMocks()
     credentialStore.updateCredential.mockResolvedValue(true)
   })
@@ -60,9 +62,13 @@ describe('EditCredentialDialog', () => {
     await wrapper.find('input').setValue('Notion Team')
     await wrapper.find('#edit-credential-form').trigger('submit')
     await flushPromises()
-    expect(credentialStore.updateCredential).toHaveBeenCalledWith('oauth-1', {
-      name: 'Notion Team',
-    })
+    expect(credentialStore.updateCredential).toHaveBeenCalledWith(
+      'oauth-1',
+      {
+        name: 'Notion Team',
+      },
+      { silent: true },
+    )
   })
 
   it('retains value replacement for ordinary environment credentials', async () => {
@@ -71,9 +77,13 @@ describe('EditCredentialDialog', () => {
     await wrapper.find('input[type="password"]').setValue('replacement-secret')
     await wrapper.find('#edit-credential-form').trigger('submit')
     await flushPromises()
-    expect(credentialStore.updateCredential).toHaveBeenCalledWith('oauth-1', {
-      value: 'replacement-secret',
-    })
+    expect(credentialStore.updateCredential).toHaveBeenCalledWith(
+      'oauth-1',
+      {
+        value: 'replacement-secret',
+      },
+      { silent: true },
+    )
   })
 
   it('does not update an unchanged OAuth name', async () => {

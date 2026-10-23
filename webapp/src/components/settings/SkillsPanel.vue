@@ -13,6 +13,8 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import SettingsSection from './SettingsSection.vue'
 import SettingsRow from './SettingsRow.vue'
+import AutosaveStatus from './AutosaveStatus.vue'
+import { useAutosave } from '@/composables/useAutosave'
 import {
   Dialog,
   DialogBody,
@@ -41,7 +43,26 @@ const createSubmitting = ref(false)
 
 const editName = ref('')
 const editBody = ref('')
-const editSubmitting = ref(false)
+const savedEdit = ref({ name: '', body: '' })
+const editPayload = () => ({ name: editName.value.trim(), body: editBody.value.trim() })
+const editAutosave = useAutosave({
+  source: editPayload,
+  dirty: () => JSON.stringify(editPayload()) !== JSON.stringify(savedEdit.value),
+  enabled: () => !!editingSkill.value && canEdit(editingSkill.value),
+  valid: () => !!editName.value.trim() && !!editBody.value.trim(),
+  scope: () => editingSkill.value?.id,
+  errorMessage: 'Failed to update skill',
+  save: async (isCurrent) => {
+    const payload = editPayload()
+    if (!(await skillStore.updateSkill(editingSkill.value!.id, payload, { silent: true })))
+      throw new Error('Failed to update skill')
+    if (isCurrent()) savedEdit.value = payload
+  },
+})
+
+async function closeEdit(): Promise<void> {
+  if (await editAutosave.flush()) editingSkill.value = null
+}
 
 onMounted(() => {
   skillStore.fetchSkills()
@@ -63,6 +84,7 @@ function openEdit(skill: Skill): void {
   editingSkill.value = skill
   editName.value = skill.name
   editBody.value = skill.body
+  savedEdit.value = editPayload()
 }
 
 async function handleCreate(): Promise<void> {
@@ -76,19 +98,6 @@ async function handleCreate(): Promise<void> {
   createSubmitting.value = false
   if (ok) {
     showCreateDialog.value = false
-  }
-}
-
-async function handleEdit(): Promise<void> {
-  if (!editingSkill.value) return
-  editSubmitting.value = true
-  const ok = await skillStore.updateSkill(editingSkill.value.id, {
-    name: editName.value.trim() || undefined,
-    body: editBody.value.trim() || undefined,
-  })
-  editSubmitting.value = false
-  if (ok) {
-    editingSkill.value = null
   }
 }
 
@@ -238,36 +247,27 @@ async function handleDelete(): Promise<void> {
       </DialogContent>
     </Dialog>
 
-    <Dialog :open="!!editingSkill" @update:open="(v) => !v && (editingSkill = null)">
+    <Dialog :open="!!editingSkill" @update:open="(v) => !v && closeEdit()">
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Edit Skill</DialogTitle>
           <DialogDescription>Update the name or body of this skill.</DialogDescription>
         </DialogHeader>
         <DialogBody>
-        <form id="edit-skill-form" class="flex flex-col gap-4" @submit.prevent="handleEdit">
+        <form id="edit-skill-form" class="flex flex-col gap-4" @submit.prevent="editAutosave.flush()">
           <div class="space-y-2">
             <Label for="edit-skill-name">Name</Label>
-            <Input id="edit-skill-name" v-model="editName" :disabled="editSubmitting" />
+            <Input id="edit-skill-name" v-model="editName" />
           </div>
           <div class="space-y-2">
             <Label for="edit-skill-body">Body (Markdown)</Label>
-            <Textarea id="edit-skill-body" v-model="editBody" :rows="6" :disabled="editSubmitting" />
+            <Textarea id="edit-skill-body" v-model="editBody" :rows="6" />
           </div>
         </form>
         </DialogBody>
         <DialogFooter>
-          <Button
-            variant="outline"
-            type="button"
-            :disabled="editSubmitting"
-            @click="editingSkill = null"
-          >
-            Cancel
-          </Button>
-          <Button type="submit" form="edit-skill-form" :disabled="editSubmitting">
-            {{ editSubmitting ? 'Saving…' : 'Save Changes' }}
-          </Button>
+          <AutosaveStatus :state="editAutosave" />
+          <Button variant="outline" type="button" @click="closeEdit">Close</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

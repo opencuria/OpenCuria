@@ -158,14 +158,14 @@ export const useCredentialStore = defineStore('credentials', () => {
     }
   }
 
-  async function updateCredential(id: string, data: CredentialUpdateIn): Promise<boolean> {
+  async function updateCredential(id: string, data: CredentialUpdateIn, options: { silent?: boolean } = {}): Promise<boolean> {
     try {
       await credentialsApi.updateCredential(id, data)
-      useNotificationStore().success('Credential updated', 'The credential has been updated.')
+      if (!options.silent) useNotificationStore().success('Credential updated', 'The credential has been updated.')
       await fetchCredentials()
       return true
     } catch (e: unknown) {
-      useNotificationStore().error(
+      if (!options.silent) useNotificationStore().error(
         'Update failed',
         e instanceof Error ? e.message : 'Failed to update credential',
       )

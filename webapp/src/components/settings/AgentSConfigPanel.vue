@@ -10,7 +10,6 @@
 -->
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
@@ -25,9 +24,8 @@ import {
   type AgentSConfig,
   type AgentSConfigIn,
 } from '@/services/harness.api'
-import { useNotificationStore } from '@/stores/notifications'
-
-const notifications = useNotificationStore()
+import { useAutosave } from '@/composables/useAutosave'
+import AutosaveStatus from './AutosaveStatus.vue'
 
 /** Client-side bounds mirror `AgentSConfigService._validate` (backend). */
 const DIMENSION_MIN = 1
@@ -39,11 +37,9 @@ const DELAY_MIN = 0
 const DELAY_MAX = 600
 
 const loading = ref(true)
-const saving = ref(false)
 const error = ref<string | null>(null)
 const loaded = ref<AgentSConfig | null>(null)
 const catalog = ref<ProviderModel[]>([])
-const fieldErrors = ref<Record<string, string>>({})
 
 const groundingModel = ref('')
 const groundingWidth = ref('')
@@ -74,7 +70,6 @@ function applyConfig(next: AgentSConfig): void {
   enableReflection.value = next.enable_reflection
   enableCodeAgent.value = next.enable_code_agent
   enableRecording.value = next.enable_recording ?? false
-  fieldErrors.value = {}
 }
 
 async function loadState(): Promise<void> {
@@ -185,47 +180,41 @@ function validate(): ValidatedState {
   return { payload, errors }
 }
 
-const dirty = computed(() => {
-  const base = loaded.value
-  if (!base) return false
-  return (
-    toText(groundingModel.value).trim() !== base.grounding_model ||
-    toText(groundingWidth.value).trim() !== String(base.grounding_width) ||
-    toText(groundingHeight.value).trim() !== String(base.grounding_height) ||
-    toText(temperature.value).trim() !==
-      (base.model_temperature == null ? '' : String(base.model_temperature)) ||
-    toText(maxSteps.value).trim() !== String(base.max_steps) ||
-    toText(maxTrajectoryLength.value).trim() !== String(base.max_trajectory_length) ||
-    toText(screenshotMaxDimension.value).trim() !== String(base.screenshot_max_dimension) ||
-    toText(preDelay.value).trim() !== String(base.action_pre_delay) ||
-    toText(postDelay.value).trim() !== String(base.action_post_delay) ||
-    toText(waitDelay.value).trim() !== String(base.wait_delay) ||
-    enableReflection.value !== base.enable_reflection ||
-    enableCodeAgent.value !== base.enable_code_agent ||
-    enableRecording.value !== (base.enable_recording ?? false)
-  )
-})
+const dirty = computed(
+  () =>
+    Object.keys(validation.value.payload).length > 0 ||
+    Object.keys(validation.value.errors).length > 0,
+)
 
-async function handleSave(): Promise<void> {
-  if (saving.value || !dirty.value) return
-  const { payload, errors } = validate()
-  fieldErrors.value = errors
-  if (Object.keys(errors).length > 0) return
-  if (Object.keys(payload).length === 0) return
-  saving.value = true
-  try {
+const validation = computed(validate)
+const fieldErrors = computed(() => validation.value.errors)
+const autosave = useAutosave({
+  source: () => [
+    groundingModel.value,
+    groundingWidth.value,
+    groundingHeight.value,
+    temperature.value,
+    maxSteps.value,
+    maxTrajectoryLength.value,
+    screenshotMaxDimension.value,
+    preDelay.value,
+    postDelay.value,
+    waitDelay.value,
+    enableReflection.value,
+    enableCodeAgent.value,
+    enableRecording.value,
+  ],
+  dirty: () => dirty.value,
+  enabled: () => !loading.value && !!loaded.value && !error.value,
+  valid: () => Object.keys(fieldErrors.value).length === 0,
+  errorMessage: 'Failed to save Agent-S settings',
+  save: async (isCurrent) => {
+    const payload = { ...validation.value.payload }
+    if (!Object.keys(payload).length) return
     const saved = await saveAgentSConfig(payload)
-    applyConfig(saved)
-    notifications.success('Agent-S settings saved')
-  } catch (e: unknown) {
-    notifications.error(
-      'Failed to save Agent-S settings',
-      e instanceof Error ? e.message : undefined,
-    )
-  } finally {
-    saving.value = false
-  }
-}
+    if (isCurrent()) loaded.value = saved
+  },
+})
 
 onMounted(() => {
   void loadState()
@@ -270,7 +259,7 @@ onMounted(() => {
                 :show-effort="false"
                 manual-fallback
                 variant="field"
-                :disabled="saving"
+
               />
             </div>
           </div>
@@ -600,20 +589,7 @@ onMounted(() => {
         </div>
       </SettingsSection>
 
-      <div class="flex items-center justify-between gap-3">
-        <p class="text-xs text-muted-foreground" data-testid="agent-s-config-status">
-          {{ dirty ? 'Unsaved changes' : 'All changes saved' }}
-        </p>
-        <Button
-          size="sm"
-          :disabled="saving || !dirty"
-          data-testid="save-agent-s-config"
-          @click="handleSave"
-        >
-          <LoadingSpinner v-if="saving" :size="12" />
-          <span v-else>Save Agent-S</span>
-        </Button>
-      </div>
+      <AutosaveStatus :state="autosave" data-testid="agent-s-config-status" />
     </template>
   </div>
 </template>

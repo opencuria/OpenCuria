@@ -1,103 +1,118 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
-
+import { createPinia, setActivePinia } from 'pinia'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import WorkspacePolicyTab from './WorkspacePolicyTab.vue'
 import * as organizationsApi from '@/services/organizations.api'
+import { useAuthStore } from '@/stores/auth'
 
 vi.mock('@/services/organizations.api', () => ({
   getOrganization: vi.fn(),
   updateOrganizationWorkspacePolicy: vi.fn(),
 }))
-
-vi.mock('@/stores/auth', () => ({
-  useAuthStore: () => ({
-    activeOrganizationId: 'org-1',
-  }),
-}))
-
+vi.mock('vue-sonner', () => ({ toast: { error: vi.fn() } }))
+enableAutoUnmount(afterEach)
+afterEach(() => vi.useRealTimers())
+const organization = {
+  id: 'org-1',
+  name: 'Acme',
+  slug: 'acme',
+  role: 'admin' as const,
+  workspace_auto_stop_timeout_minutes: null as number | null,
+  image_versions_to_keep: 2,
+  created_at: '2026-01-01T00:00:00.000Z',
+}
 const getOrganizationMock = vi.mocked(organizationsApi.getOrganization)
 const updatePolicyMock = vi.mocked(organizationsApi.updateOrganizationWorkspacePolicy)
+async function autosave() {
+  await vi.advanceTimersByTimeAsync(500)
+  await flushPromises()
+}
 
 describe('WorkspacePolicyTab', () => {
   beforeEach(() => {
+    setActivePinia(createPinia())
+    useAuthStore().activeOrganizationId = 'org-1'
+    useAuthStore().organizations = [{ ...organization }]
+    vi.useFakeTimers()
     vi.clearAllMocks()
-    getOrganizationMock.mockResolvedValue({
-      id: 'org-1',
-      name: 'Acme',
-      slug: 'acme',
-      role: 'admin',
-      workspace_auto_stop_timeout_minutes: null,
-      image_versions_to_keep: 2,
-      created_at: '2026-01-01T00:00:00.000Z',
-    })
-    updatePolicyMock.mockResolvedValue({
-      id: 'org-1',
-      name: 'Acme',
-      slug: 'acme',
-      role: 'admin',
+    getOrganizationMock.mockResolvedValue({ ...organization })
+    updatePolicyMock.mockImplementation(async (_id, payload) => ({ ...organization, ...payload }))
+  })
+
+  it('loads without a write or Save button and autosaves the policy switch', async () => {
+    const wrapper = mount(WorkspacePolicyTab)
+    await flushPromises()
+    await autosave()
+    expect(updatePolicyMock).not.toHaveBeenCalled()
+    expect(wrapper.text()).not.toContain('Save Policy')
+    expect(wrapper.get('#workspace-auto-stop').attributes('aria-checked')).toBe('false')
+    await wrapper.get('#workspace-auto-stop').trigger('click')
+    await autosave()
+    expect(updatePolicyMock).toHaveBeenCalledWith('org-1', {
       workspace_auto_stop_timeout_minutes: 240,
       image_versions_to_keep: 2,
-      created_at: '2026-01-01T00:00:00.000Z',
     })
+    expect(wrapper.get('[data-testid="workspace-policy-status"]').text()).toBe('All changes saved')
   })
 
-  it('renders the policy switch and enables auto-stop from the disabled state', async () => {
-    const wrapper = mount(WorkspacePolicyTab)
-    await flushPromises()
-
-    expect(wrapper.text()).toContain('Workspace Policy')
-    const toggle = wrapper.get('#workspace-auto-stop')
-    expect(toggle.attributes('aria-checked')).toBe('false')
-
-    await toggle.trigger('click')
-    await flushPromises()
-
-    expect(wrapper.get('#workspace-auto-stop').attributes('aria-checked')).toBe('true')
-    expect(wrapper.get('#auto-stop-minutes').element).toBeTruthy()
-  })
-
-  it('saves the enabled timeout', async () => {
+  it('keeps blank and invalid input local until a valid timeout is entered', async () => {
     getOrganizationMock.mockResolvedValue({
-      id: 'org-1',
-      name: 'Acme',
-      slug: 'acme',
-      role: 'admin',
+      ...organization,
       workspace_auto_stop_timeout_minutes: 60,
-      image_versions_to_keep: 2,
-      created_at: '2026-01-01T00:00:00.000Z',
     })
-
     const wrapper = mount(WorkspacePolicyTab)
     await flushPromises()
-
+    for (const value of ['', '0', '1.5', '10081']) {
+      await wrapper.get('#auto-stop-minutes').setValue(value)
+      await autosave()
+      expect(updatePolicyMock).not.toHaveBeenCalled()
+      expect(wrapper.find('[role="alert"]').exists()).toBe(true)
+    }
     await wrapper.get('#auto-stop-minutes').setValue('120')
-    const save = wrapper.findAll('button').find((b) => b.text().includes('Save Policy'))
-    expect(save).toBeTruthy()
-    await save!.trigger('click')
-    await flushPromises()
-
+    await autosave()
     expect(updatePolicyMock).toHaveBeenCalledWith('org-1', {
       workspace_auto_stop_timeout_minutes: 120,
       image_versions_to_keep: 2,
     })
   })
 
-  it('saves the number of image versions to keep, clamped to at least one', async () => {
+  it('validates retention without rewriting partial input and saves the corrected count', async () => {
     const wrapper = mount(WorkspacePolicyTab)
     await flushPromises()
-
-    const input = wrapper.get('[data-testid="image-versions-to-keep"]')
-    expect((input.element as HTMLInputElement).value).toBe('2')
-    await input.setValue('0')
-    expect((input.element as HTMLInputElement).value).toBe('1')
+    const input = wrapper.get('#image-versions-to-keep')
+    for (const value of ['', '0', '21', '1.5']) {
+      await input.setValue(value)
+      await autosave()
+      expect(updatePolicyMock).not.toHaveBeenCalled()
+    }
     await input.setValue('5')
-    const save = wrapper.findAll('button').find((b) => b.text().includes('Save Policy'))
-    await save!.trigger('click')
-    await flushPromises()
-
+    await autosave()
     expect(updatePolicyMock).toHaveBeenCalledWith('org-1', {
       workspace_auto_stop_timeout_minutes: null,
       image_versions_to_keep: 5,
     })
+  })
+
+  it('retains the form and input after an error and retries in place', async () => {
+    updatePolicyMock.mockRejectedValueOnce(new Error('offline'))
+    const wrapper = mount(WorkspacePolicyTab)
+    await flushPromises()
+    await wrapper.get('#image-versions-to-keep').setValue('4')
+    await autosave()
+    expect(wrapper.get('input').element.value).toBe('4')
+    expect(wrapper.text()).toContain('offline')
+    await wrapper.get('[data-testid="workspace-policy-status"] button').trigger('click')
+    await flushPromises()
+    expect(updatePolicyMock).toHaveBeenCalledTimes(2)
+    expect(wrapper.text()).toContain('All changes saved')
+  })
+  it('shows the policy as read-only to organization members', async () => {
+    useAuthStore().organizations[0]!.role = 'member'
+    const wrapper = mount(WorkspacePolicyTab)
+    await flushPromises()
+    expect(wrapper.get('#workspace-auto-stop').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('#image-versions-to-keep').attributes('disabled')).toBeDefined()
+    await autosave()
+    expect(updatePolicyMock).not.toHaveBeenCalled()
   })
 })

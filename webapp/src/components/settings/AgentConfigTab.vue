@@ -9,7 +9,6 @@
 -->
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
@@ -34,12 +33,10 @@ import {
   saveAgentConfigs,
   type AgentConfigIn,
 } from '@/services/harness.api'
-import { useNotificationStore } from '@/stores/notifications'
-
-const notifications = useNotificationStore()
+import { useAutosave } from '@/composables/useAutosave'
+import AutosaveStatus from './AutosaveStatus.vue'
 
 const loading = ref(true)
-const saving = ref(false)
 const error = ref<string | null>(null)
 const catalog = ref<ProviderModel[]>([])
 const loaded = ref<AgentConfig[]>([])
@@ -147,96 +144,63 @@ function setSubagentEffort(agent: AgentConfigId, effort: string): void {
   }
 }
 
-const modelsDirty = computed(() => {
-  const byAgent = new Map(loaded.value.map((c) => [c.agent, c]))
-  for (const agent of CONFIGURABLE_AGENTS) {
-    const s = agentState(agent)
-    const c = byAgent.get(agent)
-    const isPrimary = (PRIMARY_AGENTS as string[]).includes(agent)
-    const inherit = isPrimary ? false : s.inherit
-    const strategy: string = isPrimary ? 'fixed' : inherit ? s.strategy : 'fixed'
-    const model = inherit ? '' : s.model.trim()
-    const effort = inherit ? '' : s.effort.trim()
-    if (model !== (c?.model ?? '')) return true
-    if (effort !== (c?.effort ?? '')) return true
-    if (inherit !== (c?.inherit_model ?? SUBAGENT_IDS.includes(agent))) return true
-    if (strategy !== (c?.effort_strategy ?? (inherit ? 'inherit' : 'fixed'))) return true
-  }
-  return false
+const changedConfigs = computed<AgentConfigIn[]>(() => {
+  const byAgent = new Map(loaded.value.map((config) => [config.agent, config]))
+  return CONFIGURABLE_AGENTS.map((agent): AgentConfigIn => {
+    const current = agentState(agent)
+    const inherit = !PRIMARY_AGENTS.includes(agent) && current.inherit
+    return {
+      agent,
+      model: inherit ? '' : current.model.trim(),
+      effort: inherit ? '' : current.effort.trim(),
+      inherit_model: inherit,
+      effort_strategy: inherit ? current.strategy : 'fixed',
+    }
+  }).filter((next) => {
+    const previous = byAgent.get(next.agent)
+    const inherited = previous?.inherit_model ?? SUBAGENT_IDS.includes(next.agent as AgentConfigId)
+    return (
+      next.model !== (previous?.model ?? '') ||
+      next.effort !== (previous?.effort ?? '') ||
+      next.inherit_model !== inherited ||
+      next.effort_strategy !== (previous?.effort_strategy ?? (inherited ? 'inherit' : 'fixed'))
+    )
+  })
 })
-
-const dirty = computed(() => modelsDirty.value || depthDirty.value)
 
 const primaryMissing = computed(() =>
   (PRIMARY_AGENTS as string[]).some((a) => !agentState(a as AgentConfigId).model.trim()),
 )
 
-async function handleSave(): Promise<void> {
-  if (
-    saving.value ||
-    !dirty.value ||
-    depthError.value ||
-    (modelsDirty.value && primaryMissing.value)
-  )
-    return
-  saving.value = true
-  try {
-    const payload: AgentConfigIn[] = CONFIGURABLE_AGENTS.map((agent) => {
-      const s = agentState(agent)
-      const isPrimary = (PRIMARY_AGENTS as string[]).includes(agent)
-      if (isPrimary) {
-        return {
-          agent,
-          model: s.model.trim(),
-          effort: s.effort.trim(),
-          inherit_model: false,
-          effort_strategy: 'fixed',
-        }
-      }
-      if (s.inherit) {
-        return { agent, model: '', effort: '', inherit_model: true, effort_strategy: s.strategy }
-      }
-      return {
-        agent,
-        model: s.model.trim(),
-        effort: s.effort.trim(),
-        inherit_model: false,
-        effort_strategy: 'fixed',
-      }
-    })
-    const saves: Promise<void>[] = []
-    const savingModels = modelsDirty.value
-    const savingDepth = depthDirty.value
-    if (savingModels) {
-      saves.push(
-        saveAgentConfigs(payload).then((saved) => {
-          applyConfigs(saved)
-          invalidateAgentConfigs()
-        }),
-      )
+const modelsAutosave = useAutosave({
+  source: () => state.value,
+  dirty: () => changedConfigs.value.length > 0,
+  enabled: () => !loading.value && !error.value,
+  valid: () =>
+    changedConfigs.value.every(
+      (config) => !PRIMARY_AGENTS.includes(config.agent as AgentConfigId) || !!config.model,
+    ),
+  errorMessage: 'Failed to save agent models',
+  save: async (isCurrent) => {
+    const saved = await saveAgentConfigs(changedConfigs.value)
+    if (isCurrent()) {
+      loaded.value = saved
+      invalidateAgentConfigs()
     }
-    if (savingDepth) {
-      saves.push(
-        saveSubagentConfig({ max_depth: parsedMaxDepth.value! }).then((saved) => {
-          loadedMaxDepth.value = saved.max_depth
-          maxDepth.value = String(saved.max_depth)
-        }),
-      )
-    }
-    // Wait for both outcomes so successful parts become the new baseline even on partial failure.
-    const results = await Promise.allSettled(saves)
-    const failed = results.find((result) => result.status === 'rejected')
-    if (failed?.status === 'rejected') throw failed.reason
-    notifications.success(savingDepth ? 'Agent settings saved' : 'Agent models saved')
-  } catch (e: unknown) {
-    notifications.error(
-      depthDirty.value ? 'Failed to save agent settings' : 'Failed to save agent models',
-      e instanceof Error ? e.message : undefined,
-    )
-  } finally {
-    saving.value = false
-  }
-}
+  },
+})
+
+const depthAutosave = useAutosave({
+  source: () => maxDepth.value,
+  dirty: () => depthDirty.value,
+  enabled: () => !loading.value && !error.value,
+  valid: () => !depthError.value,
+  errorMessage: 'Failed to save agent settings',
+  save: async (isCurrent) => {
+    const saved = await saveSubagentConfig({ max_depth: parsedMaxDepth.value! })
+    if (isCurrent()) loadedMaxDepth.value = saved.max_depth
+  },
+})
 
 onMounted(() => {
   void loadState()
@@ -282,7 +246,6 @@ onMounted(() => {
                 effort-fallback="model-default"
                 allow-effort-default
                 default-effort-label="Provider default"
-                :disabled="saving"
               />
             </div>
           </div>
@@ -316,7 +279,6 @@ onMounted(() => {
                 max="2147483647"
                 step="1"
                 data-testid="subagent-max-depth"
-                :disabled="saving"
                 :aria-invalid="!!depthError"
                 :aria-describedby="
                   depthError
@@ -324,6 +286,7 @@ onMounted(() => {
                     : 'subagent-depth-hint subagent-depth-scope'
                 "
               />
+              <AutosaveStatus :state="depthAutosave" data-testid="subagent-depth-status" />
               <p id="subagent-depth-scope" class="text-xs text-muted-foreground">
                 Default: 2 · New runs
               </p>
@@ -364,7 +327,6 @@ onMounted(() => {
                 default-effort-label="Provider default"
                 manual-fallback
                 effort-fallback="model-default"
-                :disabled="saving"
                 @update:model="setSubagentModel(agent, $event)"
                 @update:effort="setSubagentEffort(agent, $event)"
               />
@@ -373,20 +335,7 @@ onMounted(() => {
         </div>
       </SettingsSection>
 
-      <div class="flex items-center justify-between gap-3">
-        <p class="text-xs text-muted-foreground" data-testid="agent-configs-status">
-          {{ dirty ? 'Unsaved changes' : 'All changes saved' }}
-        </p>
-        <Button
-          size="sm"
-          :disabled="saving || !dirty || !!depthError || (modelsDirty && primaryMissing)"
-          data-testid="save-agent-configs"
-          @click="handleSave"
-        >
-          <LoadingSpinner v-if="saving" :size="12" />
-          <span v-else>Save Agents</span>
-        </Button>
-      </div>
+      <AutosaveStatus :state="modelsAutosave" data-testid="agent-configs-status" />
 
       <AgentSConfigPanel />
     </template>

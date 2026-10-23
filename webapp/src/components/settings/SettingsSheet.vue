@@ -30,6 +30,7 @@ import {
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useAuthStore } from '@/stores/auth'
+import { provideAutosaveBoundary } from '@/composables/useAutosave'
 import { cn } from '@/lib/utils'
 import {
   CLOSE_SETTINGS_EVENT,
@@ -53,6 +54,7 @@ const ImageDefinitionsTab = defineAsyncComponent(
 )
 
 const authStore = useAuthStore()
+const flushChanges = provideAutosaveBoundary()
 
 const open = defineModel<boolean>('open', { default: false })
 const activeTab = defineModel<SettingsTabId>('tab', { default: 'general' })
@@ -101,8 +103,8 @@ function openSheet(tab?: unknown): void {
   open.value = true
 }
 
-function selectTab(id: SettingsTabId): void {
-  activeTab.value = id
+async function selectTab(id: SettingsTabId): Promise<void> {
+  if (id !== activeTab.value && (await flushChanges())) activeTab.value = id
 }
 
 function clearCredentialsContext(kind: 'service' | 'credential' | 'finished'): void {
@@ -143,7 +145,8 @@ watch(open, (isOpen) => {
   }
 })
 
-function handleSettingsEvent(event: Event): void {
+async function handleSettingsEvent(event: Event): Promise<void> {
+  if (open.value && !(await flushChanges())) return
   const detail = (
     event as CustomEvent<{
       tab?: unknown
@@ -167,8 +170,12 @@ function handleSettingsEvent(event: Event): void {
   openSheet(detail?.tab)
 }
 
+async function setOpen(value: boolean): Promise<void> {
+  if (value || (await flushChanges())) open.value = value
+}
+
 function closeSheet(): void {
-  open.value = false
+  void setOpen(false)
 }
 onMounted(() => {
   window.addEventListener(OPEN_SETTINGS_EVENT, handleSettingsEvent)
@@ -189,7 +196,7 @@ watch(isAdmin, (admin) => {
 </script>
 
 <template>
-  <Dialog v-model:open="open">
+  <Dialog :open="open" @update:open="setOpen">
     <!-- Width uses the Tailwind v4 important modifier (trailing `!`):
       tailwind-merge already replaces Dialog's `sm:max-w-md` / `w-full`,
       and `!` additionally guards stylesheet order if the class is ever
@@ -282,6 +289,7 @@ watch(isAdmin, (admin) => {
         </div>
         <ScrollArea class="min-h-0 min-w-0 flex-1">
           <div
+            :key="`${authStore.user?.id}:${authStore.activeOrganizationId}`"
             class="mx-auto min-w-0 w-full p-4 lg:p-6"
             :class="detailTab === activeTab ? 'max-w-none' : 'max-w-3xl'"
             role="tabpanel"
