@@ -10,22 +10,16 @@ import sys
 from pathlib import Path
 
 import pytest
+
 from src.runtime.managed_process import MANAGED_CODE
 from src.services.sessions.desktop import DESKTOP_STOP_COMMAND, DESKTOP_STOPPED_PROBE
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.parametrize(
-    "relative_path",
-    [
-        "runner/packer/desktop-session.sh",
-        "backend/apps/runners/scripts/qemu_desktop_session.sh",
-    ],
-)
-def test_provisioned_stop_script_matches_runner(relative_path: str) -> None:
+def test_provisioned_stop_script_matches_runner() -> None:
     """Generated image helpers retain the runner's canonical stop implementation."""
-    source = (ROOT / relative_path).read_text()
+    source = (ROOT / "backend/apps/runners/scripts/qemu_desktop_session.sh").read_text()
     script = source.split("<<'DESKSTOP'\n", 1)[1].split("\nDESKSTOP\n", 1)[0] + "\n"
     assert script == DESKTOP_STOP_COMMAND
 

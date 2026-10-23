@@ -8,7 +8,6 @@ import asyncio
 import json
 import uuid
 from datetime import timedelta
-from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -3013,24 +3012,6 @@ class TestDesktopSessionImageContent:
         assert "startxfce4" not in dockerfile
         assert "WhiteSur" not in dockerfile
         assert "--start-maximized" in dockerfile
-
-    def test_qemu_and_packer_desktop_scripts_stay_in_sync(self):
-        """Backend and Packer QEMU desktop provisioners must stay identical."""
-        backend_script = (
-            Path(__file__).resolve().parents[1] / "scripts" / "qemu_desktop_session.sh"
-        )
-        packer_script = (
-            Path(__file__).resolve().parents[4]
-            / "runner"
-            / "packer"
-            / "desktop-session.sh"
-        )
-
-        assert backend_script.is_file()
-        assert packer_script.is_file()
-        assert backend_script.read_text(encoding="utf-8") == (
-            packer_script.read_text(encoding="utf-8")
-        )
 
 
 @pytest.mark.django_db(transaction=True)

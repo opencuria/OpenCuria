@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # --- QEMU KasmVNC desktop session (XFCE + WhiteSur) ---
-# Keep these two files byte-identical:
-#   backend/apps/runners/scripts/qemu_desktop_session.sh
-#   runner/packer/desktop-session.sh
+# Included in QEMU init scripts generated from app image definitions.
 #
 # Provisions an X11 desktop for KasmVNC: XFCE, WhiteSur theme, Plank dock,
 # Ventura-style wallpaper, rofi launcher, and skippy-xd Exposé. Chrome is a

@@ -27,6 +27,10 @@ provide this; custom images must provide a current Git as well.
 
 ## QEMU image bootstrap
 
+QEMU images are built from image definitions and build jobs in the app. The
+backend generates the init script; the runner builds the QCOW2 image from an
+Ubuntu cloud image.
+
 Each newly provisioned VM gets a fresh
 [cloud-init instance ID](https://docs.cloud-init.io/en/26.1/reference/datasources/nocloud.html#example-creating-a-disk)
 in its seed ISO, independent of the stable workspace ID. This makes reset, update, and cloning
