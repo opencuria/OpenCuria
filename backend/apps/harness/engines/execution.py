@@ -221,14 +221,11 @@ async def execute_external_run(
 
         async def emit(event: dict[str, Any]) -> None:
             await ensure_current()
-            if engine_id == "claude":
-                await service._on_claude_root_event(session, assistant, event)
-            else:
-                await service._on_runner_event(session, assistant, event)
+            await service._on_external_root_event(session, assistant, event)
 
         async def on_child_event(parent_call_id: str, event: dict[str, Any]) -> None:
             await ensure_current()
-            await service._on_claude_child_event(key, parent_call_id, event)
+            await service._on_external_child_event(key, parent_call_id, event)
 
         engine = service._engine_registry_for_run().create(
             engine_id,
@@ -496,8 +493,7 @@ async def execute_external_run(
                             engine_meta=allowed_metadata or None,
                         )
             if context.get("cleanup_confirmed", True):
-                if engine_id == "claude":
-                    await service._finalize_claude_children(session, assistant)
+                await service._finalize_external_children(session, assistant)
                 if status != HarnessRunStatus.ERROR:
                     await service._finalize_run(session, assistant)
                 else:

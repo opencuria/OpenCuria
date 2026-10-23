@@ -6,7 +6,9 @@ import {
   FileText,
   FolderOpen,
   Globe,
+  Image,
   Keyboard,
+  BookText,
   Lightbulb,
   ListTodo,
   MessageCircleQuestion,
@@ -60,6 +62,14 @@ export function toolDisplayIcon(part: HarnessPart): Component {
       return FolderOpen
     case 'task':
       return Network
+    case 'memory':
+      return BookText
+    case 'image_generation':
+      return Image
+    case 'websearch':
+      return Search
+    case 'tool_call':
+      return Wrench
     case 'webfetch':
     case 'open_url':
       return Globe

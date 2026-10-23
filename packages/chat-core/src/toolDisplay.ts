@@ -163,6 +163,24 @@ export function toolDisplayLabel(part: HarnessPart): string {
       return stringArg(args, "url")
         ? `Fetch ${stringArg(args, "url")}`
         : "webfetch";
+    case "websearch": {
+      const query = stringArg(args, "query");
+      const action = stringArg(args, "action");
+      if (!query) return action ? `Web search · ${action}` : "Web search";
+      return `Search ${query}${action ? ` · ${action}` : ""}`;
+    }
+    case "memory": {
+      const operation = stringArg(args, "operation");
+      return operation ? `Memory · ${operation}` : "Memory";
+    }
+    case "image_generation": {
+      const prompt = stringArg(args, "prompt");
+      return prompt ? `Generate image: ${prompt}` : "Generate image";
+    }
+    case "tool_call": {
+      const name = stringArg(args, "name");
+      return name ? `Call ${name}` : "Tool call";
+    }
     case "todowrite":
       return "Update todos";
     case "question":

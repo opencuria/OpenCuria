@@ -111,10 +111,10 @@ def _minimal_pdf() -> bytes:
 
 
 @pytest.mark.asyncio
-async def test_real_cli_reuses_fresh_build_binding_and_recomposes_plan_context(
+async def test_real_cli_reuses_binding_with_minimal_extension_in_plan(
     tmp_path: Path,
 ) -> None:
-    """A fresh build transcript resumes in plan with updated project context."""
+    """Native history resumes without adding OpenCuria-composed project context."""
     _require_pinned_cli()
     session_id = "c391aac1-8040-46ce-bcac-ff26a7f66324"
     store = FixtureSessionStore()
@@ -144,7 +144,9 @@ async def test_real_cli_reuses_fresh_build_binding_and_recomposes_plan_context(
     assert external_id
     uuid.UUID(external_id)
     _assert_cli_permission_mode(build_accessor, "build")
-    assert any("BUILD_CONTEXT_MARKER" in _system_text(item) for item in build_requests)
+    assert not any(
+        "BUILD_CONTEXT_MARKER" in _system_text(item) for item in build_requests
+    )
 
     context_path.write_text("PLAN_CONTEXT_MARKER: revised project rules\n")
     plan_target = "resumed-plan-bash.txt"
@@ -200,7 +202,7 @@ async def test_real_cli_reuses_fresh_build_binding_and_recomposes_plan_context(
 
     system_text = "\n".join(_system_text(item) for item in plan_requests)
     assert "# Available tools" not in system_text
-    assert "PLAN_CONTEXT_MARKER" in system_text
+    assert "PLAN_CONTEXT_MARKER" not in system_text
     assert "BUILD_CONTEXT_MARKER" not in system_text
     assert "Remember the build-history marker" not in system_text
     assert "ORIGINAL_USER_TURN" in json.dumps(plan_requests)
@@ -439,10 +441,10 @@ async def test_real_cli_root_plan_write_still_requires_explicit_approval(
 
 
 @pytest.mark.asyncio
-async def test_real_cli_provider_schemas_keep_native_read_and_scope_mcp_prompt(
+async def test_real_cli_keeps_native_read_and_mcp_schemas_without_prompt_duplicates(
     tmp_path: Path,
 ) -> None:
-    """Native schemas stay CLI-owned; only OpenCuria MCP tools are summarized."""
+    """Native and MCP schemas are available without duplicated prompt tool lists."""
     _require_pinned_cli()
     registry = default_tool_registry()
     note = WriteNoteTool()
@@ -509,9 +511,9 @@ async def test_real_cli_provider_schemas_keep_native_read_and_scope_mcp_prompt(
     mcp_name = f"mcp__opencuria__{note.name}"
     assert names.count(mcp_name) == 1
     system = _system_text(provider_request)
-    assert "# OpenCuria tools" in system
+    assert "# OpenCuria tools" not in system
     assert "# Available tools" not in system
-    assert f"- {mcp_name}:" in system
+    assert f"- {mcp_name}:" not in system
     assert "- Read:" not in system and "- Bash:" not in system
     assert "Independent tool calls in one assistant message" not in system
     assert not any(name.lower() == "read" for name in names if name != "Read")
@@ -589,32 +591,29 @@ async def test_real_cli_hydrates_png_and_pdf_file_references_once(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("subagent_type", "system_marker", "agent_phrase", "mode"),
+    ("subagent_type", "system_marker", "mode"),
     [
-        ("general", "You are opencuria general", "helpful subagent", "build"),
-        ("general", "You are opencuria general", "helpful subagent", "plan"),
+        ("general", "You are opencuria general", "build"),
+        ("general", "You are opencuria general", "plan"),
         (
             "explore",
             "You are opencuria explore",
-            "Read-only research subagent",
             "build",
         ),
         (
             "explore",
             "You are opencuria explore",
-            "Read-only research subagent",
             "plan",
         ),
     ],
 )
-async def test_real_cli_task_child_gets_project_context_and_scoped_tools(
+async def test_real_cli_task_child_gets_minimal_identity_and_scoped_tools(
     tmp_path: Path,
     subagent_type: str,
     system_marker: str,
-    agent_phrase: str,
     mode: str,
 ) -> None:
-    """Native Task/Agent children receive their own context and tool scope."""
+    """Native Task/Agent children retain identity and tool scope without extra prose."""
     _require_pinned_cli()
     task_args = {
         "description": f"Inspect the {subagent_type} fixture scope.",
@@ -667,8 +666,10 @@ async def test_real_cli_task_child_gets_project_context_and_scoped_tools(
     assert task_call["description"] == task_args["description"]
     assert task_call["prompt"] == task_args["prompt"]
     assert task_call["subagent_type"] == subagent_type
-    assert "CHILD_PROJECT_CONTEXT_MARKER" in system
-    assert agent_phrase in system
+    assert "CHILD_PROJECT_CONTEXT_MARKER" not in system
+    assert "working inside an OpenCuria workspace" in system
+    assert "# OpenCuria tools" not in system
+    assert "# Environment" not in system
 
     names = [str(item.get("name") or "") for item in _tool_schemas(child_request)]
     assert "Read" in names

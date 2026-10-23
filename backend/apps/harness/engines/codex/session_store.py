@@ -45,6 +45,7 @@ def validate_snapshot(record: dict[str, Any], home: str) -> None:
             not isinstance(name, str)
             or not re.fullmatch(
                 r"(?:(?:state|thread_history|queue|goals|memories)_\d+\.sqlite|"
+                r"memories/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+\.md|"
                 r"(?:sessions|archived_sessions)/\d{4}/\d{2}/\d{2}/rollout-[A-Za-z0-9T_.:-]+\.jsonl)",
                 name,
             )
@@ -200,3 +201,30 @@ async def capture(accessor: WorkspaceAccessor, home: str) -> dict[str, Any]:
     record = json.loads(payload)
     validate_snapshot(record, home)
     return record
+
+
+async def materialize_skills(
+    accessor: WorkspaceAccessor, home: str, skills: list[str]
+) -> None:
+    """Publish selected skill bodies through native Codex discovery, not prompts."""
+    if not isinstance(skills, list) or len(skills) > 128:
+        raise ValueError("Codex skills must be a list of at most 128 bodies")
+    if any(not isinstance(x, str) or len(x.encode()) > 64 * 1024 for x in skills):
+        raise ValueError("Codex skill body exceeds the managed size limit")
+    payload = json.dumps(skills, ensure_ascii=False).encode()
+    await state_action(accessor, "prepare", home)
+    parent = home.rsplit("/", 1)[0]
+    chunks = [
+        payload[i : i + 4 * 1024 * 1024]
+        for i in range(0, len(payload), 4 * 1024 * 1024)
+    ]
+    for i, chunk in enumerate(chunks):
+        await accessor.write_file(f"{parent}/restore-{i}.part", chunk, mode=0o600)
+    await state_action(
+        accessor,
+        "assemble",
+        home,
+        str(len(chunks)),
+        hashlib.sha256(payload).hexdigest(),
+    )
+    await state_action(accessor, "skills", home)

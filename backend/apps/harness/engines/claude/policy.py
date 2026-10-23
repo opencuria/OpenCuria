@@ -90,10 +90,10 @@ def tool_identity(
         )
 
     if raw_name == "WebSearch":
-        return "WebSearch", "websearch", str(arguments.get("query", "") or "")
+        return "websearch", "websearch", str(arguments.get("query", "") or "")
 
     if raw_name == "WebFetch":
-        return "WebFetch", "webfetch", str(arguments.get("url", "") or "")
+        return "webfetch", "webfetch", str(arguments.get("url", "") or "")
 
     if raw_name.startswith("mcp__"):
         parts = raw_name.split("__", 2)

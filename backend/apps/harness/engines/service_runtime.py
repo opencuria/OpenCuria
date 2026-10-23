@@ -60,6 +60,7 @@ def _create_codex_engine(**kwargs: Any) -> HarnessEngine:
         engine_state=kwargs.get("engine_state"),
         session_store=kwargs.get("session_store"),
         on_binding=kwargs.get("on_binding"),
+        on_child_event=kwargs.get("on_child_event"),
         on_owner=kwargs.get("on_owner"),
         evaluator=kwargs.get("evaluator"),
         effort=kwargs.get("effort", "low"),

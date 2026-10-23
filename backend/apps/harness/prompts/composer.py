@@ -33,6 +33,7 @@ import structlog
 
 from ..access.base import HARNESS_WORKSPACE_ROOT
 from ..agents.definitions import AgentDefinition
+from .native import PROACTIVE_WORKSPACE_INSTRUCTIONS
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard for typing only
     from ..access.base import WorkspaceAccessor
@@ -230,15 +231,7 @@ async def compose_system_prompt(
             "changing them."
         )
         if agent.name != "explore":
-            env_lines.append(
-                "In this disposable environment, take initiative: start/restart "
-                "development servers, install missing packages, run migrations "
-                "on workspace-local test data, and test relevant flows in the "
-                "running app. "
-                "Do routine local setup and testing yourself, without "
-                "unnecessary confirmation. Investigate failures yourself; "
-                "preserve existing user work."
-            )
+            env_lines.append(PROACTIVE_WORKSPACE_INSTRUCTIONS)
     if mode == "plan":
         if agent.name == "explore":
             env_lines.append(

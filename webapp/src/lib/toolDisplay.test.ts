@@ -83,6 +83,29 @@ describe('toolDisplayLabel', () => {
         }),
       ),
     ).toBe('Read a.ts')
+    expect(
+      toolDisplayLabel(
+        makePart({
+          tool: 'websearch',
+          input: { arguments: '{"query":"climate","action":"news"}' },
+        }),
+      ),
+    ).toBe('Search climate · news')
+    expect(
+      toolDisplayLabel(
+        makePart({ tool: 'memory', input: { arguments: '{"operation":"recall"}' } }),
+      ),
+    ).toBe('Memory · recall')
+    expect(
+      toolDisplayLabel(
+        makePart({ tool: 'image_generation', input: { arguments: '{"prompt":"blue bird"}' } }),
+      ),
+    ).toBe('Generate image: blue bird')
+    expect(
+      toolDisplayLabel(
+        makePart({ tool: 'tool_call', input: { arguments: '{"name":"calculator"}' } }),
+      ),
+    ).toBe('Call calculator')
   })
 })
 

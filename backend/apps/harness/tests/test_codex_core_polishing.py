@@ -177,7 +177,7 @@ async def test_stable_ceiling_dispatch_uses_live_role_depth_and_policy() -> None
         model="model",
         allowed=allowed,
     )
-    assert result["success"] is False and len(requests) == 1
+    assert result["success"] is False and requests == []
     # Default general policy must stay YOLO even beneath a plan parent.
     assert (
         invoker._decide(get_agent("general"), "write", "/workspace/a", "plan")
@@ -384,8 +384,8 @@ async def test_pdf_workspace_read_is_authorized_and_no_follow(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_explore_managed_safe_bash_remains_available() -> None:
-    """Readonly native sandbox does not remove managed allowlisted shell reads."""
+async def test_explore_never_exposes_duplicate_managed_bash() -> None:
+    """Even a forced allowed name cannot execute duplicate managed shell tools."""
     from apps.harness.access.base import ExecResult
 
     class ReadAccessor:
@@ -406,8 +406,8 @@ async def test_explore_managed_safe_bash_remains_available() -> None:
         model="model",
         allowed={"bash"},
     )
-    assert result["success"] is True
-    assert "source.py" in str(result)
+    assert result["success"] is False
+    assert "not authorized" in str(result)
 
 
 def test_claude_compatibility_modules_keep_monkeypatch_seams(monkeypatch) -> None:

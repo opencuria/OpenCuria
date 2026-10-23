@@ -22,6 +22,8 @@ from apps.harness.engines.codex.session_store import home_for, validate_snapshot
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.runner import RunOptions
 from apps.harness.tools import default_tool_registry
+from apps.harness.tools.base import ToolRegistry
+from apps.harness.tools.files import WriteTool
 
 PINNED = Path(
     os.environ.get(
@@ -30,6 +32,19 @@ PINNED = Path(
         / ".opencuria/codex-test-runtime/package/bin/codex-app-server",
     )
 )
+
+
+class McpWriteTool(WriteTool):
+    """A registered MCP edit verifies the retained extension permission boundary."""
+
+    name = "mcp_test_write"
+
+
+def extension_registry() -> ToolRegistry:
+    """Keep core tools in the registry, but advertise only CLI extensions."""
+    registry = default_tool_registry()
+    registry.register(McpWriteTool())
+    return registry
 
 
 class ByteStream:
@@ -205,7 +220,7 @@ async def fixture_run(
     *,
     mode="build",
     agent="build",
-    tool="write",
+    tool="mcp_test_write",
     args=None,
     code: str | None = None,
     evaluator: PermissionEvaluator | None = None,
@@ -213,6 +228,10 @@ async def fixture_run(
     cancel_on_native=False,
     fail_checkpoint=False,
     resume_modes=(),
+    fixture_files=None,
+    skills=(),
+    namespace=None,
+    response_item=None,
 ):
     if not PINNED.exists():
         pytest.skip("Pinned Codex binary unavailable; set OPENCURIA_TEST_CODEX_BINARY")
@@ -223,8 +242,12 @@ async def fixture_run(
         nonlocal calls
         body = await request.json()
         requests.append(body)
-        calls += 1
-        if calls % 2 and tool:
+        auxiliary = body.get("model") != "~test/model"
+        if not auxiliary:
+            calls += 1
+        if not auxiliary and calls % 2 and response_item:
+            item = {"id": f"native_{calls}", **response_item}
+        elif not auxiliary and calls % 2 and tool:
             item = {
                 "id": f"fc_{calls}",
                 "type": "function_call",
@@ -234,6 +257,8 @@ async def fixture_run(
                     args or {"path": "note.txt", "content": "codex local test"}
                 ),
             }
+            if namespace:
+                item["namespace"] = namespace
             if code is not None:
                 item.update(type="custom_tool_call", input=code)
                 del item["arguments"]
@@ -319,6 +344,8 @@ async def fixture_run(
     await site.start()
     port = site._server.sockets[0].getsockname()[1]
     accessor = LocalAccessor(tmp_path / "workspace")
+    for path, content in (fixture_files or {}).items():
+        await accessor.write_file("/workspace/" + path, content)
     store = MemoryStore(fail_save=fail_checkpoint)
     state = {}
     events = []
@@ -354,7 +381,7 @@ async def fixture_run(
     )
     try:
         engine = CodexEngine(
-            tools=default_tool_registry(),
+            tools=extension_registry(),
             accessor=accessor,
             auth=auth,
             emit=emit,
@@ -368,7 +395,9 @@ async def fixture_run(
                 agent,
                 "openrouter/test/model",
                 mode,
-                RunOptions(session_id=session, on_permission=permission),
+                RunOptions(
+                    session_id=session, on_permission=permission, skills=list(skills)
+                ),
             )
         )
         if cancel_on_native:
@@ -388,7 +417,7 @@ async def fixture_run(
         for next_agent, next_mode in [(agent, mode)] if resume else resume_modes:
             shutil.rmtree(accessor.path(home_for(session)))
             engine = CodexEngine(
-                tools=default_tool_registry(),
+                tools=extension_registry(),
                 accessor=accessor,
                 auth=auth,
                 emit=emit,
@@ -404,7 +433,11 @@ async def fixture_run(
                     next_agent,
                     "openrouter/test/model",
                     next_mode,
-                    RunOptions(session_id=session, on_permission=permission),
+                    RunOptions(
+                        session_id=session,
+                        on_permission=permission,
+                        skills=list(skills),
+                    ),
                 ),
                 35,
             )
@@ -532,8 +565,10 @@ async def test_real_codex_build_native_shell_write_no_approvals(tmp_path):
     assert not permissions
     assert accessor.path("/workspace/native.txt").exists(), events
     assert accessor.path("/workspace/native.txt").read_text() == "native-verified"
-    assert sum(e["type"] == "tool_started" for e in events) == 1
-    assert sum(e["type"] == "tool_completed" for e in events) == 1
+    assert sum(e["type"] == "tool_started" and e["tool"] == "bash" for e in events) == 1
+    assert (
+        sum(e["type"] == "tool_completed" and e["tool"] == "bash" for e in events) == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -562,7 +597,10 @@ async def test_real_codex_code_mode_managed_write_respects_permissions(
         agent=agent,
         mode=mode,
         tool="exec",
-        code='text(await tools.write({path:"note.txt",content:"code-mode write"}));',
+        code=(
+            "text(await tools.mcp_test_write("
+            '{path:"note.txt",content:"code-mode write"}));'
+        ),
         evaluator=PermissionEvaluator(global_rules={"edit": "deny"}) if deny else None,
     )
     assert result.output == "Local done."

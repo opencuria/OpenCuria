@@ -8,14 +8,16 @@ import hashlib
 import json
 import uuid
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
+from dataclasses import replace
 from typing import Any, TypeVar
 
 from ...access.base import WorkspaceAccessor, sanitize_exec_workdir
-from ...agents.definitions import get_agent, subagent_descriptions
+from ...agents.definitions import get_agent
 from ...desktop_leases import DesktopLease
 from ...permissions.evaluator import PermissionEvaluator
-from ...prompts.composer import compose_system_prompt
-from ...providers.base import ToolSchema, Usage
+from ...prompts.native import native_prompt_extension
+from ...providers.base import Usage
 from ...runner import RunOptions, RunResult
 from ...tools.base import ToolRegistry
 from ..shared.security import StreamingRedactor, redact_text, redact_value
@@ -23,12 +25,14 @@ from .auth import CodexAuthConfiguration
 from .catalog import CODEX_VERSION, codex_provider
 from .configuration import _toml, runtime_argv, runtime_settings
 from .errors import CodexRecoveryError
+from .events import CodexEventProjector
 from .media import user_input
 from .protocol import CodexProtocol, CodexProtocolError, CodexRPCError
 from .session_store import (
     CodexSessionStore,
     capture,
     home_for,
+    materialize_skills,
     restore_snapshot,
     state_action,
 )
@@ -69,6 +73,7 @@ class CodexEngine:
         engine_state: dict[str, Any] | None = None,
         session_store: CodexSessionStore | None = None,
         on_binding: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+        on_child_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
         on_owner: Callable[[dict[str, Any], str], Awaitable[None]] | None = None,
         evaluator: PermissionEvaluator | None = None,
         effort: str = "low",
@@ -85,6 +90,11 @@ class CodexEngine:
         self.engine_state = dict(engine_state or {})
         self.session_store = session_store
         self.on_binding, self.on_owner = on_binding, on_owner
+        self.on_child_event = on_child_event
+        self.projector = CodexEventProjector(self)
+        self._child_scope: ContextVar[str | None] = ContextVar(
+            "codex_child", default=None
+        )
         self.evaluator, self.effort = evaluator, effort
         self._owner_released = False
         self._running = False
@@ -103,8 +113,12 @@ class CodexEngine:
 
     async def _send(self, event: dict[str, Any]) -> None:
         """Project all persisted/visible engine events through current secrets."""
-        if self.emit:
-            await self.emit(redact_value(event, self.secret_values))
+        safe = redact_value(event, self.secret_values)
+        parent = self._child_scope.get()
+        if parent and self.on_child_event:
+            await self.on_child_event(parent, safe)
+        elif self.emit:
+            await self.emit(safe)
 
     async def _bind(self, **state: Any) -> None:
         """Publish checkpoint metadata through the execution owner fence."""
@@ -153,22 +167,41 @@ class CodexEngine:
             }
         if method == "item/tool/call" and not self.turn_ready.is_set():
             await asyncio.wait_for(self.turn_ready.wait(), 5)
+        child = self.projector.children.get(params.get("threadId"))
         if (
-            params.get("threadId") != self.thread_id
+            (params.get("threadId") != self.thread_id and child is None)
             or not self.turn_id
-            or params.get("turnId") != self.turn_id
             or self.terminal.is_set()
+            or (child is None and params.get("turnId") != self.turn_id)
+            or (
+                child
+                and (
+                    child["finished"]
+                    or not params.get("turnId")
+                    or child.get("turn_id") not in {None, params.get("turnId")}
+                )
+            )
         ):
             raise RuntimeError("Stale Codex server request rejected")
         if method == "item/tool/call":
-            return await self.invoker.invoke(
-                params,
-                agent=self.agent,
-                mode=self.mode,
-                opts=self.opts,
-                model=self.model,
-                allowed=self.allowed,
+            token = self._child_scope.set(
+                child["parent_tool_use_id"] if child else None
             )
+            try:
+                return await self.invoker.invoke(
+                    params,
+                    agent=get_agent("general") if child else self.agent,
+                    mode=self.mode,
+                    opts=replace(self.opts, depth=self.opts.depth + 1)
+                    if child
+                    else self.opts,
+                    model=self.model,
+                    allowed=self.allowed,
+                )
+            finally:
+                self._child_scope.reset(token)
+        if method == "mcpServer/elicitation/request":
+            return {"action": "decline"}  # No automatic consent to native MCP prompts.
         if method.endswith("/requestApproval"):
             return {"decision": "decline"}
         # Built-in user questions cannot represent OpenCuria's persistent gates.
@@ -313,34 +346,10 @@ class CodexEngine:
         settings, provider_name, wire_model = runtime_settings(
             self.auth, model, readonly=readonly
         )
-        # Untrusted prevents loading workspace .codex/config.toml. The backend
-        # composes AGENTS/selected skill context independently. Explicit native
-        # approval/sandbox overrides below remain authoritative for build/plan.
-        settings["projects"] = {cwd: {"trust_level": "untrusted"}}
-        composed = await compose_system_prompt(
-            agent=self.agent,
-            mode=mode,
-            tools=[
-                ToolSchema(
-                    name=x["name"],
-                    description=x["description"],
-                    parameters=x["inputSchema"],
-                )
-                for x in schemas
-            ],
-            subagents=subagent_descriptions(),
-            accessor=self.accessor,
-            cwd=cwd,
-            skills=opts.skills,
-        )
-        instructions = (
-            composed.system
-            + "\nNative delegation, plugins, MCP discovery and hooks are disabled. "
-            "Use OpenCuria task for delegation and question for user questions. "
-            "In plan mode use managed bash/process tools for shell research and "
-            "managed edit/write (which request approval) for direct changes. "
-            "Historical tool calls are context only: never replay them."
-        )
+        # This is an authorized disposable workspace. Let Codex discover its
+        # native project instructions, skills, MCP servers and configuration.
+        settings["projects"] = {cwd: {"trust_level": "trusted"}}
+        instructions = native_prompt_extension(self.agent)
         if opts.authorize_file_read is None:
             opts.authorize_file_read = self._authorize_read
         content = await user_input(
@@ -368,8 +377,7 @@ class CodexEngine:
         self.items = {}
         self.streamed = {}
         self.redactors = {}
-        self.native = set()
-        self.finished_native = set()
+        self.projector = CodexEventProjector(self)
         self.usage = Usage()
         self.total_text_bytes = 0
         try:
@@ -394,6 +402,7 @@ class CodexEngine:
                 await restore_snapshot(self.accessor, home, checkpoint["snapshot"])
             else:
                 await state_action(self.accessor, "fresh", home)
+            await materialize_skills(self.accessor, home, opts.skills)
             config = "\n".join(
                 f"{key} = {_toml(value)}" for key, value in settings.items()
             )
@@ -441,8 +450,7 @@ class CodexEngine:
                 "approvalPolicy": "never",
                 "sandbox": "read-only" if readonly else "danger-full-access",
                 "config": settings,
-                "baseInstructions": instructions,
-                "developerInstructions": "",
+                "developerInstructions": instructions,
                 "runtimeWorkspaceRoots": [cwd],
             }
             if self.external_session_id:
@@ -512,8 +520,8 @@ class CodexEngine:
                     "cli_version": CODEX_VERSION,
                     "model": model,
                     "reasoning_effort": self.effort,
-                    "context_sources": list(composed.sources),
-                    "context_truncated": bool(composed.truncated),
+                    "context_sources": [],
+                    "context_truncated": False,
                 },
             )
         except BaseException as exc:
@@ -586,19 +594,7 @@ class CodexEngine:
                 except Exception as exc:
                     callback_error = callback_error or exc
                 await asyncio.wait_for(self.invoker.finish_abandoned(), 3)
-                for call_id in self.native - self.finished_native:
-                    await asyncio.wait_for(
-                        self._send(
-                            {
-                                "type": "tool_error",
-                                "step": 1,
-                                "call_id": call_id,
-                                "tool": "bash",
-                                "error": "Codex run ended before tool completion",
-                            }
-                        ),
-                        3,
-                    )
+                await asyncio.wait_for(self.projector.finish(), 5)
                 if callback_error and error is None:
                     raise callback_error
                 if (error is None and result is not None) or (
@@ -646,6 +642,7 @@ class CodexEngine:
         """Map only current-turn notifications into canonical harness events."""
         method, params = message.get("method"), message.get("params", {})
         if params.get("threadId") != self.thread_id:
+            await self.projector.child_notification(message)
             return
         turn = params.get("turn") or {}
         event_turn = params.get("turnId") or turn.get("id")
@@ -744,9 +741,9 @@ class CodexEngine:
     async def _item(self, item: dict[str, Any], *, completed: bool) -> None:
         """Emit balanced tool lifecycles and authoritative final text snapshots."""
         key, kind = item.get("id"), item.get("type")
-        if len(self.items) + len(self.native) > 4096:
+        if len(self.items) + len(self.projector.calls) > 4096:
             raise ValueError("Codex item count limit reached")
-        if not key or kind in {"dynamicToolCall", "userMessage"}:
+        if not key or kind == "userMessage":
             return
         if kind in {"agentMessage", "reasoning"} and completed:
             if kind == "agentMessage":
@@ -761,6 +758,12 @@ class CodexEngine:
             redactor = self.redactors.pop(key, None)
             suffix = text[len(accumulated) :] if text.startswith(accumulated) else ""
             visible = redactor.push(suffix, final=True) if redactor else text
+            citation = item.get("memoryCitation")
+            if kind == "agentMessage" and isinstance(citation, dict):
+                await self.projector.item(
+                    {"type": "memory", "id": f"{key}:memory", **citation},
+                    completed=True,
+                )
             # Persisted final snapshots, not the deltas, form RunResult.
             # A non-prefix revision is never appended as duplicate text.
             if visible and not previous:
@@ -774,55 +777,8 @@ class CodexEngine:
                     }
                 )
             return
-        if kind not in {"commandExecution", "fileChange", "webSearch", "mcpToolCall"}:
+        if kind == "contextCompaction":
+            if completed:
+                await self._send({"type": "compaction", "auto": True})
             return
-        tool = {
-            "commandExecution": "bash",
-            "fileChange": "edit",
-            "webSearch": "webfetch",
-            "mcpToolCall": "mcp",
-        }[kind]
-        if key not in self.native:
-            self.native.add(key)
-            event = {
-                "step": 1,
-                "call_id": key,
-                "tool": tool,
-                "title": str(item.get("command") or kind),
-                "arguments": json.dumps(
-                    {"command": item.get("command", "")}
-                    if kind == "commandExecution"
-                    else {}
-                ),
-            }
-            await self._send({"type": "tool_queued", **event})
-            await self._send({"type": "tool_started", **event})
-        if completed and key not in self.finished_native:
-            self.finished_native.add(key)
-            failed = item.get("status") in {"failed", "declined"} or item.get(
-                "exitCode", 0
-            ) not in {0, None}
-            output = str(
-                item.get("aggregatedOutput") or json.dumps(item.get("changes") or [])
-            )[:100000]
-            await self._send(
-                {
-                    "type": "tool_error" if failed else "tool_completed",
-                    "step": 1,
-                    "call_id": key,
-                    "tool": tool,
-                    "error" if failed else "output": output,
-                }
-            )
-            if kind == "fileChange":
-                for change in item.get("changes", []):
-                    await self._send(
-                        {
-                            "type": "patch",
-                            "step": 1,
-                            "call_id": key,
-                            "tool": "edit",
-                            "path": change.get("path", ""),
-                            "unified_diff": str(change.get("diff") or "")[:131072],
-                        }
-                    )
+        await self.projector.item(item, completed=completed)

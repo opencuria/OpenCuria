@@ -23,7 +23,8 @@ from ...access.base import (
 from ...agents.definitions import AgentDefinition, get_agent
 from ...constants import DEFAULT_MAX_DEPTH
 from ...permissions.evaluator import DEFAULT_GLOBAL_RULES, PermissionEvaluator
-from ...prompts.composer import compose_system_prompt
+from ...prompts.composer import ComposedPrompt
+from ...prompts.native import native_prompt_extension
 from ...providers.base import ToolSchema, Usage
 from ...runner import RunOptions, RunResult
 from ...tools.base import ToolContext, ToolRegistry, ToolResult
@@ -699,21 +700,7 @@ class ClaudeEngine:
             schemas = self._bridge_schemas_for_sdk(
                 self._schemas(child, self._mode, depth, options.max_depth)
             )
-            prompt = await compose_system_prompt(
-                agent=child,
-                mode=self._mode,
-                accessor=self.accessor,
-                cwd=self._cwd,
-                tools=self._prompt_tools(schemas),
-                native_tool_contracts=True,
-                skills=list(options.skills) if child.name != "explore" else [],
-                subagents={},
-            )
-            system = (
-                self._claude_system_prompt(prompt.system, self._mode)
-                if child.name != "explore"
-                else prompt.system
-            )
+            system = native_prompt_extension(child)
             if len(system.encode()) > MAX_MANAGED_PROMPT_BYTES:
                 raise ValueError("Claude child prompt exceeds the managed size limit")
             definitions[child.name] = SdkAgentDefinition(
@@ -1594,21 +1581,8 @@ class ClaudeEngine:
         self._managed_skill_names = set(skill_names)
         if agent.name == "explore":
             self._managed_skill_names.clear()
-        composed = await compose_system_prompt(
-            agent=agent,
-            mode=mode,
-            tools=self._prompt_tools(sdk_schemas),
-            native_tool_contracts=True,
-            subagents={},
-            accessor=self.accessor,
-            cwd=self._cwd,
-            skills=skills,
-        )
-        system = (
-            self._claude_system_prompt(composed.system, mode)
-            if agent.name != "explore"
-            else composed.system
-        )
+        composed = ComposedPrompt(system=native_prompt_extension(agent))
+        system = composed.system
         if len(system.encode()) > MAX_MANAGED_PROMPT_BYTES:
             raise ValueError(
                 "Composed Claude system prompt exceeds the managed size limit"

@@ -28,6 +28,8 @@ def regular(p,limit=MAX):
     return s
 def valid(name):
     if DB.fullmatch(name): return True
+    memory=r'memories/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+\.md'
+    if re.fullmatch(memory,name): return True
     pattern=(r'(?:sessions|archived_sessions)/\d{4}/\d{2}/\d{2}/'
              r'rollout-[A-Za-z0-9T_.:-]+\.jsonl')
     return bool(re.fullmatch(pattern,name))
@@ -98,7 +100,7 @@ elif action=='fresh':
 elif action=='snapshot':
     dirs(root);files=[];total=0
     paths=list(root.iterdir())
-    for subtree in ('sessions','archived_sessions'):
+    for subtree in ('sessions','archived_sessions','memories'):
         base=root/subtree
         if base.exists():
             dirs(base)
@@ -144,6 +146,25 @@ elif action=='purge':
     for p in root.parent.glob('snapshot-*.part'):
         assert re.fullmatch(r'snapshot-\d+\.part',p.name)
         p.unlink()
+elif action=='skills':
+    bodies=json.loads(read(root.parent/'restore.json'))
+    assert isinstance(bodies,list) and len(bodies)<=128
+    base=root/'skills';dirs(base)
+    for target in base.glob('opencuria-skill-*'):
+        assert re.fullmatch(r'opencuria-skill-\d{3}',target.name)
+        dirs(target);shutil.rmtree(target)
+    for index,body in enumerate(bodies):
+        assert isinstance(body,str) and len(body.encode())<=64*1024
+        if not body.strip(): continue
+        name='opencuria-skill-'+str(index+1).zfill(3)
+        target=base/name;dirs(target)
+        payload=body.strip()
+        if not payload.startswith('---\n'):
+            header='---\nname: '+name+'\ndescription: OpenCuria selected skill\n---\n\n'
+            payload=header+payload
+        fd=os.open(target/'SKILL.md',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'wb') as f:f.write(payload.encode())
+    (root.parent/'restore.json').unlink()
 elif action=='config':
     dirs(root)
     data=base64.b64decode(sys.argv[3],validate=True);assert len(data)<512*1024

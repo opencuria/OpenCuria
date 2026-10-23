@@ -12,10 +12,21 @@ from ...agents.definitions import AgentDefinition
 from ...permissions.evaluator import PermissionEvaluator
 from ...permissions.scopes import is_permission_scope, permission_scope
 from ...runner import RunOptions
-from ...tools.base import ToolContext, ToolRegistry
+from ...tools.base import Tool, ToolContext, ToolRegistry
 from ...tools.invocation import AuthorizedToolDispatcher, _PendingToolCall
 from ..shared.security import redact_action, redact_title
 from ..shared.shellpolicy import shell_command_is_explore_safe
+
+
+def is_extension_tool(tool: Tool) -> bool:
+    """Expose the same small integration surface as Claude, never native duplicates."""
+    name = tool.name.strip().lower()
+    key = (tool.permission_key or name).strip().lower()
+    return (
+        name in {"question", "todowrite"}
+        or name.startswith(("process_", "mcp_"))
+        or key.startswith("mcp_")
+    )
 
 
 class ManagedToolInvoker(AuthorizedToolDispatcher):
@@ -131,6 +142,7 @@ class ManagedToolInvoker(AuthorizedToolDispatcher):
                 "inputSchema": tool.parameters_schema(),
             }
             for tool in self.tools.list()
+            if is_extension_tool(tool)
         ]
 
     async def invoke(
@@ -167,6 +179,7 @@ class ManagedToolInvoker(AuthorizedToolDispatcher):
         if (
             not call_id
             or name not in allowed
+            or name not in {x["name"] for x in self.schemas(agent, mode, opts)}
             or not isinstance(args, dict)
             or params.get("namespace")
             or (name == "task" and opts.run_subagent is None)

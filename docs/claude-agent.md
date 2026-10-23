@@ -46,6 +46,15 @@ native harness. Usage and billing follow the account for the token you provide;
 CLI-reported cost is usage information, not an Anthropic invoice. See Anthropic's
 [Claude Code legal and compliance information](https://docs.anthropic.com/en/docs/claude-code/legal-and-compliance).
 
+## Native prompt and tools
+
+Claude Code retains its native system-prompt preset. OpenCuria appends only a
+short identity and the shared proactive-workspace paragraph; it no longer inlines
+its own role policy, environment, project files, tool descriptions or skill bodies
+in that extension. Native context loading remains Claude-owned; selected skills
+continue to use the existing managed native plugin. Native shell/file/delegation
+and the existing OpenCuria MCP/process/question/todo integration are unchanged.
+
 ## Messages while the agent runs
 
 You can keep typing while a run is active (native and Claude Agent chats alike).
@@ -102,17 +111,17 @@ environment too.
 
 The CLI uses strict run-configured MCP settings and does not load user or
 repository setting sources. OpenCuria tools, permissions, MCP integrations, and
-their credentials use OpenCuria's existing bridge. Selected skills are included
-eagerly in the composed prompt and made available through a generated Claude
-plugin in managed workspace state. Repository hooks are not automatically
+their credentials use OpenCuria's existing bridge. Selected skills are made
+available through a generated Claude plugin in managed workspace state, not
+inlined again in the system-prompt extension. Repository hooks are not automatically
 enabled; OpenCuria does not create or edit a repository `CLAUDE.md`. Native tool
-schemas and descriptions come solely from the pinned CLI; OpenCuria describes
-only its managed MCP tools. Native WebFetch/WebSearch use Claude's behavior,
+schemas and descriptions come from the pinned CLI and the MCP bridge, not a
+duplicated tool list in the system-prompt extension. Native WebFetch/WebSearch use Claude's behavior,
 including for Explore, rather than OpenCuria Webfetch's URL protections.
 
-Each run, including resume, rebuilds the OpenCuria prompt from the current mode,
-project context, and selected skills. Native subagents receive their own scoped
-project/run context. Explicit user image/PDF references (`@file:/workspace/...`
+Each run, including resume, appends the same small identity/proactivity extension.
+Native subagents retain scoped tool permissions and a minimal identity extension;
+project-context discovery is left to the CLI rather than duplicated by OpenCuria. Explicit user image/PDF references (`@file:/workspace/...`
 and Markdown images) become bounded media inputs after read authorization;
 workspace-media reads reject symlinks. Assistant/tool text never triggers these
 implicit file reads. Other file references remain text for an explicit Read call.
@@ -165,5 +174,5 @@ Runner artifact tests cover provisioning and, when pinned CLI bytes are
 available locally, run the installer against them using a local shell and
 filesystem fake—not a Docker or QEMU guest. Backend local-SSE contract tests run
 the real pinned CLI against scripted responses and cover native schemas, prompt
-refresh on resume, child context/tool scopes, direct image/PDF input, permission
+preservation on resume, child identity/tool scopes, direct image/PDF input, permission
 hooks, MCP correlation, and turn-limit completion without real provider calls.

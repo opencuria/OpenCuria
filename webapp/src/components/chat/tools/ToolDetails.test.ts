@@ -10,6 +10,8 @@ import ToolDetailSearch from './ToolDetailSearch.vue'
 import ToolDetailTodos from './ToolDetailTodos.vue'
 import ToolDetailWebfetch from './ToolDetailWebfetch.vue'
 import ToolDetailComputerUse from './ToolDetailComputerUse.vue'
+import ToolDetailImageGeneration from './ToolDetailImageGeneration.vue'
+import ToolDetailMemory from './ToolDetailMemory.vue'
 
 function makePart(overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {
@@ -132,7 +134,8 @@ describe('tool detail components', () => {
     expect(link.text()).toContain('PDF attachment')
     expect(wrapper.text()).toContain('PDF read successfully')
     expect(
-      wrapper.get('[data-testid="tool-detail-read-pdf"] [data-testid="workspace-file-icon"]')
+      wrapper
+        .get('[data-testid="tool-detail-read-pdf"] [data-testid="workspace-file-icon"]')
         .attributes('data-icon'),
     ).toBe('pdf')
   })
@@ -342,6 +345,65 @@ describe('tool detail components', () => {
     expect(wrapper.text()).toContain('click failed')
   })
 
+  it('renders generic tool arguments before output', () => {
+    const wrapper = mount(ToolDetailDefault, {
+      props: {
+        part: makePart({
+          tool: 'tool_call',
+          input: { arguments: '{"name":"calculator","arguments":{"expression":"2+2"}}' },
+          output: '{"result":4}',
+        }),
+      },
+    })
+    expect(wrapper.get('[data-testid="tool-detail-default-input"]').text()).toContain('calculator')
+    expect(wrapper.get('[data-testid="tool-detail-default-output"]').text()).toContain('result')
+  })
+
+  it('renders memory citations with safe text paths and line ranges', () => {
+    const wrapper = mount(ToolDetailMemory, {
+      props: {
+        part: makePart({
+          tool: 'memory',
+          input: {
+            arguments:
+              '{"operation":"recall","entries":[{"path":"notes/plan.md","lineStart":4,"lineEnd":8,"note":"requested"}]}',
+          },
+          output:
+            '{"citations":[{"path":"notes/source.md","lineStart":12,"lineEnd":12,"note":"found"}]}',
+        }),
+      },
+    })
+    expect(wrapper.text()).toContain('notes/plan.md')
+    expect(wrapper.text()).toContain('L4–L8')
+    expect(wrapper.text()).toContain('notes/source.md')
+    expect(wrapper.text()).toContain('L12')
+  })
+
+  it('shows generated image prompt, saved path, and sanitized attachment lightbox', async () => {
+    const url = 'data:image/png;base64,iVBORw0KGgo='
+    const wrapper = mount(ToolDetailImageGeneration, {
+      props: {
+        part: makePart({
+          tool: 'image_generation',
+          input: { arguments: '{"prompt":"a blue bird","transparent_background":true}' },
+          output: '{"savedPath":"/workspace/bird.png","status":"saved"}',
+          meta: {
+            attachments: [
+              { type: 'file', mime: 'image/png', url },
+              { type: 'file', mime: 'image/png', url: 'https://example.com/unsafe.png' },
+            ],
+          },
+        }),
+      },
+      global: { stubs: { teleport: true } },
+    })
+    expect(wrapper.text()).toContain('a blue bird')
+    expect(wrapper.text()).toContain('/workspace/bird.png')
+    expect(wrapper.findAll('[data-testid="tool-detail-image-generation-image"]')).toHaveLength(1)
+    await wrapper.get('button').trigger('click')
+    expect(wrapper.findComponent(ImageLightbox).props('src')).toBe(url)
+  })
+
   it('falls back to the default tool name and output', () => {
     const wrapper = mount(ToolDetailDefault, {
       props: {
@@ -349,6 +411,8 @@ describe('tool detail components', () => {
       },
     })
     expect(wrapper.get('[data-testid="tool-detail-default"]').text()).toContain('write')
-    expect(wrapper.text()).toContain('Wrote 12 bytes')
+    expect(wrapper.get('[data-testid="tool-detail-default-output"]').text()).toContain(
+      'Wrote 12 bytes',
+    )
   })
 })

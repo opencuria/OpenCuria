@@ -2053,8 +2053,8 @@ class HarnessService:
             session = await sync_to_async(self.get_session)(session.id)
         if session.parent_id is not None:
             child_context = self._runs.get(str(session.id), {})
-            if child_context.get("claude_projection"):
-                # The SDK owns the child process internally and has no
+            if child_context.get("external_projection"):
+                # The native runtime owns the child internally and has no
                 # separately addressable OpenCuria task handle. Stop the
                 # enclosing root run rather than leaving the subagent alive.
                 parent = await sync_to_async(self.sessions.get_by_id)(session.parent_id)
@@ -3317,10 +3317,10 @@ class HarnessService:
             if followup:
                 self._schedule_steer_followup(session, leftovers)
 
-    async def _on_claude_root_event(
+    async def _on_external_root_event(
         self, session: HarnessSession, assistant: HarnessMessage, event: dict[str, Any]
     ) -> None:
-        """Project SDK task notifications to persisted OpenCuria child sessions."""
+        """Project native task notifications to persisted OpenCuria child sessions."""
         if event.get("type") == "subtask_started":
             raw_agent = str(event.get("agent") or "general").strip().lower()
             agent = "explore" if raw_agent in {"explore", "explorer"} else "general"
@@ -3330,11 +3330,13 @@ class HarnessService:
                 title=str(event.get("description") or agent)[:255],
                 mode=session.mode,
                 agent_name=agent,
-                model=session.model or "sonnet",
-                reasoning_effort=session.reasoning_effort or "high",
+                model=str(event.get("model") or session.model or "sonnet"),
+                reasoning_effort=str(
+                    event.get("reasoning_effort") or session.reasoning_effort or "high"
+                ),
                 parent_id=session.id,
                 skill_ids=list(session.skill_ids or []),
-                harness_id="claude",
+                harness_id=session.harness_id,
                 created_by_id=getattr(session, "created_by_id", None),
             )
             child_user = await sync_to_async(
@@ -3344,7 +3346,7 @@ class HarnessService:
                 role="user",
                 content=str(event.get("description") or ""),
                 skill_ids=list(session.skill_ids or []),
-                harness_id="claude",
+                harness_id=session.harness_id,
             )
             child_assistant = await sync_to_async(
                 self.messages.create, thread_sensitive=True
@@ -3354,8 +3356,8 @@ class HarnessService:
                 content="",
                 model=child.model,
                 reasoning_effort=child.reasoning_effort or "high",
-                provider="claude",
-                harness_id="claude",
+                provider=session.harness_id,
+                harness_id=session.harness_id,
             )
             child_key = str(child.id)
             self._runs[child_key] = {
@@ -3368,13 +3370,13 @@ class HarnessService:
                 "step_parts": {},
                 "subtask_parts": {},
                 "skill_bodies": [],
-                "claude_projection": True,
+                "external_projection": True,
             }
             await sync_to_async(self.sessions.mark_status)(
                 child, HarnessSessionStatus.BUSY
             )
             root_context = self._runs.get(str(session.id), {})
-            root_context.setdefault("claude_children", {})[
+            root_context.setdefault("external_children", {})[
                 str(event.get("subtask_id", ""))
             ] = {
                 "parent_call_id": str(event.get("parent_tool_use_id", "")),
@@ -3385,17 +3387,17 @@ class HarnessService:
             }
             event = {**event, "agent": agent, "child_session_id": child_key}
         elif event.get("type") == "subtask_finished":
-            child_ctx = self._claude_child_for_event(session, event)
+            child_ctx = self._external_child_for_event(session, event)
             if child_ctx is not None:
-                await self._finish_claude_child(child_ctx, event)
+                await self._finish_external_child(child_ctx, event)
                 event = {**event, "child_session_id": str(child_ctx["session"].id)}
         await self._on_runner_event(session, assistant, event)
 
-    def _claude_child_for_event(
+    def _external_child_for_event(
         self, session: HarnessSession, event: dict[str, Any]
     ) -> dict[str, Any] | None:
         """Find a projected child by task id or parent tool-use id."""
-        children = self._runs.get(str(session.id), {}).get("claude_children", {})
+        children = self._runs.get(str(session.id), {}).get("external_children", {})
         task_id = str(event.get("subtask_id", ""))
         if task_id in children:
             return children[task_id]
@@ -3409,12 +3411,12 @@ class HarnessService:
             None,
         )
 
-    async def _on_claude_child_event(
+    async def _on_external_child_event(
         self, root_key: str, parent_call_id: str, event: dict[str, Any]
     ) -> None:
-        """Persist SDK-forwarded child events into their own message timeline."""
+        """Persist native-forwarded child events into their own message timeline."""
         root_context = self._runs.get(root_key, {})
-        children = root_context.get("claude_children", {})
+        children = root_context.get("external_children", {})
         child_ctx = next(
             (
                 item
@@ -3427,10 +3429,10 @@ class HarnessService:
             return
         await self._on_runner_event(child_ctx["session"], child_ctx["assistant"], event)
 
-    async def _finish_claude_child(
+    async def _finish_external_child(
         self, child_ctx: dict[str, Any], event: dict[str, Any]
     ) -> None:
-        """Settle a projected SDK subagent transcript without duplicating root text."""
+        """Settle a native subagent transcript without duplicating root text."""
         session = child_ctx["session"]
         assistant = child_ctx["assistant"]
         status = str(event.get("status") or "completed")
@@ -3465,28 +3467,29 @@ class HarnessService:
             session, HarnessSessionStatus.IDLE
         )
         child_ctx["finished"] = True
+        self._drop_run_tracking(str(session.id))
 
-    async def _finalize_claude_children(
+    async def _finalize_external_children(
         self, session: HarnessSession, assistant: HarnessMessage
     ) -> None:
-        """Close any child projections left open by a cancelled SDK stream."""
-        children = self._runs.get(str(session.id), {}).get("claude_children", {})
+        """Close any child projections left open by a cancelled native stream."""
+        children = self._runs.get(str(session.id), {}).get("external_children", {})
         for child_ctx in children.values():
             if child_ctx.get("finished"):
                 continue
             try:
-                await self._finish_claude_child(
+                await self._finish_external_child(
                     child_ctx,
                     {
                         "status": "aborted"
                         if self._user_abort_requested(session)
                         else "error",
-                        "summary": "Parent Claude run ended",
+                        "summary": "Parent external run ended",
                     },
                 )
             except Exception:
                 log.warning(
-                    "claude_child_projection_finalize_failed",
+                    "external_child_projection_finalize_failed",
                     child_session_id=str(child_ctx.get("session").id),
                 )
 

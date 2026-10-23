@@ -11,10 +11,11 @@ operations, limitations and reproducible tests: [Codex guide](../../../../../doc
 | --- | --- |
 | `catalog.py`, `models.json` | Pinned bundled ChatGPT capabilities and namespaced routing; OpenRouter uses the shared provider catalog. |
 | `auth.py` | Resolve the captured provider account through existing organization/user ACLs; private auth values never become public state. |
-| `configuration.py` | Authoritative startup/thread overrides, provider wire mapping, disabled native integrations. |
+| `configuration.py` | Authoritative startup/thread overrides, provider wire mapping, minimal integration overrides. |
 | `protocol.py` | Bounded JSON-RPC stdio, request deadlines, server requests and terminal transport failure. |
 | `engine.py` | Thread/turn loop, managed owner lifecycle, streaming, steering, cancellation and checkpoint finalization. |
-| `tools.py` | Dynamic OpenCuria tool signatures and invocation through shared permission/task contracts. |
+| `tools.py` | Small OpenCuria extension surface and invocation through shared permissions. |
+| `events.py` | Native tool projection, attachments and native child timelines. |
 | `media.py` | Checked image hydration and isolated bounded PDF text extraction through shared media/parser code. |
 | `session_store.py`, `state_io.py` | Encrypted owner-fenced checkpoint replacement and strict guest-side snapshot/restore. |
 
@@ -48,9 +49,14 @@ it does not decide model, prompt, tool or permission policy.
 - `CodexSessionStore` writes require exact `session_id`, `run_id`, `owner_token`
   and external thread. One encrypted generation replaces the previous row.
   Dirty/missing/mismatched state never falls back to an older generation.
-- `RunOptions.run_subagent` uses OpenCuria's existing task callback. Children
-  inherit provider, owner, skills and the parent's account snapshot. Codex-native
-  multi-agent is disabled; General/Explore are supported, computeruse is not.
+- Codex owns native multi-agent execution. Native child threads project through
+  the shared external-child timeline adapter and share the root owner/account
+  and checkpoint. OpenCuria does not advertise its `task` dispatcher to Codex.
+- Native base instructions remain untouched; `developerInstructions` contains
+  only the shared identity/proactivity extension. Native workspace configuration,
+  AGENTS and skill discovery remain enabled. Selected skills use native files.
+- Native question/update-plan tools are replaced by OpenCuria's persistent
+  question/todo tools. Process and registered MCP tools are the other extensions.
 - Dynamic signatures are immutable on resume; incompatible registry/schema
   changes require fork/new-chat. Current role, depth and policy are checked at
   every dispatch, so mode changes do not change the registered ceiling. `thread/resume` gets neither unsupported dynamic
@@ -64,14 +70,15 @@ it does not decide model, prompt, tool or permission policy.
 
 Build/General use native `dangerFullAccess`/`never`. Root Plan/Explore disable
 native shell under `readOnly`/`never`; explicit permission rules also require
-managed actions. Root Plan direct edits ask, but permitted shell/process actions
-retain existing Plan policy. General remains YOLO under Plan parents. Explore
-excludes mutation, delegation, questions, processes and plugins.
+managed extension actions. Native subagents inherit the native sandbox.
+Registered MCP edits and permitted process actions retain existing Plan policy.
+No duplicate OpenCuria file/shell tools are advertised.
 
 Images use shared authorized no-follow reads. Mandatory `pypdf==6.21.1` extracts
 text only in an isolated parser (256 MiB, 5-second soft CPU, 10-second wall,
 100 pages, 512 KiB text); there is no OCR or PDF image support.
-Checkpoints allow 256 files, 24 MiB raw/34 MiB encoded, excluding auth/config/logs.
+Checkpoints allow 256 files, 24 MiB raw/34 MiB encoded, including native memory
+markdown/databases and child rollouts, but excluding auth/config/logs/caches.
 The absolute workspace and `CODEX_HOME` must match; 4 MiB restore pieces respect
 10 MiB writes. Confirmed Stop plus cleanup/checkpoint allows continuation;
 uncertain failure requires fork/new-chat. Neither path rolls back files.

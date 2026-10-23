@@ -216,6 +216,49 @@ describe('HarnessWorkRow', () => {
     expect(wrapper.find('svg.lucide-mouse-pointer-2').exists()).toBe(true)
   })
 
+  it('uses native icons for the new built-in tools', () => {
+    const expectedIcons = [
+      ['websearch', 'search'],
+      ['memory', 'book-text'],
+      ['image_generation', 'image'],
+      ['tool_call', 'wrench'],
+    ] as const
+
+    for (const [tool, icon] of expectedIcons) {
+      const wrapper = mount(HarnessWorkRow, { props: { part: makePart({ tool }) } })
+      expect(wrapper.find(`svg.lucide-${icon}`).exists()).toBe(true)
+      wrapper.unmount()
+    }
+  })
+
+  it('selects dedicated memory and image generation details and generic native details', async () => {
+    const cases = [
+      {
+        part: makePart({ tool: 'memory', output: 'memory output' }),
+        detail: 'tool-detail-memory',
+      },
+      {
+        part: makePart({ tool: 'image_generation', output: 'image output' }),
+        detail: 'tool-detail-image-generation',
+      },
+      {
+        part: makePart({ tool: 'websearch', output: 'search output' }),
+        detail: 'tool-detail-default',
+      },
+      {
+        part: makePart({ tool: 'tool_call', output: 'call output' }),
+        detail: 'tool-detail-default',
+      },
+    ]
+
+    for (const testCase of cases) {
+      const wrapper = mount(HarnessWorkRow, { props: { part: testCase.part } })
+      await wrapper.get('[data-slot="collapsible-trigger"]').trigger('click')
+      expect(wrapper.find(`[data-testid="${testCase.detail}"]`).exists()).toBe(true)
+      wrapper.unmount()
+    }
+  })
+
   it('renders a bash terminal detail', async () => {
     const wrapper = mount(HarnessWorkRow, {
       props: {

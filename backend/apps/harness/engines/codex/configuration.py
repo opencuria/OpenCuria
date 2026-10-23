@@ -8,44 +8,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .auth import CodexAuthConfiguration
 
-# Applied at process startup and again to every thread start/resume. Codex
-# merges project configuration, so safety settings must be CLI-level overrides.
-DISABLED_FEATURES = (
-    "multi_agent",
-    "multi_agent_v2",
-    "multi_agent_v2_dynamic_tools",
-    "collab",
-    "plugins",
-    "plugin_hooks",
-    "hooks",
-    "codex_hooks",
-    "remote_plugin",
-    "recommended_plugins",
-    "remote_models",
-    "apps",
-    "connectors",
-    "browser_use",
-    "computer_use",
-    "memories",
-    "memory_tool",
-    "shell_snapshot",
-    "shell_snapshot_v2",
-    "js_repl",
-    "code_mode",
-    "tool_search",
-    "skill_search",
-    "skill_mcp_dependency_install",
-    "external_agent_memory_import",
-    "remote_control",
-    "responses_websockets",
-    "responses_websockets_v2",
-    "unbounded_connection_retries",
-    "workspace_dependencies",
-    "image_generation",
-    "imagegenext",
-    "view_image",
-)
-
 
 def _toml(value: Any) -> str:
     """Serialize a bounded runtime setting to its TOML inline representation."""
@@ -73,27 +35,25 @@ def runtime_settings(
         "model_provider": provider,
         "approval_policy": "never",
         "sandbox_mode": "read-only" if readonly else "danger-full-access",
-        "agents.enabled": False,
-        "web_search": "disabled",
-        "mcp_servers": {},
-        "projects": {},
-        "notify": [],
-        "project_doc_max_bytes": 0,
         "check_for_update_on_startup": False,
         "analytics.enabled": False,
         "feedback.enabled": False,
         "cli_auth_credentials_store": "ephemeral",
         "allow_symlinked_codex_home": False,
-        "allow_login_shell": False,
-        "skills.include_instructions": False,
-        "features.skip_host_skill_discovery": True,
+        # Memory is opt-in upstream; enable its native implementation. Other
+        # capabilities (agents, search, MCP, plugins, images, skills) keep their
+        # native defaults and workspace configuration.
+        "features.memories": True,
+        # Like Claude, persistent OpenCuria question/todo gates replace these
+        # two UI-specific tools. Native execution tools remain untouched.
+        "tools.experimental_request_user_input.enabled": False,
+        "tools.update_plan.enabled": False,
         "features.shell_tool": not readonly,
         # Models can require exec/wait even with optional code mode disabled.
         # The host executes their wrappers; managed tools still use OpenCuria's
         # dispatcher and native tools retain the thread's sandbox policy.
         "features.code_mode_host": True,
     }
-    settings.update({f"features.{key}": False for key in DISABLED_FEATURES})
     if provider == "openrouter":
         settings["model_providers.openrouter"] = {
             "name": "openrouter",

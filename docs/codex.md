@@ -1,9 +1,9 @@
 # Codex
 
 OpenCuria runs the official **Codex 0.163.0 standalone app-server package**
-inside a Linux workspace. OpenCuria owns accounts, prompts, permissions, tools,
-subagents and run lifecycle; Codex owns its model/tool loop. There is no protocol
-translation gateway. The integration uses a pinned, experimental **internal
+inside a Linux workspace. OpenCuria owns accounts, permission boundaries and
+run lifecycle; Codex retains its native prompt, tools and multi-agent loop.
+There is no protocol translation gateway. The integration uses a pinned, experimental **internal
 app-server API**, not a stable public SDK contract.
 
 ## Connect and start
@@ -34,20 +34,37 @@ not a compatibility guarantee. See [OpenRouter's Codex guide][openrouter].
   `exec`/`wait` wrappers even when optional code mode is disabled. Wrapped
   OpenCuria tools still pass through the shared permission dispatcher.
 - **Root Plan** disables native shell and uses native `read-only` mode. Managed
-  direct source edits ask for approval, while permitted shell/process actions
+  MCP source edits ask for approval, while permitted process actions
   follow the existing OpenCuria Plan policy. Plan is **not** an absolute read-only
   guarantee for the entire workflow.
-- **General subagents** use Build/YOLO behavior even under a Plan parent.
-  **Explore** uses safe read-only tools: no delegation, questions, process tools,
-  plugins or mutation; only allowlisted read-only managed shell commands.
+- Native Codex subagents inherit Codex's execution context and sandbox. Their
+  activity and answers appear in the existing OpenCuria subagent timelines.
+  They share the parent app-server, account and checkpoint, not a second
+  OpenCuria-managed inference run. Upstream decides child tool inheritance;
+  in the pinned native v1 delegation, client dynamic tools are not inherited.
+  Child shell/file tools remain native and are projected into the child timeline.
 - Explicit global permission rules also force native read-only mode with native
   shell off, so managed actions go through OpenCuria's permission evaluator.
-- OpenCuria `task` manages General/Explore children and nesting limits. Codex's
-  native multi-agent system is disabled. **Computeruse children are explicitly
-  unsupported for external harnesses**, as with Claude; there is no native fallback.
-- OpenCuria supplies plugins/skills and managed tools. Codex-native plugins,
-  hooks, discovery and other autonomous integrations are disabled. Images and
-  tool screenshots use the shared authorized, no-follow media hydration path.
+- The only additional OpenCuria tools are `question`, `todowrite`, `process_*`
+  and registered MCP tools—the same integration surface as Claude. Native
+  question/plan-update tools are disabled in favor of persistent OpenCuria gates.
+  Shell, files and delegation are native Codex, not duplicate managed tools.
+- The native base prompt is not replaced. OpenCuria adds only a short identity
+  and the shared proactive-workspace paragraph as developer instructions.
+  Codex discovers project instructions, skills, MCP configuration and plugins
+  natively. Authorized workspace `.codex/config.toml` is loaded as trusted;
+  the session-specific `CODEX_HOME` does not import another user's host config.
+  Selected OpenCuria skills are materialized as native `SKILL.md` files.
+- Native search, multi-agent and image capabilities keep upstream defaults;
+  native memory is enabled explicitly (it is opt-in upstream). Actual availability
+  remains model/account-dependent. Memory may issue its own background model
+  requests; root-turn token totals do not necessarily include these requests.
+  Memory markdown and databases are included in bounded encrypted checkpoints.
+- Tool display names are harness-independent: `task`, `websearch`, `memory`,
+  `image_generation`, and `tool_call` for unmapped native/MCP calls. Image results
+  use bounded attachments; workspace previews require authorized no-follow reads.
+  Memory citations and observed native memory operations receive their own rows;
+  internal background consolidation is not fabricated as a tool call.
 - PDFs are **text only**, parsed by the mandatory `pypdf==6.21.1` backend dependency
   in an isolated process: 20 MiB input, 256 MiB address space, 5 seconds soft CPU
   (6 seconds hard), 10 seconds wall time, 100 pages and 512 KiB extracted UTF-8.
@@ -61,6 +78,9 @@ also supports same-thread continuation after terminal interruption, process-tree
 cleanup and successful checkpoint persistence. An uncertain failure remains
 **dirty**: fork or start a new chat instead of silently restoring stale history.
 Changes to registered dynamic tool schemas also require a fork/new chat.
+Existing Codex chats using the previous full OpenCuria tool registry therefore
+need a fork/new chat after this update; native tool signatures are never rewritten
+inside an existing upstream thread.
 Mode changes keep stable signatures and re-evaluate the current role and policy.
 
 Forking or editing starts a **fresh upstream thread** from the copied OpenCuria

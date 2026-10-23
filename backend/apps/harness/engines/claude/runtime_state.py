@@ -368,15 +368,8 @@ class ClaudeRuntimeState:
     @staticmethod
     def claude_system_prompt(system: str, mode: str) -> str:
         """Compose OpenCuria run context to append to native Claude Code."""
-        value = system.strip()
-        if mode == "plan":
-            value += (
-                "\n\nOpenCuria plan mode cannot switch into build mode. "
-                "Tool permissions follow the configured OpenCuria agent rules, "
-                "including for shell commands, background processes, and "
-                "delegated work."
-            )
-        return value
+        del mode
+        return system.strip()
 
     @staticmethod
     def sdk_system_prompt() -> dict[str, Any]:

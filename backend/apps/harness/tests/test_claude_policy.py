@@ -153,7 +153,7 @@ def test_websearch_is_native_without_a_registry_entry() -> None:
         depth=1,
         max_depth=2,
     )
-    assert (decision, event_tool, action) == ("allow", "WebSearch", "OpenCuria")
+    assert (decision, event_tool, action) == ("allow", "websearch", "OpenCuria")
 
 
 @pytest.mark.parametrize(
