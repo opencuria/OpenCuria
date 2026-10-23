@@ -4228,22 +4228,36 @@ def _call_take_desktop_control(api_key, org_id, args: dict) -> list[TextContent]
 
 
 def _call_get_harness_timeline(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.mcp_app.timeline_handlers import get_harness_timeline
+    from apps.harness.schemas import timeline_to_out
 
-    response = get_harness_timeline(api_key, org_id, args)
-    if not response or response[0].text.startswith("Error:"):
-        return response
-    payload = json.loads(response[0].text)
-    harness_id = str(payload.get("session", {}).get("harness_id") or "native")
-    for message in payload.get("messages", []):
-        message["harness_id"] = harness_id
-    return _text(payload)
+    session_id = args.get("session_id")
+    if not session_id:
+        return _error("session_id is required")
+    session, error = _owned_harness_session_or_error(api_key, org_id, session_id)
+    if error is not None:
+        return error
+    return _text(timeline_to_out(_get_harness_service(), session))
 
 
 def _call_get_harness_part(api_key, org_id, args: dict) -> list[TextContent]:
-    from apps.mcp_app.timeline_handlers import get_harness_part
+    from apps.harness.schemas import part_to_out
+    from common.exceptions import NotFoundError
 
-    return get_harness_part(api_key, org_id, args)
+    session_id, part_id = args.get("session_id"), args.get("part_id")
+    if not session_id or not part_id:
+        return _error("session_id and part_id are required")
+    session, error = _owned_harness_session_or_error(api_key, org_id, session_id)
+    if error is not None:
+        return error
+    try:
+        part_uuid = uuid.UUID(str(part_id))
+    except ValueError:
+        return _error("Invalid part_id UUID")
+    try:
+        part = _get_harness_service().get_part(session.id, part_uuid)
+    except NotFoundError:
+        return _error("Harness part not found")
+    return _text(part_to_out(part))
 
 
 def _call_list_harness_todos(api_key, org_id, args: dict) -> list[TextContent]:

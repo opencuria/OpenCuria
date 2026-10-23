@@ -10,12 +10,21 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ninja import Schema
 from pydantic import Field
 
 from .constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
+from .timeline import (
+    TIMELINE_TEXT_PART_TYPES,
+    project_question_definitions,
+    timeline_part_payload,
+)
+
+if TYPE_CHECKING:
+    from .harness_service import HarnessService
+    from .models import HarnessPart, HarnessSession
 
 # ---------------------------------------------------------------------------
 # Schemas
@@ -468,3 +477,97 @@ def session_to_out_with_unread(service, session) -> HarnessSessionOut:  # type: 
         needs_attention=attention.get("needs_attention", False),
         attention_kind=attention.get("attention_kind", ""),
     )
+
+
+def timeline_to_out(service: HarnessService, session: HarnessSession) -> dict[str, Any]:
+    """Build the shared lightweight REST/MCP timeline from service reads."""
+    messages = service.list_timeline_messages(session.id)
+    parts = service.list_timeline_parts(session.id)
+    message_positions = {
+        str(message.id): int(getattr(message, "position", 0) or 0)
+        for message in messages
+    }
+    parts_by_message: dict[str, list] = {}
+    for part in parts:
+        part.message_position = message_positions.get(str(part.message_id), 0)
+        payload = timeline_part_payload(
+            part,
+            text_output=getattr(part, "timeline_output", "")
+            if part.type in TIMELINE_TEXT_PART_TYPES
+            else None,
+        )
+        parts_by_message.setdefault(str(part.message_id), []).append(payload)
+    pending_questions = service.list_pending_questions(
+        session.id, include_descendants=True
+    )
+    pending_questions = [
+        {
+            **question,
+            "questions": project_question_definitions(question.get("questions")),
+        }
+        for question in pending_questions
+    ]
+    return {
+        "session": session_to_out_with_unread(service, session).model_dump(mode="json"),
+        "messages": [
+            {
+                **HarnessMessageOut(
+                    id=message.id,
+                    harness_id=getattr(message, "harness_id", "native"),
+                    role=message.role,
+                    # Timeline text comes from ordered text parts; only
+                    # legacy assistant rows with no text parts need the
+                    # message-level fallback. This prevents sending both.
+                    content=getattr(message, "timeline_content", "") or "",
+                    model=message.model or "",
+                    reasoning_effort=message.reasoning_effort or "",
+                    cost=float(message.cost or 0.0),
+                    tokens=dict(message.tokens or {}),
+                    finish=message.finish or "",
+                    error=message.error or "",
+                    skill_ids=[str(skill_id) for skill_id in (message.skill_ids or [])],
+                    notice_dismissed_at=message.notice_dismissed_at,
+                    position=int(getattr(message, "position", 0) or 0),
+                    message_position=int(getattr(message, "position", 0) or 0),
+                    created_at=message.created_at,
+                    completed_at=message.completed_at,
+                ).model_dump(mode="json"),
+                "parts": parts_by_message.get(str(message.id), []),
+            }
+            for message in messages
+        ],
+        "permissions": service.list_pending_permissions(
+            session.id, include_descendants=True
+        ),
+        "questions": pending_questions,
+        "steers": [
+            entry.to_payload() for entry in service.list_pending_steers(session.id)
+        ],
+    }
+
+
+def part_to_out(part: HarnessPart) -> dict[str, Any]:
+    """Map expanded part detail, excluding private patch and reasoning fields."""
+    safe_meta = dict(part.meta or {})
+    if part.type == "patch":
+        safe_meta.pop("old_content", None)
+        safe_meta.pop("new_content", None)
+    display = dict(part.display or {})
+    display.pop("_reasoning_line", None)
+    return {
+        **HarnessPartOut(
+            id=part.id,
+            message_id=part.message_id,
+            type=part.type,
+            state=part.state,
+            call_id=part.call_id or "",
+            title=part.title or "",
+            output=part.output or "",
+            input=dict(part.input or {}),
+            meta=safe_meta,
+            position=int(getattr(part, "position", 0) or 0),
+            message_position=int(getattr(part, "message_position", 0) or 0),
+        ).model_dump(mode="json"),
+        "display": display,
+        "detail_loaded": True,
+    }

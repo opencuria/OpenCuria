@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -24,6 +25,7 @@ from apps.harness.repositories import (
     HarnessPartRepository,
     QuestionRequestRepository,
 )
+from apps.mcp_app.server import _call_get_harness_part, _call_get_harness_timeline
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
@@ -115,8 +117,23 @@ def fake_harness_service(monkeypatch):
         provider_factory=lambda _org: fake,
     )
     monkeypatch.setattr(harness_api, "_resolve_harness_service", lambda: service)
+    monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
     # Keep the runners owner-scoping real (no monkeypatch of _get_service).
     return service
+
+
+def _mcp_read(
+    setup: dict, session_id: uuid.UUID, part_id: uuid.UUID | None = None
+) -> dict:
+    """Read the same persisted data through MCP for exact REST payload parity."""
+    args = {"session_id": str(session_id)}
+    handler = _call_get_harness_timeline
+    if part_id is not None:
+        args["part_id"] = str(part_id)
+        handler = _call_get_harness_part
+    response = handler(SimpleNamespace(user=setup["owner"]), setup["org"].id, args)
+    assert not response[0].text.startswith("Error:"), response[0].text
+    return json.loads(response[0].text)
 
 
 async def _drop_emit(event: str, data: dict) -> None:
@@ -243,6 +260,7 @@ def test_timeline_includes_message_reasoning_effort(
     session_id = created.json()["id"]
     timeline = client.get(f"/api/v1/harness/sessions/{session_id}/timeline")
     assert timeline.status_code == 200, timeline.content[:500]
+    assert _mcp_read(harness_setup, uuid.UUID(session_id)) == timeline.json()
     messages = timeline.json()["messages"]
     assistant = next(message for message in messages if message["role"] == "assistant")
     assert assistant["model"] == "fake-model"
@@ -355,8 +373,9 @@ def test_timeline_todos_abort_flow(harness_setup, fake_harness_service):
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("harness_id", ["native", "claude", "codex"])
 def test_timeline_projects_parts_and_detail_endpoint_is_session_scoped(
-    harness_setup, fake_harness_service
+    harness_setup, fake_harness_service, harness_id
 ):
     """Timeline omits detail fields; explicit expansion loads one owned part."""
     session = fake_harness_service.create_session(
@@ -364,8 +383,10 @@ def test_timeline_projects_parts_and_detail_endpoint_is_session_scoped(
         organization_id=harness_setup["org"].id,
         prompt="timeline",
     )
+    session.harness_id = harness_id
+    session.save(update_fields=["harness_id"])
     assistant = HarnessMessageRepository.create(
-        session_id=session.id, role="assistant", content="answer"
+        session_id=session.id, role="assistant", content="answer", harness_id=harness_id
     )
     text_part = HarnessPartRepository.create(
         message_id=assistant.id,
@@ -391,12 +412,17 @@ def test_timeline_projects_parts_and_detail_endpoint_is_session_scoped(
         output="--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-old\n+new",
         meta={"path": "src/a.py", "old_content": "old copy", "new_content": "new copy"},
     )
+    patch.display["_reasoning_line"] = "internal incremental state"
+    patch.save(update_fields=["display"])
     client = _client(
         user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
     )
     timeline = client.get(f"/api/v1/harness/sessions/{session.id}/timeline")
     assert timeline.status_code == 200
     envelope = timeline.json()
+    assert _mcp_read(harness_setup, session.id) == envelope
+    assert envelope["session"]["harness_id"] == harness_id
+    assert {message["harness_id"] for message in envelope["messages"]} == {harness_id}
     assert {"session", "messages", "permissions", "questions"} <= envelope.keys()
     assistant_view = next(
         item for item in envelope["messages"] if item["id"] == str(assistant.id)
@@ -404,15 +430,25 @@ def test_timeline_projects_parts_and_detail_endpoint_is_session_scoped(
     # Timeline clients reconstruct assistant text from ordered text parts;
     # content remains a compatibility fallback only when a legacy row has no parts.
     assert assistant_view["content"] == ""
-    assert next(item for item in assistant_view["parts"] if item["id"] == str(text_part.id))["output"] == "answer"
+    assert (
+        next(
+            item for item in assistant_view["parts"] if item["id"] == str(text_part.id)
+        )["output"]
+        == "answer"
+    )
     legacy_assistant = HarnessMessageRepository.create(
-        session_id=session.id, role="assistant", content="legacy assistant body"
+        session_id=session.id,
+        role="assistant",
+        content="legacy assistant body",
+        harness_id=harness_id,
     )
     fallback_timeline = client.get(
         f"/api/v1/harness/sessions/{session.id}/timeline"
     ).json()
     legacy_view = next(
-        item for item in fallback_timeline["messages"] if item["id"] == str(legacy_assistant.id)
+        item
+        for item in fallback_timeline["messages"]
+        if item["id"] == str(legacy_assistant.id)
     )
     assert legacy_view["content"] == "legacy assistant body"
     parts = assistant_view["parts"]
@@ -426,6 +462,7 @@ def test_timeline_projects_parts_and_detail_endpoint_is_session_scoped(
     assert len(patch_view["display"]["preview"]) <= 4
     assert patch_view["display"]["additions"] == 1
     assert patch_view["display"]["deletions"] == 1
+    assert "_reasoning_line" not in patch_view["display"]
 
     # Newly persisted questions retain their compact question/answer preview.
     question_part = HarnessPartRepository.create(
@@ -433,7 +470,10 @@ def test_timeline_projects_parts_and_detail_endpoint_is_session_scoped(
         type="tool",
         state="completed",
         title="Which color?",
-        input={"tool": "question", "arguments": '{"questions":[{"question":"Which color?"}]}'},
+        input={
+            "tool": "question",
+            "arguments": '{"questions":[{"question":"Which color?"}]}',
+        },
         output='{"answers":["blue"]}',
     )
     HarnessPartRepository.mark_state(question_part, "completed")
@@ -456,6 +496,7 @@ def test_timeline_projects_parts_and_detail_endpoint_is_session_scoped(
 
     detail = client.get(f"/api/v1/harness/sessions/{session.id}/parts/{tool.id}")
     assert detail.status_code == 200
+    assert _mcp_read(harness_setup, session.id, tool.id) == detail.json()
     assert detail.json()["detail_loaded"] is True
     assert detail.json()["input"] == {"tool": "read", "arguments": '{"path":"a.txt"}'}
     assert detail.json()["output"] == "large tool output"
@@ -463,6 +504,8 @@ def test_timeline_projects_parts_and_detail_endpoint_is_session_scoped(
     patch_detail = client.get(
         f"/api/v1/harness/sessions/{session.id}/parts/{patch.id}"
     ).json()
+    assert _mcp_read(harness_setup, session.id, patch.id) == patch_detail
+    assert "_reasoning_line" not in patch_detail["display"]
     assert patch_detail["output"].startswith("--- a/src/a.py")
     assert not {"old_content", "new_content"} & patch_detail["meta"].keys()
     other = fake_harness_service.create_session(
@@ -474,6 +517,23 @@ def test_timeline_projects_parts_and_detail_endpoint_is_session_scoped(
         client.get(f"/api/v1/harness/sessions/{other.id}/parts/{tool.id}").status_code
         == 404
     )
+    key = SimpleNamespace(user=harness_setup["owner"])
+    org_id = harness_setup["org"].id
+    args = {"session_id": str(other.id), "part_id": str(tool.id)}
+    assert _call_get_harness_part(key, org_id, args)[0].text == (
+        "Error: Harness part not found"
+    )
+    args["session_id"] = str(session.id)
+    args["part_id"] = "invalid"
+    assert _call_get_harness_part(key, org_id, args)[0].text == (
+        "Error: Invalid part_id UUID"
+    )
+    foreign_key = SimpleNamespace(user=harness_setup["stranger"])
+    for handler in (_call_get_harness_timeline, _call_get_harness_part):
+        args["part_id"] = str(tool.id)
+        assert (
+            handler(foreign_key, org_id, args)[0].text == "Error: Workspace not found"
+        )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -536,6 +596,7 @@ def test_timeline_includes_pending_permissions_and_questions(
     response = client.get(f"/api/v1/harness/sessions/{session.id}/timeline")
     assert response.status_code == 200
     body = response.json()
+    assert _mcp_read(harness_setup, session.id) == body
     assert [item["request_id"] for item in body["permissions"]] == [str(permission.id)]
     assert body["permissions"][0]["tool"] == "bash"
     assert body["permissions"][0]["pattern"] == "reboot"
@@ -598,6 +659,7 @@ def test_timeline_omits_heavy_details_and_part_detail_fetches_them(
 
     timeline = client.get(f"/api/v1/harness/sessions/{session.id}/timeline")
     assert timeline.status_code == 200, timeline.content[:500]
+    assert _mcp_read(harness_setup, session.id) == timeline.json()
     timeline_json = json.dumps(timeline.json())
     for private in (arguments, output, attachment, plan):
         assert private not in timeline_json
@@ -615,6 +677,7 @@ def test_timeline_omits_heavy_details_and_part_detail_fetches_them(
     )
     assert detail.status_code == 200, detail.content[:500]
     detail_json = detail.json()
+    assert _mcp_read(harness_setup, session.id, tool.id) == detail_json
     assert detail_json["detail_loaded"] is True
     assert detail_json["input"]["arguments"] == arguments
     assert detail_json["output"] == output
@@ -625,6 +688,7 @@ def test_timeline_omits_heavy_details_and_part_detail_fetches_them(
     )
     assert agent_detail.status_code == 200
     assert agent_detail.json()["output"] == plan
+    assert _mcp_read(harness_setup, session.id, agent.id) == agent_detail.json()
 
 
 @pytest.mark.django_db(transaction=True)
@@ -683,6 +747,7 @@ def test_timeline_includes_descendant_pending_gates(
         user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
     )
     parent_body = client.get(f"/api/v1/harness/sessions/{parent.id}/timeline").json()
+    assert _mcp_read(harness_setup, parent.id) == parent_body
     assert [item["request_id"] for item in parent_body["permissions"]] == [
         str(child_perm.id)
     ]
