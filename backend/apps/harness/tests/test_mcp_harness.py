@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from apps.harness.agents.definitions import get_agent
-from apps.harness.harness_service import HarnessService, _merge_skill_bodies
+from apps.harness.harness_service import HarnessService
 from apps.harness.mcp_client.connection import McpTool, normalize_call_result
 from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import (
@@ -115,13 +115,6 @@ def _ctx(org_id, workspace_id):
         accessor=FakeAccessor(),
         agent_name="build",
     )
-
-
-def test_merge_skill_bodies_plugin_first_deduped():
-    merged = _merge_skill_bodies(["b", "a"], ["p1", "a"])
-    assert merged[0] == "p1"
-    assert merged.count("a") == 1
-    assert "b" in merged
 
 
 def test_explore_denies_all_mcp_tools():

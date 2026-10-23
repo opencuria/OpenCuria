@@ -13,7 +13,10 @@ harness in turn never imports the apps built on it; they subscribe to its
 run events (``apps.harness.run_events``). Likewise the foundational contexts
 (organizations, credentials, skills, plugins) only import the contexts below
 them; apps built on them subscribe to ``apps.organizations.events`` and
-``apps.credentials.deletion_guards`` and share ``common.schemas``. Workspaces
+``apps.credentials.deletion_guards`` and share ``common.schemas``. Skill
+selection (ID normalization, visibility, body rendering and merging) is owned
+by the skills context; the harness and scheduled tasks call ``SkillService``
+and never import skill repositories or models. Workspaces
 compose plugins, so workspace-scoped plugin endpoints and guards live in
 ``apps.runners``. REST, MCP and realtime adapters never query the ORM
 themselves and never import repositories; e.g. REST and MCP both
@@ -42,6 +45,9 @@ FOUNDATION_DEPENDENCIES = {
     "apps.skills": {"apps.accounts", "apps.organizations"},
     "apps.plugins": {"apps.accounts", "apps.organizations", "apps.credentials"},
 }
+
+#: Bounded contexts that other apps may reach only through their ``services``.
+SERVICE_ONLY_CONTEXTS = {"apps.skills"}
 
 #: Apps whose non-persistence modules reach the ORM only through repositories.
 REPOSITORY_ONLY_APPS = {
@@ -359,4 +365,30 @@ def test_foundational_apps_never_import_the_apps_built_on_them():
         "Foundational apps must not import the apps built on them; publish an "
         "event or guard signal they subscribe to, and put shared schemas in "
         "common.schemas:\n" + "\n".join(sorted(violations))
+    )
+
+
+def test_service_only_contexts_are_reached_through_their_services():
+    """Consumers call e.g. ``SkillService``; its repositories stay private."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    imports = {
+        _module_name(path): _imported_modules(path, tree)
+        for path, tree in trees.items()
+    }
+    assert "apps.skills.services" in imports["apps.harness.harness_service"]
+
+    violations = sorted(
+        f"{module} -> {imported}"
+        for module, imported_modules in imports.items()
+        for context in SERVICE_ONLY_CONTEXTS
+        if module != context and not module.startswith(f"{context}.")
+        for imported in imported_modules
+        if imported.startswith(f"{context}.")
+        and imported != f"{context}.services"
+        and not imported.startswith(f"{context}.services.")
+    )
+    assert violations == [], (
+        "Call the context's service (e.g. apps.skills.services.SkillService) "
+        "instead of importing its repositories, models or helpers:\n"
+        + "\n".join(violations)
     )

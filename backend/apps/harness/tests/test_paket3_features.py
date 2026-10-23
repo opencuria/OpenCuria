@@ -12,7 +12,7 @@ from django.test import Client
 
 import apps.harness.api as harness_api
 from apps.accounts.models import APIKey, APIKeyPermission
-from apps.harness.harness_service import HarnessService, resolve_skill_bodies
+from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessSession
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.service import PermissionService
@@ -141,17 +141,6 @@ def fake_harness_service(monkeypatch):
     )
     monkeypatch.setattr(harness_api, "_resolve_harness_service", lambda: service)
     return service
-
-
-@pytest.mark.django_db
-def test_resolve_skill_bodies_rejects_foreign_skill(paket3_setup):
-    """Foreign skill IDs raise ValueError (surfaced as HTTP 400)."""
-    with pytest.raises(ValueError, match="not accessible"):
-        resolve_skill_bodies(
-            [str(paket3_setup["foreign_skill"].id)],
-            user_id=paket3_setup["owner"].id,
-            organization_id=paket3_setup["org"].id,
-        )
 
 
 @pytest.mark.django_db(transaction=True)

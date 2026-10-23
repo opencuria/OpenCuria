@@ -9,6 +9,7 @@ import pytest
 
 from apps.scheduled_tasks.models import ScheduledTaskRun
 from apps.scheduled_tasks.services import ScheduledTaskService
+from apps.skills.services import SkillService
 
 
 class Repository:
@@ -102,15 +103,13 @@ def test_create_claude_schedule_validates_skills_and_rejects_foreign_ids(
     foreign_skill_id = str(uuid.uuid4())
     visible_for = []
 
-    def resolve_skills(skill_ids, *, user_id, organization_id):
+    def resolve_skills(_service, skill_ids, *, user_id, organization_id):
         visible_for.append((skill_ids, user_id, organization_id))
         if foreign_skill_id in skill_ids:
             raise ValueError(f"Skill not found or not accessible: {foreign_skill_id}")
         return ["## Owner skill\\nSelected prompt context"]
 
-    monkeypatch.setattr(
-        "apps.harness.harness_service.resolve_skill_bodies", resolve_skills
-    )
+    monkeypatch.setattr(SkillService, "resolve_bodies", resolve_skills)
 
     for field, value, message in (
         ("harness_id", "unsupported", "harness_id"),
@@ -144,8 +143,9 @@ def test_switch_to_claude_keeps_skills_and_resets_engine_defaults(
     skill_id = str(uuid.uuid4())
     resolved_skills = []
     monkeypatch.setattr(
-        "apps.harness.harness_service.resolve_skill_bodies",
-        lambda skill_ids, *, user_id, organization_id: (
+        SkillService,
+        "resolve_bodies",
+        lambda _service, skill_ids, *, user_id, organization_id: (
             resolved_skills.append((skill_ids, user_id, organization_id))
             or ["## Owner skill\\nSelected prompt context"]
         ),

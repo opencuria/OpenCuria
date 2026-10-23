@@ -35,6 +35,7 @@ from asgiref.sync import ThreadSensitiveContext, async_to_sync, sync_to_async
 
 from apps.runners.services import get_runner_service
 from apps.runners.services.infra import realtime
+from apps.skills.services import SkillService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .agents.definitions import get_agent
@@ -136,6 +137,7 @@ class HarnessService:
         parts: type[HarnessPartRepository] | None = None,
         todos: type[TodoRepository] | None = None,
         permissions: PermissionService | None = None,
+        skills: SkillService | None = None,
         emit: EmitFn | None = None,
         runner_factory: Callable[..., HarnessRunner] | None = None,
         provider_factory: Callable[[uuid.UUID], ProviderAdapter] | None = None,
@@ -157,6 +159,7 @@ class HarnessService:
         self.parts = parts or HarnessPartRepository
         self.todos = todos or TodoRepository
         self.permissions = permissions or PermissionService()
+        self.skills = skills or SkillService()
         self._emit = emit
         self._runner_factory = runner_factory
         self._provider_factory = provider_factory
@@ -518,9 +521,9 @@ class HarnessService:
         get_agent(resolved_agent)  # raises KeyError for unknown agents
         if not prompt or not prompt.strip():
             raise ValueError("prompt must not be empty")
-        normalized_skills = _normalize_skill_ids(skill_ids)
+        normalized_skills = SkillService.normalize_ids(skill_ids)
         if normalized_skills and user_id is not None:
-            resolve_skill_bodies(
+            self.skills.resolve_bodies(
                 normalized_skills,
                 user_id=user_id,
                 organization_id=organization_id,
@@ -760,9 +763,9 @@ class HarnessService:
         """Persist skill selection after validating visibility."""
         session = self.get_session(session_id)
         self.sessions.ensure_interactions_available(session.workspace_id)
-        normalized = _normalize_skill_ids(skill_ids)
+        normalized = SkillService.normalize_ids(skill_ids)
         if normalized:
-            resolve_skill_bodies(
+            self.skills.resolve_bodies(
                 normalized,
                 user_id=user_id,
                 organization_id=organization_id,
@@ -955,9 +958,9 @@ class HarnessService:
                 None,
             )
         effective_skill_ids = (
-            _normalize_skill_ids(skill_ids)
+            SkillService.normalize_ids(skill_ids)
             if skill_ids is not None
-            else _normalize_skill_ids(list(session.skill_ids or []))
+            else SkillService.normalize_ids(list(session.skill_ids or []))
         )
         claude_session = getattr(session, "harness_id", "native") == "claude"
         if (
@@ -971,7 +974,8 @@ class HarnessService:
                 )
             effective_skill_bodies: list[str] = []
             if user_id is not None:
-                effective_skill_bodies = await sync_to_async(resolve_skill_bodies)(
+                resolve_bodies = sync_to_async(self.skills.resolve_bodies)
+                effective_skill_bodies = await resolve_bodies(
                     effective_skill_ids,
                     user_id=user_id,
                     organization_id=organization_id or session.organization_id,
@@ -1591,14 +1595,14 @@ class HarnessService:
             )
         if engine_id == "claude":
             effective_skill_ids = (
-                _normalize_skill_ids(skill_ids)
+                SkillService.normalize_ids(skill_ids)
                 if skill_ids is not None
-                else _normalize_skill_ids(list(session.skill_ids or []))
+                else SkillService.normalize_ids(list(session.skill_ids or []))
             )
             from .engines.claude.runtime_state import validate_claude_skills
 
             bodies = (
-                await sync_to_async(resolve_skill_bodies)(
+                await sync_to_async(self.skills.resolve_bodies)(
                     effective_skill_ids,
                     user_id=run_user_id,
                     organization_id=org_id,
@@ -1621,7 +1625,7 @@ class HarnessService:
                     "A user is required to validate selected skills"
                 )
             if _edit_message_id is not None:
-                session.skill_ids = _normalize_skill_ids(skill_ids)
+                session.skill_ids = SkillService.normalize_ids(skill_ids)
             else:
                 session = await sync_to_async(self.update_skill_ids)(
                     session.id,
@@ -1635,7 +1639,7 @@ class HarnessService:
                 raise AuthenticationError(
                     "A user is required to validate selected skills"
                 )
-            skill_bodies = await sync_to_async(resolve_skill_bodies)(
+            skill_bodies = await sync_to_async(self.skills.resolve_bodies)(
                 list(session.skill_ids or []),
                 user_id=user_id,
                 organization_id=org_id,
@@ -3111,7 +3115,7 @@ class HarnessService:
                 current_user_message_id=str(
                     self._runs.get(key, {}).get("user_message_id", "")
                 ),
-                skills=_merge_skill_bodies(
+                skills=SkillService.merge_bodies(
                     self._runs.get(key, {}).get("skill_bodies", []),
                     mcp_snapshot.snapshot.plugin_skills
                     if mcp_snapshot is not None
@@ -5686,38 +5690,6 @@ class HarnessService:
         return child
 
 
-def _normalize_skill_ids(skill_ids: list[str] | None) -> list[str]:
-    """Normalize skill ID strings (deduped, trimmed)."""
-    seen: set[str] = set()
-    normalized: list[str] = []
-    for raw in skill_ids or []:
-        value = str(raw).strip()
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        normalized.append(value)
-    return normalized
-
-
-def _merge_skill_bodies(
-    explicit: list[str] | None, plugin_bodies: list[str] | None
-) -> list[str]:
-    """Merge plugin skill bodies before explicit session skills (deduped).
-
-    Plugin skills come first in stable snapshot order; exact-duplicate
-    bodies are dropped.
-    """
-    merged: list[str] = []
-    seen: set[str] = set()
-    for body in list(plugin_bodies or []) + list(explicit or []):
-        text = str(body or "")
-        if not text.strip() or text in seen:
-            continue
-        seen.add(text)
-        merged.append(text)
-    return merged
-
-
 def computeruse_recording_path(output: str, child_id: str) -> str | None:
     """Return the real recording path embedded in a computer-use child output.
 
@@ -5731,44 +5703,6 @@ def computeruse_recording_path(output: str, child_id: str) -> str | None:
     from .agent_s.harness import extract_recording_path
 
     return extract_recording_path(output)
-
-
-def resolve_skill_bodies(
-    skill_ids: list[str],
-    *,
-    user_id: int,
-    organization_id: uuid.UUID,
-) -> list[str]:
-    """Load skill bodies visible to *user_id* in *organization_id*.
-
-    Raises:
-        ValueError: When an ID is invalid or not accessible.
-    """
-    from apps.skills.repositories import SkillRepository
-
-    if not skill_ids:
-        return []
-    parsed: list[uuid.UUID] = []
-    for raw in skill_ids:
-        try:
-            parsed.append(uuid.UUID(str(raw).strip()))
-        except ValueError:
-            raise ValueError(f"Invalid skill_id: {raw}")
-    visible = set(
-        SkillRepository.list_for_user_in_org(user_id, organization_id).values_list(
-            "id", flat=True
-        )
-    )
-    by_id = {skill.id: skill for skill in SkillRepository.get_many_by_ids(parsed)}
-    bodies: list[str] = []
-    for skill_id in parsed:
-        if skill_id not in visible:
-            raise ValueError(f"Skill not found or not accessible: {skill_id}")
-        skill = by_id.get(skill_id)
-        if skill is None:
-            raise ValueError(f"Skill not found or not accessible: {skill_id}")
-        bodies.append(f"## {skill.name}\n{skill.body.strip()}")
-    return bodies
 
 
 def _normalize_generated_title(text: str) -> str:

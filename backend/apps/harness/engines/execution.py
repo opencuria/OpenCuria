@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from asgiref.sync import sync_to_async
 
+from apps.skills.services import SkillService
 from common.exceptions import ConflictError
 
 from ..models import HarnessRunStatus, HarnessSessionStatus
@@ -49,7 +50,7 @@ async def execute_external_run(
     max_depth: int,
 ) -> None:
     """Run an external engine under durable ownership and common persistence."""
-    from ..harness_service import _merge_skill_bodies, _tail_remainder
+    from ..harness_service import _tail_remainder
     from ..providers.base import Usage
     from .external_runtime import prepare_external_runtime
 
@@ -140,7 +141,7 @@ async def execute_external_run(
             workspace_id=str(session.workspace_id),
             organization_id=str(organization_id),
             current_user_message_id=str(context.get("user_message_id", "")),
-            skills=_merge_skill_bodies(
+            skills=SkillService.merge_bodies(
                 context.get("skill_bodies", []),
                 mcp_snapshot.snapshot.plugin_skills if mcp_snapshot else [],
             ),

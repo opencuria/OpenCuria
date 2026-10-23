@@ -16,6 +16,7 @@ from django.utils import timezone
 from apps.harness.harness_service import HarnessService, get_harness_service
 from apps.runners.enums import WorkspaceOperation, WorkspaceStatus
 from apps.runners.services import get_runner_service
+from apps.skills.services import SkillService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .models import ScheduledTask, ScheduledTaskRun
@@ -33,10 +34,12 @@ class ScheduledTaskService:
         repository: type[ScheduledTaskRepository] | None = None,
         harness: HarnessService | None = None,
         runner: Any | None = None,
+        skills: SkillService | None = None,
     ) -> None:
         self.repository = repository or ScheduledTaskRepository
         self.harness = harness
         self.runner = runner
+        self.skills = skills or SkillService()
 
     def _harness(self) -> HarnessService:
         return self.harness or get_harness_service()
@@ -98,11 +101,9 @@ class ScheduledTaskService:
         raw_effort = reasoning_effort.strip()
         skills = self._validate_skill_ids(skill_ids)
         if skills:
-            from apps.harness.harness_service import resolve_skill_bodies
-
             # The same ownership and organization-visibility rules apply to
             # both engines; only the engine consuming the skill bodies differs.
-            resolve_skill_bodies(
+            self.skills.resolve_bodies(
                 skills, user_id=owner_id, organization_id=organization_id
             )
 
@@ -311,9 +312,7 @@ class ScheduledTaskService:
             changes["skill_ids"] = self._validate_skill_ids(changes["skill_ids"])
             combined["skill_ids"] = changes["skill_ids"]
             if combined["harness_id"] == "native" and changes["skill_ids"]:
-                from apps.harness.harness_service import resolve_skill_bodies
-
-                resolve_skill_bodies(
+                self.skills.resolve_bodies(
                     changes["skill_ids"],
                     user_id=task.owner_id,
                     organization_id=task.organization_id,

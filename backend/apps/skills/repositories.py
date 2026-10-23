@@ -26,6 +26,15 @@ class SkillRepository:
         ).select_related("user", "organization", "created_by")
 
     @staticmethod
+    def visible_ids_for_user_in_org(user_id: int, org_id: uuid.UUID) -> set[uuid.UUID]:
+        """Return the IDs of all skills visible to a user in an org."""
+        return set(
+            SkillRepository.list_for_user_in_org(user_id, org_id).values_list(
+                "id", flat=True
+            )
+        )
+
+    @staticmethod
     def get_by_id(skill_id: uuid.UUID) -> Skill | None:
         """Fetch a single skill by primary key."""
         return (
