@@ -82,6 +82,22 @@ def test_rename_captured_image(member, runner, organization):
     assert response.status_code == 200 and response.json()["name"] == "Renamed"
 
 
+@pytest.mark.parametrize("method", ["patch", "delete"])
+def test_image_artifact_mutation_routes_are_removed(member, runner, organization, method):
+    _, (version,) = make_line(runner, member)
+    response = getattr(Client(), method)(
+        f"/api/v1/image-artifacts/{version.id}/",
+        data=json.dumps({"name": "Unused"}),
+        content_type="application/json",
+        **headers(
+            member,
+            organization,
+            [APIKeyPermission.IMAGES_CREATE, APIKeyPermission.IMAGES_DELETE],
+        ),
+    )
+    assert response.status_code == 404
+
+
 def test_new_workspace_from_captured_image_uses_latest(
     member, runner, organization, monkeypatch
 ):

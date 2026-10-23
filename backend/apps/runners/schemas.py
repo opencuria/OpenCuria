@@ -454,12 +454,6 @@ class ImageArtifactOut(Schema):
     workspaces: list[ImageVersionWorkspaceOut] = []
 
 
-class ImageArtifactUpdateIn(Schema):
-    """Request schema for renaming an image artifact."""
-
-    name: str
-
-
 class ImageArtifactCreateIn(Schema):
     """Capture a workspace as a new image or as the next version of one."""
 

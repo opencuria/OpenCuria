@@ -118,41 +118,6 @@ export const useImageStore = defineStore('images', () => {
     }
   }
 
-  async function deleteImageArtifact(imageArtifactId: string): Promise<boolean> {
-    try {
-      await workspacesApi.deleteImageArtifact(imageArtifactId)
-      await fetchImages()
-      notifications.info(
-        'Deletion requested',
-        'Intent stored; dependent workspaces are preserved. Inspect runner storage for progress.',
-      )
-      return true
-    } catch (e: any) {
-      if (e?.response?.status === 409) {
-        const detail = e?.response?.data?.detail || 'Image is in use and cannot be deleted.'
-        notifications.error('Cannot delete', detail)
-      } else {
-        const msg = e instanceof Error ? e.message : 'Failed to delete image'
-        notifications.error('Delete failed', msg)
-      }
-      return false
-    }
-  }
-
-  async function renameImageArtifact(imageArtifactId: string, name: string): Promise<boolean> {
-    try {
-      const updated = await workspacesApi.renameImageArtifact(imageArtifactId, name)
-      const idx = images.value.findIndex((artifact) => artifact.id === imageArtifactId)
-      if (idx !== -1) images.value[idx] = updated
-      notifications.success('Image renamed', `Image renamed to "${name}".`)
-      return true
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Failed to rename image'
-      notifications.error('Rename failed', msg)
-      return false
-    }
-  }
-
   async function createWorkspaceFromImageArtifact(
     imageArtifactId: string,
     data: ImageArtifactCloneIn,
@@ -181,8 +146,6 @@ export const useImageStore = defineStore('images', () => {
     createWorkspaceFromCapturedImage,
     fetchImageDefinitionsWithBuilds,
     createImageArtifact,
-    renameImageArtifact,
-    deleteImageArtifact,
     createWorkspaceFromImageArtifact,
   }
 })

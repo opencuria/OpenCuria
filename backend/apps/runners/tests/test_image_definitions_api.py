@@ -635,53 +635,6 @@ def test_list_runner_builds_does_not_backfill_missing_built_artifact(client: Cli
 
 
 @pytest.mark.django_db
-def test_delete_in_use_image_retires_it_and_returns_conflict(client: Client):
-    user_model = get_user_model()
-    admin = user_model.objects.create_user(email="image-retire@test.com", password="secret")
-    org = Organization.objects.create(name="Retire Org", slug="retire-org")
-    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
-
-    runner = Runner.objects.create(
-        name="retire-runner",
-        api_token_hash=hash_token("retire-runner-token"),
-        status=RunnerStatus.ONLINE,
-        organization=org,
-        available_runtimes=["docker"],
-    )
-    image = ImageInstance.objects.create(
-            is_legacy=True,
-        runner=runner,
-        runtime_type="docker",
-        origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-        created_by=admin,
-        name="Retire Me",
-        runner_ref="opencuria/custom/retire-me:1",
-        status=ImageInstance.Status.READY,
-    )
-    Workspace.objects.create(
-        runner=runner,
-        name="Dependent Workspace",
-        status=WorkspaceStatus.STOPPED,
-        runtime_type="docker",
-        created_by=admin,
-        base_image_instance=image,
-    )
-
-    token = _create_api_key(
-        user=admin,
-        permissions=[APIKeyPermission.IMAGES_DELETE.value],
-    )
-    response = client.delete(
-        f"/api/v1/image-artifacts/{image.id}/",
-        **_auth_headers(token, str(org.id)),
-    )
-
-    assert response.status_code == 204
-    image.refresh_from_db()
-    assert image.status == ImageInstance.Status.PENDING_DELETION
-
-
-@pytest.mark.django_db
 def test_create_runner_build_returns_pending_build_without_artifact(client: Client, monkeypatch):
     user_model = get_user_model()
     admin = user_model.objects.create_user(email="image-build-create@test.com", password="secret")

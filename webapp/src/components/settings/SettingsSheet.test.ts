@@ -119,8 +119,6 @@ vi.mock('@/stores/images', () => ({
     loading: false,
     error: null,
     fetchImages: vi.fn(),
-    deleteImageArtifact: vi.fn(),
-    renameImageArtifact: vi.fn(),
   }),
 }))
 

@@ -249,10 +249,6 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         """Return an image artifact by ID or None."""
         return self.image_instances.get_by_id(artifact_id)
 
-    def rename_image_artifact(self, artifact_id: uuid.UUID, name: str) -> bool:
-        """Rename an image artifact. Returns True if updated."""
-        return self.image_instances.update_name(artifact_id, name)
-
     def deactivate_runner_image(self, build):
         """Disable assignment selection without mutating any generation."""
         self._ensure_definition_mutable(build.image_definition)
@@ -526,20 +522,6 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
     def list_image_artifacts_for_user(self, user) -> list:
         """Return all artifacts created by a specific user."""
         return list(self.image_instances.list_by_user(user))
-
-    async def delete_image_artifact(
-        self,
-        image_artifact_id: uuid.UUID,
-    ) -> None:
-        """Delete an image instance safely and dispatch cleanup to the runner if needed."""
-        from ...deletion_repository import DeletionRepository
-        obj = await sync_to_async(self.image_instances.get_by_id)(image_artifact_id)
-        if obj is None:
-            raise ValueError('Deletion target not found')
-        if not obj.runner.organization_id:
-            raise ConflictError('Global recipes are read-only')
-        return await sync_to_async(DeletionRepository.request)(
-            obj.runner.organization_id, None, 'image', obj.id)
 
     def handle_image_artifact_deleted(
         self,

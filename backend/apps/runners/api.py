@@ -41,7 +41,6 @@ from .exceptions import (
 )
 from .image_presenters import (
     captured_image_to_out,
-    image_artifact_to_out,
     image_artifacts_to_out,
 )
 from .storage_schemas import RunnerStorageOut
@@ -65,7 +64,6 @@ from .schemas import (
     ImageArtifactCreateIn,
     ImageArtifactCreateOut,
     ImageArtifactOut,
-    ImageArtifactUpdateIn,
     ImageBuildJobCreateIn,
     ImageBuildJobListOut,
     ImageBuildJobOut,
@@ -1826,74 +1824,6 @@ async def create_image_artifact_global(
         return 404, ErrorOut(detail=e.message, code="not_found")
     except ValueError as e:
         return 404, ErrorOut(detail=str(e), code="not_found")
-
-
-@image_artifact_router.patch(
-    "/{image_artifact_id}/",
-    response={200: ImageArtifactOut, 404: ErrorOut, 403: ErrorOut},
-    summary="Rename an image artifact",
-)
-async def rename_image_artifact(
-    request: HttpRequest,
-    image_artifact_id: uuid.UUID,
-    payload: ImageArtifactUpdateIn,
-):
-    """Rename an image artifact owned by the current user."""
-    if not check_api_key_permission(request, APIKeyPermission.IMAGES_CREATE):
-        return _perm_denied(APIKeyPermission.IMAGES_CREATE)
-    org_id = _get_org_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    service = _get_service()
-    artifact = await sync_to_async(service.get_image_artifact)(image_artifact_id)
-    if artifact is None:
-        return 404, ErrorOut(detail="Image artifact not found", code="not_found")
-    if artifact.created_by != request.user:
-        return 403, ErrorOut(
-            detail="Not authorized to rename this image artifact",
-            code="forbidden",
-        )
-
-    await sync_to_async(service.rename_image_artifact)(
-        image_artifact_id, payload.name.strip()
-    )
-    updated = await sync_to_async(service.get_image_artifact)(image_artifact_id)
-    return 200, image_artifact_to_out(updated)
-
-
-@image_artifact_router.delete(
-    "/{image_artifact_id}/",
-    response={204: None, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
-    summary="Delete an image artifact",
-)
-async def delete_image_artifact_global(
-    request: HttpRequest, image_artifact_id: uuid.UUID
-):
-    """Delete an image artifact owned by the current user."""
-    if not check_api_key_permission(request, APIKeyPermission.IMAGES_DELETE):
-        return _perm_denied(APIKeyPermission.IMAGES_DELETE)
-    org_id = _get_org_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    service = _get_service()
-    try:
-        artifact = await sync_to_async(service.get_image_artifact)(image_artifact_id)
-        if artifact is None:
-            return 404, ErrorOut(detail="Image artifact not found", code="not_found")
-        from .services.deletion import DeletionService
-
-        await sync_to_async(DeletionService().request)(
-            request.user, org_id, "image", image_artifact_id
-        )
-        return 204, None
-    except AuthenticationError as e:
-        return 403, ErrorOut(detail=e.message, code=e.code)
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-    except ValueError as e:
-        return 404, ErrorOut(detail=str(e), code="not_found")
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
 
 
 @image_artifact_router.post(

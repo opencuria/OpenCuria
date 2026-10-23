@@ -11,8 +11,6 @@ export const useImageArtifactStore = defineStore('image-artifacts', () => {
     error: computed(() => images.error),
     fetchImageArtifacts: images.fetchImages,
     createImageArtifact: images.createImageArtifact,
-    renameImageArtifact: images.renameImageArtifact,
-    deleteImageArtifact: images.deleteImageArtifact,
     createWorkspaceFromImageArtifact: images.createWorkspaceFromImageArtifact,
     createWorkspaceFromCapturedImage: images.createWorkspaceFromCapturedImage,
   }

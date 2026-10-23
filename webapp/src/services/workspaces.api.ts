@@ -237,14 +237,6 @@ export function createImageArtifact(data: ImageArtifactCreateIn): Promise<ImageA
   return post<ImageArtifactCreateOut>('/image-artifacts/', data)
 }
 
-export function deleteImageArtifact(imageArtifactId: string): Promise<void> {
-  return del<void>(`/image-artifacts/${imageArtifactId}/`)
-}
-
-export function renameImageArtifact(imageArtifactId: string, name: string): Promise<ImageArtifact> {
-  return patch<ImageArtifact>(`/image-artifacts/${imageArtifactId}/`, { name })
-}
-
 export function createWorkspaceFromUserImageArtifact(
   imageArtifactId: string,
   data: ImageArtifactCloneIn,

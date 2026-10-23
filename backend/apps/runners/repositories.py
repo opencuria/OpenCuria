@@ -1325,12 +1325,6 @@ class ImageInstanceRepository:
         ).update(status=ImageInstance.Status.FAILED)
 
     @staticmethod
-    def update_name(image_id: uuid.UUID, name: str) -> bool:
-        """Rename an image instance. Returns True if updated."""
-        count = ImageInstance.objects.filter(id=image_id).update(name=name)
-        return count > 0
-
-    @staticmethod
     def get_by_id(image_id: uuid.UUID) -> ImageInstance | None:
         """Fetch an image instance by ID, including source and runner info."""
         return (

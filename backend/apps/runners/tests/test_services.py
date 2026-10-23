@@ -1534,86 +1534,6 @@ class TestWorkspaceOwnerScoping:
 @pytest.mark.django_db(transaction=True)
 class TestImageDeletionLifecycle:
     @pytest.mark.asyncio
-    async def test_delete_rejects_image_when_workspace_still_depends_on_it(
-        self, service, runner, user
-    ):
-        image = ImageInstance.objects.create(
-            is_legacy=True,
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-            name="Reusable Base",
-            runner_ref="opencuria/custom/reusable:1",
-            status=ImageInstance.Status.READY,
-            created_by=user,
-        )
-        Workspace.objects.create(
-            runner=runner,
-            name="Dependent Workspace",
-            status=WorkspaceStatus.STOPPED,
-            runtime_type="docker",
-            created_by=user,
-            base_image_instance=image,
-        )
-
-        await service.delete_image_artifact(image.id)
-
-        image.refresh_from_db()
-        assert image.status == ImageInstance.Status.PENDING_DELETION
-
-    @pytest.mark.asyncio
-    async def test_delete_marks_image_pending_deletion_when_runner_offline(
-        self, service, runner, user
-    ):
-        runner.status = RunnerStatus.OFFLINE
-        runner.save(update_fields=["status"])
-        image = ImageInstance.objects.create(
-            is_legacy=True,
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-            name="Offline Cleanup",
-            runner_ref="opencuria/custom/offline-cleanup:1",
-            status=ImageInstance.Status.READY,
-            created_by=user,
-        )
-
-        await service.delete_image_artifact(image.id)
-
-        image.refresh_from_db()
-        assert image.status == ImageInstance.Status.PENDING_DELETION
-        assert image.delete_requested_at is not None
-
-    @pytest.mark.asyncio
-    async def test_delete_waits_for_workspace_deletion_confirmation(
-        self, service, runner, user
-    ):
-        image = ImageInstance.objects.create(
-            is_legacy=True,
-            runner=runner,
-            runtime_type="docker",
-            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-            name="Deleting Dependency Base",
-            runner_ref="opencuria/custom/deleting-dependency:1",
-            status=ImageInstance.Status.READY,
-            created_by=user,
-        )
-        Workspace.objects.create(
-            runner=runner,
-            name="Deleting Workspace",
-            status=WorkspaceStatus.DELETING,
-            runtime_type="docker",
-            created_by=user,
-            base_image_instance=image,
-        )
-
-        await service.delete_image_artifact(image.id)
-
-        image.refresh_from_db()
-        assert image.status == ImageInstance.Status.PENDING_DELETION
-        assert image.deleting_task_id is None
-
-    @pytest.mark.asyncio
     async def test_delete_build_job_waits_for_workspace_deletion_confirmation(
         self, service, runner, user
     ):
@@ -1691,26 +1611,6 @@ class TestImageDeletionLifecycle:
         task.refresh_from_db()
         assert image.status == ImageInstance.Status.DELETED
         assert task.status == TaskStatus.COMPLETED
-
-    @pytest.mark.asyncio
-    async def test_delete_rejects_capturing_artifact_without_runner_ref(
-        self, service, runner, user
-    ):
-        image = ImageInstance.objects.create(
-            is_legacy=True,
-            runner=runner,
-            runtime_type="qemu",
-            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-            name="Still Capturing",
-            runner_ref="",
-            status=ImageInstance.Status.CAPTURING,
-            created_by=user,
-        )
-
-        await service.delete_image_artifact(image.id)
-
-        image.refresh_from_db()
-        assert image.status == ImageInstance.Status.PENDING_DELETION
 
     def test_handle_image_artifact_delete_failed_marks_build_and_definition_failed(
         self, service, runner, user
