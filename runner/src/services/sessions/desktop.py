@@ -17,7 +17,6 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 import structlog
 
@@ -29,11 +28,6 @@ from ..exec_kernel import KeyedLockMap
 from ..exec_kernel import sanitize_path as _sanitize_path
 from .clipboard_selection import build_guest_command
 from .desktop_leases import DesktopLeaseStore
-from .xdotool import (
-    _normalize_xdotool_key_combo,
-    _xdotool_key_failed,
-    _xdotool_type_command,
-)
 
 logger = structlog.get_logger(__name__)
 
@@ -68,20 +62,6 @@ DESKTOP_STOPPED_PROBE = (
     "pgrep -f '^(/[^[:space:]]*/)?(X[v]nc|X[t]igervnc) :1([[:space:]]|$)' "
     ">/dev/null || exit 0; i=$((i+1)); sleep 0.25; done; exit 1"
 )
-_SCROLL_BUTTONS = {
-    "up": 4,
-    "down": 5,
-    "left": 6,
-    "right": 7,
-}
-_CLICK_BUTTONS = {
-    "left": 1,
-    "middle": 2,
-    "right": 3,
-    1: 1,
-    2: 2,
-    3: 3,
-}
 
 
 @dataclass(frozen=True)
@@ -1362,27 +1342,6 @@ class DesktopManager:
         if action == "screenshot":
             return await self._desktop_action_screenshot(workspace_id, payload, log)
 
-        if action == "move":
-            return await self._desktop_action_move(workspace_id, payload)
-
-        if action == "click":
-            return await self._desktop_action_click(workspace_id, payload)
-
-        if action == "drag":
-            return await self._desktop_action_drag(workspace_id, payload)
-
-        if action == "scroll":
-            return await self._desktop_action_scroll(workspace_id, payload)
-
-        if action == "type":
-            return await self._desktop_action_type(workspace_id, payload)
-
-        if action == "key":
-            return await self._desktop_action_key(workspace_id, payload)
-
-        if action == "open_url":
-            return await self._desktop_action_open_url(workspace_id, payload)
-
         if action == "record_start":
             return await self._managed_record_start(workspace_id, payload)
 
@@ -1537,151 +1496,6 @@ class DesktopManager:
             "height": result_height,
             "text": "",
         }
-
-    async def _desktop_action_move(
-        self,
-        workspace_id: uuid.UUID,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Move the pointer via xdotool."""
-        x = int(payload["x"])
-        y = int(payload["y"])
-        exit_code, output = await self._exec_desktop_shell(
-            workspace_id,
-            f"xdotool mousemove --sync {x} {y}",
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to move mouse: {output}")
-        return {"ok": True}
-
-    async def _desktop_action_click(
-        self,
-        workspace_id: uuid.UUID,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Click a mouse button via xdotool."""
-        button = _CLICK_BUTTONS.get(payload.get("button", "left"))
-        if button is None:
-            raise ValueError(f"Invalid mouse button: {payload.get('button')}")
-        x = payload.get("x")
-        y = payload.get("y")
-        parts: list[str] = []
-        if x is not None and y is not None:
-            parts.append(f"xdotool mousemove --sync {int(x)} {int(y)}")
-        repeat = " --repeat 2" if payload.get("double") else ""
-        parts.append(f"xdotool click{repeat} {button}")
-        exit_code, output = await self._exec_desktop_shell(
-            workspace_id, " && ".join(parts)
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to click mouse: {output}")
-        return {"ok": True}
-
-    async def _desktop_action_drag(
-        self,
-        workspace_id: uuid.UUID,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Drag the pointer via xdotool."""
-        start_x = int(payload["start_x"])
-        start_y = int(payload["start_y"])
-        end_x = int(payload["end_x"])
-        end_y = int(payload["end_y"])
-        command = (
-            f"xdotool mousemove --sync {start_x} {start_y} mousedown 1 "
-            f"mousemove --sync {end_x} {end_y} mouseup 1"
-        )
-        exit_code, output = await self._exec_desktop_shell(workspace_id, command)
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to drag mouse: {output}")
-        return {"ok": True}
-
-    async def _desktop_action_scroll(
-        self,
-        workspace_id: uuid.UUID,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Scroll via xdotool click emulation."""
-        direction = str(payload.get("direction", "")).lower()
-        button = _SCROLL_BUTTONS.get(direction)
-        if button is None:
-            raise ValueError(f"Invalid scroll direction: {direction}")
-        amount = int(payload.get("amount", 1))
-        if amount < 1 or amount > 20:
-            raise ValueError("Scroll amount must be between 1 and 20")
-        x = payload.get("x")
-        y = payload.get("y")
-        parts = []
-        if x is not None and y is not None:
-            parts.append(f"xdotool mousemove --sync {int(x)} {int(y)}")
-        parts.append(f"xdotool click --repeat {amount} {button}")
-        exit_code, output = await self._exec_desktop_shell(
-            workspace_id, " && ".join(parts)
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to scroll: {output}")
-        return {"ok": True}
-
-    async def _desktop_action_type(
-        self,
-        workspace_id: uuid.UUID,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Type text via xdotool."""
-        text = str(payload.get("text", ""))
-        if not text:
-            raise ValueError("text must not be empty")
-        exit_code, output = await self._exec_desktop_shell(
-            workspace_id,
-            _xdotool_type_command(text),
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to type text: {output}")
-        return {"ok": True}
-
-    async def _desktop_action_key(
-        self,
-        workspace_id: uuid.UUID,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Send a key combo via xdotool."""
-        key = str(payload.get("key", "")).strip()
-        if not key:
-            raise ValueError("key must not be empty")
-        modifiers = payload.get("modifiers") or []
-        combo = _normalize_xdotool_key_combo(key, modifiers)
-        exit_code, output = await self._exec_desktop_shell(
-            workspace_id,
-            f"xdotool key --clearmodifiers {shlex.quote(combo)}",
-        )
-        if _xdotool_key_failed(exit_code, output):
-            raise RuntimeError(f"Failed to send key: {output}")
-        return {"ok": True}
-
-    async def _desktop_action_open_url(
-        self,
-        workspace_id: uuid.UUID,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Open an http(s) URL in the workspace browser."""
-        url = str(payload.get("url", "")).strip()
-        parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("url must use http or https")
-        quoted_url = shlex.quote(url)
-        command = (
-            "for browser in google-chrome-stable google-chrome chromium "
-            "chromium-browser; do "
-            f'if command -v "$browser" >/dev/null 2>&1; then '
-            f'"$browser" --no-sandbox --disable-gpu --disable-dev-shm-usage '
-            f"--no-first-run {quoted_url} >/dev/null 2>&1 & exit 0; fi; "
-            "done; "
-            f"xdg-open {quoted_url}"
-        )
-        exit_code, output = await self._exec_desktop_shell(workspace_id, command)
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to open url: {output}")
-        return {"ok": True}
 
     async def _desktop_action_execute(
         self,
@@ -1875,8 +1689,6 @@ __all__ = [
     "MAX_DESKTOP_WIDTH",
     "MIN_DESKTOP_HEIGHT",
     "MIN_DESKTOP_WIDTH",
-    "_CLICK_BUTTONS",
     "_RUN_ID_RE",
-    "_SCROLL_BUTTONS",
     "DesktopManager",
 ]

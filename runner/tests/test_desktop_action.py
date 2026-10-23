@@ -88,46 +88,6 @@ async def test_screenshot_happy_path(service: WorkspaceService) -> None:
 
 
 @pytest.mark.asyncio
-async def test_move_uses_xdotool_with_display(service: WorkspaceService) -> None:
-    _runtime(service).exec_command_wait.side_effect = [
-        (0, "alive"),
-        (0, ""),
-    ]
-
-    result = await service.desktop.desktop_action(
-        _workspace_id(service), "move", {"x": 10, "y": 20}
-    )
-
-    assert result == {"ok": True}
-    call = _runtime(service).exec_command_wait.await_args_list[-1]
-    assert call.args[1] == ["sh", "-lc", "xdotool mousemove --sync 10 20"]
-    assert call.kwargs["env"] == {
-        "HOME": "/root",
-        "DISPLAY": ":1",
-        "XAUTHORITY": "/root/.Xauthority",
-    }
-
-
-@pytest.mark.asyncio
-async def test_click_uses_xdotool(service: WorkspaceService) -> None:
-    _runtime(service).exec_command_wait.side_effect = [
-        (0, "alive"),
-        (0, ""),
-    ]
-
-    result = await service.desktop.desktop_action(
-        _workspace_id(service),
-        "click",
-        {"button": "left", "x": 5, "y": 6},
-    )
-
-    assert result == {"ok": True}
-    call = _runtime(service).exec_command_wait.await_args_list[-1]
-    assert "xdotool mousemove --sync 5 6" in call.args[1][2]
-    assert "xdotool click 1" in call.args[1][2]
-
-
-@pytest.mark.asyncio
 async def test_screenshot_fails_when_desktop_down(service: WorkspaceService) -> None:
     _runtime(service).exec_command_wait.return_value = (1, "dead")
 
@@ -161,25 +121,6 @@ async def test_record_start_rejects_path_outside_workspace_for_durable_owner(
         )
 
     assert await service.desktop.lease_store.recordings(lease_id) == []
-
-
-@pytest.mark.asyncio
-async def test_open_url_rejects_non_http(service: WorkspaceService) -> None:
-    _runtime(service).exec_command_wait.return_value = (0, "alive")
-
-    with pytest.raises(ValueError, match="http"):
-        await service.desktop.desktop_action(
-            _workspace_id(service),
-            "open_url",
-            {"url": "file:///etc/passwd"},
-        )
-
-    with pytest.raises(ValueError, match="http"):
-        await service.desktop.desktop_action(
-            _workspace_id(service),
-            "open_url",
-            {"url": "javascript:alert(1)"},
-        )
 
 
 @pytest.mark.asyncio
@@ -225,145 +166,16 @@ def _last_shell_command(service: WorkspaceService) -> str:
 
 
 @pytest.mark.asyncio
-async def test_key_enter_uses_xdotool_return(service: WorkspaceService) -> None:
-    _runtime(service).exec_command_wait.side_effect = [(0, "alive"), (0, "")]
-
-    result = await service.desktop.desktop_action(
-        _workspace_id(service), "key", {"key": "enter", "modifiers": []}
-    )
-
-    assert result == {"ok": True}
-    command = _last_shell_command(service)
-    assert command == "xdotool key --clearmodifiers Return"
-    assert "xdotool key -- " not in command
-
-
-@pytest.mark.asyncio
-async def test_key_enter_is_case_insensitive(service: WorkspaceService) -> None:
-    _runtime(service).exec_command_wait.side_effect = [(0, "alive"), (0, "")]
-
-    await service.desktop.desktop_action(
-        _workspace_id(service), "key", {"key": "ENTER", "modifiers": []}
-    )
-
-    assert _last_shell_command(service) == "xdotool key --clearmodifiers Return"
-
-
-@pytest.mark.asyncio
-async def test_key_tab_and_escape_use_x11_keysyms(
-    service: WorkspaceService,
-) -> None:
-    _runtime(service).exec_command_wait.side_effect = [
-        (0, "alive"),
-        (0, ""),
-        (0, "alive"),
-        (0, ""),
-    ]
-
-    await service.desktop.desktop_action(
-        _workspace_id(service), "key", {"key": "tab", "modifiers": []}
-    )
-    assert _last_shell_command(service) == "xdotool key --clearmodifiers Tab"
-
-    await service.desktop.desktop_action(
-        _workspace_id(service), "key", {"key": "escape", "modifiers": []}
-    )
-    assert _last_shell_command(service) == "xdotool key --clearmodifiers Escape"
-
-
-@pytest.mark.asyncio
-async def test_key_control_c_uses_ctrl_modifier(
-    service: WorkspaceService,
-) -> None:
-    _runtime(service).exec_command_wait.side_effect = [(0, "alive"), (0, "")]
-
-    await service.desktop.desktop_action(
-        _workspace_id(service),
-        "key",
-        {"key": "c", "modifiers": ["control"]},
-    )
-
-    assert _last_shell_command(service) == "xdotool key --clearmodifiers ctrl+c"
-
-
-@pytest.mark.asyncio
-async def test_key_command_maps_to_super(service: WorkspaceService) -> None:
-    _runtime(service).exec_command_wait.side_effect = [(0, "alive"), (0, "")]
-
-    await service.desktop.desktop_action(
-        _workspace_id(service),
-        "key",
-        {"key": "a", "modifiers": ["command"]},
-    )
-
-    assert _last_shell_command(service) == "xdotool key --clearmodifiers super+a"
-
-
-@pytest.mark.asyncio
-async def test_key_combo_in_key_field_is_split(service: WorkspaceService) -> None:
-    _runtime(service).exec_command_wait.side_effect = [(0, "alive"), (0, "")]
-
-    await service.desktop.desktop_action(
-        _workspace_id(service),
-        "key",
-        {"key": "ctrl+enter", "modifiers": []},
-    )
-
-    assert _last_shell_command(service) == "xdotool key --clearmodifiers ctrl+Return"
-
-
-@pytest.mark.asyncio
-async def test_key_unknown_name_with_exit_zero_raises(
-    service: WorkspaceService,
-) -> None:
-    _runtime(service).exec_command_wait.side_effect = [
-        (0, "alive"),
-        (0, "No such key name 'foo'. Ignoring it."),
-    ]
-
-    with pytest.raises(RuntimeError, match="Failed to send key"):
-        await service.desktop.desktop_action(
-            _workspace_id(service), "key", {"key": "foo", "modifiers": []}
-        )
-
-
-@pytest.mark.asyncio
-async def test_type_omits_end_of_options_dash(service: WorkspaceService) -> None:
-    _runtime(service).exec_command_wait.side_effect = [(0, "alive"), (0, "")]
-
-    result = await service.desktop.desktop_action(
-        _workspace_id(service), "type", {"text": "hello"}
-    )
-
-    assert result == {"ok": True}
-    command = _last_shell_command(service)
-    assert command == "xdotool type --delay 0 --clearmodifiers hello"
-    assert "xdotool type --delay 0 -- " not in command
-
-
-@pytest.mark.asyncio
-async def test_type_leading_dash_uses_file_stdin(
-    service: WorkspaceService,
-) -> None:
-    _runtime(service).exec_command_wait.side_effect = [(0, "alive"), (0, "")]
-
-    await service.desktop.desktop_action(
-        _workspace_id(service), "type", {"text": "-n flag"}
-    )
-
-    command = _last_shell_command(service)
-    assert command == (
-        "printf '%s' '-n flag' | "
-        "xdotool type --delay 0 --clearmodifiers --file -"
-    )
-
-
-@pytest.mark.asyncio
-async def test_unknown_action_raises(service: WorkspaceService) -> None:
+@pytest.mark.parametrize(
+    "action", ["bogus", "move", "click", "drag", "scroll", "type", "key", "open_url"]
+)
+async def test_unknown_action_raises(service: WorkspaceService, action: str) -> None:
     _runtime(service).exec_command_wait.return_value = (0, "alive")
 
-    with pytest.raises(ValueError, match="Unknown desktop action"):
-        await service.desktop.desktop_action(_workspace_id(service), "bogus")
+    with pytest.raises(ValueError, match=f"Unknown desktop action: {action}"):
+        await service.desktop.desktop_action(_workspace_id(service), action)
+    # Only the shared liveness probe runs; no input command is executed.
+    _runtime(service).exec_command_wait.assert_awaited_once()
 
 
 @pytest.mark.asyncio
