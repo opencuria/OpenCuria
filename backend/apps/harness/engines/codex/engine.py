@@ -16,7 +16,7 @@ from ...access.base import WorkspaceAccessor, sanitize_exec_workdir
 from ...agents.definitions import get_agent
 from ...desktop_leases import DesktopLease
 from ...permissions.evaluator import PermissionEvaluator
-from ...prompts.native import native_prompt_extension
+from ...prompts.opencuria import opencuria_context
 from ...providers.base import Usage
 from ...runner import RunOptions, RunResult
 from ...tools.base import ToolRegistry
@@ -349,7 +349,7 @@ class CodexEngine:
         # This is an authorized disposable workspace. Let Codex discover its
         # native project instructions, skills, MCP servers and configuration.
         settings["projects"] = {cwd: {"trust_level": "trusted"}}
-        instructions = native_prompt_extension(self.agent)
+        instructions = opencuria_context(self.agent)
         if opts.authorize_file_read is None:
             opts.authorize_file_read = self._authorize_read
         content = await user_input(

@@ -24,7 +24,7 @@ from ...agents.definitions import AgentDefinition, get_agent
 from ...constants import DEFAULT_MAX_DEPTH
 from ...permissions.evaluator import DEFAULT_GLOBAL_RULES, PermissionEvaluator
 from ...prompts.composer import ComposedPrompt
-from ...prompts.native import native_prompt_extension
+from ...prompts.opencuria import opencuria_context
 from ...providers.base import ToolSchema, Usage
 from ...runner import RunOptions, RunResult
 from ...tools.base import ToolContext, ToolRegistry, ToolResult
@@ -700,7 +700,7 @@ class ClaudeEngine:
             schemas = self._bridge_schemas_for_sdk(
                 self._schemas(child, self._mode, depth, options.max_depth)
             )
-            system = native_prompt_extension(child)
+            system = opencuria_context(child)
             if len(system.encode()) > MAX_MANAGED_PROMPT_BYTES:
                 raise ValueError("Claude child prompt exceeds the managed size limit")
             definitions[child.name] = SdkAgentDefinition(
@@ -1581,7 +1581,7 @@ class ClaudeEngine:
         self._managed_skill_names = set(skill_names)
         if agent.name == "explore":
             self._managed_skill_names.clear()
-        composed = ComposedPrompt(system=native_prompt_extension(agent))
+        composed = ComposedPrompt(system=opencuria_context(agent))
         system = composed.system
         if len(system.encode()) > MAX_MANAGED_PROMPT_BYTES:
             raise ValueError(

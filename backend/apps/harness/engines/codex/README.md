@@ -53,7 +53,9 @@ it does not decide model, prompt, tool or permission policy.
   the shared external-child timeline adapter and share the root owner/account
   and checkpoint. OpenCuria does not advertise its `task` dispatcher to Codex.
 - Native base instructions remain untouched; `developerInstructions` contains
-  only the shared identity/proactivity extension. Native workspace configuration,
+  only the [shared product context](../../../../../docs/harness-prompts.md)
+  (workspace boundaries, permitted local setup, and chat file/media rendering).
+  Native workspace configuration,
   AGENTS and skill discovery remain enabled. Selected skills use native files.
 - Native question/update-plan tools are replaced by OpenCuria's persistent
   question/todo tools. Process and registered MCP tools are the other extensions.

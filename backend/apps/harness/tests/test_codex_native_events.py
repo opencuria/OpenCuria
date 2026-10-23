@@ -21,25 +21,12 @@ from apps.harness.engines.codex.session_store import (
 )
 from apps.harness.engines.codex.tools import ManagedToolInvoker
 from apps.harness.permissions.evaluator import PermissionEvaluator
-from apps.harness.prompts.native import (
-    PROACTIVE_WORKSPACE_INSTRUCTIONS,
-    native_prompt_extension,
-)
+from apps.harness.prompts.opencuria import opencuria_context
 from apps.harness.runner import RunOptions
 from apps.harness.tests.conftest import TINY_PNG
 from apps.harness.tests.test_codex_core import LocalAccessor, fixture_run
 from apps.harness.tests.test_codex_core_safety import auth
 from apps.harness.tools import default_tool_registry
-
-
-def test_only_identity_and_original_proactivity_are_added() -> None:
-    extension = native_prompt_extension(get_agent("build"))
-    assert extension.split("\n\n") == [
-        "You are opencuria build, working inside an OpenCuria workspace.",
-        PROACTIVE_WORKSPACE_INSTRUCTIONS,
-    ]
-    assert "#" not in extension
-    assert native_prompt_extension(get_agent("explore")).count("\n") == 0
 
 
 def test_codex_keeps_native_capabilities_and_small_stable_extension_surface() -> None:
@@ -73,15 +60,20 @@ def test_codex_keeps_native_capabilities_and_small_stable_extension_surface() ->
 
 @pytest.mark.asyncio
 async def test_real_runtime_retains_native_base_prompt_search_and_delegation(tmp_path):
-    _, _, _, requests, _, _ = await fixture_run(tmp_path, tool="")
-    request = next(x for x in requests if x.get("model") == "~test/model")
-    context = json.dumps(request.get("input", []))
-    assert "You are a coding agent running in the Codex" in context
-    assert PROACTIVE_WORKSPACE_INSTRUCTIONS in context
-    assert (
-        "Native delegation, plugins, MCP discovery and hooks are disabled"
-        not in context
-    )
+    _, _, _, requests, _, _ = await fixture_run(tmp_path, tool="", resume=True)
+    turns = [x for x in requests if x.get("model") == "~test/model"]
+    assert len(turns) >= 2
+    for request in turns:
+        context = json.dumps(request.get("input", []))
+        assert "You are a coding agent running in the Codex" in context
+        for paragraph in opencuria_context(get_agent("build")).split("\n\n"):
+            assert context.count(paragraph) == 1
+        assert get_agent("build").system_prompt not in context
+        assert (
+            "Native delegation, plugins, MCP discovery and hooks are disabled"
+            not in context
+        )
+    request = turns[-1]
     names = {x.get("name") for x in request["tools"]}
     assert "multi_agent_v1" in names
     assert "exec_command" in names

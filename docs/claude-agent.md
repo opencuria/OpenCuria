@@ -49,10 +49,11 @@ CLI-reported cost is usage information, not an Anthropic invoice. See Anthropic'
 ## Native prompt and tools
 
 Claude Code retains its native system-prompt preset. OpenCuria appends only a
-short identity and the shared proactive-workspace paragraph; it no longer inlines
-its own role policy, environment, project files, tool descriptions or skill bodies
-in that extension. Native context loading remains Claude-owned; selected skills
-continue to use the existing managed native plugin. Native shell/file/delegation
+small [shared product context](harness-prompts.md): workspace isolation and external
+boundaries, permitted local setup, and Markdown file/media rendering. It adds no
+coding persona, role policy, tool descriptions, project files, or skill bodies.
+Context loading remains CLI-owned under the setting sources described below;
+selected skills use the existing managed native plugin. Native shell/file/delegation
 and the existing OpenCuria MCP/process/question/todo integration are unchanged.
 
 ## Messages while the agent runs
@@ -119,9 +120,12 @@ schemas and descriptions come from the pinned CLI and the MCP bridge, not a
 duplicated tool list in the system-prompt extension. Native WebFetch/WebSearch use Claude's behavior,
 including for Explore, rather than OpenCuria Webfetch's URL protections.
 
-Each run, including resume, appends the same small identity/proactivity extension.
-Native subagents retain scoped tool permissions and a minimal identity extension;
-project-context discovery is left to the CLI rather than duplicated by OpenCuria. Explicit user image/PDF references (`@file:/workspace/...`
+Each run, including resume, appends the same shared product context.
+Scoped SDK subagents receive the same context in their explicit child prompts;
+Explore omits local setup guidance. These child prompts are separate from upstream
+subagent role prompts; see [integration boundaries](harness-prompts.md#separate-runtime-integration-boundaries).
+Project-context discovery is left to the CLI rather than duplicated by OpenCuria.
+Explicit user image/PDF references (`@file:/workspace/...`
 and Markdown images) become bounded media inputs after read authorization;
 workspace-media reads reject symlinks. Assistant/tool text never triggers these
 implicit file reads. Other file references remain text for an explicit Read call.
@@ -174,5 +178,5 @@ Runner artifact tests cover provisioning and, when pinned CLI bytes are
 available locally, run the installer against them using a local shell and
 filesystem fake—not a Docker or QEMU guest. Backend local-SSE contract tests run
 the real pinned CLI against scripted responses and cover native schemas, prompt
-preservation on resume, child identity/tool scopes, direct image/PDF input, permission
+preservation on resume, child context/tool scopes, direct image/PDF input, permission
 hooks, MCP correlation, and turn-limit completion without real provider calls.

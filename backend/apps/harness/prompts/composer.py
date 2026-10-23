@@ -1,10 +1,9 @@
 """System-prompt composer for the agent harness.
 
-Assembles the system prompt from the agent definition, project context
-files (``AGENTS.md`` walk-up with ``CLAUDE.md`` fallback), environment
-facts (date, isolated Linux workspace, working directory, mode), the
-available tools, and the subagent descriptions used by the ``task``
-tool.
+Assembles the system prompt from the agent definition, shared OpenCuria
+product context, project context files (``AGENTS.md`` walk-up with ``CLAUDE.md``
+fallback), environment facts (date, platform, working directory, mode), the
+available tools, and the subagent descriptions used by the ``task`` tool.
 
 Truncation limits (documented here so callers can reason about them):
 
@@ -33,7 +32,7 @@ import structlog
 
 from ..access.base import HARNESS_WORKSPACE_ROOT
 from ..agents.definitions import AgentDefinition
-from .native import PROACTIVE_WORKSPACE_INSTRUCTIONS
+from .opencuria import opencuria_context
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard for typing only
     from ..access.base import WorkspaceAccessor
@@ -196,6 +195,9 @@ async def compose_system_prompt(
             "question tool", "mcp__opencuria__question tool"
         )
     sections: list[str] = [agent_prompt]
+    product_context = opencuria_context(agent)
+    if product_context:
+        sections.append(product_context)
     sources: list[str] = []
     truncated = False
 
@@ -211,27 +213,11 @@ async def compose_system_prompt(
     env_lines = [
         "# Environment",
         f"Date: {moment.strftime('%Y-%m-%d')}",
-        "Platform: Linux (isolated OpenCuria workspace)",
-        f"Workspace root: {HARNESS_WORKSPACE_ROOT}",
+        "Platform: Linux",
         f"Working directory: {cwd}",
         f"Mode: {mode} (plan = scope and propose; "
         "build = implement intended changes directly)",
     ]
-    if agent.mode != "hidden":
-        env_lines.append(
-            "Chat media: embed workspace images/videos as markdown, "
-            "e.g. ![Login](screenshots/login.png) (relative to "
-            f"{HARNESS_WORKSPACE_ROOT}, or {HARNESS_WORKSPACE_ROOT}/...)."
-        )
-        env_lines.append(
-            "You are working inside an isolated OpenCuria workspace "
-            "(Linux container or VM), not on the user's machine. Use the "
-            "full shell and available tools within your agent permissions. "
-            "External or production services are not isolated; ask before "
-            "changing them."
-        )
-        if agent.name != "explore":
-            env_lines.append(PROACTIVE_WORKSPACE_INSTRUCTIONS)
     if mode == "plan":
         if agent.name == "explore":
             env_lines.append(

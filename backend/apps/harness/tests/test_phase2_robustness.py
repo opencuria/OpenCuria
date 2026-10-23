@@ -419,23 +419,23 @@ async def test_composer_environment_has_platform_and_plan_reminder() -> None:
     from apps.harness.prompts.composer import compose_system_prompt
 
     plan = await compose_system_prompt(agent=get_agent("plan"), mode="plan")
-    assert "Platform: Linux (isolated OpenCuria workspace)" in plan.system
-    assert "Workspace root:" in plan.system
+    assert "Platform: Linux" in plan.system
+    assert "rooted at /workspace" in plan.system
     assert "not on the user's machine" in plan.system
     assert "ordinary temporary artifacts" in plan.system
     assert "Ask before deliberate source/configuration changes" in plan.system
     assert "follow the configured agent permissions" in plan.system
     assert "unclassified mutations" not in plan.system
-    assert "Chat media:" in plan.system
+    assert "OpenCuria chat renders" in plan.system
     build = await compose_system_prompt(agent=get_agent("build"), mode="build")
-    assert "Platform: Linux (isolated OpenCuria workspace)" in build.system
-    assert "install missing packages" in build.system
-    assert "Chat media:" in build.system
-    assert "![Login](screenshots/login.png)" in build.system
+    assert "Platform: Linux" in build.system
+    assert "installing dependencies" in build.system
+    assert "OpenCuria chat renders" in build.system
+    assert "![Screenshot](/workspace/screenshots/result.png)" in build.system
     assert "Plan mode:" not in build.system
     title = await compose_system_prompt(agent=get_agent("title"), mode="build")
     assert "not on the user's machine" not in title.system
-    assert "Chat media:" not in title.system
+    assert "OpenCuria chat renders" not in title.system
 
 
 @pytest.mark.parametrize(

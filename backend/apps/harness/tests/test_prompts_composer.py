@@ -13,6 +13,7 @@ from apps.harness.prompts.composer import (
     compose_system_prompt,
     load_project_context,
 )
+from apps.harness.prompts.opencuria import opencuria_context
 from apps.harness.providers.base import ToolSchema
 from apps.harness.tests.conftest import FakeAccessor
 
@@ -125,7 +126,7 @@ async def test_composer_sections_and_metadata() -> None:
     assert "Working directory: /workspace" in composed.system
     assert "Mode: build" in composed.system
     assert "isolated OpenCuria workspace" in composed.system
-    assert "full shell" in composed.system
+    assert composed.system.count(opencuria_context(get_agent("build"))) == 1
     assert "- read: Read a file." in composed.system
     assert "- general: Delegated subtasks." in composed.system
     assert (
@@ -133,8 +134,7 @@ async def test_composer_sections_and_metadata() -> None:
         in composed.system
     )
     assert "Launch independent subagents in one message" in composed.system
-    assert "Chat media:" in composed.system
-    assert "![Login](screenshots/login.png)" in composed.system
+    assert "![Screenshot](/workspace/screenshots/result.png)" in composed.system
     assert "actual running UI (not a mock)" in composed.system
     assert composed.truncated is False
 
@@ -153,16 +153,16 @@ async def test_composer_encourages_local_testing_with_boundaries(
         mode=mode,
         native_tool_contracts=native_tool_contracts,
     )
-    assert "take initiative: start/restart development servers" in composed.system
-    assert "install missing packages" in composed.system
-    assert "run migrations on workspace-local test data" in composed.system
-    assert "test relevant flows in the running app" in composed.system
-    assert "without unnecessary confirmation" in composed.system
-    assert "Investigate failures yourself" in composed.system
-    assert "preserve existing user work" in composed.system
-    assert "within your agent permissions" in composed.system
-    assert "External or production services are not isolated" in composed.system
-    assert "ask before changing them" in composed.system
+    assert composed.system.count(opencuria_context(get_agent(agent_name))) == 1
+    assert "starting development servers" in composed.system
+    assert "installing dependencies" in composed.system
+    assert "running migrations against workspace-local test data" in composed.system
+    assert "testing relevant flows in the running app" in composed.system
+    assert "Preserve existing user work" in composed.system
+    assert "When permitted by the current task, mode, and permissions" in (
+        composed.system
+    )
+    assert "does not extend to external or production services" in composed.system
     if agent_name == "plan":
         assert "Ask before deliberate source/configuration changes" in composed.system
 
@@ -179,16 +179,26 @@ async def test_composer_restricted_agents_do_not_get_local_testing_guidance(
         mode=mode,
         native_tool_contracts=native_tool_contracts,
     )
-    assert "take initiative" not in composed.system
-    assert "start/restart development servers" not in composed.system
-    assert "install missing packages" not in composed.system
-    assert "run migrations" not in composed.system
+    assert "starting development servers" not in composed.system
+    assert "installing dependencies" not in composed.system
+    assert "running migrations" not in composed.system
     if agent_name == "explore":
         assert "read-only research subagent" in composed.system.lower()
         assert "Never edit or write files" in composed.system
     else:
         assert "not on the user's machine" not in composed.system
-        assert "Chat media:" not in composed.system
+        assert "OpenCuria chat renders" not in composed.system
+
+
+async def test_shared_chat_paths_stay_workspace_relative_from_a_subdirectory() -> None:
+    """Shell cwd must not change the paths advertised to the chat renderer."""
+    composed = await compose_system_prompt(
+        agent=get_agent("build"), mode="build", cwd="/workspace/project/backend"
+    )
+    assert "Working directory: /workspace/project/backend" in composed.system
+    assert "Relative chat paths resolve from /workspace" in composed.system
+    assert "![Screenshot](/workspace/screenshots/result.png)" in composed.system
+    assert composed.system.count("OpenCuria chat renders") == 1
 
 
 async def test_composer_skills_references_extension_point() -> None:

@@ -49,8 +49,10 @@ not a compatibility guarantee. See [OpenRouter's Codex guide][openrouter].
   and registered MCP tools—the same integration surface as Claude. Native
   question/plan-update tools are disabled in favor of persistent OpenCuria gates.
   Shell, files and delegation are native Codex, not duplicate managed tools.
-- The native base prompt is not replaced. OpenCuria adds only a short identity
-  and the shared proactive-workspace paragraph as developer instructions.
+- The native base prompt is not replaced. OpenCuria adds only the
+  [shared product context](harness-prompts.md) as developer instructions:
+  workspace boundaries, permitted local setup, and Markdown file/media rendering.
+  Coding roles, tool guidance and planning instructions remain Codex-owned.
   Codex discovers project instructions, skills, MCP configuration and plugins
   natively. Authorized workspace `.codex/config.toml` is loaded as trusted;
   the session-specific `CODEX_HOME` does not import another user's host config.

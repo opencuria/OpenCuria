@@ -12,8 +12,10 @@ from typing import Any
 import claude_agent_sdk
 import pytest
 
+from apps.harness.agents.definitions import get_agent
 from apps.harness.engines.claude.engine import ClaudeEngine
 from apps.harness.permissions.evaluator import PermissionEvaluator
+from apps.harness.prompts.opencuria import opencuria_context
 from apps.harness.tests.conftest import TINY_PNG
 from apps.harness.tests.test_claude_engine import (
     BUNDLED_CLAUDE,
@@ -207,6 +209,16 @@ async def test_real_cli_reuses_binding_with_minimal_extension_in_plan(
     assert "Remember the build-history marker" not in system_text
     assert "ORIGINAL_USER_TURN" in json.dumps(plan_requests)
     assert "Continue the build-history marker" in json.dumps(plan_requests)
+    root_requests = [
+        request for request in build_requests + plan_requests if _tool_schemas(request)
+    ]
+    assert root_requests
+    for request in root_requests:
+        system = _system_text(request)
+        assert system.count(opencuria_context(get_agent("build"))) == 1
+        assert "Claude Code" in system
+        assert get_agent("build").system_prompt not in system
+        assert get_agent("plan").system_prompt not in system
 
 
 @pytest.mark.asyncio
@@ -511,6 +523,7 @@ async def test_real_cli_keeps_native_read_and_mcp_schemas_without_prompt_duplica
     mcp_name = f"mcp__opencuria__{note.name}"
     assert names.count(mcp_name) == 1
     system = _system_text(provider_request)
+    assert system.count(opencuria_context(get_agent("build"))) == 1
     assert "# OpenCuria tools" not in system
     assert "# Available tools" not in system
     assert f"- {mcp_name}:" not in system
@@ -590,34 +603,18 @@ async def test_real_cli_hydrates_png_and_pdf_file_references_once(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("subagent_type", "system_marker", "mode"),
-    [
-        ("general", "You are opencuria general", "build"),
-        ("general", "You are opencuria general", "plan"),
-        (
-            "explore",
-            "You are opencuria explore",
-            "build",
-        ),
-        (
-            "explore",
-            "You are opencuria explore",
-            "plan",
-        ),
-    ],
-)
-async def test_real_cli_task_child_gets_minimal_identity_and_scoped_tools(
+@pytest.mark.parametrize("subagent_type", ["general", "explore"])
+@pytest.mark.parametrize("mode", ["build", "plan"])
+async def test_real_cli_task_child_gets_shared_context_and_scoped_tools(
     tmp_path: Path,
     subagent_type: str,
-    system_marker: str,
     mode: str,
 ) -> None:
-    """Native Task/Agent children retain identity and tool scope without extra prose."""
+    """Native Task/Agent children receive product context within their tool scope."""
     _require_pinned_cli()
     task_args = {
         "description": f"Inspect the {subagent_type} fixture scope.",
-        "prompt": "Read the fixture context and return a concise summary.",
+        "prompt": "CHILD_TASK_MARKER: Read the fixture context and summarize it.",
         "subagent_type": subagent_type,
     }
     selected: tuple[Any, list[dict[str, Any]]] | None = None
@@ -645,7 +642,16 @@ async def test_real_cli_task_child_gets_minimal_identity_and_scoped_tools(
             },
         )
         child_requests = [
-            request for request in requests if system_marker in _system_text(request)
+            request
+            for request in requests
+            if task_args["prompt"]
+            in json.dumps(
+                [
+                    message
+                    for message in request.get("messages", [])
+                    if message.get("role") == "user"
+                ]
+            )
         ]
         if child_requests:
             selected = (result, child_requests)
@@ -667,13 +673,14 @@ async def test_real_cli_task_child_gets_minimal_identity_and_scoped_tools(
     assert task_call["prompt"] == task_args["prompt"]
     assert task_call["subagent_type"] == subagent_type
     assert "CHILD_PROJECT_CONTEXT_MARKER" not in system
-    assert "working inside an OpenCuria workspace" in system
+    assert system.count(opencuria_context(get_agent(subagent_type))) == 1
     assert "# OpenCuria tools" not in system
     assert "# Environment" not in system
 
     names = [str(item.get("name") or "") for item in _tool_schemas(child_request)]
     assert "Read" in names
     if subagent_type == "explore":
+        assert "starting development servers" not in system
         forbidden = {"Write", "Edit", "NotebookEdit", "Task", "Agent", "TodoWrite"}
         assert forbidden.isdisjoint(names)
         assert not any(name.startswith("mcp__") for name in names)
