@@ -48,6 +48,8 @@ export type ScheduledTaskPatch = Partial<ScheduledTaskInput>
 export interface ScheduledTaskRun {
   id: string
   scheduled_for: string
+  /** `scheduled` or `manual` (Run now). */
+  trigger?: string
   status: 'claimed' | 'running' | 'succeeded' | 'error' | 'skipped' | 'interrupted' | string
   session_id: string | null
   started_at: string | null

@@ -13,10 +13,22 @@ import type {
   ScheduledTaskPatch,
 } from '@/services/scheduledTasks.api'
 
+/** Initial values for a new task, e.g. from a calendar slot. */
+export interface ScheduledTaskPrefill {
+  workspace_id?: string
+  /** 0 = Monday … 6 = Sunday */
+  weekdays?: number[]
+  /** HH:MM */
+  times?: string[]
+  /** IANA zone the times are meant in. */
+  timezone_name?: string
+}
+
 export const useScheduledTaskStore = defineStore('scheduledTasks', () => {
   const authStore = useAuthStore()
   const tasks = ref<ScheduledTask[]>([])
   const selectedTaskId = ref<string | null>(null)
+  const newTaskPrefill = ref<ScheduledTaskPrefill | null>(null)
   const dialogOpen = ref(false)
   const loading = ref(false)
   const loadError = ref('')
@@ -144,9 +156,10 @@ export const useScheduledTaskStore = defineStore('scheduledTasks', () => {
     )
   }
 
-  function openNew(): void {
+  function openNew(prefill: ScheduledTaskPrefill | null = null): void {
     syncOrganization()
     selectedTaskId.value = null
+    newTaskPrefill.value = prefill
     dialogOpen.value = true
   }
 
@@ -164,6 +177,7 @@ export const useScheduledTaskStore = defineStore('scheduledTasks', () => {
     tasks,
     selectedTaskId,
     selectedTask,
+    newTaskPrefill,
     dialogOpen,
     loading,
     loadError,

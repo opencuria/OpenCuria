@@ -3,7 +3,7 @@
  * ChatSidebar — chat-first navigation: brand, new chat, command palette,
  * inbox, workspace-grouped conversations, scheduled tasks, account.
  */
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { CalendarClock as CalendarClockIcon, Layers, Plus, Search } from '@lucide/vue'
 import CommandPalette from './CommandPalette.vue'
@@ -62,7 +62,7 @@ const scheduledTaskStore = useScheduledTaskStore()
 const { tasks: scheduledTasks } = storeToRefs(scheduledTaskStore)
 const conversationStore = useHarnessConversationStore()
 const harnessStore = useHarnessStore()
-const { isMobile, state: sidebarState, setOpenMobile, setOpen } = useSidebar()
+const { isMobile, setOpenMobile } = useSidebar()
 
 const searchOpen = ref(false)
 const visibleConversationCounts = ref<Record<string, number>>({})
@@ -126,22 +126,9 @@ function handleOpenWorkspaces(): void {
   void router.push('/workspaces')
 }
 
-async function handleOpenScheduledTasks(): Promise<void> {
-  if (!isMobile.value && sidebarState.value === 'collapsed') {
-    setOpen(true)
-    await nextTick()
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-    document.querySelector<HTMLElement>('[data-testid="new-scheduled-task"]')?.focus()
-    return
-  }
+function handleOpenScheduledTasks(): void {
   closeMobileSidebar()
-  if (isMobile.value) {
-    await nextTick()
-    await new Promise<void>((resolve) =>
-      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-    )
-  }
-  scheduledTaskStore.openNew()
+  void router.push('/scheduled-tasks')
 }
 
 function handleMarkAllRead(): void {
@@ -425,7 +412,7 @@ watch(
           @create="handleOpenWorkspaces"
         />
 
-        <ScheduledTasksSection :tasks="scheduledTasks" />
+        <ScheduledTasksSection :tasks="scheduledTasks" @open-all="handleOpenScheduledTasks" />
       </div>
     </SidebarContent>
 

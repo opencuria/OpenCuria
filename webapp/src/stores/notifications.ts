@@ -9,14 +9,25 @@ import { toast } from 'vue-sonner'
 
 export type NotificationType = 'success' | 'error' | 'warning' | 'info'
 
+/** Inline toast button, e.g. Undo. */
+export interface NotificationAction {
+  label: string
+  onClick: () => void
+}
+
 export const useNotificationStore = defineStore('notifications', () => {
   function add(
     type: NotificationType,
     title: string,
     message?: string,
     duration = 5000,
+    action?: NotificationAction,
   ): void {
-    const options = message ? { description: message, duration } : { duration }
+    const options = {
+      ...(message ? { description: message } : {}),
+      duration,
+      ...(action ? { action } : {}),
+    }
 
     switch (type) {
       case 'success':
@@ -34,8 +45,8 @@ export const useNotificationStore = defineStore('notifications', () => {
     }
   }
 
-  function success(title: string, message?: string): void {
-    add('success', title, message)
+  function success(title: string, message?: string, action?: NotificationAction): void {
+    add('success', title, message, action ? 8000 : 5000, action)
   }
 
   function error(title: string, message?: string): void {

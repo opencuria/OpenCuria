@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ScheduledTaskDialog from './ScheduledTaskDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useScheduledTaskStore } from '@/stores/scheduledTasks'
+import type { ScheduledTaskPrefill } from '@/stores/scheduledTasks'
 import type { ScheduledTask, ScheduledTaskRun } from '@/services/scheduledTasks.api'
 
 const providerMocks = vi.hoisted(() => ({ load: vi.fn() }))
@@ -102,7 +103,11 @@ const passthrough = defineComponent({
 const selectUpdateKey = Symbol('select-update')
 const tabsModelKey = Symbol('tabs-model')
 
-async function mountDialog(mode: 'edit' | 'new' = 'edit', selectedTask = task) {
+async function mountDialog(
+  mode: 'edit' | 'new' = 'edit',
+  selectedTask = task,
+  prefill: ScheduledTaskPrefill | null = null,
+) {
   setActivePinia(createPinia())
   const auth = useAuthStore()
   auth.activeOrganizationId = 'org-1'
@@ -118,7 +123,7 @@ async function mountDialog(mode: 'edit' | 'new' = 'edit', selectedTask = task) {
   skillMocks.skills = [{ id: 'skill-1', name: 'Review skill' }]
   const store = useScheduledTaskStore()
   store.tasks = [selectedTask]
-  if (mode === 'new') store.openNew()
+  if (mode === 'new') store.openNew(prefill)
   else store.openTask(selectedTask.id)
   const router = createRouter({
     history: createMemoryHistory(),
@@ -362,6 +367,34 @@ describe('ScheduledTaskDialog', () => {
         weekdays: [],
         harness_id: 'native',
         skill_ids: [],
+      }),
+    )
+  })
+
+  it('starts a new task from a calendar slot prefill', async () => {
+    const { wrapper } = await mountDialog('new', task, {
+      workspace_id: 'ws-1',
+      weekdays: [5],
+      times: ['14:30'],
+    })
+    for (let day = 0; day < 7; day += 1) {
+      expect(wrapper.get(`[data-testid="weekday-${day}"]`).attributes('aria-pressed')).toBe(
+        String(day === 5),
+      )
+    }
+    expect((wrapper.get('[data-testid="task-time"]').element as HTMLInputElement).value).toBe(
+      '14:30',
+    )
+    await wrapper.get('[data-testid="task-name"]').setValue('Weekend review')
+    await wrapper.get('[data-testid="task-prompt"]').setValue('Review issues')
+    await wrapper.get('[data-testid="save-task"]').trigger('click')
+    await flushPromises()
+    expect(api.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspace_id: 'ws-1',
+        recurrence: 'weekly',
+        weekdays: [5],
+        local_time: '14:30',
       }),
     )
   })

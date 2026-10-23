@@ -172,6 +172,15 @@ describe('scheduled task store', () => {
     expect(store.selectedTask?.id).toBe('deep-linked')
   })
 
+  it('carries a calendar prefill only into the next new task', () => {
+    const store = useScheduledTaskStore()
+    store.openNew({ workspace_id: 'ws-1', weekdays: [2], times: ['10:00'] })
+    expect(store.dialogOpen).toBe(true)
+    expect(store.newTaskPrefill).toEqual({ workspace_id: 'ws-1', weekdays: [2], times: ['10:00'] })
+    store.openNew()
+    expect(store.newTaskPrefill).toBeNull()
+  })
+
   it('ignores responses belonging to an organization that is no longer active', async () => {
     let resolve!: (tasks: ScheduledTask[]) => void
     api.list.mockReturnValue(

@@ -172,6 +172,31 @@ export function nextCronOccurrences(
   now = new Date(),
   count = 1,
 ): Date[] {
+  return collectCronOccurrences(expression, timezone, now, count, Number.POSITIVE_INFINITY)
+}
+
+/** Occurrences in `[start, end)`, capped at `limit`, with the same zone rules. */
+export function cronOccurrencesBetween(
+  expression: string,
+  timezone: string,
+  start: Date,
+  end: Date,
+  limit = 5000,
+): Date[] {
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return []
+  return collectCronOccurrences(expression, timezone, new Date(start.getTime() - 1), limit, end.getTime())
+}
+
+// No IANA zone is further than 14 h from UTC; one extra hour of slack.
+const MAX_ZONE_OFFSET_MS = 15 * 3_600_000
+
+function collectCronOccurrences(
+  expression: string,
+  timezone: string,
+  now: Date,
+  count: number,
+  untilMs: number,
+): Date[] {
   const localParts = zoneFormatter(timezone)
   if (!localParts || Number.isNaN(now.getTime()) || count < 1) return []
   let specs: CronSpec[]
@@ -187,6 +212,7 @@ export function nextCronOccurrences(
 
   for (let offset = 0; offset < SEARCH_DAYS && results.length < count; offset += 1) {
     const date = new Date(Date.UTC(nowLocal.year, nowLocal.month - 1, nowLocal.day + offset))
+    if (date.getTime() - MAX_ZONE_OFFSET_MS >= untilMs) break
     const [year, month, day] = [date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate()]
     const wallTimes = new Set<number>()
     for (const spec of specs) {
@@ -219,7 +245,7 @@ export function nextCronOccurrences(
       // An ambiguous fall-back time has two matches; only the first (fold=0)
       // runs. If it has passed, skip rather than run in the repeated hour.
       const first = matches.sort((a, b) => a - b)[0]
-      if (first !== undefined && first > afterMs) {
+      if (first !== undefined && first > afterMs && first < untilMs) {
         dayResults.push(first)
         if (results.length + dayResults.length >= count) break
       }

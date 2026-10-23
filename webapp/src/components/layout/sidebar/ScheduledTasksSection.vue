@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { nextTick } from 'vue'
-import { CalendarClock, CirclePause, Plus } from '@lucide/vue'
+import { CalendarClock, CalendarDays, CirclePause, Plus } from '@lucide/vue'
 import { useSidebar } from '@/components/ui/sidebar'
 import { Button } from '@/components/ui/button'
 import { useScheduledTaskStore } from '@/stores/scheduledTasks'
@@ -8,6 +8,7 @@ import { describeSchedule } from '@/lib/scheduledTasks'
 import type { ScheduledTask } from '@/services/scheduledTasks.api'
 
 defineProps<{ tasks: ScheduledTask[] }>()
+const emit = defineEmits<{ 'open-all': [] }>()
 const tasksStore = useScheduledTaskStore()
 const { isMobile, setOpenMobile } = useSidebar()
 
@@ -104,5 +105,14 @@ function cadence(task: ScheduledTask): string {
         >Retry</Button
       >
     </div>
+    <Button
+      variant="ghost"
+      size="sm"
+      data-testid="open-schedule-calendar"
+      class="mt-1 h-7 w-full justify-start rounded-xl px-2 text-xs font-normal text-muted-foreground"
+      @click="emit('open-all')"
+    >
+      <CalendarDays class="size-3.5" />Calendar
+    </Button>
   </section>
 </template>

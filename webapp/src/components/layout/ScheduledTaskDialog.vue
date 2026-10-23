@@ -41,6 +41,7 @@ import { useScheduledTaskStore } from '@/stores/scheduledTasks'
 import { WorkspaceStatus } from '@/types'
 import type { HarnessId } from '@/types/harness'
 import {
+  COMMON_TIME_ZONES,
   CRON_PRESETS,
   defaultScheduleDraft,
   describeScheduleDraft,
@@ -239,6 +240,11 @@ function applyBlank(): void {
   composerResetKey.value = formGeneration
   form.value = blankForm()
   if (visibleWorkspaces.value.length === 1) form.value.workspace_id = visibleWorkspaces.value[0]!.id
+  const prefill = taskStore.newTaskPrefill
+  if (prefill?.workspace_id) form.value.workspace_id = prefill.workspace_id
+  if (prefill?.weekdays?.length) form.value.schedule.weekdays = [...prefill.weekdays]
+  if (prefill?.times?.length) form.value.schedule.times = [...prefill.times]
+  if (prefill?.timezone_name) form.value.timezone_name = prefill.timezone_name
   dirty.value = false
   errors.value = {}
   apiError.value = ''
@@ -1041,12 +1047,7 @@ onMounted(async () => {
                     data-testid="task-timezone"
                     @update:model-value="dirty = true"
                   /><datalist id="scheduled-timezones">
-                    <option value="UTC" />
-                    <option value="Europe/London" />
-                    <option value="Europe/Berlin" />
-                    <option value="America/New_York" />
-                    <option value="America/Los_Angeles" />
-                    <option value="Asia/Tokyo" /></datalist
+                    <option v-for="zone in COMMON_TIME_ZONES" :key="zone" :value="zone" /></datalist
                   ><span
                     v-if="form.timezone_name && !timezoneValid"
                     class="block text-xs text-destructive"
