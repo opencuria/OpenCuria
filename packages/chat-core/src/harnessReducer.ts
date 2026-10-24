@@ -26,7 +26,6 @@ import type {
   HarnessPart,
   HarnessPartDelta,
   HarnessPartState,
-  HarnessPartType,
   HarnessSubtaskFinishedEvent,
   HarnessSubtaskStartedEvent,
   HarnessTodo,
@@ -301,25 +300,6 @@ function closeRunningStreams(
 function toStepNumber(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
   return value;
-}
-
-/** Parts that identify an Agent-S step and must survive busy reconciliation. */
-const STEP_IDENTITY_TYPES: ReadonlySet<HarnessPartType> = new Set([
-  "agent",
-  "reasoning",
-  "step-start",
-  "step-finish",
-]);
-
-/** Step number carried by a part (`meta.step` or `delta.step_*` markers). */
-function partStepNumber(part: HarnessPart): number | undefined {
-  const metaStep = toStepNumber(part.meta?.["step"] ?? part.display?.step);
-  if (metaStep !== undefined) return metaStep;
-  if (part.type === "step-start" || part.type === "step-finish") {
-    const titleStep = /step\s+(\d+)/i.exec(part.title ?? "");
-    if (titleStep) return Number(titleStep[1]);
-  }
-  return undefined;
 }
 
 /** Normalize a defensive agent_meta map (unknown keys are dropped). */
@@ -962,13 +942,9 @@ export function sortHarnessParts<T extends HarnessPart>(parts: T[]): T[] {
 /**
  * Merge one live assistant turn into its server snapshot row.
  *
- * Matched by message id (same turn). Parts merge by part id; local
- * placeholder rows (`local-*`) fold into the server row for the same
- * logical stream (same call/subtask id, or prefix-related text/reasoning
- * output) so already-received data survives a stale snapshot. The merged
- * row keeps server ids/positions with the longest known output and the
- * furthest lifecycle state. Live-only rows the server does not know yet
- * are appended in observed order.
+ * Messages and parts share their persisted IDs across sockets and REST.
+ * Keep the longest known output and furthest lifecycle state for each ID,
+ * and append live-only parts missing from a stale snapshot.
  */
 function mergeAssistantParts(
   live: HarnessMessage,
@@ -1021,81 +997,11 @@ function mergeAssistantParts(
       }
       return serverPart;
     }
-    // Placeholder (local id) for the same logical part under a server id:
-    // fold the live output/state into the server row instead of duplicating.
-    const placeholder = findPlaceholderForServerPart(live.parts, serverPart);
-    if (placeholder) {
-      if (placeholder.output.length > serverPart.output.length) {
-        serverPart.output = placeholder.output;
-      }
-      serverPart.state = furthestPartState(serverPart.state, placeholder.state);
-      if (placeholder.display && !serverPart.display)
-        serverPart.display = placeholder.display;
-      if (placeholder.detail_loaded === false && !serverPart.detail_loaded) {
-        serverPart.detail_loaded = false;
-      }
-      if (placeholder.detail_loaded && !serverPart.detail_loaded) {
-        serverPart.input = placeholder.input;
-        serverPart.output = placeholder.output;
-        serverPart.meta = { ...serverPart.meta, ...placeholder.meta };
-        serverPart.detail_loaded = true;
-      }
-      if (
-        serverPart.meta?.["agent_meta"] == null &&
-        placeholder.meta?.["agent_meta"] != null
-      ) {
-        serverPart.meta = {
-          ...serverPart.meta,
-          agent_meta: placeholder.meta["agent_meta"],
-        };
-      }
-      return serverPart;
-    }
     return serverPart;
   });
-  const coveredLiveIds = new Set<string>();
+  const serverIds = new Set(server.parts.map((part) => part.id));
   for (const livePart of live.parts) {
-    if (liveById.has(livePart.id) && merged.some((p) => p.id === livePart.id)) {
-      coveredLiveIds.add(livePart.id);
-      continue;
-    }
-    // Already folded as a placeholder into a server row.
-    if (
-      merged.some(
-        (serverPart) =>
-          findPlaceholderForServerPart([livePart], serverPart) === livePart,
-      )
-    ) {
-      coveredLiveIds.add(livePart.id);
-      continue;
-    }
-  }
-
-  for (const livePart of live.parts) {
-    if (coveredLiveIds.has(livePart.id)) continue;
-    if (liveById.has(livePart.id) && merged.some((p) => p.id === livePart.id))
-      continue;
-    // Text placeholders fold into the running server text slot.
-    if (
-      livePart.type === "text" &&
-      foldLiveTextIntoServerSlot(merged, livePart)
-    )
-      continue;
-    // Reasoning placeholders fold by step + prefix.
-    if (
-      livePart.type === "reasoning" &&
-      foldLiveReasoningIntoServerSlot(merged, livePart)
-    )
-      continue;
-    // Same step content under a new server id: dedupe.
-    if (
-      STEP_IDENTITY_TYPES.has(livePart.type) &&
-      isSameStepContent(merged, livePart)
-    )
-      continue;
-    // Tool placeholders matched by call_id were already folded above when
-    // the server row existed; a live-only tool (server behind) is kept.
-    merged.push(livePart);
+    if (!serverIds.has(livePart.id)) merged.push(livePart);
   }
 
   server.parts = sortHarnessParts(merged);
@@ -1122,154 +1028,13 @@ function furthestPartState(
 }
 
 /**
- * Find a local placeholder part for a server row (same logical stream,
- * different id). Tools/subtasks match by call/subtask id; text/reasoning
- * match by prefix-related output (local vs server ids diverge).
- */
-function findPlaceholderForServerPart(
-  liveParts: HarnessPart[],
-  serverPart: HarnessPart,
-): HarnessPart | undefined {
-  for (const live of liveParts) {
-    if (!isLocalId(live.id)) continue;
-    if (live.type !== serverPart.type) continue;
-    if (live.type === "tool") {
-      if (
-        live.call_id &&
-        serverPart.call_id &&
-        live.call_id === serverPart.call_id
-      )
-        return live;
-      continue;
-    }
-    if (live.type === "subtask") {
-      const liveSub = live.meta?.["subtask_id"];
-      const serverSub = serverPart.meta?.["subtask_id"];
-      if (typeof liveSub === "string" && liveSub && liveSub === serverSub)
-        return live;
-      continue;
-    }
-    if (live.type === "steer") {
-      const liveSteer = steerPartId(live);
-      if (liveSteer && liveSteer === steerPartId(serverPart)) return live;
-      continue;
-    }
-    if (live.type === "text") {
-      const liveOut = live.output ?? "";
-      const serverOut = serverPart.output ?? "";
-      if (!liveOut || !serverOut) continue;
-      if (serverOut.startsWith(liveOut) || liveOut.startsWith(serverOut))
-        return live;
-      continue;
-    }
-    if (live.type === "reasoning") {
-      if (partStepNumber(live) !== partStepNumber(serverPart)) continue;
-      const liveOut = live.output ?? "";
-      const serverOut = serverPart.output ?? "";
-      if (
-        serverOut === liveOut ||
-        serverOut.startsWith(liveOut) ||
-        liveOut.startsWith(serverOut)
-      ) {
-        return live;
-      }
-      continue;
-    }
-  }
-  return undefined;
-}
-
-function foldLiveTextIntoServerSlot(
-  merged: HarnessPart[],
-  live: HarnessPart,
-): boolean {
-  const liveOutput = live.output ?? "";
-  if (!liveOutput) return false;
-  const slot = merged.find(
-    (part) => part.type === "text" && part.state === "running",
-  );
-  if (!slot) return false;
-  const serverOutput = slot.output ?? "";
-  if (serverOutput === liveOutput) return true;
-  if (
-    liveOutput.startsWith(serverOutput) ||
-    serverOutput.startsWith(liveOutput)
-  ) {
-    if (liveOutput.length > serverOutput.length) {
-      slot.output = liveOutput;
-      slot.state = furthestPartState(slot.state, live.state);
-    }
-    return true;
-  }
-  return false;
-}
-
-/**
- * Fold a live reasoning part into the matching server reasoning slot.
- *
- * Live reasoning carries a local id while the server row uses a UUID; when
- * both share the same step and one output is a prefix of the other they are
- * the same stream observed at different times (not two rows). The longer /
- * more advanced output wins on the server id; state/meta merge sensibly
- * (exact matches dedupe). Same-step but genuinely different (non-prefix)
- * content is kept as its own row (returns false).
- */
-function foldLiveReasoningIntoServerSlot(
-  merged: HarnessPart[],
-  live: HarnessPart,
-): boolean {
-  const step = partStepNumber(live);
-  const liveOutput = live.output ?? "";
-  const slot = merged.find((part) => {
-    if (part.type !== "reasoning") return false;
-    if (partStepNumber(part) !== step) return false;
-    const serverOutput = part.output ?? "";
-    return (
-      serverOutput === liveOutput ||
-      serverOutput.startsWith(liveOutput) ||
-      liveOutput.startsWith(serverOutput)
-    );
-  });
-  if (!slot) return false;
-  const serverOutput = slot.output ?? "";
-  if (liveOutput.length > serverOutput.length) {
-    slot.output = liveOutput;
-    slot.state = furthestPartState(slot.state, live.state);
-    if (live.title) slot.title = live.title;
-  } else if (serverOutput.length === liveOutput.length) {
-    slot.state = furthestPartState(slot.state, live.state);
-  }
-  // Merge live meta (e.g. step attribution) without losing server keys.
-  slot.meta = { ...slot.meta, ...live.meta };
-  if (step !== undefined) slot.meta = { ...slot.meta, step };
-  return true;
-}
-
-/**
- * True when the merged server parts already hold this live step part under
- * a different id (same step number and same output for agent/reasoning,
- * same step number for step markers).
- */
-function isSameStepContent(merged: HarnessPart[], live: HarnessPart): boolean {
-  const step = partStepNumber(live);
-  return merged.some((part) => {
-    if (part.type !== live.type) return false;
-    if (part.type === "step-start" || part.type === "step-finish") {
-      return step !== undefined && partStepNumber(part) === step;
-    }
-    if (step !== undefined && partStepNumber(part) !== step) return false;
-    return part.output === live.output;
-  });
-}
-
-/**
  * Keep locally streamed turns when a mid-run `fetchParts` snapshot races
  * the live socket deltas. Idle fetches should skip this and replace fully.
  *
  * Reconciliation is by message/part ID and position order — never by
  * comparing content lengths across turns. Same-turn rows merge (longest
  * known output wins per row so stale snapshots preserve already-received
- * data); optimistic local rows (`local-*`) the server has not echoed yet
+ * data); optimistic user rows (`local-*`) the server has not echoed yet
  * are carried over; server-echoed locals are dropped in favor of the
  * server ids. Messages and parts sort by `position` with creation-order
  * fallback.
@@ -1297,10 +1062,8 @@ export function mergeBusyFetchedMessages(
     mergeAssistantParts(live, serverMsg);
   }
 
-  // Live-only rows the server has not echoed yet (optimistic follow-up
-  // user, local assistant shell, or live-only streamed parts on a new
-  // server id). Server-echoed locals (same content, server id present)
-  // are dropped to avoid duplicates.
+  // Keep live turns missing from a stale snapshot and optimistic user
+  // messages until the server echoes them.
   const extras: HarnessMessage[] = [];
   for (const live of previous) {
     if (incomingIds.has(live.id)) continue;
@@ -1312,7 +1075,7 @@ export function mergeBusyFetchedMessages(
       continue;
     }
     if (live.role === "user") {
-      // Legacy optimistic user: only pair with a newly echoed user row
+      // Only pair an optimistic user with a newly echoed user row
       // *after* the last user known before this snapshot. Comparing against
       // any identical prompt would erase a valid repeated follow-up.
       const lastKnownUserPosition = Math.max(
@@ -1331,42 +1094,12 @@ export function mergeBusyFetchedMessages(
       if (!echoed) extras.push(live);
       continue;
     }
-    // A legacy local assistant shell can be folded into a matching
-    // running server turn below.
-    extras.push(live);
-  }
-
-  // Same-turn id mismatch (local shell vs fresh server id): the trailing
-  // local assistant and the trailing server assistant are one turn — fold
-  // instead of duplicating.
-  const localAssistants = extras.filter(
-    (m) => m.role === "assistant" && isLocalId(m.id),
-  );
-  const serverAssistants = incoming.filter(
-    (m) => m.role === "assistant" && !isLocalId(m.id),
-  );
-  if (localAssistants.length === 1 && serverAssistants.length > 0) {
-    const local = localAssistants[0]!;
-    const serverLast = serverAssistants[serverAssistants.length - 1]!;
-    // Only fold an uncompleted legacy placeholder into the uncompleted
-    // server turn; even an empty local shell must not appear twice.
-    if (local.completed_at == null && serverLast.completed_at == null) {
-      mergeAssistantParts(local, serverLast);
-      const idx = extras.indexOf(local);
-      if (idx !== -1) extras.splice(idx, 1);
-    }
   }
 
   const combined = sortHarnessMessages([...incoming, ...extras]);
   // Keep part order deterministic for every message.
   for (const message of combined) {
     message.parts = sortHarnessParts(message.parts);
-  }
-  // Also normalize incoming-only part order when no extras existed.
-  if (extras.length === 0) {
-    for (const message of incoming) {
-      message.parts = sortHarnessParts(message.parts);
-    }
   }
   return combined;
 }

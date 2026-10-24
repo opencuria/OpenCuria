@@ -115,7 +115,7 @@ describe("shared harness steering", () => {
 
   it("reconciles a live steer with its server-backed part", () => {
     const livePart = makePart("steer", {
-      id: "local-session-1-1",
+      id: "server-steer-1",
       output: "Use pnpm",
       meta: { steer_id: "steer-1" },
     });
