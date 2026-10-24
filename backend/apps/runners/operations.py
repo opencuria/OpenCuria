@@ -159,6 +159,17 @@ class OperationRepository:
         }
 
     @staticmethod
+    def list_for_inspection() -> list[LifecycleCommand]:
+        """Read interventions whose runner can receive an inspection request."""
+        return list(
+            LifecycleCommand.objects.filter(
+                phase="intervention", task__runner__status="online"
+            )
+            .exclude(task__runner__sid="")
+            .select_related("task__runner")
+        )
+
+    @staticmethod
     def candidates() -> list:
         """Claim due commands with bounded delivery; expired leases may be reclaimed."""
         now = timezone.now()

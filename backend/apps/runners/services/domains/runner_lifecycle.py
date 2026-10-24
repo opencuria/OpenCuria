@@ -16,7 +16,6 @@ from django.utils import timezone
 from common.exceptions import AuthenticationError
 from common.utils import generate_api_token, hash_token
 
-from ...enums import RunnerStatus
 from ...exceptions import RunnerNotFoundError, WorkspaceNotFoundError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
@@ -81,11 +80,8 @@ class RunnerLifecycleMixin:
 
         Looks up the runner by its Socket.IO session ID.
         """
-        from ...models import Runner
-
-        try:
-            runner = Runner.objects.get(sid=sid, status=RunnerStatus.ONLINE)
-        except Runner.DoesNotExist:
+        runner = self.runners.get_online_by_sid(sid)
+        if runner is None:
             logger.warning("Disconnect from unknown SID: %s", sid)
             return
 
@@ -187,17 +183,9 @@ class RunnerLifecycleMixin:
         user=None,
     ) -> list["Workspace"]:
         """Return workspaces filtered by org and owner."""
-        if runner_id:
-            qs = self.workspaces.list_by_runner(runner_id)
-        elif organization_id:
-            qs = self.workspaces.list_by_organization(organization_id)
-        else:
-            qs = self.workspaces.list_all()
-
-        if user is not None:
-            qs = qs.filter(created_by=user)
-
-        workspaces = list(qs)
+        workspaces = self.workspaces.list_for_scope(
+            runner_id=runner_id, organization_id=organization_id, user=user
+        )
         self._populate_workspace_activity(workspaces)
         return workspaces
 

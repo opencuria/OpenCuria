@@ -59,6 +59,14 @@ class RunnerRepository:
         return Runner.objects.filter(api_token_hash=token_hash).first()
 
     @staticmethod
+    def get_online_by_sid(sid: str) -> Runner | None:
+        """Fetch the online runner on this session, or None when it is stale."""
+        try:
+            return Runner.objects.get(sid=sid, status=RunnerStatus.ONLINE)
+        except Runner.DoesNotExist:
+            return None
+
+    @staticmethod
     def has_session(runner_id: str, sid: str, *, online_only: bool = True) -> bool:
         """Return whether *sid* is the runner's current Socket.IO session."""
         query = Runner.objects.filter(pk=runner_id, sid=sid)
@@ -280,6 +288,31 @@ class WorkspaceRepository:
             )
             .prefetch_related("credentials__service")
         )
+
+    @staticmethod
+    def list_for_scope(
+        *,
+        runner_id: uuid.UUID | None = None,
+        organization_id: uuid.UUID | None = None,
+        user: Any = None,
+        exclude_statuses: tuple[str, ...] = (),
+    ) -> list[Workspace]:
+        """Read workspaces with optional owner/status filters, newest first.
+
+        Runner scope takes precedence over organization scope. Materialize
+        the complete query here so callers do not need queryset operations.
+        """
+        if runner_id:
+            query = WorkspaceRepository.list_by_runner(runner_id)
+        elif organization_id:
+            query = WorkspaceRepository.list_by_organization(organization_id)
+        else:
+            query = WorkspaceRepository.list_all()
+        if user is not None:
+            query = query.filter(created_by=user)
+        if exclude_statuses:
+            query = query.exclude(status__in=exclude_statuses)
+        return list(query)
 
     @staticmethod
     def create(
@@ -1829,17 +1862,17 @@ class ImageBuildJobRepository:
         )
 
     @staticmethod
-    def list_in_progress_deletes_for_definition(
+    def has_in_progress_deletes_for_definition(
         definition_id: uuid.UUID,
-    ) -> QuerySet[ImageBuildJob]:
-        """Return child jobs still waiting on runner-side deletion."""
+    ) -> bool:
+        """Return whether any child job still awaits runner-side deletion."""
         return ImageBuildJob.objects.filter(
             image_definition_id=definition_id,
             status__in=[
                 ImageBuildJob.Status.PENDING_DELETION,
                 ImageBuildJob.Status.DELETING,
             ],
-        )
+        ).exists()
 
 
 class ImageGenerationRepository:

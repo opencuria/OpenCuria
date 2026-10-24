@@ -4,6 +4,8 @@
 reaches the harness only through the ``HarnessGateway`` port. The scan covers
 module-level and function-local imports as well as app-registry lookups, so
 cycles cannot be hidden behind lazy imports or ``get_model`` strings.
+Runner services also delegate ORM queries to repositories, including filtering
+and existence checks on querysets returned by a repository.
 """
 
 from __future__ import annotations
@@ -13,6 +15,26 @@ from pathlib import Path
 
 RUNNERS_DIR = Path(__file__).resolve().parents[1]
 FORBIDDEN_APPS = {"harness", "scheduled_tasks", "mcp_app"}
+ORM_QUERY_ATTRIBUTES = {
+    "objects",
+    "_default_manager",
+    "refresh_from_db",
+    "arefresh_from_db",
+    "filter",
+    "exclude",
+    "select_related",
+    "prefetch_related",
+    "select_for_update",
+    "order_by",
+    "values_list",
+    "exists",
+    "aexists",
+    "annotate",
+    "aggregate",
+    "bulk_create",
+    "bulk_update",
+    "raw",
+}
 
 
 def _runner_modules() -> list[Path]:
@@ -81,3 +103,45 @@ def test_guard_detects_function_local_imports_and_registry_lookups():
     nodes = list(ast.walk(ast.parse(source)))
     assert set().union(*map(_imported_apps, nodes)) == FORBIDDEN_APPS
     assert [app for app in map(_registry_lookup_app, nodes) if app] == ["harness"]
+
+
+def _orm_query_accesses(source: str) -> list[tuple[int, str]]:
+    """Find manager access and queryset operations, including in local functions."""
+    return sorted(
+        (node.lineno, node.attr)
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Attribute) and node.attr in ORM_QUERY_ATTRIBUTES
+    )
+
+
+def test_runner_services_delegate_orm_queries_to_repositories() -> None:
+    """Services use repository reads without constructing their own ORM queries."""
+    violations = [
+        f"{path.relative_to(RUNNERS_DIR)}:{line} accesses {attribute}"
+        for path in sorted((RUNNERS_DIR / "services").rglob("*.py"))
+        for line, attribute in _orm_query_accesses(path.read_text())
+    ]
+    assert violations == [], (
+        "Move ORM queries, queryset filtering and existence checks into the "
+        "owning repository; services should consume its results:\n"
+        + "\n".join(violations)
+    )
+
+
+def test_query_guard_detects_managers_and_repository_queryset_chaining() -> None:
+    """Returning a queryset from a repository must not bypass the boundary."""
+    assert _orm_query_accesses(
+        "def read():\n"
+        "    Runner.objects.get(sid='session')\n"
+        "    def nested():\n"
+        "        return repository.list_all().filter(owner=1).exists()\n"
+        "    return repository.list_all().exclude(status='removed')\n"
+    ) == [(2, "objects"), (4, "exists"), (4, "filter"), (5, "exclude")]
+    assert (
+        _orm_query_accesses(
+            "repository.get_by_id(identifier)\n"
+            "payload.get('workspace_id')\n"
+            "list(grouped.values())\n"
+        )
+        == []
+    )

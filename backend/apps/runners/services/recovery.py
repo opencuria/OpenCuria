@@ -55,15 +55,7 @@ class RecoveryService:
                 logger.exception(
                     "inventory_refresh_deferred", runner_id=str(refresh.runner_id)
                 )
-        from ..models import LifecycleCommand
-
-        unresolved = await sync_to_async(list)(
-            LifecycleCommand.objects.filter(
-                phase="intervention", task__runner__status="online"
-            )
-            .exclude(task__runner__sid="")
-            .select_related("task__runner")
-        )
+        unresolved = await sync_to_async(OperationRepository.list_for_inspection)()
         for row in unresolved:
             try:
                 await transport.emit(

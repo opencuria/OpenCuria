@@ -467,10 +467,8 @@ class ImageLifecycleMixin:
             )
         if definition.status == ImageDefinition.Status.DELETE_FAILED:
             in_progress = await sync_to_async(
-                lambda: self.build_jobs.list_in_progress_deletes_for_definition(
-                    definition_id
-                ).exists()
-            )()
+                self.build_jobs.has_in_progress_deletes_for_definition
+            )(definition_id)
             if in_progress:
                 raise ConflictError(
                     "Cannot restore while runner image removal is still in progress"

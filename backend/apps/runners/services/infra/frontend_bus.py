@@ -130,10 +130,9 @@ class FrontendBusMixin:
         workspace managed by the runner so subscribed frontend clients can
         update their display without a full page refresh.
         """
-        workspaces = list(
-            self.workspaces.list_by_runner(runner.id).exclude(
-                status__in=[WorkspaceStatus.REMOVED, WorkspaceStatus.FAILED]
-            )
+        workspaces = self.workspaces.list_for_scope(
+            runner_id=runner.id,
+            exclude_statuses=(WorkspaceStatus.REMOVED, WorkspaceStatus.FAILED),
         )
         event = "runner:offline" if status == "offline" else "runner:online"
         for ws in workspaces:

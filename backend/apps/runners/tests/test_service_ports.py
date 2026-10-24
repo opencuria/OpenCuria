@@ -263,7 +263,7 @@ def test_workspace_list_reads_activity_in_one_gateway_batch(busy):
     svc = RunnerService(harness_gateway=gateway)
     workspaces = [types.SimpleNamespace(id=uuid.uuid4()) for _ in range(3)]
     svc.workspaces = MagicMock()
-    svc.workspaces.list_all.return_value = workspaces
+    svc.workspaces.list_for_scope.return_value = workspaces
 
     assert svc.list_workspaces() == workspaces
     assert gateway.calls == [("busy_workspaces", [ws.id for ws in workspaces])]
@@ -276,7 +276,7 @@ def test_missing_workspace_and_empty_list_do_not_query_harness():
     svc = RunnerService(harness_gateway=gateway)
     svc.workspaces = MagicMock()
     svc.workspaces.get_by_id.return_value = None
-    svc.workspaces.list_all.return_value = []
+    svc.workspaces.list_for_scope.return_value = []
 
     assert svc.list_workspaces() == []
     assert svc.get_workspace_or_none(uuid.uuid4()) is None
