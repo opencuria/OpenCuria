@@ -2,8 +2,8 @@
 Multi-provider model catalog fetch, normalize, merge, and in-memory cache.
 
 The browser never talks to provider APIs directly. The backend proxies
-OpenRouter ``GET {base_url}/models`` with the org API key and merges static
-ChatGPT and Amazon Bedrock catalogs for connected providers.
+OpenRouter ``GET {base_url}/models`` with the selected account's API key and
+merges static catalogs for the user's connected providers.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ import httpx
 import structlog
 
 from ..provider_accounts import ProviderAccountService
-from ..repositories import ProviderConnectionRepository
 from .base import ProviderAuthError, ProviderResponseError, ProviderTimeoutError
 from .bedrock import DEFAULT_REGION, resolve_bedrock_model_id
 from .openrouter import DEFAULT_BASE_URL
@@ -66,22 +65,9 @@ class ProviderModel:
     max_output_tokens: int = 0
     provider: str = "openrouter"
 
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable mapping."""
-        return {
-            "id": self.id,
-            "name": self.name,
-            "reasoning_efforts": list(self.reasoning_efforts),
-            "default_effort": self.default_effort,
-            "supports_tools": self.supports_tools,
-            "context_length": self.context_length,
-            "max_output_tokens": self.max_output_tokens,
-            "provider": self.provider,
-        }
-
 
 class ModelsCatalogCache:
-    """Process-local TTL cache keyed by organization id."""
+    """Process-local TTL cache keyed by organization and account revisions."""
 
     def __init__(self) -> None:
         self._entries: dict[str, tuple[float, list[ProviderModel]]] = {}
@@ -117,11 +103,6 @@ _catalog_cache = ModelsCatalogCache()
 def clear_models_cache(key: str | None = None) -> None:
     """Invalidate the process-local catalog cache (tests and config saves)."""
     _catalog_cache.invalidate(key)
-
-
-def get_cached_org_catalog(organization_id: uuid.UUID) -> list[ProviderModel] | None:
-    """Return a warm merged catalog for *organization_id* when cached."""
-    return _catalog_cache.get(str(organization_id))
 
 
 def normalize_reasoning_effort(value: str | None) -> str:
@@ -581,15 +562,10 @@ def _fetch_openrouter_catalog_for_connection(
 
 def selected_catalog_connections(
     organization_id: uuid.UUID,
-    user_id: int | None,
+    user_id: int,
     account_ids: dict[str, str] | None,
-    repository: type[ProviderConnectionRepository] = ProviderConnectionRepository,
 ) -> list[Any]:
     """Resolve and authorize account identities before consulting a model cache."""
-    if user_id is None:
-        if account_ids:
-            raise ValueError("A user is required for provider account resolution")
-        return repository.list_by_org(organization_id)
     service = ProviderAccountService()
     if account_ids is None:
         return list(service.selected_accounts(organization_id, user_id).values())
@@ -620,10 +596,9 @@ def get_cached_account_catalog(
 def list_merged_provider_models(
     *,
     organization_id: uuid.UUID,
-    connection_repository: type[ProviderConnectionRepository] | None = None,
+    user_id: int,
     client: httpx.Client | None = None,
     force_refresh: bool = False,
-    user_id: int | None = None,
     account_ids: dict[str, str] | None = None,
 ) -> list[ProviderModel]:
     """Merge only selected, currently authorized provider accounts."""
@@ -631,7 +606,6 @@ def list_merged_provider_models(
         organization_id,
         user_id,
         account_ids,
-        connection_repository or ProviderConnectionRepository,
     )
     cache_key = catalog_cache_key(organization_id, connections)
     if not force_refresh:
@@ -663,27 +637,3 @@ def list_merged_provider_models(
         providers=[connection.provider for connection in connections],
     )
     return merged
-
-
-def list_cached_provider_models(
-    *,
-    cache_key: str,
-    api_key: str,
-    base_url: str = DEFAULT_BASE_URL,
-    client: httpx.Client | None = None,
-    force_refresh: bool = False,
-) -> list[ProviderModel]:
-    """Return cached models when fresh, otherwise fetch and store."""
-    if not force_refresh:
-        cached = _catalog_cache.get(cache_key)
-        if cached is not None:
-            return cached
-    models = [
-        _namespace_openrouter_model(model)
-        for model in fetch_openrouter_models(
-            api_key=api_key, base_url=base_url, client=client
-        )
-    ]
-    _catalog_cache.set(cache_key, models)
-    log.info("provider_models_fetched", cache_key=cache_key, count=len(models))
-    return models

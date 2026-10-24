@@ -81,12 +81,13 @@ async def test_run_subagent_inherit_uses_parent_model(harness_workspace, monkeyp
     from apps.harness.providers.models_catalog import ProviderModel
     monkeypatch.setattr(
         ProviderConfigService, "list_models",
-        lambda self, oid: [ProviderModel(id="big-model", name="B",
-                                         reasoning_efforts=("low", "high"),
-                                         default_effort="high",
-                                         supports_tools=True,
-                                         context_length=1000,
-                                         max_output_tokens=100)],
+        lambda self, oid, *, user_id, account_ids=None: [
+            ProviderModel(id="big-model", name="B",
+                          reasoning_efforts=("low", "high"),
+                          default_effort="high",
+                          supports_tools=True,
+                          context_length=1000,
+                          max_output_tokens=100)],
     )
 
     async def _emit(event: str, data: dict) -> None:

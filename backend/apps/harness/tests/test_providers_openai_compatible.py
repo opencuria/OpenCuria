@@ -356,7 +356,7 @@ def test_model_ref_and_catalog_shapes() -> None:
 
 @pytest.mark.django_db
 def test_openai_compatible_resolver_catalog(
-    organization, provider_account_factory
+    organization, provider_account_factory, provider_account_user
 ) -> None:
     """Resolver builds the adapter; catalog exposes manual model ids."""
     provider_account_factory(
@@ -366,13 +366,13 @@ def test_openai_compatible_resolver_catalog(
         models=["uitars-7b", "uitars-7b"],
     )
     service = ProviderConfigService()
-    resolver = service.build_resolver(organization.id)
+    resolver = service.build_resolver(organization.id, user_id=provider_account_user.id)
     resolved = resolver.resolve("openai-compatible/uitars-7b")
     assert isinstance(resolved.adapter, OpenAICompatibleAdapter)
     assert resolved.model_id == "uitars-7b"
     assert resolved.provider == "openai-compatible"
 
-    models = service.list_models(organization.id)
+    models = service.list_models(organization.id, user_id=provider_account_user.id)
     ids = {model.id for model in models}
     assert "openai-compatible/uitars-7b" in ids
     manual = next(

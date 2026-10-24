@@ -107,7 +107,7 @@ def test_bedrock_models_region_prefixing() -> None:
 
 @pytest.mark.django_db
 def test_list_merged_provider_models_only_connected(
-    organization, provider_account_factory
+    organization, provider_account_factory, provider_account_user
 ) -> None:
     """Merged catalog includes only providers with stored accounts."""
     clear_models_cache()
@@ -118,16 +118,9 @@ def test_list_merged_provider_models_only_connected(
         expires=1,
     )
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={"data": [{"id": "acme/fast", "name": "Fast"}]},
-        )
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
     models = list_merged_provider_models(
         organization_id=organization.id,
-        client=client,
+        user_id=provider_account_user.id,
     )
     providers = {model.provider for model in models}
     assert "chatgpt" in providers
@@ -137,8 +130,8 @@ def test_list_merged_provider_models_only_connected(
 
 
 @pytest.mark.django_db
-def test_list_merged_provider_models_openrouter_and_bedrock(
-    organization, provider_account_factory
+def test_selected_account_catalog_merges_and_caches_models(
+    organization, provider_account_factory, provider_account_user
 ) -> None:
     """OpenRouter live fetch and Bedrock static catalogs merge together."""
     clear_models_cache()
@@ -150,18 +143,28 @@ def test_list_merged_provider_models_openrouter_and_bedrock(
         region="us-west-2",
         auth_method="access_keys",
     )
+    calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer sk-live"
+        calls.append(request)
         return httpx.Response(
             200,
             json={"data": [{"id": "acme/fast", "name": "Fast"}]},
         )
 
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    models = list_merged_provider_models(
-        organization_id=organization.id,
-        client=client,
-    )
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        kwargs = {
+            "organization_id": organization.id,
+            "user_id": provider_account_user.id,
+            "client": client,
+        }
+        models = list_merged_provider_models(**kwargs)
+        assert list_merged_provider_models(**kwargs) == models
+        assert len(calls) == 1
+        clear_models_cache(str(organization.id))
+        assert list_merged_provider_models(**kwargs) == models
+        assert len(calls) == 2
     ids = {model.id for model in models}
     assert "openrouter/acme/fast" in ids
     assert any(model.id.startswith("amazon-bedrock/") for model in models)

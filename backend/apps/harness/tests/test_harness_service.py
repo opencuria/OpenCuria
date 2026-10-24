@@ -1018,7 +1018,7 @@ async def test_failed_run_persists_error_without_task_exception(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_execute_run_loads_org_provider_without_sync_orm(
+async def test_execute_run_loads_selected_provider_without_sync_orm(
     harness_workspace, provider_account_factory, monkeypatch
 ) -> None:
     """Production path (no provider_factory) must not hit ORM from asyncio."""
@@ -1027,7 +1027,7 @@ async def test_execute_run_loads_org_provider_without_sync_orm(
     from apps.harness.services import ProviderConfigService
 
     org_id = harness_workspace.runner.organization_id
-    provider_account_factory("openrouter")
+    account = provider_account_factory("openrouter")
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
         organization_id=org_id,
@@ -1042,7 +1042,9 @@ async def test_execute_run_loads_org_provider_without_sync_orm(
 
     monkeypatch.setattr(OpenRouterAdapter, "chat_stream", _scripted_stream)
 
-    def _fake_list(self, organization_id):  # type: ignore[no-untyped-def]
+    def _fake_list(self, organization_id, *, user_id, account_ids=None):  # type: ignore[no-untyped-def]
+        assert user_id == harness_workspace.created_by_id
+        assert account_ids == {"openrouter": str(account.id)}
         assert organization_id == org_id
         return [
             ProviderModel(
@@ -1076,6 +1078,7 @@ async def test_execute_run_loads_org_provider_without_sync_orm(
             "say hello",
             organization_id=org_id,
             workspace_id=str(harness_workspace.id),
+            user_id=harness_workspace.created_by_id,
         )
         await service._tasks[str(session.id)]
     except SynchronousOnlyOperation:
@@ -1100,7 +1103,7 @@ async def test_execute_run_passes_catalog_limits_and_last_step_tokens(
     from apps.harness.services import ProviderConfigService
 
     org_id = harness_workspace.runner.organization_id
-    provider_account_factory("openrouter")
+    account = provider_account_factory("openrouter")
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
         organization_id=org_id,
@@ -1127,7 +1130,9 @@ async def test_execute_run_passes_catalog_limits_and_last_step_tokens(
         },
     )
 
-    def _fake_list(self, organization_id):  # type: ignore[no-untyped-def]
+    def _fake_list(self, organization_id, *, user_id, account_ids=None):  # type: ignore[no-untyped-def]
+        assert user_id == harness_workspace.created_by_id
+        assert account_ids == {"openrouter": str(account.id)}
         return [
             ProviderModel(
                 id="fake-model",
@@ -1178,6 +1183,7 @@ async def test_execute_run_passes_catalog_limits_and_last_step_tokens(
         "follow up",
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
+        user_id=harness_workspace.created_by_id,
     )
     await service._tasks[str(session.id)]
 
@@ -1308,7 +1314,7 @@ async def test_execute_run_with_skills_without_sync_orm(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_generate_title_loads_org_provider_without_sync_orm(
+async def test_generate_title_loads_selected_provider_without_sync_orm(
     harness_workspace, provider_account_factory, monkeypatch
 ) -> None:
     """Title agent without provider_factory must not hit ORM from asyncio."""
@@ -1352,6 +1358,7 @@ async def test_generate_title_loads_org_provider_without_sync_orm(
             session_id=session.id,
             prompt=prompt,
             organization_id=org_id,
+            initiated_by_id=harness_workspace.created_by_id,
         )
     except SynchronousOnlyOperation:
         pytest.fail("_generate_title called Django ORM from an async context")
@@ -2073,7 +2080,7 @@ async def test_start_run_snapshots_agent_defaults_without_persisting_overrides(
     from apps.harness.services import AgentConfigService, ProviderConfigService
 
     org_id = harness_workspace.runner.organization_id
-    provider_account_factory("openrouter")
+    account = provider_account_factory("openrouter")
     AgentConfigService().save_configs(
         org_id,
         [{"agent": "build", "model": "agent-default-model", "effort": "high"}],
@@ -2093,7 +2100,9 @@ async def test_start_run_snapshots_agent_defaults_without_persisting_overrides(
 
     monkeypatch.setattr(OpenRouterAdapter, "chat_stream", _scripted_stream)
 
-    def _fake_list(self, organization_id):  # type: ignore[no-untyped-def]
+    def _fake_list(self, organization_id, *, user_id, account_ids=None):  # type: ignore[no-untyped-def]
+        assert user_id == harness_workspace.created_by_id
+        assert account_ids == {"openrouter": str(account.id)}
         return [
             ProviderModel(
                 id="agent-default-model",
@@ -2124,6 +2133,7 @@ async def test_start_run_snapshots_agent_defaults_without_persisting_overrides(
         "say hello",
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
+        user_id=harness_workspace.created_by_id,
     )
     assert assistant.model == "agent-default-model"
     assert assistant.reasoning_effort == expected_effort

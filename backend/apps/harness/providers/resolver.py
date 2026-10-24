@@ -14,7 +14,6 @@ import structlog
 from asgiref.sync import sync_to_async
 
 from ..provider_accounts import ProviderAccountService
-from ..repositories import ProviderConnectionRepository
 from .base import ChatOptions, Delta, LLMMessage, ProviderAdapter, ToolSchema
 from .bedrock import DEFAULT_REGION, BedrockAdapter, resolve_bedrock_model_id
 from .chatgpt import ChatGPTAdapter
@@ -109,21 +108,18 @@ class ProviderResolver:
         self,
         organization_id: uuid.UUID,
         *,
+        user_id: int,
         registry: ProviderRegistry | None = None,
-        connection_repository: type[ProviderConnectionRepository] | None = None,
-        user_id: int | None = None,
         account_ids: dict[str, str] | None = None,
         on_account_used: Callable | None = None,
     ) -> None:
         self._organization_id = organization_id
         self._user_id = user_id
         self._registry = registry or default_registry
-        self._connections = connection_repository or ProviderConnectionRepository
         connections = selected_catalog_connections(
             organization_id,
             user_id,
             account_ids,
-            self._connections,
         )
         self._connection_by_provider = {
             row.provider: row for row in connections if row.provider != "claude-agent"
@@ -222,21 +218,8 @@ class ProviderResolver:
         account_id = connection.id
 
         async def fresh_credentials(**kwargs: Any) -> dict[str, Any]:
-            # Legacy internal org-only resolution may use shared accounts, but
-            # cannot refresh without a live initiating member's authority.
-            if user_id is None:
-                from .base import ProviderAuthError
-
-                raise ProviderAuthError(
-                    "ChatGPT refresh requires an initiating user", provider="chatgpt"
-                )
             return await get_fresh_chatgpt_credentials(
                 organization_id, user_id, account_id, **kwargs
             )
 
         return fresh_credentials
-
-
-def wrap_provider_adapter(provider: ProviderAdapter) -> Callable[[str], ResolvedModel]:
-    """Return a resolver callable for a single injected adapter (tests)."""
-    return StaticModelResolver(provider).resolve

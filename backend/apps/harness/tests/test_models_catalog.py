@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import json
-
 import httpx
 import pytest
 
 from apps.harness.providers.base import ProviderAuthError, ProviderResponseError
 from apps.harness.providers.models_catalog import (
-    clear_models_cache,
     fetch_openrouter_models,
-    list_cached_provider_models,
     normalize_openrouter_catalog,
     normalize_reasoning_effort,
 )
@@ -161,29 +157,3 @@ def test_fetch_openrouter_models_http_error() -> None:
     client = httpx.Client(transport=httpx.MockTransport(handler))
     with pytest.raises(ProviderResponseError):
         fetch_openrouter_models(api_key="k", client=client)
-
-
-def test_list_cached_provider_models_hits_cache() -> None:
-    """A second list for the same key does not refetch."""
-    clear_models_cache()
-    calls = {"n": 0}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls["n"] += 1
-        return httpx.Response(
-            200,
-            json={"data": [{"id": "cached/one", "name": "One"}]},
-        )
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    first = list_cached_provider_models(
-        cache_key="org-1", api_key="k", client=client
-    )
-    second = list_cached_provider_models(
-        cache_key="org-1", api_key="k", client=client
-    )
-    assert first == second
-    assert calls["n"] == 1
-    assert first[0].id == "openrouter/cached/one"
-    clear_models_cache("org-1")
-    json.dumps(first[0].to_dict())

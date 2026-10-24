@@ -78,13 +78,10 @@ def organization(db) -> Organization:
 
 
 @pytest.fixture
-def provider_account_factory(
-    organization: Organization,
-) -> Callable[..., ProviderConnection]:
-    """Create shared provider accounts through the current admin-owned API."""
+def provider_account_user(organization: Organization) -> Any:
+    """An active administrator for provider-account and catalog tests."""
     from django.contrib.auth import get_user_model
 
-    from apps.harness.provider_accounts import ProviderAccountService
     from apps.organizations.models import Membership, MembershipRole
 
     admin = get_user_model().objects.create_user(
@@ -93,6 +90,17 @@ def provider_account_factory(
     Membership.objects.create(
         user=admin, organization=organization, role=MembershipRole.ADMIN
     )
+    return admin
+
+
+@pytest.fixture
+def provider_account_factory(
+    organization: Organization,
+    provider_account_user: Any,
+) -> Callable[..., ProviderConnection]:
+    """Create shared provider accounts through the current admin-owned API."""
+    from apps.harness.provider_accounts import ProviderAccountService
+
     service = ProviderAccountService()
 
     def create(
@@ -101,7 +109,7 @@ def provider_account_factory(
         defaults = {"api_key": "sk-test"} if provider == "openrouter" else {}
         return service.save_account(
             organization_id=organization.id,
-            user=admin,
+            user=provider_account_user,
             provider=provider,
             payload={**defaults, **payload, "shared": True},
         )

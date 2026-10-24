@@ -319,7 +319,6 @@ def test_callback_model_resolver_is_db_free_and_fences_before_real_request(
 ) -> None:
     """The sync resolver callback wraps network I/O with async account-use fencing."""
     from apps.harness.providers.resolver import ProviderResolver
-    from apps.harness.repositories import ProviderConnectionRepository
     account = _save_openrouter(
         organization.id,
         provider_turn_member,
@@ -330,7 +329,6 @@ def test_callback_model_resolver_is_db_free_and_fences_before_real_request(
     account_ids = {"openrouter": str(account.id)}
     resolver = ProviderResolver(
         organization.id,
-        connection_repository=ProviderConnectionRepository,
         user_id=provider_turn_member.id,
         account_ids=account_ids,
         on_account_used=lambda _account_id: None,

@@ -36,7 +36,6 @@ from .repositories import (
     AgentConfigRepository,
     AgentSConfigRepository,
     ProviderConfigRepository,
-    ProviderConnectionRepository,
     RecentModelRepository,
     SubagentConfigRepository,
 )
@@ -373,11 +372,9 @@ class ProviderConfigService:
     def __init__(
         self,
         repository: type[ProviderConfigRepository] | None = None,
-        connection_repository: type[ProviderConnectionRepository] | None = None,
         registry: ProviderRegistry | None = None,
     ) -> None:
         self.repository = repository or ProviderConfigRepository
-        self.connections = connection_repository or ProviderConnectionRepository
         self.registry = registry or default_registry
         _ensure_default_adapters(self.registry)
 
@@ -432,7 +429,7 @@ class ProviderConfigService:
         self,
         organization_id: uuid.UUID,
         *,
-        user_id: int | None = None,
+        user_id: int,
         account_ids: dict[str, str] | None = None,
         on_account_used: Any | None = None,
     ) -> ProviderResolver:
@@ -440,7 +437,6 @@ class ProviderConfigService:
         return ProviderResolver(
             organization_id,
             registry=self.registry,
-            connection_repository=self.connections,
             user_id=user_id,
             account_ids=account_ids,
             on_account_used=on_account_used,
@@ -450,21 +446,20 @@ class ProviderConfigService:
         self,
         organization_id: uuid.UUID,
         *,
-        user_id: int | None = None,
+        user_id: int,
         account_ids: dict[str, str] | None = None,
     ) -> list[ProviderModel]:
         """List models offered by precisely the selected accounts."""
         from .providers.models_catalog import selected_catalog_connections
 
         if not selected_catalog_connections(
-            organization_id, user_id, account_ids, self.connections
+            organization_id, user_id, account_ids
         ):
             raise NotFoundError("ProviderConnection", str(organization_id))
         return list_merged_provider_models(
             organization_id=organization_id,
             user_id=user_id,
             account_ids=account_ids,
-            connection_repository=self.connections,
         )
 
     def provider_connected_for_model(
@@ -472,30 +467,25 @@ class ProviderConfigService:
         organization_id: uuid.UUID,
         model: str,
         *,
-        user_id: int | None = None,
+        user_id: int,
         account_ids: dict[str, str] | None = None,
     ) -> str:
         """Validate a provider against the caller's selected/frozen account."""
         provider_id, _ = parse_model_ref(model)
-        if user_id is None:
-            connection = self.connections.get_by_org_and_provider(
-                organization_id, provider_id
+        from .provider_accounts import ProviderAccountService
+
+        account_service = ProviderAccountService()
+        account_id = (account_ids or {}).get(provider_id)
+        if account_ids is not None:
+            connection = (
+                account_service.get_account(organization_id, user_id, account_id)
+                if account_id is not None
+                else None
             )
         else:
-            from .provider_accounts import ProviderAccountService
-
-            account_service = ProviderAccountService()
-            account_id = (account_ids or {}).get(provider_id)
-            if account_ids is not None:
-                connection = (
-                    account_service.get_account(organization_id, user_id, account_id)
-                    if account_id is not None
-                    else None
-                )
-            else:
-                connection = account_service.selected_accounts(
-                    organization_id, user_id
-                ).get(provider_id)
+            connection = account_service.selected_accounts(
+                organization_id, user_id
+            ).get(provider_id)
         if connection is None or connection.provider != provider_id:
             raise ValueError(f"Provider '{provider_id}' is not connected")
         return provider_id

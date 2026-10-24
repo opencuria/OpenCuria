@@ -14,7 +14,7 @@ from apps.harness.tests.test_runner_loop import FakeProvider, _text_step
 
 @pytest.mark.django_db
 def test_provider_resolver_openrouter_adapter(
-    organization, provider_account_factory
+    organization, provider_account_factory, provider_account_user
 ) -> None:
     """OpenRouter accounts build OpenRouterAdapter with stored secrets."""
     provider_account_factory(
@@ -22,7 +22,7 @@ def test_provider_resolver_openrouter_adapter(
         base_url="https://example.com/v1",
     )
     service = ProviderConfigService()
-    resolver = service.build_resolver(organization.id)
+    resolver = service.build_resolver(organization.id, user_id=provider_account_user.id)
     resolved = resolver.resolve("openai/gpt-5")
     assert isinstance(resolved.adapter, OpenRouterAdapter)
     assert resolved.model_id == "openai/gpt-5"
@@ -31,17 +31,19 @@ def test_provider_resolver_openrouter_adapter(
 
 
 @pytest.mark.django_db
-def test_provider_resolver_missing_connection_raises(organization) -> None:
+def test_provider_resolver_missing_connection_raises(
+    organization, provider_account_user
+) -> None:
     """Missing provider connections raise a clear ValueError."""
     service = ProviderConfigService()
-    resolver = service.build_resolver(organization.id)
+    resolver = service.build_resolver(organization.id, user_id=provider_account_user.id)
     with pytest.raises(ValueError, match="Provider 'chatgpt' is not connected"):
         resolver.resolve("chatgpt/gpt-5.5")
 
 
 @pytest.mark.django_db
 def test_provider_resolver_bedrock_region_model_id(
-    organization, provider_account_factory
+    organization, provider_account_factory, provider_account_user
 ) -> None:
     """Bedrock resolves bare catalog ids with the stored region."""
     service = ProviderConfigService()
@@ -52,7 +54,7 @@ def test_provider_resolver_bedrock_region_model_id(
         region="us-east-1",
         auth_method="access_keys",
     )
-    resolver = service.build_resolver(organization.id)
+    resolver = service.build_resolver(organization.id, user_id=provider_account_user.id)
     resolved = resolver.resolve(
         "amazon-bedrock/anthropic.claude-sonnet-4-5",
     )

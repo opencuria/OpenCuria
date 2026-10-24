@@ -1311,12 +1311,9 @@ class HarnessService:
         if not model:
             raise NotFoundError("ProviderConnection", str(organization_id))
         account_user_id = user_id or getattr(session, "created_by_id", None)
-        if account_user_id is None:
-            config_service.provider_connected_for_model(organization_id, model)
-        else:
-            config_service.provider_connected_for_model(
-                organization_id, model, user_id=account_user_id, account_ids=account_ids
-            )
+        config_service.provider_connected_for_model(
+            organization_id, model, user_id=account_user_id, account_ids=account_ids
+        )
         if (session.agent_name or "").strip().lower() == "computeruse":
             # Explicit grounding models must resolve to a connected
             # provider; empty grounding falls back to the main model
@@ -1330,17 +1327,12 @@ class HarnessService:
                 or ""
             ).strip()
             if grounding and grounding.strip() != model.strip():
-                if account_user_id is None:
-                    config_service.provider_connected_for_model(
-                        organization_id, grounding
-                    )
-                else:
-                    config_service.provider_connected_for_model(
-                        organization_id,
-                        grounding,
-                        user_id=account_user_id,
-                        account_ids=account_ids,
-                    )
+                config_service.provider_connected_for_model(
+                    organization_id,
+                    grounding,
+                    user_id=account_user_id,
+                    account_ids=account_ids,
+                )
         if not (session.reasoning_effort or "").strip():
             agent_effort = (
                 "" if agent_defaults["inherit_model"] else agent_defaults["effort"]
@@ -2769,22 +2761,14 @@ class HarnessService:
         user_id: int | None = None,
         account_ids: dict[str, str] | None = None,
     ) -> tuple[int, int]:
-        """Return ``(context_length, max_output_tokens)`` from the org catalog."""
+        """Return model limits from the user's selected or frozen accounts."""
         from .services import ProviderConfigService
 
         service = ProviderConfigService()
         try:
-            if user_id is None:
-                models = service.list_models(organization_id)
-            else:
-                try:
-                    models = service.list_models(
-                        organization_id, user_id=user_id, account_ids=account_ids
-                    )
-                except TypeError:
-                    # Compatibility for existing test/service overrides with the
-                    # pre-account signature; runtime uses the scoped service API.
-                    models = service.list_models(organization_id)
+            models = service.list_models(
+                organization_id, user_id=user_id, account_ids=account_ids
+            )
         except Exception:
             return 0, 0
         namespaced = namespaced_model_id(model_id)
@@ -2954,11 +2938,7 @@ class HarnessService:
                 resolver = await sync_to_async(config_service.build_resolver)(
                     organization_id,
                     user_id=run_context.get("initiated_by_id"),
-                    account_ids=(
-                        dict(run_context.get("account_ids") or {})
-                        if run_context.get("initiated_by_id") is not None
-                        else None
-                    ),
+                    account_ids=dict(run_context.get("account_ids") or {}),
                     on_account_used=register_used if turn_id else None,
                 )
                 await sync_to_async(resolver.prepare_adapters)()
@@ -5076,7 +5056,7 @@ class HarnessService:
             resolver = await sync_to_async(config_service.build_resolver)(
                 organization_id,
                 user_id=user_id,
-                account_ids=account_ids if user_id is not None else None,
+                account_ids=account_ids,
                 on_account_used=register_used if provider_turn_id else None,
             )
             await sync_to_async(resolver.prepare_adapters)()
@@ -5326,12 +5306,8 @@ class HarnessService:
             from .services import ProviderConfigService
 
             service = ProviderConfigService()
-            models = (
-                service.list_models(organization_id)
-                if user_id is None
-                else service.list_models(
-                    organization_id, user_id=user_id, account_ids=account_ids
-                )
+            models = service.list_models(
+                organization_id, user_id=user_id, account_ids=account_ids
             )
         except Exception:
             return []

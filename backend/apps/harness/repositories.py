@@ -37,7 +37,6 @@ from .models import (
     HarnessSession,
     HarnessSessionStatus,
     ProviderConfig,
-    ProviderConnection,
     QuestionRequest,
     QuestionRequestStatus,
     RecentModel,
@@ -192,49 +191,6 @@ class SubagentConfigRepository:
             organization_id=org_id, defaults={"max_depth": max_depth}
         )
         return row
-
-
-class ProviderConnectionRepository:
-    """Data access for ProviderConnection records."""
-
-    @staticmethod
-    def get_by_org_and_provider(
-        organization_id: uuid.UUID,
-        provider: str,
-    ) -> ProviderConnection | None:
-        """Return only an unambiguous live org-shared legacy connection."""
-        rows = list(
-            ProviderConnection.objects.filter(
-                organization_id=organization_id,
-                provider=provider,
-                user__isnull=True,
-                deleted_at__isnull=True,
-            ).select_related("credential", "credential__service")[:2]
-        )
-        if len(rows) > 1:
-            raise ValueError(
-                f"Multiple shared accounts exist for provider '{provider}'"
-            )
-        return rows[0] if rows else None
-
-    @staticmethod
-    def list_by_org(organization_id: uuid.UUID) -> list[ProviderConnection]:
-        """List org-shared native accounts only, rejecting ambiguous providers."""
-        rows = list(
-            ProviderConnection.objects.filter(
-                organization_id=organization_id,
-                user__isnull=True,
-                deleted_at__isnull=True,
-            )
-            .exclude(provider="claude-agent")
-            .select_related("credential", "credential__service")
-        )
-        providers = [row.provider for row in rows]
-        if len(providers) != len(set(providers)):
-            raise ValueError(
-                "Multiple shared accounts require an explicit user selection"
-            )
-        return rows
 
 
 class RecentModelRepository:

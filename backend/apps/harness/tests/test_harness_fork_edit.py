@@ -17,7 +17,7 @@ import pytest
 from asgiref.sync import sync_to_async
 
 from apps.harness.harness_service import HarnessService, _forked_title
-from apps.harness.models import ProviderConnection, Todo
+from apps.harness.models import Todo
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.models import PermissionRequest
 from apps.harness.permissions.repositories import PermissionRequestRepository
@@ -1055,7 +1055,7 @@ async def test_edit_empty_overrides_are_noop(harness_workspace) -> None:
 
 @pytest.mark.django_db(transaction=True)
 async def test_edit_preserves_auto_model_and_effort(
-    harness_workspace, monkeypatch
+    harness_workspace, provider_account_factory, monkeypatch
 ) -> None:
     """Resolved per-turn defaults must not become persistent edit overrides."""
     from apps.harness.services import AgentConfigService
@@ -1067,9 +1067,7 @@ async def test_edit_preserves_auto_model_and_effort(
         session.organization_id,
         [{"agent": "build", "model": "openrouter/openai/gpt-4.1", "effort": "high"}],
     )
-    ProviderConnection.objects.create(
-        organization_id=session.organization_id, provider="openrouter"
-    )
+    provider_account_factory("openrouter")
     user_message = HarnessMessageRepository.create(
         session_id=session.id, role="user", content="original"
     )
@@ -1084,6 +1082,7 @@ async def test_edit_preserves_auto_model_and_effort(
         message_id=user_message.id,
         prompt="edited",
         organization_id=session.organization_id,
+        user_id=harness_workspace.created_by_id,
     )
     await service._tasks[str(session.id)]
     session.refresh_from_db()

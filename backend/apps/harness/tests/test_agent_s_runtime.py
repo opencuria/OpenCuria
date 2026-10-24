@@ -259,6 +259,7 @@ def test_validate_provider_for_run_grounding_connected_and_missing(
         workspace_id=harness_workspace.id,
         organization_id=org_id,
         title="computeruse run",
+        created_by_id=harness_workspace.created_by_id,
         agent_name="computeruse",
         mode="build",
         model="openrouter/acme/main",
