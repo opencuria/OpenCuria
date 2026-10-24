@@ -24,7 +24,9 @@ authenticate API keys through ``apps.accounts.services.APIKeyService``, and
 the realtime adapters reach models and repositories only through services.
 Below the adapters, services, tools and engines of the repository-only apps
 never query the ORM either: model managers and instance reloads appear only
-in ``models`` and ``repositories`` modules.
+in ``models`` and ``repositories`` modules. Password/JWT authentication and
+SSO provisioning share the accounts user repository; profile writes and
+password checks (which can save upgraded hashes) stay there as well.
 """
 
 from __future__ import annotations
@@ -51,6 +53,7 @@ SERVICE_ONLY_CONTEXTS = {"apps.skills"}
 
 #: Apps whose non-persistence modules reach the ORM only through repositories.
 REPOSITORY_ONLY_APPS = {
+    "apps.accounts",
     "apps.credentials",
     "apps.harness",
     "apps.mcp_app",
@@ -200,8 +203,7 @@ def test_realtime_adapters_reach_persistence_only_through_services():
         if _module_name(path) in REALTIME_ADAPTERS
         for module in _imported_modules(path, tree)
         if any(
-            module == owner or module.startswith(f"{owner}.")
-            for owner in persistence
+            module == owner or module.startswith(f"{owner}.") for owner in persistence
         )
     )
     assert violations == [], (
@@ -274,6 +276,8 @@ def test_services_query_the_orm_only_through_repositories():
     ]
     assert APPS_ROOT / "harness" / "harness_service.py" in checked  # sanity check
     assert APPS_ROOT / "harness" / "permissions" / "service.py" in checked
+    assert APPS_ROOT / "accounts" / "auth_backends.py" in checked
+    assert APPS_ROOT / "accounts" / "sso.py" in checked
 
     violations = sorted(
         f"{_module_name(path)}:{node.lineno}"
@@ -285,6 +289,31 @@ def test_services_query_the_orm_only_through_repositories():
         "Query the ORM in the owning app's repositories module and call it "
         "from the service (e.g. HarnessPartRepository, not "
         "self.parts.model.objects):\n" + "\n".join(violations)
+    )
+
+
+def test_account_services_persist_changes_only_through_repositories():
+    """Account policy selects changes; repositories handle explicit/implicit saves."""
+    violations = sorted(
+        f"{_module_name(path)}:{node.lineno}"
+        for path in _source_files()
+        if path.is_relative_to(APPS_ROOT / "accounts")
+        and not _is_persistence_module(path)
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.Attribute)
+        and node.attr
+        in {
+            "save",
+            "asave",
+            "save_base",
+            "check_password",
+            "acheck_password",
+        }
+    )
+    assert violations == [], (
+        "Persist user changes (including password hash upgrades) through "
+        "apps.accounts.repositories.UserRepository instead of saving models "
+        "from account services:\n" + "\n".join(violations)
     )
 
 

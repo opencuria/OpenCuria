@@ -15,6 +15,9 @@ from django.conf import settings
 
 from common.exceptions import AuthenticationError
 
+from .models import User
+from .repositories import UserRepository
+
 logger = logging.getLogger(__name__)
 
 
@@ -76,9 +79,11 @@ class KeycloakSsoService:
         """Expose immutable provider config."""
         return self._config
 
-    def exchange_code_for_user(self, *, code: str, redirect_uri: str):
+    def exchange_code_for_user(self, *, code: str, redirect_uri: str) -> User:
         """Exchange OIDC authorization code and return a local user."""
-        id_token = self._exchange_code_for_id_token(code=code, redirect_uri=redirect_uri)
+        id_token = self._exchange_code_for_id_token(
+            code=code, redirect_uri=redirect_uri
+        )
         claims = self._validate_id_token(id_token)
         return self._get_or_create_user(claims)
 
@@ -107,7 +112,9 @@ class KeycloakSsoService:
                 token_payload: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
         except error.HTTPError as exc:
             details = exc.read().decode("utf-8")
-            logger.warning("SSO code exchange failed: status=%s body=%s", exc.code, details)
+            logger.warning(
+                "SSO code exchange failed: status=%s body=%s", exc.code, details
+            )
             raise AuthenticationError("SSO code exchange failed")
         except (error.URLError, TimeoutError) as exc:
             logger.warning("SSO code exchange network error: %s", exc)
@@ -136,9 +143,7 @@ class KeycloakSsoService:
         return payload
 
     @staticmethod
-    def _get_or_create_user(claims: dict[str, Any]):
-        from apps.accounts.models import User
-
+    def _get_or_create_user(claims: dict[str, Any]) -> User:
         email = claims.get("email")
         if not email:
             raise AuthenticationError("SSO token did not include an email claim")
@@ -148,19 +153,17 @@ class KeycloakSsoService:
             "first_name": claims.get("given_name", ""),
             "last_name": claims.get("family_name", ""),
         }
-        user, created = User.objects.get_or_create(email=email, defaults=defaults)
+        user, created = UserRepository.get_or_create_by_email(email, defaults=defaults)
         if not created:
-            update_fields: list[str] = []
+            updates: dict[str, str] = {}
             first_name = claims.get("given_name", "")
             last_name = claims.get("family_name", "")
             if first_name and user.first_name != first_name:
-                user.first_name = first_name
-                update_fields.append("first_name")
+                updates["first_name"] = first_name
             if last_name and user.last_name != last_name:
-                user.last_name = last_name
-                update_fields.append("last_name")
-            if update_fields:
-                user.save(update_fields=update_fields)
+                updates["last_name"] = last_name
+            if updates:
+                UserRepository.update_profile(user, **updates)
 
         if not user.is_active:
             raise AuthenticationError("Account is disabled")
