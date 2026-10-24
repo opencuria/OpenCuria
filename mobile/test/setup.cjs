@@ -1,4 +1,5 @@
 jest.mock('react-native-safe-area-context', () => require('react-native-safe-area-context/jest/mock'))
+jest.mock('react-native-keyboard-controller', () => require('react-native-keyboard-controller/jest'))
 jest.mock('react-native-enriched-markdown', () => ({
   EnrichedMarkdownText: ({ markdown, ...props }) => {
     const React = require('react')

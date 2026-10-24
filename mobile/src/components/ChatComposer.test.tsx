@@ -71,6 +71,24 @@ function renderComposer(
 }
 
 describe("ChatComposer", () => {
+  it("keeps model settings accessible in both compact and expanded input", () => {
+    const onSettings = jest.fn();
+    renderComposer({
+      settings: { model: "Workspace model", mode: "plan", effort: "High" },
+      onSettings,
+    });
+    expect(
+      screen.getByRole("button", { name: "Chat settings" }).props
+        .accessibilityValue.text,
+    ).toBe("plan · Workspace model · High");
+    fireEvent.press(screen.getByTestId("chat-composer-settings"));
+    fireEvent(screen.getByTestId("chat-composer-input"), "focus");
+    expect(screen.getAllByTestId("chat-composer-input")).toHaveLength(1);
+    fireEvent.press(screen.getByTestId("chat-composer-settings"));
+    expect(onSettings).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("chat-composer-send")).toBeDisabled();
+  });
+
   it("stops a busy run even when the draft and attachments are empty", async () => {
     const onStop = jest.fn().mockResolvedValue(undefined);
     renderComposer({ busy: true, onStop });

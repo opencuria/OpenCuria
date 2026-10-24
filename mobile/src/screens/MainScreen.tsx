@@ -10,7 +10,6 @@ import {
   ActivityIndicator,
   Alert,
   Image,
-  KeyboardAvoidingView,
   Platform,
   Pressable,
   ScrollView,
@@ -20,6 +19,11 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import {
+  KeyboardAvoidingView,
+  useKeyboardState,
+} from "react-native-keyboard-controller";
+import Svg, { Path } from "react-native-svg";
 import { useVideoPlayer, VideoView } from "expo-video";
 import {
   Check,
@@ -28,12 +32,12 @@ import {
   CircleAlert,
   Ellipsis,
   LogOut,
-  Menu,
   Moon,
   MoreHorizontal,
   Plus,
   Search,
   Settings2,
+  SquarePen,
   Sun,
   SunMoon,
 } from "lucide-react-native";
@@ -84,6 +88,7 @@ import {
   type OpenedWorkspaceFile,
 } from "../platform";
 import { Banner, Button, IconButton, Sheet } from "../ui/primitives";
+import { Drawer } from "../ui/Drawer";
 import { useTheme } from "../ui/theme";
 import { useSession } from "./SessionContext";
 
@@ -124,6 +129,7 @@ type NavigationRequest = {
 
 export function MainScreen(): React.JSX.Element {
   const insets = useSafeAreaInsets();
+  const keyboardVisible = useKeyboardState((state) => state.isVisible);
   const { theme, mode: themeMode, setMode: setThemeMode } = useTheme();
   const {
     client,
@@ -989,23 +995,33 @@ export function MainScreen(): React.JSX.Element {
     <KeyboardAvoidingView
       style={[
         styles.root,
-        { backgroundColor: theme.background, paddingBottom: insets.bottom },
+        {
+          backgroundColor: theme.background,
+          paddingBottom: keyboardVisible ? 0 : insets.bottom,
+        },
       ]}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-      keyboardVerticalOffset={Platform.OS === "ios" ? insets.top : 0}
+      behavior="height"
     >
       <View
         style={[
           styles.header,
           {
-            paddingTop: Math.max(insets.top, 8),
-            backgroundColor: theme.surface,
-            borderBottomColor: theme.border,
+            paddingTop: insets.top + 12,
+            backgroundColor: theme.background,
           },
         ]}
       >
         <IconButton
-          icon={<Menu size={21} color={theme.text} />}
+          icon={
+            <Svg width={24} height={24} viewBox="0 0 24 24">
+              <Path
+                d="M4 8h16M4 16h10"
+                stroke={theme.text}
+                strokeWidth={2}
+                strokeLinecap="round"
+              />
+            </Svg>
+          }
           label="Open conversation drawer"
           onPress={() => {
             setSearch("");
@@ -1013,6 +1029,7 @@ export function MainScreen(): React.JSX.Element {
             setSheet("drawer");
           }}
           testID="main-menu"
+          style={{ backgroundColor: theme.composer }}
         />
         <Pressable
           accessibilityRole="button"
@@ -1024,7 +1041,7 @@ export function MainScreen(): React.JSX.Element {
           style={styles.titleArea}
         >
           <Text numberOfLines={1} style={[styles.title, { color: theme.text }]}>
-            {workspace?.name ?? "Select workspace"}
+            OpenCuria
           </Text>
           <View style={styles.subTitle}>
             <View
@@ -1039,26 +1056,31 @@ export function MainScreen(): React.JSX.Element {
                 },
               ]}
             />
-            <Text style={{ color: theme.mutedText, fontSize: 12 }}>
-              {workspaceLabel(workspace, isTransitioning)}
+            <Text
+              numberOfLines={1}
+              style={{ color: theme.mutedText, fontSize: 12, flexShrink: 1 }}
+            >
+              {workspace?.name ?? "Select workspace"}
             </Text>
             <ChevronDown size={14} color={theme.mutedText} />
           </View>
         </Pressable>
         <IconButton
-          icon={<Plus size={21} color={theme.primary} />}
+          icon={<SquarePen size={21} strokeWidth={1.8} color={theme.text} />}
           label="New chat"
           onPress={() => {
             void newChat();
           }}
           disabled={!canStart}
           testID="new-chat"
+          style={{ backgroundColor: theme.composer }}
         />
         <IconButton
           icon={<MoreHorizontal size={21} color={theme.text} />}
           label="Profile and settings"
           onPress={() => setSheet("profile")}
           testID="profile-menu"
+          style={{ backgroundColor: theme.composer }}
         />
       </View>
 
@@ -1241,13 +1263,16 @@ export function MainScreen(): React.JSX.Element {
             await controller?.abort();
           }}
           busy={chat.busy}
+          expanded={chat.messages.length > 0}
           disabled={chatDisabled}
           placeholder={
             chatDisabled
               ? !navigationReady
                 ? "Loading workspace conversations…"
                 : "Choose an available, running workspace…"
-              : undefined
+              : chat.messages.length > 0
+                ? "Reply to OpenCuria"
+                : "Ask OpenCuria"
           }
           settings={{
             harness: harnessEngineLabel(harness, engines),
@@ -1320,12 +1345,44 @@ export function MainScreen(): React.JSX.Element {
         )}
       </Sheet>
 
-      <Sheet
+      <Drawer
         visible={sheet === "drawer"}
         onClose={() => setSheet(null)}
-        title="OpenCuria"
         testID="conversation-drawer"
-        maxHeight="96%"
+        footer={
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Profile and settings"
+            onPress={() => setSheet("profile")}
+            style={styles.drawerAccount}
+            testID="drawer-profile"
+          >
+            <View
+              style={[
+                styles.drawerAvatar,
+                { backgroundColor: theme.surfaceMuted },
+              ]}
+            >
+              <Text
+                style={{ color: theme.text, fontSize: 16, fontWeight: "600" }}
+              >
+                {profileTitle.slice(0, 1).toUpperCase()}
+              </Text>
+            </View>
+            <Text
+              numberOfLines={1}
+              style={{
+                flex: 1,
+                color: theme.text,
+                fontSize: 15,
+                fontWeight: "500",
+              }}
+            >
+              {profileTitle}
+            </Text>
+            <Settings2 size={19} color={theme.mutedText} />
+          </Pressable>
+        }
       >
         {drawerError ? (
           <Banner
@@ -1336,8 +1393,13 @@ export function MainScreen(): React.JSX.Element {
         ) : null}
         <Button
           title="New chat"
-          variant="primary"
-          icon={<Plus size={17} color={theme.primaryForeground} />}
+          variant="ghost"
+          icon={<SquarePen size={21} color={theme.text} />}
+          style={{
+            alignSelf: "stretch",
+            justifyContent: "flex-start",
+            paddingHorizontal: 8,
+          }}
           onPress={() => {
             void newChat();
           }}
@@ -1355,7 +1417,7 @@ export function MainScreen(): React.JSX.Element {
           placeholder="Search workspaces and chats…"
           label="Search workspaces and conversations"
         />
-        <SectionTitle title="WORKSPACES" />
+        <SectionTitle title="Workspaces" />
         {visibleWorkspaces
           .filter((item) =>
             item.name.toLowerCase().includes(search.toLowerCase()),
@@ -1373,7 +1435,7 @@ export function MainScreen(): React.JSX.Element {
           ))}
         {attentionChats.length ? (
           <>
-            <SectionTitle title="ACTION REQUIRED" tone={theme.warning} />
+            <SectionTitle title="Needs attention" tone={theme.warning} />
             {attentionChats.map((item) => (
               <ConversationRow
                 key={item.session_id}
@@ -1386,7 +1448,7 @@ export function MainScreen(): React.JSX.Element {
             ))}
           </>
         ) : null}
-        <SectionTitle title="RECENT" />
+        <SectionTitle title="Recent chats" />
         {recentChats.map((item) => (
           <ConversationRow
             key={item.session_id}
@@ -1408,7 +1470,7 @@ export function MainScreen(): React.JSX.Element {
             No conversations yet.
           </Text>
         ) : null}
-      </Sheet>
+      </Drawer>
 
       <Sheet
         visible={sheet === "profile"}
@@ -2107,21 +2169,20 @@ const styles = StyleSheet.create({
   root: { flex: 1 },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   header: {
-    minHeight: 62,
-    paddingHorizontal: 8,
+    paddingBottom: 14,
+    paddingHorizontal: 14,
     flexDirection: "row",
     alignItems: "center",
-    gap: 1,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    gap: 8,
   },
   titleArea: {
     flex: 1,
     minWidth: 0,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
     alignItems: "flex-start",
   },
-  title: { fontSize: 15, fontWeight: "600", lineHeight: 20 },
+  title: { fontSize: 17, fontWeight: "600", lineHeight: 23 },
   subTitle: {
     flexDirection: "row",
     alignItems: "center",
@@ -2161,25 +2222,22 @@ const styles = StyleSheet.create({
   emptyTitle: { fontSize: 20, fontWeight: "600" },
   emptyText: { fontSize: 14, lineHeight: 21, textAlign: "center" },
   section: {
-    fontSize: 11,
-    fontWeight: "700",
-    letterSpacing: 0.8,
-    marginTop: 8,
-    marginBottom: 2,
+    fontSize: 13,
+    fontWeight: "500",
+    marginTop: 18,
+    marginBottom: 6,
   },
   row: {
     minHeight: 54,
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 4,
+    paddingHorizontal: 8,
   },
   conversationRow: {
     minHeight: 56,
     flexDirection: "row",
     alignItems: "center",
-    borderBottomWidth: StyleSheet.hairlineWidth,
   },
   conversationMain: {
     flex: 1,
@@ -2187,18 +2245,32 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
+    paddingLeft: 8,
   },
   searchBox: {
     minHeight: 46,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    borderRadius: 13,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 24,
     paddingHorizontal: 12,
     marginVertical: 4,
   },
   searchInput: { flex: 1, fontSize: 15, paddingVertical: 10 },
+  drawerAccount: {
+    minHeight: 56,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingHorizontal: 4,
+  },
+  drawerAvatar: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   accountCard: {
     minHeight: 72,
     borderRadius: 16,

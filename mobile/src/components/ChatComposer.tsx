@@ -8,12 +8,12 @@ import React, {
 import { Image } from "expo-image";
 import {
   AtSign,
+  ArrowUp,
   Camera,
   FileText,
-  ImagePlus,
+  Images,
   Paperclip,
   Plus,
-  Send,
   Settings2,
   Sparkles,
   Square,
@@ -77,6 +77,8 @@ export interface ChatComposerProps {
   busy?: boolean;
   disabled?: boolean;
   placeholder?: string;
+  /** Keep the two-row reply composer once a conversation has started. */
+  expanded?: boolean;
   settings?: ComposerSettingsSummary;
   onSettings?: () => void;
   skills?: ComposerSkill[];
@@ -119,7 +121,8 @@ export function ChatComposer({
   onStop,
   busy = false,
   disabled = false,
-  placeholder = "Message OpenCuria…",
+  placeholder = "Ask OpenCuria",
+  expanded = false,
   settings,
   onSettings,
   skills = [],
@@ -143,6 +146,8 @@ export function ChatComposer({
   const [query, setQuery] = useState<ActiveQuery | null>(null);
   const [searched, setSearched] = useState<MentionCandidate[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [inputHeight, setInputHeight] = useState(28);
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
   const sendingRef = useRef(false);
@@ -476,6 +481,78 @@ export function ChatComposer({
   const hasPicker = Boolean(onTakePhoto || onChoosePhotos || onChooseFiles);
   const canSubmit =
     !disabled && (draft.trim().length > 0 || attachments.length > 0);
+  const expandedLayout =
+    expanded ||
+    focused ||
+    Boolean(draft) ||
+    attachments.length > 0 ||
+    activeSkills.length > 0;
+  const attachmentButton = hasPicker ? (
+    <IconButton
+      icon={<Plus size={25} strokeWidth={1.8} color={theme.text} />}
+      label="Add attachment"
+      disabled={disabled}
+      onPress={() => {
+        Keyboard.dismiss();
+        setPickerOpen(true);
+      }}
+      testID="chat-composer-attachments"
+    />
+  ) : null;
+  const settingsButton =
+    settings && onSettings ? (
+      <IconButton
+        icon={<Settings2 size={22} strokeWidth={1.8} color={theme.text} />}
+        label="Chat settings"
+        accessibilityValue={{
+          text: [
+            settings.harness,
+            settings.mode,
+            settings.model,
+            settings.effort,
+          ]
+            .filter(Boolean)
+            .join(" · "),
+        }}
+        onPress={onSettings}
+        testID="chat-composer-settings"
+      />
+    ) : null;
+  const sendButton = (
+    <IconButton
+      icon={
+        <View
+          style={[
+            styles.sendCircle,
+            {
+              backgroundColor:
+                busy || canSubmit ? theme.primary : theme.disabledAction,
+            },
+          ]}
+        >
+          {busy ? (
+            <Square
+              size={14}
+              color={theme.primaryForeground}
+              fill={theme.primaryForeground}
+            />
+          ) : (
+            <ArrowUp
+              size={23}
+              strokeWidth={2.2}
+              color={canSubmit ? theme.primaryForeground : theme.subtleText}
+            />
+          )}
+        </View>
+      }
+      label={busy ? "Stop OpenCuria" : "Send message"}
+      disabled={busy ? !onStop || stopping : !canSubmit || sending}
+      onPress={() => {
+        void send();
+      }}
+      testID={busy ? "chat-composer-stop" : "chat-composer-send"}
+    />
+  );
 
   return (
     <View
@@ -555,7 +632,10 @@ export function ChatComposer({
       <View
         style={[
           styles.composerCard,
-          { backgroundColor: theme.surface, borderColor: theme.border },
+          {
+            backgroundColor: theme.composer,
+            borderColor: theme.scheme === "dark" ? theme.border : "transparent",
+          },
         ]}
       >
         {activeSkills.length ? (
@@ -644,80 +724,50 @@ export function ChatComposer({
             ))}
           </ScrollView>
         ) : null}
-        <TextInput
-          ref={inputRef}
-          value={draft}
-          onChangeText={changeText}
-          onSelectionChange={onSelectionChange}
-          multiline
-          editable={!disabled}
-          placeholder={placeholder}
-          placeholderTextColor={theme.subtleText}
-          accessibilityLabel="Chat message"
-          testID="chat-composer-input"
-          returnKeyType="default"
-          blurOnSubmit={false}
-          textAlignVertical="top"
-          style={[styles.input, { color: theme.text }]}
-        />
-        <View style={styles.toolbar}>
-          {hasPicker ? (
-            <IconButton
-              icon={<Paperclip size={19} color={theme.mutedText} />}
-              label="Add attachment"
-              onPress={() => setPickerOpen(true)}
-              testID="chat-composer-attachments"
-            />
-          ) : null}
-          {settings && onSettings ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Chat settings"
-              onPress={onSettings}
-              style={[
-                styles.settingsButton,
-                { backgroundColor: theme.surfaceMuted },
-              ]}
-              testID="chat-composer-settings"
-            >
-              <Settings2 size={15} color={theme.mutedText} />
-              <Text
-                numberOfLines={1}
-                style={{ color: theme.mutedText, fontSize: 12, maxWidth: 188 }}
-              >
-                {[
-                  settings.harness,
-                  settings.mode,
-                  settings.model,
-                  settings.effort,
-                ]
-                  .filter(Boolean)
-                  .join(" · ") || "Settings"}
-              </Text>
-            </Pressable>
-          ) : null}
-          <View style={{ flex: 1 }} />
-          <IconButton
-            icon={
-              busy ? (
-                <Square
-                  size={17}
-                  color={theme.primaryForeground}
-                  fill={theme.primaryForeground}
-                />
-              ) : (
-                <Send size={18} color={theme.primaryForeground} />
-              )
+        <View style={styles.editorRow}>
+          {!expandedLayout ? attachmentButton : null}
+          <TextInput
+            key="message-input"
+            ref={inputRef}
+            value={draft}
+            onChangeText={changeText}
+            onSelectionChange={onSelectionChange}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
+            onContentSizeChange={({ nativeEvent }) =>
+              setInputHeight(nativeEvent.contentSize.height)
             }
-            label={busy ? "Stop OpenCuria" : "Send message"}
-            disabled={busy ? !onStop || stopping : !canSubmit || sending}
-            onPress={() => {
-              void send();
-            }}
-            tone="primary"
-            testID={busy ? "chat-composer-stop" : "chat-composer-send"}
+            multiline
+            editable={!disabled}
+            placeholder={placeholder}
+            placeholderTextColor={theme.subtleText}
+            accessibilityLabel="Chat message"
+            testID="chat-composer-input"
+            returnKeyType="default"
+            blurOnSubmit={false}
+            textAlignVertical="top"
+            style={[
+              styles.input,
+              expandedLayout ? styles.expandedInput : styles.compactInput,
+              {
+                color: theme.text,
+                height: expandedLayout
+                  ? Math.max(36, Math.min(170, inputHeight))
+                  : 44,
+              },
+            ]}
           />
+          {!expandedLayout ? settingsButton : null}
+          {!expandedLayout ? sendButton : null}
         </View>
+        {expandedLayout ? (
+          <View style={styles.toolbar}>
+            {attachmentButton}
+            <View style={{ flex: 1 }} />
+            {settingsButton}
+            {sendButton}
+          </View>
+        ) : null}
       </View>
       {disabled && !busy ? (
         <Text style={[styles.disabledHint, { color: theme.subtleText }]}>
@@ -731,12 +781,15 @@ export function ChatComposer({
         title="Add to message"
         testID="chat-composer-picker-sheet"
         maxHeight="58%"
+        placement="composer"
+        showHeader={false}
       >
         <View style={styles.pickerOptions}>
           {onTakePhoto ? (
             <PickerOption
-              icon={<Camera size={19} color={theme.text} />}
+              icon={<Camera size={22} color={theme.text} />}
               label="Take a photo"
+              title="Camera"
               onPress={() => {
                 void addAttachments(onTakePhoto);
               }}
@@ -744,8 +797,9 @@ export function ChatComposer({
           ) : null}
           {onChoosePhotos ? (
             <PickerOption
-              icon={<ImagePlus size={19} color={theme.text} />}
+              icon={<Images size={22} color={theme.text} />}
               label="Choose photos"
+              title="Photos"
               onPress={() => {
                 void addAttachments(onChoosePhotos);
               }}
@@ -753,8 +807,9 @@ export function ChatComposer({
           ) : null}
           {onChooseFiles ? (
             <PickerOption
-              icon={<FileText size={19} color={theme.text} />}
+              icon={<Paperclip size={22} color={theme.text} />}
               label="Choose files"
+              title="Files"
               onPress={() => {
                 void addAttachments(onChooseFiles);
               }}
@@ -796,10 +851,12 @@ function isImage(attachment: ComposerAttachment): boolean {
 function PickerOption({
   icon,
   label,
+  title = label,
   onPress,
 }: {
   icon: React.ReactNode;
   label: string;
+  title?: string;
   onPress: () => void;
 }): React.JSX.Element {
   const { theme } = useTheme();
@@ -813,48 +870,62 @@ function PickerOption({
         { backgroundColor: pressed ? theme.surfaceMuted : "transparent" },
       ]}
     >
-      {icon}
-      <Text style={{ color: theme.text, fontSize: 16 }}>{label}</Text>
+      <View
+        style={[styles.pickerIcon, { backgroundColor: theme.surfaceMuted }]}
+      >
+        {icon}
+      </View>
+      <Text style={{ color: theme.text, fontSize: 17, fontWeight: "500" }}>
+        {title}
+      </Text>
     </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { paddingHorizontal: 14, paddingTop: 8, paddingBottom: 8 },
+  root: { paddingHorizontal: 12, paddingTop: 10, paddingBottom: 10 },
   composerCard: {
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 23,
-    paddingHorizontal: 12,
-    paddingTop: 8,
-    paddingBottom: 8,
-    gap: 5,
+    borderRadius: 26,
+    paddingHorizontal: 2,
+    paddingVertical: 2,
+    boxShadow: "0 4px 32px rgba(0, 0, 0, 0.06)",
   },
+  editorRow: { flexDirection: "row", alignItems: "center" },
   input: {
-    width: "100%",
-    minHeight: 48,
-    maxHeight: 190,
-    paddingHorizontal: 5,
-    paddingTop: 8,
-    paddingBottom: 6,
-    fontSize: 16,
-    lineHeight: 23,
+    minWidth: 0,
+    paddingVertical: 9,
+    fontSize: 17,
+    lineHeight: 26,
+  },
+  compactInput: { flex: 1, paddingHorizontal: 2 },
+  expandedInput: {
+    flex: 1,
+    paddingVertical: 6,
+    marginHorizontal: 14,
+    marginTop: 8,
+    marginBottom: 2,
+  },
+  sendCircle: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center",
   },
   toolbar: {
-    minHeight: 46,
+    minHeight: 44,
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
+    paddingHorizontal: 0,
+    paddingBottom: 2,
   },
-  settingsButton: {
-    minHeight: 36,
-    maxWidth: "68%",
-    flexDirection: "row",
+  chips: {
     alignItems: "center",
     gap: 7,
-    paddingHorizontal: 10,
-    borderRadius: 18,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
   },
-  chips: { alignItems: "center", gap: 7, paddingVertical: 3 },
   skillChip: {
     minHeight: 34,
     maxWidth: 240,
@@ -912,11 +983,18 @@ const styles = StyleSheet.create({
   disabledHint: { fontSize: 12, textAlign: "center", paddingTop: 6 },
   pickerOptions: { gap: 4 },
   pickerOption: {
-    minHeight: 52,
+    minHeight: 60,
     flexDirection: "row",
     alignItems: "center",
     gap: 13,
-    paddingHorizontal: 12,
+    paddingHorizontal: 4,
     borderRadius: 13,
+  },
+  pickerIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: "center",
+    justifyContent: "center",
   },
 });

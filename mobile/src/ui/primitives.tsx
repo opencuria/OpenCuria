@@ -147,6 +147,8 @@ export interface SheetProps extends Pick<
   testID?: string;
   dismissible?: boolean;
   maxHeight?: number | `${number}%`;
+  placement?: "bottom" | "composer";
+  showHeader?: boolean;
 }
 
 /** Bottom-anchored native Modal sheet with safe-area handling and a scrollable body. */
@@ -159,6 +161,8 @@ export function Sheet({
   testID,
   dismissible = true,
   maxHeight = "88%",
+  placement = "bottom",
+  showHeader = true,
   onRequestClose,
   statusBarTranslucent = true,
 }: SheetProps): React.JSX.Element {
@@ -178,23 +182,41 @@ export function Sheet({
           accessibilityLabel="Close sheet"
           onPress={dismissible ? onClose : undefined}
           disabled={!dismissible}
-          style={[StyleSheet.absoluteFill, { backgroundColor: theme.overlay }]}
+          style={[
+            StyleSheet.absoluteFill,
+            {
+              backgroundColor:
+                placement === "composer" ? "transparent" : theme.overlay,
+            },
+          ]}
         />
         <View
           testID={testID}
           accessibilityViewIsModal
+          onAccessibilityEscape={dismissible ? onClose : undefined}
           style={[
             styles.sheet,
+            placement === "composer" ? styles.composerSheet : null,
             {
               backgroundColor: theme.raised,
               borderColor: theme.border,
               maxHeight,
               paddingBottom: Math.max(insets.bottom, 16),
+              ...(placement === "composer"
+                ? { marginBottom: Math.max(insets.bottom, 16) + 10 }
+                : {}),
             },
           ]}
         >
-          <View style={styles.sheetHandle} />
-          {title || dismissible ? (
+          {placement === "bottom" ? (
+            <View
+              style={[
+                styles.sheetHandle,
+                { backgroundColor: theme.subtleText },
+              ]}
+            />
+          ) : null}
+          {showHeader && (title || dismissible) ? (
             <View style={styles.sheetHeader}>
               {title ? (
                 <Text
@@ -218,7 +240,10 @@ export function Sheet({
           ) : null}
           <ScrollView
             keyboardShouldPersistTaps="handled"
-            contentContainerStyle={styles.sheetBody}
+            contentContainerStyle={[
+              styles.sheetBody,
+              placement === "composer" ? { paddingHorizontal: 12 } : null,
+            ]}
           >
             {children}
           </ScrollView>
@@ -324,14 +349,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     gap: 8,
-    borderRadius: 14,
+    borderRadius: 24,
   },
   buttonText: { fontSize: 15, lineHeight: 21, fontWeight: "600" },
   modalRoot: { flex: 1, justifyContent: "flex-end" },
   sheet: {
     width: "100%",
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
+    borderTopLeftRadius: 30,
+    borderTopRightRadius: 30,
     borderWidth: StyleSheet.hairlineWidth,
     paddingTop: 10,
     overflow: "hidden",
@@ -344,6 +369,14 @@ const styles = StyleSheet.create({
     backgroundColor: "#8B8B97",
     opacity: 0.45,
     marginBottom: 8,
+  },
+  composerSheet: {
+    alignSelf: "flex-start",
+    width: "72%",
+    maxWidth: 340,
+    borderRadius: 32,
+    marginLeft: 34,
+    boxShadow: "0 4px 24px rgba(0, 0, 0, 0.12)",
   },
   sheetHeader: {
     minHeight: 48,

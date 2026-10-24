@@ -16,12 +16,14 @@ import type {
 import { Image } from "expo-image";
 import {
   ArrowDown,
-  ClipboardCopy,
+  Copy,
   ChevronDown,
   ChevronRight,
   Clock3,
   Code2,
   FileCode2,
+  EllipsisVertical,
+  Pencil,
   GitBranch,
   Hammer,
   LoaderCircle,
@@ -49,7 +51,6 @@ import {
 } from "@opencuria/chat-core/harnessUsage";
 import { classifyWorkspaceFile } from "@opencuria/chat-core/workspaceFileRefs";
 import { useTheme } from "../ui/theme";
-import { OpenCuriaMark } from "../ui/OpenCuriaMark";
 import { Banner, Button, IconButton, Sheet } from "../ui/primitives";
 import { ChatMarkdown, type ResolvedChatMedia } from "./ChatMarkdown";
 
@@ -238,16 +239,8 @@ export function ChatMessages({
         testID={testID}
         style={[styles.empty, { backgroundColor: theme.background }]}
       >
-        <View
-          style={[styles.emptyMark, { backgroundColor: theme.surfaceMuted }]}
-        >
-          <OpenCuriaMark size={32} />
-        </View>
         <Text style={[styles.emptyTitle, { color: theme.text }]}>
-          Your next idea starts here.
-        </Text>
-        <Text style={[styles.emptyBody, { color: theme.mutedText }]}>
-          Ask OpenCuria to plan, build, or explain something in your workspace.
+          What can I help with?
         </Text>
       </View>
     );
@@ -271,6 +264,8 @@ export function ChatMessages({
         maintainVisibleContentPosition
         recycleItems={false}
         keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        showsVerticalScrollIndicator={false}
         contentContainerStyle={[
           styles.listContent,
           { backgroundColor: theme.background },
@@ -280,9 +275,13 @@ export function ChatMessages({
       {showJumpToLatest ? (
         <View style={styles.jumpButton}>
           <IconButton
-            icon={<ArrowDown size={19} color={theme.primaryForeground} />}
+            icon={<ArrowDown size={20} color={theme.text} />}
             label="Scroll to latest message"
-            tone="primary"
+            style={{
+              backgroundColor: theme.composer,
+              borderWidth: StyleSheet.hairlineWidth,
+              borderColor: theme.border,
+            }}
             onPress={jumpToLatest}
             testID="chat-scroll-to-latest"
           />
@@ -378,6 +377,7 @@ const MessageRow = memo(function MessageRow({
 }: MessageRowProps): React.JSX.Element {
   const { theme } = useTheme();
   const [editing, setEditing] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
   const [editText, setEditText] = useState(message.content);
   const isUser = message.role === "user";
   const blocks = useMemo(
@@ -442,37 +442,17 @@ const MessageRow = memo(function MessageRow({
         isUser ? styles.userFrame : styles.assistantFrame,
       ]}
     >
-      <View style={styles.messageHeading}>
-        {!isUser ? (
-          <View
-            style={[
-              styles.assistantMark,
-              { backgroundColor: theme.surfaceMuted },
-            ]}
-          >
-            <OpenCuriaMark size={22} />
-          </View>
-        ) : null}
-        <Text style={[styles.roleLabel, { color: theme.mutedText }]}>
-          {isUser ? "You" : "OpenCuria"}
-        </Text>
-        {message.model ? (
-          <Text
-            numberOfLines={1}
-            style={[styles.modelLabel, { color: theme.subtleText }]}
-          >
-            {message.model}
-          </Text>
-        ) : null}
-        {message.created_at ? (
-          <Text style={[styles.timeLabel, { color: theme.subtleText }]}>
-            {formatTime(message.created_at)}
-          </Text>
-        ) : null}
-      </View>
       {isUser ? (
-        <View
-          style={[styles.userBubble, { backgroundColor: theme.surfaceMuted }]}
+        <Pressable
+          onLongPress={() => setActionsOpen(true)}
+          accessibilityLabel={`Your message: ${message.content}`}
+          accessibilityHint="Long press for message actions"
+          accessibilityActions={[
+            { name: "activate", label: "Message actions" },
+          ]}
+          onAccessibilityAction={() => setActionsOpen(true)}
+          testID={`chat-message-menu-${message.id}`}
+          style={[styles.userBubble, { backgroundColor: theme.userBubble }]}
         >
           {editing ? (
             <>
@@ -521,7 +501,7 @@ const MessageRow = memo(function MessageRow({
               testID={`chat-message-markdown-${message.id}`}
             />
           )}
-        </View>
+        </Pressable>
       ) : (
         <View style={styles.assistantBody}>
           {message.error && !message.notice_dismissed_at ? (
@@ -590,57 +570,115 @@ const MessageRow = memo(function MessageRow({
           ) : null}
         </View>
       )}
-      {!isUser &&
-      !streaming &&
-      formatMessageUsage(resolveMessageUsage(message)) ? (
-        <Text style={{ color: theme.subtleText, fontSize: 11 }}>
-          {formatMessageUsage(resolveMessageUsage(message))}
-        </Text>
+      {!isUser && !streaming ? (
+        <View style={styles.messageActions}>
+          <IconButton
+            icon={
+              <Copy
+                size={19}
+                strokeWidth={1.7}
+                color={theme.mutedText}
+              />
+            }
+            label="Copy message"
+            onPress={() => {
+              void doCopy();
+            }}
+            disabled={!copyText}
+            size={40}
+            testID={`chat-copy-${message.id}`}
+          />
+          {!disabled && onFork ? (
+            <IconButton
+              icon={
+                <GitBranch
+                  size={19}
+                  strokeWidth={1.7}
+                  color={theme.mutedText}
+                />
+              }
+              label="Fork conversation from this answer"
+              onPress={() => {
+                void forkMessage(message.id);
+              }}
+              testID={`chat-fork-${message.id}`}
+            />
+          ) : null}
+          <IconButton
+            icon={
+              <EllipsisVertical
+                size={20}
+                strokeWidth={1.7}
+                color={theme.mutedText}
+              />
+            }
+            label="Message details"
+            onPress={() => setActionsOpen(true)}
+            testID={`chat-message-menu-${message.id}`}
+          />
+        </View>
       ) : null}
-      <View
-        style={[
-          styles.messageActions,
-          isUser ? styles.userActions : styles.assistantActions,
-        ]}
+      <Sheet
+        visible={actionsOpen}
+        onClose={() => setActionsOpen(false)}
+        title={isUser ? "Message" : "OpenCuria"}
+        testID={`chat-message-actions-${message.id}`}
       >
-        <IconButton
-          icon={<ClipboardCopy size={16} color={theme.subtleText} />}
-          label="Copy message"
+        <Button
+          title="Copy message"
+          icon={<Copy size={19} color={theme.text} />}
+          variant="ghost"
+          disabled={!copyText}
           onPress={() => {
             void doCopy();
+            setActionsOpen(false);
           }}
-          disabled={!copyText}
-          size={40}
-          testID={`chat-copy-${message.id}`}
+          testID={isUser ? `chat-copy-${message.id}` : undefined}
         />
         {isUser &&
         !editing &&
         !disabled &&
         !message.id.startsWith("local-user-") &&
         onEdit ? (
-          <IconButton
-            icon={<FileCode2 size={16} color={theme.subtleText} />}
-            label="Edit and run again"
+          <Button
+            icon={<Pencil size={19} color={theme.text} />}
+            title="Edit and run again"
+            variant="ghost"
             onPress={() => {
+              setActionsOpen(false);
               setEditText(message.content);
               setEditing(true);
             }}
-            size={40}
             testID={`chat-edit-action-${message.id}`}
           />
         ) : null}
         {!isUser && !disabled && !streaming && onFork ? (
-          <IconButton
-            icon={<GitBranch size={16} color={theme.subtleText} />}
-            label="Fork conversation from this answer"
+          <Button
+            icon={<GitBranch size={19} color={theme.text} />}
+            title="Fork conversation from this answer"
+            variant="ghost"
             onPress={() => {
+              setActionsOpen(false);
               void forkMessage(message.id);
             }}
-            size={40}
-            testID={`chat-fork-${message.id}`}
           />
         ) : null}
-      </View>
+        {message.model ? (
+          <Text selectable style={{ color: theme.mutedText, fontSize: 14 }}>
+            {message.model}
+          </Text>
+        ) : null}
+        {message.created_at ? (
+          <Text style={{ color: theme.mutedText, fontSize: 13 }}>
+            {formatTime(message.created_at)}
+          </Text>
+        ) : null}
+        {formatMessageUsage(resolveMessageUsage(message)) ? (
+          <Text style={{ color: theme.subtleText, fontSize: 13 }}>
+            {formatMessageUsage(resolveMessageUsage(message))}
+          </Text>
+        ) : null}
+      </Sheet>
     </View>
   );
 });
@@ -670,6 +708,7 @@ export function UserMessageContent({
             <ChatMarkdown
               key={`text:${index}`}
               markdown={segment.text}
+              variant="prompt"
               mediaVisible={mediaVisible}
               mediaScopeKey={mediaScopeKey}
               resolveMedia={resolveMedia}
@@ -1671,38 +1710,23 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 32,
-    gap: 10,
-  },
-  emptyMark: {
-    width: 52,
-    height: 52,
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 8,
+    paddingBottom: 8,
   },
   emptyTitle: {
-    fontSize: 20,
+    fontSize: 22,
     lineHeight: 28,
-    fontWeight: "600",
-    textAlign: "center",
-  },
-  emptyBody: {
-    maxWidth: 320,
-    fontSize: 15,
-    lineHeight: 22,
+    fontWeight: "400",
     textAlign: "center",
   },
   listContent: {
     flexGrow: 1,
-    paddingHorizontal: 18,
-    paddingTop: 14,
+    paddingHorizontal: 16,
+    paddingTop: 10,
     paddingBottom: 24,
-    gap: 24,
   },
   jumpButton: {
     position: "absolute",
-    right: 18,
+    alignSelf: "center",
     bottom: 16,
     borderRadius: 24,
     elevation: 3,
@@ -1734,33 +1758,15 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   todoMarker: { width: 8, height: 8, borderRadius: 5 },
-  messageFrame: { maxWidth: 820, width: "100%", gap: 7 },
+  messageFrame: { maxWidth: 820, width: "100%", gap: 4, paddingBottom: 24 },
   userFrame: { alignSelf: "flex-end", alignItems: "flex-end" },
   assistantFrame: { alignSelf: "flex-start", alignItems: "flex-start" },
-  messageHeading: {
-    minHeight: 30,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 2,
-  },
-  assistantMark: {
-    width: 26,
-    height: 26,
-    borderRadius: 9,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  roleLabel: { fontSize: 13, fontWeight: "600" },
-  modelLabel: { maxWidth: 160, fontSize: 12 },
-  timeLabel: { fontSize: 12, marginLeft: "auto" },
   userBubble: {
-    maxWidth: "94%",
+    maxWidth: "82%",
     minWidth: 48,
-    borderRadius: 20,
-    borderBottomRightRadius: 7,
-    paddingVertical: 12,
-    paddingHorizontal: 15,
+    borderRadius: 24,
+    paddingVertical: 13,
+    paddingHorizontal: 16,
   },
   userMessageContent: {
     flexDirection: "row",
@@ -1796,8 +1802,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 0,
   },
-  userActions: { alignSelf: "flex-end", opacity: 0.9 },
-  assistantActions: { alignSelf: "flex-start" },
   inlineActions: {
     flexDirection: "row",
     justifyContent: "flex-end",

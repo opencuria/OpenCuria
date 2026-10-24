@@ -5,13 +5,16 @@ import { useColorScheme } from "react-native";
 export type ThemeMode = "system" | "light" | "dark";
 export type ColorScheme = "light" | "dark";
 
-/** Semantic colors used by the mobile chat UI. Keep surfaces neutral and actions violet. */
+/** Semantic colors for the native chat, controls, and message surfaces. */
 export interface OpenCuriaTheme {
   scheme: ColorScheme;
   background: string;
   surface: string;
   raised: string;
   surfaceMuted: string;
+  userBubble: string;
+  composer: string;
+  disabledAction: string;
   text: string;
   mutedText: string;
   subtleText: string;
@@ -31,15 +34,18 @@ export interface OpenCuriaTheme {
 const THEMES: Record<ColorScheme, OpenCuriaTheme> = {
   light: {
     scheme: "light",
-    background: "#FFFFFF",
+    background: "#FCFCFC",
     surface: "#FFFFFF",
     raised: "#FFFFFF",
-    surfaceMuted: "#F4F4F6",
-    text: "#17171B",
-    mutedText: "#64646F",
-    subtleText: "#858590",
-    border: "#E7E7EB",
-    primary: "#534AB7",
+    surfaceMuted: "#F3F3F3",
+    userBubble: "#EBF1FC",
+    composer: "#FFFFFF",
+    disabledAction: "#E7E7E7",
+    text: "#0D0D0D",
+    mutedText: "#606060",
+    subtleText: "#909090",
+    border: "#E4E4E4",
+    primary: "#3863F5",
     primaryForeground: "#FFFFFF",
     brand: "#534AB7",
     danger: "#B42318",
@@ -48,20 +54,23 @@ const THEMES: Record<ColorScheme, OpenCuriaTheme> = {
     warning: "#8A5A00",
     info: "#3159A5",
     overlay: "rgba(15, 15, 20, 0.42)",
-    codeBackground: "#F2F2F5",
+    codeBackground: "#F3F3F3",
   },
   dark: {
     scheme: "dark",
-    background: "#101014",
-    surface: "#17171C",
-    raised: "#202027",
-    surfaceMuted: "#25252D",
-    text: "#F4F4F6",
-    mutedText: "#B1B1BC",
-    subtleText: "#8B8B97",
-    border: "#34343E",
-    primary: "#A49BFF",
-    primaryForeground: "#171522",
+    background: "#000000",
+    surface: "#171717",
+    raised: "#303030",
+    surfaceMuted: "#262626",
+    userBubble: "#09064A",
+    composer: "#303030",
+    disabledAction: "#444444",
+    text: "#F5F5F5",
+    mutedText: "#B4B4B4",
+    subtleText: "#969696",
+    border: "#414141",
+    primary: "#6B8AFF",
+    primaryForeground: "#FFFFFF",
     brand: "#A49BFF",
     danger: "#FF8A80",
     dangerSurface: "#351D20",
@@ -69,7 +78,7 @@ const THEMES: Record<ColorScheme, OpenCuriaTheme> = {
     warning: "#F2C66D",
     info: "#9BB9FF",
     overlay: "rgba(0, 0, 0, 0.68)",
-    codeBackground: "#222229",
+    codeBackground: "#202020",
   },
 };
 

@@ -101,6 +101,58 @@ const part = (
 });
 
 describe("ChatMessages", () => {
+  it("opens user actions on long press and keeps edit-and-run available", async () => {
+    const onEdit = jest.fn().mockResolvedValue(undefined);
+    const prompt: HarnessMessage = {
+      id: "prompt",
+      session_id: "s1",
+      role: "user",
+      content: "Original prompt",
+      parts: [],
+    };
+    render(
+      <ThemeProvider>
+        <ChatMessages messages={[prompt]} onEdit={onEdit} />
+      </ThemeProvider>,
+    );
+    expect(screen.queryByTestId("chat-edit-action-prompt")).toBeNull();
+    fireEvent(screen.getByTestId("chat-message-menu-prompt"), "longPress");
+    fireEvent.press(await screen.findByTestId("chat-edit-action-prompt"));
+    fireEvent.changeText(
+      screen.getByTestId("chat-edit-prompt"),
+      "Updated prompt",
+    );
+    fireEvent.press(screen.getByRole("button", { name: "Save & run" }));
+    await waitFor(() =>
+      expect(onEdit).toHaveBeenCalledWith("prompt", "Updated prompt"),
+    );
+  });
+
+  it("allows inspecting a user message while editing is unavailable", () => {
+    const onEdit = jest.fn();
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          disabled
+          onEdit={onEdit}
+          messages={[
+            {
+              id: "prompt",
+              session_id: "s1",
+              role: "user",
+              content: "Saved prompt",
+              parts: [],
+            },
+          ]}
+        />
+      </ThemeProvider>,
+    );
+    fireEvent(screen.getByTestId("chat-message-menu-prompt"), "longPress");
+    expect(screen.getByRole("button", { name: "Copy message" })).toBeEnabled();
+    expect(screen.queryByTestId("chat-edit-action-prompt")).toBeNull();
+    expect(onEdit).not.toHaveBeenCalled();
+  });
+
   it("renders ordered work details and fetches omitted heavy detail only when expanded", async () => {
     const onRequestPartDetail = jest.fn().mockResolvedValue({
       ...part("tool-1", "tool", "Full output", 0),

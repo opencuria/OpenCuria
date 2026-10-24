@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react-native";
 import type { ProviderModel, Workspace } from "@opencuria/client";
 import { ThemeProvider } from "../ui/theme";
@@ -439,7 +440,11 @@ it("resumes a Codex session with an immutable engine/provider and no native-mode
   );
   fireEvent.press(screen.getByTestId("test-settings"));
   expect(screen.queryByText("Codex Sol")).toBeNull();
-  expect(screen.getByText("OpenCuria")).toBeDisabled();
+  expect(
+    within(screen.getByTestId("model-settings-sheet")).getByRole("button", {
+      name: "OpenCuria",
+    }),
+  ).toBeDisabled();
   fireEvent.press(screen.getByTestId("test-send"));
   await waitFor(() =>
     expect(mockController.send).toHaveBeenCalledWith(

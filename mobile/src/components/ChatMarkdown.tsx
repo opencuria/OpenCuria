@@ -28,6 +28,7 @@ export type ResolvedChatMedia = string | { uri: string; release: () => void };
 export interface ChatMarkdownProps {
   markdown: string;
   streaming?: boolean;
+  variant?: "body" | "prompt";
   resolveMedia?: (workspacePath: string) => Promise<ResolvedChatMedia>;
   /** Changes with the host media-cache scope (workspace/account/server). */
   mediaScopeKey?: string | number;
@@ -67,6 +68,7 @@ type MarkdownSegment =
 export function ChatMarkdown({
   markdown,
   streaming = false,
+  variant = "body",
   resolveMedia,
   mediaScopeKey = "",
   mediaVisible = true,
@@ -226,16 +228,17 @@ export function ChatMarkdown({
     () => ({
       paragraph: {
         color: theme.text,
-        fontSize: 16,
-        lineHeight: 24,
-        marginTop: 2,
-        marginBottom: 10,
+        fontSize: 17,
+        lineHeight: 26,
+        marginTop: 0,
+        marginBottom: variant === "prompt" ? 0 : 14,
       },
       h1: {
         color: theme.text,
         fontSize: 26,
         lineHeight: 32,
         fontWeight: "600" as const,
+        marginTop: 20,
         marginBottom: 8,
       },
       h2: {
@@ -243,6 +246,7 @@ export function ChatMarkdown({
         fontSize: 22,
         lineHeight: 29,
         fontWeight: "600" as const,
+        marginTop: 18,
         marginBottom: 7,
       },
       h3: {
@@ -250,6 +254,7 @@ export function ChatMarkdown({
         fontSize: 19,
         lineHeight: 27,
         fontWeight: "600" as const,
+        marginTop: 16,
         marginBottom: 6,
       },
       h4: {
@@ -289,7 +294,7 @@ export function ChatMarkdown({
       blockquote: {
         color: theme.mutedText,
         borderColor: theme.primary,
-        backgroundColor: theme.surfaceMuted,
+        backgroundColor: theme.background,
         borderWidth: 2,
         borderRadius: 12,
         padding: 12,
@@ -297,23 +302,23 @@ export function ChatMarkdown({
       },
       list: {
         color: theme.text,
-        bulletColor: theme.primary,
-        markerColor: theme.mutedText,
+        bulletColor: theme.text,
+        markerColor: theme.text,
         gapWidth: 8,
         marginLeft: 18,
-        itemSpacing: 4,
+        itemSpacing: 8,
       },
       table: {
         color: theme.text,
-        headerBackgroundColor: theme.surfaceMuted,
+        headerBackgroundColor: theme.background,
         headerTextColor: theme.text,
-        rowEvenBackgroundColor: theme.surface,
-        rowOddBackgroundColor: theme.surfaceMuted,
+        rowEvenBackgroundColor: theme.background,
+        rowOddBackgroundColor: theme.background,
         borderColor: theme.border,
         borderWidth: 1,
-        borderRadius: 10,
-        cellPaddingHorizontal: 10,
-        cellPaddingVertical: 7,
+        borderRadius: 0,
+        cellPaddingHorizontal: 12,
+        cellPaddingVertical: 12,
       },
       image: {
         borderRadius: 14,
@@ -334,7 +339,7 @@ export function ChatMarkdown({
       },
       inlineMath: { color: theme.text },
     }),
-    [theme],
+    [theme, variant],
   );
   const onLinkPress = ({ url }: { url: string }) => {
     const path = resolveWorkspaceLinkPath(url);
