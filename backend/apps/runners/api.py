@@ -20,7 +20,7 @@ from datetime import timedelta
 from asgiref.sync import sync_to_async
 from django.core.exceptions import ObjectDoesNotExist, SynchronousOnlyOperation
 from django.http import HttpRequest
-from ninja import Body, Schema, Router
+from ninja import Body, Router, Schema
 from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 from apps.accounts.api_auth import check_api_key_permission
@@ -30,6 +30,7 @@ from apps.organizations.services import OrganizationService
 from apps.plugins.schemas import WorkspacePluginOut
 from apps.plugins.services import PluginService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
+from common.request_context import get_organization_id
 from common.schemas import ErrorOut
 
 from .enums import WorkspaceStatus
@@ -39,12 +40,14 @@ from .exceptions import (
     ImageRecipeValidationError,
     RunnerOfflineError,
 )
+from .git_presenters import git_error_to_response
 from .image_presenters import (
     captured_image_to_out,
     image_artifacts_to_out,
 )
-from .storage_schemas import RunnerStorageOut
 from .schemas import (
+    CapturedImageOut,
+    CapturedImageUpdateIn,
     DesktopClipboardReadIn,
     DesktopClipboardReadOut,
     DesktopClipboardWriteIn,
@@ -54,15 +57,11 @@ from .schemas import (
     DesktopStopOut,
     DesktopTakeControlOut,
     DesktopViewerIntentIn,
-    GitCommitMessageIn,
-    GitCommitMessageOut,
     GitCommitQuery,
     GitDiffQuery,
     GitHistoryQuery,
     GitOperationIn,
     GitRepoQuery,
-    CapturedImageOut,
-    CapturedImageUpdateIn,
     ImageArtifactCreateIn,
     ImageArtifactCreateOut,
     ImageBuildJobCreateIn,
@@ -97,6 +96,7 @@ from .schemas import (
 )
 from .services import get_runner_service
 from .services.image_definitions import ImageDefinitionService
+from .storage_schemas import RunnerStorageOut
 
 
 def _perm_denied(permission: APIKeyPermission):
@@ -218,17 +218,6 @@ def _get_service():
     return get_runner_service()
 
 
-def _get_org_id(request: HttpRequest) -> uuid.UUID:
-    """Extract the organization ID from the X-Organization-Id header."""
-    org_id_str = request.headers.get("X-Organization-Id")
-    if not org_id_str:
-        raise AuthenticationError("X-Organization-Id header is required")
-    try:
-        return uuid.UUID(org_id_str)
-    except ValueError:
-        raise AuthenticationError("Invalid X-Organization-Id header")
-
-
 def _get_org_service() -> OrganizationService:
     return OrganizationService()
 
@@ -289,7 +278,7 @@ def list_lifecycle_operations(request: HttpRequest):
         return _perm_denied(APIKeyPermission.RUNNERS_READ)
     return {
         "operations": DispositionService.list_operations(
-            request.user, _get_org_id(request)
+            request.user, get_organization_id(request)
         )
     }
 
@@ -301,7 +290,7 @@ def list_runners(request: HttpRequest):
     """Return all runners for the user's active organization."""
     if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
         return _perm_denied(APIKeyPermission.RUNNERS_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
@@ -320,7 +309,7 @@ def create_runner(request: HttpRequest, payload: RunnerCreateIn):
     """
     if not check_api_key_permission(request, APIKeyPermission.RUNNERS_CREATE):
         return _perm_denied(APIKeyPermission.RUNNERS_CREATE)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
 
     try:
@@ -350,7 +339,7 @@ def create_runner(request: HttpRequest, payload: RunnerCreateIn):
 )
 def update_runner(request: HttpRequest, runner_id: uuid.UUID, payload: RunnerUpdateIn):
     """Update per-runner QEMU resource defaults and limits (admin only)."""
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     try:
         org_service.require_admin(request.user, org_id)
@@ -382,7 +371,7 @@ def update_runner(request: HttpRequest, runner_id: uuid.UUID, payload: RunnerUpd
 )
 def get_runner_metrics_latest(request: HttpRequest, runner_id: uuid.UUID):
     """Return the most recently recorded system metrics snapshot for a runner."""
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
@@ -416,7 +405,7 @@ def get_runner_metrics_history(
     request: HttpRequest, runner_id: uuid.UUID, hours: int = 24
 ):
     """Return historical system metrics for a runner (default: last 24h)."""
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
@@ -458,7 +447,7 @@ def list_workspaces(request: HttpRequest, runner_id: uuid.UUID | None = None):
     """
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_READ):
         return _perm_denied(APIKeyPermission.WORKSPACES_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
 
@@ -488,7 +477,7 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
         request, APIKeyPermission.CREDENTIALS_READ
     ):
         return _perm_denied(APIKeyPermission.CREDENTIALS_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -553,7 +542,7 @@ def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     """Return workspace details."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_READ):
         return _perm_denied(APIKeyPermission.WORKSPACES_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     org_service = _get_org_service()
     org_service.require_membership(request.user, org_id)
     try:
@@ -576,7 +565,7 @@ async def start_terminal(
     """Start an interactive PTY terminal in a workspace container."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -606,7 +595,7 @@ async def start_desktop(
     """Start a KasmVNC desktop session in a workspace container."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     service = _get_service()
     try:
         task = await service.start_desktop(
@@ -633,7 +622,7 @@ async def stop_desktop(
     """Release the viewer lease. The display stays up if computer-use holds it."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     service = _get_service()
     try:
         task = await service.stop_desktop(
@@ -659,7 +648,9 @@ async def renew_desktop(request: HttpRequest, workspace_id: uuid.UUID,
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     try:
         result = await _get_service().renew_desktop(
-            workspace_id, user=request.user, organization_id=_get_org_id(request),
+            workspace_id,
+            user=request.user,
+            organization_id=get_organization_id(request),
             viewer_client_id=payload.viewer_client_id,
             intent_revision=payload.intent_revision)
         return 200, DesktopRenewOut(**result)
@@ -683,7 +674,7 @@ async def take_desktop_control(
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     is_admin = await _get_org_admin_flag_async(request, org_id)
 
     service = _get_service()
@@ -715,7 +706,7 @@ async def desktop_status(
     """Check whether a desktop session is active for the workspace."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     service = _get_service()
     try:
         result = await service.viewer_desktop_status(
@@ -747,7 +738,7 @@ async def desktop_clipboard_write(
     """Write plain text from the browser into the VM desktop clipboard."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     is_admin = await _get_org_admin_flag_async(request, org_id)
 
     service = _get_service()
@@ -787,7 +778,7 @@ async def desktop_clipboard_read(
     """Read plain text from the VM desktop clipboard for local copy."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     is_admin = await _get_org_admin_flag_async(request, org_id)
 
     service = _get_service()
@@ -846,7 +837,7 @@ async def update_workspace(
         request, APIKeyPermission.CREDENTIALS_READ
     ):
         return _perm_denied(APIKeyPermission.CREDENTIALS_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -923,7 +914,7 @@ async def stop_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     """Stop a running workspace."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_STOP):
         return _perm_denied(APIKeyPermission.WORKSPACES_STOP)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -947,7 +938,7 @@ async def resume_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     """Resume a stopped workspace."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_RESUME):
         return _perm_denied(APIKeyPermission.WORKSPACES_RESUME)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -971,7 +962,7 @@ async def remove_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     """Remove a workspace and its container."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_DELETE):
         return _perm_denied(APIKeyPermission.WORKSPACES_DELETE)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -1001,7 +992,7 @@ async def recreate_workspace(
     """
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_DELETE):
         return _perm_denied(APIKeyPermission.WORKSPACES_DELETE)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -1087,7 +1078,7 @@ async def list_processes(
         request, APIKeyPermission.WORKSPACES_PROCESSES_READ
     ):
         return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -1124,7 +1115,7 @@ async def start_process(
     """
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_PROCESSES_RUN):
         return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_RUN)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -1164,7 +1155,7 @@ async def get_process(request: HttpRequest, workspace_id: uuid.UUID, process_id:
         request, APIKeyPermission.WORKSPACES_PROCESSES_READ
     ):
         return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -1196,7 +1187,7 @@ async def stop_process(
     """
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_PROCESSES_RUN):
         return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_RUN)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -1238,7 +1229,7 @@ async def restart_process(
     """
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_PROCESSES_RUN):
         return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_RUN)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -1286,7 +1277,7 @@ async def delete_process(
     """
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_PROCESSES_RUN):
         return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_RUN)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -1324,7 +1315,7 @@ def list_workspace_plugins(request: HttpRequest, workspace_id: uuid.UUID):
     """List org-enabled plugins with workspace state and credential gaps."""
     if not check_api_key_permission(request, APIKeyPermission.PLUGINS_READ):
         return _perm_denied(APIKeyPermission.PLUGINS_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     _get_org_service().require_membership(request.user, org_id)
     try:
         workspace = _get_owned_workspace(request, org_id, workspace_id)
@@ -1344,31 +1335,6 @@ def list_workspace_plugins(request: HttpRequest, workspace_id: uuid.UUID):
 _GIT_READ_OPS = frozenset(
     {"list_repos", "repo_snapshot", "repo_history", "working_diff", "commit_details"}
 )
-
-
-def _git_error_to_response(exc: Exception):
-    """Map git service errors to (status, ErrorOut) tuples."""
-    from .exceptions import RunnerTimeoutError, WorkspaceStateError
-
-    if isinstance(exc, NotFoundError):
-        return 404, ErrorOut(detail=exc.message, code=exc.code)
-    if isinstance(exc, RunnerTimeoutError):
-        return 504, ErrorOut(detail=exc.message, code="runner_timeout")
-    if isinstance(exc, RunnerOfflineError):
-        return 409, ErrorOut(detail=str(exc), code="runner_offline")
-    if isinstance(exc, WorkspaceStateError):
-        return 409, ErrorOut(detail=str(exc), code="workspace_conflict")
-    if isinstance(exc, ConflictError):
-        return 409, ErrorOut(detail=exc.message, code=exc.code)
-    if isinstance(exc, ValueError):
-        return 400, ErrorOut(detail=str(exc), code="validation_error")
-    if isinstance(exc, RuntimeError):
-        message = str(exc)
-        lowered = message.lower()
-        if any(marker in lowered for marker in ("timed out", "timeout")):
-            return 504, ErrorOut(detail=message, code="runner_timeout")
-        return 502, ErrorOut(detail=message, code="runner_call_failed")
-    return 502, ErrorOut(detail=str(exc), code="runner_call_failed")
 
 
 def _git_result_to_response(result: dict):
@@ -1473,7 +1439,7 @@ async def git_repos(
     """Return the discovered repos (id/name/path/branch/head) for a workspace."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
         return _perm_denied(APIKeyPermission.WORKSPACES_GIT_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -1486,7 +1452,7 @@ async def git_repos(
         )
         return _git_result_to_response(result)
     except Exception as exc:
-        return _git_error_to_response(exc)
+        return git_error_to_response(exc)
 
 
 @git_router.get(
@@ -1506,7 +1472,7 @@ async def git_repo(
         query = GitRepoQuery(repo_path=repo_path)
     except Exception as exc:
         return 400, ErrorOut(detail=str(exc), code="validation_error")
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -1520,7 +1486,7 @@ async def git_repo(
         )
         return _git_result_to_response(result)
     except Exception as exc:
-        return _git_error_to_response(exc)
+        return git_error_to_response(exc)
 
 
 @git_router.get(
@@ -1552,7 +1518,7 @@ async def git_history(
         )
     except Exception as exc:
         return 400, ErrorOut(detail=str(exc), code="validation_error")
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -1572,7 +1538,7 @@ async def git_history(
         )
         return _git_result_to_response(result)
     except Exception as exc:
-        return _git_error_to_response(exc)
+        return git_error_to_response(exc)
 
 
 @git_router.get(
@@ -1592,7 +1558,7 @@ async def git_diff(
         query = GitDiffQuery(repo_path=repo_path)
     except Exception as exc:
         return 400, ErrorOut(detail=str(exc), code="validation_error")
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -1606,7 +1572,7 @@ async def git_diff(
         )
         return _git_result_to_response(result)
     except Exception as exc:
-        return _git_error_to_response(exc)
+        return git_error_to_response(exc)
 
 
 @git_router.get(
@@ -1631,7 +1597,7 @@ async def git_commit_details(
         commit = validate_commit_hash(commit_hash)
     except ValueError as exc:
         return 400, ErrorOut(detail=str(exc), code="validation_error")
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -1645,7 +1611,7 @@ async def git_commit_details(
         )
         return _git_result_to_response(result)
     except Exception as exc:
-        return _git_error_to_response(exc)
+        return git_error_to_response(exc)
 
 
 @git_router.post(
@@ -1673,7 +1639,7 @@ async def git_operation(
     )
     if not check_api_key_permission(request, permission):
         return _perm_denied(permission)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -1688,54 +1654,7 @@ async def git_operation(
         )
         return _git_result_to_response(result)
     except Exception as exc:
-        return _git_error_to_response(exc)
-
-
-@git_router.post(
-    "/{workspace_id}/git/commit-message/",
-    response={
-        200: GitCommitMessageOut,
-        400: ErrorOut,
-        403: ErrorOut,
-        404: ErrorOut,
-        409: ErrorOut,
-        502: ErrorOut,
-        504: ErrorOut,
-    },
-    summary="Suggest a commit subject with the small model",
-)
-async def git_commit_message(
-    request: HttpRequest,
-    workspace_id: uuid.UUID,
-    payload: GitCommitMessageIn,
-):
-    """Suggest a commit subject for the staged (else all) changes of one repo.
-
-    Requires ``workspaces:git_read`` (reads the diff) and ``harness:run``
-    (prompts the organization's small model).
-    """
-    for permission in (
-        APIKeyPermission.WORKSPACES_GIT_READ,
-        APIKeyPermission.HARNESS_RUN,
-    ):
-        if not check_api_key_permission(request, permission):
-            return _perm_denied(permission)
-    org_id = _get_org_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    from apps.harness.harness_service import get_harness_service
-
-    try:
-        await _get_owned_workspace_async(request, org_id, workspace_id)
-        message = await get_harness_service().generate_commit_message(
-            workspace_id=workspace_id,
-            repo_path=payload.repo_path,
-            organization_id=org_id,
-            user_id=request.user.id,
-        )
-        return 200, GitCommitMessageOut(message=message)
-    except Exception as exc:
-        return _git_error_to_response(exc)
+        return git_error_to_response(exc)
 
 
 # ===========================================================================
@@ -1760,7 +1679,7 @@ def _deletion_response(request, action, *args):
         return _perm_denied(APIKeyPermission.IMAGES_DELETE)
     try:
         return getattr(DeletionService(), action)(
-            request.user, _get_org_id(request), *args
+            request.user, get_organization_id(request), *args
         )
     except AuthenticationError as exc:
         return 403, ErrorOut(detail=exc.message, code=exc.code)
@@ -1843,7 +1762,7 @@ def _captured_image_errors(exc: Exception):
 def list_captured_images(request: HttpRequest):
     if not check_api_key_permission(request, APIKeyPermission.IMAGES_READ):
         return _perm_denied(APIKeyPermission.IMAGES_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     _get_org_service().require_membership(request.user, org_id)
     from .services.image_versions import ImageVersionService
 
@@ -1859,7 +1778,7 @@ def list_captured_images(request: HttpRequest):
 def get_captured_image(request: HttpRequest, captured_image_id: uuid.UUID):
     if not check_api_key_permission(request, APIKeyPermission.IMAGES_READ):
         return _perm_denied(APIKeyPermission.IMAGES_READ)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     _get_org_service().require_membership(request.user, org_id)
     from .services.image_versions import ImageVersionService
 
@@ -1881,7 +1800,7 @@ def rename_captured_image(
 ):
     if not check_api_key_permission(request, APIKeyPermission.IMAGES_CREATE):
         return _perm_denied(APIKeyPermission.IMAGES_CREATE)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     _get_org_service().require_membership(request.user, org_id)
     from .services.image_versions import ImageVersionService
 
@@ -1915,7 +1834,7 @@ async def create_workspace_from_captured_image(
         request, APIKeyPermission.PLUGINS_WRITE
     ):
         return _perm_denied(APIKeyPermission.PLUGINS_WRITE)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
     from .services.image_versions import ImageVersionService
 
@@ -1960,7 +1879,7 @@ async def create_workspace_image_artifact(
     """Create an image artifact from a workspace."""
     if not check_api_key_permission(request, APIKeyPermission.IMAGES_CREATE):
         return _perm_denied(APIKeyPermission.IMAGES_CREATE)
-    org_id = _get_org_id(request)
+    org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
     service = _get_service()
@@ -2113,7 +2032,7 @@ def list_image_definitions(request: HttpRequest):
     if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_READ):
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_READ)
     definitions = _image_definitions().list_visible(
-        request.user, _get_org_id(request)
+        request.user, get_organization_id(request)
     )
     return 200, [_image_definition_to_out(d) for d in definitions]
 
@@ -2128,7 +2047,7 @@ def create_image_definition(request: HttpRequest, payload: ImageDefinitionCreate
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
     try:
         definition = _image_definitions().create(
-            request.user, _get_org_id(request), payload.model_dump()
+            request.user, get_organization_id(request), payload.model_dump()
         )
     except _IMAGE_RECIPE_ERRORS as exc:
         return _image_recipe_error(exc)
@@ -2149,7 +2068,7 @@ def duplicate_image_definition(
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
     try:
         copied = _image_definitions().duplicate(
-            request.user, _get_org_id(request), definition_id, payload.name
+            request.user, get_organization_id(request), definition_id, payload.name
         )
     except _IMAGE_RECIPE_ERRORS as exc:
         return _image_recipe_error(exc)
@@ -2168,7 +2087,10 @@ def update_image_definition(
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
     try:
         definition = _image_definitions().update(
-            request.user, _get_org_id(request), definition_id, payload.model_dump()
+            request.user,
+            get_organization_id(request),
+            definition_id,
+            payload.model_dump(),
         )
     except _IMAGE_RECIPE_ERRORS as exc:
         return _image_recipe_error(exc)
@@ -2195,7 +2117,7 @@ async def delete_image_definition(request: HttpRequest, definition_id: uuid.UUID
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
     try:
         definition = await _image_definitions().delete(
-            request.user, _get_org_id(request), definition_id
+            request.user, get_organization_id(request), definition_id
         )
     except _IMAGE_RECIPE_ERRORS as exc:
         return _image_recipe_error(exc)
@@ -2217,7 +2139,7 @@ async def deactivate_image_definition(request: HttpRequest, definition_id: uuid.
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
     try:
         definition = await _image_definitions().deactivate(
-            request.user, _get_org_id(request), definition_id
+            request.user, get_organization_id(request), definition_id
         )
     except _IMAGE_RECIPE_ERRORS as exc:
         return _image_recipe_error(exc)
@@ -2235,7 +2157,7 @@ async def activate_image_definition(request: HttpRequest, definition_id: uuid.UU
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
     try:
         definition = await _image_definitions().activate(
-            request.user, _get_org_id(request), definition_id
+            request.user, get_organization_id(request), definition_id
         )
     except _IMAGE_RECIPE_ERRORS as exc:
         return _image_recipe_error(exc)
@@ -2252,7 +2174,7 @@ def list_image_definition_runner_builds(request: HttpRequest, definition_id: uui
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_READ)
     try:
         builds = _image_definitions().list_builds(
-            request.user, _get_org_id(request), definition_id
+            request.user, get_organization_id(request), definition_id
         )
     except _IMAGE_RECIPE_ERRORS as exc:
         return _image_recipe_error(exc)
@@ -2274,7 +2196,7 @@ async def create_image_definition_runner_build(
     try:
         build = await _image_definitions().create_build(
             request.user,
-            _get_org_id(request),
+            get_organization_id(request),
             definition_id,
             payload.runner_id,
             activate=payload.activate,
@@ -2303,7 +2225,7 @@ async def update_image_definition_runner_build(
     try:
         build = await _image_definitions().update_build(
             request.user,
-            _get_org_id(request),
+            get_organization_id(request),
             definition_id,
             runner_id,
             payload.action,
@@ -2328,7 +2250,7 @@ async def delete_image_definition_runner_build(
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS)
     try:
         await _image_definitions().delete_build(
-            request.user, _get_org_id(request), definition_id, runner_id
+            request.user, get_organization_id(request), definition_id, runner_id
         )
     except _IMAGE_RECIPE_ERRORS as exc:
         return _image_recipe_error(exc)
@@ -2349,7 +2271,7 @@ def get_image_definition_runner_build_log(
         return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_READ)
     try:
         build_log = _image_definitions().build_log(
-            request.user, _get_org_id(request), definition_id, runner_id
+            request.user, get_organization_id(request), definition_id, runner_id
         )
     except _IMAGE_RECIPE_ERRORS as exc:
         return _image_recipe_error(exc)
@@ -2367,7 +2289,9 @@ def runner_storage(request: HttpRequest, runner_id: uuid.UUID):
     if not check_api_key_permission(request, APIKeyPermission.RUNNERS_READ):
         return _perm_denied(APIKeyPermission.RUNNERS_READ)
     try:
-        return StorageService().detail(request.user, _get_org_id(request), runner_id)
+        return StorageService().detail(
+            request.user, get_organization_id(request), runner_id
+        )
     except AuthenticationError as exc:
         return 403, ErrorOut(detail=exc.message, code=exc.code)
     except NotFoundError as exc:
@@ -2386,7 +2310,7 @@ async def refresh_runner_storage(request: HttpRequest, runner_id: uuid.UUID):
         return _perm_denied(APIKeyPermission.RUNNERS_READ)
     try:
         result = await StorageService().refresh(
-            _get_service(), request.user, _get_org_id(request), runner_id
+            _get_service(), request.user, get_organization_id(request), runner_id
         )
         return 202, result
     except AuthenticationError as exc:
@@ -2408,7 +2332,7 @@ async def inspect_lifecycle_operation(request: HttpRequest, operation_id: uuid.U
         return _perm_denied(APIKeyPermission.RUNNERS_READ)
     try:
         return await DispositionService().inspect(
-            _get_service(), request.user, _get_org_id(request), operation_id
+            _get_service(), request.user, get_organization_id(request), operation_id
         )
     except AuthenticationError as exc:
         return 403, ErrorOut(detail=exc.message, code=exc.code)
@@ -2431,7 +2355,7 @@ async def dispose_lifecycle_operation(
     try:
         if action == "retry":
             permission = await sync_to_async(DispositionService.retry_permission)(
-                request.user, _get_org_id(request), operation_id
+                request.user, get_organization_id(request), operation_id
             )
             if permission is None or not check_api_key_permission(request, permission):
                 return 403, ErrorOut(
@@ -2439,7 +2363,11 @@ async def dispose_lifecycle_operation(
                     code="forbidden",
                 )
         return await DispositionService().act(
-            _get_service(), request.user, _get_org_id(request), operation_id, action
+            _get_service(),
+            request.user,
+            get_organization_id(request),
+            operation_id,
+            action,
         )
     except AuthenticationError as exc:
         return 403, ErrorOut(detail=exc.message, code=exc.code)

@@ -828,27 +828,6 @@ class GitCommitQuery(Schema):
         return result
 
 
-class GitCommitMessageIn(Schema):
-    """Body for POST /git/commit-message/ (small-model commit subject)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    repo_path: str = Field(..., max_length=512)
-
-    @field_validator("repo_path")
-    @classmethod
-    def _check_repo_path(cls, value: str) -> str:
-        result = _validate_repo_path(value)
-        assert result is not None
-        return result
-
-
-class GitCommitMessageOut(Schema):
-    """Suggested commit subject for the selected repo."""
-
-    message: str
-
-
 class GitOperationIn(Schema):
     """Typed generic git operation request for POST /git/operation/.
 

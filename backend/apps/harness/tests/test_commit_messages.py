@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from django.test import Client
 
+from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.agents.definitions import get_agent
 from apps.harness.commit_messages import (
     MAX_DIFF_CHARS,
@@ -17,6 +20,7 @@ from apps.harness.harness_service import HarnessService
 from apps.harness.providers.base import Delta, ProviderAdapter, Usage
 from apps.harness.services import ProviderConfigService
 from common.exceptions import ConflictError
+from common.utils import hash_token
 
 REPO = "/workspace/repo"
 
@@ -192,6 +196,53 @@ async def test_generate_commit_message_uses_diff_and_recent_subjects(
     assert "subject line only" in provider.systems[0]
     assert "- feat(api): add login" in provider.prompts[0]
     assert "src/auth.py" in provider.prompts[0]
+
+
+@pytest.mark.django_db
+def test_commit_message_rest_uses_the_real_harness_service(
+    harness_workspace, monkeypatch
+) -> None:
+    """Exercise auth, routing, ownership, prompt generation and output together."""
+    _configure_small_model(harness_workspace)
+    calls = _fake_git(
+        monkeypatch,
+        diff={"ok": True, "diff": {"staged": [STAGED], "unstaged": [UNSTAGED]}},
+        history={"ok": True, "commits": [{"message": "feat(api): add login"}]},
+    )
+    provider = CommitProvider('"fix(auth): return the right login code"\n')
+    service = _service(provider)
+    monkeypatch.setattr(
+        "apps.harness.commit_message_api.get_harness_service", lambda: service
+    )
+    token = "commit-message-test-key"
+    APIKey.objects.create(
+        user=harness_workspace.created_by,
+        name="commit-message",
+        key_hash=hash_token(token),
+        key_prefix=token[:12],
+        permissions=[
+            APIKeyPermission.WORKSPACES_GIT_READ.value,
+            APIKeyPermission.HARNESS_RUN.value,
+        ],
+    )
+
+    response = Client().post(
+        f"/api/v1/workspaces/{harness_workspace.id}/git/commit-message/",
+        data=json.dumps({"repo_path": REPO}),
+        content_type="application/json",
+        HTTP_X_API_KEY=token,
+        HTTP_X_ORGANIZATION_ID=str(harness_workspace.runner.organization_id),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"message": "fix(auth): return the right login code"}
+    assert calls == [
+        ("working_diff", {"repo_path": REPO}),
+        ("repo_history", {"repo_path": REPO, "history_limit": 10}),
+    ]
+    assert "- feat(api): add login" in provider.prompts[0]
+    assert "src/auth.py" in provider.prompts[0]
+    assert "README.md" not in provider.prompts[0]
 
 
 @pytest.mark.django_db(transaction=True)

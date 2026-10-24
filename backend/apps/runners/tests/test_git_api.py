@@ -862,11 +862,11 @@ def test_git_service_busy_offline_maps_to_409(
 
 def _install_commit_message_fake(monkeypatch, *, result=None, side_effect=None):
     """Patch the harness service used by POST /git/commit-message/."""
-    import apps.harness.harness_service as harness_service
+    import apps.harness.commit_message_api as commit_message_api
 
     generate = AsyncMock(return_value=result, side_effect=side_effect)
     monkeypatch.setattr(
-        harness_service,
+        commit_message_api,
         "get_harness_service",
         lambda: SimpleNamespace(generate_commit_message=generate),
     )
@@ -880,12 +880,29 @@ def _commit_message_perms() -> list[str]:
     ]
 
 
+def test_git_commit_message_openapi_contract() -> None:
+    """Moving the adapter must preserve the public operation and schema names."""
+    from config.urls import api
+
+    schema = api.get_openapi_schema()
+    operation = schema["paths"][
+        "/api/v1/workspaces/{workspace_id}/git/commit-message/"
+    ]["post"]
+    assert operation["operationId"] == "apps_runners_api_git_commit_message"
+    assert operation["tags"] == ["workspaces-git"]
+    assert operation["requestBody"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/GitCommitMessageIn"
+    }
+    assert operation["responses"][200]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/GitCommitMessageOut"
+    }
+
+
 @pytest.mark.django_db
 def test_git_commit_message_happy_returns_subject(client: Client, monkeypatch):
     """POST commit-message/ delegates to the harness with org and user scope."""
     user, org, runner, workspace = _make_context()
     token = _create_api_key(user=user, permissions=_commit_message_perms())
-    _install_fake(monkeypatch, run_return={"ok": True})
     generate = _install_commit_message_fake(monkeypatch, result="feat: add login")
 
     response = client.post(
@@ -919,7 +936,6 @@ def test_git_commit_message_requires_git_read_and_harness_run(
     """Reading the diff and prompting the small model both need a scope."""
     user, org, runner, workspace = _make_context()
     token = _create_api_key(user=user, permissions=permissions)
-    _install_fake(monkeypatch, run_return={"ok": True})
     generate = _install_commit_message_fake(monkeypatch, result="unused")
 
     response = client.post(
@@ -943,7 +959,6 @@ def test_git_commit_message_rejects_foreign_workspace_and_bad_repo(
     other_user, other_org, _, _ = _make_context(email_prefix="other")
     token = _create_api_key(user=other_user, permissions=_commit_message_perms())
     own_token = _create_api_key(user=user, permissions=_commit_message_perms())
-    _install_fake(monkeypatch, run_return={"ok": True})
     generate = _install_commit_message_fake(monkeypatch, result="unused")
 
     foreign = client.post(
@@ -973,7 +988,6 @@ def test_git_commit_message_missing_small_model_maps_to_409(
 
     user, org, runner, workspace = _make_context()
     token = _create_api_key(user=user, permissions=_commit_message_perms())
-    _install_fake(monkeypatch, run_return={"ok": True})
     _install_commit_message_fake(
         monkeypatch,
         side_effect=ConflictError("Set a small model", code="small_model_missing"),
@@ -989,3 +1003,113 @@ def test_git_commit_message_missing_small_model_maps_to_409(
     assert response.status_code == 409
     assert response.json()["detail"] == "Set a small model"
     assert response.json()["code"] == "small_model_missing"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("error", "status", "code"),
+    [
+        ("not_found", 404, "not_found"),
+        ("timeout", 504, "runner_timeout"),
+        ("offline", 409, "runner_offline"),
+        ("workspace", 409, "workspace_conflict"),
+        ("validation", 400, "validation_error"),
+        ("runtime_timeout", 504, "runner_timeout"),
+        ("runtime", 502, "runner_call_failed"),
+        ("unexpected", 502, "runner_call_failed"),
+    ],
+)
+def test_git_commit_message_preserves_service_errors(
+    client: Client, monkeypatch, error: str, status: int, code: str
+) -> None:
+    """Commit suggestions retain the git API's error status, detail and code."""
+    from apps.runners.exceptions import (
+        RunnerOfflineError,
+        RunnerTimeoutError,
+        WorkspaceStateError,
+    )
+    from common.exceptions import NotFoundError
+
+    user, org, runner, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_commit_message_perms())
+    errors = {
+        "not_found": NotFoundError("Workspace", str(workspace.id)),
+        "timeout": RunnerTimeoutError("working_diff", 75),
+        "offline": RunnerOfflineError(str(runner.id)),
+        "workspace": WorkspaceStateError("Workspace is busy"),
+        "validation": ValueError("Invalid repository"),
+        "runtime_timeout": RuntimeError("Request timed out"),
+        "runtime": RuntimeError("RPC failed"),
+        "unexpected": Exception("Unexpected failure"),
+    }
+    failure = errors[error]
+    _install_commit_message_fake(monkeypatch, side_effect=failure)
+
+    response = client.post(
+        f"/api/v1/workspaces/{workspace.id}/git/commit-message/",
+        data=json.dumps({"repo_path": "/workspace/repo"}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == status
+    assert response.json() == {"detail": str(failure), "code": code, "gaps": None}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("org_header", [None, "invalid", "non_member"])
+def test_git_commit_message_requires_organization_membership(
+    client: Client, monkeypatch, org_header: str | None
+) -> None:
+    """Missing, malformed or non-member org context never prompts the model."""
+    from common.exceptions import AuthenticationError, NotFoundError
+
+    user, org, _, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_commit_message_perms())
+    generate = _install_commit_message_fake(monkeypatch, result="unused")
+    headers = {"HTTP_X_API_KEY": token}
+    if org_header == "non_member":
+        other = Organization.objects.create(name="Other", slug="other")
+        headers["HTTP_X_ORGANIZATION_ID"] = str(other.id)
+    elif org_header is not None:
+        headers["HTTP_X_ORGANIZATION_ID"] = org_header
+
+    # The current adapter lets these errors escape before its git error mapper.
+    # Preserve that behavior here; changing it is separate from moving ownership.
+    error_type = NotFoundError if org_header == "non_member" else AuthenticationError
+    with pytest.raises(error_type):
+        client.post(
+            f"/api/v1/workspaces/{workspace.id}/git/commit-message/",
+            data=json.dumps({"repo_path": "/workspace/repo"}),
+            content_type="application/json",
+            **headers,
+        )
+
+    generate.assert_not_awaited()
+
+
+@pytest.mark.django_db
+def test_git_commit_message_rejects_another_members_workspace(
+    client: Client, monkeypatch
+) -> None:
+    """Membership in the same organization does not grant workspace ownership."""
+    user, org, _, workspace = _make_context()
+    member = get_user_model().objects.create_user(
+        email="other-member@test.local", password="secret"
+    )
+    Membership.objects.create(
+        user=member, organization=org, role=MembershipRole.MEMBER
+    )
+    token = _create_api_key(user=member, permissions=_commit_message_perms())
+    generate = _install_commit_message_fake(monkeypatch, result="unused")
+
+    response = client.post(
+        f"/api/v1/workspaces/{workspace.id}/git/commit-message/",
+        data=json.dumps({"repo_path": "/workspace/repo"}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "not_found"
+    generate.assert_not_awaited()

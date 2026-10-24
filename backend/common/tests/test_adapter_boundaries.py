@@ -121,6 +121,7 @@ def test_no_application_module_imports_a_rest_router_module():
         if _defines_ninja_router(tree)
     }
     assert "apps.harness.api" in router_modules  # discovery sanity check
+    assert "apps.harness.commit_message_api" in router_modules
 
     violations = sorted(
         f"{_module_name(path)} -> {module}"
