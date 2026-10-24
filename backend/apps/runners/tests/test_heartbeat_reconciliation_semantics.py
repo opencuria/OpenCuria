@@ -77,9 +77,9 @@ async def test_auto_stop_refreshes_busy_harness_state(runner, workspace):
     service = RunnerService()
 
     # Snapshot this row before the scheduled run starts, reproducing the
-    # heartbeat's pre-admission annotation. The fresh repository read inside
+    # heartbeat's pre-admission activity. The fresh service read inside
     # auto-stop must see the busy session and skip the stop.
-    stale_workspace = service.workspaces.list_by_runner(runner.id).get(id=workspace.id)
+    stale_workspace = service.get_workspace(workspace.id)
     assert stale_workspace.has_active_harness_session is False
     session = HarnessSessionRepository.create(
         workspace_id=workspace.id,

@@ -13,6 +13,7 @@ from django.test import Client
 from django.utils import timezone
 
 from apps.accounts.models import APIKey, APIKeyPermission
+from apps.harness.models import HarnessSession
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import WorkspaceStatus
 from apps.runners.models import Runner, RunnerSystemMetrics, Workspace
@@ -189,6 +190,34 @@ class TestRunnerMetrics:
 
 @pytest.mark.django_db
 class TestListWorkspaces:
+    @pytest.mark.parametrize("busy", [False, True])
+    def test_list_and_detail_report_busy_child(self, client, auth_context, busy):
+        """The REST activity flag includes children of idle root sessions."""
+        runner = Runner.objects.create(
+            api_token_hash=uuid.uuid4().hex,
+            organization=auth_context["organization"],
+        )
+        workspace = Workspace.objects.create(
+            runner=runner, created_by=auth_context["user"]
+        )
+        root = HarnessSession.objects.create(
+            workspace=workspace, organization_id=runner.organization_id, status="idle"
+        )
+        HarnessSession.objects.create(
+            workspace=workspace,
+            organization_id=runner.organization_id,
+            parent=root,
+            status="busy" if busy else "idle",
+        )
+
+        response = client.get("/api/v1/workspaces/")
+        assert response.status_code == 200
+        assert len(response.json()) == 1
+        assert response.json()[0]["has_active_session"] is busy
+        response = client.get(f"/api/v1/workspaces/{workspace.id}/")
+        assert response.status_code == 200
+        assert response.json()["has_active_session"] is busy
+
     def test_returns_workspaces(self, client, auth_context):
         """GET /api/v1/workspaces/ should return workspaces."""
         auth_context["organization"].workspace_auto_stop_timeout_minutes = 30

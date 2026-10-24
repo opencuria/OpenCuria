@@ -12,8 +12,9 @@ Wiring status (what ``RunnerService`` consumes):
   ``resume`` / ``create_from_image_artifact`` uniqueness check).
 - ``HarnessGateway``: the only way the runners app reaches the agent
   harness (reply/stream routing, stream failure, viewer desktop actions,
-  busy agent checks, desktop take-over). The harness app registers its
-  implementation at startup (``infra/harness_gateway.register_harness_gateway``);
+  busy agent checks, workspace activity reads, desktop take-over).
+  The harness app registers its implementation at startup
+  (``infra/harness_gateway.register_harness_gateway``);
   tests may inject a fake via ``RunnerService(harness_gateway=...)``.
   Repositories never resolve the gateway themselves: lifecycle admissions
   receive ``has_busy_session`` from the service as a predicate evaluated
@@ -144,6 +145,10 @@ class HarnessGateway(Protocol):
 
         Busy includes sessions waiting for a user answer or approval.
         """
+        ...
+
+    def busy_workspace_ids(self, workspace_ids: list[uuid.UUID]) -> set[uuid.UUID]:
+        """Return requested workspace IDs with any busy root or child session."""
         ...
 
     async def abort_busy_computeruse(self, workspace_id: uuid.UUID) -> list[uuid.UUID]:

@@ -227,8 +227,9 @@ def test_list_conversations_query_count_is_independent_of_workspaces(
         )
     client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
 
-    # Authentication/membership/workspaces: 5; root sessions/unread/attention: 6.
-    with django_assert_num_queries(11):
+    # Authentication/membership/workspaces: 5; batched gateway activity: 1;
+    # root sessions/unread/attention: 6, independent of workspace count.
+    with django_assert_num_queries(12):
         response = client.get("/api/v1/harness/conversations/")
 
     assert response.status_code == 200

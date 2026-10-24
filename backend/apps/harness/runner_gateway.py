@@ -66,6 +66,10 @@ class RunnerHarnessGateway:
         """Return True when any agent session in the workspace is busy."""
         return HarnessSessionRepository.has_busy_for_workspace(workspace_id)
 
+    def busy_workspace_ids(self, workspace_ids: list[uuid.UUID]) -> set[uuid.UUID]:
+        """Return requested workspaces with busy sessions in one batch."""
+        return HarnessSessionRepository.busy_workspace_ids(workspace_ids)
+
     async def abort_busy_computeruse(self, workspace_id: uuid.UUID) -> list[uuid.UUID]:
         """Abort busy computer-use sessions and return their session ids."""
         aborted = await get_harness_service().abort_busy_computeruse_for_workspace(

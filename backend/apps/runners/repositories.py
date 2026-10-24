@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any
 
 from django.db import connection, transaction
-from django.db.models import Count, Exists, F, OuterRef, Q, QuerySet, Value
+from django.db.models import Count, F, Q, QuerySet, Value
 from django.db.models.functions import Coalesce, Length
 from django.utils import timezone
 
@@ -215,16 +215,6 @@ class RunnerSystemMetricsRepository:
 # ---------------------------------------------------------------------------
 
 
-def _active_harness_exists():
-    """Return an Exists() annotation for busy harness sessions."""
-    from django.apps import apps as django_apps
-
-    HarnessSession = django_apps.get_model("harness", "HarnessSession")
-    return Exists(
-        HarnessSession.objects.filter(workspace=OuterRef("pk"), status="busy")
-    )
-
-
 class WorkspaceRepository:
     """Data access for Workspace records."""
 
@@ -248,7 +238,6 @@ class WorkspaceRepository:
                 "base_image_instance__origin_definition",
             )
             .prefetch_related("credentials__service")
-            .annotate(has_active_harness_session=_active_harness_exists())
             .first()
         )
 
@@ -276,7 +265,6 @@ class WorkspaceRepository:
                 "base_image_instance__origin_definition",
             )
             .prefetch_related("credentials__service")
-            .annotate(has_active_harness_session=_active_harness_exists())
         )
 
     @staticmethod
@@ -291,7 +279,6 @@ class WorkspaceRepository:
                 "base_image_instance__origin_definition",
             )
             .prefetch_related("credentials__service")
-            .annotate(has_active_harness_session=_active_harness_exists())
         )
 
     @staticmethod
@@ -437,7 +424,6 @@ class WorkspaceRepository:
                 "base_image_instance__origin_definition",
             )
             .prefetch_related("credentials__service")
-            .annotate(has_active_harness_session=_active_harness_exists())
         )
 
     @staticmethod
@@ -463,7 +449,6 @@ class WorkspaceRepository:
                 "base_image_instance__origin_definition",
             )
             .prefetch_related("credentials__service")
-            .annotate(has_active_harness_session=_active_harness_exists())
         )
 
     @staticmethod

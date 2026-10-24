@@ -18,7 +18,10 @@ from common.exceptions import ConflictError
 
 @pytest.fixture
 def interaction_service():
-    service = RunnerService(sio_server=AsyncMock())
+    service = RunnerService(
+        sio_server=AsyncMock(),
+        harness_gateway=Mock(busy_workspace_ids=Mock(return_value=set())),
+    )
     workspace = SimpleNamespace(
         id=uuid.uuid4(),
         status=WorkspaceStatus.RUNNING,

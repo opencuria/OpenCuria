@@ -197,23 +197,30 @@ class RunnerLifecycleMixin:
         if user is not None:
             qs = qs.filter(created_by=user)
 
-        return list(qs)
+        workspaces = list(qs)
+        self._populate_workspace_activity(workspaces)
+        return workspaces
 
     def get_workspace(self, workspace_id: uuid.UUID) -> "Workspace":
         """Return a workspace by ID or raise WorkspaceNotFoundError."""
-        workspace = self.workspaces.get_by_id(workspace_id)
+        workspace = self.get_workspace_or_none(workspace_id)
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
         return workspace
 
     def get_workspace_or_none(self, workspace_id: uuid.UUID) -> Workspace | None:
-        """Return a workspace by ID or None (no raise).
+        """Return a workspace with current activity, or None when missing."""
+        workspace = self.workspaces.get_by_id(workspace_id)
+        if workspace is not None:
+            self._populate_workspace_activity([workspace])
+        return workspace
 
-        Phase 4 (leak closure): public read so external callers no longer
-        reach into ``service.workspaces.get_by_id`` directly. Thin
-        delegation, no logic change. Callers SHOULD prefer this over the
-        repository attribute; ``apps/harness/access/runner_accessor.py``
-        keeps a ``service.workspaces.get_by_id`` fallback for foreign
-        service doubles (see its ``_service_workspace_lookup`` helper).
-        """
-        return self.workspaces.get_by_id(workspace_id)
+    def _populate_workspace_activity(self, workspaces: list[Workspace]) -> None:
+        """Compose workspace reads with harness activity through its port."""
+        if not workspaces:
+            return
+        busy_ids = self._harness().busy_workspace_ids(
+            [workspace.id for workspace in workspaces]
+        )
+        for workspace in workspaces:
+            workspace.has_active_harness_session = workspace.id in busy_ids

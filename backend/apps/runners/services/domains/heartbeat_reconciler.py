@@ -106,9 +106,9 @@ class HeartbeatReconcilerMixin:
         for workspace in workspaces:
             # Heartbeat reconciliation may have loaded this workspace before a
             # scheduled/manual harness run started. Refresh its busy-session
-            # annotation at the auto-stop decision boundary; manual stops keep
-            # their existing behavior in stop_workspace().
-            current_workspace = await sync_to_async(self.workspaces.get_by_id)(
+            # state through the gateway at the auto-stop decision boundary.
+            # Manual stops keep their existing behavior in stop_workspace().
+            current_workspace = await sync_to_async(self.get_workspace_or_none)(
                 workspace.id
             )
             if current_workspace is None or not self._should_auto_stop_workspace(

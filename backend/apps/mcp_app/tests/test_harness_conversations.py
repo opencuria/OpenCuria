@@ -75,8 +75,9 @@ def test_conversations_query_count_and_rest_parity(
             harness_id="codex",
         )
 
-    # Membership/workspaces: 3; root sessions/unread/attention: 6.
-    with django_assert_num_queries(9):
+    # Membership/workspaces: 3; batched gateway activity: 1;
+    # root sessions/unread/attention: 6, independent of workspace count.
+    with django_assert_num_queries(10):
         result = _call_list_harness_conversations(key, org.id, {})
     rows = json.loads(result[0].text)
     assert {row["session_id"]: row["harness_id"] for row in rows} == roots

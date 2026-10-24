@@ -14,10 +14,6 @@ from pathlib import Path
 RUNNERS_DIR = Path(__file__).resolve().parents[1]
 FORBIDDEN_APPS = {"harness", "scheduled_tasks", "mcp_app"}
 
-# Known read-model coupling still to be inverted: the workspace list/detail
-# queries annotate ``has_active_harness_session`` via the app registry.
-ALLOWED_REGISTRY_LOOKUPS = {("repositories.py", "harness")}
-
 
 def _runner_modules() -> list[Path]:
     """Return every non-test, non-migration module of the runners app."""
@@ -69,9 +65,7 @@ def test_runners_never_depends_on_its_dependents():
             for app in _imported_apps(node) & FORBIDDEN_APPS:
                 violations.append(f"{relative}:{node.lineno} imports apps.{app}")
             app = _registry_lookup_app(node)
-            if app in FORBIDDEN_APPS and (relative, app) not in (
-                ALLOWED_REGISTRY_LOOKUPS
-            ):
+            if app in FORBIDDEN_APPS:
                 violations.append(f"{relative}:{node.lineno} looks up {app} models")
     assert violations == []
 
@@ -87,10 +81,3 @@ def test_guard_detects_function_local_imports_and_registry_lookups():
     nodes = list(ast.walk(ast.parse(source)))
     assert set().union(*map(_imported_apps, nodes)) == FORBIDDEN_APPS
     assert [app for app in map(_registry_lookup_app, nodes) if app] == ["harness"]
-
-
-def test_allowed_registry_lookups_are_still_present():
-    """Drop allowlist entries once the coupling they document is removed."""
-    for relative, app in ALLOWED_REGISTRY_LOOKUPS:
-        tree = ast.parse((RUNNERS_DIR / relative).read_text())
-        assert app in {_registry_lookup_app(node) for node in ast.walk(tree)}

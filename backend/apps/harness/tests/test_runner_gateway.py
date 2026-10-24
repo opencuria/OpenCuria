@@ -13,6 +13,7 @@ from apps.harness.access import runner_accessor
 from apps.harness.repositories import HarnessSessionRepository
 from apps.harness.runner_gateway import RunnerHarnessGateway
 from apps.runners.exceptions import HarnessActionError
+from apps.runners.models import Workspace
 
 
 class _StreamAccessor:
@@ -116,6 +117,40 @@ def test_has_busy_session_sees_any_busy_session_in_the_workspace(
     HarnessSessionRepository.mark_status(session, "busy")
     assert gateway.has_busy_session(harness_workspace.id) is True
     assert gateway.has_busy_session(uuid.uuid4()) is False
+
+
+@pytest.mark.django_db
+def test_busy_workspace_batch_is_scoped_and_includes_children(
+    harness_workspace, django_assert_num_queries
+):
+    """Busy children count once, idle/foreign/missing workspaces stay absent."""
+    gateway = RunnerHarnessGateway()
+    idle = Workspace.objects.create(
+        runner=harness_workspace.runner, created_by=harness_workspace.created_by
+    )
+    root = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+    )
+    for _ in range(2):
+        child = HarnessSessionRepository.create(
+            workspace_id=harness_workspace.id,
+            organization_id=root.organization_id,
+            parent_id=root.id,
+        )
+        HarnessSessionRepository.mark_status(child, "busy")
+    HarnessSessionRepository.create(
+        workspace_id=idle.id, organization_id=root.organization_id
+    )
+
+    with django_assert_num_queries(1):
+        assert gateway.busy_workspace_ids(
+            [harness_workspace.id, idle.id, uuid.uuid4()]
+        ) == {harness_workspace.id}
+    with django_assert_num_queries(1):
+        assert gateway.busy_workspace_ids([idle.id]) == set()
+    with django_assert_num_queries(0):
+        assert gateway.busy_workspace_ids([]) == set()
 
 
 def test_abort_busy_computeruse_returns_aborted_session_ids(monkeypatch):
