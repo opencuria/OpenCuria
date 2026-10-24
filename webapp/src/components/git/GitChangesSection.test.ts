@@ -23,6 +23,7 @@ vi.mock('vue-sonner', () => ({
 
 vi.mock('@/services/git.api', () => ({
   conflictSnapshotOf: vi.fn(() => null),
+  generateGitCommitMessage: vi.fn(),
   getGitCommitDetails: vi.fn(),
   getGitHistory: vi.fn(),
   getGitRepo: vi.fn(),
@@ -37,6 +38,7 @@ const getHistory = vi.mocked(gitApi.getGitHistory)
 const getDiff = vi.mocked(gitApi.getGitWorkingDiff)
 const getDetails = vi.mocked(gitApi.getGitCommitDetails)
 const runOp = vi.mocked(gitApi.runGitOperation)
+const generateMessage = vi.mocked(gitApi.generateGitCommitMessage)
 
 function mountSection() {
   return mount(GitChangesSection, {
@@ -549,6 +551,77 @@ describe('GitChangesSection', () => {
       operation: 'discard',
       paths: [target],
     })
+  })
+
+  it('asks for confirmation before discarding all changes', async () => {
+    const changes = [
+      makeRawChange('src/a.ts'),
+      makeRawChange('notes.txt', { status: 'A', unstaged: 'untracked' }),
+      makeRawChange('src/staged.ts', { staged: true, staged_kind: 'M', unstaged: null }),
+    ]
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot({ changes })])
+    await initStore()
+    const wrapper = mountSection()
+    await nextTick()
+
+    await wrapper.find('[data-testid="git-discard-all"]').trigger('click')
+    await nextTick()
+
+    const description = document.body.querySelector('[data-testid="git-discard-all-description"]')
+    expect(description?.textContent).toContain('2 files')
+    expect(description?.textContent).toContain('1 untracked file will be deleted')
+    expect(runOp).not.toHaveBeenCalled()
+
+    runOp.mockResolvedValueOnce({
+      ok: true,
+      snapshot: makeRepoSnapshot({ changes: [changes[2]!] }),
+      repo_path: '/workspace/repo-app',
+    } as never)
+    ;(document.body.querySelector('[data-testid="git-discard-confirm"]') as HTMLElement).click()
+    await flushPromises()
+
+    expect(runOp).toHaveBeenCalledTimes(1)
+    expect(runOp.mock.calls[0]?.[1]).toMatchObject({
+      operation: 'discard',
+      paths: ['src/a.ts', 'notes.txt'],
+    })
+    expect(wrapper.find('[data-testid="git-discard-all"]').exists()).toBe(false)
+  })
+
+  it('fills the message box with a generated commit message', async () => {
+    await initStore()
+    const wrapper = mountSection()
+    await nextTick()
+    generateMessage.mockResolvedValueOnce({ message: 'feat(git): add discard all' })
+
+    await wrapper.find('[data-testid="git-generate-message"]').trigger('click')
+    await flushPromises()
+
+    expect(generateMessage).toHaveBeenCalledWith('workspace-1', '/workspace/repo-app')
+    const box = wrapper.find('[data-testid="git-commit-message"]').element as HTMLTextAreaElement
+    expect(box.value).toBe('feat(git): add discard all')
+    expect(wrapper.get('[data-testid="git-commit"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('keeps the message box when generation fails and disables it without changes', async () => {
+    await initStore()
+    const wrapper = mountSection()
+    await nextTick()
+    await wrapper.find('[data-testid="git-commit-message"]').setValue('my draft')
+    generateMessage.mockRejectedValueOnce(new Error('Set a small model'))
+
+    await wrapper.find('[data-testid="git-generate-message"]').trigger('click')
+    await flushPromises()
+
+    const box = wrapper.find('[data-testid="git-commit-message"]').element as HTMLTextAreaElement
+    expect(box.value).toBe('my draft')
+
+    setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot({ changes: [] })])
+    await initStore()
+    await nextTick()
+    expect(
+      wrapper.get('[data-testid="git-generate-message"]').attributes('disabled'),
+    ).toBeDefined()
   })
 
   it('opens the diff view when a change is clicked (lazy getDiff)', async () => {

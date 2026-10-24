@@ -858,3 +858,134 @@ def test_git_service_busy_offline_maps_to_409(
 
     assert response.status_code == 409
     assert response.json()["code"] == expected_code
+
+
+def _install_commit_message_fake(monkeypatch, *, result=None, side_effect=None):
+    """Patch the harness service used by POST /git/commit-message/."""
+    import apps.harness.harness_service as harness_service
+
+    generate = AsyncMock(return_value=result, side_effect=side_effect)
+    monkeypatch.setattr(
+        harness_service,
+        "get_harness_service",
+        lambda: SimpleNamespace(generate_commit_message=generate),
+    )
+    return generate
+
+
+def _commit_message_perms() -> list[str]:
+    return [
+        APIKeyPermission.WORKSPACES_GIT_READ.value,
+        APIKeyPermission.HARNESS_RUN.value,
+    ]
+
+
+@pytest.mark.django_db
+def test_git_commit_message_happy_returns_subject(client: Client, monkeypatch):
+    """POST commit-message/ delegates to the harness with org and user scope."""
+    user, org, runner, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_commit_message_perms())
+    _install_fake(monkeypatch, run_return={"ok": True})
+    generate = _install_commit_message_fake(monkeypatch, result="feat: add login")
+
+    response = client.post(
+        f"/api/v1/workspaces/{workspace.id}/git/commit-message/",
+        data=json.dumps({"repo_path": "/workspace/repo"}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"message": "feat: add login"}
+    generate.assert_awaited_once_with(
+        workspace_id=workspace.id,
+        repo_path="/workspace/repo",
+        organization_id=org.id,
+        user_id=user.id,
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("permissions", "missing"),
+    [
+        ([APIKeyPermission.WORKSPACES_GIT_READ.value], "harness:run"),
+        ([APIKeyPermission.HARNESS_RUN.value], "workspaces:git_read"),
+    ],
+)
+def test_git_commit_message_requires_git_read_and_harness_run(
+    client: Client, monkeypatch, permissions, missing
+):
+    """Reading the diff and prompting the small model both need a scope."""
+    user, org, runner, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=permissions)
+    _install_fake(monkeypatch, run_return={"ok": True})
+    generate = _install_commit_message_fake(monkeypatch, result="unused")
+
+    response = client.post(
+        f"/api/v1/workspaces/{workspace.id}/git/commit-message/",
+        data=json.dumps({"repo_path": "/workspace/repo"}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 403
+    assert missing in response.json()["detail"]
+    generate.assert_not_awaited()
+
+
+@pytest.mark.django_db
+def test_git_commit_message_rejects_foreign_workspace_and_bad_repo(
+    client: Client, monkeypatch
+):
+    """Foreign workspaces 404 and repo paths outside /workspace never dispatch."""
+    user, org, runner, workspace = _make_context()
+    other_user, other_org, _, _ = _make_context(email_prefix="other")
+    token = _create_api_key(user=other_user, permissions=_commit_message_perms())
+    own_token = _create_api_key(user=user, permissions=_commit_message_perms())
+    _install_fake(monkeypatch, run_return={"ok": True})
+    generate = _install_commit_message_fake(monkeypatch, result="unused")
+
+    foreign = client.post(
+        f"/api/v1/workspaces/{workspace.id}/git/commit-message/",
+        data=json.dumps({"repo_path": "/workspace/repo"}),
+        content_type="application/json",
+        **_auth_headers(token, str(other_org.id)),
+    )
+    bad_repo = client.post(
+        f"/api/v1/workspaces/{workspace.id}/git/commit-message/",
+        data=json.dumps({"repo_path": "/etc"}),
+        content_type="application/json",
+        **_auth_headers(own_token, str(org.id)),
+    )
+
+    assert foreign.status_code == 404
+    assert bad_repo.status_code == 422
+    generate.assert_not_awaited()
+
+
+@pytest.mark.django_db
+def test_git_commit_message_missing_small_model_maps_to_409(
+    client: Client, monkeypatch
+):
+    """Service conflicts keep their stable code for the webapp toast."""
+    from common.exceptions import ConflictError
+
+    user, org, runner, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_commit_message_perms())
+    _install_fake(monkeypatch, run_return={"ok": True})
+    _install_commit_message_fake(
+        monkeypatch,
+        side_effect=ConflictError("Set a small model", code="small_model_missing"),
+    )
+
+    response = client.post(
+        f"/api/v1/workspaces/{workspace.id}/git/commit-message/",
+        data=json.dumps({"repo_path": "/workspace/repo"}),
+        content_type="application/json",
+        **_auth_headers(token, str(org.id)),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Set a small model"
+    assert response.json()["code"] == "small_model_missing"

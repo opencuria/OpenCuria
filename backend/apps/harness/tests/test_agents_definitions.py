@@ -23,6 +23,7 @@ def test_all_agents_defined() -> None:
         "computeruse",
         "title",
         "summary",
+        "commit_message",
         "compaction",
     }
     assert get_agent("build").mode == "primary"

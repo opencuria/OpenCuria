@@ -54,6 +54,8 @@ from .schemas import (
     DesktopStopOut,
     DesktopTakeControlOut,
     DesktopViewerIntentIn,
+    GitCommitMessageIn,
+    GitCommitMessageOut,
     GitCommitQuery,
     GitDiffQuery,
     GitHistoryQuery,
@@ -1685,6 +1687,53 @@ async def git_operation(
             user=request.user,
         )
         return _git_result_to_response(result)
+    except Exception as exc:
+        return _git_error_to_response(exc)
+
+
+@git_router.post(
+    "/{workspace_id}/git/commit-message/",
+    response={
+        200: GitCommitMessageOut,
+        400: ErrorOut,
+        403: ErrorOut,
+        404: ErrorOut,
+        409: ErrorOut,
+        502: ErrorOut,
+        504: ErrorOut,
+    },
+    summary="Suggest a commit subject with the small model",
+)
+async def git_commit_message(
+    request: HttpRequest,
+    workspace_id: uuid.UUID,
+    payload: GitCommitMessageIn,
+):
+    """Suggest a commit subject for the staged (else all) changes of one repo.
+
+    Requires ``workspaces:git_read`` (reads the diff) and ``harness:run``
+    (prompts the organization's small model).
+    """
+    for permission in (
+        APIKeyPermission.WORKSPACES_GIT_READ,
+        APIKeyPermission.HARNESS_RUN,
+    ):
+        if not check_api_key_permission(request, permission):
+            return _perm_denied(permission)
+    org_id = _get_org_id(request)
+    await _require_org_membership_async(request, org_id)
+
+    from apps.harness.harness_service import get_harness_service
+
+    try:
+        await _get_owned_workspace_async(request, org_id, workspace_id)
+        message = await get_harness_service().generate_commit_message(
+            workspace_id=workspace_id,
+            repo_path=payload.repo_path,
+            organization_id=org_id,
+            user_id=request.user.id,
+        )
+        return 200, GitCommitMessageOut(message=message)
     except Exception as exc:
         return _git_error_to_response(exc)
 

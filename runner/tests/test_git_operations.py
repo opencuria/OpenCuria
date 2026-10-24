@@ -2940,6 +2940,40 @@ class GitMutationTests(unittest.IsolatedAsyncioTestCase):
             ).stdout
             self.assertIn("add commit-me", log)
 
+    async def test_discard_many_paths_in_one_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(os.path.join(tmp, "repo"))
+            Path(repo, "README.md").write_text("# dirty\n")
+            Path(repo, "nested").mkdir()
+            for name in ("a.txt", "b.txt", "nested/c.txt"):
+                Path(repo, name).write_text("x\n")
+            Path(repo, "keep.txt").write_text("keep\n")
+            service, runtime, ws_id = _service_for(tmp)
+
+            discarded = await service.git.execute_git_operation(
+                ws_id,
+                "discard",
+                _ws_repo(tmp, "repo"),
+                {"paths": ["README.md", "a.txt", "b.txt", "nested/c.txt"]},
+            )
+
+            self.assertTrue(discarded["ok"])
+            self.assertEqual(Path(repo, "README.md").read_text(), "# test\n")
+            for name in ("a.txt", "b.txt", "nested/c.txt"):
+                self.assertFalse(Path(repo, name).exists())
+            self.assertTrue(Path(repo, "keep.txt").exists())
+            remaining = [c["path"] for c in discarded["snapshot"]["changes"]]
+            self.assertEqual(remaining, ["keep.txt"])
+            cleans = [
+                inner
+                for argv, _workdir, _env in runtime.calls
+                if (inner := git_ops.unwrap_git_exec_argv(argv)) is not None
+                and inner[:2] == ["git", "clean"]
+            ]
+            self.assertEqual(
+                cleans, [["git", "clean", "-f", "--", "a.txt", "b.txt", "nested/c.txt"]]
+            )
+
     async def test_commit_respects_existing_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(os.path.join(tmp, "repo"))

@@ -24,6 +24,7 @@ from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.exceptions import RunnerTimeoutError
 from apps.runners.models import Runner, Workspace
 from apps.runners.services import RunnerService
+from common.exceptions import ConflictError
 from common.utils import hash_token
 
 
@@ -86,11 +87,12 @@ async def _call(api_key, name: str, arguments: dict) -> list:
 
 
 def test_git_tool_contract() -> None:
-    """Keep four async tools, strict schemas and the shared mutation catalog."""
+    """Keep five async tools, strict schemas and the shared mutation catalog."""
     expected = {
         "get_git_state": APIKeyPermission.WORKSPACES_GIT_READ,
         "get_git_diff": APIKeyPermission.WORKSPACES_GIT_READ,
         "get_git_commit": APIKeyPermission.WORKSPACES_GIT_READ,
+        "generate_git_commit_message": APIKeyPermission.WORKSPACES_GIT_READ,
         "git_operation": APIKeyPermission.WORKSPACES_GIT_WRITE,
     }
     assert {tool.name for tool in _TOOLS if "git" in tool.name} == set(expected)
@@ -110,7 +112,12 @@ def test_git_tool_contract() -> None:
     [
         (
             APIKeyPermission.WORKSPACES_GIT_READ,
-            {"get_git_state", "get_git_diff", "get_git_commit"},
+            {
+                "get_git_state",
+                "get_git_diff",
+                "get_git_commit",
+                "generate_git_commit_message",
+            },
             "git_operation",
             {"operation": "stage", "repo_path": "/workspace/repo", "paths": ["a"]},
         ),
@@ -260,3 +267,63 @@ async def test_git_runner_failures(git_setup) -> None:
     result = await _call(setup.key, "get_git_state", args)
     assert result[0].text.startswith("Error:")
     assert "did not respond" in result[0].text
+
+
+@pytest.fixture
+def commit_message_fake(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Replace the shared HarnessService commit-message generator."""
+    generate = AsyncMock(return_value="feat: add login")
+    monkeypatch.setattr(
+        "apps.mcp_app.server._get_harness_service",
+        lambda: SimpleNamespace(generate_commit_message=generate),
+    )
+    return generate
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_generate_git_commit_message(git_setup, commit_message_fake) -> None:
+    """The MCP tool mirrors REST: owned workspace, org and API-key user scope."""
+    setup = git_setup
+    key = _key(
+        setup.owner, APIKeyPermission.WORKSPACES_GIT_READ, APIKeyPermission.HARNESS_RUN
+    )
+    result = await _call(
+        key,
+        "generate_git_commit_message",
+        {"workspace_id": str(setup.workspace.id), "repo_path": "/workspace/repo"},
+    )
+
+    assert json.loads(result[0].text) == {"message": "feat: add login"}
+    commit_message_fake.assert_awaited_once_with(
+        workspace_id=setup.workspace.id,
+        repo_path="/workspace/repo",
+        organization_id=setup.org.id,
+        user_id=setup.owner.id,
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_generate_git_commit_message_guards(
+    git_setup, commit_message_fake
+) -> None:
+    """harness:run, strict args and workspace ownership are enforced."""
+    setup = git_setup
+    args = {"workspace_id": str(setup.workspace.id), "repo_path": "/workspace/repo"}
+    full = (APIKeyPermission.WORKSPACES_GIT_READ, APIKeyPermission.HARNESS_RUN)
+    handler = _TOOL_HANDLERS["generate_git_commit_message"]
+    cases = [
+        (_key(setup.owner, APIKeyPermission.WORKSPACES_GIT_READ), args, "harness:run"),
+        (_key(setup.owner, *full), {**args, "paths": ["a"]}, "Unknown argument"),
+        (_key(setup.owner, *full), {"workspace_id": args["workspace_id"]}, "repo_path"),
+        (_key(setup.stranger, *full), args, "Workspace not found"),
+    ]
+    for key, arguments, error in cases:
+        result = await handler(key, setup.org.id, arguments)
+        assert error in result[0].text, (arguments, result)
+    commit_message_fake.assert_not_awaited()
+
+    commit_message_fake.side_effect = ConflictError(
+        "Set a small model", code="small_model_missing"
+    )
+    result = await handler(_key(setup.owner, *full), setup.org.id, args)
+    assert result[0].text == "Error: Set a small model"

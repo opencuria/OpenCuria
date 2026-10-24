@@ -94,6 +94,7 @@ Tools and their required permissions
 - get_git_state          → workspaces:git_read
 - get_git_diff           → workspaces:git_read
 - get_git_commit         → workspaces:git_read
+- generate_git_commit_message → workspaces:git_read + harness:run
 - git_operation          → workspaces:git_write (mutations only)
 """
 
@@ -1501,6 +1502,25 @@ _TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="generate_git_commit_message",
+        description=(
+            "Suggest a commit subject for one repo's staged changes (all "
+            "changes when nothing is staged) using the org's small model."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "workspace_id": {"type": "string", "description": "Workspace UUID."},
+                "repo_path": {
+                    "type": "string",
+                    "description": "Absolute repo path under /workspace.",
+                },
+            },
+            "required": ["workspace_id", "repo_path"],
+            "additionalProperties": False,
+        },
+    ),
+    Tool(
         name="git_operation",
         description=(
             "Run one whitelisted git operation (stage/unstage/discard/commit, "
@@ -1694,6 +1714,7 @@ _TOOL_PERMISSIONS: dict[str, APIKeyPermission] = {
     "get_git_state": APIKeyPermission.WORKSPACES_GIT_READ,
     "get_git_diff": APIKeyPermission.WORKSPACES_GIT_READ,
     "get_git_commit": APIKeyPermission.WORKSPACES_GIT_READ,
+    "generate_git_commit_message": APIKeyPermission.WORKSPACES_GIT_READ,
     "git_operation": APIKeyPermission.WORKSPACES_GIT_WRITE,
 }
 
@@ -4406,6 +4427,20 @@ def _call_mark_harness_session_unread(api_key, org_id, args: dict) -> list[TextC
 # ---------------------------------------------------------------------------
 
 
+async def _owned_git_workspace(api_key, org_id, args: dict):
+    """Resolve ``workspace_id`` to an owned workspace as ``(workspace, error)``."""
+    raw_workspace_id = args.get("workspace_id")
+    if not raw_workspace_id:
+        return None, _error("workspace_id is required")
+    try:
+        workspace_id = uuid.UUID(str(raw_workspace_id))
+    except ValueError:
+        return None, _error("Invalid workspace_id UUID")
+    return await sync_to_async(_get_owned_workspace_or_error)(
+        api_key, org_id, workspace_id
+    )
+
+
 async def _run_git_operation_mcp(
     api_key, org_id, args: dict, operation: str
 ) -> list[TextContent]:
@@ -4415,16 +4450,7 @@ async def _run_git_operation_mcp(
     unknown or caller-controlled keys, reach the service's strict whitelist.
     Commit identity is derived there from the API key user, never MCP input.
     """
-    raw_workspace_id = args.get("workspace_id")
-    if not raw_workspace_id:
-        return _error("workspace_id is required")
-    try:
-        workspace_id = uuid.UUID(str(raw_workspace_id))
-    except ValueError:
-        return _error("Invalid workspace_id UUID")
-    workspace, owned_error = await sync_to_async(_get_owned_workspace_or_error)(
-        api_key, org_id, workspace_id
-    )
+    workspace, owned_error = await _owned_git_workspace(api_key, org_id, args)
     if owned_error is not None:
         return owned_error
 
@@ -4458,6 +4484,35 @@ async def _call_get_git_diff(api_key, org_id, args: dict) -> list[TextContent]:
 async def _call_get_git_commit(api_key, org_id, args: dict) -> list[TextContent]:
     """Return full details for one commit."""
     return await _run_git_operation_mcp(api_key, org_id, args, "commit_details")
+
+
+async def _call_generate_git_commit_message(
+    api_key, org_id, args: dict
+) -> list[TextContent]:
+    """Suggest a commit subject for one repo with the org's small model."""
+    if not api_key.has_permission(APIKeyPermission.HARNESS_RUN):
+        return _error(
+            f"Permission denied: {APIKeyPermission.HARNESS_RUN.value} required"
+        )
+    unknown = sorted(set(args) - {"workspace_id", "repo_path"})
+    if unknown:
+        return _error(f"Unknown argument {unknown[0]!r}")
+    repo_path = str(args.get("repo_path") or "").strip()
+    if not repo_path:
+        return _error("repo_path is required")
+    workspace, owned_error = await _owned_git_workspace(api_key, org_id, args)
+    if owned_error is not None:
+        return owned_error
+    try:
+        message = await _get_harness_service().generate_commit_message(
+            workspace_id=workspace.id,
+            repo_path=repo_path,
+            organization_id=org_id,
+            user_id=api_key.user.id,
+        )
+    except Exception as exc:
+        return _error(str(exc))
+    return _text({"message": message})
 
 
 async def _call_git_operation(api_key, org_id, args: dict) -> list[TextContent]:
@@ -5019,6 +5074,7 @@ _TOOL_HANDLERS = {
     "get_git_state": _call_get_git_state,
     "get_git_diff": _call_get_git_diff,
     "get_git_commit": _call_get_git_commit,
+    "generate_git_commit_message": _call_generate_git_commit_message,
     "git_operation": _call_git_operation,
 }
 

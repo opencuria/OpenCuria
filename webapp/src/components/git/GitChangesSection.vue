@@ -2,12 +2,14 @@
 /**
  * GitChangesSection — VSCode-style source control section of the Git tab.
  *
- * Commit message box with Commit / Commit & Push split button and a Push
- * button plus a compact remote-actions dropdown (Pull / Sync), above
- * collapsible "Staged Changes" and "Changes" groups. A merge banner shows
- * while a merge is in progress (with an abort confirmation dialog). File
- * rows offer hover actions (stage/unstage, discard) and open the working
- * diff in the main area when clicked (staged vs unstaged side aware).
+ * Commit message box (with a small-model "generate message" action) and a
+ * Commit / Commit & Push split button plus a Push button and a compact
+ * remote-actions dropdown (Pull / Sync), above collapsible "Staged
+ * Changes" and "Changes" groups. A merge banner shows while a merge is in
+ * progress (with an abort confirmation dialog). Group headers offer bulk
+ * actions (unstage all; discard all, stage all) and file rows hover
+ * actions (stage/unstage, discard) — discards always ask first. Clicking a
+ * row opens the working diff in the main area (staged vs unstaged aware).
  */
 import { computed, ref } from 'vue'
 import type { GitFileStatus } from '@/types/git'
@@ -46,9 +48,11 @@ import {
   ArrowDown,
   Check,
   ChevronDown,
+  Loader2,
   Minus,
   Plus,
   RefreshCw,
+  Sparkles,
   Undo2,
   Upload,
 } from '@lucide/vue'
@@ -149,6 +153,19 @@ async function doCommit(andPush: boolean): Promise<void> {
   if (ok) message.value = ''
 }
 
+/** Draft from staged changes, or from all changes when nothing is staged. */
+const canGenerate = computed(
+  () =>
+    !store.generatingCommitMessage &&
+    (store.stagedChanges.length > 0 || store.unstagedChanges.length > 0),
+)
+
+async function generateMessage(): Promise<void> {
+  if (!canGenerate.value) return
+  const generated = await store.generateCommitMessage()
+  if (generated) message.value = generated
+}
+
 function onMessageKeydown(event: KeyboardEvent): void {
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
     event.preventDefault()
@@ -211,13 +228,35 @@ async function confirmAbort(): Promise<void> {
   }
 }
 
-// --- Discard confirmation ---
+// --- Discard confirmation (one file or all changes) ---
 
-const discardTarget = ref<string | null>(null)
+/** Paths awaiting confirmation; pinned so later polls can't widen the set. */
+const discardTargets = ref<string[] | null>(null)
+const discardingAll = ref(false)
+
+const untrackedDiscardCount = computed(() => {
+  const targets = new Set(discardTargets.value ?? [])
+  return store.unstagedChanges.filter(
+    (c) => targets.has(c.path) && c.unstaged === 'untracked',
+  ).length
+})
+
+function askDiscard(path: string): void {
+  discardingAll.value = false
+  discardTargets.value = [path]
+}
+
+function askDiscardAll(): void {
+  if (store.bulkUnstagedPaths.length === 0) return
+  discardingAll.value = true
+  discardTargets.value = [...store.bulkUnstagedPaths]
+}
 
 function confirmDiscard(): void {
-  if (discardTarget.value) void store.discard(discardTarget.value)
-  discardTarget.value = null
+  const targets = discardTargets.value ?? []
+  if (discardingAll.value) void store.discardAll(targets)
+  else if (targets[0]) void store.discard(targets[0])
+  discardTargets.value = null
 }
 
 // --- File row helpers ---
@@ -261,14 +300,28 @@ const changesOpen = ref(true)
   <div class="flex h-full flex-col" data-testid="git-changes-section">
     <!-- Commit box -->
     <div class="shrink-0 space-y-1.5 border-b border-border p-2">
-      <Textarea
-        v-model="message"
-        :placeholder="placeholder"
-        rows="2"
-        class="max-h-24 min-h-14 resize-none text-xs"
-        data-testid="git-commit-message"
-        @keydown="onMessageKeydown"
-      />
+      <div class="relative">
+        <Textarea
+          v-model="message"
+          :placeholder="placeholder"
+          rows="2"
+          class="max-h-24 min-h-14 resize-none pr-7 text-xs"
+          data-testid="git-commit-message"
+          @keydown="onMessageKeydown"
+        />
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="absolute right-1 top-1 h-5 w-5 text-muted-foreground"
+          :disabled="!canGenerate"
+          :title="store.generatingCommitMessage ? 'Generating commit message…' : 'Generate Commit Message'"
+          data-testid="git-generate-message"
+          @click="void generateMessage()"
+        >
+          <Loader2 v-if="store.generatingCommitMessage" :size="12" class="animate-spin" />
+          <Sparkles v-else :size="12" />
+        </Button>
+      </div>
       <div class="flex items-center gap-1">
         <div class="flex min-w-0 flex-1">
           <Button
@@ -530,6 +583,17 @@ const changesOpen = ref(true)
               </span>
             </CollapsibleTrigger>
             <Button
+              v-if="store.bulkUnstagedPaths.length > 0"
+              variant="ghost"
+              size="icon-sm"
+              class="h-5 w-5 opacity-0 transition-opacity group-hover/header:opacity-100"
+              title="Discard All Changes"
+              data-testid="git-discard-all"
+              @click="askDiscardAll"
+            >
+              <Undo2 :size="12" />
+            </Button>
+            <Button
               v-if="store.unstagedChanges.length > 0"
               variant="ghost"
               size="icon-sm"
@@ -565,7 +629,7 @@ const changesOpen = ref(true)
                 class="h-5 w-5 shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
                 title="Discard Changes"
                 data-testid="git-discard-file"
-                @click.stop="discardTarget = change.path"
+                @click.stop="askDiscard(change.path)"
               >
                 <Undo2 :size="12" />
               </Button>
@@ -631,26 +695,38 @@ const changesOpen = ref(true)
 
     <!-- Discard confirmation -->
     <Dialog
-      :open="discardTarget !== null"
-      @update:open="(v) => !v && (discardTarget = null)"
+      :open="discardTargets !== null"
+      @update:open="(v) => !v && (discardTargets = null)"
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Discard changes</DialogTitle>
-          <DialogDescription>
+          <DialogTitle>{{ discardingAll ? 'Discard all changes' : 'Discard changes' }}</DialogTitle>
+          <DialogDescription v-if="discardingAll" data-testid="git-discard-all-description">
             Are you sure you want to discard changes in
-            <span class="font-medium text-foreground">{{ discardTarget }}</span
+            <span class="font-medium text-foreground">{{
+              discardTargets?.length === 1 ? '1 file' : `${discardTargets?.length ?? 0} files`
+            }}</span
+            >?
+            <template v-if="untrackedDiscardCount > 0">
+              {{ untrackedDiscardCount === 1 ? '1 untracked file' : `${untrackedDiscardCount} untracked files` }}
+              will be deleted.
+            </template>
+            This cannot be undone.
+          </DialogDescription>
+          <DialogDescription v-else>
+            Are you sure you want to discard changes in
+            <span class="font-medium text-foreground">{{ discardTargets?.[0] }}</span
             >? This cannot be undone.
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" @click="discardTarget = null">Cancel</Button>
+          <Button variant="outline" @click="discardTargets = null">Cancel</Button>
           <Button
             variant="destructive"
             data-testid="git-discard-confirm"
             @click="confirmDiscard"
           >
-            Discard
+            {{ discardingAll ? 'Discard All' : 'Discard' }}
           </Button>
         </DialogFooter>
       </DialogContent>

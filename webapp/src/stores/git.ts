@@ -5,8 +5,9 @@
  * light repo summaries (`GET /git/repos/`), lazy per-repo snapshots
  * (`GET /git/repo/`), paged history (`GET /git/history/`), lazy
  * working-tree diffs (`GET /git/diff/`), lazy commit details
- * (`GET /git/commits/{hash}/`) and typed mutations
- * (`POST /git/operation/`). There is no mock fallback.
+ * (`GET /git/commits/{hash}/`), typed mutations
+ * (`POST /git/operation/`) and small-model commit subjects
+ * (`POST /git/commit-message/`). There is no mock fallback.
  *
  * Key behaviours:
  * - `initialize(workspaceId)` binds the store to a workspace and loads
@@ -52,6 +53,7 @@ import { ApiRequestError } from '@/services/api'
 import { groupRefTags, type GitRefGroup } from '@/lib/gitRefGroups'
 import {
   conflictSnapshotOf,
+  generateGitCommitMessage,
   getGitCommitDetails,
   getGitHistory,
   getGitRepo,
@@ -84,6 +86,8 @@ export const GIT_POLL_INTERVAL_MS = 4000
 export const GIT_DETAILS_POLL_MS = 15000
 /** Page size for per-repo history requests. */
 export const GIT_HISTORY_LIMIT = 50
+/** Backend cap for `paths` in one typed operation (bulk actions batch). */
+export const GIT_MAX_PATHS_PER_OPERATION = 256
 
 /** Suggested remote action for the changes-section primary button. */
 export type SuggestedRemoteAction = 'publish' | 'push' | 'pull' | 'sync' | 'none'
@@ -361,6 +365,8 @@ export const useGitStore = defineStore('git', () => {
   const error = ref<string | null>(null)
   /** Label of the currently running mutation, if any. */
   const busyOperation = ref<string | null>(null)
+  /** True while the small model drafts a commit message. */
+  const generatingCommitMessage = ref(false)
   /** True while a paginated history page is loading. */
   const historyLoading = ref(false)
   /**
@@ -545,6 +551,11 @@ export const useGitStore = defineStore('git', () => {
    */
   const unstagedChanges = computed(
     () => currentRepo.value?.changes.filter((c) => c.unstaged !== null) ?? [],
+  )
+
+  /** Unstaged paths that stage/discard all may touch (conflicts excluded). */
+  const bulkUnstagedPaths = computed(() =>
+    unstagedChanges.value.filter((c) => c.conflict === null).map((c) => c.path),
   )
 
   /** Branch / remote-ref tags keyed by the commit hash they point at. */
@@ -951,6 +962,7 @@ export const useGitStore = defineStore('git', () => {
     useGitWorkingDiffSeq.invalidate()
     historyLoading.value = false
     busyOperation.value = null
+    generatingCommitMessage.value = false
     error.value = null
     await refresh({ withDetails: options?.withDetails })
   }
@@ -1076,6 +1088,7 @@ export const useGitStore = defineStore('git', () => {
     loading.value = false
     error.value = null
     busyOperation.value = null
+    generatingCommitMessage.value = false
     historyLoading.value = false
     clearLastConflict()
     // Drop the bookkeeping for any in-flight snapshot; its gen-guarded
@@ -1388,21 +1401,51 @@ export const useGitStore = defineStore('git', () => {
     })
   }
 
+  /**
+   * Run one path mutation for many files, batched to the backend's
+   * per-request cap. Stops at the first failed batch; only the last batch
+   * reports success.
+   */
+  async function runPathsOperation(
+    operation: 'stage' | 'unstage' | 'discard',
+    paths: string[],
+    callbacks: OperationCallbacks,
+  ): Promise<boolean> {
+    for (let start = 0; start < paths.length; start += GIT_MAX_PATHS_PER_OPERATION) {
+      const batch = paths.slice(start, start + GIT_MAX_PATHS_PER_OPERATION)
+      const last = start + GIT_MAX_PATHS_PER_OPERATION >= paths.length
+      const ok = await runOperation(
+        operation,
+        () => ({ operation, paths: batch }),
+        last ? callbacks : { errorTitle: callbacks.errorTitle },
+      )
+      if (!ok) return false
+    }
+    return true
+  }
+
   function stageAll(): Promise<boolean> {
-    const paths = unstagedChanges.value
-      .filter((c) => c.conflict === null)
-      .map((c) => c.path)
-    if (paths.length === 0) return Promise.resolve(true)
-    return runOperation('stage', () => ({ operation: 'stage', paths }), {
+    return runPathsOperation('stage', bulkUnstagedPaths.value, {
       errorTitle: 'Stage all failed',
     })
   }
 
   function unstageAll(): Promise<boolean> {
-    const paths = stagedChanges.value.map((c) => c.path)
-    if (paths.length === 0) return Promise.resolve(true)
-    return runOperation('unstage', () => ({ operation: 'unstage', paths }), {
+    return runPathsOperation('unstage', stagedChanges.value.map((c) => c.path), {
       errorTitle: 'Unstage all failed',
+    })
+  }
+
+  /**
+   * Discard unstaged changes of many files (untracked files are deleted).
+   * `paths` pins the set the user confirmed; defaults to every
+   * non-conflicted unstaged change.
+   */
+  function discardAll(paths: string[] = bulkUnstagedPaths.value): Promise<boolean> {
+    return runPathsOperation('discard', paths, {
+      successTitle: 'Discarded changes',
+      successMessage: paths.length === 1 ? paths[0] : `${paths.length} files`,
+      errorTitle: 'Discard all failed',
     })
   }
 
@@ -1419,6 +1462,33 @@ export const useGitStore = defineStore('git', () => {
   }
 
   // -- actions: commit & push --------------------------------------------------
+
+  /**
+   * Draft a commit subject with the org's small model from the staged
+   * changes (all changes when nothing is staged). Returns null on failure
+   * or when the workspace/repo changed meanwhile.
+   */
+  async function generateCommitMessage(): Promise<string | null> {
+    const wsId = workspaceId.value
+    const repo = currentRepo.value
+    if (!wsId || !repo || generatingCommitMessage.value) return null
+    if (!isCurrentWorkspaceRequest(wsId, loadGen)) return null
+    const gen = loadGen
+    generatingCommitMessage.value = true
+    try {
+      const res = await generateGitCommitMessage(wsId, repo.path)
+      if (!isCurrentWorkspaceRequest(wsId, gen) || currentRepo.value?.path !== repo.path) {
+        return null
+      }
+      return res.message?.trim() || null
+    } catch (e: unknown) {
+      if (!isCurrentWorkspaceRequest(wsId, gen)) return null
+      notifications.error('Failed to generate commit message', errorMessage(e))
+      return null
+    } finally {
+      if (gen === loadGen) generatingCommitMessage.value = false
+    }
+  }
 
   /**
    * Commit staged changes. When `andPush` is set, the push only runs after
@@ -1851,6 +1921,7 @@ export const useGitStore = defineStore('git', () => {
     loading,
     error,
     busyOperation,
+    generatingCommitMessage,
     historyLoading,
     lastConflict,
     clearLastConflict,
@@ -1873,6 +1944,7 @@ export const useGitStore = defineStore('git', () => {
     suggestedRemoteAction,
     stagedChanges,
     unstagedChanges,
+    bulkUnstagedPaths,
     stashes,
     tagsByHash,
     refGroupsByHash,
@@ -1908,6 +1980,8 @@ export const useGitStore = defineStore('git', () => {
     stageAll,
     unstageAll,
     discard,
+    discardAll,
+    generateCommitMessage,
     commit,
     push,
     fetchRemote,

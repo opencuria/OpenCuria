@@ -10,6 +10,7 @@
  * - GET `/workspaces/{id}/git/diff/?repo_path=..`
  * - GET `/workspaces/{id}/git/commits/{hash}/?repo_path=..`
  * - POST `/workspaces/{id}/git/operation/` (typed fields only)
+ * - POST `/workspaces/{id}/git/commit-message/` (small-model commit subject)
  *
  * All calls go through `services/api` (`get`/`post`) so JWT refresh,
  * org headers and `ApiRequestError` handling (incl. raw `data` payload
@@ -366,6 +367,21 @@ export function runGitOperation(
   return post<RawGitOperationSuccess>(
     `/workspaces/${encodeURIComponent(workspaceId)}/git/operation/`,
     buildGitOperationBody(payload),
+  )
+}
+
+export interface RawGitCommitMessageResponse {
+  message: string
+}
+
+/** Suggest a commit subject for the staged (else all) changes of one repo. */
+export function generateGitCommitMessage(
+  workspaceId: string,
+  repoPath: string,
+): Promise<RawGitCommitMessageResponse> {
+  return post<RawGitCommitMessageResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/git/commit-message/`,
+    { repo_path: repoPath },
   )
 }
 

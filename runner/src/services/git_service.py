@@ -1466,9 +1466,10 @@ class GitService:
                     "git_failed", "git discard failed",
                     exit_code=exit_code, stderr=output,
                 )
-        for rel in to_clean:
+        if to_clean:
+            # One call for all untracked paths keeps "discard all" fast in VMs.
             exit_code, output = await self._git_exec(
-                runtime, instance_id, ["git", "clean", "-f", "--", rel],
+                runtime, instance_id, ["git", "clean", "-f", "--", *to_clean],
                 workdir=repo_root, env=env, timeout=timeout,
             )
             if exit_code != 0:

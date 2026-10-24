@@ -29,6 +29,7 @@ vi.mock('@/services/git.api', () => ({
     const snapshot = (data as { snapshot?: unknown } | null)?.snapshot
     return snapshot && typeof snapshot === 'object' ? snapshot : null
   }),
+  generateGitCommitMessage: vi.fn(),
   getGitCommitDetails: vi.fn(),
   getGitHistory: vi.fn(),
   getGitRepo: vi.fn(),
@@ -43,6 +44,7 @@ const getHistory = vi.mocked(gitApi.getGitHistory)
 const getDiff = vi.mocked(gitApi.getGitWorkingDiff)
 const getDetails = vi.mocked(gitApi.getGitCommitDetails)
 const runOp = vi.mocked(gitApi.runGitOperation)
+const generateMessage = vi.mocked(gitApi.generateGitCommitMessage)
 
 /** Point all three read endpoints at the given raw snapshots. */
 function setRepos(repos: RawGitRepoSnapshot[]): void {
@@ -382,6 +384,73 @@ describe('git store (productive)', () => {
     expect(opPayload()).toMatchObject({ operation: 'stage' })
     await store.unstageAll()
     expect(opPayload()).toMatchObject({ operation: 'unstage' })
+  })
+
+  it('discards all non-conflicted unstaged changes, pinned to confirmed paths', async () => {
+    const changes = [
+      makeRawChange('a.ts'),
+      makeRawChange('new.txt', { status: 'A', unstaged: 'untracked' }),
+      makeRawChange('conflict.ts', { status: 'U', staged_kind: 'U', unstaged: 'U', conflict: 'both_modified' }),
+      makeRawChange('staged-only.ts', { staged: true, staged_kind: 'M', unstaged: null }),
+    ]
+    const store = await initWith([makeRepoSnapshot({ changes })])
+    expect(store.bulkUnstagedPaths).toEqual(['a.ts', 'new.txt'])
+    runOp.mockResolvedValue({
+      ok: true,
+      snapshot: makeRepoSnapshot({ changes: [] }),
+      repo_path: '/workspace/repo-app',
+    } as never)
+
+    expect(await store.discardAll()).toBe(true)
+    expect(opPayload()).toMatchObject({ operation: 'discard', paths: ['a.ts', 'new.txt'] })
+
+    await store.discardAll(['a.ts'])
+    expect(opPayload()).toMatchObject({ operation: 'discard', paths: ['a.ts'] })
+  })
+
+  it('batches bulk path operations and stops at the first failed batch', async () => {
+    const changes = Array.from({ length: 300 }, (_, i) => makeRawChange(`f${i}.ts`))
+    const store = await initWith([makeRepoSnapshot({ changes })])
+    const snapshot = makeRepoSnapshot({ changes })
+    runOp.mockResolvedValue({ ok: true, snapshot, repo_path: '/workspace/repo-app' } as never)
+
+    expect(await store.discardAll()).toBe(true)
+    const discards = runOp.mock.calls.map((call) => call[1].paths?.length)
+    expect(discards).toEqual([256, 44])
+
+    runOp.mockClear()
+    runOp.mockRejectedValueOnce(new ApiRequestError(400, 'boom', 'git_failed'))
+    expect(await store.stageAll()).toBe(false)
+    expect(runOp).toHaveBeenCalledTimes(1)
+  })
+
+  it('generates a commit message for the current repo', async () => {
+    const store = await initWith()
+    generateMessage.mockResolvedValueOnce({ message: '  feat: add git panel  ' })
+
+    const pending = store.generateCommitMessage()
+    expect(store.generatingCommitMessage).toBe(true)
+    expect(await pending).toBe('feat: add git panel')
+    expect(store.generatingCommitMessage).toBe(false)
+    expect(generateMessage).toHaveBeenCalledWith('ws-1', '/workspace/repo-app')
+  })
+
+  it('reports commit message failures and drops results after a workspace switch', async () => {
+    const { toast } = await import('vue-sonner')
+    const store = await initWith()
+    generateMessage.mockRejectedValueOnce(
+      new ApiRequestError(409, 'Set a small model', 'small_model_missing'),
+    )
+    expect(await store.generateCommitMessage()).toBeNull()
+    expect(vi.mocked(toast.error)).toHaveBeenCalled()
+    expect(store.generatingCommitMessage).toBe(false)
+
+    let resolve: (value: { message: string }) => void = () => {}
+    generateMessage.mockReturnValueOnce(new Promise((r) => { resolve = r }))
+    const pending = store.generateCommitMessage()
+    await store.initialize('ws-2')
+    resolve({ message: 'feat: stale' })
+    expect(await pending).toBeNull()
   })
 
   it('commits and pushes in order, pushing only after commit success', async () => {
