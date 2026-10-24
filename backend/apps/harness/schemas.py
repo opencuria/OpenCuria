@@ -220,18 +220,14 @@ class HarnessPermissionOut(Schema):
 
 
 class ProviderConfigIn(Schema):
-    """Org-wide model and reasoning-effort defaults; accounts hold credentials."""
+    """Org-wide small-model defaults; agent defaults live in AgentConfig."""
 
-    default_model: str = ""
     small_model: str = ""
-    computer_use_model: str = ""
-    default_effort: str = ""
     small_effort: str = ""
-    computer_use_effort: str = ""
 
 
 class ProviderConfigOut(ProviderConfigIn):
-    """Saved org-wide model and reasoning-effort defaults."""
+    """Saved org-wide small-model defaults."""
 
 
 class AgentConfigIn(Schema):

@@ -66,7 +66,6 @@ def _service(provider: ProviderAdapter, emit=_drop_emit) -> HarnessService:
 def _configure_small_model(workspace) -> None:
     ProviderConfigService().save_config(
         organization_id=workspace.runner.organization_id,
-        default_model="big-model",
         small_model="small-model",
     )
 
@@ -434,11 +433,7 @@ async def test_run_writes_summary_and_next_run_clears_it(harness_workspace) -> N
     assert "I fixed the login bug." in provider.summary_inputs[0]
 
     # No small model for the next run: the old sentence must not linger.
-    ProviderConfigService().save_config(
-        organization_id=org_id,
-        default_model="big-model",
-        small_model="",
-    )
+    ProviderConfigService().save_config(organization_id=org_id, small_model="")
     await run("And now the logout")
     await asyncio.sleep(0.2)
     assert HarnessSession.objects.get(id=session.id).summary == ""

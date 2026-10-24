@@ -569,8 +569,7 @@ class HarnessService:
         )
         if engine_id == "native" and not normalized_effort:
             # Fall back to the AgentConfig fixed effort of the resolved agent
-            # (inherit-mode leaves "" so the caller decides). Legacy
-            # ProviderConfig.default_effort is only a deprecated fallback.
+            # (inherit-mode leaves "" so the caller decides).
             try:
                 defaults = HarnessService._agent_defaults(
                     organization_id, resolved_agent
@@ -579,16 +578,6 @@ class HarnessService:
                     normalized_effort = normalize_reasoning_effort(defaults["effort"])
             except Exception:
                 normalized_effort = ""
-            if not normalized_effort:
-                try:
-                    from .services import ProviderConfigService
-
-                    config = ProviderConfigService().get_config(organization_id)
-                    normalized_effort = normalize_reasoning_effort(
-                        config.default_effort or ""
-                    )
-                except NotFoundError:
-                    normalized_effort = ""
         session_kwargs: dict[str, Any] = {
             "workspace_id": workspace_id,
             "organization_id": organization_id,
@@ -1278,8 +1267,7 @@ class HarnessService:
         """Ensure provider config and model are present before starting a run.
 
         Returns the resolved model id for this turn. An empty session model
-        (Auto) is filled from the agent config; the legacy org default is
-        only a deprecated fallback when available.
+        (Auto) is filled from the agent config.
 
         Raises:
             NotFoundError: When no provider connection exists for the model.
@@ -1316,16 +1304,10 @@ class HarnessService:
         from .services import ProviderConfigService
 
         config_service = ProviderConfigService()
-        config = None
-        try:
-            config = config_service.get_config(organization_id)
-        except NotFoundError:
-            config = None
         agent_name = (session.agent_name or session.mode or "build").strip().lower()
         agent_defaults = self._agent_defaults(organization_id, agent_name)
         agent_model = "" if agent_defaults["inherit_model"] else agent_defaults["model"]
-        legacy_default = (config.default_model or "").strip() if config else ""
-        model = session_model or agent_model or legacy_default
+        model = session_model or agent_model
         if not model:
             raise NotFoundError("ProviderConnection", str(organization_id))
         account_user_id = user_id or getattr(session, "created_by_id", None)
@@ -1360,14 +1342,10 @@ class HarnessService:
                         account_ids=account_ids,
                     )
         if not (session.reasoning_effort or "").strip():
-            # Legacy fallback so the assistant snapshot carries the default
-            # Old sessions otherwise ran with the default but snapshotted "".
             agent_effort = (
                 "" if agent_defaults["inherit_model"] else agent_defaults["effort"]
             )
-            session.reasoning_effort = normalize_reasoning_effort(
-                agent_effort or (config.default_effort if config else "") or ""
-            )
+            session.reasoning_effort = normalize_reasoning_effort(agent_effort)
         return model
 
     def list_sessions(self, workspace_id: uuid.UUID) -> list[HarnessSession]:
@@ -3003,23 +2981,12 @@ class HarnessService:
                     if row.get("inherit_model")
                     else normalize_reasoning_effort(str(row.get("effort") or ""))
                 )
-                if session.model:
-                    model_default = session.model
-                else:
-                    legacy_default = (
-                        (config.default_model if config else "") or ""
-                    ).strip()
-                    model_default = agent_model or legacy_default
+                model_default = session.model or agent_model
                 if not model_default:
                     raise ValueError("No model configured for harness run")
                 session.model = model_default
-                legacy_effort = (config.default_effort if config else "") or ""
-                run_effort = normalize_reasoning_effort(
-                    agent_effort or legacy_effort or ""
-                )
+                run_effort = normalize_reasoning_effort(agent_effort)
                 if not (session.reasoning_effort or "").strip() and run_effort:
-                    # Robust fallback for sessions created before effort defaults
-                    # existed (or while no config existed at create time).
                     session.reasoning_effort = run_effort
             model = session.model or "default"
             context_length = 0
@@ -5384,13 +5351,6 @@ class HarnessService:
         subtask_id: str,
         organization_id: uuid.UUID,
         agent_configs: dict[str, dict[str, Any]] | None = None,
-        # Deprecated legacy kwargs (ignored, kept for backward compat).
-        small_model: str = "",
-        computer_use_model: str = "",
-        default_model: str = "",
-        small_effort: str = "",
-        computer_use_effort: str = "",
-        default_effort: str = "",
     ) -> Any:
         """Create a child session, run it to completion, return tool output.
 
@@ -5419,25 +5379,6 @@ class HarnessService:
             )
         agent = (args.agent or args.subagent_type or "general").strip().lower()
         configs = dict(agent_configs or {}) or self._agent_configs_map(organization_id)
-        # Deprecated compat: explicit legacy kwargs act as fixed config
-        # when no AgentConfig row exists (old tests callers).
-        if agent not in configs and (
-            computer_use_model or default_model or small_model
-        ):
-            if agent == "computeruse" and computer_use_model:
-                configs[agent] = {
-                    "model": computer_use_model,
-                    "effort": computer_use_effort or default_effort,
-                    "inherit_model": False,
-                    "effort_strategy": "fixed",
-                }
-            elif agent not in ("general", "explore", "computeruse") and default_model:
-                configs[agent] = {
-                    "model": default_model,
-                    "effort": default_effort,
-                    "inherit_model": False,
-                    "effort_strategy": "fixed",
-                }
         row = configs.get(agent, {})
         inherit = bool(row.get("inherit_model", True))
         fixed_model = str(row.get("model") or "").strip()
@@ -5454,10 +5395,6 @@ class HarnessService:
             model = (
                 override or (getattr(ctx, "model", "") or "") or parent.model or ""
             ).strip()
-            # Deprecated compat: legacy callers pass computer_use_model
-            # explicitly; honor it when no AgentConfig fixed model exists.
-            if agent == "computeruse" and not override and computer_use_model.strip():
-                model = computer_use_model.strip()
         else:
             model = (
                 override

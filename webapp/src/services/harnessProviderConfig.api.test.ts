@@ -3,12 +3,8 @@ import * as api from './api'
 import { getProviderConfig, saveProviderConfig } from './harness.api'
 
 const config = {
-  default_model: 'provider/model-default',
   small_model: 'provider/model-small',
-  computer_use_model: 'provider/model-computer',
-  default_effort: 'high',
   small_effort: 'low',
-  computer_use_effort: 'medium',
 }
 
 afterEach(() => vi.restoreAllMocks())
@@ -26,12 +22,8 @@ describe('harness provider config API', () => {
 
     await expect(saveProviderConfig({ small_model: 'provider/model-new' })).resolves.toEqual(config)
     expect(put).toHaveBeenCalledWith('/provider-config/', {
-      default_model: '',
       small_model: 'provider/model-new',
-      computer_use_model: '',
-      default_effort: '',
       small_effort: '',
-      computer_use_effort: '',
     })
   })
 })

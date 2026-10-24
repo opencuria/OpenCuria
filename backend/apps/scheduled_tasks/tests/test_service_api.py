@@ -14,7 +14,6 @@ from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessMessage, HarnessSession
 from apps.harness.provider_accounts import ProviderAccountService
 from apps.harness.providers.base import Delta, ProviderAdapter, Usage
-from apps.harness.services import ProviderConfigService
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
@@ -69,12 +68,6 @@ def scheduled_run_setup(db):
         model="openrouter/openai/gpt-test",
         reasoning_effort="high",
         next_run_at="2030-01-01T09:00:00Z",
-    )
-    provider_config = ProviderConfigService()
-    provider_config.save_config(
-        organization_id=org.id,
-        default_model="openrouter/openai/gpt-default",
-        default_effort="medium",
     )
     ProviderAccountService().save_account(
         user=owner,
@@ -157,12 +150,6 @@ def test_rest_run_now_default_model_and_effort_and_unauthorized_actions(
     scheduled_run_setup, monkeypatch
 ):
     org, owner, outsider, workspace, task = scheduled_run_setup
-    provider_config = ProviderConfigService()
-    provider_config.save_config(
-        organization_id=org.id,
-        default_model="openrouter/openai/gpt-default",
-        default_effort="medium",
-    )
     from apps.harness.models import AgentConfig
 
     AgentConfig.objects.update_or_create(

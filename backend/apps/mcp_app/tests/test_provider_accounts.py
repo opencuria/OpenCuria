@@ -236,9 +236,7 @@ def test_mcp_defaults_roundtrip_uses_defaults_only_contract(provider_mcp_setup):
             api_key, org_id, {"small_model": "openrouter/small", "small_effort": "low"}
         )
     )
-    assert len(saved) == 6
-    assert saved["small_model"] == "openrouter/small"
-    assert saved["small_effort"] == "low"
+    assert saved == {"small_model": "openrouter/small", "small_effort": "low"}
     assert _parse_text(_call_get_provider_config(api_key, org_id, {})) == saved
     assert _parse_text(_call_list_provider_accounts(api_key, org_id, {})) == []
     assert _parse_text(_call_delete_provider_config(api_key, org_id, {}))["deleted"]

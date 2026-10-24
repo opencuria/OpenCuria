@@ -77,12 +77,8 @@ function mountTab(admin = false) {
 }
 
 const config = {
-  default_model: '',
   small_model: 'openrouter/model-big',
-  computer_use_model: '',
-  default_effort: '',
   small_effort: '',
-  computer_use_effort: '',
 }
 
 describe('ProviderConfigTab', () => {
@@ -129,7 +125,7 @@ describe('ProviderConfigTab', () => {
     wrapper.unmount()
   })
 
-  it('saves only the changed small model and preserves legacy defaults', async () => {
+  it('saves the small model and effort', async () => {
     const wrapper = mountTab()
     await flushPromises()
     const picker = wrapper.findComponent(ModelPicker)
@@ -143,10 +139,6 @@ describe('ProviderConfigTab', () => {
     expect(harnessApi.saveProviderConfig).toHaveBeenCalledWith({
       small_model: 'openrouter/model-next',
       small_effort: '',
-      default_model: '',
-      computer_use_model: '',
-      default_effort: '',
-      computer_use_effort: '',
     })
     expect(wrapper.find('[data-testid="defaults-status"]').text()).toBe('All changes saved')
   })

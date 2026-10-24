@@ -1,7 +1,7 @@
 """
 Service layer for the harness provider configuration.
 
-Handles org-wide default models and resolves account-bound
+Handles org-wide small-model defaults and resolves account-bound
 provider adapters via :class:`~apps.harness.providers.resolver.ProviderResolver`.
 """
 
@@ -368,7 +368,7 @@ class AgentSConfigService:
 
 
 class ProviderConfigService:
-    """Business logic for org-wide provider configuration."""
+    """Business logic for org-wide small-model configuration."""
 
     def __init__(
         self,
@@ -385,36 +385,24 @@ class ProviderConfigService:
         self,
         *,
         organization_id: uuid.UUID,
-        default_model: str = "",
         small_model: str = "",
-        computer_use_model: str = "",
-        default_effort: str = "",
         small_effort: str = "",
-        computer_use_effort: str = "",
     ) -> ProviderConfig:
-        """Create or update org-wide default models and reasoning efforts."""
+        """Create or update the small model and reasoning effort."""
         existing = self.repository.get_by_org(organization_id)
 
         if existing is None:
             config = self.repository.create(
                 organization_id=organization_id,
-                default_model=default_model.strip(),
                 small_model=small_model.strip(),
-                computer_use_model=computer_use_model.strip(),
-                default_effort=default_effort.strip(),
                 small_effort=small_effort.strip(),
-                computer_use_effort=computer_use_effort.strip(),
             )
             log.info("provider_config_created", organization_id=str(organization_id))
         else:
             config = self.repository.update(
                 existing,
-                default_model=default_model.strip(),
                 small_model=small_model.strip(),
-                computer_use_model=computer_use_model.strip(),
-                default_effort=default_effort.strip(),
                 small_effort=small_effort.strip(),
-                computer_use_effort=computer_use_effort.strip(),
             )
             log.info("provider_config_updated", organization_id=str(organization_id))
 

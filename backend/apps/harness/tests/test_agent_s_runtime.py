@@ -247,13 +247,8 @@ def test_validate_provider_for_run_grounding_connected_and_missing(
     """Explicit grounding models need a connection; empty falls back to main."""
     from apps.harness.harness_service import HarnessService
     from apps.harness.repositories import HarnessSessionRepository
-    from apps.harness.services import ProviderConfigService
 
     org_id = harness_workspace.runner.organization_id
-    ProviderConfigService().save_config(
-        organization_id=org_id,
-        default_model="openrouter/acme/main",
-    )
     provider_account_factory(
         "openrouter",
         api_key="sk-main",

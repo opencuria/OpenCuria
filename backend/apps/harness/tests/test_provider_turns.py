@@ -190,13 +190,7 @@ async def test_real_request_freezes_selection_until_the_next_turn(
         base_url=local_openrouter.base_url,
     )
     accounts.select_account(organization.id, user.id, "openrouter", first.id)
-    from apps.harness.services import ProviderConfigService
 
-    ProviderConfigService().save_config(
-        organization_id=organization.id,
-        default_model="openrouter/acme/test-model",
-        small_model="",
-    )
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
         organization_id=organization.id,
@@ -277,13 +271,7 @@ async def test_real_blocked_sse_revocation_aborts_without_fallback(
         base_url=local_openrouter.base_url,
     )
     accounts.select_account(organization.id, user.id, "openrouter", revoked.id)
-    from apps.harness.services import ProviderConfigService
 
-    ProviderConfigService().save_config(
-        organization_id=organization.id,
-        default_model="openrouter/acme/test-model",
-        small_model="",
-    )
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
         organization_id=organization.id,

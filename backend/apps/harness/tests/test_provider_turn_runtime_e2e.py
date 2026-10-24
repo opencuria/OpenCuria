@@ -194,13 +194,7 @@ async def test_http_sse_selection_is_frozen_then_next_turn_uses_new_account(
         org, provider_member, local_openrouter, label="Second", key="second-key"
     )
     service_accounts.select_account(org.id, provider_member.id, "openrouter", first.id)
-    from apps.harness.services import ProviderConfigService
 
-    ProviderConfigService().save_config(
-        organization_id=org.id,
-        default_model="openrouter/acme/test-model",
-        small_model="",
-    )
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
         organization_id=org.id,
@@ -306,13 +300,7 @@ async def test_http_sse_revocation_aborts_blocked_turn_without_account_fallback(
     service_accounts.select_account(
         org.id, provider_member.id, "openrouter", selected.id
     )
-    from apps.harness.services import ProviderConfigService
 
-    ProviderConfigService().save_config(
-        organization_id=org.id,
-        default_model="openrouter/acme/test-model",
-        small_model="",
-    )
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
         organization_id=org.id,
@@ -366,13 +354,7 @@ async def test_membership_removal_aborts_personal_account_response(
         org, provider_member, local_openrouter, label="Personal", key="personal-key"
     )
     accounts.select_account(org.id, provider_member.id, "openrouter", selected.id)
-    from apps.harness.services import ProviderConfigService
 
-    ProviderConfigService().save_config(
-        organization_id=org.id,
-        default_model="openrouter/acme/test-model",
-        small_model="",
-    )
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
         organization_id=org.id,

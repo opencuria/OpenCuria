@@ -89,12 +89,8 @@ export interface AgentConfigInput {
 }
 
 export interface ProviderConfig {
-  default_model: string;
   small_model: string;
-  computer_use_model: string;
-  default_effort: string;
   small_effort: string;
-  computer_use_effort: string;
 }
 
 export type ProviderConfigInput = Partial<ProviderConfig>;

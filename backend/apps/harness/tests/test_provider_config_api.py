@@ -54,17 +54,13 @@ PROVIDERS = [APIKeyPermission.HARNESS_PROVIDERS.value]
 BOTH = READ + RUN
 ORG_URL = "/api/v1/provider-config/"
 DEFAULT_FIELDS = {
-    "default_model",
     "small_model",
-    "computer_use_model",
-    "default_effort",
     "small_effort",
-    "computer_use_effort",
 }
 
 
 @pytest.mark.django_db(transaction=True)
-def test_provider_defaults_roundtrip_has_only_six_fields(provider_setup):
+def test_provider_defaults_roundtrip_has_only_small_model_fields(provider_setup):
     client = _client(
         user=provider_setup["owner"], org=provider_setup["org"], permissions=BOTH
     )
@@ -78,12 +74,8 @@ def test_provider_defaults_roundtrip_has_only_six_fields(provider_setup):
         ORG_URL,
         data=json.dumps(
             {
-                "default_model": "model-a",
                 "small_model": "model-b",
-                "computer_use_model": "model-cu",
-                "default_effort": "high",
                 "small_effort": "low",
-                "computer_use_effort": "medium",
             }
         ),
         content_type="application/json",
@@ -91,12 +83,8 @@ def test_provider_defaults_roundtrip_has_only_six_fields(provider_setup):
     assert put.status_code == 200, put.content[:500]
     assert set(put.json()) == DEFAULT_FIELDS
     assert put.json() == {
-        "default_model": "model-a",
         "small_model": "model-b",
-        "computer_use_model": "model-cu",
-        "default_effort": "high",
         "small_effort": "low",
-        "computer_use_effort": "medium",
     }
     assert client.get(ORG_URL).json() == put.json()
     assert ProviderConfig.objects.filter(organization=provider_setup["org"]).exists()
@@ -131,7 +119,6 @@ def test_saving_defaults_does_not_mutate_or_delete_provider_accounts(provider_se
         ORG_URL,
         data=json.dumps(
             {
-                "default_model": "new-model",
                 "small_model": "small",
                 "api_key": "sk-ignored",
                 "base_url": "https://ignored.example/v1",
@@ -166,7 +153,7 @@ def test_provider_config_permissions_and_membership(provider_setup):
     run_client = _client(user=owner, org=org, permissions=RUN)
     denied_put = read_client.put(
         ORG_URL,
-        data=json.dumps({"default_model": "x"}),
+        data=json.dumps({"small_model": "x"}),
         content_type="application/json",
     )
     assert denied_put.status_code == 403

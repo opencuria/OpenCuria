@@ -1028,11 +1028,6 @@ async def test_execute_run_loads_org_provider_without_sync_orm(
 
     org_id = harness_workspace.runner.organization_id
     provider_account_factory("openrouter")
-    ProviderConfigService().save_config(
-        organization_id=org_id,
-        default_model="org-default-model",
-        small_model="",
-    )
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
         organization_id=org_id,
@@ -1106,11 +1101,6 @@ async def test_execute_run_passes_catalog_limits_and_last_step_tokens(
 
     org_id = harness_workspace.runner.organization_id
     provider_account_factory("openrouter")
-    ProviderConfigService().save_config(
-        organization_id=org_id,
-        default_model="org-default-model",
-        small_model="",
-    )
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
         organization_id=org_id,
@@ -1331,7 +1321,6 @@ async def test_generate_title_loads_org_provider_without_sync_orm(
     prompt = "Please help me build a feature"
     ProviderConfigService().save_config(
         organization_id=org_id,
-        default_model="big-model",
         small_model="small-model",
     )
     session = await sync_to_async(HarnessSessionRepository.create)(
@@ -1999,55 +1988,40 @@ def test_create_session_stores_reasoning_effort(harness_workspace) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-def test_create_session_falls_back_to_config_default_effort(harness_workspace) -> None:
-    """create_session without effort inherits the org default_effort."""
-    from apps.harness.services import ProviderConfigService
+@pytest.mark.parametrize(
+    ("agent", "requested_effort", "expected_effort"),
+    [("build", "", "high"), ("plan", "", "low"), ("build", "low", "low")],
+)
+def test_create_session_uses_agent_effort_unless_explicit(
+    harness_workspace, agent, requested_effort, expected_effort
+) -> None:
+    """Agent-specific defaults apply without a ProviderConfig row."""
+    from apps.harness.services import AgentConfigService
 
     org_id = harness_workspace.runner.organization_id
-    ProviderConfigService().save_config(
-        organization_id=org_id,
-        default_model="model-a",
-        default_effort="high",
+    AgentConfigService().save_configs(
+        org_id,
+        [
+            {"agent": "build", "model": "build-model", "effort": "high"},
+            {"agent": "plan", "model": "plan-model", "effort": "low"},
+        ],
     )
     service, _, _ = _service()
     session = service.create_session(
         workspace_id=harness_workspace.id,
         organization_id=org_id,
         prompt="think hard",
-        mode="build",
+        mode=agent,
+        reasoning_effort=requested_effort,
     )
-    assert session.reasoning_effort == "high"
-
-
-@pytest.mark.django_db(transaction=True)
-def test_create_session_explicit_effort_overrides_config_default(
-    harness_workspace,
-) -> None:
-    """An explicit reasoning_effort is never overridden by the org default."""
-    from apps.harness.services import ProviderConfigService
-
-    org_id = harness_workspace.runner.organization_id
-    ProviderConfigService().save_config(
-        organization_id=org_id,
-        default_model="model-a",
-        default_effort="high",
-    )
-    service, _, _ = _service()
-    session = service.create_session(
-        workspace_id=harness_workspace.id,
-        organization_id=org_id,
-        prompt="think easy",
-        mode="build",
-        reasoning_effort="low",
-    )
-    assert session.reasoning_effort == "low"
+    assert session.reasoning_effort == expected_effort
 
 
 @pytest.mark.django_db(transaction=True)
 def test_create_session_without_config_and_effort_stays_empty(
     harness_workspace,
 ) -> None:
-    """Missing ProviderConfig never breaks session creation (stays Auto)."""
+    """Missing agent configuration leaves the session effort on Auto."""
     service, _, _ = _service()
     session = service.create_session(
         workspace_id=harness_workspace.id,
@@ -2083,20 +2057,26 @@ async def test_start_run_snapshots_reasoning_effort_on_assistant(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_start_run_snapshots_org_default_when_session_model_empty(
-    harness_workspace, provider_account_factory, monkeypatch
+@pytest.mark.parametrize(
+    ("session_effort", "expected_effort"), [("medium", "medium"), ("", "high")]
+)
+async def test_start_run_snapshots_agent_defaults_without_persisting_overrides(
+    harness_workspace,
+    provider_account_factory,
+    monkeypatch,
+    session_effort,
+    expected_effort,
 ) -> None:
-    """Auto (empty session.model) snapshots org default onto the assistant."""
+    """Auto snapshots the agent defaults while preserving explicit effort."""
     from apps.harness.providers.models_catalog import ProviderModel
     from apps.harness.providers.openrouter import OpenRouterAdapter
-    from apps.harness.services import ProviderConfigService
+    from apps.harness.services import AgentConfigService, ProviderConfigService
 
     org_id = harness_workspace.runner.organization_id
     provider_account_factory("openrouter")
-    ProviderConfigService().save_config(
-        organization_id=org_id,
-        default_model="org-default-model",
-        small_model="",
+    AgentConfigService().save_configs(
+        org_id,
+        [{"agent": "build", "model": "agent-default-model", "effort": "high"}],
     )
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
@@ -2105,7 +2085,7 @@ async def test_start_run_snapshots_org_default_when_session_model_empty(
         agent_name="build",
         mode="build",
         model="",
-        reasoning_effort="medium",
+        reasoning_effort=session_effort,
     )
 
     async def _scripted_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
@@ -2116,8 +2096,8 @@ async def test_start_run_snapshots_org_default_when_session_model_empty(
     def _fake_list(self, organization_id):  # type: ignore[no-untyped-def]
         return [
             ProviderModel(
-                id="org-default-model",
-                name="Org Default",
+                id="agent-default-model",
+                name="Agent Default",
                 reasoning_efforts=("medium",),
                 default_effort="medium",
                 supports_tools=True,
@@ -2145,8 +2125,8 @@ async def test_start_run_snapshots_org_default_when_session_model_empty(
         organization_id=org_id,
         workspace_id=str(harness_workspace.id),
     )
-    assert assistant.model == "org-default-model"
-    assert assistant.reasoning_effort == "medium"
+    assert assistant.model == "agent-default-model"
+    assert assistant.reasoning_effort == expected_effort
     refreshed = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
     assert refreshed is not None
     assert refreshed.model == ""
@@ -2155,86 +2135,12 @@ async def test_start_run_snapshots_org_default_when_session_model_empty(
         for item in collected
         if item.get("event") == FRONTEND_EVENT_STATUS and item.get("status") == "busy"
     )
-    assert busy["model"] == "org-default-model"
-    assert busy["reasoning_effort"] == "medium"
+    assert busy["model"] == "agent-default-model"
+    assert busy["reasoning_effort"] == expected_effort
     await service._tasks[str(session.id)]
     refreshed = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
     assert refreshed is not None
     assert refreshed.model == ""
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_start_run_applies_config_default_effort_to_snapshot(
-    harness_workspace, provider_account_factory, monkeypatch
-) -> None:
-    """Leerer Session-Effort (Altsession) snapshottet den Org-Default."""
-    from apps.harness.providers.models_catalog import ProviderModel
-    from apps.harness.providers.openrouter import OpenRouterAdapter
-    from apps.harness.services import ProviderConfigService
-
-    org_id = harness_workspace.runner.organization_id
-    provider_account_factory("openrouter")
-    ProviderConfigService().save_config(
-        organization_id=org_id,
-        default_model="org-default-model",
-        default_effort="high",
-        small_model="",
-    )
-    session = await sync_to_async(HarnessSessionRepository.create)(
-        workspace_id=harness_workspace.id,
-        organization_id=org_id,
-        title="legacy session",
-        agent_name="build",
-        mode="build",
-        model="",
-        reasoning_effort="",
-    )
-
-    async def _scripted_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
-        yield Delta(text="hello", usage=Usage(1, 1, 2))
-
-    monkeypatch.setattr(OpenRouterAdapter, "chat_stream", _scripted_stream)
-
-    def _fake_list(self, organization_id):  # type: ignore[no-untyped-def]
-        return [
-            ProviderModel(
-                id="org-default-model",
-                name="Org Default",
-                reasoning_efforts=("high",),
-                default_effort="high",
-                supports_tools=True,
-                context_length=128_000,
-                max_output_tokens=8_192,
-            )
-        ]
-
-    monkeypatch.setattr(ProviderConfigService, "list_models", _fake_list)
-
-    collected: list[dict[str, Any]] = []
-
-    async def _emit(event: str, data: dict[str, Any]) -> None:
-        collected.append({"event": event, **data})
-
-    service = HarnessService(
-        permissions=PermissionService(
-            evaluator=PermissionEvaluator(global_rules={"*": "allow"})
-        ),
-        emit=_emit,
-    )
-    assistant = await service.start_run(
-        session,
-        "say hello",
-        organization_id=org_id,
-        workspace_id=str(harness_workspace.id),
-    )
-    assert assistant.reasoning_effort == "high"
-    busy = next(
-        item
-        for item in collected
-        if item.get("event") == FRONTEND_EVENT_STATUS and item.get("status") == "busy"
-    )
-    assert busy["reasoning_effort"] == "high"
-    await service._tasks[str(session.id)]
 
 
 @pytest.mark.django_db(transaction=True)

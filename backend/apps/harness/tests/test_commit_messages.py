@@ -92,7 +92,6 @@ def _fake_git(monkeypatch, *, diff: dict, history: dict | None = None):
 def _configure_small_model(workspace) -> None:
     ProviderConfigService().save_config(
         organization_id=workspace.runner.organization_id,
-        default_model="big-model",
         small_model="small-model",
     )
 

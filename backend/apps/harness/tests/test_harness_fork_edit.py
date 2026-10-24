@@ -34,7 +34,6 @@ from apps.harness.repositories import (
     HarnessMessageRepository,
     HarnessPartRepository,
     HarnessSessionRepository,
-    ProviderConfigRepository,
     QuestionRequestRepository,
     TodoRepository,
 )
@@ -1059,13 +1058,14 @@ async def test_edit_preserves_auto_model_and_effort(
     harness_workspace, monkeypatch
 ) -> None:
     """Resolved per-turn defaults must not become persistent edit overrides."""
+    from apps.harness.services import AgentConfigService
+
     service = HarnessService()
     session = await _db_create_session(harness_workspace)
     HarnessSessionRepository.set_model(session, "")
-    ProviderConfigRepository.create(
-        organization_id=session.organization_id,
-        default_model="openrouter/openai/gpt-4.1",
-        default_effort="high",
+    AgentConfigService().save_configs(
+        session.organization_id,
+        [{"agent": "build", "model": "openrouter/openai/gpt-4.1", "effort": "high"}],
     )
     ProviderConnection.objects.create(
         organization_id=session.organization_id, provider="openrouter"

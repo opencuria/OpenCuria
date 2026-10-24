@@ -113,11 +113,11 @@ class AgentConfig(models.Model):
 
 class ProviderConfig(models.Model):
     """
-    Org-wide LLM model defaults.
+    Org-wide small-model defaults for title and compaction tasks.
 
     Exactly one record per organization (OneToOne). Provider credentials
     and per-provider settings live in ``ProviderConnection``; this record
-    holds only the default model selections shared across providers.
+    holds the small model and effort. Agent defaults live in ``AgentConfig``.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -127,41 +127,17 @@ class ProviderConfig(models.Model):
         related_name="harness_provider_config",
         help_text="Owning organization (exactly one config per org).",
     )
-    default_model = models.CharField(
-        max_length=255,
-        default="",
-        blank=True,
-        help_text="Default model for agentic runs.",
-    )
     small_model = models.CharField(
         max_length=255,
         default="",
         blank=True,
         help_text="Cheaper model for title/compaction tasks.",
     )
-    computer_use_model = models.CharField(
-        max_length=255,
-        default="",
-        blank=True,
-        help_text="Model for the computeruse subagent; falls back to default_model.",
-    )
-    default_effort = models.CharField(
-        max_length=50,
-        default="",
-        blank=True,
-        help_text="Default reasoning effort for default model.",
-    )
     small_effort = models.CharField(
         max_length=50,
         default="",
         blank=True,
         help_text="Default reasoning effort for small model.",
-    )
-    computer_use_effort = models.CharField(
-        max_length=50,
-        default="",
-        blank=True,
-        help_text="Default reasoning effort for computer-use model.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -367,7 +367,6 @@ async def test_title_agent_updates_session_title(
 
     ProviderConfigService().save_config(
         organization_id=harness_workspace.runner.organization_id,
-        default_model="big-model",
         small_model="small-model",
     )
     prompt = "Please help me build a feature"
@@ -415,7 +414,6 @@ async def test_title_agent_does_not_overwrite_user_rename(harness_workspace) -> 
 
     ProviderConfigService().save_config(
         organization_id=harness_workspace.runner.organization_id,
-        default_model="big-model",
         small_model="small-model",
     )
     prompt = "Please help me build a feature"
@@ -455,7 +453,6 @@ async def test_child_session_created_for_task_tool(harness_workspace) -> None:
 
     ProviderConfigService().save_config(
         organization_id=harness_workspace.runner.organization_id,
-        default_model="big-model",
         small_model="small-model",
     )
     parent = HarnessSessionRepository.create(
@@ -495,7 +492,6 @@ async def test_child_session_created_for_task_tool(harness_workspace) -> None:
         ctx=ctx,
         subtask_id="sub-abc",
         organization_id=harness_workspace.runner.organization_id,
-        small_model="small-model",
     )
     assert "child output" in result.output
     children = list(HarnessSession.objects.filter(parent_id=parent.id))

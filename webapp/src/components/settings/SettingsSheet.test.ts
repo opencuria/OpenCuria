@@ -208,12 +208,8 @@ describe('SettingsSheet', () => {
     authMock.isAdmin = true
     vi.spyOn(providerCatalog, 'loadProviderModelsCached').mockResolvedValue([])
     getProviderConfigMock.mockResolvedValue({
-      default_model: 'model-big',
       small_model: 'model-small',
-      computer_use_model: 'model-cu',
-      default_effort: '',
       small_effort: '',
-      computer_use_effort: '',
     })
   })
 

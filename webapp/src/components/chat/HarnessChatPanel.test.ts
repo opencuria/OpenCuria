@@ -26,12 +26,8 @@ vi.mock('@/services/harness.api', async () => {
     listHarnessParts: vi.fn().mockResolvedValue({ session: {}, messages: [] }),
     listHarnessTodos: vi.fn().mockResolvedValue([]),
     getProviderConfig: vi.fn().mockResolvedValue({
-      default_model: 'model-big',
       small_model: 'model-small',
-      computer_use_model: 'model-cu',
-      default_effort: '',
       small_effort: '',
-      computer_use_effort: '',
     }),
     listEngineModels: vi.fn().mockResolvedValue([]),
     listRecentModels: vi.fn().mockResolvedValue([]),

@@ -40,21 +40,13 @@ export interface AgentConfigIn {
 }
 
 export interface HarnessProviderConfig {
-  default_model: string
   small_model: string
-  computer_use_model: string
-  default_effort: string
   small_effort: string
-  computer_use_effort: string
 }
 
 export interface HarnessProviderConfigIn {
-  default_model?: string
   small_model?: string
-  computer_use_model?: string
-  default_effort?: string
   small_effort?: string
-  computer_use_effort?: string
 }
 
 export const HARNESS_ENGINE_CONNECTION_CHANGED_EVENT = 'harness:engine-connection-changed'
@@ -379,12 +371,8 @@ export function getProviderConfig(): Promise<HarnessProviderConfig> {
 
 export function saveProviderConfig(data: HarnessProviderConfigIn): Promise<HarnessProviderConfig> {
   return put<HarnessProviderConfig>('/provider-config/', {
-    default_model: data.default_model ?? '',
     small_model: data.small_model ?? '',
-    computer_use_model: data.computer_use_model ?? '',
-    default_effort: data.default_effort ?? '',
     small_effort: data.small_effort ?? '',
-    computer_use_effort: data.computer_use_effort ?? '',
   })
 }
 

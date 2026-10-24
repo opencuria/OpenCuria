@@ -1,4 +1,4 @@
-<!-- Provider accounts plus organization-wide default models. -->
+<!-- Provider accounts plus organization-wide small-model defaults. -->
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { Button } from '@/components/ui/button'
@@ -179,10 +179,6 @@ const autosave = useAutosave({
     const saved = await saveProviderConfig({
       small_model: smallModel.value.trim(),
       small_effort: smallEffort.value.trim(),
-      default_model: config.value?.default_model ?? '',
-      computer_use_model: config.value?.computer_use_model ?? '',
-      default_effort: config.value?.default_effort ?? '',
-      computer_use_effort: config.value?.computer_use_effort ?? '',
     })
     if (isCurrent()) config.value = saved
   },

@@ -873,12 +873,8 @@ describe("reverse-proxy server prefixes", () => {
 describe("provider model defaults", () => {
   it("reads and saves defaults independently of provider credentials", async () => {
     const defaults = {
-      default_model: "openrouter/main",
       small_model: "openrouter/small",
-      computer_use_model: "",
-      default_effort: "high",
       small_effort: "low",
-      computer_use_effort: "",
     };
     const fetch = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>

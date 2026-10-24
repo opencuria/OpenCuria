@@ -690,16 +690,12 @@ _TOOLS: list[Tool] = [
     ),
     Tool(
         name="save_provider_config",
-        description="Save the org-wide model and reasoning-effort defaults.",
+        description="Save the org-wide small model and reasoning effort.",
         inputSchema={
             "type": "object",
             "properties": {
-                "default_model": {"type": "string"},
                 "small_model": {"type": "string"},
-                "computer_use_model": {"type": "string"},
-                "default_effort": {"type": "string"},
                 "small_effort": {"type": "string"},
-                "computer_use_effort": {"type": "string"},
             },
         },
     ),

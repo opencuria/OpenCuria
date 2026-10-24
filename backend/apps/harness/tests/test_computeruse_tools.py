@@ -265,7 +265,7 @@ def test_allowed_subagent_types_includes_computeruse() -> None:
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
-    ("computer_use_model", "model_override", "ctx_model", "expected_model"),
+    ("configured_model", "model_override", "ctx_model", "expected_model"),
     [
         ("cu-model", None, "parent-model", "cu-model"),
         ("cu-model", "override-model", "parent-model", "override-model"),
@@ -274,12 +274,12 @@ def test_allowed_subagent_types_includes_computeruse() -> None:
 )
 async def test_computeruse_subagent_model_resolution(
     harness_workspace,
-    computer_use_model: str,
+    configured_model: str,
     model_override: str | None,
     ctx_model: str,
     expected_model: str,
 ) -> None:
-    """Computer-use child sessions resolve model override > cu model > parent."""
+    """Resolve model override, fixed AgentConfig model, then inherited parent."""
     accessor = FakeAccessor()
     service = _computeruse_harness_service(accessor)
     parent = HarnessSessionRepository.create(
@@ -303,9 +303,12 @@ async def test_computeruse_subagent_model_resolution(
         ctx=_task_ctx(parent, str(harness_workspace.id), model=ctx_model),
         subtask_id="sub-cu-model",
         organization_id=harness_workspace.runner.organization_id,
-        small_model="small-model",
-        computer_use_model=computer_use_model,
-        default_model="default-model",
+        agent_configs={
+            "computeruse": {
+                "model": configured_model,
+                "inherit_model": not bool(configured_model),
+            }
+        },
     )
     children = list(HarnessSession.objects.filter(parent_id=parent.id))
     assert len(children) == 1
@@ -451,7 +454,6 @@ async def test_parent_cancel_propagates_through_subagent_tool(
             ctx=ctx,
             subtask_id="sub-parent-cancel",
             organization_id=harness_workspace.runner.organization_id,
-            computer_use_model="cu-model",
         )
     )
     await asyncio.sleep(0)
@@ -504,7 +506,6 @@ async def test_independent_computeruse_cancel_converts_to_tool_error(
             ctx=ctx,
             subtask_id="sub-cu-abort",
             organization_id=harness_workspace.runner.organization_id,
-            computer_use_model="cu-model",
         )
     assert current_task_cancelling() == 0
     assert finished
@@ -550,7 +551,6 @@ async def test_independent_child_start_cancel_converts_to_tool_error(
             ctx=ctx,
             subtask_id="sub-general-cancel",
             organization_id=harness_workspace.runner.organization_id,
-            default_model="default-model",
         )
 
     assert current_task_cancelling() == 0
@@ -594,7 +594,6 @@ async def test_computeruse_subagent_run_recording_opt_in(harness_workspace) -> N
         ctx=_task_ctx(parent, str(harness_workspace.id)),
         subtask_id="sub-cu-rec",
         organization_id=harness_workspace.runner.organization_id,
-        computer_use_model="cu-model",
     )
     actions = [call[0] for call in accessor.desktop_calls]
     assert_desktop_lifecycle(accessor, recording=True)
