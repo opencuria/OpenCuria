@@ -36,6 +36,8 @@ _BACKGROUND_STOP_POLL_S = 0.2
 #: candidate) so a hostile/misbehaving backend cannot fan out
 #: unbounded workspace execs.
 _BACKGROUND_VERIFY_MAX_ENTRIES = 100
+# Bound shell argv/output without spawning concurrent Docker execs/SSH channels.
+_BACKGROUND_STATUS_BATCH_SIZE = 100
 
 
 @dataclass
@@ -659,10 +661,15 @@ class BackgroundProcessManager:
         runtime: RuntimeBackend,
         instance_id: str,
         entry: BackgroundProcess,
+        *,
+        is_running: bool | None = None,
     ) -> dict[str, Any]:
-        """Compute a live status dict for a tracked background process."""
-        running = await self._probe_background_pid(runtime, instance_id, entry.pid)
-        if running:
+        """Resolve status, optionally reusing a batched liveness observation."""
+        if is_running is None:
+            is_running = await self._probe_background_pid(
+                runtime, instance_id, entry.pid
+            )
+        if is_running:
             return _status_dict(entry.process_id, "running", None, entry.pid)
         exit_code = await self._read_background_exit_code(
             runtime, instance_id, entry.exit_path
@@ -670,6 +677,86 @@ class BackgroundProcessManager:
         if exit_code is None:
             return _status_dict(entry.process_id, "unknown", None, entry.pid)
         return _status_dict(entry.process_id, "exited", exit_code, entry.pid)
+
+    async def _background_statuses(
+        self,
+        runtime: RuntimeBackend,
+        instance_id: str,
+        entries: list[BackgroundProcess],
+        *,
+        tolerate_errors: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Probe tracked PIDs in bounded batches, preserving entry order.
+
+        Only stopped processes need the existing exit-file read. Heartbeats
+        tolerate failures per batch/read; interactive callers propagate them.
+        Cancellation always propagates, and no tracking state is changed.
+        """
+        results: list[dict[str, Any]] = []
+        for offset in range(0, len(entries), _BACKGROUND_STATUS_BATCH_SIZE):
+            batch = entries[offset : offset + _BACKGROUND_STATUS_BATCH_SIZE]
+            try:
+                if len(batch) == 1:
+                    running = [
+                        await self._probe_background_pid(
+                            runtime, instance_id, batch[0].pid
+                        )
+                    ]
+                else:
+                    code, output = await runtime.exec_command_wait(
+                        instance_id,
+                        command=[
+                            "sh",
+                            "-c",
+                            (
+                                'for pid do if kill -0 "$pid" 2>/dev/null; then '
+                                "printf '1\\n'; else printf '0\\n'; fi; done"
+                            ),
+                            "background-status",
+                            *(str(int(entry.pid)) for entry in batch),
+                        ],
+                        workdir="/workspace",
+                    )
+                    rows = output.splitlines()
+                    if (
+                        code != 0
+                        or len(rows) != len(batch)
+                        or any(row not in {"0", "1"} for row in rows)
+                    ):
+                        raise RuntimeError("Invalid background liveness response")
+                    running = [row == "1" for row in rows]
+            except Exception:
+                if not tolerate_errors:
+                    raise
+                logger.exception(
+                    "background_heartbeat_failed",
+                    workspace_id=str(batch[0].workspace_id),
+                )
+                results.extend(
+                    _status_dict(entry.process_id, "unknown", None, entry.pid)
+                    for entry in batch
+                )
+                continue
+
+            for entry, is_running in zip(batch, running, strict=True):
+                try:
+                    results.append(
+                        await self._background_status_locked(
+                            runtime, instance_id, entry, is_running=is_running
+                        )
+                    )
+                except Exception:
+                    if not tolerate_errors:
+                        raise
+                    logger.exception(
+                        "background_heartbeat_failed",
+                        workspace_id=str(entry.workspace_id),
+                        process_id=entry.process_id,
+                    )
+                    results.append(
+                        _status_dict(entry.process_id, "unknown", None, entry.pid)
+                    )
+        return results
 
     def _get_background_entry(
         self,
@@ -721,22 +808,18 @@ class BackgroundProcessManager:
             raise RuntimeError("Workspace has no instance assigned")
         async with self._background_lock:
             entries = list(self._background_processes.get(workspace_id, {}).values())
-        results: list[dict[str, Any]] = []
-        for entry in entries:
-            status = await self._background_status_locked(
-                runtime, info.instance_id, entry
-            )
-            results.append(
-                {
-                    **status,
-                    "command": entry.command,
-                    "workdir": entry.workdir,
-                    "log_path": entry.log_path,
-                    "name": entry.name,
-                    "started_at": entry.started_at.isoformat(),
-                }
-            )
-        return results
+        statuses = await self._background_statuses(runtime, info.instance_id, entries)
+        return [
+            {
+                **status,
+                "command": entry.command,
+                "workdir": entry.workdir,
+                "log_path": entry.log_path,
+                "name": entry.name,
+                "started_at": entry.started_at.isoformat(),
+            }
+            for entry, status in zip(entries, statuses, strict=True)
+        ]
 
     @live_interaction
     async def stop_background_process(

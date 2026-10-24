@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
+from functools import partial
 from typing import Any
 
 import structlog
@@ -102,7 +103,9 @@ class WorkspaceService:
         )
         self._registry.desktop_sessions = self._desktop._desktop_sessions
         self._registry.background_entries = self._background._background_processes
-        self._registry.background_status = self._background._background_status_locked
+        self._registry.background_statuses = partial(
+            self._background._background_statuses, tolerate_errors=True
+        )
         self._registry.desktop_live = self._desktop._is_desktop_session_live
         self._registry.desktop_manager = self._desktop
         self.capture_fence = CaptureFence(self._registry)

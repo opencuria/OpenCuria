@@ -45,8 +45,9 @@ class WorkspaceRegistry:
         self.desktop_manager: Any | None = None
         self.desktop_sessions: dict[uuid.UUID, DesktopSession] | None = None
         self.background_entries: dict[uuid.UUID, dict[str, Any]] | None = None
-        self.background_status: (
-            Callable[[RuntimeBackend, str, Any], Awaitable[dict[str, Any]]] | None
+        self.background_statuses: (
+            Callable[[RuntimeBackend, str, list[Any]], Awaitable[list[dict[str, Any]]]]
+            | None
         ) = None
         self.desktop_live: Callable[[uuid.UUID], Awaitable[bool]] | None = None
 
@@ -248,33 +249,30 @@ class WorkspaceRegistry:
             processes: list[dict[str, Any]] = []
             if info.status == "running":
                 runtime = self._runtimes.get(info.runtime_type)
-                for entry in entries.get(workspace_id, {}).values():
+                tracked = list(entries.get(workspace_id, {}).values())
+                if tracked:
                     try:
                         if runtime is None or not info.instance_id:
                             raise RuntimeError("runtime unavailable")
-                        if self.background_status is None:
+                        if self.background_statuses is None:
                             raise RuntimeError("runtime unavailable")
-                        processes.append(
-                            await self.background_status(
-                                runtime,
-                                info.instance_id,
-                                entry,
-                            )
+                        processes = await self.background_statuses(
+                            runtime, info.instance_id, tracked
                         )
                     except Exception:
                         logger.exception(
                             "background_heartbeat_failed",
                             workspace_id=str(workspace_id),
-                            process_id=entry.process_id,
                         )
-                        processes.append(
+                        processes = [
                             {
                                 "process_id": entry.process_id,
                                 "status": "unknown",
                                 "exit_code": None,
                                 "pid": entry.pid,
                             }
-                        )
+                            for entry in tracked
+                        ]
             item["processes"] = processes
 
             payload.append(item)
