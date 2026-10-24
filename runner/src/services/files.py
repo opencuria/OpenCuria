@@ -21,6 +21,7 @@ import structlog
 from ..models import WorkspaceInfo
 from ..runtime.base import RuntimeBackend
 from .capture_fence import CaptureFence, live_interaction
+from .directory_archive import DIRECTORY_ARCHIVE_TOO_LARGE, directory_archive_command
 from .exec_kernel import sanitize_filename as _sanitize_filename
 from .exec_kernel import sanitize_path as _sanitize_path
 
@@ -511,40 +512,33 @@ class FileManager:
         is_dir = exit_code == 0
 
         if is_dir:
-            qp_dir = shlex.quote(os.path.dirname(safe_path))
-            qp_base = shlex.quote(os.path.basename(safe_path))
-            # Report the archive size first so huge directories fail with a
-            # small error instead of streaming unbounded base64 into memory.
-            size_cmd = f"tar czf - -C {qp_dir} {qp_base} 2>/dev/null | wc -c"
-            exit_code, size_output = await runtime.exec_command_wait(
+            exit_code, output = await runtime.exec_command_wait(
                 info.instance_id,
-                command=["sh", "-c", size_cmd],
+                command=directory_archive_command(safe_path, FILE_DOWNLOAD_MAX_SIZE),
                 workdir="/workspace",
             )
-            if exit_code != 0:
-                raise RuntimeError(f"Failed to download: {size_output}")
-            try:
-                archive_size = int(size_output.strip().split()[0])
-            except (ValueError, IndexError) as exc:
-                raise RuntimeError(
-                    f"Failed to download: invalid size {size_output!r}"
-                ) from exc
-            if archive_size > FILE_DOWNLOAD_MAX_SIZE:
+            if exit_code == DIRECTORY_ARCHIVE_TOO_LARGE:
                 raise ValueError(
                     "Download exceeds maximum size of "
                     f"{FILE_DOWNLOAD_MAX_SIZE} bytes"
                 )
-            exit_code, output = await runtime.exec_command_wait(
-                info.instance_id,
-                command=[
-                    "sh",
-                    "-c",
-                    f"tar czf - -C {qp_dir} {qp_base} | base64",
-                ],
-                workdir="/workspace",
-            )
+            if exit_code != 0:
+                raise RuntimeError(f"Failed to download: {output}")
+            size_output, separator, output = output.partition("\n")
+            try:
+                raw_size = int(size_output)
+                if not separator or raw_size < 0:
+                    raise ValueError("Missing archive size")
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"Failed to download: invalid size {size_output!r}"
+                ) from exc
+            if raw_size > FILE_DOWNLOAD_MAX_SIZE:
+                raise ValueError(
+                    "Download exceeds maximum size of "
+                    f"{FILE_DOWNLOAD_MAX_SIZE} bytes"
+                )
             filename = os.path.basename(safe_path) + ".tar.gz"
-            raw_size = archive_size
         else:
             qpath = shlex.quote(safe_path)
             shell_cmd = f"test -f {qpath} || exit 1; " f"stat -c '%s' {qpath}"

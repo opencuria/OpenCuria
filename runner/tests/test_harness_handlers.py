@@ -1117,9 +1117,7 @@ class HarnessServiceQuoteInjectionTests(unittest.IsolatedAsyncioTestCase):
         shell_cmd = next(c[2] for c in captured if c[:2] == ["sh", "-c"])
         self.assertIn(shlex.quote(evil), shell_cmd)
 
-    async def test_download_dir_quotes_single_quote_path(self) -> None:
-        import shlex
-
+    async def test_download_dir_passes_single_quote_path_as_argv(self) -> None:
         from src.models import WorkspaceInfo
 
         service, captured, workspace_id = self._service()
@@ -1133,9 +1131,7 @@ class HarnessServiceQuoteInjectionTests(unittest.IsolatedAsyncioTestCase):
                 captured.append(command)
                 if command[:2] == ["test", "-d"]:
                     return 0, ""
-                if command[:2] == ["sh", "-c"] and "wc -c" in command[2]:
-                    return 0, "4\n"
-                return 0, "QUJD"
+                return 0, "3\nQUJD"
 
         service.registry._runtime = DirRuntime()
         info = service.registry._cache[workspace_id]
@@ -1147,8 +1143,8 @@ class HarnessServiceQuoteInjectionTests(unittest.IsolatedAsyncioTestCase):
         evil = "/workspace/x'; touch /tmp/pwned; echo '"
         result = await service.files.download_file(workspace_id, evil)
         self.assertTrue(result["content"])
-        shell_cmd = next(c[2] for c in captured if c[:2] == ["sh", "-c"])
-        self.assertIn(shlex.quote(evil.rsplit("/", 1)[0]), shell_cmd)
+        argv = next(c for c in captured if c[:2] == ["sh", "-c"])
+        self.assertEqual(argv[-3:-1], evil.rsplit("/", 1))
 
 
 class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):

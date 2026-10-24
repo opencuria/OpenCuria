@@ -1,0 +1,21 @@
+{
+  "revision": "working-tree",
+  "samples": 31,
+  "files": 2,
+  "input_bytes": 162816,
+  "download": {
+    "p50_ms": 16.173,
+    "p95_ms": 18.125,
+    "child_cpu_p50_ms": 15.288,
+    "runtime_calls": 3,
+    "archive_bytes": 131543,
+    "peak_python_allocated_bytes": 554542,
+    "archive_contents_sha256": "d29facba7cf08969c70dbf76f7794e3718e9ffbcb0eebd029ee7b935f318ca57"
+  },
+  "notes": [
+    "Real FileManager, containment, tar/gzip, base64 and result parsing.",
+    "Local subprocess runtime; no QEMU or network latency.",
+    "Child CPU includes waited-for tar/gzip/base64 and guest helper.",
+    "Tracemalloc is a separate run: runner allocations, not guest RSS."
+  ]
+}

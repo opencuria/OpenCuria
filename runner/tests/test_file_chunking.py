@@ -398,9 +398,7 @@ def _oversize_download_service():
 
 @pytest.mark.asyncio
 async def test_download_oversize_rejected_via_size_precheck() -> None:
-    # Single-file downloads fail via a stat size precheck (no base64 read);
-    # directory downloads need a size-reporting tar pass first, then the
-    # payload pass — so "before base64" holds for files, not for dirs.
+    # Single-file downloads fail via a stat size precheck (no base64 read).
     service, runtime, workspace_id = _oversize_download_service()
     with pytest.raises(ValueError, match="maximum size"):
         await service.files.download_file(workspace_id, "/workspace/big.bin")
