@@ -2595,7 +2595,19 @@ class HarnessService:
             *(exclude_message_ids or []),
         }
         stored = [message for message in stored if message.id not in excluded_ids]
-        compaction = await self._find_latest_compaction(stored)
+        assistant_by_id = {
+            message.id: message for message in stored if message.role == "assistant"
+        }
+        # Find the checkpoint without reading every assistant's full tool output.
+        checkpoint = await sync_to_async(self.parts.get_latest_completed_compaction)(
+            list(assistant_by_id)
+        )
+        compaction = (
+            (assistant_by_id[checkpoint.message_id], checkpoint)
+            if checkpoint is not None
+            else None
+        )
+        del assistant_by_id
         checkpoint_summary = ""
         compaction_msg_id: uuid.UUID | None = None
         if compaction is not None:
@@ -2724,20 +2736,6 @@ class HarnessService:
                     pending_calls.append(part)
             flush_segment()
         return history
-
-    async def _find_latest_compaction(
-        self, messages: list[HarnessMessage]
-    ) -> tuple[HarnessMessage, HarnessPart] | None:
-        """Return the latest completed compaction part among *messages*."""
-        latest: tuple[HarnessMessage, HarnessPart] | None = None
-        for message in messages:
-            if message.role != "assistant":
-                continue
-            parts = await sync_to_async(self.parts.list_for_message)(message.id)
-            for part in parts:
-                if part.type == "compaction" and part.state == "completed":
-                    latest = (message, part)
-        return latest
 
     @staticmethod
     def _slice_messages_for_compaction(

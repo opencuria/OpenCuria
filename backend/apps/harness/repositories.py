@@ -1518,6 +1518,27 @@ class HarnessPartRepository:
         )
 
     @staticmethod
+    def get_latest_completed_compaction(
+        message_ids: list[uuid.UUID],
+    ) -> HarnessPart | None:
+        """Read the last checkpoint without loading unrelated history payloads."""
+        return (
+            HarnessPart.objects.filter(
+                message_id__in=message_ids, type="compaction", state="completed"
+            )
+            .only("message_id", "output", "meta")
+            .order_by(
+                "-message__position",
+                "-message__created_at",
+                "-message__id",
+                "-position",
+                "-created_at",
+                "-id",
+            )
+            .first()
+        )
+
+    @staticmethod
     def list_for_message(message_id: uuid.UUID) -> list[HarnessPart]:
         """Return all parts of one message in timeline order."""
         return list(
