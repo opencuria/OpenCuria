@@ -6,7 +6,7 @@ import os
 from typing import Any
 
 from ...access.base import HARNESS_WORKSPACE_ROOT
-from ...agents.definitions import AgentDefinition
+from ...agents.definitions import AgentDefinition, canonical_subagent_type
 from ...permissions.evaluator import ASK, DENY, PermissionEvaluator
 from ...tools.base import ToolRegistry
 
@@ -247,8 +247,28 @@ def decide_tool(
     raw = str(source_name or "")
     if key.startswith("__unknown_"):
         return DENY, event_tool, action, event_tool
-    if key == "task" and raw in {"Task", "Agent"} and depth >= max_depth:
-        return DENY, event_tool, action, "Subagent depth limit reached"
+    if raw in {"Task", "Agent"}:
+        if depth >= max_depth:
+            return DENY, event_tool, action, "Subagent depth limit reached"
+        try:
+            canonical_subagent_type(str(arguments.get("subagent_type") or ""))
+        except ValueError:
+            return DENY, event_tool, action, "Unsupported OpenCuria subagent type"
+    if raw in NATIVE_TOOL_KEYS:
+        # Match CLI availability at the hook/callback boundary as well. Agent is
+        # the current wire alias for Task; other task-management tools are not
+        # implicitly authorized just because they share the task permission key.
+        native_name = "Task" if raw == "Agent" else raw
+        if native_name not in native_tools_for_claude(
+            tools=tools,
+            agent=agent,
+            evaluator=evaluator,
+            mode=mode,
+            depth=depth,
+            max_depth=max_depth,
+            selected_skills=selected_skills,
+        ):
+            return DENY, event_tool, action, "Native tool is unavailable in this scope"
     if key == "todowrite" and depth > 0:
         return DENY, event_tool, action, "TodoWrite is unavailable to subagents"
     if raw == "ExitPlanMode":

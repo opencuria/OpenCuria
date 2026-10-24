@@ -433,9 +433,15 @@ class PermissionBridge:
                 self.queue_mcp_call(
                     registry_source, arguments, call_id, authorized=decision != ASK
                 )
-            if decision == ASK:
+            if decision == ASK or (
+                self.mode == "plan" and not is_mcp and source in NATIVE_TOOL_KEYS
+            ):
+                # Since CLI 2.1.299, a hook allow in Plan can fall through to its
+                # auto-mode classifier instead of the host. Ask routes to our
+                # paired callback; preserve the actual OpenCuria decision so an
+                # allowed action does not become a new user approval prompt.
                 return self.hook_decision(
-                    "ask", "OpenCuria permission approval required"
+                    "ask", "OpenCuria permission decision required"
                 )
             if not is_mcp and source in {"Write", "Edit"}:
                 await engine._native_pre_tool(call_id, source, arguments=arguments)
@@ -668,6 +674,10 @@ class PermissionBridge:
                     )
                 )
             if call_id:
+                if source_name in {"Write", "Edit"}:
+                    await engine._native_pre_tool(
+                        call_id, source_name, arguments=arguments
+                    )
                 await engine._start_tool(call_id, parent_id=parent_id)
             return PermissionResultAllow()
         if not call_id:

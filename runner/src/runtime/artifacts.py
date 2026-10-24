@@ -34,29 +34,28 @@ ARTIFACT_DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 ARTIFACT_MAX_DOWNLOAD_SIZE = 300 * 1024 * 1024
 ARTIFACT_GUEST_ROOT = "/opt/opencuria/runtimes"
 CLAUDE_RELEASE_MANIFEST_SHA256 = (
-    "64f5abe05a43151810acf8c25169872e41293c96d3ae73d6508733a8b336e2b1"
+    "895e85ce24c3df3fdb77ac1006bdb2b66f1c42dd557000e65ced1e4aad847e74"
 )
-# Deliberately repinned canonical manifest after adding the pinned Codex entry.
-# Claude release signatures, digests, sizes and URLs are unchanged.
+# Canonical manifest hash after repinning Claude; the Codex entry is unchanged.
 CLAUDE_ARTIFACT_SPEC_SHA256 = (
-    "742e3787874df558942c561b9884287fc4e610debd4cc63b28d1746a78f68d87"
+    "2b93d98daff1c20034f288a02c6842c01b75adc81c8bc1087272d98bdfd0cd4c"
 )
 CLAUDE_PLATFORM_PINS = {
     "linux-x64": (
-        "a967e7b1d8b4e47ee421d5433027880347952b0c0857abf880e2c942a4ec93b3",
-        251456696,
+        "b73676430af12f97316a798b8371f81d640f90a58bdcb8f3ce56a835bb47df56",
+        291638640,
     ),
     "linux-arm64": (
-        "24caa9e6ff13bf227049a2626f1c816fc895023050f0ec3b12dbf14d897367e0",
-        250798072,
+        "9c64d9a7442436b65fcd7cc02c1aa0051bb5a7041e7788576ed3b5f29c447d54",
+        291496120,
     ),
     "linux-x64-musl": (
-        "d23f28ef84f5459a25d2d4cf999a7debd41df83507160446983d4ca65554e50f",
-        245203032,
+        "2ceb05e0a97b09be4c14717464a2156e8d087dea9867a399dd75d3b898ca4824",
+        285302928,
     ),
     "linux-arm64-musl": (
-        "a17c919b13df206371a55de716ab81e3dcd7c039f66b79003ed87b7665fdc15f",
-        243152704,
+        "adfd1f0ef12a3bcafa66e33491fc3e4204e41aeb4a7305ffc311c16c26793825",
+        283658112,
     ),
 }
 
@@ -109,7 +108,7 @@ set -eu
 source=$1 digest=$2 version=$3 stage_name=$4 runtime_root=$5
 case "$runtime_root" in /*) ;; *) exit 2 ;; esac
 case "$runtime_root" in *[!A-Za-z0-9/_-]*|*/../*|*/..) exit 2 ;; esac
-case "$version" in 2.1.292) ;; *) exit 2 ;; esac
+case "$version" in 2.1.310) ;; *) exit 2 ;; esac
 case "$digest" in *[!0-9a-f]*|'') exit 2 ;; esac
 [ "${#digest}" -eq 64 ] || exit 2
 case "$stage_name" in .claude-stage-[0-9a-f]*) ;; *) exit 2 ;; esac
@@ -220,13 +219,13 @@ class RuntimeArtifactManager:
             != CLAUDE_RELEASE_MANIFEST_SHA256
             or manifest_entry.get("signing_fingerprint")
             != "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"
-            or manifest_entry.get("version") != "2.1.292"
+            or manifest_entry.get("version") != "2.1.310"
             or manifest_entry.get("manifest_url")
-            != "https://downloads.claude.ai/claude-code-releases/2.1.292/manifest.json"
+            != "https://downloads.claude.ai/claude-code-releases/2.1.310/manifest.json"
             or manifest_entry.get("signature_url")
-            != "https://downloads.claude.ai/claude-code-releases/2.1.292/manifest.json.sig"
+            != "https://downloads.claude.ai/claude-code-releases/2.1.310/manifest.json.sig"
             or manifest_entry.get("signature_sha256")
-            != "537e1a8bcca1646fd5e52d3dc8d16509395a88f6f18b13765b2c085d057567ea"
+            != "5a441d83b678da97ab2447bfa4fb718fbed07ecc4912909edf96284a4a799011"
             or set(manifest_entry.get("platforms", {})) != set(CLAUDE_PLATFORM_PINS)
         ):
             raise RuntimeError("Runtime artifact manifest integrity check failed")
@@ -263,7 +262,7 @@ class RuntimeArtifactManager:
         platform_key: str,
         digest: str,
         artifact_id: str = "claude-agent",
-        version: str = "2.1.292",
+        version: str = "2.1.310",
     ) -> Path:
         """Create private cache directories, refusing symlinked components."""
         # The configured state directory is operator-controlled; the artifact
@@ -563,7 +562,7 @@ class RuntimeArtifactManager:
         if not entry or entry.get("version") != version:
             raise ArtifactRequestError("Unapproved runtime artifact or version")
         if (artifact_id, version) not in {
-            ("claude-agent", "2.1.292"),
+            ("claude-agent", "2.1.310"),
             ("codex-agent", "0.163.0"),
         }:
             raise ArtifactRequestError("Unapproved runtime artifact or version")
@@ -597,7 +596,7 @@ class RuntimeArtifactManager:
                 and (
                     CLAUDE_PLATFORM_PINS.get(platform_key) != (digest, size)
                     or url
-                    != f"https://downloads.claude.ai/claude-code-releases/2.1.292/{platform_key}/claude"
+                    != f"https://downloads.claude.ai/claude-code-releases/2.1.310/{platform_key}/claude"
                 )
             )
             or (

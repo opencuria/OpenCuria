@@ -29,7 +29,12 @@ from ...providers.base import ToolSchema, Usage
 from ...runner import RunOptions, RunResult
 from ...tools.base import ToolContext, ToolRegistry, ToolResult
 from ...tools.todos import repository_for_session
-from ..catalog import normalize_claude_effort, resolve_claude_sdk_model
+from ..catalog import (
+    CLAUDE_AGENT_SDK_VERSION,
+    CLAUDE_CODE_CLI_VERSION,
+    normalize_claude_effort,
+    resolve_claude_sdk_model,
+)
 from .context import build_user_content
 from .errors import ClaudeTranscriptError
 from .events import ClaudeEventNormalizer, StepState
@@ -48,8 +53,8 @@ from .security import StreamingRedactor, redact_text, redact_value
 from .transport import ClaudeWorkspaceTransport
 
 log = structlog.get_logger(__name__)
-CLI_VERSION = "2.1.292"
-SDK_VERSION = "0.2.164"
+CLI_VERSION = CLAUDE_CODE_CLI_VERSION
+SDK_VERSION = CLAUDE_AGENT_SDK_VERSION
 MAX_RESTORED_TRANSCRIPT_BYTES = 10 * 1024 * 1024
 MAX_MANAGED_PROMPT_BYTES = 256 * 1024
 CANCEL_CLEANUP_TIMEOUT_S = 3.0

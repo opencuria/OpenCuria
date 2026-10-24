@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import uuid
+from functools import cache
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -18,6 +20,10 @@ from pydantic import BaseModel, Field
 
 from apps.harness.access.base import FileContent
 from apps.harness.agents.definitions import get_agent
+from apps.harness.engines.catalog import (
+    CLAUDE_AGENT_SDK_VERSION,
+    CLAUDE_CODE_CLI_VERSION,
+)
 from apps.harness.engines.claude.engine import ClaudeEngine
 from apps.harness.engines.claude.policy import decide_tool, native_tools_for_claude
 from apps.harness.permissions.evaluator import PermissionEvaluator
@@ -26,6 +32,36 @@ from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
 
 BUNDLED_CLAUDE = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
+
+
+@cache
+def require_pinned_cli() -> None:
+    """Fail, rather than silently skip contracts, if SDK and runner pins drift."""
+    assert claude_agent_sdk.__version__ == CLAUDE_AGENT_SDK_VERSION
+    assert BUNDLED_CLAUDE.is_file(), "Pinned SDK CLI is unavailable"
+    version = subprocess.check_output(
+        [str(BUNDLED_CLAUDE), "--version"], text=True, timeout=15
+    )
+    assert version.split()[0] == CLAUDE_CODE_CLI_VERSION
+
+
+def test_bundled_cli_matches_runner_artifact_and_sdk_pin() -> None:
+    """Real-CLI contracts must exercise exactly the production runner artifact."""
+    import hashlib
+
+    require_pinned_cli()
+    manifest = json.loads(
+        (
+            Path(__file__).resolve().parents[4]
+            / "runner/src/runtime/artifact_manifest.json"
+        ).read_text()
+    )["artifacts"]["claude-agent"]
+    assert manifest["version"] == CLAUDE_CODE_CLI_VERSION
+    digest = hashlib.sha256(BUNDLED_CLAUDE.read_bytes()).hexdigest()
+    assert any(
+        pin["sha256"] == digest and pin["size"] == BUNDLED_CLAUDE.stat().st_size
+        for pin in manifest["platforms"].values()
+    )
 
 
 class FakeProcessStream:
@@ -278,7 +314,7 @@ class LocalSseWorkspaceAccessor:
                 remote_config_dir="",
                 local_config_dir="",
             )
-        assert argv[0] == "/opt/opencuria/runtimes/claude-agent/2.1.292/claude"
+        assert argv[0] == "/opt/opencuria/runtimes/claude-agent/2.1.310/claude"
         argv[0] = str(BUNDLED_CLAUDE)
         argv = [
             str(self.guest_path(item))
@@ -417,7 +453,7 @@ def test_cli_argv_is_explicit_bounded_and_resume_is_uuid() -> None:
     engine = ClaudeEngine(tools=default_tool_registry(), accessor=object())
     sid = str(uuid.uuid4())
     argv = engine._build_command(
-        binary="/opt/opencuria/runtimes/claude-agent/2.1.292/claude",
+        binary="/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
         config_dir="/workspace/.opencuria/harness/claude/abc/config",
         mcp_path="/unused",
         prompt_path="/workspace/.opencuria/harness/claude/abc/prompt.md",
@@ -451,7 +487,7 @@ def test_cli_argv_fresh_run_mirrors_session_without_forcing_resume() -> None:
     engine = ClaudeEngine(tools=ToolRegistry(), accessor=object())
     session_id = str(uuid.uuid4())
     argv = engine._build_command(
-        binary="/opt/opencuria/runtimes/claude-agent/2.1.292/claude",
+        binary="/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
         config_dir="/workspace/.opencuria/harness/claude/abc/config",
         mcp_path="",
         prompt_path="/workspace/.opencuria/harness/claude/abc/system-prompt.md",
@@ -773,7 +809,7 @@ async def _run_local_cli_fixture(
             0,
             result={
                 "ok": True,
-                "path": "/opt/opencuria/runtimes/claude-agent/2.1.292/claude",
+                "path": "/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
             },
         ),
     )
@@ -802,8 +838,7 @@ async def _run_local_cli_fixture(
 
 @pytest.mark.asyncio
 async def test_real_sdk_cli_mcp_hook_question_and_followup_sse(tmp_path: Path) -> None:
-    if claude_agent_sdk.__version__ != "0.2.164" or not BUNDLED_CLAUDE.is_file():
-        pytest.skip("Pinned SDK CLI is unavailable")
+    require_pinned_cli()
     (
         result,
         events,
@@ -851,8 +886,7 @@ async def test_real_sdk_cli_mcp_hook_question_and_followup_sse(tmp_path: Path) -
 async def test_real_cli_fresh_session_mirror_is_resumable_without_network(
     tmp_path: Path,
 ) -> None:
-    if claude_agent_sdk.__version__ != "0.2.164" or not BUNDLED_CLAUDE.is_file():
-        pytest.skip("Pinned SDK CLI is unavailable")
+    require_pinned_cli()
     (
         result,
         _events,
@@ -915,8 +949,7 @@ async def test_real_sdk_cli_local_bash_task_does_not_emit_subtask_events(
     tmp_path: Path,
 ) -> None:
     """A foreground Bash task has CLI task frames but is not an Agent subtask."""
-    if claude_agent_sdk.__version__ != "0.2.164" or not BUNDLED_CLAUDE.is_file():
-        pytest.skip("Pinned SDK CLI is unavailable")
+    require_pinned_cli()
 
     (
         result,
@@ -959,8 +992,7 @@ async def test_real_sdk_cli_local_bash_task_does_not_emit_subtask_events(
     ]
     assert local_bash_starts
     assert not any(
-        event.get("type")
-        in {"subtask_started", "subtask_updated", "subtask_finished"}
+        event.get("type") in {"subtask_started", "subtask_updated", "subtask_finished"}
         for event in events
     )
 
@@ -969,8 +1001,7 @@ async def test_real_sdk_cli_local_bash_task_does_not_emit_subtask_events(
 async def test_real_sdk_cli_plan_native_write_uses_open_curia_approval(
     tmp_path: Path,
 ) -> None:
-    if claude_agent_sdk.__version__ != "0.2.164" or not BUNDLED_CLAUDE.is_file():
-        pytest.skip("Pinned SDK CLI is unavailable")
+    require_pinned_cli()
     target = tmp_path / "workspace" / "approved-note.txt"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.unlink(missing_ok=True)
@@ -1002,8 +1033,7 @@ async def test_real_sdk_cli_plan_native_write_uses_open_curia_approval(
 async def test_real_sdk_cli_mcp_ask_is_approved_once_before_dispatch(
     tmp_path: Path,
 ) -> None:
-    if claude_agent_sdk.__version__ != "0.2.164" or not BUNDLED_CLAUDE.is_file():
-        pytest.skip("Pinned SDK CLI is unavailable")
+    require_pinned_cli()
     registry = ToolRegistry()
     note = WriteNoteTool()
     registry.register(note)
@@ -1042,8 +1072,7 @@ async def test_real_sdk_cli_mcp_ask_is_approved_once_before_dispatch(
 @pytest.mark.asyncio
 async def test_real_sdk_cli_folds_steer_into_the_running_turn(tmp_path: Path) -> None:
     """A message queued while a tool runs reaches the model with the tool result."""
-    if claude_agent_sdk.__version__ != "0.2.164" or not BUNDLED_CLAUDE.is_file():
-        pytest.skip("Pinned SDK CLI is unavailable")
+    require_pinned_cli()
     from apps.harness.steering import SteeringChannel
 
     delivered: list[str] = []

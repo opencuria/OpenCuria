@@ -9,17 +9,16 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import claude_agent_sdk
 import pytest
 from aiohttp import web
 
 from apps.harness.tests.test_claude_engine import (
-    BUNDLED_CLAUDE,
     FixtureSessionStore,
     LocalSseWorkspaceAccessor,
     _api_final_message,
     _api_tool_message,
     _sse,
+    require_pinned_cli,
 )
 from apps.harness.tools import default_tool_registry
 
@@ -84,12 +83,13 @@ def _child_read_message(file_path: str) -> bytes:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("subagent_type", ["general", "explore"])
+@pytest.mark.parametrize("mode", ["build", "plan"])
 async def test_local_agent_task_type_preserves_hook_identity_for_child_read(
     tmp_path: Path,
     subagent_type: str,
+    mode: str,
 ) -> None:
-    if claude_agent_sdk.__version__ != "0.2.164" or not BUNDLED_CLAUDE.is_file():
-        pytest.skip("Pinned SDK CLI is unavailable")
+    require_pinned_cli()
 
     requests: list[dict[str, Any]] = []
     fixture_path = str(tmp_path / "workspace" / "child-note.txt")
@@ -189,7 +189,7 @@ async def test_local_agent_task_type_preserves_hook_identity_for_child_read(
             0,
             result={
                 "ok": True,
-                "path": "/opt/opencuria/runtimes/claude-agent/2.1.292/claude",
+                "path": "/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
             },
         ),
     )
@@ -197,8 +197,9 @@ async def test_local_agent_task_type_preserves_hook_identity_for_child_read(
         result = await asyncio.wait_for(
             engine.run(
                 "Use Task to delegate the file read, then return its contents.",
-                "build",
+                mode,
                 "sonnet",
+                mode,
                 opts=RunOptions(
                     session_id=str(uuid.uuid4()),
                     workspace_id=accessor.workspace_id,

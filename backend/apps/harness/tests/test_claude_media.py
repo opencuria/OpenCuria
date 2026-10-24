@@ -10,7 +10,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import claude_agent_sdk
 import pytest
 from mcp.server.lowlevel.server import request_ctx
 from pydantic import BaseModel
@@ -199,11 +198,12 @@ async def test_history_image_parts_are_preserved_but_resume_omits_duplicate_hist
 async def test_local_sse_real_cli_receives_workspace_image_without_provider_network(
     tmp_path: Path,
 ) -> None:
-    from apps.harness.tests.test_claude_engine import _run_local_cli_fixture
+    from apps.harness.tests.test_claude_engine import (
+        _run_local_cli_fixture,
+        require_pinned_cli,
+    )
 
-    bundled_cli = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
-    if claude_agent_sdk.__version__ != "0.2.164" or not bundled_cli.is_file():
-        pytest.skip("Pinned SDK CLI is unavailable")
+    require_pinned_cli()
     payload = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAACXBIWXMAAAABAAAA"
         "AQBPJcTWAAAAKUlEQVR4nO3NsQkAAAzDsPz/c6FPJJvAs5VLpm3vAAAAAAAAAAAAoNgDp+T0"
@@ -245,11 +245,12 @@ async def test_local_sse_real_cli_receives_workspace_image_without_provider_netw
 
 @pytest.mark.asyncio
 async def test_local_sse_real_cli_receives_history_image_blocks(tmp_path: Path) -> None:
-    from apps.harness.tests.test_claude_engine import _run_local_cli_fixture
+    from apps.harness.tests.test_claude_engine import (
+        _run_local_cli_fixture,
+        require_pinned_cli,
+    )
 
-    bundled_cli = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
-    if claude_agent_sdk.__version__ != "0.2.164" or not bundled_cli.is_file():
-        pytest.skip("Pinned SDK CLI is unavailable")
+    require_pinned_cli()
     payload = base64.b64decode(
         "/9j/4AAQSkZJRgABAgAAAQABAAD//gAQTGF2YzYwLjMxLjEwMgD/2wBDAAgEBAQEBAUFBQUFBQYGBgYGBgYGBgYGBgYHBwcICAgHBwcGBgcHCAgICAkJCQgICAgJCQoKCgwMCwsODg4RERT/xABNAAEBAAAAAAAAAAAAAAAAAAAABgEBAQEAAAAAAAAAAAAAAAAAAAYHEAEAAAAAAAAAAAAAAAAAAAAAEQEAAAAAAAAAAAAAAAAAAAAA/8AAEQgAIAAgAwEiAAIRAAMRAP/aAAwDAQACEQMRAD8AiwEo38AAAAAB/9k="
     )

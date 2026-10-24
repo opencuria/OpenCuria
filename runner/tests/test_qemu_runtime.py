@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import libvirt
+
 from src.runtime.base import WorkspaceConfig
 from src.runtime.qemu_runtime import QemuRuntime
 
@@ -380,12 +381,13 @@ class QemuRuntimeAgentStdinTests(unittest.IsolatedAsyncioTestCase):
             "ANTHROPIC_API_KEY": "test-secret",
             "CLAUDE_CONFIG_DIR": "/workspace/.opencuria/harness/claude/12345678-1234-1234-1234-123456789abc/config",
             "CLAUDE_CODE_ENTRYPOINT": "sdk-py",
-            "CLAUDE_AGENT_SDK_VERSION": "0.2.164",
+            "CLAUDE_AGENT_SDK_VERSION": "0.2.174",
             "CLAUDE_CODE_SDK_READS_SESSION_STATE": "1",
             "DISABLE_UPDATES": "1",
             "DISABLE_TELEMETRY": "1",
             "DISABLE_ERROR_REPORTING": "1",
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+            "CLAUDE_CODE_FORK_SUBAGENT": "0",
         }
 
         await runtime.spawn_process(

@@ -326,7 +326,8 @@ async def test_plan_and_child_native_tool_policy_is_applied_at_hook_boundary(
     def decision(result: dict[str, Any]) -> str:
         return result["hookSpecificOutput"]["permissionDecision"]
 
-    assert decision(read) == "allow"
+    assert decision(read) == "ask"  # Route Plan's native allow to the host callback.
+    assert engine._tool_events["plan-read"]["permission_decision"] == "allow"
     native_read_result = await bridge.can_use_tool(
         engine,
         "Read",
@@ -353,8 +354,9 @@ async def test_plan_and_child_native_tool_policy_is_applied_at_hook_boundary(
             "key": "permission",
         }
     ]
-    assert decision(bash_read_only) == "allow"
-    assert decision(bash_mutation) == "allow"
+    assert decision(bash_read_only) == "ask"
+    assert decision(bash_mutation) == "ask"
+    assert engine._tool_events["plan-bash-mutation"]["permission_decision"] == "allow"
     mutation_result = await bridge.can_use_tool(
         engine,
         "Bash",
@@ -386,9 +388,9 @@ async def test_plan_and_child_native_tool_policy_is_applied_at_hook_boundary(
         "explore-websearch",
         None,
     )
-    assert decision(explore_webfetch) == "allow"
-    assert decision(explore_websearch) == "allow"
-    assert decision(selected_skill) == "allow"
+    assert decision(explore_webfetch) == "ask"
+    assert decision(explore_websearch) == "ask"
+    assert decision(selected_skill) == "ask"
     assert decision(unselected_skill) == "deny"
     assert decision(max_depth_task) == "deny"
     schemas = engine._schemas(get_agent("plan"), "plan", 0, options.max_depth)
@@ -948,7 +950,7 @@ async def test_default_allowed_tools_skip_callbacks_and_registered_mcp_dispatche
         "default-read",
         None,
     )
-    assert native_read["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert native_read["hookSpecificOutput"]["permissionDecision"] == "ask"
     native_read_permission = await bridge.can_use_tool(
         engine,
         "Read",
@@ -1108,7 +1110,9 @@ async def test_general_child_can_write_in_plan_mode_without_approval(
         "general-child-write",
         None,
     )
-    assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert engine._tool_events["general-child-write"]["permission_decision"] == "allow"
+    assert "general-child-write" not in engine._native_file_snapshots
     permission = await bridge.can_use_tool(
         engine,
         "Write",
@@ -1116,6 +1120,7 @@ async def test_general_child_can_write_in_plan_mode_without_approval(
         ToolPermissionContext(tool_use_id="general-child-write"),
     )
     assert isinstance(permission, PermissionResultAllow)
+    assert "general-child-write" in engine._native_file_snapshots
     assert callbacks == []
 
 
@@ -1145,8 +1150,13 @@ async def test_general_child_can_write_in_plan_mode_without_approval(
             "deny",
         ),
         (
-            "plan", "build", {}, {"build": {"edit": "ask"}},
-            "Write", "/workspace/a.txt", "ask",
+            "plan",
+            "build",
+            {},
+            {"build": {"edit": "ask"}},
+            "Write",
+            "/workspace/a.txt",
+            "ask",
         ),
         (
             "general",
@@ -1213,9 +1223,7 @@ def test_native_harness_and_claude_bridge_permission_decision_parity(
     native.tools = registry
     native.evaluator = evaluator
     agent = get_agent(agent_name)
-    harness_tool = {"Bash": "bash", "Write": "write", "Edit": "edit"}.get(
-        tool, tool
-    )
+    harness_tool = {"Bash": "bash", "Write": "write", "Edit": "edit"}.get(tool, tool)
     external = harness_tool in {"bash", "process_start"} and detect_external_directory(
         action
     )
@@ -1282,3 +1290,26 @@ async def test_unknown_subagent_hook_type_never_uses_requested_general(
     assert not engine._agent_parent_tool
     with pytest.raises(ValueError, match="Unknown Claude subagent identity"):
         bridge.scope(engine, {"agent_id": "unknown-child"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_name", ["Task", "Agent", "Monitor", "TaskCreate"])
+async def test_new_unscoped_features_never_start_or_reach_approval(
+    fake_accessor, source_name: str
+) -> None:
+    """Even auto-approval cannot authorize unscoped forks or absent built-ins."""
+    engine, bridge, _options, events = _bridge_case(fake_accessor, auto_approve=True)
+    arguments = {"subagent_type": "fork", "prompt": "Inherit the parent tools"}
+    result = await _pre_hook(bridge, engine)(
+        {"tool_name": source_name, "tool_input": arguments}, "unscoped", None
+    )
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "unscoped" not in engine._pending_task_tool_ids
+    assert not any(event["type"] == "tool_started" for event in events)
+    response = await bridge.can_use_tool(
+        engine,
+        source_name,
+        arguments,
+        ToolPermissionContext(tool_use_id="unscoped"),
+    )
+    assert isinstance(response, PermissionResultDeny)

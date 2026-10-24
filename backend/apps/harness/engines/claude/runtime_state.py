@@ -350,6 +350,8 @@ class ClaudeRuntimeState:
             "DISABLE_TELEMETRY": "1",
             "DISABLE_ERROR_REPORTING": "1",
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+            # Forks inherit the parent's tools instead of an OpenCuria child scope.
+            "CLAUDE_CODE_FORK_SUBAGENT": "0",
         }
 
     @staticmethod

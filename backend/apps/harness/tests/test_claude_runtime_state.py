@@ -258,3 +258,11 @@ def test_sdk_preset_is_live_for_resume_updates() -> None:
         "preset": "claude_code",
         "snapshot": False,
     }
+
+
+def test_cli_environment_disables_unscoped_fork_subagents(tmp_path: Path) -> None:
+    """CLI 2.1.302+ must not enable parent-tool-inheriting forks by default."""
+    state = _runtime(tmp_path / "managed")
+    environment = state.cli_environment(str(tmp_path / "managed/session/config"))
+    assert environment["CLAUDE_CODE_FORK_SUBAGENT"] == "0"
+    assert environment["ANTHROPIC_API_KEY"] == "not-a-real-secret"

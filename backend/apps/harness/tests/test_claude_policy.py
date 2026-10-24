@@ -216,3 +216,62 @@ def test_scope_never_escalates_unknown_or_unmapped_child_to_general(
     )
     with pytest.raises(ValueError, match="Unmapped Claude subagent identity"):
         bridge.scope(orphan, {"agent_id": "orphan"})
+
+
+@pytest.mark.parametrize("source_name", ["Task", "Agent"])
+@pytest.mark.parametrize("subagent_type", ["fork", "unknown", "", None])
+def test_native_delegation_rejects_unscoped_children(
+    source_name: str, subagent_type: str | None
+) -> None:
+    """New CLI fork defaults cannot inherit the root's tool/permission scope."""
+    decision, *_ = decide_tool(
+        source_name=source_name,
+        arguments={"subagent_type": subagent_type, "prompt": "Inspect the project"},
+        tools=default_tool_registry(),
+        agent=get_agent("build"),
+        evaluator=PermissionEvaluator(global_rules={"*": "allow"}),
+        mode="build",
+        depth=0,
+        max_depth=2,
+    )
+    assert decision == "deny"
+
+
+@pytest.mark.parametrize("source_name", ["Task", "Agent"])
+@pytest.mark.parametrize("subagent_type", ["general", "general-purpose", "explore"])
+def test_native_delegation_keeps_scoped_children(
+    source_name: str, subagent_type: str
+) -> None:
+    """Both delegated-call wire names retain the supported OpenCuria scopes."""
+    decision, *_ = decide_tool(
+        source_name=source_name,
+        arguments={"subagent_type": subagent_type, "prompt": "Inspect the project"},
+        tools=default_tool_registry(),
+        agent=get_agent("build"),
+        evaluator=PermissionEvaluator(),
+        mode="build",
+        depth=0,
+        max_depth=2,
+    )
+    assert decision == "allow"
+
+
+@pytest.mark.parametrize(
+    "source_name",
+    ["Monitor", "Workflow", "SendMessage", "TaskCreate", "TaskUpdate", "TaskOutput"],
+)
+def test_unexposed_native_tools_cannot_borrow_an_allowed_permission_key(
+    source_name: str,
+) -> None:
+    """A known task permission key must not authorize an absent native tool."""
+    decision, *_ = decide_tool(
+        source_name=source_name,
+        arguments={"command": "printf fixture", "task_id": "fixture"},
+        tools=default_tool_registry(),
+        agent=get_agent("build"),
+        evaluator=PermissionEvaluator(global_rules={"*": "allow"}),
+        mode="build",
+        depth=0,
+        max_depth=2,
+    )
+    assert decision == "deny"

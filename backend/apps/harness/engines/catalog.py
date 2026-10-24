@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from apps.harness.providers.models_catalog import ProviderModel
 
 ENGINE_IDS = ("native", "claude", "codex")
-CLAUDE_AGENT_SDK_VERSION = "0.2.164"
-CLAUDE_CODE_CLI_VERSION = "2.1.292"
+CLAUDE_AGENT_SDK_VERSION = "0.2.174"
+CLAUDE_CODE_CLI_VERSION = "2.1.310"
 DEFAULT_CLAUDE_MODEL = "sonnet"
 DEFAULT_CLAUDE_EFFORT = "high"
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -50,10 +50,12 @@ class ClaudeModelSpec:
         )
 
 
+# First-party defaults for the aliases resolved by the pinned CLI. Haiku joined
+# Sonnet/Opus on 5.5 with a 1M window in CLI 2.1.293; 200K/64K is now stale.
 CLAUDE_MODELS: tuple[ClaudeModelSpec, ...] = (
-    ClaudeModelSpec("sonnet", "Claude Sonnet", "sonnet", 200_000, 64_000),
-    ClaudeModelSpec("opus", "Claude Opus", "opus", 200_000, 64_000),
-    ClaudeModelSpec("haiku", "Claude Haiku", "haiku", 200_000, 64_000),
+    ClaudeModelSpec("sonnet", "Claude Sonnet", "sonnet", 1_000_000, 128_000),
+    ClaudeModelSpec("opus", "Claude Opus", "opus", 1_000_000, 128_000),
+    ClaudeModelSpec("haiku", "Claude Haiku", "haiku", 1_000_000, 128_000),
 )
 
 

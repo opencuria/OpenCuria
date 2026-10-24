@@ -18,11 +18,18 @@ their expiry; to reconnect, paste a valid token.
 In a new chat, choose **Claude Agent Build** or **Claude Agent Plan**. Chats keep
 their selected harness; start a new chat to choose another. Model and effort use
 the shared model picker, which offers `sonnet`, `opus`, and `haiku`. These are
-runtime-resolved aliases, not fixed model versions. Both modes use the same
-configured permission rules as the native OpenCuria harness. Build allows tools
+runtime-resolved aliases, not fixed model versions. The pinned CLI resolves the
+first-party aliases to the 5.5 family (including Haiku 5.5 since CLI 2.1.293).
+The catalog advertises their current first-party defaults: 1M context and 128K
+maximum output tokens; account entitlements and upstream policy still apply.
+Both modes use the same configured permission rules as the native OpenCuria
+harness. Build allows tools
 by default; the primary Plan agent asks before direct file edits/writes but
 allows Bash, background processes, and registered MCP tools without additional
-Claude-specific approval gates. Explicit `ask`/`deny` rules still apply.
+Claude-specific approval gates. For native tools in Plan, hooks route through
+the paired host callback, which rechecks OpenCuria policy; an allowed action
+needs no extra user approval or Claude auto-mode classifier call. Explicit
+`ask`/`deny` rules still apply.
 Subagents use their own OpenCuria agent rules; general subagents are not
 restricted by an extra Plan gate, while Explore remains read-only. Plan does not
 switch to Build automatically.
@@ -72,11 +79,11 @@ expose the same behavior.
 
 Deploy matching OpenCuria backend and runner versions; apply migrations
 `0028_claude_harness`, `0029_harnessrun`, and `0006_scheduledtask_harness_id`.
-The backend pins `claude-agent-sdk==0.2.164`; the runner provisions Claude Code
-CLI `2.1.292` at:
+The backend pins `claude-agent-sdk==0.2.174`; the runner provisions Claude Code
+CLI `2.1.310` at:
 
 ```text
-/opt/opencuria/runtimes/claude-agent/2.1.292/claude
+/opt/opencuria/runtimes/claude-agent/2.1.310/claude
 ```
 
 The checked-in [artifact manifest](../runner/src/runtime/artifact_manifest.json)
@@ -94,7 +101,25 @@ The runner provisions the pinned CLI on demand and reuses the verified workspace
 artifact; it does not look up `latest` or allow CLI self-updates. A version change requires a reviewed OpenCuria manifest/code
 update and coordinated backend/runner deployment. Keep `$RUNNER_STATE_DIR`
 persistent across restarts; the artifact cache is under
-`artifacts/claude-agent/2.1.292/` in the runner state volume.
+`artifacts/claude-agent/2.1.310/` in the runner state volume.
+
+### Upgrade review: CLI 2.1.292 → 2.1.310 / SDK 0.2.164 → 0.2.174
+
+Reviewed against the official [CLI changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md)
+and [Python SDK changelog](https://github.com/anthropics/claude-agent-sdk-python/blob/main/CHANGELOG.md)
+on 2026-10-24:
+
+| Change | OpenCuria handling |
+| --- | --- |
+| Plan hook approvals now keep CLI write checks (2.1.299) | Native Plan actions explicitly route to the existing host permission callback. Root edit approval, child scopes, explicit denies and MCP approval correlation remain enforced. No bypass/auto permission mode is enabled. |
+| Fork subagents default on in SDK/headless sessions (2.1.302) | Disabled with the required fixed `CLAUDE_CODE_FORK_SUBAGENT=0` on both backend and runner/guest. Task/Agent hooks reject unsupported child types before launch, rather than inheriting the parent's tools. Scoped General/Explore delegation remains available. Native forks need explicit identity, permissions, depth and lifecycle support before being enabled. |
+| Monitor and plugin monitors work with telemetry disabled (2.1.310) | Not exposed by the explicit native tool allowlist. Unknown tools fail closed; recognized native tools are also checked against the current agent's allowlist at the hook boundary. Use OpenCuria's managed process tools. Monitor support would need permission mapping, event projection and cleanup/lease integration first. |
+| Haiku 5.5 becomes the first-party `haiku` alias (2.1.293) | Aliases still pass through; the catalog's outdated 200K/64K metadata is updated to the current 1M/128K first-party defaults. Alias targets and Anthropic pricing can change. |
+| `Read.allow_large` (2.1.296), typed hook/init payloads (SDK 0.2.166) | Native schemas remain CLI-owned; no duplicated schemas or new UI required. Existing hook/event normalization remains compatible. |
+| Tool allowlist enforcement, MCP reconnect/retry and compaction/resume fixes (2.1.295–2.1.310) | Adopted through the pinned update. Real-CLI contracts cover schemas, permissions, resume, child identity, media, steering, skills and todos. Encrypted eager transcript mirroring remains authoritative. SDK 0.2.170 also fixes parallel branches in its session-message helpers; OpenCuria restores raw mirrored entries. |
+| Idle compaction (2.1.299) | Runs remain turn-scoped; native compaction and resume stay CLI-owned. No independent idle Claude process or OpenCuria scheduler is added. |
+| Unanswered headless MCP elicitation (2.1.310) | The bridge has no generic MCP elicitation-to-UI handler. Use the existing OpenCuria question tool; interactive MCP elicitation needs a separate validated, cancellable user-input bridge before being offered. |
+| Mods/plugin monitors, auto-mode setup, workflows, telemetry events, Remote Control/cloud/terminal UI changes | No automatic opt-in or duplicate OpenCuria UI. Selected skill bodies are trusted native plugin content and can contain executable frontmatter; review them like code. Supporting untrusted executable skill hooks/mods needs a separate policy review. Repository/user setting sources remain disabled. |
 
 ## Workspace and data
 
@@ -174,9 +199,14 @@ Run relevant component suites when changing or deploying them:
 ```
 
 Backend accessor and runner-handler tests cover the artifact RPC contract.
-Runner artifact tests cover provisioning and, when pinned CLI bytes are
-available locally, run the installer against them using a local shell and
-filesystem fake—not a Docker or QEMU guest. Backend local-SSE contract tests run
+Runner artifact tests cover provisioning. Set `CLAUDE_TEST_BINARY` to a local
+Linux x64 release binary to run the actual installer/cache/corruption contract;
+its size/hash must match the checked-in pin. This uses a local shell and
+filesystem fake—not a Docker or QEMU guest. Backend local-SSE contracts fail if
+the installed SDK/bundled CLI differs from the production pins; a separate check
+compares the bundled binary's size/hash with the runner manifest. These tests run
 the real pinned CLI against scripted responses and cover native schemas, prompt
-preservation on resume, child context/tool scopes, direct image/PDF input, permission
-hooks, MCP correlation, and turn-limit completion without real provider calls.
+preservation on resume, child context/tool scopes, direct image/PDF input,
+permission allow/ask/deny paths, MCP correlation, steering, selected skills,
+native edits, todos and turn-limit completion without real provider calls.
+They do not verify Anthropic token validity, billing or live model inference.

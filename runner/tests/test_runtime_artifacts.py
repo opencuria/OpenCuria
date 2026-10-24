@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import shutil
 import tarfile
 import uuid
@@ -29,7 +30,7 @@ class FakeArtifactRuntime:
         self.exec_command_wait = AsyncMock(side_effect=self._exec)
         self.put_archive = AsyncMock()
         self.install_rc = 0
-        self.output = "2.1.292\n"
+        self.output = "2.1.310\n"
 
     async def _exec(self, instance_id, command, workdir=None, env=None):
         if command[0] == "sh" and command[1] == "-c":
@@ -92,16 +93,16 @@ async def test_ensure_downloads_once_caches_hash_and_returns_pinned_path(setup_m
     workspace_id = uuid.uuid4()
 
     first = await manager.ensure_runtime_artifact(
-        workspace_id, "claude-agent", "2.1.292"
+        workspace_id, "claude-agent", "2.1.310"
     )
     second = await manager.ensure_runtime_artifact(
-        workspace_id, "claude-agent", "2.1.292"
+        workspace_id, "claude-agent", "2.1.310"
     )
 
     assert first == {
         "ok": True,
-        "path": f"{manager._guest_runtime_root}/claude-agent/2.1.292/claude",
-        "version": "2.1.292",
+        "path": f"{manager._guest_runtime_root}/claude-agent/2.1.310/claude",
+        "version": "2.1.310",
         "platform": "linux-x64",
     }
     assert second == first
@@ -116,11 +117,11 @@ async def test_ensure_downloads_once_caches_hash_and_returns_pinned_path(setup_m
 @pytest.mark.asyncio
 async def test_cache_hash_mismatch_triggers_a_verified_redownload(setup_manager):
     manager, _runtime, _info, _payload, digest = setup_manager
-    await manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.292")
+    await manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.310")
     cache = next(manager._cache_root.rglob("claude"))
     cache.write_bytes(b"corrupt")
 
-    await manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.292")
+    await manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.310")
 
     assert manager._download.await_count == 2
     assert manager._hash_file(cache) == digest
@@ -131,9 +132,9 @@ async def test_rejects_unsupported_guest_platform_and_unapproved_artifact(setup_
     manager, runtime, _info, _payload, _digest = setup_manager
     runtime.platform = "linux-riscv64"
     with pytest.raises(ValueError, match="Unsupported workspace platform"):
-        await manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.292")
+        await manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.310")
     with pytest.raises(ValueError, match="Unapproved"):
-        await manager.ensure_runtime_artifact(uuid.uuid4(), "anything", "2.1.292")
+        await manager.ensure_runtime_artifact(uuid.uuid4(), "anything", "2.1.310")
     manager._download.assert_not_awaited()
 
 
@@ -143,7 +144,7 @@ async def test_provision_failure_is_sanitized(setup_manager):
     runtime.put_archive.side_effect = RuntimeError("secret stdout or env")
 
     with pytest.raises(ArtifactProvisionError, match="Runtime artifact provisioning failed") as exc:
-        await manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.292")
+        await manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.310")
 
     assert "secret" not in str(exc.value)
 
@@ -176,7 +177,7 @@ async def test_cancelled_archive_upload_is_settled_then_temp_is_removed(setup_ma
 
     runtime.exec_command_wait.side_effect = platform_exec
     request = asyncio.create_task(
-        manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.292")
+        manager.ensure_runtime_artifact(uuid.uuid4(), "claude-agent", "2.1.310")
     )
     await asyncio.wait_for(entered.wait(), 2)
     request.cancel()
@@ -192,13 +193,17 @@ async def test_cancelled_archive_upload_is_settled_then_temp_is_removed(setup_ma
     assert not manager._background_guest_tasks
 
 
-@pytest.mark.skipif(not Path("/tmp/claude-x64").is_file(), reason="real pinned CLI not available")
+@pytest.mark.skipif(
+    not os.environ.get("CLAUDE_TEST_BINARY")
+    or not Path(os.environ["CLAUDE_TEST_BINARY"]).is_file(),
+    reason="set CLAUDE_TEST_BINARY to the versioned Claude CLI release binary",
+)
 @pytest.mark.asyncio
 async def test_real_pinned_claude_binary_install_cache_and_corruption(
     tmp_path, monkeypatch
 ):
     """Run actual release bytes and guest installer through local runtime fakes."""
-    source = Path("/tmp/claude-x64")
+    source = Path(os.environ["CLAUDE_TEST_BINARY"])
     expected, size = artifacts.CLAUDE_PLATFORM_PINS["linux-x64"]
     assert source.stat().st_size == size
     digest = await asyncio.to_thread(lambda: hashlib.file_digest(source.open("rb"), "sha256").hexdigest())
@@ -251,7 +256,7 @@ async def test_real_pinned_claude_binary_install_cache_and_corruption(
             return None
 
         def get(self, url, *, allow_redirects):
-            assert url == "https://downloads.claude.ai/claude-code-releases/2.1.292/linux-x64/claude"
+            assert url == "https://downloads.claude.ai/claude-code-releases/2.1.310/linux-x64/claude"
             assert allow_redirects is False
             return FakeResponse()
 
@@ -301,7 +306,7 @@ async def test_real_pinned_claude_binary_install_cache_and_corruption(
     runtime.exec_command_wait = AsyncMock(side_effect=guest_exec)
     workspace_id = uuid.uuid4()
     result = await manager.ensure_runtime_artifact(
-        workspace_id, "claude-agent", "2.1.292"
+        workspace_id, "claude-agent", "2.1.310"
     )
     installed = root / result["path"].lstrip("/")
     cached_binary = next(manager._cache_root.rglob("claude"))
@@ -314,12 +319,12 @@ async def test_real_pinned_claude_binary_install_cache_and_corruption(
         str(installed), "--version", stdout=asyncio.subprocess.PIPE
     )
     output, _ = await version.communicate()
-    assert version.returncode == 0 and output.decode().startswith("2.1.292 ")
+    assert version.returncode == 0 and output.decode().startswith("2.1.310 ")
     inode = installed.stat().st_ino
 
     # Idempotent ensure keeps the same pinned executable inode.
     assert await manager.ensure_runtime_artifact(
-        workspace_id, "claude-agent", "2.1.292"
+        workspace_id, "claude-agent", "2.1.310"
     ) == result
     assert installed.stat().st_ino == inode
 
@@ -330,5 +335,5 @@ async def test_real_pinned_claude_binary_install_cache_and_corruption(
     )
     with pytest.raises(ArtifactProvisionError):
         await manager.ensure_runtime_artifact(
-            workspace_id, "claude-agent", "2.1.292"
+            workspace_id, "claude-agent", "2.1.310"
         )

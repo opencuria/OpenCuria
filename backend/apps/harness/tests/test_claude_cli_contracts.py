@@ -9,7 +9,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import claude_agent_sdk
 import pytest
 
 from apps.harness.agents.definitions import get_agent
@@ -18,18 +17,14 @@ from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.prompts.opencuria import opencuria_context
 from apps.harness.tests.conftest import TINY_PNG
 from apps.harness.tests.test_claude_engine import (
-    BUNDLED_CLAUDE,
     FixtureSessionStore,
     WriteNoteTool,
     _run_local_cli_fixture,
 )
+from apps.harness.tests.test_claude_engine import (
+    require_pinned_cli as _require_pinned_cli,
+)
 from apps.harness.tools import default_tool_registry
-
-
-def _require_pinned_cli() -> None:
-    """Skip when the repository's pinned SDK/CLI fixture is unavailable."""
-    if claude_agent_sdk.__version__ != "0.2.164" or not BUNDLED_CLAUDE.is_file():
-        pytest.skip("Pinned SDK CLI is unavailable")
 
 
 def _system_text(request: dict[str, Any]) -> str:
