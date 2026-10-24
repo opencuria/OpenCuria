@@ -407,7 +407,7 @@ class _ScriptedMetadataRuntime(FakeGitRuntime):
     """Fake with scripted rev-parse metadata outputs (pure escape tests).
 
     *git_dir_output* / *common_output* are served verbatim for the
-    preferred probes (absolute common-dir), so hostile multiline/empty
+    combined root/metadata probe, so hostile multiline/empty
     values can be exercised without touching the filesystem.  ``realpath``
     failures are injected via *realpath_fail_prefixes*: any
     ``realpath -m`` target starting with such a prefix returns exit 1.
@@ -438,19 +438,21 @@ class _ScriptedMetadataRuntime(FakeGitRuntime):
     ) -> tuple[int, str]:
         argv = [str(c) for c in command]
         inner = git_ops.unwrap_git_exec_argv(argv) or argv
-        if inner == ["git", "rev-parse", "--absolute-git-dir"]:
-            if self.git_dir_output is not None:
-                self.calls.append((argv, workdir, dict(env or {})))
-                return 0, self.git_dir_output
         if inner == [
-            "git",
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-common-dir",
+            "git", "rev-parse", "--path-format=absolute", "--show-toplevel",
+            "--absolute-git-dir", "--git-common-dir",
         ]:
-            if self.common_output is not None or self.common_exit_code:
-                self.calls.append((argv, workdir, dict(env or {})))
-                return self.common_exit_code, self.common_output or ""
+            code, output = await super().exec_command_wait(
+                instance_id, command, workdir, env
+            )
+            if code != 0:
+                return code, output
+            paths = output.splitlines(keepends=True)
+            if self.git_dir_output is not None:
+                paths[1] = self.git_dir_output
+            if self.common_output is not None:
+                paths[2] = self.common_output
+            return self.common_exit_code, "".join(paths)
         if inner[:2] == ["realpath", "-m"]:
             target = inner[2] if len(inner) > 2 else ""
             if target.startswith(self.realpath_fail_prefixes):

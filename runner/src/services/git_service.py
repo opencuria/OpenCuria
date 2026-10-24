@@ -211,75 +211,6 @@ class GitService:
             )
         return resolved
 
-    async def _git_verify_metadata_paths(
-        self,
-        runtime: RuntimeBackend,
-        instance_id: str,
-        repo_root: str,
-        env: dict[str, str],
-    ) -> str:
-        """Verify gitdir + common-dir live under ``/workspace`` (fail-closed).
-
-        *repo_root* is an already containment-checked ``/workspace`` path
-        used as ``workdir`` and as the only path echoed in errors.  All
-        rev-parse outputs must be single-line absolute paths; empty,
-        multiline or relative values reject. Both metadata paths are
-        passed through ``realpath -m`` containment. Returns the verified
-        (realpath) git dir. All probes use fixed argv lists.
-        """
-        exit_code, output = await self._git_exec(
-            runtime,
-            instance_id,
-            ["git", "rev-parse", "--absolute-git-dir"],
-            workdir=repo_root,
-            env=env,
-            timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        if exit_code != 0:
-            raise git_ops.GitError(
-                "not_a_repo",
-                f"Path is not a git repository: {repo_root}",
-                exit_code=exit_code,
-                stderr="",
-            )
-        git_dir_raw = git_ops.parse_single_path_output(output)
-        if git_dir_raw is None or not git_dir_raw.startswith("/"):
-            raise git_ops.GitError(
-                "not_a_repo",
-                f"Path is not a git repository: {repo_root}",
-                exit_code=exit_code,
-                stderr="",
-            )
-        git_dir = await self._git_realpath_contained(
-            runtime, instance_id, git_dir_raw, env,
-            context="metadata", display=repo_root,
-        )
-        exit_code_c, output_c = await self._git_exec(
-            runtime,
-            instance_id,
-            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            workdir=repo_root,
-            env=env,
-            timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        common_candidate = git_ops.parse_single_path_output(output_c)
-        if (
-            exit_code_c != 0
-            or common_candidate is None
-            or not common_candidate.startswith("/")
-        ):
-            raise git_ops.GitError(
-                "not_a_repo",
-                f"Path is not a git repository: {repo_root}",
-                exit_code=exit_code_c,
-                stderr="",
-            )
-        await self._git_realpath_contained(
-            runtime, instance_id, common_candidate, env,
-            context="metadata", display=repo_root,
-        )
-        return git_dir
-
     async def _git_verify_repo_root(
         self,
         runtime: RuntimeBackend,
@@ -287,39 +218,55 @@ class GitService:
         resolved: str,
         env: dict[str, str],
     ) -> str:
-        """Verify *resolved* is a repo root with in-workspace metadata.
+        """Verify the repo root and both metadata paths with one Git probe.
 
-        Central root+metadata check shared by explicit resolution and
-        discovery: ``--show-toplevel`` must equal *resolved*, then gitdir +
-        common-dir must resolve under ``/workspace``.  *resolved* must
-        already be a ``/workspace`` path (realpath-contained by the caller).
+        ``resolved`` is already realpath-contained by the caller. Git emits
+        exactly three absolute paths in option order. Reject malformed output
+        before resolving metadata; distinct gitdir/common-dir paths (worktrees)
+        each need their own containment check. Ordinary repos share one path.
         """
         exit_code, output = await self._git_exec(
             runtime,
             instance_id,
-            ["git", "rev-parse", "--show-toplevel"],
+            [
+                "git", "rev-parse", "--path-format=absolute", "--show-toplevel",
+                "--absolute-git-dir", "--git-common-dir",
+            ],
             workdir=resolved,
             env=env,
             timeout=git_ops.GIT_READ_TIMEOUT_S,
         )
-        if exit_code != 0:
+        paths = [
+            git_ops.parse_single_path_output(line) or "" for line in output.splitlines()
+        ]
+        if (
+            exit_code != 0
+            or len(paths) != 3
+            or any(not path.startswith("/") for path in paths)
+        ):
             raise git_ops.GitError(
                 "not_a_repo",
                 f"Path is not a git repository: {resolved}",
                 exit_code=exit_code,
                 stderr="",
             )
-        toplevel = git_ops.parse_single_path_output(output)
-        if toplevel is None or toplevel != resolved:
+        toplevel, git_dir_raw, common_dir_raw = paths
+        if toplevel != resolved:
             raise git_ops.GitError(
                 "not_a_repo",
                 f"Path is not a repository root: {resolved}",
                 exit_code=exit_code,
                 stderr="",
             )
-        await self._git_verify_metadata_paths(
-            runtime, instance_id, resolved, env
+        await self._git_realpath_contained(
+            runtime, instance_id, git_dir_raw, env,
+            context="metadata", display=resolved,
         )
+        if common_dir_raw != git_dir_raw:
+            await self._git_realpath_contained(
+                runtime, instance_id, common_dir_raw, env,
+                context="metadata", display=resolved,
+            )
         return resolved
 
     async def _git_resolve_repo_root(
