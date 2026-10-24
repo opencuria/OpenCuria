@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from apps.mcp_app.server import _call_create_image_artifact
+from apps.mcp_app.tools.images import _call_create_image_artifact
 from common.exceptions import ConflictError, NotFoundError
 
 
@@ -23,11 +23,11 @@ def test_capture_reports_outcome_and_always_closes_loop(monkeypatch, error_type)
             else error_type("Capture diagnostic")
         )
     monkeypatch.setattr(
-        "apps.mcp_app.server._get_owned_workspace_or_error",
+        "apps.mcp_app.access.owned_workspace_or_error",
         lambda *args: (workspace, None),
     )
     monkeypatch.setattr(
-        "apps.mcp_app.server._runner_service",
+        "apps.mcp_app.access.runner_service",
         lambda: SimpleNamespace(create_image_artifact=capture),
     )
     loop = asyncio.new_event_loop()
@@ -57,11 +57,11 @@ def test_capture_reports_outcome_and_always_closes_loop(monkeypatch, error_type)
 def test_capture_unexpected_error_also_closes_loop(monkeypatch):
     workspace = SimpleNamespace(id=uuid.uuid4())
     monkeypatch.setattr(
-        "apps.mcp_app.server._get_owned_workspace_or_error",
+        "apps.mcp_app.access.owned_workspace_or_error",
         lambda *args: (workspace, None),
     )
     monkeypatch.setattr(
-        "apps.mcp_app.server._runner_service",
+        "apps.mcp_app.access.runner_service",
         lambda: SimpleNamespace(
             create_image_artifact=AsyncMock(side_effect=RuntimeError("unexpected"))
         ),

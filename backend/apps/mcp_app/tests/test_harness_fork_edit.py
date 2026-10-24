@@ -34,15 +34,15 @@ from apps.harness.providers.base import (
 )
 from apps.harness.repositories import HarnessMessageRepository, HarnessPartRepository
 from apps.harness.tests.helpers import parts_for_session
-from apps.mcp_app.server import (
-    _TOOL_HANDLERS,
-    _TOOL_PERMISSIONS,
-    _TOOLS,
+from apps.mcp_app.server import create_mcp_server
+from apps.mcp_app.tools import TOOL_HANDLERS, TOOL_PERMISSIONS, TOOLS
+from apps.mcp_app.tools.harness_sessions import (
     _call_edit_harness_message,
     _call_fork_harness_session,
+)
+from apps.mcp_app.tools.harness_timeline import (
     _call_get_harness_part,
     _call_get_harness_timeline,
-    create_mcp_server,
 )
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
@@ -143,28 +143,28 @@ def _key(user, permissions: list[APIKeyPermission]) -> SimpleNamespace:
 
 def test_timeline_detail_mcp_tools_registered_read_permission() -> None:
     """Timeline and detail parity tools are discoverable to read-only keys."""
-    names = {tool.name for tool in _TOOLS}
+    names = {tool.name for tool in TOOLS}
     assert {"get_harness_timeline", "get_harness_part"} <= names
     assert "list_harness_parts" not in names
-    assert "list_harness_parts" not in _TOOL_PERMISSIONS
-    assert "list_harness_parts" not in _TOOL_HANDLERS
-    assert _TOOL_PERMISSIONS["get_harness_timeline"] == APIKeyPermission.HARNESS_READ
-    assert _TOOL_PERMISSIONS["get_harness_part"] == APIKeyPermission.HARNESS_READ
-    assert _TOOL_HANDLERS["get_harness_timeline"] is _call_get_harness_timeline
-    assert _TOOL_HANDLERS["get_harness_part"] is _call_get_harness_part
+    assert "list_harness_parts" not in TOOL_PERMISSIONS
+    assert "list_harness_parts" not in TOOL_HANDLERS
+    assert TOOL_PERMISSIONS["get_harness_timeline"] == APIKeyPermission.HARNESS_READ
+    assert TOOL_PERMISSIONS["get_harness_part"] == APIKeyPermission.HARNESS_READ
+    assert TOOL_HANDLERS["get_harness_timeline"] is _call_get_harness_timeline
+    assert TOOL_HANDLERS["get_harness_part"] is _call_get_harness_part
 
 
 def test_fork_edit_tools_registered_with_run_permission() -> None:
     """Both tools are exposed and require ``harness:run``."""
-    names = {tool.name for tool in _TOOLS}
+    names = {tool.name for tool in TOOLS}
     assert {"fork_harness_session", "edit_harness_message"} <= names
-    assert _TOOL_PERMISSIONS["fork_harness_session"] == APIKeyPermission.HARNESS_RUN
-    assert _TOOL_PERMISSIONS["edit_harness_message"] == APIKeyPermission.HARNESS_RUN
-    assert _TOOL_HANDLERS["fork_harness_session"] is _call_fork_harness_session
-    assert _TOOL_HANDLERS["edit_harness_message"] is _call_edit_harness_message
+    assert TOOL_PERMISSIONS["fork_harness_session"] == APIKeyPermission.HARNESS_RUN
+    assert TOOL_PERMISSIONS["edit_harness_message"] == APIKeyPermission.HARNESS_RUN
+    assert TOOL_HANDLERS["fork_harness_session"] is _call_fork_harness_session
+    assert TOOL_HANDLERS["edit_harness_message"] is _call_edit_harness_message
     assert inspect.iscoroutinefunction(_call_fork_harness_session)
     assert inspect.iscoroutinefunction(_call_edit_harness_message)
-    fork_tool = next(tool for tool in _TOOLS if tool.name == "fork_harness_session")
+    fork_tool = next(tool for tool in TOOLS if tool.name == "fork_harness_session")
     assert fork_tool.inputSchema["properties"]["include_message"] == {
         "type": "boolean",
         "default": False,
@@ -218,7 +218,7 @@ def test_mcp_fork_edit_permission_denied_at_call_time(monkeypatch) -> None:
         prompt="seed",
         user_id=user.id,
     )
-    monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
+    monkeypatch.setattr("apps.mcp_app.access.harness_service", lambda: service)
     read_key = _key(user, [APIKeyPermission.HARNESS_READ])
     server = create_mcp_server(read_key)
     handler = server.request_handlers[_types.CallToolRequest]
@@ -277,7 +277,7 @@ async def test_mcp_fork_happy_path(monkeypatch) -> None:
     second_user = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="user", content="second"
     )
-    monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
+    monkeypatch.setattr("apps.mcp_app.access.harness_service", lambda: service)
     api_key = SimpleNamespace(user=user)
     result = await _call_fork_harness_session(
         api_key,
@@ -340,7 +340,7 @@ async def test_mcp_fork_includes_last_assistant_and_parts(monkeypatch) -> None:
     source_part_state = [
         (part.id, part.message_id, part.output, part.position) for part in source_parts
     ]
-    monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
+    monkeypatch.setattr("apps.mcp_app.access.harness_service", lambda: service)
 
     result = await _call_fork_harness_session(
         SimpleNamespace(user=user),
@@ -398,7 +398,7 @@ async def test_mcp_fork_include_message_without_id(monkeypatch) -> None:
         prompt="first",
         user_id=user.id,
     )
-    monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
+    monkeypatch.setattr("apps.mcp_app.access.harness_service", lambda: service)
     result = await _call_fork_harness_session(
         SimpleNamespace(user=user),
         org.id,
@@ -421,7 +421,7 @@ async def test_mcp_fork_full_copy_without_message_id(monkeypatch) -> None:
     await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="user", content="first"
     )
-    monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
+    monkeypatch.setattr("apps.mcp_app.access.harness_service", lambda: service)
     api_key = SimpleNamespace(user=user)
     result = await _call_fork_harness_session(
         api_key, org.id, {"session_id": str(session.id)}
@@ -480,7 +480,7 @@ async def test_mcp_fork_rejects_foreign_session(monkeypatch) -> None:
         prompt="seed",
         user_id=user.id,
     )
-    monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
+    monkeypatch.setattr("apps.mcp_app.access.harness_service", lambda: service)
     api_key = SimpleNamespace(user=stranger)
     result = await _call_fork_harness_session(
         api_key, org.id, {"session_id": str(session.id)}
@@ -508,7 +508,7 @@ async def test_mcp_edit_happy_path(monkeypatch) -> None:
     await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="user", content="second"
     )
-    monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
+    monkeypatch.setattr("apps.mcp_app.access.harness_service", lambda: service)
     api_key = SimpleNamespace(user=user)
     result = await _call_edit_harness_message(
         api_key,
@@ -575,7 +575,7 @@ async def test_mcp_edit_busy_reports_conflict(monkeypatch) -> None:
 
     task = loop.create_task(_never())
     service._tasks[str(session.id)] = task
-    monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
+    monkeypatch.setattr("apps.mcp_app.access.harness_service", lambda: service)
     try:
         api_key = SimpleNamespace(user=user)
         result = await _call_edit_harness_message(

@@ -9,12 +9,8 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from apps.accounts.models import APIKeyPermission
-from apps.mcp_app.server import (
-    _TOOL_HANDLERS,
-    _TOOL_PERMISSIONS,
-    _TOOLS,
-    _call_read_desktop_clipboard,
-)
+from apps.mcp_app.tools import TOOL_HANDLERS, TOOL_PERMISSIONS, TOOLS
+from apps.mcp_app.tools.desktop import _call_read_desktop_clipboard
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.services import RunnerService
@@ -78,7 +74,7 @@ def _install_runner_service(
     service.workspaces = Mock()
     service.workspaces.get_by_id.return_value = workspace
     service.read_desktop_clipboard = AsyncMock(return_value=clipboard_text)
-    monkeypatch.setattr("apps.mcp_app.server._runner_service", lambda: service)
+    monkeypatch.setattr("apps.mcp_app.access.runner_service", lambda: service)
     return service
 
 
@@ -88,14 +84,14 @@ def _payload(result):
 
 
 def test_clipboard_tool_is_registered_with_terminal_permission():
-    tool = next(tool for tool in _TOOLS if tool.name == "read_desktop_clipboard")
+    tool = next(tool for tool in TOOLS if tool.name == "read_desktop_clipboard")
     assert tool.inputSchema["required"] == ["workspace_id"]
     assert tool.inputSchema["additionalProperties"] is False
     assert (
-        _TOOL_PERMISSIONS["read_desktop_clipboard"]
+        TOOL_PERMISSIONS["read_desktop_clipboard"]
         == APIKeyPermission.TERMINAL_ACCESS
     )
-    assert "read_desktop_clipboard" in _TOOL_HANDLERS
+    assert "read_desktop_clipboard" in TOOL_HANDLERS
 
 
 @pytest.mark.django_db

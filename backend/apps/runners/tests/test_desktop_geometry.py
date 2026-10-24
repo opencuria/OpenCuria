@@ -10,7 +10,7 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
-from apps.mcp_app.server import _call_get_workspace, _call_update_workspace
+from apps.mcp_app.tools.workspaces import _call_get_workspace, _call_update_workspace
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.desktop import validate_desktop_dimension
 from apps.runners.enums import RunnerStatus, WorkspaceStatus

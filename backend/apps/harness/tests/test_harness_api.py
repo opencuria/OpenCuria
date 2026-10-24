@@ -23,7 +23,10 @@ from apps.harness.repositories import (
     HarnessPartRepository,
     QuestionRequestRepository,
 )
-from apps.mcp_app.server import _call_get_harness_part, _call_get_harness_timeline
+from apps.mcp_app.tools.harness_timeline import (
+    _call_get_harness_part,
+    _call_get_harness_timeline,
+)
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
@@ -114,7 +117,7 @@ def fake_harness_service(monkeypatch):
         provider_factory=lambda _org: fake,
     )
     monkeypatch.setattr(harness_api, "_resolve_harness_service", lambda: service)
-    monkeypatch.setattr("apps.mcp_app.server._get_harness_service", lambda: service)
+    monkeypatch.setattr("apps.mcp_app.access.harness_service", lambda: service)
     # Keep the runners owner-scoping real (no monkeypatch of _get_service).
     return service
 
@@ -1069,13 +1072,13 @@ def test_production_harness_service_wires_runner_accessor():
         get_harness_service,
         reset_default_harness_service,
     )
-    from apps.mcp_app import server as mcp_server
+    from apps.mcp_app import access
 
     reset_default_harness_service()
     try:
         service = harness_api._resolve_harness_service()
         assert callable(service._accessor_factory)
-        assert mcp_server._get_harness_service() is service
+        assert access.harness_service() is service
         assert get_harness_service() is service
     finally:
         reset_default_harness_service()

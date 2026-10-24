@@ -11,10 +11,8 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
-from apps.mcp_app.server import (
-    _TOOL_HANDLERS,
-    _TOOL_PERMISSIONS,
-    _TOOLS,
+from apps.mcp_app.tools import TOOL_HANDLERS, TOOL_PERMISSIONS, TOOLS
+from apps.mcp_app.tools.harness_settings import (
     _call_get_provider_config,
     _call_list_engine_models,
     _call_list_harness_engines,
@@ -44,14 +42,14 @@ def test_engine_catalog_tools_require_read_permission() -> None:
     names = {"list_harness_engines", "list_engine_models"}
     removed = {"list_provider_models", "list_claude_engine_models"}
     assert not removed.intersection(
-        {tool.name for tool in _TOOLS}
-        | _TOOL_HANDLERS.keys()
-        | _TOOL_PERMISSIONS.keys()
+        {tool.name for tool in TOOLS}
+        | TOOL_HANDLERS.keys()
+        | TOOL_PERMISSIONS.keys()
     )
-    assert names <= {tool.name for tool in _TOOLS}
-    assert names <= _TOOL_HANDLERS.keys()
+    assert names <= {tool.name for tool in TOOLS}
+    assert names <= TOOL_HANDLERS.keys()
     assert all(
-        _TOOL_PERMISSIONS[name] == APIKeyPermission.HARNESS_READ for name in names
+        TOOL_PERMISSIONS[name] == APIKeyPermission.HARNESS_READ for name in names
     )
 
 

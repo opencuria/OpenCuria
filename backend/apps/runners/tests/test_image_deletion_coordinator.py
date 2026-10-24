@@ -535,7 +535,7 @@ def test_rest_mcp_contract_and_owner_force_denial(runner, user):
     from django.test import Client
 
     from apps.accounts.models import APIKey, APIKeyPermission
-    from apps.mcp_app.server import (
+    from apps.mcp_app.tools.images import (
         _call_list_image_deletions,
         _call_preview_image_deletion,
     )

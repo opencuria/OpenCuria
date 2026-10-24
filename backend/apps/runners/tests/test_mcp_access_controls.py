@@ -7,16 +7,12 @@ from types import SimpleNamespace
 import pytest
 from django.contrib.auth import get_user_model
 
+from apps.mcp_app.tools import TOOL_HANDLERS, TOOLS
+from apps.mcp_app.tools.harness_sessions import _call_set_harness_session_mode
+from apps.mcp_app.tools.workspaces import _call_get_workspace, _call_list_workspaces
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
-from apps.mcp_app.server import (
-    _TOOL_HANDLERS,
-    _TOOLS,
-    _call_get_workspace,
-    _call_list_workspaces,
-    _call_set_harness_session_mode,
-)
 from common.utils import hash_token
 
 
@@ -98,24 +94,24 @@ def test_mcp_get_workspace_rejects_foreign_admin_access(mcp_access_setup):
 def test_mcp_harness_tools_require_permissions():
     """Harness MCP tools map to harness:* API key permissions."""
     from apps.accounts.models import APIKeyPermission
-    from apps.mcp_app.server import _TOOL_PERMISSIONS
+    from apps.mcp_app.tools import TOOL_PERMISSIONS
 
-    assert _TOOL_PERMISSIONS["list_harness_sessions"] == APIKeyPermission.HARNESS_READ
-    assert _TOOL_PERMISSIONS["create_harness_session"] == APIKeyPermission.HARNESS_RUN
+    assert TOOL_PERMISSIONS["list_harness_sessions"] == APIKeyPermission.HARNESS_READ
+    assert TOOL_PERMISSIONS["create_harness_session"] == APIKeyPermission.HARNESS_RUN
     assert (
-        _TOOL_PERMISSIONS["resolve_harness_permission"]
+        TOOL_PERMISSIONS["resolve_harness_permission"]
         == APIKeyPermission.HARNESS_PERMISSIONS
     )
-    assert _TOOL_PERMISSIONS["delete_harness_session"] == APIKeyPermission.HARNESS_RUN
-    assert _TOOL_PERMISSIONS["set_harness_session_mode"] == APIKeyPermission.HARNESS_RUN
+    assert TOOL_PERMISSIONS["delete_harness_session"] == APIKeyPermission.HARNESS_RUN
+    assert TOOL_PERMISSIONS["set_harness_session_mode"] == APIKeyPermission.HARNESS_RUN
     assert (
-        _TOOL_PERMISSIONS["list_harness_conversations"] == APIKeyPermission.HARNESS_READ
+        TOOL_PERMISSIONS["list_harness_conversations"] == APIKeyPermission.HARNESS_READ
     )
     assert (
-        _TOOL_PERMISSIONS["mark_harness_session_read"] == APIKeyPermission.HARNESS_READ
+        TOOL_PERMISSIONS["mark_harness_session_read"] == APIKeyPermission.HARNESS_READ
     )
     assert (
-        _TOOL_PERMISSIONS["mark_harness_session_unread"]
+        TOOL_PERMISSIONS["mark_harness_session_unread"]
         == APIKeyPermission.HARNESS_READ
     )
     for provider_account_tool in (
@@ -125,20 +121,20 @@ def test_mcp_harness_tools_require_permissions():
         "select_provider_account",
     ):
         assert (
-            _TOOL_PERMISSIONS[provider_account_tool]
+            TOOL_PERMISSIONS[provider_account_tool]
             == APIKeyPermission.HARNESS_PROVIDERS
         )
     assert (
-        _TOOL_PERMISSIONS["chatgpt_oauth_start"] == APIKeyPermission.HARNESS_PROVIDERS
+        TOOL_PERMISSIONS["chatgpt_oauth_start"] == APIKeyPermission.HARNESS_PROVIDERS
     )
-    assert _TOOL_PERMISSIONS["take_desktop_control"] == APIKeyPermission.HARNESS_RUN
-    assert _TOOL_PERMISSIONS["update_workspace"] == APIKeyPermission.WORKSPACES_UPDATE
+    assert TOOL_PERMISSIONS["take_desktop_control"] == APIKeyPermission.HARNESS_RUN
+    assert TOOL_PERMISSIONS["update_workspace"] == APIKeyPermission.WORKSPACES_UPDATE
 
 
 @pytest.mark.django_db
 def test_mcp_legacy_agent_tools_are_removed():
     """Negative test: legacy agent/chat/conversation/prompt tools are gone."""
-    names = {tool.name for tool in _TOOLS}
+    names = {tool.name for tool in TOOLS}
     for legacy in [
         "list_workspace_chats",
         "list_chat_sessions",
@@ -154,7 +150,7 @@ def test_mcp_legacy_agent_tools_are_removed():
         "toggle_org_agent_definition_activation",
     ]:
         assert legacy not in names
-        assert legacy not in _TOOL_HANDLERS
+        assert legacy not in TOOL_HANDLERS
 
 
 @pytest.fixture
@@ -163,7 +159,7 @@ def mcp_harness_service(monkeypatch):
     from apps.harness.harness_service import HarnessService
     from apps.harness.permissions.evaluator import PermissionEvaluator
     from apps.harness.permissions.service import PermissionService
-    from apps.mcp_app import server as mcp_server
+    from apps.mcp_app import access
 
     async def _drop_emit(event: str, data: dict) -> None:
         return None
@@ -175,16 +171,16 @@ def mcp_harness_service(monkeypatch):
         emit=_drop_emit,
         provider_factory=lambda _org: None,
     )
-    monkeypatch.setattr(mcp_server, "_get_harness_service", lambda: service)
+    monkeypatch.setattr(access, "harness_service", lambda: service)
     return service
 
 
 @pytest.mark.django_db(transaction=True)
 def test_mcp_set_harness_session_mode_happy_path(mcp_access_setup, mcp_harness_service):
     """Idle session mode switch aligns agent_name and registers the MCP tool."""
-    tool_names = {tool.name for tool in _TOOLS}
+    tool_names = {tool.name for tool in TOOLS}
     assert "set_harness_session_mode" in tool_names
-    assert "set_harness_session_mode" in _TOOL_HANDLERS
+    assert "set_harness_session_mode" in TOOL_HANDLERS
 
     session = mcp_harness_service.create_session(
         workspace_id=mcp_access_setup["admin_workspace"].id,

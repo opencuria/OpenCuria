@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from apps.accounts.models import APIKeyPermission
-from apps.mcp_app.server import _call_create_workspace
+from apps.mcp_app.tools.workspaces import _call_create_workspace
 from apps.organizations.models import Organization
 
 
@@ -52,7 +52,7 @@ def test_create_workspace_empty_plugin_ids_does_not_require_plugins_write(
         lambda self, *_args, **_kwargs: ResolvedCredentials(),
     )
     monkeypatch.setattr(
-        "apps.mcp_app.server._runner_service", lambda: FakeRunnerService()
+        "apps.mcp_app.access.runner_service", lambda: FakeRunnerService()
     )
     monkeypatch.setattr(
         "apps.plugins.repositories.WorkspacePluginActivationRepository.enabled_plugin_ids",

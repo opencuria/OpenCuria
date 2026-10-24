@@ -11,10 +11,8 @@ from django.contrib.auth import get_user_model
 
 from apps.accounts.models import APIKeyPermission
 from apps.credentials.models import CredentialService
-from apps.mcp_app.server import (
-    _TOOL_HANDLERS,
-    _TOOL_PERMISSIONS,
-    _TOOLS,
+from apps.mcp_app.tools import TOOL_HANDLERS, TOOL_PERMISSIONS, TOOLS
+from apps.mcp_app.tools.plugins import (
     _call_list_workspace_plugins,
     _call_toggle_org_plugin_activation,
     _plugin_payload,
@@ -70,25 +68,25 @@ def _text(result) -> str:
 
 
 def test_plugin_tools_registered_with_expected_permissions() -> None:
-    names = {tool.name for tool in _TOOLS if "plugin" in tool.name}
+    names = {tool.name for tool in TOOLS if "plugin" in tool.name}
     assert names == {
         "list_plugins",
         "toggle_org_plugin_activation",
         "list_workspace_plugins",
     }
-    assert _TOOL_PERMISSIONS["list_plugins"] == APIKeyPermission.PLUGINS_READ
+    assert TOOL_PERMISSIONS["list_plugins"] == APIKeyPermission.PLUGINS_READ
     assert (
-        _TOOL_PERMISSIONS["toggle_org_plugin_activation"]
+        TOOL_PERMISSIONS["toggle_org_plugin_activation"]
         == APIKeyPermission.PLUGINS_WRITE
     )
-    assert _TOOL_PERMISSIONS["list_workspace_plugins"] == APIKeyPermission.PLUGINS_READ
+    assert TOOL_PERMISSIONS["list_workspace_plugins"] == APIKeyPermission.PLUGINS_READ
     for name in (
         "list_plugins",
         "toggle_org_plugin_activation",
         "list_workspace_plugins",
     ):
-        assert name in _TOOL_HANDLERS
-    for tool in _TOOLS:
+        assert name in TOOL_HANDLERS
+    for tool in TOOLS:
         if "plugin" not in tool.name:
             continue
         assert tool.inputSchema.get("additionalProperties") is False
@@ -97,7 +95,7 @@ def test_plugin_tools_registered_with_expected_permissions() -> None:
 def test_plugin_tool_visibility_follows_api_key_permissions() -> None:
     read_names = [
         tool.name
-        for tool in _TOOLS
+        for tool in TOOLS
         if tool.name.startswith("list_")
         and "plugin" in tool.name
         or tool.name in ("list_plugins", "list_workspace_plugins")
@@ -219,7 +217,7 @@ def test_mcp_workspace_plugin_flow_is_owner_scoped() -> None:
     )
     assert any(p["id"] == plugin_id for p in listed)
     # Workspace plugin mutation is unified with workspace create/update.
-    assert "set_workspace_plugins" not in _TOOL_HANDLERS
+    assert "set_workspace_plugins" not in TOOL_HANDLERS
     assert ctx["workspace"].plugin_activations.count() == 0
 
     # A stranger (no workspace ownership) gets an error, not the data.

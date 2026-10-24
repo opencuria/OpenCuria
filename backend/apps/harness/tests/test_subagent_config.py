@@ -152,22 +152,20 @@ def test_rest_permissions_and_membership(agent_s_setup) -> None:
 
 def test_mcp_parity(agent_s_setup) -> None:
     """MCP metadata, defaults, writes, and membership match REST."""
-    from apps.mcp_app.server import (
-        _TOOL_HANDLERS,
-        _TOOL_PERMISSIONS,
-        _TOOLS,
+    from apps.mcp_app.tools import TOOL_HANDLERS, TOOL_PERMISSIONS, TOOLS
+    from apps.mcp_app.tools.harness_settings import (
         _call_get_subagent_config,
         _call_save_subagent_config,
     )
 
-    tools = {tool.name: tool for tool in _TOOLS}
+    tools = {tool.name: tool for tool in TOOLS}
     for name, permission in (
         ("get_subagent_config", APIKeyPermission.HARNESS_READ),
         ("save_subagent_config", APIKeyPermission.HARNESS_RUN),
     ):
         assert name in tools
-        assert name in _TOOL_HANDLERS
-        assert _TOOL_PERMISSIONS[name] == permission
+        assert name in TOOL_HANDLERS
+        assert TOOL_PERMISSIONS[name] == permission
     depth_schema = tools["save_subagent_config"].inputSchema["properties"]["max_depth"]
     assert depth_schema == {
         "type": "integer",

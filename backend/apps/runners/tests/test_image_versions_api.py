@@ -8,11 +8,9 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
-from apps.mcp_app.server import (
-    _call_list_captured_images,
-    _call_recreate_workspace,
-    _call_update_workspace_policy,
-)
+from apps.mcp_app.tools.images import _call_list_captured_images
+from apps.mcp_app.tools.organizations import _call_update_workspace_policy
+from apps.mcp_app.tools.workspaces import _call_recreate_workspace
 from apps.organizations.models import Membership, MembershipRole
 from apps.runners.models import WorkspaceRecreateRequest
 from apps.runners.services import get_runner_service

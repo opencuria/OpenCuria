@@ -97,7 +97,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
 
     from apps.accounts.models import APIKey, APIKeyPermission
     from apps.harness.models import HarnessSession
-    from apps.mcp_app.server import _call_list_harness_conversations
+    from apps.mcp_app.tools.harness_sessions import _call_list_harness_conversations
     from apps.organizations.models import Membership, Organization
     from apps.runners.models import Runner, Workspace
     from common.utils import generate_api_token, hash_token

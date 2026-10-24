@@ -23,19 +23,19 @@ from apps.harness.provider_accounts import ProviderAccountService
 from apps.harness.providers.base import Usage
 from apps.harness.repositories import HarnessMessageRepository
 from apps.harness.tests.conftest import FakeAccessor
-from apps.mcp_app import server as mcp_server
-from apps.mcp_app.server import (
-    _TOOL_HANDLERS,
-    _TOOL_PERMISSIONS,
-    _TOOLS,
+from apps.mcp_app import access
+from apps.mcp_app.results import error_result
+from apps.mcp_app.tools import TOOL_HANDLERS, TOOL_PERMISSIONS, TOOLS
+from apps.mcp_app.tools.harness_sessions import (
     _call_create_harness_session,
-    _call_get_harness_timeline,
     _call_list_harness_conversations,
     _call_list_harness_sessions,
+    _call_send_harness_message,
+)
+from apps.mcp_app.tools.harness_timeline import (
+    _call_get_harness_timeline,
     _call_resolve_harness_permission,
     _call_resolve_harness_question,
-    _call_send_harness_message,
-    _error,
 )
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
@@ -290,26 +290,26 @@ def claude_mcp_setup(db, monkeypatch):
             permission in (APIKeyPermission.HARNESS_RUN, APIKeyPermission.HARNESS_READ)
         ),
     )
-    monkeypatch.setattr(mcp_server, "_get_harness_service", lambda: service)
+    monkeypatch.setattr(access, "harness_service", lambda: service)
     monkeypatch.setattr(
-        mcp_server,
-        "_runner_service",
+        access,
+        "runner_service",
         lambda: SimpleNamespace(
             list_workspaces=lambda *, organization_id, user: [workspace]
         ),
     )
     monkeypatch.setattr(
-        mcp_server,
-        "_get_owned_workspace_or_error",
+        access,
+        "owned_workspace_or_error",
         lambda _key, _org, workspace_id: (
             (workspace, None)
             if str(workspace_id) == str(workspace.id)
-            else (None, _error("Workspace not found"))
+            else (None, error_result("Workspace not found"))
         ),
     )
     monkeypatch.setattr(
-        mcp_server,
-        "_owned_harness_session_or_error",
+        access,
+        "owned_harness_session_or_error",
         lambda _key, _org, session_id: _resolve_owned_session(service, session_id),
     )
     return {
@@ -330,7 +330,7 @@ def _resolve_owned_session(service, session_id):
     try:
         return service.get_session(uuid.UUID(str(session_id))), None
     except Exception:
-        return None, _error("Harness session not found")
+        return None, error_result("Harness session not found")
 
 
 async def _wait_for_messages(
@@ -361,7 +361,7 @@ async def _wait_for_messages(
 
 
 def test_mcp_session_tools_publish_engine_and_connection_selector():
-    tools = {tool.name: tool for tool in _TOOLS}
+    tools = {tool.name: tool for tool in TOOLS}
     create_schema = tools["create_harness_session"].inputSchema
     assert create_schema["properties"]["harness_id"]["enum"] == [
         "native",
@@ -369,10 +369,10 @@ def test_mcp_session_tools_publish_engine_and_connection_selector():
         "codex",
     ]
     assert create_schema["properties"]["connection_id"]["format"] == "uuid"
-    assert _TOOL_PERMISSIONS["create_harness_session"] == APIKeyPermission.HARNESS_RUN
-    assert _TOOL_PERMISSIONS["send_harness_message"] == APIKeyPermission.HARNESS_RUN
-    assert _TOOL_HANDLERS["create_harness_session"] is _call_create_harness_session
-    assert _TOOL_HANDLERS["send_harness_message"] is _call_send_harness_message
+    assert TOOL_PERMISSIONS["create_harness_session"] == APIKeyPermission.HARNESS_RUN
+    assert TOOL_PERMISSIONS["send_harness_message"] == APIKeyPermission.HARNESS_RUN
+    assert TOOL_HANDLERS["create_harness_session"] is _call_create_harness_session
+    assert TOOL_HANDLERS["send_harness_message"] is _call_send_harness_message
 
 
 @pytest.mark.django_db(transaction=True)

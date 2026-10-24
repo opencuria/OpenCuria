@@ -95,7 +95,10 @@ def test_pinned_default_and_per_model_ultra_allowlist():
 
 @pytest.mark.django_db(transaction=True)
 def test_discovery_rest_and_mcp_share_account_scoped_catalog(codex_setup):
-    from apps.mcp_app.server import _call_list_engine_models, _call_list_harness_engines
+    from apps.mcp_app.tools.harness_settings import (
+        _call_list_engine_models,
+        _call_list_harness_engines,
+    )
 
     data = codex_setup
     from apps.accounts.models import APIKey, APIKeyPermission
@@ -390,7 +393,7 @@ def test_generic_catalog_provider_failures_do_not_leak_secrets(
 ):
     from apps.accounts.models import APIKey, APIKeyPermission
     from apps.harness.providers.base import ProviderAuthError
-    from apps.mcp_app.server import _call_list_engine_models
+    from apps.mcp_app.tools.harness_settings import _call_list_engine_models
     from common.utils import generate_api_token, hash_token
 
     data = codex_setup

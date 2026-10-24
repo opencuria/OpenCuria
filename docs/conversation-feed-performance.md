@@ -34,8 +34,8 @@ sessions, including children, once per workspace to reconstruct that field.
 
 - `backend/apps/harness/harness_service.py`: include the public `harness_id` in
   `list_conversations`, preserving the existing empty-value fallback to `native`.
-- `backend/apps/harness/api.py` and `backend/apps/mcp_app/server.py`: consume the
-  shared projection instead of building independent engine maps.
+- `backend/apps/harness/api.py` and `backend/apps/mcp_app/tools/harness_sessions.py`:
+  consume the shared projection instead of building independent engine maps.
 
 Only unnecessary work is removed. ORM remains in repositories, business projection
 remains in the service, and adapters remain thin. No dependency, cache, migration,

@@ -353,7 +353,7 @@ def test_runner_build_log_is_scoped_to_visible_builds(client, recipe_org):
 
 def test_workspace_and_recipe_contracts_expose_vm_configuration_only():
     """REST and MCP share one workspace format without runtime selection."""
-    from apps.mcp_app.server import _TOOLS
+    from apps.mcp_app.tools import TOOLS
     from apps.runners.schemas import (
         ImageDefinitionCreateIn,
         ImageDefinitionUpdateIn,
@@ -366,7 +366,7 @@ def test_workspace_and_recipe_contracts_expose_vm_configuration_only():
     for schema in (WorkspaceCreateIn, ImageDefinitionCreateIn, ImageDefinitionUpdateIn):
         assert "runtime_type" not in schema.model_fields
         assert "custom_dockerfile" not in schema.model_fields
-    for tool in _TOOLS:
+    for tool in TOOLS:
         if tool.name in {
             "create_workspace",
             "create_image_definition",

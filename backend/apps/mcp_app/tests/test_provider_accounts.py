@@ -12,10 +12,8 @@ from django.contrib.auth import get_user_model
 
 from apps.accounts.models import APIKeyPermission
 from apps.harness.providers.chatgpt_oauth import DeviceFlowStart, OAuthTokens
-from apps.mcp_app.server import (
-    _TOOL_HANDLERS,
-    _TOOL_PERMISSIONS,
-    _TOOLS,
+from apps.mcp_app.tools import TOOL_HANDLERS, TOOL_PERMISSIONS, TOOLS
+from apps.mcp_app.tools.harness_settings import (
     _call_chatgpt_oauth_cancel,
     _call_chatgpt_oauth_start,
     _call_chatgpt_oauth_status,
@@ -48,7 +46,7 @@ def _parse_text(result) -> dict | list:
 
 
 def test_mcp_provider_account_tools_are_registered_and_old_tools_removed():
-    tool_names = {tool.name for tool in _TOOLS}
+    tool_names = {tool.name for tool in TOOLS}
     retained = {
         "list_provider_accounts",
         "save_provider_account",
@@ -60,8 +58,8 @@ def test_mcp_provider_account_tools_are_registered_and_old_tools_removed():
     }
     for name in retained:
         assert name in tool_names
-        assert name in _TOOL_HANDLERS
-        assert _TOOL_PERMISSIONS[name] == APIKeyPermission.HARNESS_PROVIDERS
+        assert name in TOOL_HANDLERS
+        assert TOOL_PERMISSIONS[name] == APIKeyPermission.HARNESS_PROVIDERS
 
     removed = {
         "list_provider_connections",
@@ -72,8 +70,8 @@ def test_mcp_provider_account_tools_are_registered_and_old_tools_removed():
         "delete_claude_connection",
     }
     assert tool_names.isdisjoint(removed)
-    assert not (_TOOL_HANDLERS.keys() & removed)
-    assert not (_TOOL_PERMISSIONS.keys() & removed)
+    assert not (TOOL_HANDLERS.keys() & removed)
+    assert not (TOOL_PERMISSIONS.keys() & removed)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -224,7 +222,7 @@ async def test_mcp_chatgpt_oauth_flow(provider_mcp_setup):
 
 @pytest.mark.django_db
 def test_mcp_defaults_roundtrip_uses_defaults_only_contract(provider_mcp_setup):
-    from apps.mcp_app.server import (
+    from apps.mcp_app.tools.harness_settings import (
         _call_delete_provider_config,
         _call_get_provider_config,
         _call_save_provider_config,

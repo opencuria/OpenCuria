@@ -13,7 +13,8 @@ from django.test import Client
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.harness_service import HarnessService
 from apps.harness.repositories import HarnessSessionRepository
-from apps.mcp_app import server as mcp_server
+from apps.mcp_app import access
+from apps.mcp_app.tools.harness_sessions import _call_list_harness_conversations
 from apps.organizations.models import Membership, Organization
 from apps.runners.models import Runner, Workspace
 from common.exceptions import NotFoundError
@@ -42,7 +43,7 @@ def conversations_setup(db, monkeypatch):
         permissions=[APIKeyPermission.HARNESS_READ.value],
     )
     service = HarnessService()
-    monkeypatch.setattr(mcp_server, "_get_harness_service", lambda: service)
+    monkeypatch.setattr(access, "harness_service", lambda: service)
     client = Client(HTTP_X_API_KEY=token, HTTP_X_ORGANIZATION_ID=str(org.id))
     return org, owner, runner, key, client
 
@@ -76,7 +77,7 @@ def test_conversations_query_count_and_rest_parity(
 
     # Membership/workspaces: 3; root sessions/unread/attention: 6.
     with django_assert_num_queries(9):
-        result = mcp_server._call_list_harness_conversations(key, org.id, {})
+        result = _call_list_harness_conversations(key, org.id, {})
     rows = json.loads(result[0].text)
     assert {row["session_id"]: row["harness_id"] for row in rows} == roots
     assert "private-connection" not in result[0].text
@@ -107,7 +108,7 @@ def test_conversations_empty_for_other_workspace_owner(conversations_setup) -> N
         workspace_id=workspace.id, organization_id=org.id, harness_id="claude"
     )
 
-    result = mcp_server._call_list_harness_conversations(key, org.id, {})
+    result = _call_list_harness_conversations(key, org.id, {})
     assert json.loads(result[0].text) == []
 
 
@@ -119,4 +120,4 @@ def test_conversations_rejects_foreign_organization(conversations_setup) -> None
         name="Foreign", slug=f"foreign-{uuid.uuid4().hex[:8]}"
     )
     with pytest.raises(NotFoundError):
-        mcp_server._call_list_harness_conversations(key, foreign.id, {})
+        _call_list_harness_conversations(key, foreign.id, {})

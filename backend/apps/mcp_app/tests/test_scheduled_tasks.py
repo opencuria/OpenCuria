@@ -7,10 +7,9 @@ import pytest
 from asgiref.sync import sync_to_async
 
 from apps.accounts.models import APIKeyPermission, User
-from apps.mcp_app.server import (
-    create_mcp_server,
-    _TOOL_HANDLERS,
-    _TOOL_PERMISSIONS,
+from apps.mcp_app.server import create_mcp_server
+from apps.mcp_app.tools import TOOL_HANDLERS, TOOL_PERMISSIONS
+from apps.mcp_app.tools.scheduled_tasks import (
     _call_create_scheduled_task,
     _call_get_scheduled_task,
     _call_list_scheduled_tasks,
@@ -64,7 +63,7 @@ async def test_mcp_scheduled_task_crud_scope_and_tool_permissions(monkeypatch):
         status=WorkspaceStatus.RUNNING,
     )
     monkeypatch.setattr(
-        "apps.mcp_app.server._get_owned_workspace_or_error",
+        "apps.mcp_app.access.owned_workspace_or_error",
         lambda api_key, org_id, workspace_id: (workspace, None),
     )
     monkeypatch.setattr(
@@ -96,8 +95,8 @@ async def test_mcp_scheduled_task_crud_scope_and_tool_permissions(monkeypatch):
         )["name"]
         == "MCP task"
     )
-    assert _TOOL_PERMISSIONS["get_scheduled_task"] is APIKeyPermission.HARNESS_READ
-    assert _TOOL_HANDLERS["get_scheduled_task"] is not None
+    assert TOOL_PERMISSIONS["get_scheduled_task"] is APIKeyPermission.HARNESS_READ
+    assert TOOL_HANDLERS["get_scheduled_task"] is not None
     read_key = FakeAPIKey(owner, [APIKeyPermission.HARNESS_READ])
     import mcp.types as mcp_types
 

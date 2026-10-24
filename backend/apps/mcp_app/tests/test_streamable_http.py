@@ -3,7 +3,7 @@ from __future__ import annotations
 from mcp.types import DEFAULT_NEGOTIATED_VERSION
 from starlette.testclient import TestClient
 
-from apps.mcp_app.server import build_mcp_app
+from apps.mcp_app.transport import build_mcp_app
 
 
 class _DummyAPIKey:
@@ -38,7 +38,7 @@ def _initialize_payload() -> dict[str, object]:
 
 def test_streamable_http_initialize_uses_primary_mcp_endpoint(monkeypatch):
     monkeypatch.setattr(
-        "apps.mcp_app.auth.authenticate_api_key",
+        "apps.mcp_app.transport.authenticate_api_key",
         lambda token: _DummyAPIKey() if token == "test-token" else None,
     )
 
@@ -68,7 +68,7 @@ def test_streamable_http_initialize_uses_primary_mcp_endpoint(monkeypatch):
 
 def test_streamable_http_rejects_sessionless_non_initialize_post(monkeypatch):
     monkeypatch.setattr(
-        "apps.mcp_app.auth.authenticate_api_key",
+        "apps.mcp_app.transport.authenticate_api_key",
         lambda token: _DummyAPIKey() if token == "test-token" else None,
     )
 
@@ -85,7 +85,7 @@ def test_streamable_http_rejects_sessionless_non_initialize_post(monkeypatch):
 
 def test_streamable_http_get_without_session_returns_405(monkeypatch):
     monkeypatch.setattr(
-        "apps.mcp_app.auth.authenticate_api_key",
+        "apps.mcp_app.transport.authenticate_api_key",
         lambda token: _DummyAPIKey() if token == "test-token" else None,
     )
 

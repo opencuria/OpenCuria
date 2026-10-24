@@ -105,11 +105,13 @@ async def test_offline_inspection_never_dispatches(
 
 @pytest.mark.django_db(transaction=True)
 def test_rest_mcp_owner_admin_cross_org_and_scopes(runner, workspace, user):
+    from types import SimpleNamespace
+
     from apps.accounts.models import APIKeyPermission
+    from apps.mcp_app.tools import TOOL_PERMISSIONS
+    from apps.mcp_app.tools.runners import _call_inspect_lifecycle_operation
     from apps.organizations.models import Membership
     from apps.runners.tests.test_workspace_access_controls import _make_client
-    from apps.mcp_app.server import _call_inspect_lifecycle_operation, _TOOL_PERMISSIONS
-    from types import SimpleNamespace
 
     Membership.objects.create(
         user=user, organization=runner.organization, role="member"
@@ -134,7 +136,7 @@ def test_rest_mcp_owner_admin_cross_org_and_scopes(runner, workspace, user):
     )
     assert client.get("/api/v1/runners/operations/").status_code == 200
     assert (
-        _TOOL_PERMISSIONS["inspect_lifecycle_operation"]
+        TOOL_PERMISSIONS["inspect_lifecycle_operation"]
         == APIKeyPermission.RUNNERS_READ
     )
     result = _call_inspect_lifecycle_operation(
@@ -151,7 +153,7 @@ def test_rest_and_mcp_retry_require_the_task_specific_scope(runner, workspace, u
     from types import SimpleNamespace
 
     from apps.accounts.models import APIKeyPermission
-    from apps.mcp_app.server import (
+    from apps.mcp_app.tools.runners import (
         _call_dispose_lifecycle_operation,
         _call_list_lifecycle_operations,
     )

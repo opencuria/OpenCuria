@@ -263,21 +263,19 @@ def test_agent_s_config_mcp_parity(agent_s_setup) -> None:
     import json as _json
     from types import SimpleNamespace
 
-    from apps.mcp_app.server import (
-        _TOOL_HANDLERS,
-        _TOOL_PERMISSIONS,
-        _TOOLS,
+    from apps.mcp_app.tools import TOOL_HANDLERS, TOOL_PERMISSIONS, TOOLS
+    from apps.mcp_app.tools.harness_settings import (
         _call_get_agent_s_config,
         _call_save_agent_s_config,
     )
 
-    names = {tool.name for tool in _TOOLS}
+    names = {tool.name for tool in TOOLS}
     assert "get_agent_s_config" in names
     assert "save_agent_s_config" in names
-    assert "get_agent_s_config" in _TOOL_HANDLERS
-    assert "save_agent_s_config" in _TOOL_HANDLERS
-    assert _TOOL_PERMISSIONS["get_agent_s_config"] == APIKeyPermission.HARNESS_READ
-    assert _TOOL_PERMISSIONS["save_agent_s_config"] == APIKeyPermission.HARNESS_RUN
+    assert "get_agent_s_config" in TOOL_HANDLERS
+    assert "save_agent_s_config" in TOOL_HANDLERS
+    assert TOOL_PERMISSIONS["get_agent_s_config"] == APIKeyPermission.HARNESS_READ
+    assert TOOL_PERMISSIONS["save_agent_s_config"] == APIKeyPermission.HARNESS_RUN
 
     api_key = SimpleNamespace(user=agent_s_setup["owner"])
     org_id = agent_s_setup["org"].id
@@ -363,7 +361,7 @@ def test_agent_s_config_rest_then_mcp_partial(agent_s_setup) -> None:
     import json as _json
     from types import SimpleNamespace
 
-    from apps.mcp_app.server import _call_save_agent_s_config
+    from apps.mcp_app.tools.harness_settings import _call_save_agent_s_config
 
     api_key = SimpleNamespace(user=agent_s_setup["owner"])
     saved = _call_save_agent_s_config(
@@ -384,7 +382,7 @@ def test_agent_s_config_recording_roundtrip_and_run_config(agent_s_setup) -> Non
     import json as _json
     from types import SimpleNamespace
 
-    from apps.mcp_app.server import _call_save_agent_s_config
+    from apps.mcp_app.tools.harness_settings import _call_save_agent_s_config
 
     service = AgentSConfigService()
     assert service.get_or_default(agent_s_setup["org"].id)["enable_recording"] is False

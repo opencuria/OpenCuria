@@ -58,7 +58,7 @@ def test_rest_and_mcp_expose_the_same_grouped_activity(
 ) -> None:
     """The shared storage service must serialize identically in both interfaces."""
     from apps.accounts.models import APIKeyPermission
-    from apps.mcp_app.server import _call_get_runner_storage
+    from apps.mcp_app.tools.runners import _call_get_runner_storage
     from apps.runners.tests.test_workspace_access_controls import _make_client
 
     command(workspace, "intervention")

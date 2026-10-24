@@ -9,7 +9,10 @@ from django.contrib.auth import get_user_model
 
 from apps.credentials.models import Credential, CredentialService
 from apps.credentials.services import CredentialOAuthSvc, CredentialSvc
-from apps.mcp_app.server import _call_connect_credential_oauth, _call_list_credentials
+from apps.mcp_app.tools.credentials import (
+    _call_connect_credential_oauth,
+    _call_list_credentials,
+)
 from apps.organizations.models import Membership, Organization
 
 
@@ -203,7 +206,7 @@ def test_mcp_credential_service_tools_only_reach_visible_services() -> None:
     from types import SimpleNamespace
 
     from apps.credentials.models import OrgCredentialServiceActivation
-    from apps.mcp_app.server import (
+    from apps.mcp_app.tools.credentials import (
         _call_list_credential_services,
         _call_list_org_credential_services,
         _call_toggle_org_credential_service_activation,

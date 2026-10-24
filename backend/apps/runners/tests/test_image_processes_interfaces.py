@@ -12,11 +12,9 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
-from apps.mcp_app.server import (
-    _call_create_workspace,
-    _call_create_workspace_from_captured_image,
-    create_mcp_server,
-)
+from apps.mcp_app.server import create_mcp_server
+from apps.mcp_app.tools.images import _call_create_workspace_from_captured_image
+from apps.mcp_app.tools.workspaces import _call_create_workspace
 from apps.organizations.models import Membership, MembershipRole
 from apps.runners.capture_repository import CaptureRepository
 from apps.runners.enums import ProcessStatus, TaskType, WorkspaceStatus
@@ -363,10 +361,10 @@ def test_general_workspace_create_rejects_foreign_captured_image_without_dispatc
         )
         assert response.status_code == 404, response.content
     else:
-        from apps.mcp_app.server import _TOOL_PERMISSIONS
+        from apps.mcp_app.tools import TOOL_PERMISSIONS
 
         assert (
-            _TOOL_PERMISSIONS["create_workspace"] == APIKeyPermission.WORKSPACES_CREATE
+            TOOL_PERMISSIONS["create_workspace"] == APIKeyPermission.WORKSPACES_CREATE
         )
         # MCP exposes the generic create tool to this correctly-scoped key;
         # invoke its operation handler without the MCP network transport.

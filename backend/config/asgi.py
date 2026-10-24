@@ -16,7 +16,7 @@ django.setup()
 
 from django.core.asgi import get_asgi_application  # noqa: E402
 
-from apps.mcp_app.server import get_mcp_app  # noqa: E402
+from apps.mcp_app.transport import get_mcp_app  # noqa: E402
 from apps.runners.desktop_proxy import desktop_proxy_app  # noqa: E402
 from apps.runners.sio_server import create_sio_app  # noqa: E402
 

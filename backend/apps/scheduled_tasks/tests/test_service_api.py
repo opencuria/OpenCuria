@@ -264,16 +264,15 @@ def test_delete_task_keeps_workspace_session_and_run_history(scheduled_run_setup
 async def test_mcp_run_now_requires_permission_and_owner_scope(
     scheduled_run_setup, monkeypatch
 ):
-    from apps.mcp_app.server import (
-        _TOOL_HANDLERS,
-        _TOOL_PERMISSIONS,
+    from apps.mcp_app.server import create_mcp_server
+    from apps.mcp_app.tests.test_scheduled_tasks import FakeAPIKey, parse
+    from apps.mcp_app.tools import TOOL_HANDLERS, TOOL_PERMISSIONS
+    from apps.mcp_app.tools.scheduled_tasks import (
         _call_delete_scheduled_task,
         _call_list_scheduled_task_runs,
         _call_run_scheduled_task_now,
         _call_update_scheduled_task,
-        create_mcp_server,
     )
-    from apps.mcp_app.tests.test_scheduled_tasks import FakeAPIKey, parse
 
     org, owner, outsider, _, task = scheduled_run_setup
     gate = asyncio.Event()
@@ -304,9 +303,9 @@ async def test_mcp_run_now_requires_permission_and_owner_scope(
     listed = {tool.name for tool in listing.root.tools}
     assert "run_scheduled_task_now" not in listed
     assert "update_scheduled_task" not in listed
-    assert _TOOL_PERMISSIONS["run_scheduled_task_now"] is APIKeyPermission.HARNESS_RUN
-    assert _TOOL_PERMISSIONS["update_scheduled_task"] is APIKeyPermission.HARNESS_RUN
-    assert _TOOL_HANDLERS["run_scheduled_task_now"] is not None
+    assert TOOL_PERMISSIONS["run_scheduled_task_now"] is APIKeyPermission.HARNESS_RUN
+    assert TOOL_PERMISSIONS["update_scheduled_task"] is APIKeyPermission.HARNESS_RUN
+    assert TOOL_HANDLERS["run_scheduled_task_now"] is not None
 
     from mcp.types import CallToolRequest, CallToolRequestParams
 

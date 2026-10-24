@@ -25,13 +25,13 @@ from apps.harness.providers.base import (
     ToolSchema,
     Usage,
 )
-from apps.mcp_app.server import (
+from apps.mcp_app.tools.harness_sessions import (
     _call_create_harness_session,
-    _call_get_harness_timeline,
     _call_send_harness_message,
     _call_steer_harness_session,
     _call_withdraw_harness_steer,
 )
+from apps.mcp_app.tools.harness_timeline import _call_get_harness_timeline
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
@@ -120,7 +120,7 @@ async def test_mcp_create_harness_session_without_sync_orm(monkeypatch) -> None:
     org, user, workspace = await sync_to_async(_setup_owned_workspace)()
     service = _service()
     monkeypatch.setattr(
-        "apps.mcp_app.server._get_harness_service", lambda: service
+        "apps.mcp_app.access.harness_service", lambda: service
     )
     api_key = SimpleNamespace(user=user)
     monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
@@ -157,7 +157,7 @@ async def test_mcp_send_harness_message_without_sync_orm(monkeypatch) -> None:
         user_id=user.id,
     )
     monkeypatch.setattr(
-        "apps.mcp_app.server._get_harness_service", lambda: service
+        "apps.mcp_app.access.harness_service", lambda: service
     )
     api_key = SimpleNamespace(user=user)
     monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
@@ -204,7 +204,7 @@ async def test_mcp_steer_and_withdraw_without_sync_orm(monkeypatch) -> None:
         user_id=user.id,
     )
     monkeypatch.setattr(
-        "apps.mcp_app.server._get_harness_service", lambda: service
+        "apps.mcp_app.access.harness_service", lambda: service
     )
     api_key = SimpleNamespace(user=user)
     args = {"session_id": str(session.id), "prompt": "also add tests"}
@@ -250,10 +250,10 @@ async def test_mcp_steer_and_withdraw_without_sync_orm(monkeypatch) -> None:
 
 def test_mcp_steer_tools_are_registered_with_run_permission() -> None:
     from apps.accounts.models import APIKeyPermission
-    from apps.mcp_app.server import _TOOL_HANDLERS, _TOOL_PERMISSIONS, _TOOLS
+    from apps.mcp_app.tools import TOOL_HANDLERS, TOOL_PERMISSIONS, TOOLS
 
-    names = {tool.name for tool in _TOOLS}
+    names = {tool.name for tool in TOOLS}
     for name in ("steer_harness_session", "withdraw_harness_steer"):
         assert name in names
-        assert _TOOL_PERMISSIONS[name] == APIKeyPermission.HARNESS_RUN
-        assert name in _TOOL_HANDLERS
+        assert TOOL_PERMISSIONS[name] == APIKeyPermission.HARNESS_RUN
+        assert name in TOOL_HANDLERS

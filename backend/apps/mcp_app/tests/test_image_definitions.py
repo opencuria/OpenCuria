@@ -10,7 +10,8 @@ import pytest
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 
-from apps.mcp_app.server import (
+from apps.mcp_app.server import create_mcp_server
+from apps.mcp_app.tools.image_definitions import (
     _call_create_build_job,
     _call_create_image_definition,
     _call_delete_build_job,
@@ -21,7 +22,6 @@ from apps.mcp_app.server import (
     _call_list_image_definitions,
     _call_update_build_job,
     _call_update_image_definition,
-    create_mcp_server,
 )
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus

@@ -12,10 +12,8 @@ import pytest
 from django.contrib.auth import get_user_model
 
 from apps.accounts.models import APIKeyPermission
-from apps.mcp_app.server import (
-    _TOOL_HANDLERS,
-    _TOOL_PERMISSIONS,
-    _TOOLS,
+from apps.mcp_app.tools import TOOL_HANDLERS, TOOL_PERMISSIONS, TOOLS
+from apps.mcp_app.tools.processes import (
     _call_delete_process,
     _call_get_process,
     _call_list_processes,
@@ -78,29 +76,29 @@ def _text(result) -> str:
 
 def test_process_tool_permissions() -> None:
     """list/get need read; start/stop/restart/delete need run."""
-    assert _TOOL_PERMISSIONS["list_processes"] == (
+    assert TOOL_PERMISSIONS["list_processes"] == (
         APIKeyPermission.WORKSPACES_PROCESSES_READ
     )
-    assert _TOOL_PERMISSIONS["get_process"] == (
+    assert TOOL_PERMISSIONS["get_process"] == (
         APIKeyPermission.WORKSPACES_PROCESSES_READ
     )
-    assert _TOOL_PERMISSIONS["start_process"] == (
+    assert TOOL_PERMISSIONS["start_process"] == (
         APIKeyPermission.WORKSPACES_PROCESSES_RUN
     )
-    assert _TOOL_PERMISSIONS["stop_process"] == (
+    assert TOOL_PERMISSIONS["stop_process"] == (
         APIKeyPermission.WORKSPACES_PROCESSES_RUN
     )
-    assert _TOOL_PERMISSIONS["restart_process"] == (
+    assert TOOL_PERMISSIONS["restart_process"] == (
         APIKeyPermission.WORKSPACES_PROCESSES_RUN
     )
-    assert _TOOL_PERMISSIONS["delete_process"] == (
+    assert TOOL_PERMISSIONS["delete_process"] == (
         APIKeyPermission.WORKSPACES_PROCESSES_RUN
     )
 
 
 def test_process_tools_registered_and_async() -> None:
     """All six tools are exposed and async (awaited, no nested loop)."""
-    names = {tool.name for tool in _TOOLS}
+    names = {tool.name for tool in TOOLS}
     assert {
         "list_processes",
         "get_process",
@@ -117,8 +115,8 @@ def test_process_tools_registered_and_async() -> None:
         "restart_process",
         "delete_process",
     ):
-        assert name in _TOOL_HANDLERS
-        assert inspect.iscoroutinefunction(_TOOL_HANDLERS[name])
+        assert name in TOOL_HANDLERS
+        assert inspect.iscoroutinefunction(TOOL_HANDLERS[name])
 
 
 @pytest.mark.django_db(transaction=True)
@@ -229,7 +227,7 @@ async def test_mcp_start_process_happy_path(monkeypatch) -> None:
             )
 
     monkeypatch.setattr(
-        "apps.mcp_app.server._runner_service", lambda: _FakeService()
+        "apps.mcp_app.access.runner_service", lambda: _FakeService()
     )
     api_key = SimpleNamespace(user=process_setup["owner"])
     result = await _call_start_process(
@@ -302,7 +300,7 @@ async def test_mcp_restart_process_happy_path(monkeypatch) -> None:
             )
 
     monkeypatch.setattr(
-        "apps.mcp_app.server._runner_service", lambda: _FakeService()
+        "apps.mcp_app.access.runner_service", lambda: _FakeService()
     )
     api_key = SimpleNamespace(user=process_setup["owner"])
     result = await _call_restart_process(
@@ -358,7 +356,7 @@ async def test_mcp_delete_process_happy_path(monkeypatch) -> None:
             return process_id
 
     monkeypatch.setattr(
-        "apps.mcp_app.server._runner_service", lambda: _FakeService()
+        "apps.mcp_app.access.runner_service", lambda: _FakeService()
     )
     api_key = SimpleNamespace(user=process_setup["owner"])
     result = await _call_delete_process(

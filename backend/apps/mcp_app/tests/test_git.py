@@ -13,12 +13,8 @@ from django.contrib.auth import get_user_model
 from mcp.types import CallToolRequest, CallToolRequestParams, ListToolsRequest
 
 from apps.accounts.models import APIKeyPermission
-from apps.mcp_app.server import (
-    _TOOL_HANDLERS,
-    _TOOL_PERMISSIONS,
-    _TOOLS,
-    create_mcp_server,
-)
+from apps.mcp_app.server import create_mcp_server
+from apps.mcp_app.tools import TOOL_HANDLERS, TOOL_PERMISSIONS, TOOLS
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.exceptions import RunnerTimeoutError
@@ -58,7 +54,7 @@ def git_setup(db, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     )
     service = RunnerService()
     service._await_git_result = AsyncMock(return_value={"ok": True})
-    monkeypatch.setattr("apps.mcp_app.server._runner_service", lambda: service)
+    monkeypatch.setattr("apps.mcp_app.access.runner_service", lambda: service)
     return SimpleNamespace(
         org=org,
         owner=owner,
@@ -94,13 +90,13 @@ def test_git_tool_contract() -> None:
         "generate_git_commit_message": APIKeyPermission.WORKSPACES_GIT_READ,
         "git_operation": APIKeyPermission.WORKSPACES_GIT_WRITE,
     }
-    assert {tool.name for tool in _TOOLS if "git" in tool.name} == set(expected)
-    for tool in _TOOLS:
+    assert {tool.name for tool in TOOLS if "git" in tool.name} == set(expected)
+    for tool in TOOLS:
         if tool.name in expected:
-            assert _TOOL_PERMISSIONS[tool.name] == expected[tool.name]
-            assert inspect.iscoroutinefunction(_TOOL_HANDLERS[tool.name])
+            assert TOOL_PERMISSIONS[tool.name] == expected[tool.name]
+            assert inspect.iscoroutinefunction(TOOL_HANDLERS[tool.name])
             assert tool.inputSchema["additionalProperties"] is False
-    generic = next(tool for tool in _TOOLS if tool.name == "git_operation")
+    generic = next(tool for tool in TOOLS if tool.name == "git_operation")
     assert set(generic.inputSchema["properties"]["operation"]["enum"]) == (
         set(RunnerService.GIT_OPERATIONS) - RunnerService.GIT_READ_OPERATIONS
     )
@@ -194,14 +190,14 @@ async def test_git_ownership_and_mutation_guards(git_setup) -> None:
         args,
     )
     assert result[0].text == "Error: Workspace not found"
-    result = await _TOOL_HANDLERS["git_operation"](
+    result = await TOOL_HANDLERS["git_operation"](
         _key(setup.owner, APIKeyPermission.WORKSPACES_GIT_READ),
         setup.org.id,
         {**args, "operation": "stage", "repo_path": "/workspace/repo", "paths": ["a"]},
     )
     assert "Permission denied" in result[0].text
     for operation in RunnerService.GIT_READ_OPERATIONS:
-        result = await _TOOL_HANDLERS["git_operation"](
+        result = await TOOL_HANDLERS["git_operation"](
             setup.key, setup.org.id, {**args, "operation": operation}
         )
         assert "get_git_state/get_git_diff/get_git_commit" in result[0].text
@@ -243,7 +239,7 @@ async def test_git_service_validation_cannot_be_bypassed(git_setup) -> None:
         }.items()
     )
     for tool, arguments, error in cases:
-        result = await _TOOL_HANDLERS[tool](setup.key, setup.org.id, arguments)
+        result = await TOOL_HANDLERS[tool](setup.key, setup.org.id, arguments)
         assert error in result[0].text, (tool, arguments, result)
     setup.service._await_git_result.assert_not_called()
 
@@ -273,7 +269,7 @@ def commit_message_fake(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     """Replace the shared HarnessService commit-message generator."""
     generate = AsyncMock(return_value="feat: add login")
     monkeypatch.setattr(
-        "apps.mcp_app.server._get_harness_service",
+        "apps.mcp_app.access.harness_service",
         lambda: SimpleNamespace(generate_commit_message=generate),
     )
     return generate
@@ -309,7 +305,7 @@ async def test_generate_git_commit_message_guards(
     setup = git_setup
     args = {"workspace_id": str(setup.workspace.id), "repo_path": "/workspace/repo"}
     full = (APIKeyPermission.WORKSPACES_GIT_READ, APIKeyPermission.HARNESS_RUN)
-    handler = _TOOL_HANDLERS["generate_git_commit_message"]
+    handler = TOOL_HANDLERS["generate_git_commit_message"]
     cases = [
         (_key(setup.owner, APIKeyPermission.WORKSPACES_GIT_READ), args, "harness:run"),
         (_key(setup.owner, *full), {**args, "paths": ["a"]}, "Unknown argument"),

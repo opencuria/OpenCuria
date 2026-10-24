@@ -8,7 +8,8 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
-from apps.mcp_app.server import _TOOLS, _call_create_image_artifact
+from apps.mcp_app.tools import TOOLS
+from apps.mcp_app.tools.images import _call_create_image_artifact
 from apps.organizations.models import Membership, MembershipRole
 from apps.runners.enums import WorkspaceStatus
 from apps.runners.models import CaptureRequest
@@ -105,7 +106,7 @@ def test_capture_hides_another_members_workspace(capture_setup):
 def test_capture_rest_and_mcp_schemas_have_no_restart_flag():
     fields = {"name", "workspace_id", "captured_image_id", "message"}
     assert set(ImageArtifactCreateIn.model_fields) == fields - {"workspace_id"}
-    tool = next(tool for tool in _TOOLS if tool.name == "create_image_artifact")
+    tool = next(tool for tool in TOOLS if tool.name == "create_image_artifact")
     assert set(tool.inputSchema["properties"]) == fields
 
 
