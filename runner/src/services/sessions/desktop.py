@@ -70,7 +70,6 @@ class WorkspaceEndedEvidence:
 
     workspace_id: uuid.UUID
     instance_id: str
-    runtime_type: str
     operation: str
 
 
@@ -83,7 +82,7 @@ class DesktopManager:
 
     def __init__(
         self,
-        runtimes: dict[str, RuntimeBackend] | None = None,
+        runtime: RuntimeBackend | None = None,
         get_cached: Callable[[uuid.UUID], WorkspaceInfo] | None = None,
         get_runtime: Callable[[uuid.UUID], RuntimeBackend] | None = None,
         exec_harness_command: (
@@ -105,7 +104,7 @@ class DesktopManager:
 
         self.close_owner_streams = close_owner_streams or unconfigured_streams
         self.capture_fence: CaptureFence | None = None
-        self._runtimes = runtimes if runtimes is not None else {}
+        self._runtime = runtime
         self._get_cached = get_cached
         self._get_runtime = get_runtime
         self._exec_harness_command = exec_harness_command
@@ -136,7 +135,6 @@ class DesktopManager:
         self,
         workspace_id: uuid.UUID,
         instance_id: str,
-        runtime_type: str,
         evidence: WorkspaceEndedEvidence,
     ) -> None:
         """Finalize only proven-dead physical owners, without guest execution.
@@ -149,13 +147,12 @@ class DesktopManager:
             not isinstance(evidence, WorkspaceEndedEvidence)
             or evidence.workspace_id != workspace_id
             or evidence.instance_id != instance_id
-            or evidence.runtime_type != runtime_type
             or evidence.operation not in {"stop", "remove"}
             or not instance_id
         ):
             raise ValueError("Invalid physical workspace-ended evidence")
         info = self._get_cached(workspace_id)
-        if info.instance_id != instance_id or info.runtime_type != runtime_type:
+        if info.instance_id != instance_id:
             raise ValueError("Workspace-ended evidence does not match registry")
         lock = await self._desktop_lock(workspace_id)
         async with lock:
@@ -868,8 +865,7 @@ class DesktopManager:
         """Return heartbeat fields for a live desktop session."""
         return {
             "port": session.port,
-            "container_ip": self.get_desktop_container_ip(workspace_id),
-            "network_name": self.get_desktop_network_name(workspace_id),
+            "guest_ip": self.get_desktop_guest_ip(workspace_id),
             "viewer": session.viewer_held,
             "computer_use": bool(session.computeruse_run_ids),
             "mcp": session.mcp_active,
@@ -1081,8 +1077,7 @@ class DesktopManager:
         return {
             "workspace_id": str(workspace_id),
             "port": session.port,
-            "container_ip": self.get_desktop_container_ip(workspace_id),
-            "network_name": self.get_desktop_network_name(workspace_id),
+            "guest_ip": self.get_desktop_guest_ip(workspace_id),
             "viewer": session.viewer_held,
             "computer_use": bool(session.computeruse_run_ids),
             "generation": session.generation,
@@ -1660,20 +1655,13 @@ class DesktopManager:
         """Return the active desktop session if any."""
         return self._desktop_sessions.get(workspace_id)
 
-    def get_desktop_container_ip(self, workspace_id: uuid.UUID) -> str:
+    def get_desktop_guest_ip(self, workspace_id: uuid.UUID) -> str:
         """Get the upstream IP address for the workspace desktop proxy."""
         info = self._get_cached(workspace_id)
         runtime = self._get_runtime(workspace_id)
-        if not hasattr(runtime, "get_container_ip"):
+        if not hasattr(runtime, "get_guest_ip"):
             raise RuntimeError("Runtime does not support desktop proxy")
-        return runtime.get_container_ip(info.instance_id, str(workspace_id))
-
-    def get_desktop_network_name(self, workspace_id: uuid.UUID) -> str:
-        """Get the backend-attachable network for a workspace desktop proxy."""
-        runtime = self._get_runtime(workspace_id)
-        if not hasattr(runtime, "get_workspace_network_name"):
-            raise RuntimeError("Runtime does not support desktop networking")
-        return runtime.get_workspace_network_name(str(workspace_id))
+        return runtime.get_guest_ip(info.instance_id, str(workspace_id))
 
 
 __all__ = [

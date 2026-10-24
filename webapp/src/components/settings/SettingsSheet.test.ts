@@ -145,9 +145,6 @@ vi.mock('@/services/workspaces.api', () => ({
   getRunnerImageBuildLog: vi.fn(),
 }))
 
-vi.mock('@/lib/runtimeSupport', () => ({
-  filterRunnersByRuntime: () => [],
-}))
 
 const getProviderConfigMock = vi.mocked(harnessApi.getProviderConfig)
 

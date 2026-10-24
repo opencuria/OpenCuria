@@ -25,7 +25,6 @@ class ManagedDesktopWiringTests(unittest.IsolatedAsyncioTestCase):
             workspace_id=self.ws,
             instance_id="guest",
             status="running",
-            runtime_type="docker",
         )
         self.desktop = self.service.desktop
         self.desktop._ensure_desktop_process_locked = AsyncMock(
@@ -39,8 +38,7 @@ class ManagedDesktopWiringTests(unittest.IsolatedAsyncioTestCase):
                 self.ws, None
             )
         )
-        self.desktop.get_desktop_container_ip = lambda _: "127.0.0.1"
-        self.desktop.get_desktop_network_name = lambda _: "network"
+        self.desktop.get_desktop_guest_ip = lambda _: "127.0.0.1"
         self.handlers = self.interface._sio.handlers["/"]
 
     def intent(self, lease="one", **extra):
@@ -118,7 +116,6 @@ class ManagedDesktopWiringTests(unittest.IsolatedAsyncioTestCase):
                 "connection_id": "persisted",
                 "workspace_id": str(self.ws),
                 "instance_id": "guest",
-                "runtime_type": "docker",
                 "lease_id": "one",
                 "epoch": self.desktop.epoch,
                 "control_path": "/control",

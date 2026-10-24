@@ -19,9 +19,9 @@ from src.service import WorkspaceService
 from src.services.sessions.desktop_leases import DesktopLeaseStore
 
 
-def _make_service(runtimes: dict | None = None) -> WorkspaceService:
+def _make_service(runtime=None) -> WorkspaceService:
     return WorkspaceService(
-        runtimes={} if runtimes is None else runtimes,
+        runtime=runtime,
         settings=RunnerSettings(),
     )
 
@@ -31,13 +31,11 @@ def _cache_workspace(
     workspace_id: uuid.UUID,
     *,
     instance_id: str = "instance-1",
-    runtime_type: str = "docker",
 ) -> WorkspaceInfo:
     info = WorkspaceInfo(
         workspace_id=workspace_id,
         instance_id=instance_id,
         status="running",
-        runtime_type=runtime_type,
     )
     service.registry._cache[workspace_id] = info
     return info
@@ -46,7 +44,7 @@ def _cache_workspace(
 async def test_workspace_context_resolution_errors() -> None:
     from src.services.exec_kernel import WorkspaceContext
 
-    service = _make_service(runtimes={"docker": object()})
+    service = _make_service(runtime=object())
     workspace_id = uuid.uuid4()
 
     with pytest.raises(ValueError, match="not found"):
@@ -54,12 +52,14 @@ async def test_workspace_context_resolution_errors() -> None:
             service.registry.get_cached, service.registry.get_runtime, workspace_id
         )
 
-    _cache_workspace(service, workspace_id, runtime_type="qemu")
-    with pytest.raises(RuntimeError, match="not available"):
+    _cache_workspace(service, workspace_id)
+    service.registry._runtime = None
+    with pytest.raises(RuntimeError, match="unavailable"):
         await WorkspaceContext.resolve(
             service.registry.get_cached, service.registry.get_runtime, workspace_id
         )
 
+    service.registry._runtime = object()
     missing_instance = uuid.uuid4()
     _cache_workspace(service, missing_instance, instance_id="")
     with pytest.raises(RuntimeError, match="no instance assigned"):
@@ -130,7 +130,7 @@ class _FakePtyRuntime:
 
 async def test_terminal_manager_pty_lifecycle_and_unknown_id_error() -> None:
     runtime = _FakePtyRuntime()
-    service = _make_service(runtimes={"docker": runtime})
+    service = _make_service(runtime=runtime)
     workspace_id = uuid.uuid4()
     _cache_workspace(service, workspace_id)
     terminals = service.terminal_manager
@@ -157,27 +157,9 @@ async def test_terminal_manager_pty_lifecycle_and_unknown_id_error() -> None:
     assert len(runtime.closed) == 1 and runtime.closed[0].closed
 
 
-@pytest.mark.parametrize(
-    ("runtime_type", "runtimes", "error"),
-    [
-        ("other", {}, "Unsupported runtime_type"),
-        ("qemu", {}, "Runtime 'qemu' is not enabled"),
-        ("qemu", {"qemu": object()}, "does not support image builds"),
-    ],
-)
-async def test_image_build_rejects_unsupported_and_unavailable_runtimes(
-    runtime_type: str, runtimes: dict, error: str
-) -> None:
-    with pytest.raises(RuntimeError, match=error):
-        await _make_service(runtimes).images.build_image(
-            runtime_type=runtime_type,
-            build_job_id="job",
-            image_path="/tmp/image.qcow2",
-        )
 
 
 class _ComposedRuntime:
-    supports_image_artifacts = True
 
     def __init__(self) -> None:
         self.exec_calls: list[tuple[str, list[str], str | None, dict | None]] = []
@@ -209,8 +191,7 @@ class _ComposedRuntime:
 
 async def test_composer_wires_desktop_harness_and_image_credentials() -> None:
     runtime = _ComposedRuntime()
-    runtimes = {"docker": runtime}
-    service = _make_service(runtimes=runtimes)
+    service = _make_service(runtime=runtime)
     source_id = uuid.uuid4()
     _cache_workspace(service, source_id)
 
@@ -239,7 +220,7 @@ async def test_composer_wires_desktop_harness_and_image_credentials() -> None:
         cloned,
         credentials_present,
     ) = await service.images.create_workspace_from_image_artifact(
-        "artifact-1", clone_id, "docker", env_vars={"TOKEN": "secret"}
+        "artifact-1", clone_id, env_vars={"TOKEN": "secret"}
     )
     assert (cloned, credentials_present) == (clone_id, True)
     assert runtime.clone_calls == [("artifact-1", str(clone_id))]
@@ -264,7 +245,7 @@ async def test_remove_workspace_uses_managed_lifecycle_confirmation() -> None:
         ),
         workspace_exists=AsyncMock(return_value=False),
     )
-    service = _make_service(runtimes={"docker": runtime})
+    service = _make_service(runtime=runtime)
     workspace_id = uuid.uuid4()
     _cache_workspace(service, workspace_id)
 

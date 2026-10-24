@@ -16,7 +16,6 @@ from asgiref.sync import sync_to_async
 from apps.organizations.services import OrganizationService
 from common.exceptions import ConflictError
 
-from ..enums import RuntimeType
 from ..exceptions import (
     AdminRoleRequiredError,
     ImageRecipeNotFoundError,
@@ -32,11 +31,9 @@ from ..repositories import (
 RECIPE_FIELDS = (
     "name",
     "description",
-    "runtime_type",
     "base_distro",
     "packages",
     "env_vars",
-    "custom_dockerfile",
     "custom_init_script",
     "is_active",
 )
@@ -68,7 +65,7 @@ class ImageDefinitionService:
     def create(self, user, organization_id: uuid.UUID, recipe: dict[str, Any]):
         """Create an org-owned recipe without requesting a build."""
         self._require_admin(user, organization_id)
-        self._validate_runtime(recipe["runtime_type"], recipe["base_distro"])
+        self._validate_base_distro(recipe["base_distro"])
         return ImageDefinitionRepository.create(
             organization_id=organization_id,
             created_by=user,
@@ -94,11 +91,9 @@ class ImageDefinitionService:
                 name or source.name, organization_id
             ),
             description=source.description,
-            runtime_type=source.runtime_type,
             base_distro=source.base_distro,
             packages=list(source.packages or []),
             env_vars=dict(source.env_vars or {}),
-            custom_dockerfile=source.custom_dockerfile,
             custom_init_script=source.custom_init_script,
             is_active=source.is_active,
         )
@@ -114,10 +109,7 @@ class ImageDefinitionService:
         definition = self._owned_definition_for_admin(
             user, organization_id, definition_id
         )
-        self._validate_runtime(
-            values.get("runtime_type") or definition.runtime_type,
-            values.get("base_distro") or definition.base_distro,
-        )
+        self._validate_base_distro(values.get("base_distro") or definition.base_distro)
         return ImageDefinitionRepository.update_recipe(
             definition.id,
             {field: values[field] for field in RECIPE_FIELDS if field in values},
@@ -306,9 +298,7 @@ class ImageDefinitionService:
         return definition, runner
 
     @staticmethod
-    def _validate_runtime(runtime_type: str | None, base_distro: str | None) -> None:
-        if (runtime_type or "").strip().lower() != RuntimeType.QEMU:
-            return
+    def _validate_base_distro(base_distro: str | None) -> None:
         if not (base_distro or "").strip().lower().startswith("ubuntu:"):
             raise ConflictError(
                 "QEMU image definitions currently require an ubuntu:<version> "

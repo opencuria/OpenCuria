@@ -47,7 +47,7 @@ const generation = (
   id,
   name: id,
   owner_label: 'Owner',
-  runtime_type: 'qemu',
+
   definition_id: null,
   definition_name: null,
   build_job_id: null,
@@ -82,7 +82,6 @@ const runtime = (
   resources: StorageResource[],
   overrides: Partial<StorageRuntime> = {},
 ): StorageRuntime => ({
-  runtime_type: 'qemu',
   fresh: true,
   snapshot_id: 1,
   collected_at: null,
@@ -280,16 +279,11 @@ describe('runner storage accounting', () => {
     expect(absent.groups).toHaveLength(1)
     expect(absent.groups[0]).toMatchObject({ bytes: 0, children: [{ bytes: 0, unknown: true }] })
   })
-  it('excludes Docker counters and resources but preserves QEMU staleness', () => {
+  it('preserves QEMU inventory staleness', () => {
     const scan = fixture()
     scan.fresh = false
-    const docker = runtime([file('docker', 100000)], {
-      runtime_type: 'docker',
-      fresh: false,
-      filesystems: [],
-    })
-    expect(chart([scan, docker]).result).toMatchObject({ capacity: 1000, stale: true, other: 450 })
-    expect(chart([docker]).result.unavailable).toMatch(/No QEMU/)
+    expect(chart([scan]).result).toMatchObject({ capacity: 1000, stale: true, other: 450 })
+    expect(chart([]).result.unavailable).toMatch(/No QEMU/)
   })
   it.each(['filesystem', 'file_identity', 'filesystem_id'] as const)(
     'requires %s identity rather than guessing from paths',

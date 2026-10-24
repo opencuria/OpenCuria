@@ -111,13 +111,11 @@ def _lifecycle(
         workspace_id=workspace_id,
         instance_id=instance_id,
         status="running",
-        runtime_type="test",
     )
-    runtimes = {"test": runtime} if runtime is not None else {}
-    registry = WorkspaceRegistry(runtimes=runtimes)
+    registry = WorkspaceRegistry(runtime=runtime)
     registry._cache[workspace_id] = info
     settings = SimpleNamespace(ssh_health_check_interval=0, ssh_unreachable_timeout=0)
-    return WorkspaceLifecycle(registry, settings, runtimes), info, workspace_id
+    return WorkspaceLifecycle(registry, settings, runtime), info, workspace_id
 
 
 @pytest.mark.parametrize(
@@ -168,7 +166,7 @@ async def test_lifecycle_assumes_reachable_without_runtime_or_instance(
     runtime = _ReachabilityOverrideRuntime()
     lifecycle, info, workspace_id = _lifecycle(runtime, instance_id=instance_id)
     if not runtime_available:
-        lifecycle._runtimes.clear()
+        lifecycle._runtime = None
 
     assert await lifecycle._check_workspace_reachable(workspace_id, info) is True
     assert runtime.reachability_calls == []

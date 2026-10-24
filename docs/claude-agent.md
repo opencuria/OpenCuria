@@ -202,7 +202,7 @@ Backend accessor and runner-handler tests cover the artifact RPC contract.
 Runner artifact tests cover provisioning. Set `CLAUDE_TEST_BINARY` to a local
 Linux x64 release binary to run the actual installer/cache/corruption contract;
 its size/hash must match the checked-in pin. This uses a local shell and
-filesystem fake—not a Docker or QEMU guest. Backend local-SSE contracts fail if
+filesystem fake—not a QEMU guest. Backend local-SSE contracts fail if
 the installed SDK/bundled CLI differs from the production pins; a separate check
 compares the bundled binary's size/hash with the runner manifest. These tests run
 the real pinned CLI against scripted responses and cover native schemas, prompt

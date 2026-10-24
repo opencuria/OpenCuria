@@ -27,7 +27,7 @@ class StreamIntentStore:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS intents (
                     connection_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
-                    instance_id TEXT NOT NULL, runtime_type TEXT NOT NULL,
+                    instance_id TEXT NOT NULL,
                     lease_id TEXT NOT NULL, epoch TEXT NOT NULL,
                     control_path TEXT NOT NULL, state TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS intents_owner ON intents(lease_id);
@@ -39,6 +39,8 @@ class StreamIntentStore:
 
         with self._db() as db:
             columns = {r["name"] for r in db.execute("PRAGMA table_info(intents)")}
+            if "runtime_type" in columns:
+                db.execute("ALTER TABLE intents DROP COLUMN runtime_type")
             if "guest_token" not in columns:
                 db.execute("ALTER TABLE intents ADD COLUMN guest_token TEXT")
 
@@ -66,15 +68,14 @@ class StreamIntentStore:
                     raise ValueError("Stream owner has ended")
                 db.execute(
                     "INSERT INTO intents (connection_id,workspace_id,instance_id,"
-                    "runtime_type,lease_id,epoch,control_path,state,guest_token) "
-                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    "lease_id,epoch,control_path,state,guest_token) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
                     tuple(
                         row[k]
                         for k in (
                             "connection_id",
                             "workspace_id",
                             "instance_id",
-                            "runtime_type",
                             "lease_id",
                             "epoch",
                             "control_path",

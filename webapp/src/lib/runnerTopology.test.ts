@@ -35,8 +35,7 @@ const resource = (
   provenance: '',
   ...overrides,
 })
-const runtime = (resources: StorageResource[], runtime_type = 'qemu'): StorageRuntime => ({
-  runtime_type,
+const runtime = (resources: StorageResource[]): StorageRuntime => ({
   resources,
   fresh: true,
   snapshot_id: 1,
@@ -49,7 +48,7 @@ const generation = (overrides: Partial<StorageGeneration> = {}): StorageGenerati
   id: 'image',
   name: 'Base image',
   owner_label: 'Owner',
-  runtime_type: 'qemu',
+
   definition_id: null,
   definition_name: null,
   build_job_id: null,
@@ -128,14 +127,8 @@ describe('runner topology', () => {
       graph.nodes.find((n) => n.key === graph.edges.find((e) => e.kind === 'usage')?.from)?.label,
     ).toBe('Workspace logical')
   })
-  it('includes unconfirmed generations without inventing observed ready, and scopes runtimes', () => {
+  it('includes unconfirmed generations without inventing observed ready', () => {
     expect(buildRunnerTopology([], [generation()]).nodes).toHaveLength(2)
-    expect(buildRunnerTopology([runtime([], 'docker')], [generation()]).nodes).toHaveLength(2)
-    const graph = buildRunnerTopology(
-      [runtime([resource('same')]), runtime([resource('same')], 'docker')],
-      [],
-    )
-    expect(new Set(graph.nodes.map((n) => n.key)).size).toBe(2)
   })
   it('does not join ambiguous aliases or mistake a workspace image_id for the image', () => {
     const graph = buildRunnerTopology(
@@ -204,9 +197,8 @@ it('gives attached disks distinct safe labels without changing inventory kind or
 })
 
 it('keeps supplied generations and domain workspaces when their runtime snapshot is absent', () => {
-  const graph = buildRunnerTopology([runtime([], 'docker')], [generation()])
+  const graph = buildRunnerTopology([runtime([])], [generation()])
   expect(graph.nodes).toHaveLength(2)
-  expect(graph.nodes.every((node) => node.runtime === 'qemu')).toBe(true)
   expect(graph.edges).toHaveLength(1)
   expect(graph.edges[0]?.kind).toBe('usage')
 })
@@ -241,7 +233,7 @@ it('aligns shared dependency columns with upstream consumers rather than image n
   expect(imageOrder).toEqual(['zzz-image', 'aaa-image'])
 })
 
-it.each(['volume', 'file', 'build_cache'])(
+it.each(['disk', 'file', 'build_cache'])(
   'does not promote a %s alias into a physical image without server association',
   (kind) => {
     const graph = buildRunnerTopology(
@@ -251,7 +243,7 @@ it.each(['volume', 'file', 'build_cache'])(
           resource('other', {
             kind,
             aliases: ['base-alias'],
-            workspace: kind === 'volume' ? ws('a') : null,
+            workspace: kind === 'disk' ? ws('a') : null,
           }),
         ]),
       ],
@@ -263,9 +255,9 @@ it.each(['volume', 'file', 'build_cache'])(
       graph.nodes.find((node) => node.resource?.physical_id === 'other')?.generation,
     ).toBeUndefined()
     expect(graph.edges.some((edge) => edge.to === image.key && edge.kind === 'usage')).toBe(true)
-    if (kind === 'volume')
+    if (kind === 'disk')
       expect(graph.nodes.find((node) => node.resource?.physical_id === 'other')?.label).toContain(
-        'Workspace volume',
+        'Workspace disk',
       )
   },
 )
@@ -285,7 +277,7 @@ it('permits the supported legacy QEMU disk reference, but not an unassociated mo
 
 describe('collapsed runner topology', () => {
   const key = (kind: string, id: string, type = 'qemu') => JSON.stringify([type, kind, id])
-  it('collapses disk, boot seed, volume and orphan owned files without inflating image or capacity', () => {
+  it('collapses disk, boot seed and orphan owned files without inflating image or capacity', () => {
     const graph = buildRunnerTopology(
       [
         runtime([
@@ -293,7 +285,7 @@ describe('collapsed runner topology', () => {
             kind: 'workspace',
             workspace: ws('a'),
             state: 'running',
-            dependencies: ['disk', 'seed.iso', 'volume'],
+            dependencies: ['disk', 'seed.iso', 'data.qcow2'],
           }),
           resource('disk', {
             allocated_bytes: 10,
@@ -307,8 +299,8 @@ describe('collapsed runner topology', () => {
             logical_bytes: 50,
             virtual_bytes: 50,
           }),
-          resource('volume', {
-            kind: 'volume',
+          resource('data.qcow2', {
+            kind: 'disk',
             allocated_bytes: 5,
             logical_bytes: 7,
             virtual_bytes: 30,
@@ -406,7 +398,7 @@ describe('collapsed runner topology', () => {
     ).toBeDefined()
     expect(projected.nodes.find((node) => node.key === key('physical', 'first'))).toBeDefined()
   })
-  it('uses stable domain keys before and after inventory arrives, scoped by runtime', () => {
+  it('uses stable domain keys before and after inventory arrives, ', () => {
     const absent = projectRunnerTopology(buildRunnerTopology([], [generation()]))
     const present = projectRunnerTopology(
       buildRunnerTopology(
@@ -422,19 +414,7 @@ describe('collapsed runner topology', () => {
     expect(present.nodes.map((node) => node.key).sort()).toEqual(
       absent.nodes.map((node) => node.key).sort(),
     )
-    const scoped = projectRunnerTopology(
-      buildRunnerTopology(
-        [
-          runtime([resource('same', { workspace: ws('a') })]),
-          runtime([resource('same', { workspace: ws('a') })], 'docker'),
-        ],
-        [],
-      ),
-    )
-    expect(scoped.nodes.map((node) => node.key).sort()).toEqual(
-      [key('workspace', 'a'), key('workspace', 'a', 'docker')].sort(),
-    )
-    expect(scoped.nodes.every((node) => !node.resource)).toBe(true)
+
   })
   it('never treats disk state as VM state and discloses partial allocated totals', () => {
     const projected = projectRunnerTopology(
@@ -517,7 +497,7 @@ it('reports missing optional snapshot metrics as unknown, never NaN', () => {
   })
 })
 
-it.each(['workspace', 'container'])(
+it.each(['workspace'])(
   'treats %s image_id as usage and prioritizes domain workspace metadata',
   (kind) => {
     const domain = { ...ws('a'), observed_state: 'running', base_image_instance_id: 'pin' }
@@ -534,7 +514,6 @@ it.each(['workspace', 'container'])(
               dependencies: ['disk'],
             }),
           ],
-          'docker',
         ),
       ],
       [],
@@ -601,31 +580,19 @@ it('deduplicates allocated hardlinks while retaining all members and runtime/fil
           resource('no-identity', { workspace: ws('a'), allocated_bytes: 5 }),
           resource('unknown', { workspace: ws('a'), allocated_bytes: null }),
         ]),
-        runtime(
-          [
-            resource('one', {
-              workspace: ws('a'),
-              filesystem_id: 'fs',
-              file_identity: 'inode',
-              allocated_bytes: 30,
-            }),
-          ],
-          'docker',
-        ),
+
       ],
       [],
     ),
   )
-  expect(projected.nodes.find((node) => node.runtime === 'qemu')?.storage).toMatchObject({
+  expect(projected.nodes[0]?.storage).toMatchObject({
     allocatedBytes: 35,
     unknownCount: 1,
   })
-  expect(projected.nodes.find((node) => node.runtime === 'qemu')?.storage?.resources).toHaveLength(
+  expect(projected.nodes[0]?.storage?.resources).toHaveLength(
     5,
   )
-  expect(projected.nodes.find((node) => node.runtime === 'docker')?.storage?.allocatedBytes).toBe(
-    30,
-  )
+
 })
 
 it('keeps contradictory hardlink ownership inspectable instead of charging both workspaces', () => {

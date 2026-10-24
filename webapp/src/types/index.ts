@@ -51,10 +51,6 @@ export enum TaskType {
   BUILD_IMAGE = 'build_image',
 }
 
-export enum RuntimeType {
-  DOCKER = 'docker',
-  QEMU = 'qemu',
-}
 
 // --- Auth ---
 
@@ -137,7 +133,6 @@ export interface Runner {
   id: string
   name: string
   status: RunnerStatus
-  available_runtimes: string[]
   qemu_min_vcpus: number
   qemu_max_vcpus: number
   qemu_default_vcpus: number
@@ -211,7 +206,6 @@ export interface Workspace {
   status: WorkspaceStatus
   active_operation: WorkspaceOperation | null
   name: string
-  runtime_type: string
   qemu_vcpus: number | null
   qemu_memory_mb: number | null
   qemu_disk_size_gb: number | null
@@ -264,7 +258,6 @@ export type WorkspaceDetail = Workspace
 export interface WorkspaceCreateIn {
   name: string
   repos: string[]
-  runtime_type?: string
   credential_ids: string[]
   plugin_ids: string[]
   runner_id?: string | null
@@ -709,7 +702,6 @@ export interface ImageArtifact {
   build_job_id?: string | null
   source_definition_name?: string | null
   source_runner_id?: string | null
-  runtime_type?: RuntimeType | 'docker' | 'qemu' | null
   is_deactivated?: boolean
   source_runner_online?: boolean
   delete_requested_at?: string | null
@@ -826,11 +818,9 @@ export interface ImageDefinition {
   name: string
   description: string
   is_standard: boolean
-  runtime_type: RuntimeType | 'docker' | 'qemu'
   base_distro: string
   packages: string[]
   env_vars: Record<string, string>
-  custom_dockerfile: string
   custom_init_script: string
   is_active: boolean
   status: 'active' | 'deactivated' | 'pending_deletion' | 'deleting' | 'deleted' | 'delete_failed'

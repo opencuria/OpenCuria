@@ -9,7 +9,7 @@ OpenCuria centrally provisions, manages, and monitors AI coding agents.
 
 - `backend/` (Django + Ninja + Channels): control plane and agent harness
   (providers, tools, permissions, prompts, agentic loop). Owns all agent logic.
-- `runner/` (Python, asyncio): dumb exec daemon. Runs Docker/QEMU workspaces,
+- `runner/` (Python, asyncio): dumb exec daemon. Runs QEMU/KVM workspaces,
   exposes lifecycle, exec, files, terminal, desktop, and git RPC. No agent logic.
 - `webapp/` (Vue 3): dashboard for workspaces, chat, credentials, images.
 - `mobile/` (Expo + React Native): native iOS/Android client for existing chats.

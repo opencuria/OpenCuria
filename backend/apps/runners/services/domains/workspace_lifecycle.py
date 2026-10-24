@@ -36,7 +36,6 @@ from ...desktop import (
     validate_desktop_geometry,
 )
 from ...enums import (
-    RuntimeType,
     TaskStatus,
     TaskType,
     WorkspaceOperation,
@@ -165,8 +164,8 @@ class WorkspaceLifecycleMixin:
         *,
         organization_id: uuid.UUID | None = None,
         requested_runner_id: uuid.UUID | None = None,
-    ) -> tuple[Runner, str]:
-        """Resolve runner and runtime from the image, not origin_workspace.
+    ) -> Runner:
+        """Resolve the runner from the image, not origin_workspace.
 
         ``origin_workspace`` is provenance only. Captured images stay
         usable after the source workspace is deleted or pending deletion.
@@ -187,10 +186,8 @@ class WorkspaceLifecycleMixin:
                     "Selected image definition is not available for new workspaces"
                 )
             runner = selected_build_job.runner
-            runtime_type = image.runtime_type
         else:
             runner = image.runner
-            runtime_type = image.runtime_type
 
         if runner is None:
             raise ConflictError(
@@ -202,14 +199,13 @@ class WorkspaceLifecycleMixin:
             raise ConflictError(
                 "Selected runner does not have the selected image artifact"
             )
-        return runner, runtime_type
+        return runner
 
     async def create_workspace(
         self,
         *,
         name: str,
         repos: list[str],
-        runtime_type: str = "docker",
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
@@ -246,7 +242,7 @@ class WorkspaceLifecycleMixin:
         if selected_image.status != "ready":
             raise ConflictError(f"Image artifact '{image_artifact_id}' is not ready")
 
-        runner, runtime_type = self._placement_for_image_instance(
+        runner = self._placement_for_image_instance(
             selected_image,
             organization_id=organization_id,
             requested_runner_id=runner_id,
@@ -254,32 +250,26 @@ class WorkspaceLifecycleMixin:
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))
 
-        self._ensure_runner_supports_runtime(
-            runner=runner,
-            runtime_type=runtime_type,
-        )
-
         self._validate_runner_qemu_limits(runner)
         resolved_qemu_vcpus: int | None = None
         resolved_qemu_memory_mb: int | None = None
         resolved_qemu_disk_size_gb: int | None = None
-        if runtime_type == RuntimeType.QEMU:
-            (
-                resolved_qemu_vcpus,
-                resolved_qemu_memory_mb,
-                resolved_qemu_disk_size_gb,
-            ) = self._resolve_qemu_resources(
-                runner=runner,
-                qemu_vcpus=qemu_vcpus,
-                qemu_memory_mb=qemu_memory_mb,
-                qemu_disk_size_gb=qemu_disk_size_gb,
-            )
-            await self._ensure_qemu_active_capacity(
-                runner=runner,
-                requested_vcpus=resolved_qemu_vcpus,
-                requested_memory_mb=resolved_qemu_memory_mb,
-                requested_disk_size_gb=resolved_qemu_disk_size_gb,
-            )
+        (
+            resolved_qemu_vcpus,
+            resolved_qemu_memory_mb,
+            resolved_qemu_disk_size_gb,
+        ) = self._resolve_qemu_resources(
+            runner=runner,
+            qemu_vcpus=qemu_vcpus,
+            qemu_memory_mb=qemu_memory_mb,
+            qemu_disk_size_gb=qemu_disk_size_gb,
+        )
+        await self._ensure_qemu_active_capacity(
+            runner=runner,
+            requested_vcpus=resolved_qemu_vcpus,
+            requested_memory_mb=resolved_qemu_memory_mb,
+            requested_disk_size_gb=resolved_qemu_disk_size_gb,
+        )
 
         resolved_desktop_width, resolved_desktop_height = validate_desktop_geometry(
             DEFAULT_DESKTOP_WIDTH if desktop_width is None else desktop_width,
@@ -318,15 +308,13 @@ class WorkspaceLifecycleMixin:
         task_id = generate_uuid()
         from ..workspace_configuration import WorkspaceConfigurationService
 
-        if runtime_type == RuntimeType.QEMU:
-            resolved_qemu_disk_size_gb = disk_size_for(
-                resolved_qemu_disk_size_gb, selected_image
-            )
+        resolved_qemu_disk_size_gb = disk_size_for(
+            resolved_qemu_disk_size_gb, selected_image
+        )
         command = provisioning_command(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             image=selected_image,
-            runtime_type=runtime_type,
             repos=[] if uses_artifact_clone(selected_image) else repos,
             qemu_vcpus=resolved_qemu_vcpus,
             qemu_memory_mb=resolved_qemu_memory_mb,
@@ -336,7 +324,6 @@ class WorkspaceLifecycleMixin:
             "workspace_id": workspace_id,
             "runner": runner,
             "name": workspace_name,
-            "runtime_type": runtime_type,
             "qemu_vcpus": resolved_qemu_vcpus,
             "qemu_memory_mb": resolved_qemu_memory_mb,
             "qemu_disk_size_gb": resolved_qemu_disk_size_gb,
@@ -464,8 +451,6 @@ class WorkspaceLifecycleMixin:
         qemu_values = None
         qemu_changed = False
         if qemu_fields_requested:
-            if workspace.runtime_type != RuntimeType.QEMU:
-                raise ValueError("QEMU resources can only be set for QEMU workspaces")
             if workspace.status not in (
                 WorkspaceStatus.RUNNING,
                 WorkspaceStatus.STOPPED,
@@ -684,33 +669,28 @@ class WorkspaceLifecycleMixin:
         runner = workspace.runner
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))
-        self._ensure_runner_supports_runtime(
-            runner=runner,
-            runtime_type=workspace.runtime_type,
-        )
 
         qemu_vcpus = workspace.qemu_vcpus
         qemu_memory_mb = workspace.qemu_memory_mb
         qemu_disk_size_gb = workspace.qemu_disk_size_gb
-        if workspace.runtime_type == RuntimeType.QEMU:
-            self._validate_runner_qemu_limits(runner)
-            (
-                qemu_vcpus,
-                qemu_memory_mb,
-                qemu_disk_size_gb,
-            ) = self._resolve_qemu_resources(
-                runner=runner,
-                qemu_vcpus=qemu_vcpus,
-                qemu_memory_mb=qemu_memory_mb,
-                qemu_disk_size_gb=qemu_disk_size_gb,
-            )
-            await self._ensure_qemu_active_capacity(
-                runner=runner,
-                requested_vcpus=qemu_vcpus,
-                requested_memory_mb=qemu_memory_mb,
-                requested_disk_size_gb=qemu_disk_size_gb,
-                exclude_workspace_id=workspace.id,
-            )
+        self._validate_runner_qemu_limits(runner)
+        (
+            qemu_vcpus,
+            qemu_memory_mb,
+            qemu_disk_size_gb,
+        ) = self._resolve_qemu_resources(
+            runner=runner,
+            qemu_vcpus=qemu_vcpus,
+            qemu_memory_mb=qemu_memory_mb,
+            qemu_disk_size_gb=qemu_disk_size_gb,
+        )
+        await self._ensure_qemu_active_capacity(
+            runner=runner,
+            requested_vcpus=qemu_vcpus,
+            requested_memory_mb=qemu_memory_mb,
+            requested_disk_size_gb=qemu_disk_size_gb,
+            exclude_workspace_id=workspace.id,
+        )
 
         task_id = generate_uuid()
         task = await sync_to_async(self.tasks.create)(
@@ -770,22 +750,21 @@ class WorkspaceLifecycleMixin:
             raise NotFoundError("Image version", str(image_id))
 
         disk_size_gb = workspace.qemu_disk_size_gb
-        if workspace.runtime_type == RuntimeType.QEMU:
-            disk_size_gb = disk_size_for(workspace.qemu_disk_size_gb, target)
-            vcpus, memory_mb, disk_size_gb = self._resolve_qemu_resources(
+        disk_size_gb = disk_size_for(workspace.qemu_disk_size_gb, target)
+        vcpus, memory_mb, disk_size_gb = self._resolve_qemu_resources(
+            runner=runner,
+            qemu_vcpus=workspace.qemu_vcpus,
+            qemu_memory_mb=workspace.qemu_memory_mb,
+            qemu_disk_size_gb=disk_size_gb,
+        )
+        if workspace.status != WorkspaceStatus.RUNNING:
+            await self._ensure_qemu_active_capacity(
                 runner=runner,
-                qemu_vcpus=workspace.qemu_vcpus,
-                qemu_memory_mb=workspace.qemu_memory_mb,
-                qemu_disk_size_gb=disk_size_gb,
+                requested_vcpus=vcpus,
+                requested_memory_mb=memory_mb,
+                requested_disk_size_gb=disk_size_gb,
+                exclude_workspace_id=workspace.id,
             )
-            if workspace.status != WorkspaceStatus.RUNNING:
-                await self._ensure_qemu_active_capacity(
-                    runner=runner,
-                    requested_vcpus=vcpus,
-                    requested_memory_mb=memory_mb,
-                    requested_disk_size_gb=disk_size_gb,
-                    exclude_workspace_id=workspace.id,
-                )
 
         from apps.credentials.services import CredentialSvc
 
@@ -1284,7 +1263,7 @@ class WorkspaceLifecycleMixin:
         if image.status != "ready":
             raise ConflictError(f"Image artifact '{image_artifact_id}' is not ready")
 
-        runner, runtime_type = self._placement_for_image_instance(
+        runner = self._placement_for_image_instance(
             image,
             organization_id=organization_id,
         )
@@ -1308,28 +1287,23 @@ class WorkspaceLifecycleMixin:
         if not runner.is_online:
             raise RunnerOfflineError(str(runner.id))
 
-        self._ensure_runner_supports_runtime(
+        self._validate_runner_qemu_limits(runner)
+        (
+            qemu_vcpus,
+            qemu_memory_mb,
+            qemu_disk_size_gb,
+        ) = self._resolve_qemu_resources(
             runner=runner,
-            runtime_type=runtime_type,
+            qemu_vcpus=qemu_vcpus,
+            qemu_memory_mb=qemu_memory_mb,
+            qemu_disk_size_gb=qemu_disk_size_gb,
         )
-        if runtime_type == RuntimeType.QEMU:
-            self._validate_runner_qemu_limits(runner)
-            (
-                qemu_vcpus,
-                qemu_memory_mb,
-                qemu_disk_size_gb,
-            ) = self._resolve_qemu_resources(
-                runner=runner,
-                qemu_vcpus=qemu_vcpus,
-                qemu_memory_mb=qemu_memory_mb,
-                qemu_disk_size_gb=qemu_disk_size_gb,
-            )
-            await self._ensure_qemu_active_capacity(
-                runner=runner,
-                requested_vcpus=qemu_vcpus,
-                requested_memory_mb=qemu_memory_mb,
-                requested_disk_size_gb=qemu_disk_size_gb,
-            )
+        await self._ensure_qemu_active_capacity(
+            runner=runner,
+            requested_vcpus=qemu_vcpus,
+            requested_memory_mb=qemu_memory_mb,
+            requested_disk_size_gb=qemu_disk_size_gb,
+        )
 
         resolved_env_vars = env_vars or {}
         resolved_files = files or []
@@ -1368,7 +1342,6 @@ class WorkspaceLifecycleMixin:
                 "workspace_id": workspace_id,
                 "runner": runner,
                 "name": workspace_name,
-                "runtime_type": runtime_type,
                 "qemu_vcpus": qemu_vcpus,
                 "qemu_memory_mb": qemu_memory_mb,
                 "qemu_disk_size_gb": qemu_disk_size_gb,
@@ -1391,7 +1364,6 @@ class WorkspaceLifecycleMixin:
                 "workspace_id": str(workspace_id),
                 "workspace_name": workspace_name,
                 "image_artifact_id": image.runner_ref,
-                "runtime_type": runtime_type,
                 "qemu_vcpus": qemu_vcpus,
                 "qemu_memory_mb": qemu_memory_mb,
                 "qemu_disk_size_gb": qemu_disk_size_gb,
@@ -1410,7 +1382,6 @@ class WorkspaceLifecycleMixin:
                 "task_id": str(task_id),
                 "workspace_id": str(workspace_id),
                 "image_artifact_id": image.runner_ref,
-                "runtime_type": runtime_type,
                 "qemu_vcpus": qemu_vcpus,
                 "qemu_memory_mb": qemu_memory_mb,
                 "qemu_disk_size_gb": qemu_disk_size_gb,

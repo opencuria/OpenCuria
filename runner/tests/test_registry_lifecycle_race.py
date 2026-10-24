@@ -14,7 +14,6 @@ from src.service import WorkspaceService
 
 
 class BarrierRuntime:
-    supports_image_artifacts = True
 
     def __init__(self, workspace_id):
         self.workspace_id = workspace_id
@@ -92,9 +91,11 @@ def setup(tmp_path):
     ws_id = uuid.uuid4()
     runtime = BarrierRuntime(ws_id)
     settings = RunnerSettings(state_dir=str(tmp_path))
-    service = WorkspaceService({"qemu": runtime}, settings)
+    service = WorkspaceService(runtime, settings)
     service.registry._cache[ws_id] = WorkspaceInfo(
-        ws_id, runtime.instance_id, "stopped", runtime_type="qemu"
+        ws_id,
+        runtime.instance_id,
+        "stopped",
     )
     interface = WebSocketInterface(service, settings)
     interface._operations.emit = AsyncMock()
@@ -126,9 +127,7 @@ async def test_sync_during_real_handler_and_immediate_next_stop(tmp_path, operat
         service.registry._cache.clear()
     data = command(ws_id, operation)
     if operation == "create":
-        data.update(
-            runtime_type="qemu", base_image_path="/managed/base.qcow2", repos=[]
-        )
+        data.update(base_image_path="/managed/base.qcow2", repos=[])
     task = asyncio.create_task(
         interface._sio.handlers["/"][f"task:{operation}_workspace"](data)
     )
@@ -175,9 +174,7 @@ async def test_snapshot_started_before_operation_cannot_overwrite_completion(
     await runtime.scan_entered.wait()
     runtime.release.set()
     if operation == "create":
-        await service.create_workspace(
-            [], workspace_id=ws_id, runtime_type="qemu", base_image_path="/base"
-        )
+        await service.create_workspace([], workspace_id=ws_id, base_image_path="/base")
     elif operation == "resume":
         await service.resume_workspace(
             ws_id, qemu_vcpus=1, qemu_memory_mb=512, qemu_disk_size_gb=10
@@ -295,9 +292,7 @@ async def test_incomplete_create_failure_is_preserved_for_recovery(tmp_path):
     runtime.exists = False
     runtime.create_workspace = AsyncMock(side_effect=OSError("creation uncertain"))
     with pytest.raises(OSError):
-        await service.create_workspace(
-            [], workspace_id=ws_id, runtime_type="qemu", base_image_path="/base"
-        )
+        await service.create_workspace([], workspace_id=ws_id, base_image_path="/base")
     await service.registry.sync_from_runtime()
     assert service.registry.get_cached(ws_id).status == "creating"
     assert service.registry.get_cached(ws_id).credentials_present is None

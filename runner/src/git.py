@@ -491,9 +491,8 @@ def git_exec_wrapper_argv(argv: list[str]) -> list[str]:
     Returns ``["sh", "-c", <fixed script>, "opencuria-git-exec", *argv]``.
     The fixed script contains no caller input; user-controlled git arguments
     (branches, paths, messages) stay separate argv elements behind
-    ``exec "$@"`` and are never shell-interpreted.  Works for both runtimes:
-    Docker exec argv and QEMU single-quote escaping both preserve the argv
-    boundary.  The git process inherits ``GITHUB_TOKEN`` from the sourced
+    ``exec "$@"`` and are never shell-interpreted. QEMU single-quote
+    escaping preserves the argv boundary.  The git process inherits ``GITHUB_TOKEN`` from the sourced
     file (when present) without the token ever appearing in argv/URLs/logs.
     """
     if not argv or argv[0] != "git":
@@ -524,7 +523,7 @@ def build_git_env(
     Only the secure base plus optional ``GIT_ASKPASS`` pointer.  No
     caller-provided env is accepted (the Git RPC must not allow
     ``GIT_CONFIG_*``/``PATH``/token injection).  ``GITHUB_TOKEN`` is never
-    placed in this mapping for Docker/QEMU; it reaches the git process via
+    placed in this mapping for QEMU; it reaches the git process via
     the sourcing wrapper (:func:`git_exec_wrapper_argv`) from the
     persistent workspace credential file.  ``SSH_ASKPASS`` is never set:
     SSH runs BatchMode key auth only, and the PAT must never answer an

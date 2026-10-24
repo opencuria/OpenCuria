@@ -21,13 +21,12 @@ def scan(sequence=1, complete=True, epoch=None, resources=None):
         "complete": complete,
         "runtimes": [
             {
-                "runtime_type": runtime,
                 "collected_at": timezone.now().isoformat(),
                 "complete": complete,
                 "errors": [] if complete else ["inspection failed"],
                 "resources": resources or [],
             }
-            for runtime in ["docker", "qemu"]
+            for runtime in ["qemu"]
         ],
     }
 
@@ -47,7 +46,7 @@ def test_sequence_session_and_partial_retention(runner):
     assert not InventoryRepository.record(str(runner.id), runner.sid, payload)
     assert not InventoryRepository.record(str(runner.id), "old-sid", scan())
     assert not InventoryRepository.record(str(runner.id), runner.sid, scan())
-    assert InventoryEdge.objects.filter(target__kind="unknown").count() == 2
+    assert InventoryEdge.objects.filter(target__kind="unknown").count() == 1
     partial = scan(2, False, payload["inventory_epoch"])
     assert InventoryRepository.record(str(runner.id), runner.sid, partial)
     detail = InventoryRepository.detail(runner)
@@ -161,13 +160,10 @@ def test_backfill_only_unique_physical_dependency_not_existing_conflicting_pin(
 ):
     from apps.runners.models import ImageInstance
     from apps.runners.tests.test_image_deletion_coordinator import observe
-
-    workspace.runtime_type = "qemu"
     workspace.save()
     first = ImageInstance.objects.create(
         runner=runner,
         created_by=user,
-        runtime_type="qemu",
         name="base",
         runner_ref="/images/actual",
         is_legacy=True,
@@ -175,7 +171,6 @@ def test_backfill_only_unique_physical_dependency_not_existing_conflicting_pin(
     second = ImageInstance.objects.create(
         runner=runner,
         created_by=user,
-        runtime_type="qemu",
         name="other",
         runner_ref="/images/other",
         is_legacy=True,
@@ -221,7 +216,6 @@ def test_enriched_generation_db_pin_without_physical_observation(runner, workspa
     image = ImageInstance.objects.create(
         runner=runner,
         name="Historical base",
-        runtime_type="qemu",
         origin_type="workspace_capture",
         origin_workspace=workspace,
         created_by=workspace.created_by,
@@ -261,7 +255,6 @@ def test_recursive_physical_consumers_and_logical_pins_ignore_provenance(
     root = ImageInstance.objects.create(
         runner=runner,
         name="Root",
-        runtime_type="qemu",
         is_legacy=True,
         origin_type="workspace_capture",
         runner_ref="root",
@@ -269,7 +262,6 @@ def test_recursive_physical_consumers_and_logical_pins_ignore_provenance(
     child = ImageInstance.objects.create(
         runner=runner,
         name="Child",
-        runtime_type="qemu",
         is_legacy=True,
         origin_type="workspace_capture",
         runner_ref="child",
@@ -277,7 +269,6 @@ def test_recursive_physical_consumers_and_logical_pins_ignore_provenance(
     unrelated = ImageInstance.objects.create(
         runner=runner,
         name="Independent capture",
-        runtime_type="qemu",
         is_legacy=True,
         origin_type="workspace_capture",
         runner_ref="independent",
@@ -310,65 +301,6 @@ def test_recursive_physical_consumers_and_logical_pins_ignore_provenance(
     assert images[str(unrelated.id)]["dependencies"] == []
 
 
-def test_docker_inherited_labels_do_not_join_generation(runner, user):
-    from apps.runners.models import ImageInstance, InventoryResource
-
-    generation = ImageInstance.objects.create(
-        runner=runner,
-        runtime_type="docker",
-        name="final",
-        created_by=user,
-        runner_ref="placeholder",
-        status="ready",
-        is_legacy=True,
-    )
-    tag = f"opencuria/generations:{generation.id}"
-    generation.runner_ref = tag
-    generation.save()
-    labels = {
-        "opencuria.image-instance-id": str(generation.id),
-        "opencuria.operation-id": "op",
-    }
-    resources = [
-        {
-            "resource_id": "intermediate",
-            "kind": "build_cache",
-            "managed": True,
-            "logical_bytes": 900,
-            "metadata": labels,
-            "aliases": [],
-        },
-        {
-            "resource_id": "final",
-            "kind": "image",
-            "managed": True,
-            "logical_bytes": 100,
-            "state": "observed",
-            "metadata": labels,
-            "aliases": [tag],
-        },
-    ]
-    payload = scan(resources=resources)
-    assert InventoryRepository.record(str(runner.id), runner.sid, payload)
-    assert InventoryResource.objects.filter(image=generation).count() == 1
-    generation.refresh_from_db()
-    assert generation.size_bytes == 100
-    # Physical publication binding survives manual tag removal, labels alone do not.
-    resources[1]["aliases"] = []
-    resources[1]["metadata"] = {
-        **labels,
-        "published_image_id": "final",
-        "expected_image_tag": tag,
-    }
-    payload = scan(2, epoch=payload["inventory_epoch"], resources=resources)
-    assert InventoryRepository.record(str(runner.id), runner.sid, payload)
-    latest = InventorySnapshot.objects.latest("id")
-    assert (
-        InventoryResource.objects.filter(
-            runtime__snapshot=latest, image=generation
-        ).count()
-        == 1
-    )
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -380,11 +312,9 @@ def test_workspace_state_authority_not_disk_order(runner, workspace, reverse, st
     image = ImageInstance.objects.create(
         runner=runner,
         name="base",
-        runtime_type="qemu",
         runner_ref="base",
         is_legacy=True,
     )
-    workspace.runtime_type = "qemu"
     workspace.base_image_instance = image
     workspace.save()
     resources = [
@@ -413,7 +343,7 @@ def test_workspace_state_authority_not_disk_order(runner, workspace, reverse, st
     observe(runner, [], complete=False)
     detail = InventoryRepository.detail(runner)
     assert detail["generations"][0]["dependencies"][0]["observed_state"] == state
-    assert not next(r for r in detail["runtimes"] if r["runtime_type"] == "qemu")[
+    assert not detail["runtimes"][0][
         "fresh"
     ]
     # Disk-only ownership still links dependents but never supplies runtime state.
@@ -449,7 +379,6 @@ def test_current_pointer_is_not_default_after_retirement(
     image = ImageInstance.objects.create(
         runner=runner,
         name="base",
-        runtime_type="qemu",
         runner_ref="base",
         is_legacy=True,
         build_job=job,
@@ -472,12 +401,10 @@ def test_exact_legacy_disk_reference_is_association_not_publication(
     image = ImageInstance.objects.create(
         runner=runner,
         name="Legacy",
-        runtime_type="qemu",
         is_legacy=True,
         runner_ref="/cache/base.qcow2",
         size_bytes=17,
     )
-    workspace.runtime_type = "qemu"
     workspace.base_image_instance = image
     workspace.save()
     payload = scan(
@@ -503,7 +430,7 @@ def test_exact_legacy_disk_reference_is_association_not_publication(
     assert InventoryRepository.record(str(runner.id), runner.sid, payload)
     assert (
         InventoryResource.objects.get(
-            runtime__runtime_type="qemu", physical_id=physical
+            physical_id=physical
         ).image_id
         == image.id
     )
@@ -526,7 +453,6 @@ def test_legacy_shared_physical_alias_is_unverified_not_missing(runner):
     image = ImageInstance.objects.create(
         runner=runner,
         name="Legacy",
-        runtime_type="qemu",
         is_legacy=True,
         runner_ref="/base.qcow2",
     )
@@ -564,7 +490,6 @@ def test_legacy_capture_snapshot_alias_joins_only_its_runner(
     image = ImageInstance.objects.create(
         runner=runner if same_runner else offline_runner,
         name="Legacy capture",
-        runtime_type="qemu",
         origin_type="workspace_capture",
         origin_workspace=workspace,
         is_legacy=True,
@@ -572,8 +497,6 @@ def test_legacy_capture_snapshot_alias_joins_only_its_runner(
         status="ready",
     )
     assert str(image.id) != snapshot_id
-    workspace.runtime_type = "qemu"
-    workspace.save(update_fields=["runtime_type"])
     payload = scan(
         resources=[
             {
@@ -595,7 +518,7 @@ def test_legacy_capture_snapshot_alias_joins_only_its_runner(
     assert not InventoryRepository.record(str(runner.id), "old-session", payload)
     assert InventoryRepository.record(str(runner.id), runner.sid, payload)
     observed = InventoryResource.objects.get(
-        runtime__runtime_type="qemu", physical_id=physical
+        physical_id=physical
     )
     workspace.refresh_from_db()
     if same_runner:
@@ -617,7 +540,6 @@ def test_qemu_uuid_manifest_requires_artifact_and_operation(runner, operation_ma
     image = ImageInstance.objects.create(
         runner=runner,
         name="New",
-        runtime_type="qemu",
         runner_ref="/base.qcow2",
         creating_task=task,
         **capture_version_fields(runner, None, "New"),
@@ -651,7 +573,6 @@ def test_shared_legacy_database_reference_cannot_guess_identity(runner):
         ImageInstance.objects.create(
             runner=runner,
             name=name,
-            runtime_type="qemu",
             is_legacy=True,
             runner_ref="/base.qcow2",
         )
@@ -682,7 +603,6 @@ def test_unpublished_capture_without_reference_is_not_missing(runner):
     ImageInstance.objects.create(
         runner=runner,
         name="Failed capture",
-        runtime_type="qemu",
         status="failed",
         runner_ref="",
         **capture_version_fields(runner, None, "Failed capture"),
@@ -760,7 +680,6 @@ def test_exact_base_pin_serialized_without_physical_base(runner, workspace):
     image = ImageInstance.objects.create(
         runner=runner,
         name="Orphan base",
-        runtime_type="qemu",
         runner_ref="",
         **capture_version_fields(runner, None, "Orphan base"),
     )

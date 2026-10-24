@@ -80,8 +80,6 @@ class CaptureRepository:
                     "Workspace credentials are synchronizing. "
                     "Wait for synchronization before capturing."
                 )
-            if ws.runtime_type != "qemu":
-                raise ConflictError("Only QEMU supports capture")
             if ws.status not in ["running", "stopped"]:
                 raise ConflictError("Capture requires a running or stopped workspace")
             if has_busy_agent(ws.id):
@@ -107,7 +105,6 @@ class CaptureRepository:
             # allocation/transport preparation crash window for capture.
             image = ImageInstance.objects.create(
                 runner=ws.runner,
-                runtime_type="qemu",
                 origin_type="workspace_capture",
                 origin_workspace=ws,
                 created_by=ws.created_by,
@@ -184,7 +181,7 @@ class CaptureRepository:
             )
             ImageInstance.objects.filter(pk=request.image_id).update(creating_task=task)
         if phase == "resume":
-            payload.update(runtime_type=ws.runtime_type)
+            payload.update()
         OperationRepository.prepare(str(task.id), "task:" + kind, payload)
         request.child = task
         request.phase = phase

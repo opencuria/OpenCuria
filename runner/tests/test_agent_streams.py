@@ -14,7 +14,6 @@ from src.services.sessions.streams import StreamManager
 
 
 class Runtime:
-    runtime_type = "docker"
     supports_managed_process = True
 
     def __init__(self):

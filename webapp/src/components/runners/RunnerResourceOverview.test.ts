@@ -14,7 +14,6 @@ const timestamp = '2026-10-03T00:00:00Z'
 const runner = {
   id: 'a',
   status: RunnerStatus.ONLINE,
-  available_runtimes: ['qemu'],
   qemu_max_active_vcpus: 8,
   qemu_max_active_memory_mb: null,
   qemu_max_active_disk_size_gb: 50,
@@ -38,7 +37,6 @@ const sample: RunnerSystemMetrics = {
   disk_total_bytes: 1000,
 }
 const runtime = (name: string): StorageRuntime => ({
-  runtime_type: name,
   fresh: true,
   snapshot_id: 1,
   collected_at: timestamp,
@@ -131,7 +129,7 @@ describe('RunnerResourceOverview', () => {
 
   it('keeps each equal-sized filesystem and its own timestamp independent of host sample', async () => {
     const wrapper = overview(runner, [
-      runtime('docker'),
+      runtime('qemu'),
       { ...runtime('qemu'), collected_at: '2026-10-02T22:00:00Z', fresh: false },
     ])
     await flushPromises()
@@ -140,8 +138,8 @@ describe('RunnerResourceOverview', () => {
       .find((button) => button.text().includes('Filesystems'))!
       .trigger('click')
     expect(wrapper.text()).toContain('Filesystems (2)')
-    expect(wrapper.text()).toContain('docker · /data')
-    expect(wrapper.text()).toContain('qemu · /data')
+    expect(wrapper.text()).toContain('/data')
+    expect(wrapper.text()).toContain('/data')
     expect(wrapper.text()).toContain('600 B available')
     expect(wrapper.text()).toContain('Filesystem sample · 0s ago · Recent')
     expect(wrapper.text()).toContain('Filesystem sample · 2h ago · Outdated')
@@ -150,7 +148,7 @@ describe('RunnerResourceOverview', () => {
 
   it('trusts backend filesystem freshness even beyond the host stale threshold', async () => {
     const wrapper = overview(runner, [
-      { ...runtime('docker'), collected_at: '2026-10-02T23:56:00Z' },
+      { ...runtime('qemu'), collected_at: '2026-10-02T23:56:00Z' },
     ])
     await flushPromises()
     await wrapper

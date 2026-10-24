@@ -30,11 +30,9 @@ class DummyRuntime:
     def __init__(self) -> None:
         self.exec_command_wait = AsyncMock()
 
-    def get_container_ip(self, instance_id: str, workspace_id: str) -> str:
+    def get_guest_ip(self, instance_id: str, workspace_id: str) -> str:
         return "172.22.0.2"
 
-    def get_workspace_network_name(self, workspace_id: str) -> str:
-        return f"opencuria-ws-{workspace_id}"
 
 
 def _workspace_id(service: WorkspaceService) -> uuid.UUID:
@@ -49,7 +47,7 @@ def _runtime(service: WorkspaceService) -> DummyRuntime:
 def service(tmp_path) -> WorkspaceService:
     runtime = DummyRuntime()
     svc = WorkspaceService(
-        runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=str(tmp_path))
+        runtime=runtime, settings=RunnerSettings(state_dir=str(tmp_path))
     )
     svc.configure_desktop_leases(str(tmp_path), "desktop-test-epoch")
     workspace_id = uuid.uuid4()
@@ -57,7 +55,6 @@ def service(tmp_path) -> WorkspaceService:
         workspace_id=workspace_id,
         instance_id="instance-1",
         status="running",
-        runtime_type="docker",
     )
     return svc
 

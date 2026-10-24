@@ -1,6 +1,6 @@
 """Secure process-tree wrapper for generic workspace stream processes.
 
-Both Docker and QEMU runtimes launch MCP stdio servers (and the
+QEMU launches MCP stdio servers (and the
 workspace-local TCP relay) through this static wrapper so that:
 
 - ``command`` + ``args`` travel exclusively as positional argv
@@ -20,7 +20,6 @@ the final argv as::
 
     wrapper_argv(pidfile, workdir, env) + [command, *args]
 
-Docker passes it via ``exec_create(cmd=[...])`` (no shell involved).
 QEMU passes a single-quoted argv string built with the same quoting
 helper used elsewhere (``_shell_quote``), keeping user values opaque.
 """
@@ -37,7 +36,7 @@ import shlex
 #:
 #: ``setsid --wait`` (not bare ``setsid``): plain ``setsid`` forks on
 #: util-linux >= 2.35 and the forking parent exits immediately with
-#: status 0 — the transport (SSH exec channel, Docker exec socket)
+#: status 0 — the transport (SSH exec channel)
 #: then sees EOF and the stdio pipes die before the real server ever
 #: speaks (MCP ``initialize`` -> ``Connection closed``).  ``--wait``
 #: keeps the direct child alive until the server exits and propagates

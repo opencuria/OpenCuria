@@ -24,7 +24,6 @@ from asgiref.sync import sync_to_async
 
 from common.exceptions import ConflictError
 
-from ...enums import RuntimeType
 from ...exceptions import WorkspaceNotFoundError
 
 if TYPE_CHECKING:
@@ -36,23 +35,6 @@ logger = logging.getLogger(__name__)
 class ImageLifecycleMixin:
     """Image definition/build/artifact flows shared by RunnerService."""
 
-    @staticmethod
-    def _build_package_install_block(base_distro: str, packages: list[str]) -> str:
-        """Generate package installation block based on distro family."""
-        clean_packages = [p.strip() for p in packages if p.strip()]
-        if not clean_packages:
-            return ""
-
-        distro = (base_distro or "").lower()
-        if "alpine" in distro:
-            return "RUN apk add --no-cache " + " ".join(clean_packages)
-
-        # Default to apt for ubuntu/debian and unknown distros.
-        return (
-            "RUN apt-get update && apt-get install -y \\\n"
-            f"    {' '.join(clean_packages)} \\\n"
-            "    && rm -rf /var/lib/apt/lists/*"
-        )
 
     @staticmethod
     def _validate_qemu_base_distro(base_distro: str) -> None:
@@ -64,67 +46,6 @@ class ImageLifecycleMixin:
             "QEMU image definitions currently require an ubuntu:<version> base distro"
         )
 
-    @staticmethod
-    def _desktop_session_dockerfile_block() -> str:
-        """Return Dockerfile lines that install KasmVNC desktop session support.
-
-        Includes the Agent-S computer-use workspace dependencies for all
-        non-Alpine desktop images (PyAutoGUI/pyperclip, tesseract OCR,
-        wmctrl, xclip/xsel, sudo/iproute2 ``ss``, LibreOffice Calc +
-        python3-uno). ``python3-pyautogui`` has no Ubuntu 22.04/24.04 apt
-        package, so it falls back to a minimal pip install into the system
-        python (``python3 -m pip`` keeps the distribution visible to
-        apt-Python). pip on 24.04 requires ``--break-system-packages``
-        (PEP 668); pip on 22.04 does not know the flag, so retry without
-        it. ``python3-pyperclip`` from apt already provides
-        ``import pyperclip`` (no pip needed). ``python3-tk`` is a pure
-        runtime dep: pyautogui imports mouseinfo, which imports tkinter —
-        without it every execute snippet dies at import time with
-        "You must install tkinter on Linux to use MouseInfo". Existing
-        images are never modified in place: rebuild the image definition
-        after this block changes.
-        """
-        return """# --- KasmVNC desktop session support ---
-RUN apt-get update && apt-get install -y \\
-    xfonts-base openbox dbus-x11 x11-xserver-utils ffmpeg xdotool \\
-    libnss3 libatk-bridge2.0-0 libcups2 libdrm2 \\
-    libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \\
-    libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \\
-    wget ca-certificates \\
-    tesseract-ocr wmctrl xclip xsel libreoffice-calc python3-uno \\
-    python3-pyperclip python3-tk sudo iproute2 python3-pip \\
-    && (apt-get install -y libasound2t64 || apt-get install -y libasound2) \\
-    && (apt-get install -y python3-pyautogui \\
-        || python3 -m pip install --break-system-packages pyautogui \\
-        || python3 -m pip install pyautogui) \\
-    && wget -q -O /tmp/kasmvnc.deb \\
-       "https://github.com/kasmtech/KasmVNC/releases/download/v1.3.3/kasmvncserver_jammy_1.3.3_amd64.deb" \\
-    && apt-get install -y /tmp/kasmvnc.deb || true \\
-    && apt-get install -f -y \\
-    && rm -f /tmp/kasmvnc.deb \\
-    && wget -q -O /tmp/google-chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \\
-    && (apt-get install -y /tmp/google-chrome.deb || apt-get install -f -y) \\
-    && rm -f /tmp/google-chrome.deb \\
-    && rm -rf /var/lib/apt/lists/*
-
-# Pre-configure KasmVNC (skip interactive wizard).
-# python-Xlib opens $XAUTHORITY/~/.Xauthority unconditionally, even
-# against the auth-less Xvnc (-SecurityTypes None): bake an empty file
-# so PyAutoGUI/mouseinfo connect out of the box (the runner also
-# touches it at every start and before each execute for self-healing).
-RUN mkdir -p /root/.vnc \\
-    && touch /root/.vnc/.de-was-selected /root/.Xauthority \\
-    && printf "password\\npassword\\n" | vncpasswd -u root -w -r 2>/dev/null || true \\
-    && printf 'desktop:\\n  resolution:\\n    width: 1920\\n    height: 1080\\n  allow_resize: false\\nnetwork:\\n  protocol: http\\n  interface: 0.0.0.0\\n  websocket_port: 6901\\n  ssl:\\n    require_ssl: false\\n    pem_certificate:\\n    pem_key:\\n' > /root/.vnc/kasmvnc.yaml \\
-    && printf '#!/bin/bash\\nset -eu\\nfor browser in google-chrome-stable google-chrome chromium chromium-browser /usr/lib/chromium/chromium; do\\n  if [ \"${browser#/}\" != \"$browser\" ]; then\\n    if [ -x \"$browser\" ]; then\\n      exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n    fi\\n    continue\\n  fi\\n  if command -v \"$browser\" >/dev/null 2>&1; then\\n    if [ \"$browser\" = \"chromium-browser\" ] && ! chromium-browser --version >/dev/null 2>&1; then\\n      continue\\n    fi\\n    exec \"$browser\" --no-sandbox --disable-gpu --start-maximized --disable-dev-shm-usage --no-first-run\\n  fi\\ndone\\necho \"No supported browser binary found for desktop session\" >&2\\n' > /usr/local/bin/opencuria-desktop-browser \\
-    && printf '#!/bin/bash\\nexport DISPLAY=:1\\nexport HOME=/root\\nopenbox-session &\\nsleep 1\\n/usr/local/bin/opencuria-desktop-browser >/root/.vnc/browser.log 2>&1 &\\nwait\\n' > /root/.vnc/xstartup \\
-    && chmod +x /root/.vnc/xstartup /usr/local/bin/opencuria-desktop-browser
-
-# Desktop start/stop scripts (use Xvnc directly to avoid KasmVNC perl wrapper prompts)
-RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOMETRY="${OPENCURIA_DESKTOP_GEOMETRY:-1920x1080}"\\n/usr/local/bin/opencuria-desktop-stop 2>/dev/null || true\\nmkdir -p /root/.vnc\\nrm -f /root/.vnc/.xstartup-started\\nrm -f /tmp/.X1-lock /tmp/.X11-unix/X1\\n/usr/bin/Xvnc :1 -geometry "$GEOMETRY" -depth 24 -rfbport 5901 -SecurityTypes None -disableBasicAuth -websocketPort 6901 -httpd /usr/share/kasmvnc/www -interface 0.0.0.0 -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents -SendCutText -AcceptCutText -AcceptSetDesktopSize=0 >>/root/.vnc/server.log 2>&1 &\\nfor _ in $(seq 1 120); do\\n  if [ -e /tmp/.X11-unix/X1 ] && [ ! -f /root/.vnc/.xstartup-started ]; then\\n    touch /root/.vnc/.xstartup-started\\n    /root/.vnc/xstartup >>/root/.vnc/xstartup.log 2>&1 &\\n  fi\\n  if [ -e /tmp/.X11-unix/X1 ] && (echo >/dev/tcp/127.0.0.1/6901) >/dev/null 2>&1; then\\n    echo \"Desktop session started on :1 (ws port 6901)\"\\n    exit 0\\n  fi\\n  sleep 0.25\\ndone\\necho \"Desktop session failed to start\" >&2\\nexit 1\\n' > /usr/local/bin/opencuria-desktop-start \
-    && printf '#!/bin/bash\\nfor pid in $(pgrep -f "^(/usr/bin/)?Xvnc :1" 2>/dev/null); do kill "$pid" 2>/dev/null || true; done\\nfor pid in $(pgrep -f "openbox" 2>/dev/null); do kill "$pid" 2>/dev/null || true; done\\nrm -f /tmp/.X1-lock /tmp/.X11-unix/X1\\n' > /usr/local/bin/opencuria-desktop-stop \
-    && chmod +x /usr/local/bin/opencuria-desktop-start /usr/local/bin/opencuria-desktop-stop
-"""
 
     @staticmethod
     def _desktop_session_init_script_block() -> str:
@@ -146,21 +67,14 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         ]
 
         packages = [p.strip() for p in list(definition.packages or []) if p.strip()]
-        distro = (definition.base_distro or "").lower()
         if packages:
-            if "alpine" in distro:
-                lines += [
-                    f"apk add --no-cache {' '.join(packages)}",
-                    "",
-                ]
-            else:
-                lines += [
-                    "export DEBIAN_FRONTEND=noninteractive",
-                    "apt-get update",
-                    f"apt-get install -y {' '.join(packages)}",
-                    "rm -rf /var/lib/apt/lists/*",
-                    "",
-                ]
+            lines += [
+                "export DEBIAN_FRONTEND=noninteractive",
+                "apt-get update",
+                f"apt-get install -y {' '.join(packages)}",
+                "rm -rf /var/lib/apt/lists/*",
+                "",
+            ]
 
         env_vars = dict(definition.env_vars or {})
         if env_vars:
@@ -186,44 +100,10 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
                 "",
             ]
 
-        # Always include KasmVNC desktop session support (non-Alpine only)
-        distro_check = (definition.base_distro or "").lower()
-        if "alpine" not in distro_check:
-            lines += [cls._desktop_session_init_script_block(), ""]
+        lines += [cls._desktop_session_init_script_block(), ""]
 
         return "\n".join(lines).strip() + "\n"
 
-    @classmethod
-    def _generate_dockerfile_content(cls, definition) -> str:
-        """Build Dockerfile content from an image definition record."""
-        lines = [f"FROM {definition.base_distro}", ""]
-
-        if "alpine" not in (definition.base_distro or "").lower():
-            lines += ["ENV DEBIAN_FRONTEND=noninteractive", ""]
-
-        install_block = cls._build_package_install_block(
-            definition.base_distro, list(definition.packages or [])
-        )
-        if install_block:
-            lines += [install_block, ""]
-
-        for key, value in dict(definition.env_vars or {}).items():
-            if key:
-                lines.append(f"ENV {key}={value}")
-        if definition.env_vars:
-            lines.append("")
-
-        if definition.custom_dockerfile:
-            lines += [definition.custom_dockerfile.strip(), ""]
-
-        # Always include KasmVNC desktop session support (non-Alpine only)
-        if "alpine" not in (definition.base_distro or "").lower():
-            lines += [cls._desktop_session_dockerfile_block(), ""]
-
-        lines += [
-            'CMD ["tail", "-f", "/dev/null"]',
-        ]
-        return "\n".join(lines).strip() + "\n"
 
     def _ensure_definition_mutable(self, definition) -> None:
         """Reject runner mutations while a definition is deleted or being removed."""
@@ -289,10 +169,6 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         Every build is a new standalone version; ``message`` describes it.
         """
 
-        self._ensure_runner_supports_runtime(
-            runner=runner,
-            runtime_type=image_definition.runtime_type,
-        )
         self._ensure_definition_mutable(image_definition)
 
         from ...repositories import ImageGenerationRepository
@@ -301,18 +177,11 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
             return await sync_to_async(self.build_jobs.ensure_inactive)(
                 image_definition, runner
             )
-        if image_definition.runtime_type == RuntimeType.QEMU:
-            self._validate_qemu_base_distro(image_definition.base_distro)
-            rendered = {
-                "base_distro": image_definition.base_distro,
-                "init_script": self._build_qemu_init_script_content(image_definition),
-            }
-        else:
-            rendered = {
-                "dockerfile_content": self._generate_dockerfile_content(
-                    image_definition
-                )
-            }
+        self._validate_qemu_base_distro(image_definition.base_distro)
+        rendered = {
+            "base_distro": image_definition.base_distro,
+            "init_script": self._build_qemu_init_script_content(image_definition),
+        }
         build, image, task = await sync_to_async(ImageGenerationRepository.request)(
             definition=image_definition,
             runner=runner,
@@ -325,11 +194,8 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
             "task_id": str(task.id),
             "build_job_id": str(build.id),
             "image_instance_id": str(image.id),
-            "runtime_type": image.runtime_type,
         }
-        payload[
-            "image_tag" if image.runtime_type == RuntimeType.DOCKER else "image_path"
-        ] = image.runner_ref
+        payload["image_path"] = image.runner_ref
         await self._emit_to_runner(runner, "task:build_image", payload)
         if runner.sid:
             await sync_to_async(self.tasks.mark_in_progress)(task)
@@ -373,7 +239,6 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
         *,
         task_id: str,
         build_job_id: str,
-        image_tag: str = "",
         image_path: str = "",
         runner_id: str | None = None,
     ) -> None:
@@ -385,7 +250,7 @@ RUN printf '#!/bin/bash\\nset -e\\nexport DISPLAY=:1\\nexport HOME=/root\\nGEOME
             task_id=task_id,
             build_job_id=build_job_id,
             runner_id=runner_id,
-            runner_ref=image_tag or image_path,
+            runner_ref=image_path,
         )
 
     def handle_image_build_failed(

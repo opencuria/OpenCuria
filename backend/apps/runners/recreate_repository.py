@@ -196,7 +196,7 @@ class RecreateRepository:
                 "This image version is being deleted or unavailable. "
                 "Update to the latest version or delete the workspace."
             )
-        if image.runtime_type != ws.runtime_type:
+        if "qemu" != "qemu":
             raise ConflictError("Image version runtime does not match the workspace")
         return image
 
@@ -234,7 +234,6 @@ class RecreateRepository:
                 workspace_id=ws.id,
                 workspace_name=ws.name,
                 image=ws.base_image_instance,
-                runtime_type=ws.runtime_type,
                 repos=ws.repos or [],
                 qemu_vcpus=ws.qemu_vcpus,
                 qemu_memory_mb=ws.qemu_memory_mb,

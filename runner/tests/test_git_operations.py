@@ -336,13 +336,14 @@ def _make_repo(path: str, *, branch: str = "main") -> str:
 
 def _service_for(root: str) -> tuple[WorkspaceService, FakeGitRuntime, uuid.UUID]:
     runtime = FakeGitRuntime(root)
-    service = WorkspaceService(runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
+    service = WorkspaceService(
+        runtime=runtime, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+    )
     workspace_id = uuid.uuid4()
     service.registry._cache[workspace_id] = WorkspaceInfo(
         workspace_id=workspace_id,
         instance_id="instance-1",
         status="running",
-        runtime_type="docker",
     )
     return service, runtime, workspace_id
 
@@ -1963,7 +1964,7 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(kwargs=kwargs):
                     runtime = _ScriptedMetadataRuntime(tmp, **kwargs)  # type: ignore[arg-type]
                     service = WorkspaceService(
-                        runtimes={"docker": runtime},
+                        runtime=runtime,
                         settings=RunnerSettings(state_dir=tempfile.mkdtemp()),
                     )
                     ws_id = uuid.uuid4()
@@ -1971,7 +1972,6 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                         workspace_id=ws_id,
                         instance_id="instance-1",
                         status="running",
-                        runtime_type="docker",
                     )
                     before = len(runtime.calls)
                     result = await service.git.execute_git_operation(
@@ -1992,14 +1992,13 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                 tmp, realpath_fail_prefixes=("/workspace/repo",)
             )
             service = WorkspaceService(
-                runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+                runtime=runtime, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
             )
             ws_id = uuid.uuid4()
             service.registry._cache[ws_id] = WorkspaceInfo(
                 workspace_id=ws_id,
                 instance_id="instance-1",
                 status="running",
-                runtime_type="docker",
             )
             before = len(runtime.calls)
             result = await service.git.execute_git_operation(
@@ -2014,14 +2013,13 @@ class GitMetadataSandboxTests(unittest.IsolatedAsyncioTestCase):
                 tmp, realpath_fail_prefixes=("/workspace/repo/.git",)
             )
             service2 = WorkspaceService(
-                runtimes={"docker": runtime2}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+                runtime=runtime2, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
             )
             ws_id2 = uuid.uuid4()
             service2.registry._cache[ws_id2] = WorkspaceInfo(
                 workspace_id=ws_id2,
                 instance_id="instance-1",
                 status="running",
-                runtime_type="docker",
             )
             result2 = await service2.git.execute_git_operation(
                 ws_id2, "working_diff", "/workspace/repo", {}
@@ -3862,14 +3860,13 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
             _make_repo(os.path.join(tmp, "repo"))
             runtime = AskpassRuntime(tmp)
             service = WorkspaceService(
-                runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+                runtime=runtime, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
             )
             ws_id = uuid.uuid4()
             service.registry._cache[ws_id] = WorkspaceInfo(
                 workspace_id=ws_id,
                 instance_id="instance-1",
                 status="running",
-                runtime_type="docker",
             )
             await service.git.execute_git_operation(
                 ws_id,
@@ -3921,14 +3918,14 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory():
             service = WorkspaceService(
-                runtimes={"docker": NoGitRuntime()}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+                runtime=NoGitRuntime(),
+                settings=RunnerSettings(state_dir=tempfile.mkdtemp()),
             )
             ws_id = uuid.uuid4()
             service.registry._cache[ws_id] = WorkspaceInfo(
                 workspace_id=ws_id,
                 instance_id="instance-1",
                 status="running",
-                runtime_type="docker",
             )
             result = await service.git.execute_git_operation(
                 ws_id, "working_diff", "/workspace/repo", {}
@@ -3975,7 +3972,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
             repo = _make_repo(os.path.join(tmp, "repo"))
             Path(os.path.join(repo, "not found notes.txt")).write_text("x\n")
             service = WorkspaceService(
-                runtimes={"docker": NotFoundTextRuntime(tmp)},
+                runtime=NotFoundTextRuntime(tmp),
                 settings=RunnerSettings(state_dir=tempfile.mkdtemp()),
             )
             ws_id = uuid.uuid4()
@@ -3983,7 +3980,6 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
                 workspace_id=ws_id,
                 instance_id="instance-1",
                 status="running",
-                runtime_type="docker",
             )
             result = await service.git.execute_git_operation(
                 ws_id, "working_diff", "/workspace/repo", {}
@@ -4010,14 +4006,14 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory():
             service = WorkspaceService(
-                runtimes={"docker": Exit1Runtime()}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+                runtime=Exit1Runtime(),
+                settings=RunnerSettings(state_dir=tempfile.mkdtemp()),
             )
             ws_id = uuid.uuid4()
             service.registry._cache[ws_id] = WorkspaceInfo(
                 workspace_id=ws_id,
                 instance_id="instance-1",
                 status="running",
-                runtime_type="docker",
             )
             result = await service.git.execute_git_operation(
                 ws_id, "working_diff", "/workspace/repo", {}
@@ -4044,7 +4040,7 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory():
             service = WorkspaceService(
-                runtimes={"docker": NoGitRuntime127()},
+                runtime=NoGitRuntime127(),
                 settings=RunnerSettings(state_dir=tempfile.mkdtemp()),
             )
             ws_id = uuid.uuid4()
@@ -4052,7 +4048,6 @@ class GitAuthEnvTests(unittest.IsolatedAsyncioTestCase):
                 workspace_id=ws_id,
                 instance_id="instance-1",
                 status="running",
-                runtime_type="docker",
             )
             result = await service.git.execute_git_operation(
                 ws_id, "working_diff", "/workspace/repo", {}
@@ -4161,7 +4156,9 @@ class GitWebsocketTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("code", payload)
 
     async def test_git_operation_cancel(self) -> None:
-        service = WorkspaceService(runtimes={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
+        service = WorkspaceService(
+            runtime={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
 
         started = asyncio.Event()
 
@@ -4581,7 +4578,9 @@ class GitWebsocketValidationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(interface._running_tasks, {})
 
     async def test_duplicate_request_id_rejected_conflict(self) -> None:
-        service = WorkspaceService(runtimes={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
+        service = WorkspaceService(
+            runtime={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
 
         started = asyncio.Event()
 

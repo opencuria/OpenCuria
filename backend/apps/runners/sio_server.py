@@ -21,7 +21,6 @@ import socketio
 from asgiref.sync import sync_to_async
 
 from common.exceptions import ConflictError
-from common.utils import hash_token
 
 from .services import get_runner_service
 from .services.infra.desktop_tunnels import push_runner_ws_closed, push_runner_ws_frame
@@ -248,7 +247,6 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         await sync_to_async(service.register_runner)(
             runner,
             sid=sid,
-            available_runtimes=data.get("supported_runtimes", ["docker"]),
             desktop_epoch=(data.get("desktop_leases") or {}).get("epoch"),
         )
 
@@ -534,8 +532,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             task_id=data.get("task_id"),
             workspace_id=data["workspace_id"],
             port=data.get("port", 6901),
-            container_ip=data.get("container_ip", ""),
-            network_name=data.get("network_name", ""),
+            guest_ip=data.get("guest_ip", ""),
             runner_id=runner_id,
             viewer=(bool(data["viewer"]) if "viewer" in data else None),
             computer_use=(
@@ -557,8 +554,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         await service.handle_desktop_process(
             workspace_id=data["workspace_id"],
             port=data.get("port", 6901),
-            container_ip=data.get("container_ip", ""),
-            network_name=data.get("network_name", ""),
+            guest_ip=data.get("guest_ip", ""),
             runner_id=runner_id,
             viewer=(bool(data["viewer"]) if "viewer" in data else None),
             computer_use=(

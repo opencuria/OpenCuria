@@ -31,10 +31,9 @@ class ImageManager:
 
     def __init__(
         self,
-        runtimes: dict[str, RuntimeBackend] | None = None,
+        runtime: RuntimeBackend | None = None,
         get_cached: Callable[[uuid.UUID], WorkspaceInfo] | None = None,
         get_runtime: Callable[[uuid.UUID], RuntimeBackend] | None = None,
-        get_runtime_by_type: Callable[[str], RuntimeBackend] | None = None,
         store_workspace: Callable[[WorkspaceInfo], None] | None = None,
         credentials_injector: Callable[
             [RuntimeBackend, str, Any, Any, Any, Any], Awaitable[bool]
@@ -42,10 +41,9 @@ class ImageManager:
         | None = None,
     ) -> None:
         self.capture_fence: CaptureFence | None = None
-        self._runtimes = runtimes if runtimes is not None else {}
+        self._runtime = runtime
         self._get_cached = get_cached
         self._get_runtime = get_runtime
-        self._get_runtime_by_type = get_runtime_by_type
         self._store_workspace = store_workspace
         self.lifecycle_context = None
         self.scrub_proof_hook = None
@@ -55,10 +53,7 @@ class ImageManager:
     async def build_image(
         self,
         *,
-        runtime_type: str,
         build_job_id: str,
-        dockerfile_content: str = "",
-        image_tag: str = "",
         base_distro: str = "",
         init_script: str = "",
         image_path: str = "",
@@ -68,43 +63,25 @@ class ImageManager:
     ) -> dict[str, str]:
         """Build runtime image from definition payload.
 
-        Returns a dict containing ``image_tag`` and/or ``image_path``.
+        Returns a dict containing ``image_path``.
         """
-        if runtime_type == "docker":
-            if not dockerfile_content.strip():
-                raise RuntimeError(
-                    "dockerfile_content is required for docker image builds"
-                )
-            if not image_tag.strip():
-                raise RuntimeError("image_tag is required for docker image builds")
-            runtime = self._get_runtime_by_type("docker")
-            return await runtime.build_image(
-                dockerfile_content=dockerfile_content,
-                image_tag=image_tag,
-                operation_id=operation_id,
-                image_instance_id=image_instance_id,
-                progress_callback=progress_callback,
-            )
 
-        if runtime_type == "qemu":
-            if not image_path.strip():
-                raise RuntimeError("image_path is required for qemu image builds")
-            if self._get_runtime_by_type is None:
-                raise RuntimeError("Runtime 'qemu' is not enabled")
-            runtime = self._get_runtime_by_type("qemu")
-            build_image = getattr(runtime, "build_image", None)
-            if build_image is None:
-                raise RuntimeError("QEMU runtime does not support image builds")
-            return await build_image(
-                base_distro=base_distro,
-                init_script=init_script,
-                image_path=image_path,
-                operation_id=operation_id,
-                image_instance_id=image_instance_id,
-                progress_callback=progress_callback,
-            )
-
-        raise RuntimeError(f"Unsupported runtime_type for image build: {runtime_type}")
+        if not image_path.strip():
+            raise RuntimeError("image_path is required for qemu image builds")
+        if self._runtime is None:
+            raise RuntimeError("Workspace runtime is unavailable")
+        runtime = self._runtime
+        build_image = getattr(runtime, "build_image", None)
+        if build_image is None:
+            raise RuntimeError("QEMU runtime does not support image builds")
+        return await build_image(
+            base_distro=base_distro,
+            init_script=init_script,
+            image_path=image_path,
+            operation_id=operation_id,
+            image_instance_id=image_instance_id,
+            progress_callback=progress_callback,
+        )
 
     @asynccontextmanager
     async def _capture_context(self, workspace_id: uuid.UUID) -> AsyncIterator[None]:
@@ -143,10 +120,6 @@ class ImageManager:
                 raise RuntimeError("ImageManager has no workspace lookup configured")
             info = self._get_cached(workspace_id)
             runtime = self._get_runtime(workspace_id)
-            if not runtime.supports_image_artifacts:
-                raise RuntimeError(
-                    f"Runtime '{info.runtime_type}' does not support image artifact capture"
-                )
             proven_clean = False
             if self.scrub_proof_hook is not None:
                 proven_clean = await self.scrub_proof_hook(workspace_id)
@@ -168,42 +141,30 @@ class ImageManager:
     async def delete_image_reference(
         self,
         *,
-        runtime_type: str,
         image_ref: str,
     ) -> str:
         """Delete a concrete runtime image reference without requiring a workspace.
 
         Returns 'deleted' or 'already_absent' to indicate the result.
         """
-        if runtime_type == "docker":
-            if not image_ref.strip():
-                raise RuntimeError("image_ref is required for docker image deletion")
-            runtime = self._get_runtime_by_type("docker")
-            return await runtime.delete_image_reference(image_ref)
 
-        if runtime_type == "qemu":
-            if not image_ref.strip():
-                raise RuntimeError("image_ref is required for qemu image deletion")
-            if self._get_runtime_by_type is None:
-                raise RuntimeError("Runtime 'qemu' is not enabled")
-            runtime = self._get_runtime_by_type("qemu")
-            try:
-                await runtime.delete_image_artifact(image_ref)
-                logger.info("qemu_image_deleted", image_ref=image_ref)
-                return "deleted"
-            except FileNotFoundError:
-                logger.info("qemu_image_already_absent", image_ref=image_ref)
-                return "already_absent"
-
-        raise RuntimeError(
-            f"Unsupported runtime_type for image deletion: {runtime_type}"
-        )
+        if not image_ref.strip():
+            raise RuntimeError("image_ref is required for qemu image deletion")
+        if self._runtime is None:
+            raise RuntimeError("Workspace runtime is unavailable")
+        runtime = self._runtime
+        try:
+            await runtime.delete_image_artifact(image_ref)
+            logger.info("qemu_image_deleted", image_ref=image_ref)
+            return "deleted"
+        except FileNotFoundError:
+            logger.info("qemu_image_already_absent", image_ref=image_ref)
+            return "already_absent"
 
     async def create_workspace_from_image_artifact(
         self,
         image_artifact_id: str,
         new_workspace_id: uuid.UUID,
-        runtime_type: str,
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
@@ -213,10 +174,14 @@ class ImageManager:
     ) -> tuple[uuid.UUID, bool]:
         """Fence clone initialization against inventory while retaining leaf API."""
         kwargs = dict(
-            image_artifact_id=image_artifact_id, new_workspace_id=new_workspace_id,
-            runtime_type=runtime_type, qemu_vcpus=qemu_vcpus,
-            qemu_memory_mb=qemu_memory_mb, qemu_disk_size_gb=qemu_disk_size_gb,
-            env_vars=env_vars, files=files, ssh_keys=ssh_keys,
+            image_artifact_id=image_artifact_id,
+            new_workspace_id=new_workspace_id,
+            qemu_vcpus=qemu_vcpus,
+            qemu_memory_mb=qemu_memory_mb,
+            qemu_disk_size_gb=qemu_disk_size_gb,
+            env_vars=env_vars,
+            files=files,
+            ssh_keys=ssh_keys,
         )
         if self.lifecycle_context is None:
             return await self._create_workspace_from_image_artifact(**kwargs)
@@ -227,7 +192,6 @@ class ImageManager:
         self,
         image_artifact_id: str,
         new_workspace_id: uuid.UUID,
-        runtime_type: str,
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
@@ -239,17 +203,12 @@ class ImageManager:
 
         Credentials remain on disk until a controlled stop.
         """
-        if self._get_runtime_by_type is None:
-            raise RuntimeError(f"Runtime '{runtime_type}' is not enabled")
-        runtime = self._get_runtime_by_type(runtime_type)
-        if not runtime.supports_image_artifacts:
-            raise RuntimeError(
-                f"Runtime '{runtime_type}' does not support image artifact cloning"
-            )
+        if self._runtime is None:
+            raise RuntimeError("Workspace runtime is unavailable")
+        runtime = self._runtime
 
         info = WorkspaceInfo(
             workspace_id=new_workspace_id, instance_id="", status="creating",
-            runtime_type=runtime_type,
         )
         if self._store_workspace is None:
             raise RuntimeError("ImageManager has no workspace store configured")
@@ -267,7 +226,6 @@ class ImageManager:
         log = logger.bind(
             workspace_id=str(new_workspace_id),
             image_artifact_id=image_artifact_id,
-            runtime_type=runtime_type,
         )
         log.info("workspace_created_from_image_artifact")
 

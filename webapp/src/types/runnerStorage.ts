@@ -29,7 +29,6 @@ export interface StorageResource {
   provenance: string
 }
 export interface StorageRuntime {
-  runtime_type: string
   fresh: boolean
   snapshot_id: number | null
   collected_at: string | null
@@ -53,7 +52,6 @@ export interface StorageGeneration {
   id: string
   name: string
   owner_label: string
-  runtime_type: string
   definition_id: string | null
   definition_name: string | null
   build_job_id: string | null

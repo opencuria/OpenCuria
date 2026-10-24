@@ -138,12 +138,12 @@ class FileManager:
 
     def __init__(
         self,
-        runtimes: dict[str, RuntimeBackend] | None = None,
+        runtime: RuntimeBackend | None = None,
         get_cached: Callable[[uuid.UUID], WorkspaceInfo] | None = None,
         get_runtime: Callable[[uuid.UUID], RuntimeBackend] | None = None,
     ) -> None:
         self.capture_fence: CaptureFence | None = None
-        self._runtimes = runtimes if runtimes is not None else {}
+        self._runtime = runtime
         self._get_cached = get_cached
         self._get_runtime = get_runtime
         # Limit concurrent file-read SSH channels per workspace to avoid
@@ -319,7 +319,7 @@ class FileManager:
         *,
         allow_external: bool = False,
     ) -> dict:
-        """Read a file from the workspace container.
+        """Read a file from the workspace VM.
 
         Returns a dict with ``content`` (base64), ``size``, ``truncated``,
         and ``mime_type``.
@@ -418,7 +418,7 @@ class FileManager:
         content_b64: str,
         is_directory: bool = False,
     ) -> None:
-        """Upload a file into the workspace container.
+        """Upload a file into the workspace VM.
 
         Args:
             workspace_id: Target workspace.
@@ -484,7 +484,7 @@ class FileManager:
         workspace_id: uuid.UUID,
         path: str,
     ) -> dict:
-        """Download a file or directory from the workspace container.
+        """Download a file or directory from the workspace VM.
 
         Returns a dict with ``content`` (base64), ``filename``, ``is_archive``
         and ``size`` (raw byte count). For directories, the content is a
@@ -591,7 +591,7 @@ class FileManager:
         *,
         allow_external: bool = False,
     ) -> dict:
-        """Stat a path inside the workspace container.
+        """Stat a path inside the workspace VM.
 
         Returns a dict with ``path``, ``is_dir``, ``size``, ``mime_type``.
         """
@@ -646,7 +646,7 @@ class FileManager:
         *,
         allow_external: bool = False,
     ) -> None:
-        """Write file content atomically inside the workspace container.
+        """Write file content atomically inside the workspace VM.
 
         Args:
             workspace_id: Target workspace.
@@ -677,7 +677,7 @@ class FileManager:
 
         archive = build_single_file_tar(os.path.basename(safe_path), decoded)
         if allow_external:
-            # Docker put_archive needs the destination directory to exist;
+            # Archive extraction needs the destination directory to exist;
             # keep ordinary file-explorer writes unchanged.
             exit_code, output = await runtime.exec_command_wait(
                 info.instance_id,

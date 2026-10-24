@@ -104,7 +104,6 @@ def _create_fixture(args: argparse.Namespace) -> tuple[str, str, str, uuid.UUID,
         api_token_hash=hash_token(uuid.uuid4().hex),
         status=RunnerStatus.OFFLINE,
         organization=org,
-        available_runtimes=["docker"],
     )
     workspace = Workspace.objects.create(
         runner=runner,

@@ -10,7 +10,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from src.runtime.docker_runtime import DockerRuntime
 
 try:
     import libvirt  # noqa: F401
@@ -205,30 +204,6 @@ async def test_mutation_cancellation_drains_thread_and_holds_lock():
     await second
 
 
-@pytest.mark.asyncio
-async def test_docker_aliases_one_physical_id_foreign_consumer_blocks():
-    r = DockerRuntime()
-    client = MagicMock()
-    r._client = client
-    image = MagicMock()
-    image.id = "sha256:physical"
-    image.attrs = {
-        "RepoTags": ["opencuria:one", "opencuria:two"],
-        "Size": 100,
-        "Config": {"Labels": {}},
-    }
-    client.images.list.return_value = [image]
-    container = MagicMock()
-    container.id = "foreign"
-    container.attrs = {"Image": image.id, "Config": {"Labels": {}}}
-    client.containers.list.return_value = [container]
-    client.api.df.return_value = {"Images": [{"Id": image.id, "SharedSize": 90}]}
-    scan = await r.inventory()
-    assert scan.complete and len([x for x in scan.resources if x.kind == "image"]) == 1
-    assert scan.resources[0].shared_bytes == 90
-    with pytest.raises(RuntimeError, match="dependents"):
-        await r.delete_image_reference("opencuria:one")
-    client.images.remove.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -258,7 +233,7 @@ async def test_journal_recovers_exact_publication_without_rerun(tmp_path):
         source, target, {"operation_id": "op", "artifact_id": image_id, "kind": "build"}
     )
     journal.close()
-    service = WorkspaceService({"qemu": r}, RunnerSettings())
+    service = WorkspaceService(r, RunnerSettings())
 
     class Socket:
         def __init__(self):
@@ -371,7 +346,7 @@ async def test_source_scrub_survives_corrupt_output_but_not_external_disk_write(
     disk = r._disk_path(ws)
     qcow(disk)
     source_domain(r, ws, disk)
-    service = WorkspaceService({"qemu": r}, RunnerSettings())
+    service = WorkspaceService(r, RunnerSettings())
     observed = await service.workspace_incarnation(ws)
     assert observed and observed[1] == "exited"
     journal = Journal(str(tmp_path / "journal"))
@@ -411,7 +386,7 @@ async def test_truncated_conversion_failure_retains_safe_source_evidence(tmp_pat
     disk = r._disk_path(ws)
     qcow(disk)
     source_domain(r, ws, disk)
-    service = WorkspaceService({"qemu": r}, RunnerSettings())
+    service = WorkspaceService(r, RunnerSettings())
     journal = Journal(str(tmp_path / "journal"))
     observed = await service.workspace_incarnation(ws)
     journal.checkpoint(
@@ -462,11 +437,8 @@ async def test_image_manager_never_bypasses_latest_scrub_proof(cached_clean):
     from src.services.images import ImageManager
 
     ws = uuid.uuid4()
-    info = SimpleNamespace(
-        credentials_present=not cached_clean, runtime_type="qemu", instance_id=str(ws)
-    )
+    info = SimpleNamespace(credentials_present=not cached_clean, instance_id=str(ws))
     runtime = SimpleNamespace(
-        supports_image_artifacts=True,
         create_image_artifact=AsyncMock(side_effect=RuntimeError("scrub required")),
     )
     manager = ImageManager(get_cached=lambda _: info, get_runtime=lambda _: runtime)
@@ -481,137 +453,10 @@ async def test_image_manager_never_bypasses_latest_scrub_proof(cached_clean):
     assert runtime.create_image_artifact.call_args.kwargs["credential_clean"] is False
 
 
-@pytest.mark.asyncio
-async def test_docker_intermediate_not_publication_and_untagged_checkpoint(tmp_path):
-    from src.config import RunnerSettings
-    from src.journal import Journal
-    from src.service import WorkspaceService
-
-    generation = str(uuid.uuid4())
-    tag = f"opencuria/generations:{generation}"
-    r = DockerRuntime()
-    client = MagicMock()
-    r._client = client
-    labels = {"opencuria.image-instance-id": generation, "opencuria.operation-id": "op"}
-
-    def image(physical, tags):
-        return SimpleNamespace(
-            id=physical,
-            attrs={"RepoTags": tags, "Size": 100, "Config": {"Labels": labels}},
-        )
-
-    intermediate = image("sha256:intermediate", [])
-    final = image("sha256:final", [tag])
-    client.images.list.return_value = [intermediate]
-    client.containers.list.return_value = []
-    client.api.df.return_value = {
-        "Images": [{"Id": intermediate.id, "SharedSize": 200, "Size": 250}]
-    }
-    service = WorkspaceService({"docker": r}, RunnerSettings())
-    identity = {
-        "operation_id": "op",
-        "target": generation,
-        "image_instance_id": generation,
-        "image_tag": tag,
-        "failure_event": "image:build_failed",
-    }
-    scan = await r.inventory()
-    assert scan.complete
-    assert scan.resources[0].kind == "build_cache"
-    assert scan.resources[0].shared_bytes is None
-    assert scan.resources[0].metadata["docker_df_shared_bytes"] == 200
-    assert await service.publication_evidence(identity) is None
-    client.images.list.return_value = [intermediate, final]
-    proof = await service.publication_evidence(identity)
-    assert proof[1]["image_id"] == final.id
-    journal = Journal(str(tmp_path / "journal"))
-    journal.publish_image(
-        final.id, {"generation_id": generation, "operation_id": "op", "image_tag": tag}
-    )
-    journal.close()
-    reopened = Journal(str(tmp_path / "journal"))
-    r._publication_journal = reopened
-    final.attrs["RepoTags"] = ["foreign:tag"]
-    scan = await r.inventory()
-    assert [x.kind for x in scan.resources] == ["build_cache", "image"]
-    assert (await service.publication_evidence(identity))[1]["image_id"] == final.id
-    with pytest.raises(RuntimeError, match="Foreign/shared"):
-        await r.delete_image_reference(final.id)
-    reopened.close()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("remote", [False, True])
-async def test_docker_filesystem_capacity_local_only(tmp_path, remote):
-    r = DockerRuntime("tcp://daemon:2375" if remote else "unix:///docker.sock")
-    r._client = MagicMock()
-    r._client.images.list.return_value = []
-    r._client.containers.list.return_value = []
-    r._client.api.df.return_value = {}
-    r._client.info.return_value = {"DockerRootDir": str(tmp_path)}
-    scan = await r.inventory()
-    assert scan.complete
-    fs = scan.filesystems[0]
-    assert fs["path"] == str(tmp_path)
-    if remote:
-        assert fs["capacity_bytes"] is None and fs["available_bytes"] is None
-    else:
-        assert fs["capacity_bytes"] > 0
-        assert 0 <= fs["available_bytes"] <= fs["capacity_bytes"]
 
 
-@pytest.mark.asyncio
-async def test_docker_build_checkpoints_verified_final_and_refuses_overwrite(tmp_path):
-    from docker.errors import ImageNotFound
-    from src.journal import Journal
-
-    r = DockerRuntime()
-    r._client = MagicMock()
-    generation = str(uuid.uuid4())
-    tag = f"opencuria/generations:{generation}"
-    final = SimpleNamespace(id="sha256:built")
-    r._client.images.get.side_effect = [ImageNotFound("absent"), final]
-    r._client.images.build.return_value = (final, [])
-    journal = Journal(str(tmp_path / "journal"))
-    r._publication_journal = journal
-    await r.build_image(
-        dockerfile_content="FROM scratch",
-        image_tag=tag,
-        operation_id="op",
-        image_instance_id=generation,
-    )
-    assert journal.publications()[final.id]["generation_id"] == generation
-    r._client.images.get.side_effect = None
-    r._client.images.get.return_value = final
-    with pytest.raises(FileExistsError):
-        await r.build_image(
-            dockerfile_content="FROM scratch",
-            image_tag=tag,
-            operation_id="other",
-            image_instance_id=generation,
-        )
-    assert r._client.images.build.call_count == 1
-    # External overwrite cannot replace the durably bound generation.
-    r._client.images.list.return_value = [
-        SimpleNamespace(
-            id="sha256:replacement",
-            attrs={
-                "RepoTags": [tag],
-                "Size": 100,
-                "Config": {
-                    "Labels": {
-                        "opencuria.image-instance-id": generation,
-                        "opencuria.operation-id": "op",
-                    }
-                },
-            },
-        )
-    ]
-    r._client.containers.list.return_value = []
-    r._client.api.df.return_value = {}
-    scan = await r.inventory()
-    assert not scan.complete and scan.resources[0].kind == "build_cache"
-    journal.close()
 
 
 def test_publication_hash_cache_invalidates_same_size_and_mtime(tmp_path, monkeypatch):

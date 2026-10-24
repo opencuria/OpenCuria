@@ -17,7 +17,6 @@ const snapshot = (id: string, complete = true): RunnerStorage => ({
   latest_complete: complete,
   runtimes: [
     {
-      runtime_type: 'qemu',
       fresh: complete,
       received_at: '2026-10-03T12:01:00Z',
       collected_at: '2026-10-03T12:00:59Z',

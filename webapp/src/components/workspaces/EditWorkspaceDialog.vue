@@ -20,7 +20,7 @@ import { useNotificationStore } from '@/stores/notifications'
 import { useCredentialStore } from '@/stores/credentials'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
-import { RuntimeType, type Workspace, type WorkspaceUpdateIn } from '@/types'
+import { type Workspace, type WorkspaceUpdateIn } from '@/types'
 import { DEFAULT_DESKTOP_HEIGHT, DEFAULT_DESKTOP_WIDTH } from '@/lib/desktopGeometry'
 import { readWorkspaceDraft, removeWorkspaceDraft, saveWorkspaceDraft } from '@/lib/workspaceDraft'
 import type { WorkspaceDraftFields } from '@/lib/workspaceDraft'
@@ -172,7 +172,6 @@ const resourceSelectionValid = computed(() => {
   const heightValid =
     desktopHeight.value >= 600 && desktopHeight.value <= 2160 && desktopHeight.value % 2 === 0
   if (!widthValid || !heightValid) return false
-  if (props.workspace.runtime_type !== RuntimeType.QEMU) return true
   return (
     qemuVcpus.value >= qemuLimits.value.minVcpus &&
     qemuVcpus.value <= qemuLimits.value.maxVcpus &&
@@ -188,16 +187,12 @@ function buildPayload(): WorkspaceUpdateIn {
     credential_ids: [...selectedCredentialIds.value],
     plugin_ids: [...selectedPluginIds.value],
   }
-  if (props.workspace.runtime_type === RuntimeType.QEMU) {
-    if (qemuVcpus.value !== (props.workspace.qemu_vcpus ?? qemuDefaults.value.vcpus))
-      payload.qemu_vcpus = qemuVcpus.value
-    if (qemuMemoryMb.value !== (props.workspace.qemu_memory_mb ?? qemuDefaults.value.memoryMb))
-      payload.qemu_memory_mb = qemuMemoryMb.value
-    if (
-      qemuDiskSizeGb.value !== (props.workspace.qemu_disk_size_gb ?? qemuDefaults.value.diskSizeGb)
-    )
-      payload.qemu_disk_size_gb = qemuDiskSizeGb.value
-  }
+  if (qemuVcpus.value !== (props.workspace.qemu_vcpus ?? qemuDefaults.value.vcpus))
+    payload.qemu_vcpus = qemuVcpus.value
+  if (qemuMemoryMb.value !== (props.workspace.qemu_memory_mb ?? qemuDefaults.value.memoryMb))
+    payload.qemu_memory_mb = qemuMemoryMb.value
+  if (qemuDiskSizeGb.value !== (props.workspace.qemu_disk_size_gb ?? qemuDefaults.value.diskSizeGb))
+    payload.qemu_disk_size_gb = qemuDiskSizeGb.value
   if (desktopWidth.value !== (props.workspace.desktop_width || DEFAULT_DESKTOP_WIDTH))
     payload.desktop_width = desktopWidth.value
   if (desktopHeight.value !== (props.workspace.desktop_height || DEFAULT_DESKTOP_HEIGHT))
@@ -368,7 +363,7 @@ const canSave = computed(
             </div>
           </div>
 
-          <div v-if="workspace.runtime_type === RuntimeType.QEMU" class="space-y-3">
+          <div class="space-y-3">
             <label class="text-sm font-medium text-foreground block">QEMU resources</label>
 
             <div>

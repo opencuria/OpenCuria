@@ -20,7 +20,6 @@ from src.services.sessions.desktop import DESKTOP_STOP_COMMAND
 
 class DummyService:
     def __init__(self) -> None:
-        self.supported_runtimes = []
         self.registry = SimpleNamespace(_cache={})
         self.sync_from_runtime = AsyncMock()
         self.recover_desktop_sessions_from_runtime = AsyncMock()
@@ -89,7 +88,7 @@ class DummyService:
         def get_desktop_generation(self, workspace_id):
             return getattr(self.get_desktop_session(workspace_id), "generation", 0)
 
-        def get_desktop_container_ip(self, workspace_id):
+        def get_desktop_guest_ip(self, workspace_id):
             return "127.0.0.1"
 
         def get_desktop_network_name(self, workspace_id):
@@ -105,8 +104,7 @@ class DummyService:
             return {
                 "workspace_id": str(workspace_id),
                 "port": session.port,
-                "container_ip": self.get_desktop_container_ip(workspace_id),
-                "network_name": self.get_desktop_network_name(workspace_id),
+                "guest_ip": self.get_desktop_guest_ip(workspace_id),
                 "viewer": session.viewer_held,
                 "computer_use": bool(session.computeruse_run_ids),
                 "generation": session.generation,
@@ -227,7 +225,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
 
                 async def workspace_incarnation(self, _workspace_id):
                     return (
-                        {"runtime": "docker", "resource_id": "instance-1"},
+                        {"runtime": "qemu", "resource_id": "instance-1"},
                         "running",
                     )
 
@@ -238,7 +236,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
                         )
                     ]
 
-                def get_container_ip(self, instance_id, workspace_id):
+                def get_guest_ip(self, instance_id, workspace_id):
                     return "127.0.0.1"
 
                 def get_workspace_network_name(self, workspace_id):
@@ -252,9 +250,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
                         return 0, "stopped"
                     return 0, ""
 
-            service = WorkspaceService(
-                {"docker": Runtime()}, RunnerSettings(state_dir=state_dir)
-            )
+            service = WorkspaceService(Runtime(), RunnerSettings(state_dir=state_dir))
             service.registry._cache[workspace_id] = WorkspaceInfo(
                 workspace_id, "instance-1", "running"
             )
@@ -361,11 +357,9 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "workspace_id": str(uuid.uuid4()),
                     "status": "running",
-                    "runtime_type": "docker",
                     "desktop": {
                         "port": 6901,
-                        "container_ip": "127.0.0.1",
-                        "network_name": "workspace-net",
+                        "guest_ip": "127.0.0.1",
                     },
                 }
             ]
@@ -383,7 +377,6 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         interface._sio.emit.assert_any_await(
             "runner:register",
             {
-                "supported_runtimes": [],
                 "status": "ready",
                 "inventory_epoch": interface._inventory_epoch,
                 "desktop_leases": {
@@ -459,7 +452,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_start_desktop_emits_qemu_proxy_metadata(self) -> None:
         service = DummyService()
-        service.desktop.get_desktop_container_ip = lambda workspace_id: "10.100.0.2"
+        service.desktop.get_desktop_guest_ip = lambda workspace_id: "10.100.0.2"
         service.desktop.get_desktop_network_name = lambda workspace_id: ""
         interface = WebSocketInterface(
             service, RunnerSettings(state_dir=tempfile.mkdtemp())
@@ -493,8 +486,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             {
                 "workspace_id": str(workspace_id),
                 "port": 6901,
-                "container_ip": "10.100.0.2",
-                "network_name": "",
+                "guest_ip": "10.100.0.2",
                 "viewer": True,
                 "computer_use": False,
                 "generation": 1,
@@ -574,8 +566,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         service.desktop.get_desktop_state_payload = lambda ws_id: {
             "workspace_id": str(ws_id),
             "port": 6901,
-            "container_ip": "10.0.0.5",
-            "network_name": "net",
+            "guest_ip": "10.0.0.5",
             "generation": 5,
             "epoch": interface._desktop_epoch,
             "viewer": True,
@@ -687,8 +678,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
             {
                 "workspace_id": str(ws_id),
                 "port": 6901,
-                "container_ip": "10.0.0.5",
-                "network_name": "net",
+                "guest_ip": "10.0.0.5",
                 "viewer": True,
                 "generation": 5,
                 "epoch": "runner-desktop-epoch",
@@ -892,15 +882,15 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "runtime_type,outcome",
+    "outcome",
     [
-        ("docker", "deleted"),
-        ("qemu", "already_absent"),
-        ("qemu", RuntimeError("blocked")),
+        "deleted",
+        "already_absent",
+        RuntimeError("blocked"),
     ],
 )
 async def test_image_deletion_uses_runtime_reference(
-    tmp_path: Path, runtime_type: str, outcome: str | Exception
+    tmp_path: Path, outcome: str | Exception
 ) -> None:
     """Image deletion has no workspace dependency and retains durable results."""
     service = DummyService()
@@ -918,13 +908,10 @@ async def test_image_deletion_uses_runtime_reference(
                 "runner_id": "runner",
                 "target": "image",
                 "image_instance_id": "image",
-                "runtime_type": runtime_type,
                 "image_artifact_id": "physical-reference",
             }
         )
-        delete.assert_awaited_once_with(
-            runtime_type=runtime_type, image_ref="physical-reference"
-        )
+        delete.assert_awaited_once_with(image_ref="physical-reference")
         event, result = interface._operations.journal.pending()[0]
         assert result["execution_finished"]
         if isinstance(outcome, Exception):
@@ -956,7 +943,6 @@ class WebSocketCloneWorkspaceTests(unittest.IsolatedAsyncioTestCase):
             "task_id": task_id,
             "workspace_id": str(workspace_id),
             "image_artifact_id": str(uuid.uuid4()),
-            "runtime_type": "qemu",
             "agent_type": "copilot",
             "env_vars": {},
             "ssh_keys": [],
@@ -996,8 +982,7 @@ class WebSocketCreateWorkspaceTests(unittest.IsolatedAsyncioTestCase):
             "task_id": task_id,
             "workspace_id": str(workspace_id),
             "repos": ["git@github.com:example/private-repo.git"],
-            "runtime_type": "docker",
-            "image_tag": "opencuria/workspace:test",
+            "base_image_path": "/images/base.qcow2",
             "env_vars": {"GITHUB_TOKEN": "secret"},
             "ssh_keys": [
                 "-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----"

@@ -143,7 +143,6 @@ const runningWorkspace: Workspace = {
   name: "Ready workspace",
   status: "running",
   runner_id: "runner",
-  runtime_type: "docker",
   active_operation: null,
   runner_online: true,
   has_active_session: false,

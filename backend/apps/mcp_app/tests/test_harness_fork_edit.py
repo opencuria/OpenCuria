@@ -102,7 +102,6 @@ def _setup_owned_workspace():
         status=RunnerStatus.ONLINE,
         sid=f"mcp-fork-sid-{uuid.uuid4().hex[:8]}",
         organization=org,
-        available_runtimes=["docker"],
     )
     workspace = Workspace.objects.create(
         runner=runner,

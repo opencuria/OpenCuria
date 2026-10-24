@@ -24,7 +24,7 @@ Backend-Prozess (Daphne/Django)
          │ harness:exec/read/write/list/... (neu)
          ▼
 Runner (dummer Exec-/Datei-Server, kein Agent-Wissen)
-  WorkspaceService + Docker/QEMU Runtime (bleibt)
+  WorkspaceService + QEMU Runtime (bleibt)
 ```
 
 **Harness-Laufzeit:** v1 als sauber gekapseltes Modul mit eigenem

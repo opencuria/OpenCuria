@@ -52,7 +52,6 @@ def git_setup(db, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         status=RunnerStatus.ONLINE,
         sid="git-mcp-sid",
         organization=org,
-        available_runtimes=["docker"],
     )
     workspace = Workspace.objects.create(
         runner=runner, name="Git MCP", status=WorkspaceStatus.RUNNING, created_by=owner

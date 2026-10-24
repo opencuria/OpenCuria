@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .enums import RuntimeType, TaskType
+from .enums import TaskType
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,6 @@ def uses_artifact_clone(image) -> bool:
     """Published QEMU captures are cloned by artifact id, not by image path."""
     return (
         image.origin_type == "workspace_capture"
-        and image.runtime_type == RuntimeType.QEMU
     )
 
 
@@ -42,7 +41,6 @@ def provisioning_command(
     workspace_id,
     workspace_name: str,
     image,
-    runtime_type: str,
     repos: list[str],
     qemu_vcpus: int | None,
     qemu_memory_mb: int | None,
@@ -62,7 +60,6 @@ def provisioning_command(
                 "workspace_id": str(workspace_id),
                 "workspace_name": workspace_name,
                 "image_artifact_id": image.runner_ref,
-                "runtime_type": runtime_type,
                 **qemu,
             },
         )
@@ -73,13 +70,9 @@ def provisioning_command(
             "workspace_id": str(workspace_id),
             "repos": list(repos),
             "workspace_name": workspace_name,
-            "runtime_type": runtime_type,
             **qemu,
             "configure_commands": [],
             "image_artifact_id": str(image.id),
-            "image_tag": image.runner_ref if runtime_type == RuntimeType.DOCKER else "",
-            "base_image_path": image.runner_ref
-            if runtime_type == RuntimeType.QEMU
-            else "",
+            "base_image_path": image.runner_ref,
         },
     )

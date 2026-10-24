@@ -37,15 +37,16 @@ async def test_create_workspace_injects_credentials_and_leaves_them() -> None:
             return "instance-1"
 
     runtime = DummyRuntime()
-    service = WorkspaceService({"docker": runtime}, RunnerSettings())
+    service = WorkspaceService(runtime, RunnerSettings())
     service.exec_kernel.exec_command = AsyncMock(side_effect=[(0, "")])
 
     workspace_id, credentials_present = await service.create_workspace(
         repos=["git@github.com:example/private-repo.git"],
         env_vars={"GITHUB_TOKEN": "secret"},
-        ssh_keys=["-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----"],
-        runtime_type="docker",
-        image_tag="opencuria/workspace:test",
+        ssh_keys=[
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----"
+        ],
+        base_image_path="/images/base.qcow2",
     )
 
     assert credentials_present is True
@@ -83,7 +84,7 @@ async def test_inject_workspace_credentials_materializes_file_credentials() -> N
             return 0, ""
 
     runtime = DummyRuntime()
-    service = WorkspaceService({"docker": runtime}, RunnerSettings())
+    service = WorkspaceService(runtime, RunnerSettings())
     service.credentials.remove_workspace_credentials = AsyncMock()
 
     present = await service.credentials.inject_workspace_credentials(
@@ -122,7 +123,7 @@ async def test_inject_workspace_credentials_materializes_file_credentials() -> N
 async def test_inject_workspace_credentials_empty_set_returns_false() -> None:
     runtime = Mock()
     runtime.exec_command_wait = AsyncMock(return_value=(0, ""))
-    service = WorkspaceService({"docker": runtime}, RunnerSettings())
+    service = WorkspaceService(runtime, RunnerSettings())
     service.credentials.remove_workspace_credentials = AsyncMock()
 
     present = await service.credentials.inject_workspace_credentials(
@@ -144,9 +145,7 @@ async def test_stop_workspace_removes_credentials_before_runtime_stop(tmp_path) 
     runtime = Mock()
     runtime.stop_workspace = AsyncMock()
     runtime.get_workspace_status = AsyncMock(return_value=Mock(status="running"))
-    service = WorkspaceService(
-        {"docker": runtime}, RunnerSettings(state_dir=str(tmp_path))
-    )
+    service = WorkspaceService(runtime, RunnerSettings(state_dir=str(tmp_path)))
     service.configure_desktop_leases(str(tmp_path), "security-test-epoch")
     service.credentials.remove_workspace_credentials = AsyncMock()
     workspace_id = __import__("uuid").uuid4()
@@ -156,7 +155,6 @@ async def test_stop_workspace_removes_credentials_before_runtime_stop(tmp_path) 
         workspace_id=workspace_id,
         instance_id="instance-1",
         status="running",
-        runtime_type="docker",
     )
 
     present = await service.stop_workspace(workspace_id)
@@ -173,7 +171,7 @@ async def test_start_terminal_sources_persistent_env() -> None:
     runtime.exec_pty = AsyncMock(return_value=Mock())
     runtime.workspace_exists = AsyncMock(return_value=True)
 
-    service = WorkspaceService({"docker": runtime}, RunnerSettings())
+    service = WorkspaceService(runtime, RunnerSettings())
     workspace_id = __import__("uuid").uuid4()
     from src.models import WorkspaceInfo
 
@@ -181,7 +179,6 @@ async def test_start_terminal_sources_persistent_env() -> None:
         workspace_id=workspace_id,
         instance_id="instance-1",
         status="running",
-        runtime_type="docker",
     )
 
     await service.terminal_manager.start_terminal(workspace_id=workspace_id)

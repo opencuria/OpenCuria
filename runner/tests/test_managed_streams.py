@@ -43,7 +43,6 @@ def local_control_root(tmp_path, monkeypatch):
 
 
 class LocalRuntime:
-    runtime_type = "local"
     supports_managed_process = True
 
     def __init__(self):
@@ -325,7 +324,6 @@ async def test_persisted_starting_intent_without_transport(tmp_path):
             connection_id="crashed",
             workspace_id=str(workspace),
             instance_id="instance",
-            runtime_type="local",
             control_path=path,
             state="starting",
         )
@@ -376,7 +374,6 @@ async def test_old_incarnation_status_proof(tmp_path, same_instance, status, clo
             connection_id="proof",
             workspace_id=str(workspace),
             instance_id="instance",
-            runtime_type="local",
             control_path=str(tmp_path / "unused"),
             state="starting",
         )
@@ -397,7 +394,6 @@ async def test_recovery_bound_runtime_not_replacement_status(tmp_path):
             return RuntimeStatus(instance_id, "running")
 
     class ReplacementRuntime(LocalRuntime):
-        runtime_type = "replacement"
 
         async def get_workspace_status(self, instance_id):
             raise AssertionError("replacement status is not old death evidence")
@@ -412,14 +408,13 @@ async def test_recovery_bound_runtime_not_replacement_status(tmp_path):
         owner,
         SimpleNamespace(instance_id="replacement"),
     )
-    m._runtimes["local"] = old
+    m._runtime = old
     await m.intent_store.reserve(
         dict(
             owner,
             connection_id="proof",
             workspace_id=str(workspace),
             instance_id="instance",
-            runtime_type="local",
             control_path=str(tmp_path / "unused"),
             state="starting",
         )
@@ -621,7 +616,7 @@ async def test_confirm_workspace_ended_durable_without_cache(
         owner,
         SimpleNamespace(instance_id="replacement"),
     )
-    m._runtimes["local"] = ProofRuntime()
+    m._runtime = ProofRuntime()
     m._get_cached = lambda _: (_ for _ in ()).throw(ValueError("cache removed"))
     await m.intent_store.reserve(
         dict(
@@ -629,7 +624,6 @@ async def test_confirm_workspace_ended_durable_without_cache(
             connection_id="ended",
             workspace_id=str(workspace),
             instance_id="instance",
-            runtime_type="local",
             control_path="unused",
             state="closing",
         )
@@ -646,7 +640,6 @@ async def test_confirm_workspace_ended_durable_without_cache(
                     connection_id="late",
                     workspace_id=str(workspace),
                     instance_id="instance",
-                    runtime_type="local",
                     control_path="unused",
                     state="starting",
                 )
@@ -678,7 +671,6 @@ async def test_confirmation_pending_spawn_bounded_and_retained(tmp_path, monkeyp
             connection_id="pending",
             workspace_id=str(workspace),
             instance_id="instance",
-            runtime_type="local",
             control_path="unused",
             state="starting",
         )

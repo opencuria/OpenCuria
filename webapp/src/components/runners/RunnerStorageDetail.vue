@@ -34,18 +34,10 @@ import {
 } from '@/lib/runnerPresentation'
 import { formatRelativeTime } from '@/lib/utils'
 import { runnerActivityGroups } from '@/lib/runnerActivity'
-import { runnerSupportsRuntime } from '@/lib/runtimeSupport'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Skeleton } from '@/components/ui/skeleton'
 import DetailHeader from '@/components/common/DetailHeader.vue'
@@ -65,7 +57,6 @@ const { data, deletions, error, loading, refreshPending, load, refresh } =
   useRunnerStorage(runnerId)
 const tab = ref<'overview' | 'inventory' | 'activities'>(props.initialTab ?? 'overview')
 const freshMetrics = ref<RunnerSystemMetrics | null>(null)
-const runtimeFilter = ref('all')
 const inventoryQuery = ref('')
 const showDeleted = ref(false)
 const selectedKey = ref<string | null>(null)
@@ -96,36 +87,14 @@ const confirmedRuntimes = computed(() =>
 )
 const stored = computed(() => data.value?.generations.filter((i) => i.status !== 'deleted') ?? [])
 const deleted = computed(() => data.value?.generations.filter((i) => i.status === 'deleted') ?? [])
-const runtimeTypes = computed(() =>
-  [
-    ...new Set([
-      ...(props.runner.available_runtimes ?? []),
-      ...(data.value?.runtimes.map((r) => r.runtime_type) ?? []),
-      ...stored.value.map((i) => i.runtime_type),
-    ]),
-  ].filter(Boolean),
-)
-const visibleRuntimes = computed(
-  () =>
-    confirmedRuntimes.value.filter(
-      (r) => runtimeFilter.value === 'all' || r.runtime_type === runtimeFilter.value,
-    ) ?? [],
-)
-const visibleGenerations = computed(() =>
-  stored.value.filter(
-    (i) => runtimeFilter.value === 'all' || i.runtime_type === runtimeFilter.value,
-  ),
-)
+const visibleRuntimes = confirmedRuntimes
+const visibleGenerations = stored
 const topology = computed(() =>
   buildRunnerTopology(data.value?.runtimes ?? [], data.value?.generations ?? []),
 )
 const presentation = computed(() => projectRunnerTopology(topology.value))
 const visibleTopology = computed(() => {
-  const nodes = presentation.value.nodes.filter(
-    (node) =>
-      node.generation?.status !== 'deleted' &&
-      (runtimeFilter.value === 'all' || node.runtime === runtimeFilter.value),
-  )
+  const nodes = presentation.value.nodes.filter((node) => node.generation?.status !== 'deleted')
   const keys = new Set(nodes.map((node) => node.key))
   return {
     ...presentation.value,
@@ -196,8 +165,7 @@ const inventoryGroups = computed(() => {
   const matches = (image: StorageGeneration) =>
     [image.name, image.definition_name, image.id, image.runner_ref].some((t) =>
       t?.toLowerCase().includes(term),
-    ) &&
-    (runtimeFilter.value === 'all' || image.runtime_type === runtimeFilter.value)
+    )
   return [
     {
       name: 'Base / build images',
@@ -222,15 +190,11 @@ const inventoryResources = computed(() =>
   topology.value.nodes.filter(
     (n) =>
       n.resource &&
-      (runtimeFilter.value === 'all' || n.runtime === runtimeFilter.value) &&
       [n.label, n.resource.physical_id, ...n.resource.aliases].some((t) =>
         t.toLowerCase().includes(inventoryQuery.value.trim().toLowerCase()),
       ),
   ),
 )
-watch(runtimeFilter, () => {
-  selectedKey.value = null
-})
 watch(selectedKey, async (key) => {
   if (!key) return
   await nextTick()
@@ -315,17 +279,13 @@ async function rebuild(definition: string) {
             :class="online ? 'bg-success' : 'bg-muted-foreground'"
           />{{ online ? 'Online' : 'Offline' }}</span
         >
-        <span v-for="type in runtimeTypes" :key="type">{{ type.toUpperCase() }}</span>
         <span
           >{{ online ? 'Connected' : 'Last seen' }}
           {{ formatRelativeTime(online ? runner.connected_at : runner.disconnected_at) }}</span
         >
       </template>
       <template #actions>
-        <EditRunnerResourcesDialog
-          v-if="auth.isAdmin && runnerSupportsRuntime(runner, 'qemu')"
-          :runner="runner"
-        />
+        <EditRunnerResourcesDialog v-if="auth.isAdmin" :runner="runner" />
         <Button variant="outline" size="sm" :disabled="scanBusy || refreshPending" @click="scan"
           ><RefreshCw :class="{ 'animate-spin': scanBusy || refreshPending }" />{{
             refreshPending ? 'Scan queued' : 'Refresh inventory'
@@ -368,16 +328,6 @@ async function rebuild(definition: string) {
             ></TabsTrigger
           >
         </TabsList>
-        <Select v-if="runtimeTypes.length > 1 && tab !== 'activities'" v-model="runtimeFilter"
-          ><SelectTrigger size="sm" aria-label="Filter runtime" class="w-32"
-            ><SelectValue /></SelectTrigger
-          ><SelectContent
-            ><SelectItem value="all">All runtimes</SelectItem
-            ><SelectItem v-for="type in runtimeTypes" :key="type" :value="type">{{
-              type.toUpperCase()
-            }}</SelectItem></SelectContent
-          ></Select
-        >
       </div>
       <TabsContent value="overview" class="min-w-0 space-y-5">
         <RunnerResourceOverview
@@ -412,7 +362,7 @@ async function rebuild(definition: string) {
           >
         </div>
         <RunnerStorageDonut
-          v-if="runtimeFilter !== 'docker' && runtimeTypes.includes('qemu') && data"
+          v-if="data"
           :runtimes="visibleRuntimes"
           :topology="visibleTopology"
           :selected-key="presentationSelectedKey"
@@ -499,9 +449,8 @@ async function rebuild(definition: string) {
               Snapshot {{ data?.latest_snapshot_id ?? 'Unknown' }} · Lifecycle intent and observed
               state are independent. Partial or stale inventory cannot prove absence.
             </p>
-            <div v-for="runtime in visibleRuntimes" :key="runtime.runtime_type" class="space-y-1">
+            <div v-for="(runtime, index) in visibleRuntimes" :key="index" class="space-y-1">
               <p class="font-medium">
-                {{ runtime.runtime_type.toUpperCase() }} ·
                 {{ runtime.fresh ? 'Recent confirmed inventory' : 'Stale / unknown inventory' }}
               </p>
               <p class="break-words">
@@ -529,10 +478,7 @@ async function rebuild(definition: string) {
                 {{ message }}
               </p>
             </div>
-            <p>
-              Image sizes are not filesystem usage. Docker layers overlap; logical / shared sizes
-              are not summed.
-            </p>
+            <p>Image sizes are not filesystem usage. Logical / shared sizes are not summed.</p>
           </CollapsibleContent>
         </Collapsible>
         <section v-for="group in inventoryGroups" :key="group.name" class="space-y-2">
@@ -560,8 +506,7 @@ async function rebuild(definition: string) {
                 ><span class="block truncate text-sm font-medium">{{
                   storageVersionTitle(image)
                 }}</span
-                ><span class="mt-1 block text-xs text-muted-foreground"
-                  >{{ image.runtime_type?.toUpperCase() }} ·
+                ><span class="mt-1 block text-xs text-muted-foreground">
                   {{
                     image.origin_type === 'workspace_capture'
                       ? image.owner_label || 'Capture'
@@ -614,7 +559,7 @@ async function rebuild(definition: string) {
                 /><span class="min-w-0 flex-1"
                   ><span class="block truncate text-xs font-medium">{{ node.label }}</span
                   ><span class="block text-[11px] text-muted-foreground"
-                    >{{ node.runtime }} · {{ node.resource?.kind }} ·
+                    >{{ node.resource?.kind }} ·
                     {{ node.resource?.managed ? 'Managed' : 'Unmanaged / unknown' }}</span
                   ></span
                 ><span class="shrink-0 text-xs tabular-nums text-muted-foreground">{{

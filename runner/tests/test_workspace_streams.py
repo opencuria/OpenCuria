@@ -67,15 +67,12 @@ class FakeStreamRuntime:
 
 def _service(runtime=None):
     runtime = runtime or FakeStreamRuntime()
-    service = WorkspaceService(
-        runtimes={"docker": runtime}, settings=RunnerSettings()
-    )
+    service = WorkspaceService(runtime=runtime, settings=RunnerSettings())
     workspace_id = uuid.uuid4()
     service.registry._cache[workspace_id] = WorkspaceInfo(
         workspace_id=workspace_id,
         instance_id="instance-1",
         status="running",
-        runtime_type="docker",
     )
     return service, runtime, workspace_id
 
@@ -250,7 +247,6 @@ class StreamValidationTests(unittest.IsolatedAsyncioTestCase):
             workspace_id=other,
             instance_id="instance-2",
             status="running",
-            runtime_type="docker",
         )
         await service.streams.stream_start_process(ws_id, "m1", ["sleep", "5"])
         session = service.streams._streams["m1"]
@@ -327,66 +323,6 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class DockerCloseOrderingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_process_close_sends_eof_before_flag(self) -> None:
-        """process_close must attempt stdin EOF while handle is open."""
-        from src.runtime.base import ProcessHandle
-        from src.runtime.docker_runtime import DockerRuntime
-
-        calls: list[str] = []
-
-        class FakeRaw:
-            def shutdown(self, _how: int) -> None:
-                calls.append("shutdown")
-
-            def close(self) -> None:
-                calls.append("close")
-
-            def recv(self, _n: int) -> bytes:
-                return b""
-
-        class FakeSock:
-            _sock = FakeRaw()
-
-            def close(self) -> None:
-                calls.append("sock_close")
-
-        runtime = object.__new__(DockerRuntime)
-        runtime._container = lambda _id: (_ for _ in ()).throw(  # type: ignore[method-assign]
-            AssertionError("kill must not run without pidfile exec")
-        )
-        import queue as _queue
-        import threading
-
-        handle = ProcessHandle(instance_id="c1", handle=FakeSock())
-        handle.metadata.update(
-            {
-                "pidfile": "",
-                "stop": threading.Event(),
-                "pump": None,
-                "stdout_queue": _queue.Queue(),
-                "stderr_queue": _queue.Queue(),
-            }
-        )
-        # Producer threads are not running here; pre-seed EOF sentinels
-        # so _stream_queue_read would not block (not used in this test).
-        handle.metadata["stdout_queue"].put(None)
-        await runtime.process_close(handle)
-        self.assertIn("shutdown", calls)
-        self.assertTrue(handle.closed)
-
-    async def test_reconfigure_and_heal_close_streams(self) -> None:
-        service, _rt, ws_id = _service()
-        await service.streams.stream_start_process(ws_id, "r1", ["sleep", "5"])
-        self.assertIn("r1", service.streams._streams)
-        await service.update_workspace_resources(
-            ws_id, qemu_vcpus=2, qemu_memory_mb=1024, qemu_disk_size_gb=10
-        ) if False else None
-        # update_workspace_resources requires qemu runtime; exercise the
-        # close path directly for the generic runtime instead.
-        closed = await service.streams.close_workspace_streams(ws_id, reason="test")
-        self.assertEqual(closed, 1)
-        self.assertNotIn("r1", service.streams._streams)
 
 
 class RelayFullDuplexTests(unittest.TestCase):
@@ -405,7 +341,7 @@ class RelayFullDuplexTests(unittest.TestCase):
         self.assertNotIn("break", after.split("conn_write_closed = True")[1][:200])
 
     def test_relay_request_halfclose_response(self) -> None:
-        """Run the real relay against a local TCP server (no Docker)."""
+        """Run the real relay against a local TCP server in a local process."""
         import os
         import socket
         import subprocess

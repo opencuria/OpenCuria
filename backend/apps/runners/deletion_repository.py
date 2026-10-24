@@ -148,11 +148,7 @@ class DeletionRepository:
                         "source_id", "target_id"
                     )
                 )
-                root_ids = {
-                    i.id
-                    for i in roots
-                    if i.runner_id == runner_id and i.runtime_type == scan.runtime_type
-                }
+                root_ids = {i.id for i in roots if i.runner_id == runner_id}
                 chosen = {r.id for r in resources if r.image_id in root_ids}
                 for image in roots:
                     if image.id in root_ids and not any(
@@ -200,7 +196,7 @@ class DeletionRepository:
                         result["blockers"].append("missing_workspace:" + str(w.id))
                 for resource_id in chosen:
                     r = by_id[resource_id]
-                    key = f"{runner_id}:{scan.runtime_type}:{r.physical_id}"
+                    key = f"{runner_id}:qemu:{r.physical_id}"
                     result["resources"].append(
                         {
                             "key": key,
@@ -222,17 +218,6 @@ class DeletionRepository:
                     ):
                         result["blockers"].append("unknown_or_foreign:" + key)
                     aliases = list(r.aliases.values_list("reference", flat=True))
-                    if (
-                        scan.runtime_type == "docker"
-                        and r.image_id
-                        and any(
-                            not alias.startswith(
-                                ("opencuria/", "opencuria-", "opencuria:")
-                            )
-                            for alias in aliases
-                        )
-                    ):
-                        result["blockers"].append("foreign_alias:" + key)
                     if (
                         r.image_id
                         and ImageInstance.objects.filter(
@@ -270,7 +255,7 @@ class DeletionRepository:
                             result["edges"].append(
                                 [
                                     key,
-                                    f"{runner_id}:{scan.runtime_type}:{dependency.physical_id}",
+                                    f"{runner_id}:qemu:{dependency.physical_id}",
                                 ]
                             )
         for i in selected_images.values():
@@ -846,7 +831,6 @@ class DeletionRepository:
                 else:
                     payload.update(
                         image_instance_id=str(image.id),
-                        runtime_type=image.runtime_type,
                         image_artifact_id=image.runner_ref,
                     )
                     ImageInstance.objects.filter(pk=image.id).update(

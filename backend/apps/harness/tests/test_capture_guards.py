@@ -237,7 +237,7 @@ async def test_nested_abort_settles_before_capture_and_blocks_child_resume(
     )
     from apps.runners.capture_repository import CaptureRepository
 
-    Workspace.objects.filter(id=harness_workspace.id).update(runtime_type="qemu")
+    Workspace.objects.filter(id=harness_workspace.id).update()
     provider = NestedProvider()
     service, _, _ = _service(provider)
     root = session_for(harness_workspace)
@@ -285,7 +285,7 @@ async def test_capture_between_abort_join_and_gate_cleanup_keeps_tree_cleanup(
     )
     from apps.runners.capture_repository import CaptureRepository
 
-    Workspace.objects.filter(id=harness_workspace.id).update(runtime_type="qemu")
+    Workspace.objects.filter(id=harness_workspace.id).update()
     provider = NestedProvider()
     service, _, _ = _service(provider)
     root = session_for(harness_workspace)

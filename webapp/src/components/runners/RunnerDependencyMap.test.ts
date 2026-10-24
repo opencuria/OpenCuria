@@ -7,7 +7,6 @@ const generations = [
   {
     id: 'g',
     name: 'Base image',
-    runtime_type: 'qemu',
     status: 'ready',
     observed_state: 'unknown',
     dependencies: [
@@ -43,7 +42,6 @@ it('offers keyboard-accessible selection and distinguishes lifecycle, observatio
 it('discloses other resource count without showing raw IDs, while retaining linked unresolved targets', async () => {
   const runtimes = [
     {
-      runtime_type: 'qemu',
       resources: [
         {
           physical_id: 'workspace-physical',
@@ -73,7 +71,6 @@ it('discloses other resource count without showing raw IDs, while retaining link
 it('shows valid normalized VM telemetry only on physical QEMU workspace nodes', async () => {
   const runtimes = [
     {
-      runtime_type: 'qemu',
       resources: [
         {
           physical_id: 'vm',
@@ -127,7 +124,6 @@ it('shows valid normalized VM telemetry only on physical QEMU workspace nodes', 
 it('retains distinct allocated and generation accounting in compact image cards', async () => {
   const runtimes = [
     {
-      runtime_type: 'qemu',
       resources: [
         {
           physical_id: 'base',
@@ -163,10 +159,9 @@ it('retains distinct allocated and generation accounting in compact image cards'
   wrapper.unmount()
 })
 
-it('groups runtime diagrams and searches collapsed boot seed members without a separate toggle', async () => {
+it('searches collapsed boot seed members without a separate toggle', async () => {
   const runtimes = [
     {
-      runtime_type: 'qemu',
       resources: [
         {
           physical_id: 'vm',
@@ -194,20 +189,18 @@ it('groups runtime diagrams and searches collapsed boot seed members without a s
         },
       ],
     },
-    { runtime_type: 'docker', resources: [] },
   ] as unknown as StorageRuntime[]
   const wrapper = mount(RunnerDependencyMap, {
     props: {
       runtimes,
-      generations: [{ ...generations[0]!, runtime_type: 'docker', dependencies: [] }],
+      generations: [{ ...generations[0]!, dependencies: [] }],
     },
   })
   await flushPromises()
   expect(wrapper.find('button[aria-label="Inspect VM · Boot seed"]').exists()).toBe(false)
   expect(wrapper.get('button[aria-label="Inspect VM"]').text()).toContain('partial (2 unknown)')
   expect(wrapper.find('button[aria-label="Inspect VM · Workspace disk"]').exists()).toBe(false)
-  expect(wrapper.get('section[aria-label="qemu dependency map"]').text()).toContain('QEMU')
-  expect(wrapper.get('section[aria-label="docker dependency map"]').text()).toContain('Docker')
+  expect(wrapper.find('section[aria-label="Workspace dependency map"]').exists()).toBe(true)
   expect(wrapper.findAll('button').some((b) => b.text().includes('Boot seeds'))).toBe(false)
   await wrapper.get('input').setValue('cloud-init')
   expect(wrapper.text()).toContain('1 matches')
@@ -219,7 +212,6 @@ it('groups runtime diagrams and searches collapsed boot seed members without a s
 it('does not color cached observed states as current or show telemetry on an exited VM', async () => {
   const runtimes = [
     {
-      runtime_type: 'qemu',
       fresh: false,
       resources: [
         {
@@ -264,7 +256,6 @@ it('accepts a parent projection, translates physical selection and searches memb
   const { buildRunnerTopology, projectRunnerTopology } = await import('@/lib/runnerTopology')
   const runtimes = [
     {
-      runtime_type: 'qemu',
       resources: [
         {
           physical_id: 'disk',
@@ -322,7 +313,6 @@ it('accepts a parent projection, translates physical selection and searches memb
 it('hides shared and foreign exceptions behind Other resources unless selected or searched', async () => {
   const runtimes = [
     {
-      runtime_type: 'qemu',
       resources: [
         {
           physical_id: 'a',

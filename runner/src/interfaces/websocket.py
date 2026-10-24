@@ -3,7 +3,7 @@
 Connects to the Django backend, authenticates with a Bearer token,
 and handles task and harness request/reply events.
 
-Includes a periodic heartbeat that reports workspace container states
+Includes a periodic heartbeat that reports workspace VM states
 so the backend can reconcile its records with actual runtime state.
 
 A separate metrics loop collects host CPU, RAM, and disk usage every
@@ -223,8 +223,8 @@ class WebSocketInterface(Interface):
         query_string: str = "",
     ) -> dict[str, object]:
         """Fetch a desktop HTTP resource from the local workspace runtime."""
-        container_ip = self._service.desktop.get_desktop_container_ip(workspace_id)
-        upstream_url = f"http://{container_ip}:6901{rest_path}"
+        guest_ip = self._service.desktop.get_desktop_guest_ip(workspace_id)
+        upstream_url = f"http://{guest_ip}:6901{rest_path}"
         if query_string:
             upstream_url = f"{upstream_url}?{query_string}"
 
@@ -297,9 +297,9 @@ class WebSocketInterface(Interface):
         subprotocols: list[str] | None = None,
     ) -> dict[str, object]:
         """Open a runner-local WebSocket tunnel to the desktop session."""
-        container_ip = self._service.desktop.get_desktop_container_ip(workspace_id)
-        upstream_url = f"ws://{container_ip}:6901/websockify"
-        upstream_origin = f"http://{container_ip}:6901"
+        guest_ip = self._service.desktop.get_desktop_guest_ip(workspace_id)
+        upstream_url = f"ws://{guest_ip}:6901/websockify"
+        upstream_origin = f"http://{guest_ip}:6901"
         chosen_protocol = "binary" if "binary" in (subprotocols or []) else None
 
         session = aiohttp.ClientSession()
@@ -725,8 +725,7 @@ class WebSocketInterface(Interface):
                                 {
                                     "workspace_id": workspace["workspace_id"],
                                     "port": desktop["port"],
-                                    "container_ip": desktop["container_ip"],
-                                    "network_name": desktop["network_name"],
+                                    "guest_ip": desktop["guest_ip"],
                                     "viewer": bool(desktop.get("viewer")),
                                     "computer_use": bool(desktop.get("computer_use")),
                                     "mcp": bool(desktop.get("mcp")),
@@ -877,7 +876,6 @@ class WebSocketInterface(Interface):
             await sio.emit(
                 "runner:register",
                 {
-                    "supported_runtimes": self._service.supported_runtimes,
                     "status": "ready",
                     "inventory_epoch": self._inventory_epoch,
                     "desktop_leases": {
@@ -1162,8 +1160,6 @@ class WebSocketInterface(Interface):
                     files=data.get("files", []),
                     ssh_keys=data.get("ssh_keys", []),
                     workspace_id=workspace_id,
-                    runtime_type=data.get("runtime_type", "docker"),
-                    image_tag=data.get("image_tag") or None,
                     base_image_path=data.get("base_image_path") or None,
                 )
                 await sio.emit(
@@ -1190,9 +1186,8 @@ class WebSocketInterface(Interface):
         async def on_build_image(data: dict) -> None:
             task_id = data.get("task_id", str(uuid.uuid4()))
             build_job_id = data.get("build_job_id", "")
-            runtime_type = data.get("runtime_type", "docker")
             log = logger.bind(task_id=task_id, build_job_id=build_job_id)
-            log.info("task_received", task="build_image", runtime_type=runtime_type)
+            log.info("task_received", task="build_image")
             try:
 
                 async def _progress(line: str) -> None:
@@ -1207,10 +1202,7 @@ class WebSocketInterface(Interface):
 
                 # Step 2: image ops go through the ImageManager directly.
                 result = await self._service.images.build_image(
-                    runtime_type=runtime_type,
                     build_job_id=build_job_id,
-                    dockerfile_content=data.get("dockerfile_content", ""),
-                    image_tag=data.get("image_tag", ""),
                     base_distro=data.get("base_distro", ""),
                     init_script=data.get("init_script", ""),
                     image_path=data.get("image_path", ""),
@@ -1223,7 +1215,6 @@ class WebSocketInterface(Interface):
                     {
                         "task_id": task_id,
                         "build_job_id": build_job_id,
-                        "image_tag": result.get("image_tag", ""),
                         "image_path": result.get("image_path", ""),
                     },
                 )
@@ -3427,7 +3418,6 @@ class WebSocketInterface(Interface):
             log = logger.bind(task_id=task_id, image_artifact_id=image_artifact_id)
             try:
                 result = await self._service.images.delete_image_reference(
-                    runtime_type=data["runtime_type"],
                     image_ref=image_artifact_id,
                 )
                 await sio.emit(
@@ -3458,7 +3448,6 @@ class WebSocketInterface(Interface):
             image_artifact_id = data["image_artifact_id"]
             raw_ws_id = data.get("workspace_id")
             new_workspace_id = uuid.UUID(raw_ws_id) if raw_ws_id else uuid.uuid4()
-            runtime_type = data.get("runtime_type", "qemu")
             log = logger.bind(task_id=task_id, image_artifact_id=image_artifact_id)
             log.info("task_received", task="create_workspace_from_image_artifact")
             try:
@@ -3468,7 +3457,6 @@ class WebSocketInterface(Interface):
                 ) = await self._service.images.create_workspace_from_image_artifact(
                     image_artifact_id=image_artifact_id,
                     new_workspace_id=new_workspace_id,
-                    runtime_type=runtime_type,
                     qemu_vcpus=data.get("qemu_vcpus"),
                     qemu_memory_mb=data.get("qemu_memory_mb"),
                     qemu_disk_size_gb=data.get("qemu_disk_size_gb"),

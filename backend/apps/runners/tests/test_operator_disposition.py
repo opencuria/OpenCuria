@@ -250,7 +250,6 @@ def test_is_active_setter_cannot_revive_retired_definition(runner, user):
         organization=runner.organization,
         created_by=user,
         name="retired",
-        runtime_type="docker",
         status="pending_deletion",
     )
     with pytest.raises(ConflictError):

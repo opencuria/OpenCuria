@@ -323,18 +323,6 @@ AGENT_SEEDS = [
 
 IMAGE_SEEDS = [
     {
-        "id": "3ecafbe4-d2e5-4d3e-84df-6c5b8741a24d",
-        "name": "Ubuntu 24.04 Docker",
-        "description": "",
-        "runtime_type": "docker",
-        "base_distro": "ubuntu:24.04",
-        "packages": ["python3", "git"],
-        "env_vars": {},
-        "custom_dockerfile": "RUN apt-get update && apt-get install -y curl ca-certificates gnupg ",
-        "custom_init_script": "",
-        "is_active": True,
-    },
-    {
         "id": "2025335b-0e41-4baf-89b9-a7281a4fd62f",
         "name": "Ubuntu 24.04",
         "description": "",

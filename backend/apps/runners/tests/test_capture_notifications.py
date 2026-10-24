@@ -44,7 +44,6 @@ def operation_payload(workspace, diagnostic="", intervention=False):
 def test_unknown_result_notifies_only_after_commit(
     service, frontend, runner, workspace
 ):
-    workspace.runtime_type = "qemu"
     workspace.save()
     _, child = CaptureRepository.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
@@ -85,7 +84,6 @@ def test_unknown_result_notifies_only_after_commit(
 def test_child_result_rollback_discards_changes_and_events(
     service, frontend, runner, workspace, phase
 ):
-    workspace.runtime_type = "qemu"
     workspace.credentials_present = True
     workspace.save()
     _, child = CaptureRepository.allocate(
@@ -169,7 +167,6 @@ def test_child_result_rollback_discards_changes_and_events(
 def test_deadline_intervention_tick_and_recovery_flags(
     service, frontend, sio_mock, workspace, monkeypatch
 ):
-    workspace.runtime_type = "qemu"
     workspace.save()
     _, child = CaptureRepository.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
@@ -208,7 +205,6 @@ def test_completed_duplicate_ticks_notify_exactly_once(
     service, frontend, sio_mock, runner, stopped_workspace, monkeypatch
 ):
     workspace = stopped_workspace
-    workspace.runtime_type = "qemu"
     workspace.save()
     _, child = CaptureRepository.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
@@ -257,7 +253,6 @@ async def test_async_operation_projection_without_unsafe_orm(
     from asgiref.sync import sync_to_async
 
     def allocate():
-        workspace.runtime_type = "qemu"
         workspace.save()
         CaptureRepository.allocate(
             workspace.id, "capture", has_busy_agent=has_busy_agent

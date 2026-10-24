@@ -138,7 +138,6 @@ def claude_mcp_setup(db, monkeypatch):
         status=RunnerStatus.ONLINE,
         sid=f"mcp-claude-session-{uuid.uuid4().hex[:8]}",
         organization=org,
-        available_runtimes=["docker"],
     )
     workspace = Workspace.objects.create(
         runner=runner,

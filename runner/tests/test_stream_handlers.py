@@ -44,14 +44,13 @@ class FakeStreamRuntime:
 def _setup():
     runtime = FakeStreamRuntime()
     service = WorkspaceService(
-        runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+        runtime=runtime, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
     )
     ws_id = uuid.uuid4()
     service.registry._cache[ws_id] = WorkspaceInfo(
         workspace_id=ws_id,
         instance_id="instance-1",
         status="running",
-        runtime_type="docker",
     )
     interface = WebSocketInterface(service, RunnerSettings(state_dir=tempfile.mkdtemp()))
     interface._sio.emit = AsyncMock()

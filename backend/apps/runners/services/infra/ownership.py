@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
 from asgiref.sync import sync_to_async
 
@@ -18,6 +19,9 @@ from common.exceptions import ConflictError
 
 from ...enums import WorkspaceStatus
 from ...exceptions import RunnerOfflineError, WorkspaceStateError
+
+if TYPE_CHECKING:
+    from ...models import Runner, Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -53,15 +57,6 @@ class OwnershipMixin:
             return False
         return True
 
-    @staticmethod
-    def _ensure_runner_supports_runtime(
-        *,
-        runner: "Runner",
-        runtime_type: str,
-    ) -> None:
-        """Raise when a runner does not advertise support for a runtime."""
-        if runtime_type not in (runner.available_runtimes or []):
-            raise ConflictError(f"Runner does not support runtime '{runtime_type}'")
 
     def _validate_task_runner(self, task, runner_id: str | None) -> bool:
         """Return True if the task belongs to the given runner.

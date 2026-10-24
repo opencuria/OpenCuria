@@ -63,7 +63,6 @@ def _make_runner_workspace(*, sid: str, prefix: str = "git-sio"):
         status=RunnerStatus.ONLINE,
         sid=sid,
         organization=org,
-        available_runtimes=["docker"],
     )
     workspace = Workspace.objects.create(
         runner=runner,

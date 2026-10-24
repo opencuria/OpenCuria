@@ -77,7 +77,6 @@ const eligible = computed(() =>
     )
   }),
 )
-const runtimeScopes = computed(() => [...new Set(graph.value.nodes.map((n) => n.runtime))].sort())
 const visible = computed(() => {
   if (showAll.value || query.value.trim()) return eligible.value
   // A focused path remains visible even beyond the initial preview.
@@ -195,19 +194,10 @@ function mismatch(node: RunnerTopologyNode) {
   return lifecycle(node) && runnerStateLabel(lifecycle(node)) !== runnerStateLabel(observed(node))
 }
 function observationRecent(node: RunnerTopologyNode) {
-  return (
-    !!node.resource &&
-    props.runtimes.some((runtime) => runtime.runtime_type === node.runtime && runtime.fresh)
-  )
+  return !!node.resource && props.runtimes.some((runtime) => runtime.fresh)
 }
 function vmSample(node: RunnerTopologyNode) {
-  if (
-    node.runtime !== 'qemu' ||
-    node.column !== 0 ||
-    !node.resource ||
-    !node.workspace ||
-    node.resource.state !== 'running'
-  )
+  if (node.column !== 0 || !node.resource || !node.workspace || node.resource.state !== 'running')
     return
   const sample = props.vmMetrics?.[node.workspace.id]
   if (
@@ -280,18 +270,7 @@ function vmSample(node: RunnerTopologyNode) {
           stroke="currentColor"
         />
       </svg>
-      <section
-        v-for="scope in runtimeScopes.filter((runtime) =>
-          visible.some((n) => n.runtime === runtime),
-        )"
-        :key="scope"
-        class="relative space-y-3"
-        :class="runtimeScopes.length > 1 ? 'mb-5 last:mb-0' : ''"
-        :aria-label="`${scope} dependency map`"
-      >
-        <h3 v-if="runtimeScopes.length > 1" class="border-b pb-2 text-xs font-semibold">
-          {{ scope === 'qemu' ? 'QEMU' : scope === 'docker' ? 'Docker' : scope }}
-        </h3>
+      <section class="relative space-y-3" aria-label="Workspace dependency map">
         <div
           class="topology-columns relative grid gap-10"
           :class="columns.length === 3 ? 'grid-cols-3' : 'grid-cols-2'"
@@ -305,13 +284,11 @@ function vmSample(node: RunnerTopologyNode) {
             <h4 class="mb-3 flex items-center gap-2 text-xs font-semibold text-muted-foreground">
               <component :is="icon" class="size-3.5" />{{ title
               }}<span class="ml-auto tabular-nums">{{
-                visible.filter((n) => n.runtime === scope && displayColumn(n) === column).length
+                visible.filter((n) => displayColumn(n) === column).length
               }}</span>
             </h4>
             <Button
-              v-for="node in visible.filter(
-                (n) => n.runtime === scope && displayColumn(n) === column,
-              )"
+              v-for="node in visible.filter((n) => displayColumn(n) === column)"
               :key="node.key"
               variant="outline"
               :data-node-key="node.key"
@@ -374,7 +351,6 @@ function vmSample(node: RunnerTopologyNode) {
                 <span
                   class="flex flex-wrap justify-between gap-x-2 text-[11px] text-muted-foreground"
                 >
-                  <span>{{ node.runtime }}</span>
                   <span v-if="!node.storage && node.resource?.allocated_bytes != null"
                     >{{ storageBytes(node.resource.allocated_bytes) }} allocated</span
                   >
@@ -421,7 +397,7 @@ function vmSample(node: RunnerTopologyNode) {
               </span>
             </Button>
             <p
-              v-if="!visible.some((n) => n.runtime === scope && displayColumn(n) === column)"
+              v-if="!visible.some((n) => displayColumn(n) === column)"
               class="text-xs text-muted-foreground"
             >
               None in this view

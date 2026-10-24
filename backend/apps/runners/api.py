@@ -176,7 +176,6 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
         intervention_required=workspace.intervention_required,
         lifecycle_diagnostic=workspace.lifecycle_diagnostic,
         name=workspace.name,
-        runtime_type=workspace.runtime_type,
         qemu_vcpus=workspace.qemu_vcpus,
         qemu_memory_mb=workspace.qemu_memory_mb,
         qemu_disk_size_gb=workspace.qemu_disk_size_gb,
@@ -509,7 +508,6 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
         workspace, task = await service.create_workspace(
             name=payload.name,
             repos=payload.repos,
-            runtime_type=payload.runtime_type,
             qemu_vcpus=payload.qemu_vcpus,
             qemu_memory_mb=payload.qemu_memory_mb,
             qemu_disk_size_gb=payload.qemu_disk_size_gb,
@@ -573,7 +571,7 @@ async def start_terminal(
     workspace_id: uuid.UUID,
     payload: TerminalStartIn = None,
 ):
-    """Start an interactive PTY terminal in a workspace container."""
+    """Start an interactive PTY terminal in a workspace VM."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     org_id = _get_org_id(request)
@@ -603,7 +601,7 @@ async def start_desktop(
     workspace_id: uuid.UUID,
     payload: DesktopViewerIntentIn,
 ):
-    """Start a KasmVNC desktop session in a workspace container."""
+    """Start a KasmVNC desktop session in a workspace VM."""
     if not check_api_key_permission(request, APIKeyPermission.TERMINAL_ACCESS):
         return _perm_denied(APIKeyPermission.TERMINAL_ACCESS)
     org_id = _get_org_id(request)
@@ -2025,11 +2023,9 @@ def _image_definition_to_out(defn) -> ImageDefinitionOut:
         name=defn.name,
         description=defn.description,
         is_standard=defn.organization_id is None,
-        runtime_type=defn.runtime_type,
         base_distro=defn.base_distro,
         packages=list(defn.packages or []),
         env_vars=dict(defn.env_vars or {}),
-        custom_dockerfile=defn.custom_dockerfile or "",
         custom_init_script=defn.custom_init_script or "",
         is_active=defn.is_active,
         status=getattr(defn, "status", "active"),

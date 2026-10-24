@@ -40,7 +40,6 @@ const fields = ref<InstanceType<typeof CaptureTargetFields> | null>(null)
 const isValid = computed(
   () =>
     !!fields.value?.isValid &&
-    props.workspace.runtime_type === 'qemu' &&
     !props.workspace.intervention_required &&
     !workspaceStore.isWorkspaceTransitioning(props.workspace.id) &&
     (props.workspace.status === 'running' || props.workspace.status === 'stopped'),

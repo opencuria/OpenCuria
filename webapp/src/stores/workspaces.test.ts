@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
 import { useWorkspaceStore } from './workspaces'
-import { WorkspaceOperation, WorkspaceStatus, RuntimeType, type Workspace } from '@/types'
+import { WorkspaceOperation, WorkspaceStatus, type Workspace } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 import { toast } from 'vue-sonner'
 
@@ -33,7 +33,6 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     status: overrides.status ?? WorkspaceStatus.RUNNING,
     active_operation: overrides.active_operation ?? null,
     name: overrides.name ?? 'Workspace',
-    runtime_type: overrides.runtime_type ?? RuntimeType.DOCKER,
     qemu_vcpus: overrides.qemu_vcpus ?? null,
     qemu_memory_mb: overrides.qemu_memory_mb ?? null,
     qemu_disk_size_gb: overrides.qemu_disk_size_gb ?? null,

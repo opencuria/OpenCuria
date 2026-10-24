@@ -58,11 +58,9 @@ class DummyRuntime:
     async def workspace_exists(self, instance_id: str) -> bool:
         return self.workspace_status != "removed"
 
-    def get_container_ip(self, instance_id: str, workspace_id: str) -> str:
+    def get_guest_ip(self, instance_id: str, workspace_id: str) -> str:
         return "172.22.0.2"
 
-    def get_workspace_network_name(self, workspace_id: str) -> str:
-        return f"opencuria-ws-{workspace_id}"
 
 
 class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
@@ -71,7 +69,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.directory.cleanup)
         self.runtime = DummyRuntime()
         self.service = WorkspaceService(
-            runtimes={"docker": self.runtime},
+            runtime=self.runtime,
             settings=RunnerSettings(state_dir=self.directory.name),
         )
         self.workspace_id = uuid.uuid4()
@@ -79,7 +77,6 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
             workspace_id=self.workspace_id,
             instance_id="instance-1",
             status="running",
-            runtime_type="docker",
         )
         self.epoch = "desktop-test-epoch"
         self.lease_store = DesktopLeaseStore(self.directory.name)

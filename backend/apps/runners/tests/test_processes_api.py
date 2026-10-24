@@ -59,7 +59,6 @@ def _make_context(*, email_prefix: str = "proc-api"):
         status=RunnerStatus.ONLINE,
         sid="proc-sid",
         organization=org,
-        available_runtimes=["docker"],
     )
     workspace = Workspace.objects.create(
         runner=runner,

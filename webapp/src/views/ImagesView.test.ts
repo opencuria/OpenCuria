@@ -43,7 +43,6 @@ describe('ImagesView', () => {
       size_bytes: null,
       status: 'capturing',
       artifact_kind: 'captured',
-      runtime_type: 'qemu',
       created_at: '2026-05-06T12:00:00.000Z',
       created_by_id: 1,
       captured_image_id: 'line-1',

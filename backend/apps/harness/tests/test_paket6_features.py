@@ -429,7 +429,6 @@ async def test_resolve_question_via_service(db) -> None:
         status=RunnerStatus.ONLINE,
         sid=f"q-{uuid.uuid4().hex[:8]}",
         organization=org,
-        available_runtimes=["docker"],
     )
     workspace = Workspace.objects.create(
         runner=runner,

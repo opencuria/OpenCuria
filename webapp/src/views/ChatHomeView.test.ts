@@ -4,7 +4,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ChatHomeView from './ChatHomeView.vue'
-import { WorkspaceStatus, RuntimeType, type Workspace } from '@/types'
+import { WorkspaceStatus, type Workspace } from '@/types'
 import { clearComposerTransition, isComposerTransitionPending } from '@/lib/composerTransition'
 import { subscribeToWorkspace } from '@/services/socket'
 
@@ -117,7 +117,6 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     status: WorkspaceStatus.RUNNING,
     active_operation: null,
     name: 'Alpha',
-    runtime_type: RuntimeType.DOCKER,
     qemu_vcpus: null,
     qemu_memory_mb: null,
     qemu_disk_size_gb: null,

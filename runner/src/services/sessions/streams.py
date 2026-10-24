@@ -234,7 +234,7 @@ class StreamManager:
 
     def __init__(
         self,
-        runtimes: dict[str, RuntimeBackend] | None = None,
+        runtime: RuntimeBackend | None = None,
         get_cached: Callable[[uuid.UUID], WorkspaceInfo] | None = None,
         get_runtime: Callable[[uuid.UUID], RuntimeBackend] | None = None,
         sanitize_exec_workdir: Callable[[str], str] | None = None,
@@ -247,7 +247,7 @@ class StreamManager:
         self.lease_store = lease_store
         self.intent_store = StreamIntentStore(state_dir) if state_dir else None
         self.capture_fence: CaptureFence | None = None
-        self._runtimes = runtimes if runtimes is not None else {}
+        self._runtime = runtime
         self._get_cached = get_cached
         self._get_runtime = get_runtime
         self._sanitize_exec_workdir = sanitize_exec_workdir
@@ -433,7 +433,6 @@ class StreamManager:
                         "connection_id": conn_id,
                         "workspace_id": str(workspace_id),
                         "instance_id": info.instance_id,
-                        "runtime_type": runtime.runtime_type,
                         "lease_id": owner["lease_id"],
                         "epoch": owner["epoch"],
                         "control_path": control_path,
@@ -627,11 +626,8 @@ class StreamManager:
     async def stream_wait(self, connection_id: str) -> int | None:
         """Wait for the stream process tree to exit; return exit code.
 
-        Returns ``None`` when the exit code is unknown (Docker reports
-        ``None`` while the exec is still ``Running`` after the pump
-        drained, on framing corruption, or on inspect failures) — the
-        websocket pump omits ``exit_code`` then instead of sending a
-        bogus 0.
+        Returns ``None`` when the SSH channel has no exit status. The websocket
+        pump then omits ``exit_code``.
         """
         session = self.get_stream(connection_id)
         code = await session.runtime.process_wait(session.handle)
@@ -702,13 +698,7 @@ class StreamManager:
         await self.intent_store.set_state(record["connection_id"], "closing")
         try:
             workspace_id = uuid.UUID(record["workspace_id"])
-            # Resolve by the persisted runtime, not the replacement workspace.
-            runtime = self._runtimes.get(record["runtime_type"])
-            if runtime is None:
-                candidate = self._get_runtime(workspace_id)
-                if candidate.runtime_type != record["runtime_type"]:
-                    return False
-                runtime = candidate
+            runtime = self._runtime or self._get_runtime(workspace_id)
             try:
                 info = self._get_cached(workspace_id)
                 same_instance = info.instance_id == record["instance_id"]
@@ -792,7 +782,7 @@ class StreamManager:
 
         Inspect the bound OLD runtime independently of current cache. A pending
         spawn must settle before death evidence is accepted; timeout retains all
-        protective intents, because cancellation cannot undo Docker thread work.
+        protective intents while a remote launch may still be in progress.
         Lifecycle must serialize stop/remove and resume with this hook.
         """
         if not self.intent_store:
@@ -809,16 +799,12 @@ class StreamManager:
                 await asyncio.wait_for(
                     session.spawn_settled.wait(), STREAM_SETTLE_TIMEOUT
                 )
-            for runtime_type in {r["runtime_type"] for r in rows}:
-                runtime = self._runtimes.get(runtime_type)
-                if runtime is None and self._get_runtime:
-                    candidate = self._get_runtime(workspace_id)
-                    if candidate.runtime_type == runtime_type:
-                        runtime = candidate
-                if runtime is None or not await self._incarnation_gone(
-                    runtime, instance_id
-                ):
-                    return False
+            runtime = self._runtime or self._get_runtime(workspace_id)
+            if rows and (
+                runtime is None
+                or not await self._incarnation_gone(runtime, instance_id)
+            ):
+                return False
             for session in sessions:
                 if session.handle:
                     await session.runtime.process_detach(session.handle)

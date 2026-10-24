@@ -23,7 +23,6 @@ def image_artifact_to_out(artifact, extras: dict | None = None) -> ImageArtifact
         extras = ImageVersionService().version_extras([artifact])[artifact.id]
     runner_build = getattr(artifact, "build_job", None)
     image_runner = getattr(artifact, "runner", None)
-    runtime_type = getattr(artifact, "runtime_type", None)
     source_runner_id = getattr(image_runner, "id", None)
     source_runner_online = False
     if image_runner is not None:
@@ -64,7 +63,6 @@ def image_artifact_to_out(artifact, extras: dict | None = None) -> ImageArtifact
         build_job_id=artifact.build_job_id,
         source_definition_name=source_definition_name,
         source_runner_id=source_runner_id,
-        runtime_type=runtime_type,
         is_deactivated=is_deactivated,
         source_runner_online=source_runner_online,
         delete_requested_at=getattr(artifact, "delete_requested_at", None),

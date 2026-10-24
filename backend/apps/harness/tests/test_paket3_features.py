@@ -85,7 +85,6 @@ def paket3_setup(db):
         status=RunnerStatus.ONLINE,
         sid=f"p3-{uuid.uuid4().hex[:8]}",
         organization=org,
-        available_runtimes=["docker"],
     )
     owned = Workspace.objects.create(
         runner=runner,

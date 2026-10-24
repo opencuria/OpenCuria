@@ -10,11 +10,6 @@ from __future__ import annotations
 from django.db import models
 
 
-class RuntimeType(models.TextChoices):
-    """Virtualisation backend for workspaces."""
-
-    DOCKER = "docker", "Docker"
-    QEMU = "qemu", "QEMU/KVM"
 
 
 class RunnerStatus(models.TextChoices):

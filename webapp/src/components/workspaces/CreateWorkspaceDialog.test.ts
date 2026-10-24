@@ -3,7 +3,6 @@ import { shallowMount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import CreateWorkspaceDialog from './CreateWorkspaceDialog.vue'
-import { RuntimeType } from '@/types'
 import { saveWorkspaceDraft } from '@/lib/workspaceDraft'
 
 const routerPush = vi.fn()
@@ -33,7 +32,6 @@ const runnerStore = {
       id: 'runner-1',
       name: 'Runner 1',
       status: 'online',
-      available_runtimes: ['docker', 'qemu'],
       organization_id: 'org-1',
       connected_at: null,
       disconnected_at: null,
@@ -82,7 +80,6 @@ const imageStore = {
           status: 'ready',
           artifact_kind: 'captured',
           source_runner_id: 'runner-1',
-          runtime_type: RuntimeType.QEMU,
           source_runner_online: true,
           created_at: '2026-04-01T10:00:00.000Z',
           created_by_id: 1,
@@ -150,7 +147,6 @@ describe('CreateWorkspaceDialog', () => {
         pluginIds: ['plugin-1'],
         repos: ['https://example.test/repo'],
         runnerId: 'runner-1',
-        runtimeType: RuntimeType.QEMU,
         qemuVcpus: 3,
         qemuMemoryMb: 8192,
         qemuDiskSizeGb: 75,

@@ -279,44 +279,6 @@ async def test_missing_executable_cleans_isolated_home(tmp_path):
     assert code == 125 and not marker.exists() and not home.exists()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("api_key", [False, True])
-async def test_docker_selects_codex_profile_and_transmits_only_private_preamble(
-    api_key,
-):
-    from unittest.mock import MagicMock, patch
-
-    from src.runtime.docker_runtime import DockerRuntime
-
-    runtime = DockerRuntime()
-    raw_socket, socket, api = MagicMock(), MagicMock(), MagicMock()
-    socket._sock = raw_socket
-    api.exec_create.return_value = {"Id": "codex-exec"}
-    api.exec_start.return_value = socket
-    runtime._client = MagicMock(api=api)
-    env = codex_env()
-    if api_key:
-        env["OPENCURIA_CODEX_API_KEY"] = "private-codex-key"
-    with patch.object(runtime, "_drain_docker_stream_socket"):
-        handle = await runtime.spawn_process(
-            "guest",
-            ["/opt/opencuria/runtimes/codex-agent/0.163.0/bin/codex-app-server"],
-            workdir="/workspace",
-            env=env,
-            control_path="/tmp/control",
-            expected_token=current_token(),
-            isolated_env=True,
-            isolated_home="/tmp/opencuria-agent-home-" + uuid.uuid4().hex,
-        )
-    argv = api.exec_create.call_args.kwargs["cmd"]
-    data = json.loads(argv[argv.index("start") + 1])
-    assert data["isolated_agent"]["profile"] == "codex"
-    assert data["isolated_agent"]["config_root"] == ISOLATED_CODEX_CONFIG_ROOT
-    assert "private-codex-key" not in str(api.exec_create.call_args)
-    raw_socket.sendall.assert_called_once_with(isolated_agent_env_preamble(env))
-    raw_socket.shutdown.assert_not_called()
-    handle.metadata["stop"].set()
-    handle.metadata["pump"].join(timeout=1)
 
 
 @pytest.mark.asyncio

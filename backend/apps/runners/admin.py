@@ -16,15 +16,15 @@ from .models import (
 
 @admin.register(Runner)
 class RunnerAdmin(admin.ModelAdmin):
-    list_display = ["id", "name", "status", "available_runtimes", "connected_at"]
+    list_display = ["id", "name", "status", "connected_at"]
     list_filter = ["status"]
     readonly_fields = ["id", "api_token_hash", "created_at", "updated_at"]
 
 
 @admin.register(Workspace)
 class WorkspaceAdmin(admin.ModelAdmin):
-    list_display = ["id", "name", "runner", "status", "runtime_type", "created_at"]
-    list_filter = ["status", "runtime_type"]
+    list_display = ["id", "name", "runner", "status", "created_at"]
+    list_filter = ["status"]
     readonly_fields = ["id", "created_at", "updated_at"]
 
 
@@ -69,8 +69,15 @@ class ImageInstanceAdmin(admin.ModelAdmin):
 
 @admin.register(ImageDefinition)
 class ImageDefinitionAdmin(admin.ModelAdmin):
-    list_display = ["id", "name", "runtime_type", "base_distro", "organization", "is_active", "updated_at"]
-    list_filter = ["runtime_type", "status", "organization"]
+    list_display = [
+        "id",
+        "name",
+        "base_distro",
+        "organization",
+        "is_active",
+        "updated_at",
+    ]
+    list_filter = ["status", "organization"]
     search_fields = ["name", "description", "base_distro"]
 
 

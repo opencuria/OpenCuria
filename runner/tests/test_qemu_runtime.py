@@ -108,9 +108,7 @@ class QemuRuntimeCloudInitTests(unittest.IsolatedAsyncioTestCase):
             return_value=process,
         ), self.assertRaisesRegex(RuntimeError, "ISO creation failed"):
             await self.runtime.create_workspace(
-                WorkspaceConfig(
-                    workspace_id=self.workspace_id, image="base.qcow2", env_vars={}
-                )
+                WorkspaceConfig(workspace_id=self.workspace_id, image="base.qcow2")
             )
 
         self.runtime._libvirt_conn.assert_not_called()
@@ -524,19 +522,15 @@ class QemuRuntimeUsageTests(unittest.IsolatedAsyncioTestCase):
 
 
 class QemuRuntimeDesktopProxyTests(unittest.TestCase):
-    def test_get_container_ip_returns_workspace_vm_ip(self) -> None:
+    def test_get_guest_ip_returns_workspace_vm_ip(self) -> None:
         runtime = object.__new__(QemuRuntime)
         runtime._get_workspace_vm_ip = MagicMock(return_value="10.100.0.2")
 
-        result = runtime.get_container_ip("instance-1", "workspace-1")
+        result = runtime.get_guest_ip("instance-1", "workspace-1")
 
         self.assertEqual(result, "10.100.0.2")
         runtime._get_workspace_vm_ip.assert_called_once_with("instance-1")
 
-    def test_get_workspace_network_name_returns_empty_string(self) -> None:
-        runtime = object.__new__(QemuRuntime)
-
-        self.assertEqual(runtime.get_workspace_network_name("workspace-1"), "")
 
     def test_resolve_image_artifact_path_accepts_absolute_base_image_path(self) -> None:
         runtime = object.__new__(QemuRuntime)

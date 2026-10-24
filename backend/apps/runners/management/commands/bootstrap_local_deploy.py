@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import textwrap
 
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
@@ -13,7 +12,6 @@ from apps.credentials.models import CredentialService
 from apps.credentials.services import OrgCredentialServiceActivationSvc
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.organizations.services import OrganizationService
-from apps.runners.enums import RuntimeType
 from apps.runners.models import ImageBuildJob, ImageDefinition, Runner
 from apps.runners.services import RunnerService
 from common.utils import hash_token
@@ -37,49 +35,45 @@ DEFAULT_WORKSPACE_PACKAGES = [
     "jq",
     "zip",
     "unzip",
-    "tini",
 ]
 
-# Custom Dockerfile fragment appended after package installation.
-# Installs Node.js 22.x, GitHub CLI, sets up /workspace with default
-# agent instruction files, and configures tini as entrypoint.
-DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE = textwrap.dedent("""\
-    # Node.js 22.x
-    RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \\
-        && apt-get install -y nodejs \\
-        && rm -rf /var/lib/apt/lists/*
+DEFAULT_WORKSPACE_INIT_SCRIPT = r"""#!/bin/bash
+set -euo pipefail
+# Node.js 22.x
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
 
-    # GitHub CLI
-    RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \\
-          | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \\
-        && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \\
-        && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \\
-          | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \\
-        && apt-get update && apt-get install -y gh \\
-        && rm -rf /var/lib/apt/lists/*
+# GitHub CLI
+curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update && apt-get install -y gh \
+    && rm -rf /var/lib/apt/lists/*
 
-    WORKDIR /workspace
+mkdir -p /workspace
 
-    # Default agent instruction files
-    RUN printf '%s\\n' \\
-          '# Agent Environment & Operating Protocol' \\
-          '' \\
-          'You are operating within a **dedicated, isolated Virtual Machine (VM)**.' \\
-          'You have **full administrative access** to this system.' \\
-          '' \\
-          '## The AGENTS.md Protocol' \\
-          '1. **Read on Startup:** Always check this file first.' \\
-          '2. **Self-Modification:** You may edit this file.' \\
-        > /workspace/AGENTS.md \\
-      && printf '%s\\n' \\
-          '# Critical Instructions for Claude / AI Agent' \\
-          '' \\
-          '## Mandatory Initialization' \\
-          'Before performing any task, read the AGENTS.md file in the root directory.' \\
-        > /workspace/CLAUDE.md
+# Default agent instruction files
+printf '%s\n' \
+      '# Agent Environment & Operating Protocol' \
+      '' \
+      'You are operating within a **dedicated, isolated Virtual Machine (VM)**.' \
+      'You have **full administrative access** to this system.' \
+      '' \
+      '## The AGENTS.md Protocol' \
+      '1. **Read on Startup:** Always check this file first.' \
+      '2. **Self-Modification:** You may edit this file.' \
+    > /workspace/AGENTS.md \
+  && printf '%s\n' \
+      '# Critical Instructions for Claude / AI Agent' \
+      '' \
+      '## Mandatory Initialization' \
+      'Before performing any task, read the AGENTS.md file in the root directory.' \
+    > /workspace/CLAUDE.md
 
-    ENTRYPOINT ["/usr/bin/tini", "--"]
-""")
+"""
 
 # Default environment variables baked into the workspace image.
 _DEFAULT_ENV_VARS = {"PATH": "/root/.local/bin:$" + "{PATH}"}
@@ -114,7 +108,7 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             "--runner-name",
-            default=os.getenv("LOCAL_RUNNER_NAME", "local-docker"),
+            default=os.getenv("LOCAL_RUNNER_NAME", "local-qemu"),
             help="Name of the local runner record.",
         )
         parser.add_argument(
@@ -126,7 +120,7 @@ class Command(BaseCommand):
             "--image-definition-name",
             default=os.getenv(
                 "LOCAL_IMAGE_DEFINITION_NAME",
-                "Local Docker Workspace",
+                "Local Workspace",
             ),
             help="Display name of the seeded default image definition.",
         )
@@ -230,7 +224,6 @@ class Command(BaseCommand):
             name=name,
             defaults={
                 "api_token_hash": hash_token(runner_token),
-                "available_runtimes": [RuntimeType.DOCKER],
             },
         )
 
@@ -239,9 +232,6 @@ class Command(BaseCommand):
         if runner.api_token_hash != token_hash:
             runner.api_token_hash = token_hash
             update_fields.append("api_token_hash")
-        if runner.available_runtimes != [RuntimeType.DOCKER]:
-            runner.available_runtimes = [RuntimeType.DOCKER]
-            update_fields.append("available_runtimes")
         if update_fields:
             runner.save(update_fields=update_fields)
         return runner
@@ -265,10 +255,9 @@ class Command(BaseCommand):
             defaults={
                 "created_by": user,
                 "description": "Default workspace image for the local all-in-one stack.",
-                "runtime_type": RuntimeType.DOCKER,
                 "base_distro": "ubuntu:22.04",
                 "packages": DEFAULT_WORKSPACE_PACKAGES,
-                "custom_dockerfile": DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE,
+                "custom_init_script": DEFAULT_WORKSPACE_INIT_SCRIPT,
                 "env_vars": _DEFAULT_ENV_VARS,
             },
         )
@@ -276,18 +265,15 @@ class Command(BaseCommand):
         if definition.created_by_id is None:
             definition.created_by = user
             definition_updates.append("created_by")
-        if definition.runtime_type != RuntimeType.DOCKER:
-            definition.runtime_type = RuntimeType.DOCKER
-            definition_updates.append("runtime_type")
         if definition.base_distro != "ubuntu:22.04":
             definition.base_distro = "ubuntu:22.04"
             definition_updates.append("base_distro")
         if definition.packages != DEFAULT_WORKSPACE_PACKAGES:
             definition.packages = DEFAULT_WORKSPACE_PACKAGES
             definition_updates.append("packages")
-        if definition.custom_dockerfile != DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE:
-            definition.custom_dockerfile = DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE
-            definition_updates.append("custom_dockerfile")
+        if definition.custom_init_script != DEFAULT_WORKSPACE_INIT_SCRIPT:
+            definition.custom_init_script = DEFAULT_WORKSPACE_INIT_SCRIPT
+            definition_updates.append("custom_init_script")
         if definition.env_vars != _DEFAULT_ENV_VARS:
             definition.env_vars = _DEFAULT_ENV_VARS
             definition_updates.append("env_vars")

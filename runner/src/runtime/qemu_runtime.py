@@ -228,13 +228,7 @@ class QemuRuntime(RuntimeBackend):
 
     # ── Properties ────────────────────────────────────────────────────
 
-    @property
-    def runtime_type(self) -> str:
-        return "qemu"
 
-    @property
-    def supports_image_artifacts(self) -> bool:
-        return True
 
     # ── Internal helpers ──────────────────────────────────────────────
 
@@ -1016,22 +1010,13 @@ class QemuRuntime(RuntimeBackend):
         """
         return self._get_workspace_vm_ip(instance_id)
 
-    def get_container_ip(self, instance_id: str, workspace_id: str) -> str:
+    def get_guest_ip(self, instance_id: str, workspace_id: str) -> str:
         """Return the VM IP used by the runner desktop proxy.
 
-        The desktop session payload stores the upstream address under the historical
-        ``container_ip`` key for both Docker containers and QEMU VMs.
         """
         del workspace_id
         return self._get_workspace_vm_ip(instance_id)
 
-    def get_workspace_network_name(self, workspace_id: str) -> str:
-        """Return the workspace network marker used in desktop session payloads.
-
-        Runner-proxied QEMU desktops do not require an attachable Docker network.
-        """
-        del workspace_id
-        return ""
 
     # ── RuntimeBackend implementation ─────────────────────────────────
 
@@ -2164,7 +2149,7 @@ class QemuRuntime(RuntimeBackend):
         import os
         import xml.etree.ElementTree as ET
 
-        scan = RuntimeInventory("qemu")
+        scan = RuntimeInventory()
         paths: set[Path] = set()
         workspace_disks: dict[str, set[str]] = {}
         roots = [

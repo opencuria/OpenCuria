@@ -168,7 +168,7 @@ class RuntimeArtifactManager:
 
     def __init__(
         self,
-        runtimes: dict[str, RuntimeBackend],
+        runtime: RuntimeBackend,
         get_cached: Callable[[uuid.UUID], Any],
         get_runtime: Callable[[uuid.UUID], RuntimeBackend],
         state_dir: str | Path,
@@ -176,7 +176,7 @@ class RuntimeArtifactManager:
         manifest_path: str | Path | None = None,
         guest_runtime_root: str = ARTIFACT_GUEST_ROOT,
     ) -> None:
-        self._runtimes = runtimes
+        self._runtime = runtime
         self._get_cached = get_cached
         self._get_runtime = get_runtime
         self._state_dir = Path(state_dir).expanduser()

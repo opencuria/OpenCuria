@@ -31,7 +31,6 @@ class FakeChunkService:
     """Minimal fake WorkspaceService for chunked-transfer handler tests."""
 
     def __init__(self, *, read_content: str = "aGk=", download_content: str = "aGk=") -> None:
-        self.supported_runtimes = ["docker"]
         self.sync_from_runtime = AsyncMock()
         self.recover_desktop_sessions_from_runtime = AsyncMock()
         self.run_health_check_loop = AsyncMock()
@@ -385,10 +384,15 @@ def _oversize_download_service():
     from src.service import WorkspaceService
 
     runtime = _OversizeProbeRuntime()
-    service = WorkspaceService(runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
+    service = WorkspaceService(
+        runtime=runtime, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+    )
     workspace_id = uuid.uuid4()
-    service.registry._cache[workspace_id] = WorkspaceInfo(workspace_id=workspace_id,
-        instance_id="instance-1", status="running", runtime_type="docker")
+    service.registry._cache[workspace_id] = WorkspaceInfo(
+        workspace_id=workspace_id,
+        instance_id="instance-1",
+        status="running",
+    )
     return service, runtime, workspace_id
 
 
@@ -578,14 +582,13 @@ def _cap_service(monkeypatch, cap_bytes: int):
     monkeypatch.setattr(files_module, "FILE_UPLOAD_MAX_SIZE", cap_bytes)
     runtime = _CapProbeRuntime()
     service = WorkspaceService(
-        runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+        runtime=runtime, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
     )
     workspace_id = uuid.uuid4()
     service.registry._cache[workspace_id] = WorkspaceInfo(
         workspace_id=workspace_id,
         instance_id="instance-1",
         status="running",
-        runtime_type="docker",
     )
     return service, runtime, workspace_id
 

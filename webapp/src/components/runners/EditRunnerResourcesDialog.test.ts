@@ -28,7 +28,6 @@ function makeRunner(overrides: Partial<Runner> = {}): Runner {
     id: overrides.id ?? 'runner-1',
     name: overrides.name ?? 'Runner',
     status: overrides.status ?? 'online',
-    available_runtimes: overrides.available_runtimes ?? ['docker', 'qemu'],
     organization_id: overrides.organization_id ?? 'org-1',
     connected_at: overrides.connected_at ?? null,
     disconnected_at: overrides.disconnected_at ?? null,
@@ -177,12 +176,5 @@ describe('EditRunnerResourcesDialog', () => {
     expect(updateRunner).toHaveBeenCalledTimes(2)
   })
 
-  it('does not save QEMU limits for a runner without QEMU support', async () => {
-    const wrapper = shallowMount(EditRunnerResourcesDialog, {
-      props: { runner: makeRunner({ available_runtimes: ['docker'] }) },
-    })
-    const vm = wrapper.vm as unknown as DialogVm
-    await vm.handleSubmit()
-    expect(updateRunner).not.toHaveBeenCalled()
-  })
+
 })

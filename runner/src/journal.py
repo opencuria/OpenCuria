@@ -64,43 +64,10 @@ class Journal:
             "CREATE TABLE IF NOT EXISTS checkpoints "
             "(workspace_id TEXT PRIMARY KEY, incarnation TEXT, proof TEXT)"
         )
-        self.db.execute(
-            "CREATE TABLE IF NOT EXISTS publications "
-            "(physical_id TEXT PRIMARY KEY, proof TEXT)"
-        )
         if not defer_recovery:
             self.interrupt_unproven()
 
-    def publications(self) -> dict:
-        """Return durable final Docker IDs, including pre-ledger terminal outcomes."""
-        bindings = {}
-        for event, result in self.db.execute(
-            "SELECT event,result FROM operations WHERE result IS NOT NULL"
-        ):
-            data = json.loads(result)
-            if (
-                event == "image:built"
-                and data.get("image_id")
-                and data.get("image_tag")
-            ):
-                bindings[data["image_id"]] = {
-                    "generation_id": data.get("image_instance_id"),
-                    "operation_id": data.get("operation_id"),
-                    "image_tag": data["image_tag"],
-                }
-        for physical, proof in self.db.execute(
-            "SELECT physical_id,proof FROM publications"
-        ):
-            bindings[physical] = json.loads(proof)
-        return bindings
 
-    def publish_image(self, physical_id: str, proof: dict) -> None:
-        """Checkpoint physical identity after successful final tag verification."""
-        with self.db:
-            self.db.execute(
-                "INSERT OR REPLACE INTO publications VALUES(?,?)",
-                (physical_id, json.dumps(proof)),
-            )
 
     def unfinished(self) -> list[tuple[str, dict]]:
         """Read identities only; no execution recipes or credentials are persisted."""
@@ -146,7 +113,6 @@ class Journal:
                 "build_job_id",
                 "image_instance_id",
                 "image_artifact_id",
-                "image_tag",
                 "image_path",
             )
             if k in data
@@ -171,7 +137,6 @@ class Journal:
                 "env_vars",
                 "files",
                 "ssh_keys",
-                "dockerfile_content",
                 "init_script",
             }
         }
@@ -309,9 +274,6 @@ class OperationExecutor:
 
     def __init__(self, sio, journal: Journal, reconciler=None, observer=None) -> None:
         self.observer = observer
-        for runtime in getattr(observer, "_runtimes", {}).values():
-            if getattr(runtime, "runtime_type", None) == "docker":
-                runtime._publication_journal = journal
         self.reconciler = reconciler
         self._recovered = False
         self.sio = sio

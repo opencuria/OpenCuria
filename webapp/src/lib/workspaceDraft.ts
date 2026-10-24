@@ -10,7 +10,6 @@ export interface WorkspaceDraftFields {
   workspaceId?: string
   repos?: string[]
   runnerId?: string
-  runtimeType?: 'docker' | 'qemu'
   qemuVcpus?: number
   qemuMemoryMb?: number
   qemuDiskSizeGb?: number
@@ -51,7 +50,6 @@ const FIELD_KEYS = new Set([
   'workspaceId',
   'repos',
   'runnerId',
-  'runtimeType',
   'qemuVcpus',
   'qemuMemoryMb',
   'qemuDiskSizeGb',
@@ -106,12 +104,6 @@ function isWorkspaceDraftFields(value: unknown): value is WorkspaceDraftFields {
   if (value.repos !== undefined && (!isStringArray(value.repos) || value.repos.length > 100))
     return false
   if (value.runnerId !== undefined && typeof value.runnerId !== 'string') return false
-  if (
-    value.runtimeType !== undefined &&
-    value.runtimeType !== 'docker' &&
-    value.runtimeType !== 'qemu'
-  )
-    return false
   if (
     value.imageValue !== undefined &&
     (typeof value.imageValue !== 'string' ||

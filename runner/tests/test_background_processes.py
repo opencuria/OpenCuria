@@ -24,7 +24,7 @@ from src.services.sessions.background import (
 
 
 class FakeRuntime:
-    """Fake runtime simulating detached processes without Docker."""
+    """Fake runtime simulating detached processes without a VM."""
 
     def __init__(self) -> None:
         self.exec_command_wait = AsyncMock(side_effect=self._dispatch)
@@ -92,7 +92,7 @@ def _service_with_workspace(runtime=None):
     runtime = runtime or FakeRuntime()
     state_dir = tempfile.mkdtemp()
     service = WorkspaceService(
-        runtimes={"docker": runtime},
+        runtime=runtime,
         settings=RunnerSettings(state_dir=state_dir),
     )
     service.configure_desktop_leases(state_dir, "background-test-epoch")
@@ -101,7 +101,6 @@ def _service_with_workspace(runtime=None):
         workspace_id=workspace_id,
         instance_id="instance-1",
         status="running",
-        runtime_type="docker",
     )
     return service, runtime, workspace_id
 

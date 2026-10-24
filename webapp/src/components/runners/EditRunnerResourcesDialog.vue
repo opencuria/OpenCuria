@@ -15,7 +15,6 @@ import {
 } from '@/components/ui/dialog'
 import { useRunnerStore } from '@/stores/runners'
 import { getRunnerMetricsLatest } from '@/services/runners.api'
-import { runnerSupportsRuntime } from '@/lib/runtimeSupport'
 
 const props = defineProps<{
   runner: Runner
@@ -48,7 +47,6 @@ const hostDiskSizeGb = ref<number | null>(null)
 
 const RAM_STEP = 256
 const DISK_STEP = 5
-const supportsQemu = computed(() => runnerSupportsRuntime(props.runner, 'qemu'))
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
@@ -230,7 +228,7 @@ const limitsValid = computed(
 )
 
 async function handleSubmit(): Promise<void> {
-  if (submitting.value || !limitsValid.value || !supportsQemu.value) return
+  if (submitting.value || !limitsValid.value) return
   submitting.value = true
   formError.value = null
   try {
@@ -262,7 +260,7 @@ watch(open, (value) => {
     @update:open="setOpen"
   >
     <DialogTrigger as-child>
-      <Button variant="outline" size="sm" :disabled="!supportsQemu">QEMU Limits</Button>
+      <Button variant="outline" size="sm">QEMU Limits</Button>
     </DialogTrigger>
 
     <DialogContent class="sm:max-w-3xl">

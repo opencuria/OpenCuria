@@ -59,7 +59,7 @@ def test_captured_images_list_versions_and_latest(member, runner, organization):
     assert versions[1]["workspaces"][0]["name"] == "Versioned"
     assert versions[2]["source_workspace_id"] is None
     assert versions[2]["source_runner_id"] == str(runner.id)
-    assert versions[2]["runtime_type"] == "qemu"
+    assert "runtime_type" not in versions[2]
     assert "credential_ids" not in versions[2]
 
 
@@ -128,7 +128,7 @@ def test_new_workspace_from_captured_image_uses_latest(
     assert calls == [v2.id]
 
 
-@pytest.mark.parametrize("unavailable", ["offline", "runtime", "no_ready_version"])
+@pytest.mark.parametrize("unavailable", ["offline", "no_ready_version"])
 def test_clone_rejects_unavailable_image(member, runner, organization, unavailable):
     line, _ = make_line(
         runner, member, ("failed",) if unavailable == "no_ready_version" else ("ready",)
@@ -136,9 +136,6 @@ def test_clone_rejects_unavailable_image(member, runner, organization, unavailab
     if unavailable == "offline":
         runner.status = "offline"
         runner.save(update_fields=["status"])
-    elif unavailable == "runtime":
-        runner.available_runtimes = ["docker"]
-        runner.save(update_fields=["available_runtimes"])
     response = Client().post(
         f"/api/v1/captured-images/{line.id}/workspaces/",
         data=json.dumps({"name": "Unavailable", "credential_ids": []}),

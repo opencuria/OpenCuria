@@ -29,7 +29,6 @@ function version(patch: Partial<ImageArtifact>): ImageArtifact {
     name: 'Before refactor',
     artifact_kind: 'captured',
     status: 'ready',
-    runtime_type: 'qemu',
     size_bytes: 1024,
     created_at: '2026-01-01T00:00:00.000Z',
     runner_artifact_id: 'art',

@@ -19,7 +19,6 @@ pytestmark = pytest.mark.django_db
 
 
 def resume_child(service, runner, workspace):
-    workspace.runtime_type = "qemu"
     workspace.save()
     _, stop = CaptureRepository.allocate(
         workspace.id, "evidence capture", has_busy_agent=has_busy_agent
@@ -152,7 +151,6 @@ def test_unauthenticated_result_cannot_change_evidence(service, runner, workspac
 def test_known_stop_failure_persists_actual_evidence(
     service, runner, workspace, state, present, status
 ):
-    workspace.runtime_type = "qemu"
     workspace.credentials_present = not present
     workspace.save()
     _, stop = CaptureRepository.allocate(
@@ -178,7 +176,6 @@ def test_known_stop_failure_persists_actual_evidence(
 def test_unknown_stop_failure_does_not_release_capture_reservation(
     service, runner, workspace
 ):
-    workspace.runtime_type = "qemu"
     workspace.save()
     _, stop = CaptureRepository.allocate(
         workspace.id, "partial scrub", has_busy_agent=has_busy_agent

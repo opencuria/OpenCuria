@@ -20,13 +20,15 @@ class DesktopClipboardSelectionTests(unittest.IsolatedAsyncioTestCase):
         self.state_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.state_dir.cleanup)
         self.service = WorkspaceService(
-            {"docker": self.runtime},
+            self.runtime,
             RunnerSettings(state_dir=self.state_dir.name),
         )
         self.service.configure_desktop_leases(self.state_dir.name, "clipboard-epoch")
         self.workspace_id = uuid.uuid4()
         self.service.registry._cache[self.workspace_id] = WorkspaceInfo(
-            self.workspace_id, "guest", "running", runtime_type="docker"
+            self.workspace_id,
+            "guest",
+            "running",
         )
         self.service.desktop._is_desktop_session_live = AsyncMock(return_value=True)
         self.service.desktop._exec_desktop_shell = AsyncMock(

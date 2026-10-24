@@ -32,14 +32,6 @@ def test_validate_desktop_dimension_rejects_odd_and_out_of_range() -> None:
         validate_desktop_dimension(200, kind="width")
 
 
-def test_docker_desktop_block_disables_remote_resize() -> None:
-    """Docker workspace images start Xvnc at a fixed size without remote resize."""
-    from apps.runners.services import RunnerService
-
-    block = RunnerService._desktop_session_dockerfile_block()
-    assert "allow_resize: false" in block
-    assert "-AcceptSetDesktopSize=0" in block
-    assert "OPENCURIA_DESKTOP_GEOMETRY" in block
 
 
 @pytest.fixture
@@ -72,7 +64,6 @@ def desktop_api(db):
         status=RunnerStatus.ONLINE,
         sid="desktop-sid",
         organization=org,
-        available_runtimes=["docker"],
     )
     workspace = Workspace.objects.create(
         runner=runner,

@@ -14,7 +14,6 @@ class _Desktop:
 
 class _Service:
     def __init__(self):
-        self.supported_runtimes = []
         self.desktop = _Desktop()
 
 

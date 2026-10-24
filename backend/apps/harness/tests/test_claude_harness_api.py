@@ -153,7 +153,6 @@ def claude_api_setup(db, monkeypatch):
         status=RunnerStatus.ONLINE,
         sid=f"claude-harness-api-{uuid.uuid4().hex[:8]}",
         organization=org,
-        available_runtimes=["docker"],
     )
     owned = Workspace.objects.create(
         runner=runner,

@@ -43,37 +43,18 @@ const emit = defineEmits<{
 const name = ref('')
 const description = ref('')
 const activeTab = ref<'definition' | 'advanced'>('definition')
-const runtimeType = ref<'docker' | 'qemu'>('docker')
 const baseDistroPreset = ref('ubuntu:22.04')
 const customBaseDistro = ref('')
 const packages = ref('')
 const envVars = ref('')
-const customDockerfile = ref('')
 const customInitScript = ref('')
 
-const runtimeOptions = [
-  { value: 'docker', label: 'Docker' },
-  { value: 'qemu', label: 'QEMU' },
-]
-
-const dockerDistroOptions = [
-  { value: 'ubuntu:22.04', label: 'ubuntu:22.04' },
-  { value: 'ubuntu:24.04', label: 'ubuntu:24.04' },
-  { value: 'debian:12', label: 'debian:12' },
-  { value: 'fedora:40', label: 'fedora:40' },
-  { value: 'alpine:3.19', label: 'alpine:3.19' },
-  { value: '__custom__', label: 'Custom...' },
-]
-
-const qemuDistroOptions = [
+const distroOptions = [
   { value: 'ubuntu:22.04', label: 'ubuntu:22.04' },
   { value: 'ubuntu:24.04', label: 'ubuntu:24.04' },
   { value: '__custom__', label: 'Custom...' },
 ]
 
-const distroOptions = computed(() =>
-  runtimeType.value === 'qemu' ? qemuDistroOptions : dockerDistroOptions,
-)
 const title = computed(() =>
   props.imageDefinition ? 'Edit Image Definition' : 'Create Image Definition',
 )
@@ -103,14 +84,12 @@ function payload(): Partial<ImageDefinition> {
   return {
     name: name.value.trim(),
     description: description.value.trim(),
-    runtime_type: runtimeType.value,
     base_distro: baseDistro.value.trim(),
     packages: packages.value
       .split(',')
       .map((v) => v.trim())
       .filter(Boolean),
     env_vars: parseEnvVars(envVars.value),
-    custom_dockerfile: customDockerfile.value,
     custom_init_script: customInitScript.value,
   }
 }
@@ -123,18 +102,14 @@ watch(
     activeTab.value = 'definition'
     name.value = src?.name || ''
     description.value = src?.description || ''
-    runtimeType.value = (src?.runtime_type as 'docker' | 'qemu') || 'docker'
     const currentBase = src?.base_distro || 'ubuntu:22.04'
-    const known = [...dockerDistroOptions, ...qemuDistroOptions].find(
-      (opt) => opt.value === currentBase,
-    )
+    const known = distroOptions.find((opt) => opt.value === currentBase)
     baseDistroPreset.value = known ? currentBase : '__custom__'
     customBaseDistro.value = known ? '' : currentBase
     packages.value = (src?.packages || []).join(', ')
     envVars.value = Object.entries(src?.env_vars || {})
       .map(([k, v]) => `${k}=${v}`)
       .join('\n')
-    customDockerfile.value = src?.custom_dockerfile || ''
     customInitScript.value = src?.custom_init_script || ''
   },
   { immediate: true },
@@ -150,10 +125,7 @@ function setOpen(value: boolean): void {
 </script>
 
 <template>
-  <Dialog
-    :open="open"
-    @update:open="setOpen"
-  >
+  <Dialog :open="open" @update:open="setOpen">
     <DialogContent class="sm:max-w-lg">
       <DialogHeader>
         <DialogTitle>{{ title }}</DialogTitle>
@@ -163,110 +135,112 @@ function setOpen(value: boolean): void {
       </DialogHeader>
 
       <DialogBody>
-      <p v-if="error" class="text-sm text-destructive" role="alert">{{ error }}</p>
-      <form id="image-definition-form" class="space-y-4" @submit.prevent="handleSave">
-        <fieldset :disabled="saving" class="contents">
-        <div class="rounded-md border border-border bg-muted/50 p-1">
-          <div class="grid grid-cols-2 gap-1">
-            <Button type="button" size="sm" :variant="activeTab === 'definition' ? 'secondary' : 'ghost'" @click="activeTab = 'definition'">
-              Definition
-            </Button>
-            <Button type="button" size="sm" :variant="activeTab === 'advanced' ? 'secondary' : 'ghost'" @click="activeTab = 'advanced'">
-              Advanced / Custom Build
-            </Button>
-          </div>
-        </div>
-
-        <template v-if="activeTab === 'definition'">
-          <div>
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
-            <Input v-model="name" placeholder="Python Dev Environment" />
-          </div>
-
-          <div>
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Description</label>
-            <Textarea v-model="description" :rows="2" />
-          </div>
-
-          <div class="grid gap-3 sm:grid-cols-2">
-            <div>
-              <label class="text-sm font-medium text-foreground mb-1.5 block">Runtime Type</label>
-              <Select v-model="runtimeType">
-                <SelectTrigger>
-                  <SelectValue placeholder="Select runtime" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem
-                    v-for="opt in runtimeOptions"
-                    :key="opt.value"
-                    :value="opt.value"
-                  >
-                    {{ opt.label }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+        <p v-if="error" class="text-sm text-destructive" role="alert">{{ error }}</p>
+        <form id="image-definition-form" class="space-y-4" @submit.prevent="handleSave">
+          <fieldset :disabled="saving" class="contents">
+            <div class="rounded-md border border-border bg-muted/50 p-1">
+              <div class="grid grid-cols-2 gap-1">
+                <Button
+                  type="button"
+                  size="sm"
+                  :variant="activeTab === 'definition' ? 'secondary' : 'ghost'"
+                  @click="activeTab = 'definition'"
+                >
+                  Definition
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  :variant="activeTab === 'advanced' ? 'secondary' : 'ghost'"
+                  @click="activeTab = 'advanced'"
+                >
+                  Advanced / Custom Build
+                </Button>
+              </div>
             </div>
-            <div>
-              <label class="text-sm font-medium text-foreground mb-1.5 block">Base Distro</label>
-              <Select v-model="baseDistroPreset">
-                <SelectTrigger>
-                  <SelectValue placeholder="Select distro" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem
-                    v-for="opt in distroOptions"
-                    :key="opt.value"
-                    :value="opt.value"
+
+            <template v-if="activeTab === 'definition'">
+              <div>
+                <label class="text-sm font-medium text-foreground mb-1.5 block">Name</label>
+                <Input v-model="name" placeholder="Python Dev Environment" />
+              </div>
+
+              <div>
+                <label class="text-sm font-medium text-foreground mb-1.5 block">Description</label>
+                <Textarea v-model="description" :rows="2" />
+              </div>
+
+              <div class="grid gap-3">
+                <div>
+                  <label class="text-sm font-medium text-foreground mb-1.5 block"
+                    >Base Distro</label
                   >
-                    {{ opt.label }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
+                  <Select v-model="baseDistroPreset">
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select distro" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="opt in distroOptions" :key="opt.value" :value="opt.value">
+                        {{ opt.label }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
 
-          <p v-if="runtimeType === 'qemu'" class="text-xs text-muted-foreground -mt-1">
-            QEMU image builds currently support Ubuntu cloud images only.
-          </p>
+              <p class="text-xs text-muted-foreground -mt-1">
+                QEMU image builds currently support Ubuntu cloud images only.
+              </p>
 
-          <div v-if="baseDistroPreset === '__custom__'">
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Custom Base Distro</label>
-            <Input v-model="customBaseDistro" placeholder="e.g. ubuntu:22.04" />
-          </div>
+              <div v-if="baseDistroPreset === '__custom__'">
+                <label class="text-sm font-medium text-foreground mb-1.5 block"
+                  >Custom Base Distro</label
+                >
+                <Input v-model="customBaseDistro" placeholder="e.g. ubuntu:22.04" />
+              </div>
 
-          <div>
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Pre-installed Packages</label>
-            <Input v-model="packages" placeholder="python3, nodejs, ffmpeg" />
-          </div>
+              <div>
+                <label class="text-sm font-medium text-foreground mb-1.5 block"
+                  >Pre-installed Packages</label
+                >
+                <Input v-model="packages" placeholder="python3, nodejs, ffmpeg" />
+              </div>
 
-          <div>
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Baked Environment Variables</label>
-            <Textarea v-model="envVars" :rows="4" placeholder="NODE_ENV=production" />
-          </div>
-        </template>
+              <div>
+                <label class="text-sm font-medium text-foreground mb-1.5 block"
+                  >Baked Environment Variables</label
+                >
+                <Textarea v-model="envVars" :rows="4" placeholder="NODE_ENV=production" />
+              </div>
+            </template>
 
-        <template v-else>
-          <p class="text-xs text-muted-foreground">
-            The base distro and packages above are applied first. Use this section for advanced customization.
-          </p>
-          <div v-if="runtimeType === 'docker'">
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Custom Dockerfile</label>
-            <Textarea v-model="customDockerfile" :rows="8" placeholder="RUN pip install numpy torch" />
-          </div>
-
-          <div v-else>
-            <label class="text-sm font-medium text-foreground mb-1.5 block">Custom Init Script</label>
-            <Textarea v-model="customInitScript" :rows="8" placeholder="#!/bin/bash\napt-get install -y ffmpeg" />
-          </div>
-        </template>
-
-        </fieldset>
-      </form>
+            <template v-else>
+              <p class="text-xs text-muted-foreground">
+                The base distro and packages above are applied first. Use this section for advanced
+                customization.
+              </p>
+              <div>
+                <label class="text-sm font-medium text-foreground mb-1.5 block"
+                  >Custom Init Script</label
+                >
+                <Textarea
+                  v-model="customInitScript"
+                  :rows="8"
+                  placeholder="#!/bin/bash\napt-get install -y ffmpeg"
+                />
+              </div>
+            </template>
+          </fieldset>
+        </form>
       </DialogBody>
 
       <DialogFooter>
-        <Button variant="outline" type="button" :disabled="saving" @click="setOpen(false)">Cancel</Button>
-        <Button type="submit" form="image-definition-form" :disabled="saving || !isValid">{{ saving ? 'Saving…' : 'Save' }}</Button>
+        <Button variant="outline" type="button" :disabled="saving" @click="setOpen(false)"
+          >Cancel</Button
+        >
+        <Button type="submit" form="image-definition-form" :disabled="saving || !isValid">{{
+          saving ? 'Saving…' : 'Save'
+        }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

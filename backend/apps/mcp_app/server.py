@@ -192,11 +192,6 @@ _TOOLS: list[Tool] = [
                     },
                     "description": "Repositories to clone into the workspace.",
                 },
-                "runtime_type": {
-                    "type": "string",
-                    "enum": ["docker", "qemu"],
-                    "description": "Virtualisation backend (default: docker).",
-                },
                 "image_artifact_id": {
                     "type": "string",
                     "description": "Optional image artifact UUID to start workspace from.",
@@ -495,11 +490,9 @@ _TOOLS: list[Tool] = [
             "properties": {
                 "name": {"type": "string"},
                 "description": {"type": "string"},
-                "runtime_type": {"type": "string", "enum": ["docker", "qemu"]},
                 "base_distro": {"type": "string"},
                 "packages": {"type": "array", "items": {"type": "string"}},
                 "env_vars": {"type": "object"},
-                "custom_dockerfile": {"type": "string"},
                 "custom_init_script": {"type": "string"},
                 "is_active": {"type": "boolean"},
             },
@@ -527,11 +520,9 @@ _TOOLS: list[Tool] = [
                 "definition_id": {"type": "string"},
                 "name": {"type": "string"},
                 "description": {"type": "string"},
-                "runtime_type": {"type": "string", "enum": ["docker", "qemu"]},
                 "base_distro": {"type": "string"},
                 "packages": {"type": "array", "items": {"type": "string"}},
                 "env_vars": {"type": "object"},
-                "custom_dockerfile": {"type": "string"},
                 "custom_init_script": {"type": "string"},
                 "is_active": {"type": "boolean"},
             },
@@ -1812,7 +1803,6 @@ def _call_list_workspaces(api_key, org_id, args: dict) -> list[TextContent]:
             "intervention_required": w.intervention_required,
             "lifecycle_diagnostic": w.lifecycle_diagnostic,
             "runner_id": str(w.runner_id),
-            "runtime_type": str(w.runtime_type),
             "created_at": w.created_at.isoformat(),
         }
         for w in workspaces
@@ -1845,7 +1835,6 @@ def _call_get_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         "intervention_required": workspace.intervention_required,
         "lifecycle_diagnostic": workspace.lifecycle_diagnostic,
         "runner_id": str(workspace.runner_id),
-        "runtime_type": str(workspace.runtime_type),
         "desktop_width": workspace.desktop_width,
         "desktop_height": workspace.desktop_height,
         "credential_ids": [
@@ -1884,7 +1873,6 @@ def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
             return _error("Invalid runner_id UUID")
 
     repos = args.get("repos", [])
-    runtime_type = args.get("runtime_type", "docker")
     credential_ids = args.get("credential_ids", [])
     plugin_ids = args.get("plugin_ids", [])
     if not isinstance(credential_ids, list) or not isinstance(plugin_ids, list):
@@ -1923,7 +1911,6 @@ def _call_create_workspace(api_key, org_id, args: dict) -> list[TextContent]:
         workspace, task = await svc.create_workspace(
             name=name,
             repos=repos,
-            runtime_type=runtime_type,
             env_vars=resolved.env_vars,
             files=resolved.files,
             ssh_keys=resolved.ssh_keys,
@@ -2520,11 +2507,9 @@ def _image_definition_payload(definition) -> dict:
         "name": definition.name,
         "description": definition.description,
         "is_standard": definition.organization_id is None,
-        "runtime_type": definition.runtime_type,
         "base_distro": definition.base_distro,
         "packages": list(definition.packages or []),
         "env_vars": dict(definition.env_vars or {}),
-        "custom_dockerfile": definition.custom_dockerfile or "",
         "custom_init_script": definition.custom_init_script or "",
         "is_active": bool(definition.is_active),
         "status": getattr(definition, "status", "active"),
@@ -2568,11 +2553,9 @@ def _call_create_image_definition(api_key, org_id, args: dict) -> list[TextConte
     recipe = {
         "name": name,
         "description": args.get("description") or "",
-        "runtime_type": args.get("runtime_type") or "docker",
         "base_distro": args.get("base_distro") or "ubuntu:22.04",
         "packages": list(args.get("packages") or []),
         "env_vars": dict(args.get("env_vars") or {}),
-        "custom_dockerfile": args.get("custom_dockerfile") or "",
         "custom_init_script": args.get("custom_init_script") or "",
         "is_active": bool(args.get("is_active", True)),
     }
@@ -2643,16 +2626,9 @@ def _call_list_build_jobs(api_key, org_id, args: dict) -> list[TextContent]:
     return _text(
         [
             {
-                "image_tag": (
-                    build.image_instance.runner_ref
-                    if getattr(build, "image_instance", None) is not None
-                    and build.image_definition.runtime_type == "docker"
-                    else ""
-                ),
                 "image_path": (
                     build.image_instance.runner_ref
                     if getattr(build, "image_instance", None) is not None
-                    and build.image_definition.runtime_type == "qemu"
                     else ""
                 ),
                 "id": str(build.id),

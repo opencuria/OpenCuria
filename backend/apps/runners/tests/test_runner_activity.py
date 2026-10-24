@@ -132,7 +132,6 @@ def test_only_blender_needs_attention_and_closed_capture_is_one_history_entry(
     image = ImageInstance.objects.create(
         runner=runner,
         name="OpenCuria",
-        runtime_type="qemu",
         status="failed",
         origin_type="workspace_capture",
         is_legacy=True,
@@ -203,7 +202,6 @@ def test_failed_capture_with_retained_child_stays_visible_and_counted_once(
     image = ImageInstance.objects.create(
         runner=runner,
         name="Capture",
-        runtime_type="qemu",
         status="failed",
         origin_type="workspace_capture",
         is_legacy=True,
@@ -230,7 +228,6 @@ def test_capture_replacement_is_part_of_the_same_workflow(
     image = ImageInstance.objects.create(
         runner=runner,
         name="Capture",
-        runtime_type="qemu",
         status="ready",
         origin_type="workspace_capture",
         is_legacy=True,

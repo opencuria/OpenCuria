@@ -96,7 +96,7 @@ jobs:
           cache: pip
           cache-dependency-path: runner/requirements*.txt
       - name: Install dependencies
-        run: pip install -r requirements.txt -r requirements-qemu.txt
+        run: pip install -r requirements.txt
       - name: Run tests
         run: pytest -q --junitxml=test-results.xml
       - name: Annotate Python test failures
@@ -167,10 +167,6 @@ jobs:
             image: ghcr.io/opencuria/webapp
             context: .
             dockerfile: ./webapp/Dockerfile
-          - name: runner
-            image: ghcr.io/opencuria/runner
-            context: ./runner
-            dockerfile: ./runner/Dockerfile.runner
 
     steps:
       - name: Checkout

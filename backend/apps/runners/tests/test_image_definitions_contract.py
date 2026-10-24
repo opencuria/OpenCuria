@@ -49,13 +49,11 @@ def recipe_org(db):
         api_token_hash=hash_token("recipe-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["docker"],
     )
     definition = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Recipe",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     return {
@@ -97,7 +95,7 @@ def test_create_recipe_persists_fields(client, recipe_org):
     payload = response.json()
     assert payload["name"] == "Python"
     assert payload["organization_id"] == str(recipe_org["org"].id)
-    assert payload["runtime_type"] == "docker"
+    assert "runtime_type" not in payload
     assert payload["base_distro"] == "ubuntu:22.04"
     assert payload["runner_build_summary"]["active"] == 0
     created = ImageDefinition.objects.get(id=payload["id"])
@@ -351,3 +349,29 @@ def test_runner_build_log_is_scoped_to_visible_builds(client, recipe_org):
     assert no_build.json()["detail"] == "Runner image build not found"
     assert invisible.status_code == 404
     assert invisible.json()["detail"] == "Image definition not found"
+
+
+def test_workspace_and_recipe_contracts_expose_vm_configuration_only():
+    """REST and MCP share one workspace format without runtime selection."""
+    from apps.mcp_app.server import _TOOLS
+    from apps.runners.schemas import (
+        ImageDefinitionCreateIn,
+        ImageDefinitionUpdateIn,
+        RunnerOut,
+        WorkspaceCreateIn,
+    )
+
+    assert "available_runtimes" not in RunnerOut.model_fields
+    assert "qemu_vcpus" in WorkspaceCreateIn.model_fields
+    for schema in (WorkspaceCreateIn, ImageDefinitionCreateIn, ImageDefinitionUpdateIn):
+        assert "runtime_type" not in schema.model_fields
+        assert "custom_dockerfile" not in schema.model_fields
+    for tool in _TOOLS:
+        if tool.name in {
+            "create_workspace",
+            "create_image_definition",
+            "update_image_definition",
+        }:
+            properties = tool.inputSchema["properties"]
+            assert "runtime_type" not in properties
+            assert "custom_dockerfile" not in properties

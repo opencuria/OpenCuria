@@ -20,7 +20,6 @@ class _FakeService:
     """Minimal fake WorkspaceService for harness handler tests."""
 
     def __init__(self) -> None:
-        self.supported_runtimes = ["docker"]
         self.sync_from_runtime = AsyncMock()
         self.recover_desktop_sessions_from_runtime = AsyncMock()
         self.run_health_check_loop = AsyncMock()
@@ -95,7 +94,7 @@ class _FakeService:
             # Sessions as plain sentinels: identity comparison detects restarts.
             return self._desktop_sessions.get(workspace_id)
 
-        def get_desktop_container_ip(self, workspace_id):
+        def get_desktop_guest_ip(self, workspace_id):
             return "172.22.0.2"
 
         def get_desktop_network_name(self, workspace_id):
@@ -168,8 +167,7 @@ class _FakeService:
         return {
             "workspace_id": str(workspace_id),
             "port": 6901,
-            "container_ip": "172.22.0.2",
-            "network_name": f"opencuria-ws-{workspace_id}",
+            "guest_ip": "172.22.0.2",
             "viewer": session.viewer_held,
             "computer_use": bool(session.computeruse_run_ids),
             "generation": session.generation,
@@ -613,10 +611,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
             for call in interface._sio.emit.await_args_list
             if call.args[0] == "desktop:process"
         )
-        self.assertEqual(process_payload["container_ip"], "172.22.0.2")
-        self.assertEqual(
-            process_payload["network_name"], f"opencuria-ws-{workspace_id}"
-        )
+        self.assertEqual(process_payload["guest_ip"], "172.22.0.2")
 
     async def test_idempotent_hold_keeps_tunnels(self) -> None:
         """Same session object (no restart) must not close healthy tunnels."""
@@ -1004,7 +999,9 @@ class HarnessServiceSandboxTests(unittest.IsolatedAsyncioTestCase):
     async def test_write_file_content_rejects_traversal(self) -> None:
         from src.service import WorkspaceService
 
-        service = WorkspaceService(runtimes={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
+        service = WorkspaceService(
+            runtime={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
         with self.assertRaises(ValueError):
             await service.files.write_file_content(
                 uuid.uuid4(), "/etc/passwd", base64.b64encode(b"x").decode()
@@ -1024,13 +1021,13 @@ class HarnessServiceSandboxTests(unittest.IsolatedAsyncioTestCase):
 
         workspace_id = uuid.uuid4()
         service = WorkspaceService(
-            runtimes={"docker": UnusedRuntime()}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+            runtime=UnusedRuntime(),
+            settings=RunnerSettings(state_dir=tempfile.mkdtemp()),
         )
         service.registry._cache[workspace_id] = WorkspaceInfo(
             workspace_id=workspace_id,
             instance_id="instance-1",
             status="running",
-            runtime_type="docker",
         )
         content = base64.b64encode(b"x").decode()
 
@@ -1046,7 +1043,9 @@ class HarnessServiceSandboxTests(unittest.IsolatedAsyncioTestCase):
     async def test_stat_path_rejects_traversal(self) -> None:
         from src.service import WorkspaceService
 
-        service = WorkspaceService(runtimes={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp()))
+        service = WorkspaceService(
+            runtime={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
         with self.assertRaises(ValueError):
             await service.files.stat_path(uuid.uuid4(), "/workspace/../evil")
 
@@ -1087,14 +1086,13 @@ class HarnessServiceQuoteInjectionTests(unittest.IsolatedAsyncioTestCase):
 
         runtime = FakeRuntime()
         service = WorkspaceService(
-            runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+            runtime=runtime, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
         )
         workspace_id = uuid.uuid4()
         service.registry._cache[workspace_id] = WorkspaceInfo(
             workspace_id=workspace_id,
             instance_id="instance-1",
             status="running",
-            runtime_type="docker",
         )
         return service, captured, workspace_id
 
@@ -1139,14 +1137,12 @@ class HarnessServiceQuoteInjectionTests(unittest.IsolatedAsyncioTestCase):
                     return 0, "4\n"
                 return 0, "QUJD"
 
-        service.registry._runtimes.clear()
-        service.registry._runtimes.update({"docker": DirRuntime()})
+        service.registry._runtime = DirRuntime()
         info = service.registry._cache[workspace_id]
         service.registry._cache[workspace_id] = WorkspaceInfo(
             workspace_id=info.workspace_id,
             instance_id="instance-1",
             status="running",
-            runtime_type="docker",
         )
         evil = "/workspace/x'; touch /tmp/pwned; echo '"
         result = await service.files.download_file(workspace_id, evil)
@@ -1188,14 +1184,13 @@ class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
 
         runtime = FakeRuntime()
         service = WorkspaceService(
-            runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+            runtime=runtime, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
         )
         workspace_id = uuid.uuid4()
         service.registry._cache[workspace_id] = WorkspaceInfo(
             workspace_id=workspace_id,
             instance_id="instance-1",
             status="running",
-            runtime_type="docker",
         )
         return service, runtime, workspace_id
 
@@ -1328,7 +1323,7 @@ class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
 
         runtime = FailingRuntime()
         service = WorkspaceService(
-            runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
+            runtime=runtime, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
         )
         resolved = await service.files._realpath_under_workspace(
             runtime, "instance-1", "/workspace/a.txt"

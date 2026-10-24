@@ -7,11 +7,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from docker.errors import NotFound
 
 from src.journal import Journal
 from src.runtime.base import WorkspaceConfig
-from src.runtime.docker_runtime import DockerRuntime
 
 
 def qemu_modules():
@@ -114,7 +112,6 @@ async def test_same_id_remove_then_create_clears_disk_iso_key(tmp_path):
         WorkspaceConfig(
             workspace_id=workspace_id,
             image=str(base),
-            env_vars={},
             qemu_disk_size_gb=1,
         )
     )
@@ -201,121 +198,6 @@ async def test_capture_of_capture_has_no_backing_file(tmp_path):
     assert second.artifact_id == second_id
 
 
-@pytest.mark.asyncio
-async def test_docker_same_id_remove_then_create_rebuilds_volume_and_network():
-    runtime = DockerRuntime()
-    client = runtime._client = MagicMock()
-    workspace_id = str(uuid.uuid4())
-    volume_name = f"opencuria-workspace-{workspace_id}"
-    network_name = f"opencuria-ws-{workspace_id}"
-    labels = runtime._volume_labels(workspace_id)
-    present = {"container": None, "volume": False, "network": False}
-
-    volume = MagicMock()
-    volume.name = volume_name
-    volume.attrs = {"Labels": labels}
-
-    def drop_volume():
-        present["volume"] = False
-
-    volume.remove.side_effect = drop_volume
-
-    network = MagicMock()
-    network.attrs = {
-        "Labels": {"opencuria.workspace-id": workspace_id},
-        "Containers": {},
-    }
-
-    def drop_network():
-        present["network"] = False
-
-    network.remove.side_effect = drop_network
-
-    def volumes_get(_name):
-        if present["volume"]:
-            return volume
-        raise NotFound("absent")
-
-    def networks_get(_name):
-        if present["network"]:
-            return network
-        raise NotFound("absent")
-
-    def volumes_create(**_kwargs):
-        present["volume"] = True
-        return volume
-
-    def networks_create(**_kwargs):
-        present["network"] = True
-        return network
-
-    def containers_run(**kwargs):
-        container = MagicMock()
-        container.id = f"cid-{uuid.uuid4().hex[:8]}"
-        container.name = kwargs["name"]
-        container.labels = kwargs["labels"]
-        container.attrs = {"Mounts": []}
-
-        def drop_container(**_remove):
-            present["container"] = None
-
-        container.remove.side_effect = drop_container
-        present["container"] = container
-        return container
-
-    def containers_get(instance_id):
-        current = present["container"]
-        if current is None:
-            raise NotFound("absent")
-        if instance_id in {current.id, current.name, workspace_id}:
-            return current
-        raise NotFound("absent")
-
-    def volumes_list(**_kwargs):
-        return [volume] if present["volume"] else []
-
-    def containers_list(**_kwargs):
-        current = present["container"]
-        return [current] if current is not None else []
-
-    client.volumes.get.side_effect = volumes_get
-    client.volumes.create.side_effect = volumes_create
-    client.volumes.list.side_effect = volumes_list
-    client.networks.get.side_effect = networks_get
-    client.networks.create.side_effect = networks_create
-    client.containers.run.side_effect = containers_run
-    client.containers.get.side_effect = containers_get
-    client.containers.list.side_effect = containers_list
-
-    config = WorkspaceConfig(
-        workspace_id,
-        "alpine:3.21",
-        {},
-        {volume_name: {"bind": "/workspace", "mode": "rw"}},
-    )
-    first = await runtime.create_workspace(config)
-    first_container = present["container"]
-    assert first == first_container.id
-    client.volumes.create.assert_called_once_with(name=volume_name, labels=labels)
-    client.networks.create.assert_called_once()
-    assert client.containers.run.call_args.kwargs["name"] == volume_name
-    assert client.containers.run.call_args.kwargs["network"] == network_name
-
-    await runtime.remove_workspace(first)
-    first_container.remove.assert_called_once_with(force=True)
-    volume.remove.assert_called_once()
-    network.remove.assert_called_once()
-    assert present == {"container": None, "volume": False, "network": False}
-
-    client.volumes.create.reset_mock()
-    client.networks.create.reset_mock()
-    client.containers.run.reset_mock()
-    second = await runtime.create_workspace(config)
-    assert second != first
-    client.volumes.create.assert_called_once_with(name=volume_name, labels=labels)
-    assert client.networks.create.call_args.kwargs["name"] == network_name
-    assert client.containers.run.call_args.kwargs["name"] == volume_name
-    assert client.containers.run.call_args.kwargs["network"] == network_name
 
 
 def test_journal_checkpoint_can_be_replaced_after_same_id_remove(tmp_path):

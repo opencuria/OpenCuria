@@ -67,7 +67,6 @@ def workspace_access_setup(db):
         status=RunnerStatus.ONLINE,
         sid="workspace-access-runner-sid",
         organization=org,
-        available_runtimes=["qemu"],
     )
     owner_workspace = Workspace.objects.create(
         runner=runner,

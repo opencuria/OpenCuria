@@ -23,8 +23,6 @@ from src.runtime.artifacts import ArtifactProvisionError, RuntimeArtifactManager
 class FakeArtifactRuntime:
     """Runtime fake for fast unit coverage; guest commands are canned."""
 
-    runtime_type = "docker"
-
     def __init__(self, platform="linux-x64"):
         self.platform = platform
         self.exec_command_wait = AsyncMock(side_effect=self._exec)
@@ -69,7 +67,7 @@ def setup_manager(tmp_path, monkeypatch):
     runtime = FakeArtifactRuntime()
     info = SimpleNamespace(instance_id="container-1")
     manager = RuntimeArtifactManager(
-        {"docker": runtime},
+        runtime,
         lambda _: info,
         lambda _: runtime,
         tmp_path / "runner-state",
@@ -214,7 +212,7 @@ async def test_real_pinned_claude_binary_install_cache_and_corruption(
     runtime = FakeArtifactRuntime()
     info = SimpleNamespace(instance_id="local-guest")
     manager = RuntimeArtifactManager(
-        {"docker": runtime},
+        runtime,
         lambda _: info,
         lambda _: runtime,
         tmp_path / "runner-state",

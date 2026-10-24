@@ -177,7 +177,7 @@ def test_current_generation_promotion(runner, user):
             definition=definition,
             runner=runner,
             created_by=user,
-            rendered_input={"dockerfile_content": "FROM ubuntu\n"},
+            rendered_input={"init_script": "#!/bin/bash\n"},
         )
 
     builds = race(runner, allocate, allocate)
@@ -237,8 +237,6 @@ def test_capture_allocation_vs_harness_admission(runner, workspace, launch):
 
     if connection.vendor != "postgresql":
         pytest.skip("requires real PostgreSQL row locks")
-    workspace.runtime_type = "qemu"
-    workspace.save(update_fields=["runtime_type"])
     parent = None
     if launch == "child":
         parent = HarnessSession.objects.create(
@@ -300,8 +298,6 @@ def test_stale_configuration_vs_inter_child_capture(
 
     if connection.vendor != "postgresql":
         pytest.skip("requires real PostgreSQL row locks")
-    workspace.runtime_type = "qemu"
-    workspace.save(update_fields=["runtime_type"])
     configuration = WorkspaceConfigurationService()
     stale = configuration.workspaces.get_by_id(workspace.id)
     real_get = configuration.workspaces.get_by_id
@@ -368,8 +364,6 @@ def test_duplicate_capture_completion_finishes_parent_once(
     if connection.vendor != "postgresql":
         pytest.skip("requires real PostgreSQL row locks")
     workspace = stopped_workspace
-    workspace.runtime_type = "qemu"
-    workspace.save(update_fields=["runtime_type"])
     _, child = Capture.allocate(workspace.id, "Concurrent completion")
     request = CaptureRequest.objects.get(workspace=workspace)
     service = RunnerService(sio_server=AsyncMock())
@@ -426,8 +420,6 @@ def test_credential_injection_admission_vs_capture(runner, workspace):
 
     if connection.vendor != "postgresql":
         pytest.skip("requires real PostgreSQL row locks")
-    workspace.runtime_type = "qemu"
-    workspace.save(update_fields=["runtime_type"])
     injection_id = uuid.uuid4()
 
     def inject():

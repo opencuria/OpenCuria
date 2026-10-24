@@ -13,7 +13,7 @@ OpenCuria exposes two **Model Context Protocol (MCP)** servers that let AI agent
 
 Connect your AI agent to the OpenCuria backend. First [create an API key](/docs/api-keys) with `MCP_ACCESS` permission and any workspace/tool permissions you need.
 
-**Endpoint:** `https://your-backend.example.com/mcp` · Local: `http://localhost:8000/mcp`  
+**Endpoint:** `https://your-backend.example.com/mcp` · Local: `http://localhost:8000/mcp`
 **Auth:** `Authorization: Bearer kai_your_api_key_here`
 
 <details>
@@ -217,7 +217,7 @@ Or add to `settings.json`:
 <details>
 <summary><strong>Running inside a container / OpenCuria workspace</strong></summary>
 
-Chromium requires `--headless` and `--no-sandbox` when running as root inside Docker:
+Chromium requires `--headless` and `--no-sandbox` when running as root in the workspace:
 
 ```json
 {
