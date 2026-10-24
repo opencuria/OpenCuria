@@ -16,7 +16,12 @@ from django.test import Client
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus
-from apps.runners.models import ImageBuildJob, ImageDefinition, Runner
+from apps.runners.models import (
+    ImageBuildJob,
+    ImageDefinition,
+    ImageDeletionRequest,
+    Runner,
+)
 from common.utils import hash_token
 
 from .test_image_definitions_api import _auth_headers, _create_api_key
@@ -25,6 +30,7 @@ _ALL_IMAGE_PERMISSIONS = [
     APIKeyPermission.IMAGE_DEFINITIONS_READ.value,
     APIKeyPermission.IMAGE_DEFINITIONS_WRITE.value,
     APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS.value,
+    APIKeyPermission.IMAGES_DELETE.value,
 ]
 
 
@@ -121,7 +127,6 @@ def test_recipe_mutations_require_org_admin(client, recipe_org):
             {"name": "y"},
             headers,
         ),
-        client.delete(f"/api/v1/image-definitions/{definition.id}/", **headers),
         client.post(
             f"/api/v1/image-definitions/{definition.id}/deactivate/", **headers
         ),
@@ -295,24 +300,28 @@ def test_deactivate_runner_build(client, recipe_org):
     assert build.status == ImageBuildJob.Status.DEACTIVATED
 
 
-@pytest.mark.django_db(transaction=True)
-def test_delete_runner_build_requests_deletion(client, recipe_org):
+@pytest.mark.parametrize("target_type", ["definition", "assignment"])
+def test_recipe_deletion_uses_shared_api(client, recipe_org, target_type):
+    definition = recipe_org["definition"]
     build = ImageBuildJob.objects.create(
-        image_definition=recipe_org["definition"],
+        image_definition=definition,
         runner=recipe_org["runner"],
         status=ImageBuildJob.Status.FAILED,
     )
+    target = definition if target_type == "definition" else build
+    payload = {"target_type": target_type, "target_id": str(target.id)}
+    url = "/api/v1/image-artifacts/deletions/"
+    denied = _post(client, url, payload, recipe_org["member_headers"])
+    assert denied.status_code == 403
+    assert not ImageDeletionRequest.objects.exists()
+    response = _post(client, url, payload, recipe_org["admin_headers"])
 
-    response = client.delete(
-        f"/api/v1/image-definitions/{recipe_org['definition'].id}/runner-builds/"
-        f"{recipe_org['runner'].id}/",
-        **recipe_org["admin_headers"],
-    )
-
-    assert response.status_code == 202
-    assert response.json() == {"detail": "Build job deletion initiated"}
-    build.refresh_from_db()
-    assert build.status == ImageBuildJob.Status.PENDING_DELETION
+    assert response.status_code == 200
+    assert response.json()["phase"] == "waiting_inventory"
+    request = ImageDeletionRequest.objects.get(pk=response.json()["id"])
+    assert request.requested_by_id == definition.created_by_id
+    target.refresh_from_db()
+    assert target.status == "pending_deletion"
 
 
 def test_runner_build_log_is_scoped_to_visible_builds(client, recipe_org):

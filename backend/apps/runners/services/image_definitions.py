@@ -2,8 +2,8 @@
 
 Owns who may see or change an image definition and its runner builds,
 recipe validation and duplicate naming. Recipes and builds are read and
-written through the image repositories; runner-facing build and deletion
-orchestration stays on the injected :class:`RunnerService`.
+written through the image repositories; runner-facing build orchestration
+stays on the injected :class:`RunnerService`. Removal uses ``DeletionService``.
 """
 
 from __future__ import annotations
@@ -115,14 +115,6 @@ class ImageDefinitionService:
             {field: values[field] for field in RECIPE_FIELDS if field in values},
         )
 
-    async def delete(self, user, organization_id: uuid.UUID, definition_id: uuid.UUID):
-        """Request orchestrated removal; return the recipe, or None once gone."""
-        definition = await sync_to_async(self._owned_definition_for_admin)(
-            user, organization_id, definition_id
-        )
-        await self._runner_service.delete_image_definition(definition.id)
-        return await sync_to_async(ImageDefinitionRepository.get_by_id)(definition.id)
-
     async def deactivate(
         self, user, organization_id: uuid.UUID, definition_id: uuid.UUID
     ):
@@ -223,19 +215,6 @@ class ImageDefinitionService:
                 message=message,
             )
         raise ConflictError("action must be one of: deactivate, activate, rebuild")
-
-    async def delete_build(
-        self,
-        user,
-        organization_id: uuid.UUID,
-        definition_id: uuid.UUID,
-        runner_id: uuid.UUID,
-    ) -> dict:
-        """Request removal of a runner build and its image versions."""
-        build = await sync_to_async(self._build_for_admin)(
-            user, organization_id, definition_id, runner_id
-        )
-        return await self._runner_service.delete_build_job(build.id)
 
     # -- Access and validation -------------------------------------------
 

@@ -418,21 +418,6 @@ class ImageLifecycleMixin:
             self.build_jobs.mark_delete_failed(image.build_job_id, error=error)
             self._mark_definition_delete_failed(image.origin_definition_id, error=error)
 
-    async def delete_build_job(self, build_job_id: uuid.UUID) -> None:
-        """Delete a runner image build and its associated artifact.
-
-        Checks workspace dependencies before allowing deletion.
-        If runner is offline, queues as pending_deletion.
-        """
-        from ...deletion_repository import DeletionRepository
-        obj = await sync_to_async(self.build_jobs.get_by_id)(build_job_id)
-        if obj is None:
-            raise ValueError('Deletion target not found')
-        if not obj.runner.organization_id:
-            raise ConflictError('Global recipes are read-only')
-        return await sync_to_async(DeletionRepository.request)(
-            obj.runner.organization_id, None, 'assignment', obj.id)
-
     def _mark_definition_delete_failed(
         self,
         definition_id: uuid.UUID | None,
@@ -492,19 +477,3 @@ class ImageLifecycleMixin:
                 )
         await sync_to_async(self.image_definitions.activate)(definition_id)
         logger.info("Image definition activated: %s", definition_id)
-
-    async def delete_image_definition(self, definition_id: uuid.UUID) -> None:
-        """Orchestrated two-step definition delete.
-
-        Step 1: Immediately deactivate.
-        Step 2: Initiate deletion of all runner builds.
-        Definition itself is only marked deleted when all build deletes are confirmed.
-        """
-        from ...deletion_repository import DeletionRepository
-        obj = await sync_to_async(self.image_definitions.get_by_id)(definition_id)
-        if obj is None:
-            raise ValueError('Deletion target not found')
-        if not obj.organization_id:
-            raise ConflictError('Global recipes are read-only')
-        return await sync_to_async(DeletionRepository.request)(
-            obj.organization_id, None, 'definition', obj.id)

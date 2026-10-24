@@ -2093,37 +2093,6 @@ def update_image_definition(
     return 200, _image_definition_to_out(definition)
 
 
-@image_definition_router.delete(
-    "/{definition_id}/",
-    response={
-        202: ImageDefinitionOut,
-        204: None,
-        404: ErrorOut,
-        403: ErrorOut,
-        409: ErrorOut,
-    },
-    summary="Delete image definition (orchestrated)",
-)
-async def delete_image_definition(request: HttpRequest, definition_id: uuid.UUID):
-    """Orchestrated two-step delete: deactivate then delete all builds.
-
-    Definition is only fully deleted when all runner build deletes are confirmed.
-    """
-    if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_WRITE):
-        return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
-    try:
-        definition = await _image_definitions().delete(
-            request.user, get_organization_id(request), definition_id
-        )
-    except _IMAGE_RECIPE_ERRORS as exc:
-        return _image_recipe_error(exc)
-    except ValueError as e:
-        return 404, ErrorOut(detail=str(e), code="not_found")
-    if definition is None:
-        return 204, None
-    return 202, await sync_to_async(_image_definition_to_out)(definition)
-
-
 @image_definition_router.post(
     "/{definition_id}/deactivate/",
     response={200: ImageDefinitionOut, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
@@ -2230,29 +2199,6 @@ async def update_image_definition_runner_build(
     except _IMAGE_RECIPE_ERRORS as exc:
         return _image_recipe_error(exc)
     return 200, _build_job_to_out(build)
-
-
-@image_definition_router.delete(
-    "/{definition_id}/runner-builds/{runner_id}/",
-    response={202: dict, 204: None, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
-    summary="Delete runner build and its associated artifact",
-)
-async def delete_image_definition_runner_build(
-    request: HttpRequest, definition_id: uuid.UUID, runner_id: uuid.UUID
-):
-    if not check_api_key_permission(
-        request, APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS
-    ):
-        return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS)
-    try:
-        await _image_definitions().delete_build(
-            request.user, get_organization_id(request), definition_id, runner_id
-        )
-    except _IMAGE_RECIPE_ERRORS as exc:
-        return _image_recipe_error(exc)
-    except ValueError as e:
-        return 404, ErrorOut(detail=str(e), code="not_found")
-    return 202, {"detail": "Build job deletion initiated"}
 
 
 @image_definition_router.get(

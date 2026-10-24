@@ -843,16 +843,17 @@ def test_handle_image_build_progress_appends_atomically_and_caps_log():
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("action", ["activate", "deactivate", "delete"])
+@pytest.mark.parametrize("action", ["activate", "deactivate"])
 def test_global_recipe_lifecycle_is_read_only_for_org_admin(client, action):
     user = get_user_model().objects.create_user(email="readonly@test.com", password="secret")
     org = Organization.objects.create(name="Readonly org", slug="readonly-org")
     Membership.objects.create(user=user, organization=org, role=MembershipRole.ADMIN)
     definition = ImageDefinition.objects.create(name="Readonly global", organization=None)
     token = _create_api_key(user=user, permissions=[APIKeyPermission.IMAGE_DEFINITIONS_WRITE.value])
-    url = f"/api/v1/image-definitions/{definition.id}/"
-    response = (client.delete(url, **_auth_headers(token, str(org.id))) if action == "delete"
-                else client.post(url + action + "/", **_auth_headers(token, str(org.id))))
+    response = client.post(
+        f"/api/v1/image-definitions/{definition.id}/{action}/",
+        **_auth_headers(token, str(org.id)),
+    )
     assert response.status_code == 404
     definition.refresh_from_db()
     assert definition.status == "active"

@@ -1467,51 +1467,6 @@ class TestWorkspaceOwnerScoping:
 
 @pytest.mark.django_db(transaction=True)
 class TestImageDeletionLifecycle:
-    @pytest.mark.asyncio
-    async def test_delete_build_job_waits_for_workspace_deletion_confirmation(
-        self, service, runner, user
-    ):
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name="Build Deletion Base",
-            base_distro="ubuntu:24.04",
-        )
-        build = ImageBuildJob.objects.create(
-            image_definition=definition,
-            runner=runner,
-            status=ImageBuildJob.Status.ACTIVE,
-        )
-        image = ImageInstance.objects.create(
-            is_legacy=True,
-            runner=runner,
-            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-            origin_definition=definition,
-            build_job=build,
-            name="Build Deletion Artifact",
-            runner_ref="opencuria/custom/build-delete:1",
-            status=ImageInstance.Status.READY,
-            created_by=user,
-        )
-        build.current_generation = image
-        build.save()
-        Workspace.objects.create(
-            runner=runner,
-            name="Deleting Build Workspace",
-            status=WorkspaceStatus.DELETING,
-            created_by=user,
-            base_image_instance=image,
-        )
-
-        await service.delete_build_job(build.id)
-
-        build.refresh_from_db()
-        image.refresh_from_db()
-        assert build.status == ImageBuildJob.Status.PENDING_DELETION
-        assert image.status == ImageInstance.Status.PENDING_DELETION
-        assert build.deleting_task_id is None
-        assert image.deleting_task_id == build.deleting_task_id
-
     def test_handle_image_artifact_deleted_marks_image_deleted(
         self, service, runner, user
     ):
@@ -1593,52 +1548,6 @@ class TestImageDeletionLifecycle:
         assert definition.status == ImageDefinition.Status.DELETE_FAILED
         assert "runner refused delete" in definition.delete_last_error
         assert task.status == TaskStatus.FAILED
-
-    @pytest.mark.asyncio
-    async def test_delete_image_definition_marks_definition_failed_when_build_delete_cannot_start(
-        self, service, runner, user
-    ):
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name=f"Delete Definition Failure {uuid.uuid4().hex[:6]}",
-            base_distro="ubuntu:24.04",
-        )
-        build = ImageBuildJob.objects.create(
-            image_definition=definition,
-            runner=runner,
-            status=ImageBuildJob.Status.ACTIVE,
-        )
-        image = ImageInstance.objects.create(
-            is_legacy=True,
-            runner=runner,
-            origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
-            origin_definition=definition,
-            build_job=build,
-            name="Definition Failure Artifact",
-            runner_ref="opencuria/custom/definition-failure:1",
-            status=ImageInstance.Status.READY,
-            created_by=user,
-        )
-        build.current_generation = image
-        build.save()
-        Workspace.objects.create(
-            runner=runner,
-            name="Dependent Definition Workspace",
-            status=WorkspaceStatus.RUNNING,
-            created_by=user,
-            base_image_instance=image,
-        )
-
-        await service.delete_image_definition(definition.id)
-
-        definition.refresh_from_db()
-        build.refresh_from_db()
-        assert definition.status == ImageDefinition.Status.PENDING_DELETION
-        assert not definition.delete_last_error
-        assert build.status == ImageBuildJob.Status.PENDING_DELETION
-
-
 
 
 @pytest.mark.django_db(transaction=True)

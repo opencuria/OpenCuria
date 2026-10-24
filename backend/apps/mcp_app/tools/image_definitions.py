@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import uuid
 
-from asgiref.sync import sync_to_async
 from mcp.types import TextContent, Tool
 
 from apps.accounts.models import APIKeyPermission
@@ -39,7 +38,9 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="duplicate_image_definition",
-        description="Duplicate a visible image definition into the active organization (admin).",
+        description=(
+            "Duplicate a visible image definition into the active organization (admin)."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -64,15 +65,6 @@ TOOLS: list[Tool] = [
                 "custom_init_script": {"type": "string"},
                 "is_active": {"type": "boolean"},
             },
-            "required": ["definition_id"],
-        },
-    ),
-    Tool(
-        name="delete_image_definition",
-        description="Delete an image definition from the active organization (admin).",
-        inputSchema={
-            "type": "object",
-            "properties": {"definition_id": {"type": "string"}},
             "required": ["definition_id"],
         },
     ),
@@ -104,7 +96,9 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         name="update_build_job",
-        description="Update runner image build state (deactivate, activate, rebuild) (admin).",
+        description=(
+            "Update runner image build state (deactivate, activate, rebuild) (admin)."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -120,18 +114,6 @@ TOOLS: list[Tool] = [
                 },
             },
             "required": ["definition_id", "runner_id", "action"],
-        },
-    ),
-    Tool(
-        name="delete_build_job",
-        description="Remove a runner image build assignment (admin).",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "definition_id": {"type": "string"},
-                "runner_id": {"type": "string"},
-            },
-            "required": ["definition_id", "runner_id"],
         },
     ),
     Tool(
@@ -154,11 +136,9 @@ PERMISSIONS: dict[str, APIKeyPermission] = {
     "create_image_definition": APIKeyPermission.IMAGE_DEFINITIONS_WRITE,
     "duplicate_image_definition": APIKeyPermission.IMAGE_DEFINITIONS_WRITE,
     "update_image_definition": APIKeyPermission.IMAGE_DEFINITIONS_WRITE,
-    "delete_image_definition": APIKeyPermission.IMAGE_DEFINITIONS_WRITE,
     "list_build_jobs": APIKeyPermission.IMAGE_DEFINITIONS_READ,
     "create_build_job": APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS,
     "update_build_job": APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS,
-    "delete_build_job": APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS,
     "get_build_job_log": APIKeyPermission.IMAGE_DEFINITIONS_READ,
 }
 
@@ -269,25 +249,6 @@ def _call_update_image_definition(api_key, org_id, args: dict) -> list[TextConte
     return text_result({"id": str(definition.id), "name": definition.name})
 
 
-async def _call_delete_image_definition(
-    api_key, org_id, args: dict
-) -> list[TextContent]:
-    definition_id, error = _parse_definition_id(args)
-    if error is not None:
-        return error
-    try:
-        definition = await _image_definitions().delete(
-            api_key.user, org_id, definition_id
-        )
-    except ServiceError as exc:
-        return error_result(exc.message)
-    except ValueError as exc:
-        return error_result(str(exc))
-    if definition is None or definition.status == "deleted":
-        return text_result({"deleted": True, "status": "deleted"})
-    return text_result(await sync_to_async(_image_definition_payload)(definition))
-
-
 def _call_list_build_jobs(api_key, org_id, args: dict) -> list[TextContent]:
     definition_id, error = _parse_definition_id(args)
     if error is not None:
@@ -369,21 +330,6 @@ async def _call_update_build_job(api_key, org_id, args: dict) -> list[TextConten
     return text_result({"id": str(build.id), "status": build.status})
 
 
-async def _call_delete_build_job(api_key, org_id, args: dict) -> list[TextContent]:
-    build_ids, error = _parse_build_ids(args)
-    if error is not None:
-        return error
-    try:
-        result = await _image_definitions().delete_build(
-            api_key.user, org_id, *build_ids
-        )
-    except ServiceError as exc:
-        return error_result(exc.message)
-    except ValueError as exc:
-        return error_result(str(exc))
-    return text_result(result)
-
-
 def _call_get_build_job_log(api_key, org_id, args: dict) -> list[TextContent]:
     build_ids, error = _parse_build_ids(args)
     if error is not None:
@@ -400,10 +346,8 @@ HANDLERS: dict[str, ToolHandler] = {
     "create_image_definition": _call_create_image_definition,
     "duplicate_image_definition": _call_duplicate_image_definition,
     "update_image_definition": _call_update_image_definition,
-    "delete_image_definition": _call_delete_image_definition,
     "list_build_jobs": _call_list_build_jobs,
     "create_build_job": _call_create_build_job,
     "update_build_job": _call_update_build_job,
-    "delete_build_job": _call_delete_build_job,
     "get_build_job_log": _call_get_build_job_log,
 }

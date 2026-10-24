@@ -14,8 +14,6 @@ from apps.mcp_app.server import create_mcp_server
 from apps.mcp_app.tools.image_definitions import (
     _call_create_build_job,
     _call_create_image_definition,
-    _call_delete_build_job,
-    _call_delete_image_definition,
     _call_duplicate_image_definition,
     _call_get_build_job_log,
     _call_list_build_jobs,
@@ -23,9 +21,15 @@ from apps.mcp_app.tools.image_definitions import (
     _call_update_build_job,
     _call_update_image_definition,
 )
+from apps.mcp_app.tools.images import _call_request_image_deletion
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus
-from apps.runners.models import ImageBuildJob, ImageDefinition, Runner
+from apps.runners.models import (
+    ImageBuildJob,
+    ImageDefinition,
+    ImageDeletionRequest,
+    Runner,
+)
 from common.utils import hash_token
 
 
@@ -92,58 +96,28 @@ def test_mcp_list_image_definitions_excludes_deleted(mcp_image_setup):
     assert names["Visible MCP Recipe"]["id"] == str(visible.id)
 
 
-@pytest.mark.django_db(transaction=True)
-def test_mcp_delete_image_definition_uses_orchestrated_delete(mcp_image_setup):
-    definition = ImageDefinition.objects.create(
-        organization=mcp_image_setup["org"],
-        created_by=mcp_image_setup["admin"],
-        name="MCP Delete Recipe",
-        base_distro="ubuntu:24.04",
-    )
-
-    payload = _parse_json(
-        async_to_sync(_call_delete_image_definition)(
-            mcp_image_setup["api_key"],
-            mcp_image_setup["org"].id,
-            {"definition_id": str(definition.id)},
-        )
-    )
-
-    definition.refresh_from_db()
-    assert payload["status"] == "pending_deletion"
-    assert definition.status == ImageDefinition.Status.PENDING_DELETION
-    assert ImageDefinition.objects.filter(id=definition.id).exists()
-
-
-@pytest.mark.django_db(transaction=True)
-def test_mcp_delete_build_job_uses_orchestrated_delete(mcp_image_setup):
-    definition = ImageDefinition.objects.create(
-        organization=mcp_image_setup["org"],
-        created_by=mcp_image_setup["admin"],
-        name="MCP Build Delete Recipe",
-        base_distro="ubuntu:24.04",
-    )
+@pytest.mark.django_db
+@pytest.mark.parametrize("target_type", ["definition", "assignment"])
+def test_mcp_recipe_deletion_uses_shared_tool(mcp_image_setup, mcp_recipe, target_type):
     build = ImageBuildJob.objects.create(
-        image_definition=definition,
+        image_definition=mcp_recipe,
         runner=mcp_image_setup["runner"],
         status=ImageBuildJob.Status.FAILED,
     )
-
+    target = mcp_recipe if target_type == "definition" else build
     payload = _parse_json(
-        async_to_sync(_call_delete_build_job)(
+        _call_request_image_deletion(
             mcp_image_setup["api_key"],
             mcp_image_setup["org"].id,
-            {
-                "definition_id": str(definition.id),
-                "runner_id": str(mcp_image_setup["runner"].id),
-            },
+            {"target_type": target_type, "target_id": str(target.id)},
         )
     )
 
-    build.refresh_from_db()
     assert payload["phase"] == "waiting_inventory"
-    assert build.status == ImageBuildJob.Status.PENDING_DELETION
-    assert ImageBuildJob.objects.filter(id=build.id).exists()
+    request = ImageDeletionRequest.objects.get(pk=payload["id"])
+    assert request.requested_by_id == mcp_image_setup["admin"].id
+    target.refresh_from_db()
+    assert target.status == "pending_deletion"
 
 
 def _error_text(result) -> str:
@@ -324,21 +298,6 @@ def test_mcp_update_image_definition(mcp_image_setup, mcp_recipe):
 
 
 @pytest.mark.django_db
-def test_mcp_delete_global_image_definition_is_not_found(mcp_image_setup):
-    global_recipe = ImageDefinition.objects.create(name="Global Del", organization=None)
-
-    result = async_to_sync(_call_delete_image_definition)(
-        mcp_image_setup["api_key"],
-        mcp_image_setup["org"].id,
-        {"definition_id": str(global_recipe.id)},
-    )
-
-    assert _error_text(result) == "Error: Image definition not found"
-    global_recipe.refresh_from_db()
-    assert global_recipe.status == ImageDefinition.Status.ACTIVE
-
-
-@pytest.mark.django_db
 def test_mcp_list_build_jobs_payload(mcp_image_setup, mcp_recipe):
     build = ImageBuildJob.objects.create(
         image_definition=mcp_recipe,
@@ -479,19 +438,14 @@ def test_mcp_dispatcher_runs_async_image_tools_on_its_own_loop(mcp_image_setup):
         return json.loads(result.root.content[0].text)
 
     build_payload = dispatch(
-        "delete_build_job",
+        "update_build_job",
         {
             "definition_id": str(definition.id),
             "runner_id": str(mcp_image_setup["runner"].id),
+            "action": "deactivate",
         },
-    )
-    definition_payload = dispatch(
-        "delete_image_definition", {"definition_id": str(definition.id)}
     )
 
     build.refresh_from_db()
-    definition.refresh_from_db()
-    assert build_payload["phase"] == "waiting_inventory"
-    assert build.status == ImageBuildJob.Status.PENDING_DELETION
-    assert definition_payload["status"] == "pending_deletion"
-    assert definition.status == ImageDefinition.Status.PENDING_DELETION
+    assert build_payload == {"id": str(build.id), "status": "deactivated"}
+    assert build.status == ImageBuildJob.Status.DEACTIVATED

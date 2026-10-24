@@ -136,12 +136,10 @@ vi.mock('@/services/workspaces.api', () => ({
   listRunnerImageBuilds: vi.fn(async () => []),
   createImageDefinition: vi.fn(),
   updateImageDefinition: vi.fn(),
-  deleteImageDefinition: vi.fn(),
   activateImageDefinition: vi.fn(),
   duplicateImageDefinition: vi.fn(),
   createRunnerImageBuild: vi.fn(),
   updateRunnerImageBuild: vi.fn(),
-  deleteRunnerImageBuild: vi.fn(),
   getRunnerImageBuildLog: vi.fn(),
 }))
 

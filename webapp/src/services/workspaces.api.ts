@@ -265,10 +265,6 @@ export function updateImageDefinition(id: string, data: Partial<ImageDefinition>
   return patch<ImageDefinition>(`/image-definitions/${id}/`, data)
 }
 
-export function deleteImageDefinition(id: string): Promise<void> {
-  return del<void>(`/image-definitions/${id}/`)
-}
-
 export function deactivateImageDefinition(id: string): Promise<ImageDefinition> {
   return post<ImageDefinition>(`/image-definitions/${id}/deactivate/`)
 }
@@ -297,10 +293,6 @@ export function updateRunnerImageBuild(
     `/image-definitions/${definitionId}/runner-builds/${runnerId}/`,
     data,
   )
-}
-
-export function deleteRunnerImageBuild(definitionId: string, runnerId: string): Promise<void> {
-  return del<void>(`/image-definitions/${definitionId}/runner-builds/${runnerId}/`)
 }
 
 export function getRunnerImageBuildLog(
