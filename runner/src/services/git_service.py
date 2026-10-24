@@ -1488,8 +1488,8 @@ class GitService:
         """Commit the index only; message passed as a single argv element.
 
         Git argv runs behind the fixed sourcing wrapper (persistent
-        credentials only), and both runtimes preserve the argv boundary
-        behind ``exec "$@"`` (Docker exec argv, SSH single-quote
+        credentials only), and SSH preserves the argv boundary
+        behind ``exec "$@"`` (SSH single-quote
         escaping), so ``-m <message>`` cannot inject flags or shell
         operators.  Plain ``message`` is the transport (argv-safe).
         """

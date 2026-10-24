@@ -21,7 +21,6 @@ services:
       REDIS_URL: redis://redis:6379/0
     volumes: &id003
     - backend-data:/data
-    - /var/run/docker.sock:/var/run/docker.sock
     ports:
     - 127.0.0.1:${BACKEND_PORT:-8000}:8000
     networks: &id004
@@ -72,11 +71,11 @@ services:
     - --organization-name
     - ${LOCAL_ORGANIZATION_NAME:-Local}
     - --runner-name
-    - ${LOCAL_RUNNER_NAME:-local-docker}
+    - ${LOCAL_RUNNER_NAME:-local-qemu}
     - --runner-token
     - ${LOCAL_RUNNER_API_TOKEN:-local-runner-token-change-me}
     - --image-definition-name
-    - ${LOCAL_IMAGE_DEFINITION_NAME:-Local Docker Workspace}
+    - ${LOCAL_IMAGE_DEFINITION_NAME:-Local Workspace}
     environment:
       DJANGO_ENV: development
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-dev-secret-key-change-me}
@@ -88,34 +87,11 @@ services:
       LOCAL_ADMIN_EMAIL: ${LOCAL_ADMIN_EMAIL:-admin@localhost.test}
       LOCAL_ADMIN_PASSWORD: ${LOCAL_ADMIN_PASSWORD:-CHANGE_ME_local_admin_password}
       LOCAL_ORGANIZATION_NAME: ${LOCAL_ORGANIZATION_NAME:-Local}
-      LOCAL_RUNNER_NAME: ${LOCAL_RUNNER_NAME:-local-docker}
+      LOCAL_RUNNER_NAME: ${LOCAL_RUNNER_NAME:-local-qemu}
       LOCAL_RUNNER_API_TOKEN: ${LOCAL_RUNNER_API_TOKEN:-local-runner-token-change-me}
-      LOCAL_IMAGE_DEFINITION_NAME: ${LOCAL_IMAGE_DEFINITION_NAME:-Local Docker Workspace}
+      LOCAL_IMAGE_DEFINITION_NAME: ${LOCAL_IMAGE_DEFINITION_NAME:-Local Workspace}
     volumes:
     - backend-data:/data
-    networks:
-    - opencuria-local
-  runner:
-    image: ghcr.io/opencuria/runner:${OPENCURIA_TAG:-latest}
-    build:
-      context: ./runner
-      dockerfile: Dockerfile.runner
-    container_name: opencuria_local_runner
-    restart: unless-stopped
-    depends_on:
-      bootstrap:
-        condition: service_completed_successfully
-    environment:
-      RUNNER_API_TOKEN: ${LOCAL_RUNNER_API_TOKEN:-local-runner-token-change-me}
-      RUNNER_BACKEND_URL: http://backend:8000
-      RUNNER_DOCKER_NETWORK: opencuria-local
-      RUNNER_LOG_LEVEL: ${RUNNER_LOG_LEVEL:-INFO}
-      RUNNER_LOG_FORMAT: ${RUNNER_LOG_FORMAT:-console}
-      RUNNER_ENABLED_RUNTIMES: docker
-      RUNNER_STATE_DIR: /var/lib/opencuria/runner
-    volumes:
-    - /var/run/docker.sock:/var/run/docker.sock
-    - runner-state:/var/lib/opencuria/runner
     networks:
     - opencuria-local
   redis:
@@ -140,7 +116,6 @@ services:
         condition: service_healthy
 volumes:
   backend-data: null
-  runner-state: null
 networks:
   opencuria-local:
     name: opencuria-local

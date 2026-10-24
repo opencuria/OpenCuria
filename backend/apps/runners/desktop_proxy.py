@@ -1,7 +1,7 @@
 """ASGI reverse proxy for KasmVNC desktop sessions.
 
 Routes ``/ws/desktop/{workspace_id}/`` to the KasmVNC server running
-inside the workspace container.  Handles both HTTP requests (for the
+inside the workspace VM.  Handles both HTTP requests (for the
 KasmVNC web client static files) and WebSocket connections (for the
 VNC data stream).
 

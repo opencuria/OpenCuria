@@ -13,7 +13,6 @@ from src.interfaces.websocket import WebSocketInterface
 
 class DummyService:
     def __init__(self):
-        self.supported_runtimes = []
         self.ensure_runtime_artifact = AsyncMock(
             return_value={
                 "ok": True,

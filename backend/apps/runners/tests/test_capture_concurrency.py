@@ -29,7 +29,6 @@ def test_any_busy_session_refuses_capture_without_mutations(
     workspace,
     session_kind,
 ):
-    workspace.runtime_type = "qemu"
     workspace.save()
     root = HarnessSession.objects.create(
         workspace=workspace, organization_id=runner.organization_id, status="idle"
@@ -118,7 +117,6 @@ def test_foreign_callback_does_not_release_capture_or_emit_events(
     django_capture_on_commit_callbacks,
     foreign_field,
 ):
-    workspace.runtime_type = "qemu"
     workspace.save()
     _, child = CaptureRepository.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
@@ -150,7 +148,6 @@ def test_foreign_callback_does_not_release_capture_or_emit_events(
 
 
 def test_unknown_stop_preserves_scrub_fence(service, runner, workspace):
-    workspace.runtime_type = "qemu"
     workspace.credentials_present = True
     workspace.save()
     _, child = CaptureRepository.allocate(
@@ -201,9 +198,6 @@ def test_unknown_stop_preserves_scrub_fence(service, runner, workspace):
 def test_admitted_credential_sync_blocks_capture(runner, workspace, task_status):
     """A reconciliation admitted first must settle before capture can own scrub."""
     from apps.runners.repositories import TaskRepository
-
-    workspace.runtime_type = "qemu"
-    workspace.save(update_fields=["runtime_type"])
     task = TaskRepository.create(
         task_id=uuid.uuid4(),
         runner=runner,
@@ -226,9 +220,6 @@ def test_admitted_credential_sync_blocks_capture(runner, workspace, task_status)
 
 def test_capture_admitted_first_blocks_delayed_credential_sync(runner, workspace):
     from apps.runners.repositories import TaskRepository
-
-    workspace.runtime_type = "qemu"
-    workspace.save(update_fields=["runtime_type"])
     _, child = CaptureRepository.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
     )

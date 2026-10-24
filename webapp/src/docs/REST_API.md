@@ -310,7 +310,6 @@ List all runners visible to the organization.
     "id": "uuid",
     "name": "local-runner",
     "status": "online",
-    "available_runtimes": ["docker"],
     "organization_id": "uuid",
     "connected_at": "2026-01-01T00:00:00Z",
     "disconnected_at": null,
@@ -401,7 +400,6 @@ Get a single workspace without chat session history.
   "runner_id": "uuid",
   "status": "running",
   "name": "My workspace",
-  "runtime_type": "docker",
   "repos": ["https://github.com/org/repo"],
   "base_image": {
     "id": "uuid",

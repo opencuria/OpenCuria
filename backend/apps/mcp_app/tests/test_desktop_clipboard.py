@@ -47,7 +47,6 @@ def _setup_workspace():
         status=RunnerStatus.ONLINE,
         sid=f"clipboard-sid-{uuid.uuid4().hex[:8]}",
         organization=org,
-        available_runtimes=["docker"],
     )
     from apps.runners.models import Workspace
 

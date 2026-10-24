@@ -24,7 +24,6 @@ async def test_create_workspace_resolves_credentials_without_api_pre_resolution(
     artifact = ImageInstance.objects.create(
         is_legacy=True,
         runner=runner,
-        runtime_type="docker",
         origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
         created_by=user,
         runner_ref="captured-image",
@@ -129,7 +128,6 @@ async def test_create_workspace_fallback_requires_user_and_organization(runner, 
     artifact = ImageInstance.objects.create(
         is_legacy=True,
         runner=runner,
-        runtime_type="docker",
         origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
         created_by=user,
         runner_ref="captured-image",
@@ -170,7 +168,6 @@ async def test_create_workspace_fallback_validates_credential_ownership(runner, 
     artifact = ImageInstance.objects.create(
         is_legacy=True,
         runner=runner,
-        runtime_type="docker",
         origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
         created_by=user,
         runner_ref="captured-image",

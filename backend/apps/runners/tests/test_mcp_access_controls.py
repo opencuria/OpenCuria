@@ -43,7 +43,6 @@ def mcp_access_setup(db):
         status=RunnerStatus.ONLINE,
         sid="mcp-access-sid",
         organization=org,
-        available_runtimes=["docker"],
     )
     owner_workspace = Workspace.objects.create(
         runner=runner,

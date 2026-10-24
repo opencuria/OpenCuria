@@ -34,7 +34,6 @@ function workspace(id: string, overrides: Partial<Workspace> = {}): Workspace {
     runner_online: true,
     active_operation: null,
     has_active_session: false,
-    runtime_type: 'docker',
     qemu_vcpus: null,
     qemu_memory_mb: null,
     qemu_disk_size_gb: null,

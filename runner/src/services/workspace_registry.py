@@ -23,16 +23,16 @@ logger = structlog.get_logger(__name__)
 class WorkspaceRegistry:
     """Owns the in-memory workspace cache and runtime resolution.
 
-    The runner composition root injects the shared runtime mapping. Optional
+    The runner composition root injects the shared runtime. Optional
     hooks provide desktop and background-process heartbeat data.
     """
 
     def __init__(
         self,
-        runtimes: dict[str, RuntimeBackend] | None = None,
+        runtime: RuntimeBackend | None = None,
         settings: Any | None = None,
     ) -> None:
-        self._runtimes = runtimes if runtimes is not None else {}
+        self._runtime = runtime
         self._settings = settings
         self._cache: dict[uuid.UUID, WorkspaceInfo] = {}
         self._epochs: dict[uuid.UUID, int] = {}
@@ -93,21 +93,20 @@ class WorkspaceRegistry:
             active = self._active.copy()
             observed: dict[uuid.UUID, WorkspaceInfo] = {}
             # Collect first: a failed/incomplete enumeration must not delete cache.
-            for runtime_type, runtime in self._runtimes.items():
-                for info in await runtime.list_workspaces():
-                    try:
-                        ws_id = uuid.UUID(info.workspace_id)
-                    except ValueError:
-                        logger.warning(
-                            "skipping_invalid_workspace_id", raw_id=info.workspace_id
-                        )
-                        continue
-                    observed[ws_id] = WorkspaceInfo(
-                        workspace_id=ws_id,
-                        instance_id=info.instance_id,
-                        status=info.status,
-                        runtime_type=runtime_type,
+            runtime = self._runtime
+            for info in await runtime.list_workspaces():
+                try:
+                    ws_id = uuid.UUID(info.workspace_id)
+                except ValueError:
+                    logger.warning(
+                        "skipping_invalid_workspace_id", raw_id=info.workspace_id
                     )
+                    continue
+                observed[ws_id] = WorkspaceInfo(
+                    workspace_id=ws_id,
+                    instance_id=info.instance_id,
+                    status=info.status,
+                )
 
             for ws_id in self._cache.keys() | observed.keys():
                 if (
@@ -123,7 +122,6 @@ class WorkspaceRegistry:
                         self._cache.pop(ws_id, None)
                 elif (
                     existing is not None
-                    and existing.runtime_type == incoming.runtime_type
                     and existing.instance_id == incoming.instance_id
                 ):
                     # Credentials/progress are lifecycle-owned, never inventory-derived.
@@ -142,26 +140,10 @@ class WorkspaceRegistry:
 
     def get_runtime(self, workspace_id: uuid.UUID) -> RuntimeBackend:
         """Return the runtime backend for a workspace."""
-        info = self.get_cached(workspace_id)
-        runtime = self._runtimes.get(info.runtime_type)
-        if runtime is None:
-            raise RuntimeError(
-                f"Runtime '{info.runtime_type}' not available for "
-                f"workspace {workspace_id}"
-            )
-        return runtime
-
-    def get_runtime_by_type(self, runtime_type: str) -> RuntimeBackend:
-        """Return the runtime backend by type name."""
-        runtime = self._runtimes.get(runtime_type)
-        if runtime is None:
-            raise RuntimeError(f"Runtime '{runtime_type}' is not enabled")
-        return runtime
-
-    @property
-    def supported_runtimes(self) -> list[str]:
-        """Return the list of enabled runtime type names."""
-        return list(self._runtimes.keys())
+        self.get_cached(workspace_id)
+        if self._runtime is None:
+            raise RuntimeError("Workspace runtime is unavailable")
+        return self._runtime
 
     def workspace_exists(self, workspace_id: uuid.UUID) -> bool:
         """Return True when *workspace_id* is present in the cache."""
@@ -208,7 +190,6 @@ class WorkspaceRegistry:
             {
                 "workspace_id": str(info.workspace_id),
                 "status": info.status,
-                "runtime_type": info.runtime_type,
             }
             for info in self._cache.values()
         ]
@@ -223,7 +204,6 @@ class WorkspaceRegistry:
             item = {
                 "workspace_id": str(workspace_id),
                 "status": info.status,
-                "runtime_type": info.runtime_type,
             }
             session = sessions.get(workspace_id)
             if self.desktop_manager is not None:
@@ -248,7 +228,7 @@ class WorkspaceRegistry:
 
             processes: list[dict[str, Any]] = []
             if info.status == "running":
-                runtime = self._runtimes.get(info.runtime_type)
+                runtime = self._runtime
                 tracked = list(entries.get(workspace_id, {}).values())
                 if tracked:
                     try:
@@ -316,7 +296,7 @@ class WorkspaceRegistry:
 
     async def get_vm_metrics(self) -> dict[str, dict[str, Any]]:
         """Collect host-observed metrics for QEMU workspaces."""
-        qemu_runtime = self._runtimes.get("qemu")
+        qemu_runtime = self._runtime
         if qemu_runtime is None:
             return {}
 
@@ -326,8 +306,6 @@ class WorkspaceRegistry:
 
         metrics: dict[str, dict[str, Any]] = {}
         for workspace_id, info in list(self._cache.items()):
-            if info.runtime_type != "qemu":
-                continue
             try:
                 usage = await get_workspace_usage(info.instance_id)
             except Exception:

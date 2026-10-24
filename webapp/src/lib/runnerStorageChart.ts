@@ -39,7 +39,7 @@ export function buildRunnerStorageChart(
     stale: false,
     unavailable: null,
   }
-  const scans = runtimes.filter((runtime) => runtime.runtime_type === 'qemu')
+  const scans = runtimes
   result.stale = scans.some((runtime) => !runtime.fresh)
   function unavailable(message: string) {
     return { ...result, groups: [], unavailable: message }
@@ -82,7 +82,6 @@ export function buildRunnerStorageChart(
   }
   const images = graph.nodes.filter(
     (node) =>
-      node.runtime === 'qemu' &&
       node.column === 2 &&
       node.generation?.status !== 'deleted' &&
       node.resource?.kind !== 'build_cache',
@@ -143,7 +142,7 @@ export function buildRunnerStorageChart(
     for (const resource of resources) owners.set(resource, { node, groupKey })
   }
   for (const image of images) addSlice(image, image.key, image.resource ? [image.resource] : [])
-  for (const node of graph.nodes.filter((node) => node.runtime === 'qemu' && node.column === 0)) {
+  for (const node of graph.nodes.filter((node) => node.column === 0)) {
     const groupKey = baseImage(node)
     if (groupKey) addSlice(node, groupKey, node.storage?.resources ?? [])
   }

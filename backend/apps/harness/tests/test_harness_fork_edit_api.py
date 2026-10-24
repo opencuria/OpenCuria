@@ -56,7 +56,6 @@ def fork_edit_setup(db):
         status=RunnerStatus.ONLINE,
         sid=f"fork-api-{uuid.uuid4().hex[:8]}",
         organization=org,
-        available_runtimes=["docker"],
     )
     owned = Workspace.objects.create(
         runner=runner,

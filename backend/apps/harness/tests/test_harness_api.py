@@ -54,7 +54,6 @@ def harness_setup(db):
         status=RunnerStatus.ONLINE,
         sid=f"harness-api-{uuid.uuid4().hex[:8]}",
         organization=org,
-        available_runtimes=["docker"],
     )
     owned = Workspace.objects.create(
         runner=runner,

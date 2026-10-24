@@ -35,7 +35,6 @@ def image(runner, user, name="base", **kw):
         created_by=user,
         name=name,
         runner_ref="/images/" + name,
-        runtime_type="qemu",
         is_legacy=True,
         **kw,
     )
@@ -69,12 +68,11 @@ def observe(runner, resources, complete=True):
         "complete": complete,
         "runtimes": [
             {
-                "runtime_type": runtime,
                 "collected_at": timezone.now().isoformat(),
                 "complete": complete,
                 "resources": resources if runtime == "qemu" else [],
             }
-            for runtime in runner.available_runtimes
+            for runtime in ["qemu"]
         ],
     }
     assert InventoryRepository.record(str(runner.id), runner.sid, payload)
@@ -115,7 +113,6 @@ def test_force_physical_chain_excludes_independent_capture(runner, user):
         runner=runner,
         created_by=user,
         name="w1",
-        runtime_type="qemu",
         status="stopped",
         base_image_instance=base,
     )
@@ -125,7 +122,6 @@ def test_force_physical_chain_excludes_independent_capture(runner, user):
         runner=runner,
         created_by=user,
         name="w2",
-        runtime_type="qemu",
         status="running",
         base_image_instance=capture,
     )
@@ -343,7 +339,6 @@ def test_retirement_blocks_clone_and_capture(runner, user):
         runner=runner,
         created_by=user,
         name="source",
-        runtime_type="qemu",
         status="stopped",
         base_image_instance=base,
         credentials_present=False,
@@ -491,7 +486,6 @@ def test_real_qemu_domain_and_disk_join(runner, user):
         runner=runner,
         created_by=user,
         name="vm",
-        runtime_type="qemu",
         status="stopped",
         base_image_instance=base,
     )
@@ -654,7 +648,8 @@ def test_cancel_reconciles_latest_build(runner, user, target, rebuild, failed):
     from apps.runners.repositories import ImageGenerationRepository as Generations
 
     definition = ImageDefinition.objects.create(
-        organization=runner.organization, name="cancel recipe", runtime_type="docker"
+        organization=runner.organization,
+        name="cancel recipe",
     )
 
     def allocate():
@@ -662,7 +657,7 @@ def test_cancel_reconciles_latest_build(runner, user, target, rebuild, failed):
             definition=definition,
             runner=runner,
             created_by=user,
-            rendered_input={"dockerfile_content": "FROM ubuntu\n"},
+            rendered_input={"init_script": "#!/bin/bash\n"},
         )
 
     job, first, task = allocate()
@@ -710,7 +705,8 @@ def test_cancel_preserves_deactivation_and_superseded_build(
     from apps.runners.repositories import ImageGenerationRepository as Generations
 
     definition = ImageDefinition.objects.create(
-        organization=runner.organization, name="inactive recipe", runtime_type="docker"
+        organization=runner.organization,
+        name="inactive recipe",
     )
     job, older, old_task = Generations.request(
         definition=definition, runner=runner, rendered_input={}
@@ -752,7 +748,8 @@ def test_cancel_then_independent_generation_retirement(runner, user, target):
     from apps.runners.repositories import ImageGenerationRepository as Generations
 
     definition = ImageDefinition.objects.create(
-        organization=runner.organization, name="retired recipe", runtime_type="docker"
+        organization=runner.organization,
+        name="retired recipe",
     )
     job, older, old_task = Generations.request(
         definition=definition, runner=runner, rendered_input={}
@@ -806,7 +803,6 @@ def test_force_real_qcow_overlay_domain_and_cloud_init(runner, user, tmp_path):
         runner=runner,
         created_by=user,
         name="full VM",
-        runtime_type="qemu",
         status="stopped",
         base_image_instance=base,
     )

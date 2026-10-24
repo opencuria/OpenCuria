@@ -47,7 +47,7 @@ it('captures a running QEMU workspace as a new image and retains failure errors'
   api.createImageArtifact.mockResolvedValue(false)
   const w = mount(WorkspaceImageArtifactDialog, {
     props: {
-      workspace: { id: 'w', name: 'Running', status: 'running', runtime_type: 'qemu' } as never,
+      workspace: { id: 'w', name: 'Running', status: 'running', } as never,
       open: true,
     },
     global: { stubs },
@@ -86,7 +86,6 @@ it('preselects the next version of the image the workspace is based on', async (
         id: 'w',
         name: 'Running',
         status: 'running',
-        runtime_type: 'qemu',
         runner_id: 'r',
         base_image: { line_kind: 'captured', line_id: 'line-1' },
       } as never,

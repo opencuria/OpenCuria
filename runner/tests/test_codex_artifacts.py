@@ -64,8 +64,6 @@ def package_bytes(*, target=TARGET, extra=None, omit=None):
 class LocalPackageRuntime:
     """Execute the real guest installer and transport wrapper using local files."""
 
-    runtime_type = "local"
-
     def __init__(self):
         self.uploads = []
         self.commands = []
@@ -120,7 +118,7 @@ def setup_codex(tmp_path, monkeypatch):
     runtime = LocalPackageRuntime()
     info = SimpleNamespace(instance_id="local-guest")
     manager = RuntimeArtifactManager(
-        {"local": runtime},
+        runtime,
         lambda _: info,
         lambda _: runtime,
         tmp_path / "state",
@@ -349,7 +347,7 @@ async def test_real_codex_package_local_installer_contract(tmp_path):
     runtime = LocalPackageRuntime()
     info = SimpleNamespace(instance_id="real-local-guest")
     manager = RuntimeArtifactManager(
-        {"local": runtime},
+        runtime,
         lambda _: info,
         lambda _: runtime,
         tmp_path / "state",
@@ -369,7 +367,7 @@ async def test_real_codex_package_local_installer_contract(tmp_path):
         installed, await asyncio.to_thread(codex.inspect_package, REAL_PACKAGE, TARGET)
     )
     # The installed standalone package also speaks the official protocol under
-    # the same managed isolation used by Docker and QEMU, with no auth env.
+    # the same managed isolation used by QEMU, with no auth env.
     from src.runtime.managed_process import isolated_agent_env_preamble, managed_argv
 
     from tests.test_managed_streams import current_token

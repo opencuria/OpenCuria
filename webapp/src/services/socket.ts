@@ -451,7 +451,7 @@ export function sendTerminalClose(workspaceId: string, terminalId: string): void
 // ---------------------------------------------------------------------------
 
 /**
- * Request a directory listing inside the workspace container.
+ * Request a directory listing inside the workspace VM.
  */
 export function sendFilesList(workspaceId: string, requestId: string, path: string): void {
   if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
@@ -486,7 +486,7 @@ export function sendFilesFind(
 }
 
 /**
- * Request file content (base64-encoded) from the workspace container.
+ * Request file content (base64-encoded) from the workspace VM.
  */
 export function sendFilesRead(
   workspaceId: string,
@@ -598,7 +598,7 @@ export function planFilesUpload(
 }
 
 /**
- * Upload a file to the workspace container.
+ * Upload a file to the workspace VM.
  *
  * Small payloads ride inline (backward compatible). Payloads above 256 KiB
  * base64 are split into `frontend:files_upload_start` + ordered
@@ -632,7 +632,7 @@ export function sendFilesUpload(
 }
 
 /**
- * Download a file or directory from the workspace container.
+ * Download a file or directory from the workspace VM.
  */
 export function sendFilesDownload(workspaceId: string, requestId: string, path: string): void {
   if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return

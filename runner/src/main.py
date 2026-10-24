@@ -85,42 +85,17 @@ def serve(
         sys.exit(1)
 
     async def _run() -> None:
-        from .config import RUNTIME_DOCKER, RUNTIME_QEMU
-        from .runtime.docker_runtime import DockerRuntime
+        from .runtime.qemu_runtime import QemuRuntime
         from .service import WorkspaceService
         from .interfaces.websocket import WebSocketInterface
 
-        # Build runtime backends based on configuration
-        runtimes: dict[str, object] = {}
-        enabled = settings.enabled_runtime_list
-
-        if RUNTIME_DOCKER in enabled:
-            runtimes[RUNTIME_DOCKER] = DockerRuntime(
-                base_url=settings.docker_socket,
-            )
-            log.info("runtime_enabled", runtime=RUNTIME_DOCKER)
-
-        if RUNTIME_QEMU in enabled:
-            from .runtime.qemu_runtime import QemuRuntime
-
-            runtimes[RUNTIME_QEMU] = QemuRuntime(settings=settings)
-            log.info("runtime_enabled", runtime=RUNTIME_QEMU)
-
-        if not runtimes:
-            log.error(
-                "no_runtimes_enabled",
-                hint="Set RUNNER_ENABLED_RUNTIMES to 'docker', 'qemu', or 'docker,qemu'",
-            )
-            sys.exit(1)
-
-        service = WorkspaceService(runtimes, settings)
+        service = WorkspaceService(QemuRuntime(settings=settings), settings)
         await service.sync_from_runtime()
         ws_interface = WebSocketInterface(service, settings)
 
         log.info(
             "runner_starting",
             backend_url=settings.backend_url,
-            runtimes=list(runtimes.keys()),
         )
 
         try:

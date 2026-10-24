@@ -659,8 +659,7 @@ class InteractiveSessionsMixin:
         task_id: str | None,
         workspace_id: str,
         port: int,
-        container_ip: str,
-        network_name: str,
+        guest_ip: str,
         runner_id: str | None = None,
         *,
         viewer: bool | None = None,
@@ -708,8 +707,7 @@ class InteractiveSessionsMixin:
                     if value is not None
                 },
                 "port": port,
-                "container_ip": container_ip,
-                "network_name": network_name,
+                "guest_ip": guest_ip,
                 "viewer": True if viewer is None else viewer,
                 **({"computer_use": computer_use} if computer_use is not None else {}),
             },
@@ -725,7 +723,7 @@ class InteractiveSessionsMixin:
             "Desktop started: workspace=%s, port=%s, ip=%s",
             workspace_id,
             port,
-            container_ip,
+            guest_ip,
         )
 
         if not task_id:
@@ -749,8 +747,7 @@ class InteractiveSessionsMixin:
         self,
         workspace_id: str,
         port: int,
-        container_ip: str,
-        network_name: str,
+        guest_ip: str,
         runner_id: str | None = None,
         *,
         viewer: bool | None = None,
@@ -801,8 +798,7 @@ class InteractiveSessionsMixin:
                     if value is not None
                 },
                 "port": port,
-                "container_ip": container_ip,
-                "network_name": network_name,
+                "guest_ip": guest_ip,
                 **({"viewer": viewer} if viewer is not None else {}),
                 **({"computer_use": computer_use} if computer_use is not None else {}),
             },

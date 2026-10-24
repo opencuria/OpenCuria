@@ -65,8 +65,7 @@ class InventoryRepository:
                         # Epoch changes require a new authenticated connection.
                         return False
                 scans = payload["runtimes"]
-                runtime_names = [scan["runtime_type"] for scan in scans]
-                if len(set(runtime_names)) != len(runtime_names):
+                if len(scans) != 1:
                     return False
                 snapshot = InventorySnapshot.objects.create(
                     runner=runner,
@@ -75,8 +74,7 @@ class InventoryRepository:
                     sequence=sequence,
                     complete=bool(payload.get("complete"))
                     and bool(scans)
-                    and all(scan.get("complete") is True for scan in scans)
-                    and set(runner.available_runtimes).issubset(runtime_names),
+                    and all(scan.get("complete") is True for scan in scans),
                 )
                 images = list(ImageInstance.objects.filter(runner=runner))
                 workspaces = {
@@ -88,7 +86,6 @@ class InventoryRepository:
                         raise ValueError("Inventory timestamp requires timezone")
                     runtime = InventoryRuntime.objects.create(
                         snapshot=snapshot,
-                        runtime_type=scan["runtime_type"],
                         collected_at=collected,
                         complete=scan.get("complete") is True,
                         errors=scan.get("errors", []),
@@ -105,18 +102,12 @@ class InventoryRepository:
                         candidates = [
                             i
                             for i in images
-                            if i.runtime_type == runtime.runtime_type
-                            and (
+                            if (
                                 item["kind"] == "image"
-                                or (
-                                    runtime.runtime_type == "qemu"
-                                    and i.is_legacy
-                                    and item["kind"] == "disk"
-                                )
+                                or ((i.is_legacy) and (item["kind"] == "disk"))
                             )
                             and (
-                                runtime.runtime_type != "qemu"
-                                or i.is_legacy
+                                (i.is_legacy)
                                 or (
                                     str(i.id) == metadata.get("artifact_id")
                                     and i.creating_task_id is not None
@@ -125,30 +116,18 @@ class InventoryRepository:
                                 )
                             )
                             and (
-                                bool(i.runner_ref)
-                                and i.runner_ref in [physical_id, *aliases]
-                                or (
-                                    runtime.runtime_type == "docker"
-                                    and metadata.get("published_image_id")
-                                    == physical_id
-                                    and metadata.get("expected_image_tag")
-                                    == i.runner_ref
-                                    and str(i.id)
-                                    == metadata.get("opencuria.image-instance-id")
+                                (
+                                    bool(i.runner_ref)
+                                    and i.runner_ref in [physical_id, *aliases]
                                 )
-                                or (
-                                    runtime.runtime_type == "qemu"
-                                    and str(i.id) == metadata.get("artifact_id")
-                                )
+                                or (str(i.id) == metadata.get("artifact_id"))
                             )
                         ]
-                        asserted_id = metadata.get(
-                            "opencuria.image-instance-id"
-                        ) or metadata.get("artifact_id")
+                        asserted_id = metadata.get("artifact_id")
                         image = candidates[0] if len(candidates) == 1 else None
                         if image and asserted_id and str(image.id) != asserted_id:
                             image = None
-                        if image and image.is_legacy and runtime.runtime_type == "qemu":
+                        if (image) and (image.is_legacy):
                             # Exact references establish association, not publication.
                             # Shared aliases cannot identify a unique physical object.
                             matches = [
@@ -166,9 +145,7 @@ class InventoryRepository:
                                     "Ambiguous physical generation identity"
                                 )
                             mapped_images.add(image.id)
-                        ws_id = metadata.get("workspace_id") or metadata.get(
-                            "opencuria.workspace-id"
-                        )
+                        ws_id = metadata.get("workspace_id")
                         workspace = workspaces.get(str(ws_id))
                         sizes = {key: item.get(key) for key in SIZES}
                         if any(
@@ -183,10 +160,9 @@ class InventoryRepository:
                             managed=item["managed"],
                             state=(
                                 "unknown"
-                                if image
-                                and image.is_legacy
-                                and runtime.runtime_type == "qemu"
-                                and item["kind"] == "disk"
+                                if (image)
+                                and (image.is_legacy)
+                                and (item["kind"] == "disk")
                                 else item.get("state", "unknown")
                             ),
                             **sizes,
@@ -211,11 +187,8 @@ class InventoryRepository:
                             < collected
                             <= timezone.now()
                         ):
-                            # No invented zero or aggregate Docker layer sum.
                             size = (
                                 sizes["allocated_bytes"]
-                                if runtime.runtime_type == "qemu"
-                                else sizes["logical_bytes"]
                             )
                             ImageInstance.objects.filter(pk=image.id).update(
                                 size_bytes=size
@@ -258,8 +231,7 @@ class InventoryRepository:
                             image_id = dependencies[0]
                             image = next(i for i in images if i.id == image_id)
                             if (
-                                ws.runtime_type == runtime.runtime_type
-                                and ws.base_image_instance_id is None
+                                ws.base_image_instance_id is None
                                 and not ws.current_task_id
                             ):
                                 Workspace.objects.filter(
@@ -323,106 +295,100 @@ class InventoryRepository:
             "latest_snapshot_id": latest.id if latest else None,
             "latest_complete": latest.complete if latest else False,
         }
-        for runtime_type in runner.available_runtimes:
-            scan = (
-                InventoryRuntime.objects.filter(
-                    snapshot__runner=runner, runtime_type=runtime_type, complete=True
-                )
-                .select_related("snapshot")
-                .order_by("-id")
-                .first()
-            )
-            diagnostic = (
-                InventoryRuntime.objects.filter(
-                    snapshot__runner=runner, runtime_type=runtime_type
-                )
-                .order_by("-id")
-                .first()
-            )
-            fresh = bool(
-                scan
-                and runner.is_online
-                and latest
-                and latest.complete
-                and scan.snapshot_id == latest.id
-                and scan.snapshot.session == runner.sid
-                and scan.snapshot.received_at > now - timedelta(minutes=5)
-                and now - timedelta(minutes=5) < scan.collected_at <= now
-            )
-            resources = []
-            if scan:
-                for resource in scan.resources.select_related(
-                    "workspace__created_by", "image"
-                ):
-                    ws = resource.workspace
-                    resources.append(
-                        {
-                            "physical_id": resource.physical_id,
-                            "kind": resource.kind,
-                            "managed": resource.managed,
-                            "state": resource.state,
-                            **{key: getattr(resource, key) for key in SIZES},
-                            "aliases": list(
-                                resource.aliases.values_list("reference", flat=True)
+        scan = (
+            InventoryRuntime.objects.filter(snapshot__runner=runner, complete=True)
+            .select_related("snapshot")
+            .order_by("-id")
+            .first()
+        )
+        diagnostic = (
+            InventoryRuntime.objects.filter(snapshot__runner=runner)
+            .order_by("-id")
+            .first()
+        )
+        fresh = bool(
+            scan
+            and runner.is_online
+            and latest
+            and latest.complete
+            and scan.snapshot_id == latest.id
+            and scan.snapshot.session == runner.sid
+            and scan.snapshot.received_at > now - timedelta(minutes=5)
+            and now - timedelta(minutes=5) < scan.collected_at <= now
+        )
+        resources = []
+        if scan:
+            for resource in scan.resources.select_related(
+                "workspace__created_by", "image"
+            ):
+                ws = resource.workspace
+                resources.append(
+                    {
+                        "physical_id": resource.physical_id,
+                        "kind": resource.kind,
+                        "managed": resource.managed,
+                        "state": resource.state,
+                        **{key: getattr(resource, key) for key in SIZES},
+                        "aliases": list(
+                            resource.aliases.values_list("reference", flat=True)
+                        ),
+                        "dependencies": list(
+                            resource.dependencies.values_list(
+                                "target__physical_id", flat=True
+                            )
+                        ),
+                        "image_id": str(resource.image_id)
+                        if resource.image_id
+                        else None,
+                        "workspace": {
+                            "id": str(ws.id),
+                            "base_image_instance_id": str(ws.base_image_instance_id)
+                            if ws.base_image_instance_id
+                            else None,
+                            "owner_id": str(ws.created_by_id),
+                            "owner_label": InventoryRepository.owner_label(
+                                ws.created_by
                             ),
-                            "dependencies": list(
-                                resource.dependencies.values_list(
-                                    "target__physical_id", flat=True
-                                )
-                            ),
-                            "image_id": str(resource.image_id)
-                            if resource.image_id
-                            else None,
-                            "workspace": {
-                                "id": str(ws.id),
-                                "base_image_instance_id": str(ws.base_image_instance_id)
-                                if ws.base_image_instance_id
-                                else None,
-                                "owner_id": str(ws.created_by_id),
-                                "owner_label": InventoryRepository.owner_label(
-                                    ws.created_by
-                                ),
-                                "name": ws.name,
-                                "status": ws.status,
-                                "last_activity_at": ws.last_activity_at,
-                            }
-                            if ws
-                            else None,
-                            "filesystem_id": resource.metadata.get("filesystem_id")
-                            if isinstance(resource.metadata.get("filesystem_id"), str)
-                            else None,
-                            "file_identity": resource.metadata.get("file_identity")
-                            if isinstance(resource.metadata.get("file_identity"), str)
-                            else None,
-                            "provenance": resource.provenance,
+                            "name": ws.name,
+                            "status": ws.status,
+                            "last_activity_at": ws.last_activity_at,
                         }
-                    )
-            result["runtimes"].append(
-                {
-                    "runtime_type": runtime_type,
-                    "fresh": fresh,
-                    "snapshot_id": scan.snapshot_id if scan else None,
-                    "epoch": str(scan.snapshot.epoch) if scan else None,
-                    "sequence": scan.snapshot.sequence if scan else None,
-                    "collected_at": scan.collected_at if scan else None,
-                    "received_at": scan.snapshot.received_at if scan else None,
-                    "filesystems": scan.filesystems if scan else [],
-                    "resources": resources,
-                    "diagnostics": {
-                        "complete": diagnostic.complete,
-                        "errors": diagnostic.errors,
-                        "collected_at": diagnostic.collected_at,
-                        "foreign_resource_count": diagnostic.foreign_resource_count,
+                        if ws
+                        else None,
+                        "filesystem_id": resource.metadata.get("filesystem_id")
+                        if isinstance(resource.metadata.get("filesystem_id"), str)
+                        else None,
+                        "file_identity": resource.metadata.get("file_identity")
+                        if isinstance(resource.metadata.get("file_identity"), str)
+                        else None,
+                        "provenance": resource.provenance,
                     }
-                    if diagnostic
-                    else None,
+                )
+        result["runtimes"].append(
+            {
+                "fresh": fresh,
+                "snapshot_id": scan.snapshot_id if scan else None,
+                "epoch": str(scan.snapshot.epoch) if scan else None,
+                "sequence": scan.snapshot.sequence if scan else None,
+                "collected_at": scan.collected_at if scan else None,
+                "received_at": scan.snapshot.received_at if scan else None,
+                "filesystems": scan.filesystems if scan else [],
+                "resources": resources,
+                "diagnostics": {
+                    "complete": diagnostic.complete,
+                    "errors": diagnostic.errors,
+                    "collected_at": diagnostic.collected_at,
+                    "foreign_resource_count": diagnostic.foreign_resource_count,
                 }
-            )
+                if diagnostic
+                else None,
+            }
+        )
         workspaces = list(
             Workspace.objects.filter(runner=runner).select_related("created_by")
         )
         # Reverse physical dependencies recursively; provenance is deliberately ignored.
-        # Domain/container observations alone describe workspace runtime state.
+        # Domain observations alone describe workspace runtime state.
         # Disks retain dependency ownership, never state authority. Prefer managed
         # observations then stable identity, not known states over unknown ones.
         workspace_states = {}
@@ -432,9 +398,9 @@ class InventoryRepository:
                 key=lambda r: (not r["managed"], r["physical_id"]),
             ):
                 if resource["kind"] == "workspace" and resource["workspace"]:
-                    key = (runtime["runtime_type"], resource["workspace"]["id"])
+                    key = resource["workspace"]["id"]
                     workspace_states.setdefault(key, resource["state"])
-        # Allocated bytes of each workspace's own storage (disks, ISOs, volumes).
+        # Allocated bytes of each workspace's own storage (disks and ISOs).
         workspace_bytes: dict[str, int] = {}
         for runtime in result["runtimes"]:
             for resource in runtime["resources"]:
@@ -464,7 +430,6 @@ class InventoryRepository:
             image_resources = [
                 resource
                 for runtime in result["runtimes"]
-                if runtime["runtime_type"] == image.runtime_type
                 for resource in runtime["resources"]
             ]
             observed = [r for r in image_resources if r["image_id"] == str(image.id)]
@@ -503,14 +468,7 @@ class InventoryRepository:
                 )
                 and w.status not in {"deleted", "removed"}
             ]
-            runtime = next(
-                (
-                    r
-                    for r in result["runtimes"]
-                    if r["runtime_type"] == image.runtime_type
-                ),
-                None,
-            )
+            runtime = next(iter(result["runtimes"]), None)
             result["generations"].append(
                 {
                     "id": str(image.id),
@@ -519,7 +477,6 @@ class InventoryRepository:
                     if image.created_by_id
                     else None,
                     "owner_label": InventoryRepository.owner_label(image.created_by),
-                    "runtime_type": image.runtime_type,
                     "build_job_id": str(image.build_job_id)
                     if image.build_job_id
                     else None,
@@ -578,12 +535,8 @@ class InventoryRepository:
                         )
                     ),
                     "size_source": "observed allocated"
-                    if observed and image.runtime_type == "qemu"
-                    else (
-                        "observed logical (overlapping)"
-                        if observed
-                        else "last recorded / unknown"
-                    ),
+                    if observed
+                    else "last recorded / unknown",
                     "dependencies": [
                         {
                             "id": str(w.id),
@@ -604,7 +557,7 @@ class InventoryRepository:
                             "status": w.status,
                             "last_activity_at": w.last_activity_at,
                             "observed_state": workspace_states.get(
-                                (w.runtime_type, str(w.id)), "unknown"
+                                str(w.id), "unknown"
                             ),
                         }
                         for w in dependents

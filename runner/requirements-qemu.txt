@@ -1,4 +1,0 @@
-# QEMU/KVM runtime (optional — only needed when RUNNER_ENABLED_RUNTIMES includes "qemu")
-libvirt-python>=10.0.0
-# SSHClientConnection.is_closed() requires AsyncSSH 2.15+.
-asyncssh>=2.15,<3.0

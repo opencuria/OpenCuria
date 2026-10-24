@@ -59,7 +59,6 @@ def _make_context(*, email_prefix: str = "git-api"):
         status=RunnerStatus.ONLINE,
         sid="git-sid",
         organization=org,
-        available_runtimes=["docker"],
     )
     workspace = Workspace.objects.create(
         runner=runner,

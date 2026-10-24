@@ -55,7 +55,7 @@ def normalise_command_args(raw_args: list[str] | str) -> list[str]:
     Commands are primarily modelled as argv lists. However, configure
     commands are sometimes authored with shell operators (e.g. ``|``,
     ``&&``) split into individual args. Such operators are treated as
-    literal argv tokens by Docker/SSH exec and therefore fail.
+    literal argv tokens by SSH exec and therefore fail.
 
     To keep backend data backwards-compatible, detect shell operators and
     redirections (including forms with attached targets like

@@ -9,9 +9,8 @@ from django.core.management import call_command
 
 from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
 from apps.organizations.models import Membership, MembershipRole, Organization
-from apps.runners.enums import RuntimeType, TaskStatus, TaskType
+from apps.runners.enums import TaskStatus, TaskType
 from apps.runners.management.commands.bootstrap_local_deploy import (
-    DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE,
     DEFAULT_WORKSPACE_PACKAGES,
 )
 from apps.runners.models import (
@@ -50,7 +49,7 @@ def test_bootstrap_creates_pending_build(db) -> None:
     runner = Runner.objects.get(name="local-runner", organization=org)
     definition = ImageDefinition.objects.get(
         organization=org,
-        name="Local Docker Workspace",
+        name="Local Workspace",
     )
     build = ImageBuildJob.objects.get(image_definition=definition, runner=runner)
 
@@ -59,7 +58,6 @@ def test_bootstrap_creates_pending_build(db) -> None:
     assert user.is_superuser is True
     assert membership.role == MembershipRole.ADMIN
     assert runner.api_token_hash == hash_token("runner-secret")
-    assert runner.available_runtimes == [RuntimeType.DOCKER]
 
     # The immutable generation and its task are queued for the offline runner.
     assert build.status == ImageBuildJob.Status.PENDING
@@ -76,15 +74,13 @@ def test_bootstrap_creates_pending_build(db) -> None:
     command = LifecycleCommand.objects.get(task=build.build_task)
     assert command.event == "task:build_image"
     assert command.payload["image_instance_id"] == str(generation.id)
-    assert command.payload["image_tag"] == generation.runner_ref
+    assert command.payload["image_path"] == generation.runner_ref
     assert command.payload["_revision_id"] == str(generation.revision_id)
-    assert generation.revision.rendered_input["dockerfile_content"]
+    assert generation.revision.rendered_input["init_script"]
     assert command.deliveries == 0
 
-    # Image definition should have the correct packages and Dockerfile
+    # Image definition should have the configured packages and initialization script
     assert definition.packages == DEFAULT_WORKSPACE_PACKAGES
-    assert definition.custom_dockerfile == DEFAULT_WORKSPACE_CUSTOM_DOCKERFILE
-    assert definition.runtime_type == RuntimeType.DOCKER
     assert definition.base_distro == "ubuntu:22.04"
 
     assert (

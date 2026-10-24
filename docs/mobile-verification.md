@@ -57,7 +57,7 @@ These are captures of the installed native app with deterministic sample content
 ## Explicit remaining limits
 
 - No macOS/Xcode environment was available: **iOS native compilation, signing, simulator and iPhone acceptance have not been performed**. Run the documented Mac checks before an iOS release.
-- No physical Android handset, app-store distribution, production signing or external LLM/Docker/QEMU run is claimed.
+- No physical Android handset, app-store distribution, production signing or external LLM/QEMU run is claimed.
 - A development APK requires Metro. No standalone signed release package or cloud build was requested.
 - The first GitHub Actions run passed Webapp, Mobile and Security Audit but failed its Backend and Runner jobs despite local backend and runner test runs passing. Detailed hosted logs were unavailable with the current repository rights. A clean local runner installation also passed all 794 tests; the clean backend installation also passed all 2,913 tests. CI now retains JUnit reports and emits failing test identities as annotations, so hosted failures are inspectable without weakening tests or adding retries.
 

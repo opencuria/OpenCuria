@@ -10,18 +10,18 @@
 </p>
 
 <p align="center">
-  OpenCuria gives you a central backend, a web dashboard, and runners that launch Docker workspaces or QEMU VMs.
+  OpenCuria gives you a central backend, a web dashboard, and runners that launch QEMU/KVM virtual machines.
 </p>
 
 <p align="center">
-  🐳 Local all-in-one &nbsp;•&nbsp; 🌍 Distributed deployment &nbsp;•&nbsp; 🤖 Multiple agents &nbsp;•&nbsp; 🧱 Docker and QEMU runtimes
+  🖥️ Local deployment &nbsp;•&nbsp; 🌍 Distributed deployment &nbsp;•&nbsp; 🤖 Multiple agents &nbsp;•&nbsp; 🧱 QEMU/KVM workspaces
 </p>
 
 ---
 
 ## ✨ Quick Start
 
-Want the whole stack locally with one command?
+Start the local control plane, then configure a native Linux runner:
 
 ```bash
 cp .env.example .env
@@ -43,16 +43,13 @@ What this starts for you:
 
 - `backend` in local mode
 - `webapp` on localhost
-- `runner` on the same machine
 - automatic bootstrap for admin, org, runner, and default workspace image
 
 No manual runner registration is needed in local mode.
 
-> [!NOTE]
-> The one-command local path is intentionally **Docker-only**. If you want
-> QEMU/KVM workspaces, keep using the local backend/webapp, but run a
-> **native Linux runner** with `RUNNER_ENABLED_RUNTIMES=qemu` or
-> `RUNNER_ENABLED_RUNTIMES=docker,qemu`.
+> Run the QEMU/KVM runner natively on Linux using the setup below. Use the
+> bootstrap token from `LOCAL_RUNNER_API_TOKEN` for this local runner.
+> Workspace creation becomes available once its default image build finishes.
 
 ## 🧭 What OpenCuria Is
 
@@ -60,7 +57,7 @@ OpenCuria is a control plane for AI coding agents.
 
 - `backend/` is the Django API and runner control plane
 - `webapp/` is the dashboard
-- `runner/` executes Docker workspaces or QEMU VMs
+- `runner/` executes QEMU/KVM VMs
 - `mobile/` is a native Expo iOS/Android client for existing OpenCuria
   workspaces and chats
 
@@ -68,9 +65,9 @@ Use it when you want:
 
 - one local stack for fast onboarding
 - a central server with one or more remote runners
-- isolated agent workspaces on Docker or QEMU
+- isolated agent workspaces in QEMU/KVM VMs
 
-## 🐳 Local All-in-One
+## 🐳 Local Control Plane
 
 The repository root is optimized for the fast path:
 
@@ -83,11 +80,8 @@ Key files:
 - [`compose.yml`](./compose.yml) — local default
 - [`.env.example`](./.env.example) — local environment template
 
-Local mode is designed for:
-
-- Linux
-- macOS with Docker Desktop
-- Windows with Docker Desktop
+The control plane can run wherever Docker Compose is available. Workspace
+runners require a Linux host with QEMU/KVM and libvirt.
 
 ## 🌍 Distributed Setup
 
@@ -112,26 +106,9 @@ This starts:
 - backend
 - webapp
 
-### 2. Remote Docker runner
+### 2. QEMU runner
 
-```bash
-cd runner
-cp .env.example .env
-docker compose up -d
-```
-
-Key files:
-
-- [`runner/compose.yml`](./runner/compose.yml)
-- [`runner/.env.example`](./runner/.env.example)
-
-For Docker-only runner hosts, leave `RUNNER_QEMU_SSH_USER` at its default `root`
-unless you are intentionally customizing the QEMU guest image to use a different
-SSH login user.
-
-### 3. Remote QEMU runner
-
-If a runner host should support QEMU/KVM, run it natively on Linux instead of inside a container.
+Run the runner natively on a Linux host with QEMU/KVM and libvirt.
 
 Use:
 
@@ -159,6 +136,7 @@ Recommended setup flow:
    sudo apt-get update
    sudo apt-get install -y \
      qemu-kvm \
+     qemu-utils \
      libvirt-daemon-system \
      libvirt-clients \
      genisoimage \
@@ -183,8 +161,6 @@ Recommended setup flow:
    ```dotenv
    RUNNER_API_TOKEN=...
    RUNNER_BACKEND_URL=http://<backend-host>:8000
-   RUNNER_ENABLED_RUNTIMES=qemu
-   # or: RUNNER_ENABLED_RUNTIMES=docker,qemu
    ```
 
 6. Create the QEMU storage directories configured in that env file, for example:
@@ -228,8 +204,6 @@ Published via GHCR:
 
 - `ghcr.io/opencuria/backend`
 - `ghcr.io/opencuria/webapp`
-- `ghcr.io/opencuria/runner`
-- `ghcr.io/opencuria/workspace`
 
 The GitHub Actions workflow builds multi-arch images for:
 
@@ -243,12 +217,6 @@ If you do not want Docker Compose for day-to-day development:
 
 ```bash
 ./scripts/setup-dev.sh
-```
-
-Optional local workspace image build:
-
-```bash
-./scripts/setup-dev.sh --build-workspace-image
 ```
 
 After that you can run `backend`, `webapp`, and `runner` individually. When
@@ -353,8 +321,8 @@ See [`LICENSE`](./LICENSE).
 ### Lifecycle recovery operations
 
 Backend and runner lifecycle protocol versions must match. Keep the runner's
-`RUNNER_STATE_DIR` persistent across restarts/upgrades (`runner/compose.yml` mounts
-`runner_state`) together with workspace disks/volumes. Do not share one journal
+`RUNNER_STATE_DIR` persistent across restarts/upgrades together with the QEMU disks
+and snapshots. Do not share one journal
 between runners or delete it to resolve a failed task. Run migrations and the
 independent `python manage.py recover_lifecycle` worker alongside ASGI (Compose
 and the backend systemd worker unit provide this process).

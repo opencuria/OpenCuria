@@ -41,7 +41,6 @@ def make_line(runner, user, versions=("ready",), name="Image"):
     images = [
         ImageInstance.objects.create(
             runner=runner,
-            runtime_type="qemu",
             origin_type="workspace_capture",
             captured_image=line,
             generation=number,
@@ -61,7 +60,6 @@ def qemu_workspace(runner, user, base, status=WorkspaceStatus.RUNNING):
         runner=runner,
         created_by=user,
         name="Versioned",
-        runtime_type="qemu",
         status=status,
         qemu_disk_size_gb=20,
         base_image_instance=base,
@@ -127,7 +125,6 @@ def test_new_version_preconditions(runner, user, organization):
     CapturedImage.objects.filter(pk=line.id).update(status="active")
     ImageInstance.objects.create(
         runner=runner,
-        runtime_type="qemu",
         captured_image=line,
         generation=2,
         name="Image",
@@ -388,7 +385,8 @@ def test_definition_generations_follow_the_same_retention(runner, user):
     from apps.runners.tests.test_image_generations import finish, request
 
     definition = ImageDefinition.objects.create(
-        name="Retained recipe", organization=runner.organization, runtime_type="docker"
+        name="Retained recipe",
+        organization=runner.organization,
     )
     built = []
     for _ in range(3):

@@ -56,7 +56,6 @@ def _make_process_setup():
         status=RunnerStatus.ONLINE,
         sid=f"proc-sid-{uuid.uuid4().hex[:8]}",
         organization=org,
-        available_runtimes=["docker"],
     )
     workspace = Workspace.objects.create(
         runner=runner,

@@ -32,7 +32,6 @@ class RunnerOut(Schema):
     id: uuid.UUID
     name: str
     status: str
-    available_runtimes: list[str] = []
     organization_id: uuid.UUID
     connected_at: datetime | None
     disconnected_at: datetime | None
@@ -126,7 +125,6 @@ class WorkspaceOut(Schema):
     intervention_required: bool = False
     lifecycle_diagnostic: str = ""
     name: str
-    runtime_type: str = "docker"
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
     qemu_disk_size_gb: int | None = None
@@ -173,7 +171,6 @@ class WorkspaceCreateIn(Schema):
 
     name: str
     repos: list[str] = []
-    runtime_type: str = "docker"
     credential_ids: list[uuid.UUID] = []
     plugin_ids: list[uuid.UUID] = []
     runner_id: uuid.UUID | None = None
@@ -437,7 +434,6 @@ class ImageArtifactOut(Schema):
     build_job_id: uuid.UUID | None = None
     source_definition_name: str | None = None
     source_runner_id: uuid.UUID | None = None
-    runtime_type: str | None = None
     is_deactivated: bool = False
     source_runner_online: bool = False
     delete_requested_at: datetime | None = None
@@ -597,11 +593,9 @@ class ImageDefinitionOut(Schema):
     name: str
     description: str
     is_standard: bool = False
-    runtime_type: str
     base_distro: str
     packages: list[str] = []
     env_vars: dict[str, str] = {}
-    custom_dockerfile: str = ""
     custom_init_script: str = ""
     is_active: bool
     status: str = "active"
@@ -622,11 +616,9 @@ class ImageDefinitionCreateIn(Schema):
 
     name: str
     description: str = ""
-    runtime_type: str = "docker"
     base_distro: str = "ubuntu:22.04"
     packages: list[str] = []
     env_vars: dict[str, str] = {}
-    custom_dockerfile: str = ""
     custom_init_script: str = ""
     is_active: bool = True
 
@@ -636,11 +628,9 @@ class ImageDefinitionUpdateIn(Schema):
 
     name: str | None = None
     description: str | None = None
-    runtime_type: str | None = None
     base_distro: str | None = None
     packages: list[str] | None = None
     env_vars: dict[str, str] | None = None
-    custom_dockerfile: str | None = None
     custom_init_script: str | None = None
     is_active: bool | None = None
 

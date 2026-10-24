@@ -525,7 +525,6 @@ def harness_workspace(db, organization):
         status=RunnerStatus.ONLINE,
         sid=f"harness-sid-{_uuid.uuid4().hex[:8]}",
         organization=organization,
-        available_runtimes=["docker"],
     )
     return Workspace.objects.create(
         runner=runner,

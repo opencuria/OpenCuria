@@ -2,7 +2,7 @@ import { shallowMount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 
 import WorkspaceActions from './WorkspaceActions.vue'
-import { RuntimeType, WorkspaceStatus, type Workspace } from '@/types'
+import { WorkspaceStatus, type Workspace } from '@/types'
 
 vi.mock('@/stores/workspaces', () => ({
   useWorkspaceStore: () => ({
@@ -30,7 +30,6 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     status: WorkspaceStatus.RUNNING,
     active_operation: null,
     name: 'Workspace',
-    runtime_type: RuntimeType.QEMU,
     qemu_vcpus: null,
     qemu_memory_mb: null,
     qemu_disk_size_gb: null,

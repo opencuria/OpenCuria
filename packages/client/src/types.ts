@@ -37,7 +37,6 @@ export interface Workspace {
   name: string;
   status: string;
   runner_id: string;
-  runtime_type: string;
   active_operation: string | null;
   runner_online: boolean;
   has_active_session: boolean;

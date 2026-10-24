@@ -3,7 +3,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import EditWorkspaceDialog from './EditWorkspaceDialog.vue'
-import { RuntimeType, WorkspaceStatus, type Workspace } from '@/types'
+import { WorkspaceStatus, type Workspace } from '@/types'
 import { saveWorkspaceDraft } from '@/lib/workspaceDraft'
 
 const mocks = vi.hoisted(() => ({
@@ -76,7 +76,6 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     status: WorkspaceStatus.RUNNING,
     active_operation: null,
     name: 'Workspace',
-    runtime_type: RuntimeType.QEMU,
     qemu_vcpus: null,
     qemu_memory_mb: null,
     qemu_disk_size_gb: null,

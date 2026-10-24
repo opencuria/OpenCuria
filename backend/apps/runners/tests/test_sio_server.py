@@ -161,7 +161,6 @@ async def test_frontend_workspace_access_is_owner_scoped():
         status=RunnerStatus.ONLINE,
         sid="sio-sid",
         organization=org,
-        available_runtimes=["docker"],
     )
     workspace = Workspace.objects.create(
         runner=runner,
@@ -278,13 +277,12 @@ async def test_runner_inventory_is_recorded_for_the_current_session_only(
             "complete": True,
             "runtimes": [
                 {
-                    "runtime_type": runtime,
                     "collected_at": timezone.now().isoformat(),
                     "complete": True,
                     "errors": [],
                     "resources": [],
                 }
-                for runtime in runner.available_runtimes
+                for runtime in ["qemu"]
             ],
         }
 
@@ -332,6 +330,5 @@ async def test_operation_heartbeat_marks_only_the_bound_attempt_executing(
 async def test_runner_register_resolves_the_session_runner(runner_sio, runner):
     handlers = runner_sio.handlers["/"]
 
-    await handlers["runner:register"](runner.sid, {"supported_runtimes": ["qemu"]})
+    await handlers["runner:register"](runner.sid, {})
     runner.refresh_from_db()
-    assert runner.available_runtimes == ["qemu"]

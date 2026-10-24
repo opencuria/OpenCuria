@@ -255,7 +255,6 @@ async def test_worker_recovers_offline_intent_after_registration(
         definition = ImageDefinition.objects.create(
             organization=runner.organization,
             name="Offline recipe",
-            runtime_type="docker",
         )
         build = await service.trigger_build_job(
             image_definition=definition, runner=runner, created_by=user
@@ -274,7 +273,10 @@ async def test_worker_recovers_offline_intent_after_registration(
     transport = AsyncMock()
     await RecoveryService().tick(transport)
     transport.emit.assert_not_awaited()
-    service.register_runner(runner, sid="reconnected", available_runtimes=["docker"])
+    service.register_runner(
+        runner,
+        sid="reconnected",
+    )
     sio_mock.emit.assert_not_awaited()
 
     await RecoveryService().tick(transport)
@@ -288,8 +290,8 @@ async def test_worker_recovers_offline_intent_after_registration(
     assert payload["runner_id"] == str(runner.id)
     if kind == "build_image":
         assert payload["image_instance_id"] == str(image.id)
-        assert payload["image_tag"] == image.runner_ref
-        assert payload["dockerfile_content"] == rendered["dockerfile_content"]
+        assert payload["image_path"] == image.runner_ref
+        assert payload["init_script"] == rendered["init_script"]
         result_event = "image:built"
         result = payload
     else:

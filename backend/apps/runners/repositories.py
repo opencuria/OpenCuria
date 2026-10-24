@@ -95,13 +95,10 @@ class RunnerRepository:
         runner: Runner,
         *,
         sid: str,
-        available_runtimes: list[str] | None = None,
     ) -> Runner:
         """Mark a runner as online with its Socket.IO session ID."""
         runner.status = RunnerStatus.ONLINE
         runner.sid = sid
-        if available_runtimes is not None:
-            runner.available_runtimes = available_runtimes
         runner.last_heartbeat_at = timezone.now()
         runner.connected_at = timezone.now()
         runner.disconnected_at = None
@@ -109,7 +106,6 @@ class RunnerRepository:
             update_fields=[
                 "status",
                 "sid",
-                "available_runtimes",
                 "last_heartbeat_at",
                 "connected_at",
                 "disconnected_at",
@@ -304,7 +300,6 @@ class WorkspaceRepository:
         workspace_id: uuid.UUID,
         runner: Runner,
         name: str,
-        runtime_type: str = "docker",
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
@@ -321,7 +316,6 @@ class WorkspaceRepository:
             id=workspace_id,
             runner=runner,
             name=name,
-            runtime_type=runtime_type,
             qemu_vcpus=qemu_vcpus,
             qemu_memory_mb=qemu_memory_mb,
             qemu_disk_size_gb=qemu_disk_size_gb,
@@ -620,7 +614,6 @@ class WorkspaceRepository:
         """Return active QEMU workspaces for a runner."""
         return Workspace.objects.filter(
             runner_id=runner_id,
-            runtime_type="qemu",
             status=WorkspaceStatus.RUNNING,
         )
 
@@ -1218,7 +1211,6 @@ class ImageInstanceRepository:
     def create(
         *,
         runner: Runner,
-        runtime_type: str,
         origin_type: str,
         runner_ref: str,
         name: str,
@@ -1232,7 +1224,6 @@ class ImageInstanceRepository:
         """Create a new image instance record (immediately ready)."""
         image = ImageInstance.objects.create(
             runner=runner,
-            runtime_type=runtime_type,
             origin_type=origin_type,
             origin_definition=origin_definition,
             origin_workspace=origin_workspace,
@@ -1251,7 +1242,6 @@ class ImageInstanceRepository:
     def create_pending(
         *,
         runner: Runner,
-        runtime_type: str,
         origin_type: str,
         name: str,
         creating_task_id: str,
@@ -1269,7 +1259,6 @@ class ImageInstanceRepository:
         )
         image = ImageInstance.objects.create(
             runner=runner,
-            runtime_type=runtime_type,
             origin_type=origin_type,
             origin_definition=origin_definition,
             origin_workspace=origin_workspace,
@@ -1872,11 +1861,9 @@ class ImageGenerationRepository:
     """Atomic generation allocation and task-bound monotonic completion."""
 
     RECIPE_FIELDS = (
-        "runtime_type",
         "base_distro",
         "packages",
         "env_vars",
-        "custom_dockerfile",
         "custom_init_script",
     )
 
@@ -1939,15 +1926,10 @@ class ImageGenerationRepository:
                 task_id=uuid.uuid4(), runner=runner, task_type=TaskType.BUILD_IMAGE
             )
             image_id = uuid.uuid4()
-            runner_ref = (
-                f"opencuria/generations:{image_id}"
-                if definition.runtime_type == "docker"
-                else f"/var/lib/opencuria/base-images/{image_id}.qcow2"
-            )
+            runner_ref = f"/var/lib/opencuria/base-images/{image_id}.qcow2"
             image = ImageInstance.objects.create(
                 id=image_id,
                 runner=runner,
-                runtime_type=definition.runtime_type,
                 origin_type="definition_build",
                 origin_definition=definition,
                 build_job=job,
@@ -1974,11 +1956,8 @@ class ImageGenerationRepository:
                 "task_id": str(task.id),
                 "build_job_id": str(job.id),
                 "image_instance_id": str(image.id),
-                "runtime_type": image.runtime_type,
             }
-            payload["image_tag" if image.runtime_type == "docker" else "image_path"] = (
-                runner_ref
-            )
+            payload["image_path"] = runner_ref
             OperationRepository.prepare(str(task.id), "task:build_image", payload)
             return ImageBuildJobRepository.get_by_id(job.id), image, task
 

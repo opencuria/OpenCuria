@@ -7,7 +7,6 @@ import { Badge } from '@/components/ui/badge'
 import { Server, Wifi, WifiOff, Clock, Cpu, MemoryStick, HardDrive } from '@lucide/vue'
 import { formatRelativeTime } from '@/lib/utils'
 import { getRunnerMetricsLatest, getRunnerMetricsHistory } from '@/services/runners.api'
-import { runnerSupportsRuntime } from '@/lib/runtimeSupport'
 import { useAuthStore } from '@/stores/auth'
 import EditRunnerResourcesDialog from './EditRunnerResourcesDialog.vue'
 import Sparkline from '@/components/charts/Sparkline.vue'
@@ -39,7 +38,6 @@ const diskPercent = computed(() => {
   return Math.round((metrics.value.disk_used_bytes / metrics.value.disk_total_bytes) * 100)
 })
 
-const supportsQemu = computed(() => runnerSupportsRuntime(props.runner, 'qemu'))
 const isOnline = computed(() => props.runner.status === RunnerStatus.ONLINE)
 
 function barColor(pct: number): string {
@@ -101,7 +99,7 @@ onUnmounted(() => {
       </Badge>
     </template>
     <template #actions>
-      <EditRunnerResourcesDialog v-if="authStore.isAdmin && supportsQemu" :runner="runner" />
+      <EditRunnerResourcesDialog v-if="authStore.isAdmin" :runner="runner" />
     </template>
     <template v-if="metrics" #detail>
       <div class="grid grid-cols-3 gap-3">

@@ -93,7 +93,6 @@ async def test_proxy_returns_not_found_for_member_without_workspace_access(
         api_token_hash=hash_token("runner-token"),
         status="online",
         organization=organization,
-        available_runtimes=["docker"],
     )
     workspace = runner.workspaces.create(
         name="desktop-proxy-workspace",
@@ -155,7 +154,6 @@ async def test_desktop_access_is_limited_to_owner_and_organization_admins(
         api_token_hash=hash_token(f"desktop-access-{uuid.uuid4().hex}"),
         status="online",
         organization=organization,
-        available_runtimes=["docker"],
     )
     workspace = runner.workspaces.create(
         name="desktop-access-workspace", status="running", created_by=owner

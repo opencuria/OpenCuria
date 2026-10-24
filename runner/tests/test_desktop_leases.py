@@ -418,8 +418,12 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         from src.services.workspace_registry import WorkspaceRegistry
 
         manager, runtime, _intent = await self.recording_manager()
-        info = WorkspaceInfo(self.ws, "guest", "running", runtime_type="qemu")
-        registry = WorkspaceRegistry(runtimes={"qemu": runtime})
+        info = WorkspaceInfo(
+            self.ws,
+            "guest",
+            "running",
+        )
+        registry = WorkspaceRegistry(runtime=runtime)
         registry._cache[self.ws] = info
         manager._get_cached = registry.get_cached
         runtime.stop_workspace = AsyncMock()
@@ -442,7 +446,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         manager.release_workspace = AsyncMock(return_value=False)
         lifecycle = WorkspaceLifecycle(
             registry,
-            runtimes={"qemu": runtime},
+            runtime=runtime,
             credentials=credentials,
             background=background,
             desktop=manager,
@@ -486,7 +490,9 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         from src.models import WorkspaceInfo
 
         registry._cache[self.ws] = WorkspaceInfo(
-            self.ws, "guest-2", "running", runtime_type="qemu"
+            self.ws,
+            "guest-2",
+            "running",
         )
         result = await manager.desktop_action(
             self.ws,
@@ -526,8 +532,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
             await manager.workspace_ended(
                 self.ws,
                 "guest",
-                "qemu",
-                WorkspaceEndedEvidence(self.ws, "wrong", "qemu", "remove"),
+                WorkspaceEndedEvidence(self.ws, "wrong", "remove"),
             )
         self.assertEqual(len(await self.store.list_unfinished(str(self.ws))), 2)
 

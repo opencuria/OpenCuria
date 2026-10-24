@@ -37,11 +37,11 @@ def _fixture(
 ) -> tuple[WorkspaceService, LocalRuntime, uuid.UUID, list[BackgroundProcess]]:
     runtime = LocalRuntime(str(tmp_path))
     service = WorkspaceService(
-        {"docker": runtime}, RunnerSettings(state_dir=str(tmp_path), _env_file=None)
+        runtime, RunnerSettings(state_dir=str(tmp_path), _env_file=None)
     )
     workspace_id = uuid.uuid4()
     service.registry._cache[workspace_id] = WorkspaceInfo(
-        workspace_id, "instance-1", "running", runtime_type="docker"
+        workspace_id, "instance-1", "running"
     )
     entries = [
         BackgroundProcess(

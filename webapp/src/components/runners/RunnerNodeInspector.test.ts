@@ -30,7 +30,7 @@ function image(patch: Partial<StorageGeneration> = {}): StorageGeneration {
     id: 'image-secret',
     name: 'Base v2',
     owner_label: 'Admin',
-    runtime_type: 'qemu',
+
     definition_id: 'definition',
     definition_name: 'Recipe',
     build_job_id: 'assignment',
@@ -86,7 +86,6 @@ function setup(
     props: {
       node: {
         key: 'stable-key',
-        runtime: 'qemu',
         label: 'Base v2',
         column: 2,
         generation,

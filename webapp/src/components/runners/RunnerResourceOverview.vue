@@ -6,7 +6,6 @@ import { RunnerStatus } from '@/types'
 import type { StorageRuntime } from '@/types/runnerStorage'
 import { useRunnerMetrics, resourcePercent, sampleOutdated } from '@/composables/useRunnerMetrics'
 import { storageBytes } from '@/composables/useRunnerStorage'
-import { runnerSupportsRuntime } from '@/lib/runtimeSupport'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import Sparkline from '@/components/charts/Sparkline.vue'
@@ -102,7 +101,6 @@ const filesystems = computed(() =>
     runtime.filesystems.map((fs, index) => ({
       ...fs,
       key: `${runtimeIndex}-${index}`,
-      runtime: runtime.runtime_type,
       timestamp: runtime.collected_at,
       outdated:
         offline.value ||
@@ -224,7 +222,7 @@ const policy = computed(() => [
         ></CollapsibleTrigger>
         <CollapsibleContent class="order-2 col-span-full space-y-3 py-2">
           <p class="text-xs text-muted-foreground">
-            Separate runtime paths; capacity is not summed because mounts may overlap.
+            Capacity is shown per filesystem because mounts may overlap.
           </p>
           <p v-if="!filesystems.length" class="text-xs text-muted-foreground">
             No filesystem samples available.
@@ -234,7 +232,7 @@ const policy = computed(() => [
             :key="fs.key"
             class="min-w-0 space-y-1.5 rounded-md border border-border p-3"
           >
-            <p class="break-all text-xs font-medium">{{ fs.runtime }} · {{ fs.path }}</p>
+            <p class="break-all text-xs font-medium">{{ fs.path }}</p>
             <p class="text-xs text-muted-foreground tabular-nums">
               {{ bytes(fs.used_bytes) }} used / {{ bytes(fs.capacity_bytes) }} capacity ·
               {{ bytes(fs.available_bytes) }} available
@@ -253,7 +251,7 @@ const policy = computed(() => [
           </div>
         </CollapsibleContent>
       </Collapsible>
-      <Collapsible v-if="runnerSupportsRuntime(runner, 'qemu')" class="contents">
+      <Collapsible class="contents">
         <CollapsibleTrigger as-child>
           <Button
             variant="ghost"

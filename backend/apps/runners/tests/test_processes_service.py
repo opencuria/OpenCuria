@@ -245,7 +245,6 @@ class TestStartProcess:
             status=RunnerStatus.ONLINE,
             sid="other-sid",
             organization=organization,
-            available_runtimes=["docker"],
         )
         service._emit_to_runner = AsyncMock()  # type: ignore[method-assign]
 
@@ -817,7 +816,6 @@ class TestReconcile:
                     {
                         "workspace_id": str(workspace.id),
                         "status": "running",
-                        "runtime_type": "docker",
                         "processes": [],
                     }
                 ],

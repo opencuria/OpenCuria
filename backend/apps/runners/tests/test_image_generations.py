@@ -15,17 +15,16 @@ def definition(runner):
     return ImageDefinition.objects.create(
         name="Generation recipe",
         organization=runner.organization,
-        runtime_type="docker",
         packages=["git"],
     )
 
 
-def request(definition, runner, user, rendered="FROM ubuntu:24.04\n"):
+def request(definition, runner, user, rendered="#!/bin/bash\napt-get install -y git\n"):
     return Generations.request(
         definition=definition,
         runner=runner,
         created_by=user,
-        rendered_input={"dockerfile_content": rendered},
+        rendered_input={"init_script": rendered},
     )
 
 
@@ -44,7 +43,7 @@ def test_new_generation_snapshot_failed_rebuild_and_pins(definition, runner, use
     job, first, task = request(definition, runner, user)
     assert first.revision.recipe["packages"] == ["git"]
     assert first.revision.rendered_input == {
-        "dockerfile_content": "FROM ubuntu:24.04\n"
+        "init_script": "#!/bin/bash\napt-get install -y git\n"
     }
     assert str(first.id) in first.runner_ref and str(job.id) not in first.runner_ref
     assert finish(job, first, task)
@@ -54,7 +53,9 @@ def test_new_generation_snapshot_failed_rebuild_and_pins(definition, runner, use
     definition.packages = ["curl"]
     definition.save()
     assert job.generations.count() == 1  # Editing does not build.
-    job, second, task2 = request(definition, runner, user, "FROM debian\n")
+    job, second, task2 = request(
+        definition, runner, user, "#!/bin/bash\napt-get install -y curl\n"
+    )
     assert first.id != second.id and first.revision_id != second.revision_id
     assert finish(job, second, task2, error="build failed")
     job.refresh_from_db()
@@ -130,7 +131,7 @@ def test_local_constraints_and_creator_preservation(definition, runner, user):
     with pytest.raises(IntegrityError), transaction.atomic():
         ImageInstance.objects.filter(id=image.id).update(size_bytes=-1)
     with pytest.raises(IntegrityError), transaction.atomic():
-        ImageInstance.objects.create(runner=runner, name="invalid docker capture")
+        ImageInstance.objects.create(runner=runner, name="invalid capture")
     from django.db import connection
 
     with pytest.raises(IntegrityError), transaction.atomic():
@@ -143,7 +144,10 @@ def test_local_constraints_and_creator_preservation(definition, runner, user):
 
 @pytest.mark.django_db
 def test_capture_no_fallback_wrong_workspace_and_no_revival(runner, user):
-    ws = Workspace.objects.create(runner=runner, created_by=user, runtime_type="qemu")
+    ws = Workspace.objects.create(
+        runner=runner,
+        created_by=user,
+    )
     task = Task.objects.create(
         runner=runner, workspace=ws, type="create_image_artifact"
     )
@@ -156,7 +160,6 @@ def test_capture_no_fallback_wrong_workspace_and_no_revival(runner, user):
     assert not Generations.capture_result(**kwargs)  # Never invent an image.
     image = ImageInstance.objects.create(
         runner=runner,
-        runtime_type="qemu",
         origin_workspace=ws,
         name="capture",
         status="capturing",
@@ -180,7 +183,6 @@ def test_deletion_callback_exact_attempt_target(runner, user):
     task = Task.objects.create(runner=runner, type="delete_image")
     image = ImageInstance.objects.create(
         runner=runner,
-        runtime_type="qemu",
         name="delete",
         status="deleting",
         deleting_task=task,

@@ -1,7 +1,7 @@
 """Abstract base class for runtime backends.
 
 The runtime backend is responsible for managing the lifecycle of isolated
-workspace environments (containers, VMs, etc.).  Concrete implementations
+QEMU/KVM virtual machines.  Concrete implementations
 must implement every abstract method defined here.
 """
 
@@ -20,20 +20,12 @@ from .managed_process import managed_close_argv, TOKEN_PROBE_CODE, validate_gues
 class WorkspaceConfig:
     """Parameters for creating a new workspace environment.
 
-    Fields are generic — each runtime interprets them appropriately:
-    - Docker: ``image`` is a Docker image tag, ``volumes`` maps volume
-      names to mount specs, ``network`` is a Docker network name.
-    - QEMU: ``image`` is a QCOW2 base image path, ``volumes`` is unused
-      (storage is managed via disk images), ``network`` is a libvirt
-      network name.
+    ``image`` is a QCOW2 base image path. Each VM gets its own libvirt network
+    and overlay disk.
     """
 
     workspace_id: str
     image: str
-    env_vars: dict[str, str]
-    volumes: dict[str, dict[str, str]] = field(default_factory=dict)
-    network: str | None = None
-    labels: dict[str, str] | None = None
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
     qemu_disk_size_gb: int | None = None
@@ -53,7 +45,7 @@ class RuntimeWorkspaceInfo:
     """Workspace information discovered from the runtime.
 
     Used by ``list_workspaces`` to reconstruct workspace state from
-    container/VM metadata and status without needing a local database.
+    libvirt metadata and status without needing a local database.
     """
 
     workspace_id: str
@@ -69,8 +61,8 @@ class ProcessHandle:
     Created by ``spawn_process``; drive I/O with ``process_read`` /
     ``process_write`` / ``process_close`` / ``process_wait``.
 
-    ``instance_id`` identifies the workspace instance (container ID,
-    domain name, …).  ``handle`` stores the runtime-specific I/O object.
+    ``instance_id`` identifies the libvirt domain. ``handle`` stores the
+    transport's I/O object.
     ``metadata`` holds runtime-specific data (exec id, pidfile, …).
     """
 
@@ -87,10 +79,8 @@ class PtyHandle:
     Created by ``exec_pty`` and passed to ``pty_read``/``pty_write``/
     ``pty_resize``/``pty_close``.
 
-    ``instance_id`` identifies the workspace instance (container ID,
-    domain name, …).  ``handle`` stores the runtime-specific I/O object
-    (Docker exec socket, asyncssh process, …).  ``metadata`` holds any
-    additional runtime-specific data.
+    ``instance_id`` identifies the libvirt domain. ``handle`` stores the
+    asyncssh process. ``metadata`` holds additional transport data.
     """
 
     instance_id: str
@@ -113,16 +103,8 @@ class ImageArtifactInfo:
 class RuntimeBackend(abc.ABC):
     """Abstract interface for workspace runtime management.
 
-    Implement this interface to swap Docker for another virtualisation
-    technology (QEMU/KVM, Firecracker, Kata Containers, …).
+    Keeps workspace operations independent of the QEMU/libvirt transport.
     """
-
-    # --- Runtime identity ----------------------------------------------------
-
-    @property
-    @abc.abstractmethod
-    def runtime_type(self) -> str:
-        """Return a short identifier for this runtime (e.g. ``"docker"``)."""
 
     # --- Lifecycle ------------------------------------------------------------
 
@@ -130,8 +112,7 @@ class RuntimeBackend(abc.ABC):
     async def create_workspace(self, config: WorkspaceConfig) -> str:
         """Create and start a new workspace environment.
 
-        Returns the runtime-specific identifier (e.g. Docker container ID,
-        libvirt domain name).
+        Returns the libvirt domain name.
         """
 
     @abc.abstractmethod
@@ -177,7 +158,7 @@ class RuntimeBackend(abc.ABC):
 
     async def inventory(self) -> RuntimeInventory:
         """Return a full physical graph or explicit incomplete inspection."""
-        return RuntimeInventory(self.runtime_type, errors=["Inventory unsupported"])
+        return RuntimeInventory(errors=["Inventory unsupported"])
 
     # --- Inspection -----------------------------------------------------------
 
@@ -233,11 +214,8 @@ class RuntimeBackend(abc.ABC):
 
     # Limits shared by all runtime implementations of the generic stream
     # transport (MCP stdio / workspace-local TCP relay).  Chunk sizes are
-    # bounded so one peer can never force unbounded buffering; frame
-    # sizes up to 16MiB are accepted (Docker may deliver large frames)
-    # and re-chunked losslessly into <=64KiB queue items by the pump.
+    # bounded so one peer can never force unbounded buffering.
     STREAM_CHUNK_SIZE = 64 * 1024
-    STREAM_MAX_FRAME_SIZE = 16 * 1024 * 1024
     STREAM_READ_TIMEOUT = 300.0
 
     @property
@@ -381,12 +359,8 @@ class RuntimeBackend(abc.ABC):
     async def pty_close(self, handle: PtyHandle) -> None:
         """Close the PTY and release resources."""
 
-    # --- Image artifacts (optional) ------------------------------------------
+    # --- Image artifacts -----------------------------------------------------
 
-    @property
-    def supports_image_artifacts(self) -> bool:
-        """Whether this runtime supports image artifact capture/clone operations."""
-        return False
 
     async def create_image_artifact(
         self, instance_id: str, artifact_name: str, *,

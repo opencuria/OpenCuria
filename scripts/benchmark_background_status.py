@@ -76,11 +76,11 @@ async def _run(args: argparse.Namespace, directory: str) -> dict[str, Any]:
     """Exercise the real Socket.IO handler and service heartbeat projection."""
     runtime = LocalRuntime(directory)
     settings = RunnerSettings(state_dir=directory, _env_file=None)
-    service = WorkspaceService({"docker": runtime}, settings)
+    service = WorkspaceService(runtime, settings)
     interface = WebSocketInterface(service, settings)
     workspace_id = uuid.UUID(int=1)
     service.registry._cache[workspace_id] = WorkspaceInfo(
-        workspace_id, "synthetic-instance", "running", runtime_type="docker"
+        workspace_id, "synthetic-instance", "running"
     )
     emitted: list[dict[str, Any]] = []
 

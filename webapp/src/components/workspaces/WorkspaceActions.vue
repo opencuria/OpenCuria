@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { WorkspaceStatus, RuntimeType } from '@/types'
+import { WorkspaceStatus } from '@/types'
 import type { Workspace } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Square, Play, Trash2, Camera, Loader2, RotateCcw } from '@lucide/vue'
@@ -56,7 +56,6 @@ const canRemove = computed(
 const canCaptureImage = computed(
   () =>
     !isRunnerOfflineState.value &&
-    props.workspace.runtime_type === RuntimeType.QEMU &&
     (props.workspace.status === WorkspaceStatus.RUNNING ||
       props.workspace.status === WorkspaceStatus.STOPPED),
 )

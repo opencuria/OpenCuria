@@ -51,7 +51,6 @@ const imageArtifact: ImageArtifact = {
   status: 'ready',
   artifact_kind: 'captured',
   source_runner_id: 'runner-1',
-  runtime_type: 'docker',
   source_runner_online: true,
   created_at: '',
   created_by_id: 1,

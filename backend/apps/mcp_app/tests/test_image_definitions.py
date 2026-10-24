@@ -52,7 +52,6 @@ def mcp_image_setup(db):
         status=RunnerStatus.ONLINE,
         sid="mcp-image-sid",
         organization=org,
-        available_runtimes=["docker"],
     )
     return {
         "org": org,
@@ -68,14 +67,12 @@ def test_mcp_list_image_definitions_excludes_deleted(mcp_image_setup):
         organization=mcp_image_setup["org"],
         created_by=mcp_image_setup["admin"],
         name="Visible MCP Recipe",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     ImageDefinition.objects.create(
         organization=mcp_image_setup["org"],
         created_by=mcp_image_setup["admin"],
         name="Deleted MCP Recipe",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
         status=ImageDefinition.Status.DELETED,
     )
@@ -101,7 +98,6 @@ def test_mcp_delete_image_definition_uses_orchestrated_delete(mcp_image_setup):
         organization=mcp_image_setup["org"],
         created_by=mcp_image_setup["admin"],
         name="MCP Delete Recipe",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
 
@@ -125,7 +121,6 @@ def test_mcp_delete_build_job_uses_orchestrated_delete(mcp_image_setup):
         organization=mcp_image_setup["org"],
         created_by=mcp_image_setup["admin"],
         name="MCP Build Delete Recipe",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     build = ImageBuildJob.objects.create(
@@ -176,7 +171,6 @@ def mcp_recipe(mcp_image_setup):
         organization=mcp_image_setup["org"],
         created_by=mcp_image_setup["admin"],
         name="MCP Recipe",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
 
@@ -195,7 +189,6 @@ def test_mcp_create_image_definition(mcp_image_setup):
     assert payload == {"id": str(created.id), "name": "MCP Python"}
     assert created.organization_id == mcp_image_setup["org"].id
     assert created.created_by_id == mcp_image_setup["admin"].id
-    assert created.runtime_type == "docker"
     assert created.base_distro == "ubuntu:22.04"
     assert created.packages == ["python3"]
     assert created.is_active is True
@@ -219,7 +212,7 @@ def test_mcp_create_image_definition_validates_input(mcp_image_setup, mcp_member
         _call_create_image_definition(
             admin_key,
             org_id,
-            {"name": "VM", "runtime_type": "qemu", "base_distro": "debian:12"},
+            {"name": "VM", "base_distro": "debian:12"},
         )
     ) == (
         "Error: QEMU image definitions currently require an ubuntu:<version> "
@@ -320,7 +313,6 @@ def test_mcp_update_image_definition(mcp_image_setup, mcp_recipe):
             org_id,
             {
                 "definition_id": str(mcp_recipe.id),
-                "runtime_type": "qemu",
                 "base_distro": "debian:12",
             },
         )
@@ -329,7 +321,6 @@ def test_mcp_update_image_definition(mcp_image_setup, mcp_recipe):
         "base distro"
     )
     mcp_recipe.refresh_from_db()
-    assert mcp_recipe.runtime_type == "docker"
 
 
 @pytest.mark.django_db
@@ -370,7 +361,7 @@ def test_mcp_list_build_jobs_payload(mcp_image_setup, mcp_recipe):
     assert payload[0]["status"] == "failed"
     assert payload[0]["build_log_size"] == 10
     assert "build_log" not in payload[0]
-    assert payload[0]["image_tag"] == ""
+    assert payload[0]["image_path"] == ""
 
 
 @pytest.mark.django_db
@@ -467,7 +458,6 @@ def test_mcp_dispatcher_runs_async_image_tools_on_its_own_loop(mcp_image_setup):
         organization=mcp_image_setup["org"],
         created_by=mcp_image_setup["admin"],
         name="MCP Dispatcher Recipe",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     build = ImageBuildJob.objects.create(

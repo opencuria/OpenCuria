@@ -62,7 +62,6 @@ def runner(db, api_token: str, organization: Organization) -> Runner:
         status=RunnerStatus.ONLINE,
         sid="test-sid-123",
         organization=organization,
-        available_runtimes=["docker", "qemu"],
     )
 
 
@@ -74,7 +73,6 @@ def offline_runner(db, organization: Organization) -> Runner:
         api_token_hash=hash_token("offline-token"),
         status=RunnerStatus.OFFLINE,
         organization=organization,
-        available_runtimes=["docker", "qemu"],
     )
 
 

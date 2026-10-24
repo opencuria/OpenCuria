@@ -128,7 +128,7 @@ Guests need Python 3.10+ (`python3`), `sh`, `bash`, `setsid` and the kernel/libc
 sandbox/publication support described in the [runner guide](../runner/README.md#pinned-external-runtimes).
 
 Live browser/QEMU verification has covered **x86_64 only**. aarch64 release bytes
-are pinned, but aarch64 runtime execution has not been verified. Docker/QEMU
+are pinned, but aarch64 runtime execution has not been verified. QEMU
 transport support does not imply every guest kernel permits native sandboxing.
 Usage comes from Codex token totals with resumed baselines subtracted. Displayed
 cost is **unknown (recorded as zero)**, not an invoice or a promise of free usage.

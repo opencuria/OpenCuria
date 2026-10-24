@@ -25,9 +25,8 @@ import {
 import CaptureTargetFields from '@/components/images/CaptureTargetFields.vue'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
-import { WorkspaceStatus, RuntimeType } from '@/types'
+import { WorkspaceStatus } from '@/types'
 import { NEW_IMAGE } from '@/lib/imageVersions'
-import { runnerSupportsRuntime } from '@/lib/runtimeSupport'
 
 const workspaceStore = useWorkspaceStore()
 const runnerStore = useRunnerStore()
@@ -42,14 +41,11 @@ const fields = ref<InstanceType<typeof CaptureTargetFields> | null>(null)
 
 const snappableWorkspaces = computed(() =>
   workspaceStore.workspaces.filter((w) => {
-    const runner = runnerStore.runnerById(w.runner_id)
     return (
-      w.runtime_type === RuntimeType.QEMU &&
       !w.intervention_required &&
       !workspaceStore.isWorkspaceTransitioning(w.id) &&
       (w.status === WorkspaceStatus.RUNNING || !w.credentials_present) &&
-      (w.status === WorkspaceStatus.RUNNING || w.status === WorkspaceStatus.STOPPED) &&
-      runnerSupportsRuntime(runner, RuntimeType.QEMU)
+      (w.status === WorkspaceStatus.RUNNING || w.status === WorkspaceStatus.STOPPED)
     )
   }),
 )
@@ -57,7 +53,6 @@ const snappableWorkspaces = computed(() =>
 const blockedByCredentials = computed(() =>
   workspaceStore.workspaces.some(
     (w) =>
-      w.runtime_type === RuntimeType.QEMU &&
       w.credentials_present &&
       (w.status === WorkspaceStatus.RUNNING || w.status === WorkspaceStatus.STOPPED),
   ),

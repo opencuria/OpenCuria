@@ -14,8 +14,8 @@ from django.utils import timezone
 
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.organizations.models import Membership, MembershipRole, Organization
-from apps.runners.enums import RunnerStatus, WorkspaceStatus
-from apps.runners.models import ImageDefinition, ImageInstance, Runner, ImageBuildJob, Workspace
+from apps.runners.enums import RunnerStatus
+from apps.runners.models import ImageDefinition, ImageInstance, Runner, ImageBuildJob
 from common.utils import generate_api_token, hash_token
 
 
@@ -54,14 +54,12 @@ def test_list_includes_global_and_org_image_definitions(client: Client):
         organization=None,
         created_by=admin,
         name="Global Base",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     local = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Local Base",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
 
@@ -102,7 +100,6 @@ def test_org_admin_can_duplicate_global_image_definition(client: Client):
         organization=None,
         created_by=admin,
         name="Global Python",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
         packages=["python3"],
         env_vars={"HELLO": "world"},
@@ -152,7 +149,6 @@ def test_foreign_org_cannot_list_runner_builds(client: Client):
         organization=owner_org,
         created_by=admin,
         name="Owner Definition",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     ImageBuildJob.objects.create(
@@ -195,7 +191,6 @@ def test_foreign_org_cannot_update_runner_build(client: Client):
         organization=owner_org,
         created_by=admin,
         name="Build Definition",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     ImageBuildJob.objects.create(
@@ -220,41 +215,6 @@ def test_foreign_org_cannot_update_runner_build(client: Client):
     assert response.json()["detail"] == "Runner image build not found"
 
 
-@pytest.mark.django_db
-def test_assign_runner_build_rejects_incompatible_runtime(client: Client):
-    user_model = get_user_model()
-    admin = user_model.objects.create_user(email="image-build-runtime@test.com", password="secret")
-    org = Organization.objects.create(name="Runtime Org", slug="runtime-org")
-    Membership.objects.create(user=admin, organization=org, role=MembershipRole.ADMIN)
-
-    runner = Runner.objects.create(
-        name="docker-only-runner",
-        api_token_hash=hash_token("docker-only-runner-token"),
-        status=RunnerStatus.ONLINE,
-        organization=org,
-        available_runtimes=["docker"],
-    )
-    definition = ImageDefinition.objects.create(
-        organization=org,
-        created_by=admin,
-        name="QEMU Definition",
-        runtime_type="qemu",
-        base_distro="ubuntu:24.04",
-    )
-
-    token = _create_api_key(
-        user=admin,
-        permissions=[APIKeyPermission.IMAGE_DEFINITIONS_MANAGE_RUNNERS.value],
-    )
-    response = client.post(
-        f"/api/v1/image-definitions/{definition.id}/runner-builds/",
-        data=json.dumps({"runner_id": str(runner.id), "activate": True}),
-        content_type="application/json",
-        **_auth_headers(token, str(org.id)),
-    )
-
-    assert response.status_code == 409
-    assert response.json()["detail"] == "Runner does not support runtime 'qemu'"
 
 
 @pytest.mark.django_db
@@ -269,13 +229,11 @@ def test_list_runner_builds_includes_image_artifact_id(client: Client):
         api_token_hash=hash_token("artifact-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["qemu"],
     )
     definition = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Artifact Definition",
-        runtime_type="qemu",
         base_distro="ubuntu:24.04",
     )
     build = ImageBuildJob.objects.create(
@@ -287,7 +245,6 @@ def test_list_runner_builds_includes_image_artifact_id(client: Client):
     artifact = ImageInstance.objects.create(
             is_legacy=True,
         runner=runner,
-        runtime_type="qemu",
         origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
         origin_definition=definition,
         created_by=admin,
@@ -325,13 +282,11 @@ def test_list_runner_builds_does_not_backfill_missing_built_artifact(client: Cli
         api_token_hash=hash_token("backfill-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["docker"],
     )
     definition = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Backfill Definition",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     build = ImageBuildJob.objects.create(
@@ -367,13 +322,11 @@ def test_create_runner_build_returns_pending_build_without_artifact(client: Clie
         api_token_hash=hash_token("create-build-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["qemu"],
     )
     definition = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Create Build Definition",
-        runtime_type="qemu",
         base_distro="ubuntu:24.04",
     )
     build = ImageBuildJob.objects.create(
@@ -422,13 +375,11 @@ def test_list_runner_builds_includes_global_definition_builds(client: Client):
         api_token_hash=hash_token("global-build-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["qemu"],
     )
     definition = ImageDefinition.objects.create(
         organization=None,
         created_by=admin,
         name="Global QEMU Definition",
-        runtime_type="qemu",
         base_distro="ubuntu:24.04",
     )
     build = ImageBuildJob.objects.create(
@@ -464,13 +415,11 @@ def test_rebuild_runner_build_allows_global_definition_builds(client: Client, mo
         api_token_hash=hash_token("global-rebuild-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["qemu"],
     )
     definition = ImageDefinition.objects.create(
         organization=None,
         created_by=admin,
         name="Global Rebuild Definition",
-        runtime_type="qemu",
         base_distro="ubuntu:24.04",
     )
     build = ImageBuildJob.objects.create(
@@ -517,27 +466,23 @@ def test_list_image_definitions_excludes_deleted_and_counts_builds(client: Clien
         api_token_hash=hash_token("summary-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["docker"],
     )
     second_runner = Runner.objects.create(
         name="summary-runner-2",
         api_token_hash=hash_token("summary-runner-token-2"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["docker"],
     )
     visible = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Visible Recipe",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Gone Recipe",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
         status=ImageDefinition.Status.DELETED,
     )
@@ -589,13 +534,11 @@ def test_list_runner_builds_excludes_deleted_jobs(client: Client):
         api_token_hash=hash_token("deleted-build-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["docker"],
     )
     definition = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Deleted Build Definition",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     ImageBuildJob.objects.create(
@@ -633,14 +576,12 @@ def test_activate_runner_build_uses_activate_action(client: Client, monkeypatch)
         api_token_hash=hash_token("activate-action-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["docker"],
         sid="activate-action-sid",
     )
     definition = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Activate Action Definition",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     build = ImageBuildJob.objects.create(
@@ -701,14 +642,12 @@ def test_rebuild_runner_build_uses_rebuild_action(client: Client, monkeypatch):
         api_token_hash=hash_token("rebuild-action-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["docker"],
         sid="rebuild-action-sid",
     )
     definition = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Rebuild Action Definition",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     build = ImageBuildJob.objects.create(
@@ -764,14 +703,12 @@ def test_runner_build_mutation_rejected_for_deleting_definition(client: Client):
         api_token_hash=hash_token("locked-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["docker"],
         sid="locked-sid",
     )
     definition = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Locked Definition",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
         status=ImageDefinition.Status.DELETING,
     )
@@ -810,13 +747,11 @@ def test_list_runner_builds_omits_full_log_but_reports_size(client: Client):
         api_token_hash=hash_token("log-size-runner-token"),
         status=RunnerStatus.ONLINE,
         organization=org,
-        available_runtimes=["docker"],
     )
     definition = ImageDefinition.objects.create(
         organization=org,
         created_by=admin,
         name="Log Size Definition",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     log_text = "x" * 5000 + "\n"
@@ -864,7 +799,6 @@ def test_handle_image_build_progress_appends_atomically_and_caps_log():
         organization=org,
         created_by=admin,
         name="Progress Definition",
-        runtime_type="docker",
         base_distro="ubuntu:24.04",
     )
     build = ImageBuildJob.objects.create(

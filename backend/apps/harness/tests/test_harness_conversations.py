@@ -86,7 +86,6 @@ def conv_setup(db):
         status=RunnerStatus.ONLINE,
         sid=f"conv-{uuid.uuid4().hex[:8]}",
         organization=org,
-        available_runtimes=["docker"],
     )
     owned = Workspace.objects.create(
         runner=runner,

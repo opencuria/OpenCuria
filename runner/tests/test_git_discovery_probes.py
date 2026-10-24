@@ -43,7 +43,6 @@ def _service(runtime: FakeGitRuntime) -> tuple[GitService, uuid.UUID]:
         workspace_id=workspace_id,
         instance_id="instance-1",
         status="running",
-        runtime_type="docker",
     )
     return GitService(lambda _: info, lambda _: runtime), workspace_id
 

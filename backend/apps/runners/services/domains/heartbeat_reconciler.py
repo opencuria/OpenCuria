@@ -202,7 +202,7 @@ class HeartbeatReconcilerMixin:
                 # Absence from a partial/failed scan proves nothing.
                 continue
             else:
-                # Map Docker container status to workspace status
+                # Map the observed VM status to workspace status
                 new_status = self._map_instance_status(runner_status)
                 if new_status and new_status != ws.status:
                     # Never promote CREATING → RUNNING via heartbeat.
@@ -385,16 +385,14 @@ class HeartbeatReconcilerMixin:
     def _map_instance_status(status: str) -> str | None:
         """Map a runtime instance status string to a WorkspaceStatus value.
 
-        Supports both Docker container states and QEMU/libvirt domain states.
+        Supports normalized QEMU/libvirt domain states.
         """
         mapping = {
-            # Docker states
             "running": WorkspaceStatus.RUNNING,
             "exited": WorkspaceStatus.STOPPED,
             "dead": WorkspaceStatus.FAILED,
             "removing": WorkspaceStatus.REMOVED,
             "created": WorkspaceStatus.CREATING,
-            # QEMU/libvirt states
             "stopped": WorkspaceStatus.STOPPED,
             "failed": WorkspaceStatus.FAILED,
             "removed": WorkspaceStatus.REMOVED,

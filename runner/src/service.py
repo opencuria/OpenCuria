@@ -35,16 +35,16 @@ logger = structlog.get_logger(__name__)
 
 
 class WorkspaceService:
-    """Wire canonical managers to one registry and shared runtime mapping."""
+    """Wire canonical managers to one registry and shared runtime."""
 
     def __init__(
         self,
-        runtimes: dict[str, RuntimeBackend],
+        runtime: RuntimeBackend,
         settings: RunnerSettings,
     ) -> None:
-        self._runtimes = runtimes
+        self._runtime = runtime
         self._settings = settings
-        self._registry = WorkspaceRegistry(runtimes, settings)
+        self._registry = WorkspaceRegistry(runtime, settings)
         get_cached = self._registry.get_cached
         get_runtime = self._registry.get_runtime
         self._exec_kernel = ExecKernel(
@@ -52,17 +52,16 @@ class WorkspaceService:
         )
         self._credentials_manager = CredentialManager()
         self._terminals_manager = TerminalManager(
-            runtimes,
+            runtime,
             get_cached,
             get_runtime,
             lambda workspace_id: self._registry._cache.pop(workspace_id, None),
             WORKSPACE_CREDENTIAL_ENV_FILE,
         )
         self._images = ImageManager(
-            runtimes,
+            runtime,
             get_cached,
             get_runtime,
-            self._registry.get_runtime_by_type,
             store_workspace=lambda info: self._registry._cache.__setitem__(
                 info.workspace_id, info
             ),
@@ -70,18 +69,18 @@ class WorkspaceService:
         )
         self._images.lifecycle_context = self._registry.lifecycle
         self._streams_manager = StreamManager(
-            runtimes, get_cached, get_runtime, sanitize_exec_workdir
+            runtime, get_cached, get_runtime, sanitize_exec_workdir
         )
         self._background = BackgroundProcessManager(
-            runtimes,
+            runtime,
             get_cached,
             get_runtime,
             sanitize_exec_workdir,
             WORKSPACE_CREDENTIAL_ENV_FILE,
         )
-        self._files_manager = FileManager(runtimes, get_cached, get_runtime)
+        self._files_manager = FileManager(runtime, get_cached, get_runtime)
         self._harness = HarnessExecService(
-            runtimes,
+            runtime,
             get_cached,
             get_runtime,
             sanitize_exec_workdir,
@@ -89,12 +88,12 @@ class WorkspaceService:
         )
         self._git = GitService(get_cached, get_runtime)
         self._desktop = DesktopManager(
-            runtimes, get_cached, get_runtime, self._harness.exec_harness_command
+            runtime, get_cached, get_runtime, self._harness.exec_harness_command
         )
         self._lifecycle = WorkspaceLifecycle(
             self._registry,
             settings,
-            runtimes,
+            runtime,
             self._credentials_manager,
             self._exec_kernel,
             self._background,
@@ -110,7 +109,7 @@ class WorkspaceService:
         self._registry.desktop_manager = self._desktop
         self.capture_fence = CaptureFence(self._registry)
         self._runtime_artifacts = RuntimeArtifactManager(
-            runtimes, get_cached, get_runtime, settings.state_dir
+            runtime, get_cached, get_runtime, settings.state_dir
         )
         for manager in (
             self._images,
@@ -207,23 +206,23 @@ class WorkspaceService:
         await self._registry.sync_from_runtime()
 
     async def inventory_for_runner(self) -> dict:
-        """Collect explicit completeness independently for each enabled runtime."""
+        """Collect the QEMU storage inventory with explicit completeness."""
         from dataclasses import asdict
 
         from .runtime.inventory import RuntimeInventory
 
         snapshots = []
-        for name, runtime in self._runtimes.items():
-            try:
-                scan = await runtime.inventory()
-            except Exception:
-                scan = RuntimeInventory(name, errors=["Runtime unavailable"])
-            if getattr(self, "_journal", None):
-                for resource in scan.resources:
-                    workspace_id = resource.metadata.get("workspace_id")
-                    if resource.kind == "workspace" and workspace_id:
-                        self._journal.observe_workspace(workspace_id, resource.state)
-            snapshots.append(asdict(scan))
+        runtime = self._runtime
+        try:
+            scan = await runtime.inventory()
+        except Exception:
+            scan = RuntimeInventory(errors=["Runtime unavailable"])
+        if getattr(self, "_journal", None):
+            for resource in scan.resources:
+                workspace_id = resource.metadata.get("workspace_id")
+                if resource.kind == "workspace" and workspace_id:
+                    self._journal.observe_workspace(workspace_id, resource.state)
+        snapshots.append(asdict(scan))
         return {
             "schema_version": 1,
             "runtimes": snapshots,
@@ -235,32 +234,32 @@ class WorkspaceService:
         from dataclasses import asdict
 
         matches = []
-        for name, runtime in self._runtimes.items():
-            inspect_source = getattr(runtime, "workspace_incarnation", None)
-            if inspect_source is not None:
-                observed = await inspect_source(workspace_id)
-                if observed:
-                    matches.append(observed)
-                continue
-            scan = asdict(await runtime.inventory())
-            if not scan["complete"]:
-                continue
-            for resource in scan["resources"]:
-                if (
-                    resource["kind"] == "workspace"
-                    and resource["metadata"].get("workspace_id") == workspace_id
-                ):
-                    matches.append(
-                        (
-                            {
-                                "runtime": name,
-                                "resource_id": resource["resource_id"],
-                                "dependencies": sorted(resource["dependencies"]),
-                                "metadata": resource["metadata"],
-                            },
-                            resource["state"],
-                        )
+        runtime = self._runtime
+        inspect_source = getattr(runtime, "workspace_incarnation", None)
+        if inspect_source is not None:
+            result = await inspect_source(workspace_id)
+            if result and getattr(self, "_journal", None):
+                self._journal.observe_workspace(workspace_id, result[1])
+            return result
+        scan = asdict(await runtime.inventory())
+        if not scan["complete"]:
+            return None
+        for resource in scan["resources"]:
+            if (
+                resource["kind"] == "workspace"
+                and resource["metadata"].get("workspace_id") == workspace_id
+            ):
+                matches.append(
+                    (
+                        {
+                            "runtime": "qemu",
+                            "resource_id": resource["resource_id"],
+                            "dependencies": sorted(resource["dependencies"]),
+                            "metadata": resource["metadata"],
+                        },
+                        resource["state"],
                     )
+                )
         result = matches[0] if len(matches) == 1 else None
         if result and getattr(self, "_journal", None):
             self._journal.observe_workspace(workspace_id, result[1])
@@ -302,27 +301,16 @@ class WorkspaceService:
                 continue
             for resource in scan["resources"]:
                 meta = resource["metadata"]
-                op = meta.get("operation_id") or meta.get("opencuria.operation-id")
-                image = meta.get("artifact_id") or meta.get(
-                    "opencuria.image-instance-id"
-                )
+                op = meta.get("operation_id")
+                image = meta.get("artifact_id")
                 if (
                     op != identity.get("operation_id")
                     or image != identity.get("image_instance_id")
                     or image != identity.get("target")
                 ):
                     continue
-                if (
-                    scan["runtime_type"] == "qemu"
-                    and identity.get("image_path")
-                    and meta.get("image_path") != identity["image_path"]
-                ):
-                    continue
-                if scan["runtime_type"] == "docker" and (
-                    resource["kind"] != "image"
-                    or identity.get("image_tag") != f"opencuria/generations:{image}"
-                    or meta.get("published_image_id") != resource["resource_id"]
-                    or meta.get("expected_image_tag") != identity.get("image_tag")
+                if (identity.get("image_path")) and (
+                    meta.get("image_path") != identity["image_path"]
                 ):
                     continue
                 failure = identity.get("failure_event")
@@ -330,12 +318,6 @@ class WorkspaceService:
                     return "image:built", {
                         **identity,
                         "image_path": meta.get("image_path", ""),
-                        "image_tag": identity.get("image_tag", ""),
-                        "image_id": (
-                            resource["resource_id"]
-                            if scan["runtime_type"] == "docker"
-                            else ""
-                        ),
                     }
                 if (
                     failure == "image_artifact:failed"
@@ -350,10 +332,6 @@ class WorkspaceService:
                     }
         return None
 
-    @property
-    def supported_runtimes(self) -> list[str]:
-        """Return the list of enabled runtime type names."""
-        return self._registry.supported_runtimes
 
     def workspace_exists(self, workspace_id: uuid.UUID) -> bool:
         """Return True when *workspace_id* is present in the cache."""
@@ -369,8 +347,6 @@ class WorkspaceService:
         files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
         workspace_id: uuid.UUID | None = None,
-        runtime_type: str = "docker",
-        image_tag: str | None = None,
         base_image_path: str | None = None,
     ) -> tuple[uuid.UUID, bool]:
         """Create a new workspace, inject credentials, and clone repos."""
@@ -383,8 +359,6 @@ class WorkspaceService:
             files=files,
             ssh_keys=ssh_keys,
             workspace_id=workspace_id,
-            runtime_type=runtime_type,
-            image_tag=image_tag,
             base_image_path=base_image_path,
         )
 

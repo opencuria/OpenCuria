@@ -29,10 +29,8 @@ import {
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
 import { useImageStore } from '@/stores/images'
-import { RuntimeType } from '@/types'
-import { filterRunnersByRuntime, runnerSupportsRuntime } from '@/lib/runtimeSupport'
 import { isDefinitionSelectableForWorkspace } from '@/components/images/imageDefinitionLifecycle'
-import { X, Camera } from '@lucide/vue'
+import { X } from '@lucide/vue'
 import type { ImageArtifact, RunnerImageBuild } from '@/types'
 
 type SelectableImageKind = 'definition' | 'captured'
@@ -41,7 +39,6 @@ interface SelectableImageOption {
   value: string
   kind: SelectableImageKind
   label: string
-  runtimeType: RuntimeType
   imageArtifact?: ImageArtifact
   capturedImageId?: string
   runnerBuilds?: RunnerImageBuild[]
@@ -75,7 +72,6 @@ const restoringDraftId = ref<string | null>(null)
 let preserveDraftOnClose = false
 let resetTimer: ReturnType<typeof setTimeout> | undefined
 const runnerId = ref('')
-const runtimeType = ref<string>(RuntimeType.QEMU)
 const qemuVcpus = ref(2)
 const qemuMemoryMb = ref(4096)
 const qemuDiskSizeGb = ref(50)
@@ -105,7 +101,6 @@ function restoreDraft(id: string): void {
   selectedPluginIds.value = [...fields.pluginIds]
   repos.value = [...(fields.repos ?? [])]
   runnerId.value = fields.runnerId ?? ''
-  runtimeType.value = fields.runtimeType ?? RuntimeType.QEMU
   qemuVcpus.value = fields.qemuVcpus ?? 2
   qemuMemoryMb.value = fields.qemuMemoryMb ?? 4096
   qemuDiskSizeGb.value = fields.qemuDiskSizeGb ?? 50
@@ -133,10 +128,7 @@ const imageOptions = computed(() => {
     const activeBuilds = (imageStore.runnerBuildsByDefinition[definition.id] || []).filter(
       (build) => {
         if (build.status !== 'active' || !build.image_artifact_id) return false
-        return runnerStore.onlineRunners.some(
-          (runner) =>
-            runner.id === build.runner_id && runnerSupportsRuntime(runner, definition.runtime_type),
-        )
+        return runnerStore.onlineRunners.some((runner) => runner.id === build.runner_id)
       },
     )
 
@@ -145,8 +137,7 @@ const imageOptions = computed(() => {
     definitionOptions.push({
       value: `definition:${definition.id}`,
       kind: 'definition',
-      label: `● ${definition.name} [${definition.runtime_type}]`,
-      runtimeType: definition.runtime_type === 'docker' ? RuntimeType.DOCKER : RuntimeType.QEMU,
+      label: `● ${definition.name}`,
       runnerBuilds: activeBuilds,
     })
   }
@@ -157,19 +148,12 @@ const imageOptions = computed(() => {
     const sourceRunner = artifact.source_runner_id
       ? runnerStore.runners.find((runner) => runner.id === artifact.source_runner_id)
       : null
-    if (
-      artifact.status !== 'ready' ||
-      !image.runner_online ||
-      !runnerSupportsRuntime(sourceRunner, artifact.runtime_type || RuntimeType.QEMU)
-    )
-      return []
+    if (artifact.status !== 'ready' || !image.runner_online || !sourceRunner) return []
     return [
       {
         value: `captured:${artifact.id}`,
         kind: 'captured' as const,
-        label: `○ ${image.name} · v${image.latest_version} [${artifact.runtime_type}]`,
-        runtimeType:
-          artifact.runtime_type === RuntimeType.DOCKER ? RuntimeType.DOCKER : RuntimeType.QEMU,
+        label: `○ ${image.name} · v${image.latest_version}`,
         imageArtifact: artifact,
         capturedImageId: image.id,
       },
@@ -228,8 +212,7 @@ const compatibleRunnerOptions = computed(() => {
     const runner = runnerStore.runners.find(
       (entry) => entry.id === option.imageArtifact?.source_runner_id,
     )
-    if (!runner || runner.status !== 'online' || !runnerSupportsRuntime(runner, option.runtimeType))
-      return []
+    if (!runner || runner.status !== 'online') return []
     return [{ value: runner.id, label: runner.name || runner.id.slice(0, 8) }]
   }
 
@@ -249,7 +232,6 @@ const selectedDefinitionArtifactId = computed<string | null>(
 )
 
 watch(selectedImageOption, (option, previousOption) => {
-  if (option && !restorationPending.value) runtimeType.value = option.runtimeType
   if (!restorationPending.value && previousOption && previousOption.value !== option?.value) {
     selectedCredentialIds.value = []
     selectedPluginIds.value = []
@@ -325,7 +307,7 @@ const advancedRunnerOptions = computed(() => {
     return compatibleRunnerOptions.value
   }
 
-  return filterRunnersByRuntime(runnerStore.onlineRunners, runtimeType.value).map((runner) => ({
+  return runnerStore.onlineRunners.map((runner) => ({
     value: runner.id,
     label: runner.name || runner.id.slice(0, 8),
   }))
@@ -360,9 +342,9 @@ const qemuLimits = computed(() => {
 })
 
 watch(
-  [() => open.value, runtimeType, runnerId, selectedImageValue],
+  [() => open.value, runnerId, selectedImageValue],
   () => {
-    if (!open.value || runtimeType.value !== RuntimeType.QEMU || isCapturedClone.value) return
+    if (!open.value || isCapturedClone.value) return
 
     const limits = qemuLimits.value
     const clampOrDefault = (value: number, min: number, max: number, fallback: number) => {
@@ -455,13 +437,10 @@ async function handleSubmit(): Promise<void> {
       plugin_ids: selectedPluginIds.value,
       runner_id: runnerId.value || null,
       image_id: resolvedImageId,
-      ...(runtimeType.value === RuntimeType.QEMU
-        ? {
-            qemu_vcpus: qemuVcpus.value,
-            qemu_memory_mb: qemuMemoryMb.value,
-            qemu_disk_size_gb: qemuDiskSizeGb.value,
-          }
-        : {}),
+
+      qemu_vcpus: qemuVcpus.value,
+      qemu_memory_mb: qemuMemoryMb.value,
+      qemu_disk_size_gb: qemuDiskSizeGb.value,
     })
     if (success) {
       const created = workspaceStore.workspaces.find((entry) => !beforeIds.has(entry.id))
@@ -492,7 +471,6 @@ function handleClose(): void {
     selectedCredentialIds.value = []
     selectedPluginIds.value = []
     runnerId.value = ''
-    runtimeType.value = RuntimeType.QEMU
     qemuVcpus.value = 2
     qemuMemoryMb.value = 4096
     qemuDiskSizeGb.value = 50
@@ -519,7 +497,6 @@ async function navigateToCredentials(serviceId?: string, reconnectId?: string): 
     pluginIds: [...selectedPluginIds.value],
     repos: [...repos.value],
     runnerId: runnerId.value,
-    runtimeType: runtimeType.value as 'docker' | 'qemu',
     qemuVcpus: qemuVcpus.value,
     qemuMemoryMb: qemuMemoryMb.value,
     qemuDiskSizeGb: qemuDiskSizeGb.value,
@@ -556,7 +533,7 @@ async function navigateToCredentials(serviceId?: string, reconnectId?: string): 
 }
 
 const resourceSelectionValid = computed(() => {
-  if (isCapturedClone.value || runtimeType.value !== RuntimeType.QEMU) return true
+  if (isCapturedClone.value) return true
   const limits = qemuLimits.value
   return (
     qemuVcpus.value >= limits.minVcpus &&
@@ -587,7 +564,7 @@ const isValid = computed(
       <DialogHeader>
         <DialogTitle>Create Workspace</DialogTitle>
         <DialogDescription>
-          Provision a new workspace container. Start a harness session to run the agent.
+          Provision a new workspace VM. Start a harness session to run the agent.
         </DialogDescription>
       </DialogHeader>
 
@@ -644,14 +621,6 @@ const isValid = computed(
             <p v-if="!selectedImageOption" class="text-xs text-destructive mt-1">
               No active organization or captured images are available.
             </p>
-            <p
-              v-if="isFromImage && !isCapturedClone"
-              class="text-xs text-muted-foreground mt-1 flex items-center gap-1"
-            >
-              <Camera :size="12" />
-              Runtime is locked by the selected image. An image selection is required to create a
-              workspace.
-            </p>
           </div>
 
           <WorkspacePluginCredentialSelection
@@ -704,8 +673,8 @@ const isValid = computed(
               v-if="isCapturedClone"
               class="rounded-md border border-border bg-muted/50 p-3 text-sm text-muted-foreground"
             >
-              Captured image clones keep runner, runtime and resources from the image. Advanced
-              options are disabled.
+              Captured image clones keep runner and resources from the image. Advanced options are
+              disabled.
             </div>
 
             <div v-else class="space-y-4">
@@ -728,16 +697,13 @@ const isValid = computed(
                 <p class="text-xs text-muted-foreground mt-1">
                   {{
                     isFromImage
-                      ? 'Only runners that have the selected image and support its runtime are available.'
-                      : 'Only online runners that support the selected runtime are available.'
+                      ? 'Only online runners with the selected image are available.'
+                      : 'Only online runners are available.'
                   }}
                 </p>
               </div>
 
-              <div
-                v-if="runtimeType === RuntimeType.QEMU"
-                class="space-y-3 rounded-md border border-border bg-muted/50 p-3"
-              >
+              <div class="space-y-3 rounded-md border border-border bg-muted/50 p-3">
                 <p class="text-sm font-medium text-foreground">QEMU resources</p>
 
                 <div>

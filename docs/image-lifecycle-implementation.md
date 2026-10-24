@@ -51,19 +51,13 @@ preserve runner bytes/journal before deploying both components together.
   to recreate under the same workspace id; resume of the prior guest is only the
   fallback when replacement is blocked or the version was deleted. Failed
   capture may resume only its previously running guest; unknown outcomes retain
-  fences. Docker capture remains unsupported (legacy captures remain readable).
+  fences.
   Reset and update reuse the same recreate path. Retention keeps Latest plus
   `Organization.image_versions_to_keep` newest ready versions; pinned unused
   versions stay until the last workspace is gone.
 - Ordinary QEMU removal checks the reverse graph before destroying its domain
-  and before unlinking its disk. Docker canonical workspace data volumes are
-  explicitly labelled at creation. Removal checks all stopped/running consumers
-  before container destruction, then confirms volume/network absence. A stable
-  workspace UUID supports retry after container loss. Unlabelled legacy volumes
-  require exact canonical container identity + `/workspace` mount proof; absent
-  legacy containers require operator review. Bind/shared/foreign volumes are
-  never unlinked. Network/volume failures propagate, never false success.
-- External guest/container stop is observation only: never auto-start it.
+  and before unlinking its disk.
+- External guest stop is observation only: never auto-start it.
   Interrupted create/build/capture is never blindly executed again. Retained
   fences require exact journal/runtime evidence and explicit operator action.
 
@@ -134,20 +128,15 @@ child now also closes its reserved image before the capture task exists.
 -> dict` aggregates dataclasses using `asdict`. `runner:inventory` payload:
 `{schema_version: 1, inventory_epoch: UUID string, inventory_sequence: integer,
 complete: boolean, runtimes: RuntimeInventory[]}`. Each runtime snapshot has
-`runtime_type`, UTC ISO `collected_at`, `complete`, `errors: string[]`,
+UTC ISO `collected_at`, `complete`, `errors: string[]`,
 `foreign_resource_count`, `filesystems`, `resources`. Filesystems expose path,
 capacity_bytes, used_bytes, available_bytes, independently of image accounting.
 Resources (`StorageResource`) have resource_id, kind, managed, aliases,
 dependencies (physical resource IDs), state, allocated_bytes, logical_bytes,
 virtual_bytes, shared_bytes, reclaimable_bytes, provenance and metadata.
-All five sizes default null; Docker logical image bytes overlap layers and must
-not be summed. Docker IDs are physical sha256 IDs, tag aliases are references;
-QEMU IDs are absolute physical paths, backing edges include captures and recursive
-external chains. Foreign domain/container references are read-only blockers;
-foreign unrelated Docker assets/cache are counted only. Build-cache ownership
-cannot be reliably proven from Docker's df API and is not asserted managed.
-Docker volume bytes may be unknown and unlabelled mounted volumes are read-only.
-A complete inventory means enumeration/inspection succeeded, not that every
+All five sizes default null. QEMU IDs are absolute physical paths; backing
+edges include captures and recursive external chains. Foreign domain references
+are read-only blockers. A complete inventory means enumeration/inspection succeeded, not that every
 resource is ready or cleanup-authorized. Manifest-less files remain unknown.
 
 `inventory:refresh` takes an optional ignored payload and emits a new full snapshot.
@@ -196,7 +185,6 @@ optimized immutable-file caching needs independent validation.
   expose physical_id, kind, managed, state, five nullable byte measurements,
   aliases, dependencies, image_id, provenance and workspace identity/owner/status/
   last_activity_at. Generations include assignment/current pointer and revision.
-  Docker logical/shared sizes overlap and must not be summed.
 - `POST /api/v1/runners/{runner_id}/storage/refresh/` returns 202 with requested,
   runner_id, requested_at. Coalesced durable request accepts offline runners;
   independent worker sends inventory:refresh with backoff on the current SID.
@@ -204,7 +192,7 @@ optimized immutable-file caching needs independent validation.
   `get_runner_storage` and `refresh_runner_storage` share StorageService and
   authorization. Unknown inventory sizes remain null; fresh managed matching
   physical observations update generation sizes.
-- Minor runner contract correction: Docker container and managed QEMU domain
+- Managed QEMU domain
   resources now include metadata.workspace_id, allowing actual workspace joins.
 
 ### Capture pipeline
@@ -219,7 +207,7 @@ user secrets. Known safe capture failure may resume an explicitly prior-running
 source; failed restart retains the successful capture. While capture owns the
 workspace, user stop/remove and all other live interactions are rejected and cannot
 suppress automatic restart. Active agents and pending credential synchronization
-must finish before capture is admitted. Docker capture remains rejected.
+must finish before capture is admitted.
 
 API migration: callers must stop sending `stop_and_restart`; it is removed from
 REST/MCP schemas. Capturing a running source now restarts it automatically, without
@@ -332,30 +320,6 @@ inspect returns summary plus `{evidence: {...}}`; disposition returns
 `{operation_id, reconciled}` / `{operation_id, previous_operation_id}` /
 `{operation_id, released, resources_preserved}`.
 
-## Docker publication and accounting
-
-Docker build labels are inherited by intermediate images: they identify managed
-build cache, **not** publication. Only the exact immutable
-`opencuria/generations:<generation UUID>` alias with generation/operation labels
-identifies a final image. After successful build and tag/physical-ID verification,
-the runner FULL-sync SQLite publication checkpoint retains the final physical ID.
-Existing `image:built` journal records also provide this binding. Removing the
-tag manually therefore does not make a published physical image disappear;
-foreign aliases remain deletion blockers. A contradictory final tag/physical
-checkpoint makes the scan incomplete rather than replacing identity. Backend
-joins require an exact target alias or physical publication binding, never labels
-alone, and reject multiple physical resources for a single generation.
-Interrupted builds are never proved by intermediate labels. Known intermediates
-remain visible as managed `build_cache` with overlapping logical bytes and no
-image FK; enumeration can be complete with cache present. No automatic cache or
-unknown-resource deletion is performed.
-
-Docker inspect logical Size and system-df SharedSize can use different engine
-accounting units. Raw df sizes remain source-labelled metadata; shared_bytes is
-null when it would exceed inspect logical bytes, rather than inventing a clamp.
-DockerRootDir filesystem capacity/available/used uses local statvfs only for a
-local Unix daemon and accessible directory; remote/inaccessible values are null.
-
 ## Verification and limitations
 
 Automated suites cover migrations, exact identities, stale/duplicate callbacks,
@@ -369,10 +333,8 @@ frontend chunk-size warnings are separate from correctness assertions.
 Host-crash/ENOSPC/Redis-outage production scenarios still require deliberate live
 evidence, not mocked tests.
 
-For this focused volume cleanup, test paths are
-`runner/tests/test_docker_workspace_storage.py`, `test_docker_runtime.py`,
-`test_storage_inventory.py` and `test_services_contract.py`. Actual test counts
-belong in the completion report/run artifacts rather than cumulative phase notes.
+Storage coverage lives in `runner/tests/test_storage_inventory.py` and
+`test_services_contract.py`. Test counts belong in run artifacts.
 No automatic pruning, generic garbage collector, journal reset, or broad foreign
 resource deletion exists. For uncertain ownership preserve resources and inspect.
 

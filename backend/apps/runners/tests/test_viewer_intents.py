@@ -151,7 +151,6 @@ async def test_desktop_events_preserve_process_aggregates(monkeypatch):
         workspace,
         6901,
         "ip",
-        "net",
         runner_id="runner",
         viewer=True,
         mcp=True,
@@ -162,7 +161,7 @@ async def test_desktop_events_preserve_process_aggregates(monkeypatch):
     assert service.get_desktop_info(workspace)["mcp"] is True
     assert emit.await_args.args[1]["holder_count"] == 3
     await service.handle_desktop_started(
-        None, workspace, 6901, "ip", "net", runner_id="runner"
+        None, workspace, 6901, "ip", runner_id="runner"
     )
     assert service.get_desktop_info(workspace)["mcp"] is True
     assert service.get_desktop_info(workspace)["generation"] == 4
@@ -187,7 +186,6 @@ async def test_desktop_events_preserve_process_aggregates(monkeypatch):
         workspace,
         6901,
         "ip",
-        "net",
         runner_id="runner",
         mcp=False,
         holder_count=0,

@@ -7,7 +7,6 @@ import type {
 
 export interface RunnerTopologyNode {
   key: string
-  runtime: string
   label: string
   column: number
   storage?: {
@@ -33,7 +32,7 @@ export interface RunnerTopology {
   nodes: RunnerTopologyNode[]
   edges: RunnerTopologyEdge[]
 }
-const keyFor = (runtime: string, kind: string, id: string) => JSON.stringify([runtime, kind, id])
+const keyFor = (kind: string, id: string) => JSON.stringify(['qemu', kind, id])
 function shortLabel(ref: string): string {
   const basename = ref.replace(/\/$/, '').split('/').pop() || ref
   const uuid = basename.match(/([0-9a-f]{8}-[0-9a-f-]{27})(?:\.|$)/i)
@@ -73,7 +72,7 @@ export function buildRunnerTopology(
 ): RunnerTopology {
   const nodes: RunnerTopologyNode[] = []
   const edges: RunnerTopologyEdge[] = []
-  // The caller owns runtime filtering; missing snapshots are not absent generations.
+  // Missing snapshots are not absent generations.
   const images = generations
   const edgeKeys = new Set<string>()
   function connect(from: string, to: string, kind: RunnerTopologyEdge['kind']) {
@@ -84,22 +83,21 @@ export function buildRunnerTopology(
     }
   }
   for (const runtime of runtimes) {
-    const type = runtime.runtime_type
     const lookup = new Map<string, RunnerTopologyNode>()
     for (const resource of runtime.resources) {
       if (lookup.has(resource.physical_id)) continue
-      const column = ['workspace', 'container'].includes(resource.kind)
-        ? 0
-        : ['image', 'build_cache'].includes(resource.kind) ||
-            (resource.image_id && !resource.workspace && !resource.dependencies.length)
-          ? 2
-          : 1
+      const column =
+        resource.kind === 'workspace'
+          ? 0
+          : resource.kind === 'image' ||
+              (resource.image_id && !resource.workspace && !resource.dependencies.length)
+            ? 2
+            : 1
       const node: RunnerTopologyNode = {
-        key: keyFor(type, 'physical', resource.physical_id),
-        runtime: type,
+        key: keyFor('physical', resource.physical_id),
         label: resource.workspace?.name
           ? column === 1
-            ? `${resource.workspace.name} · ${/(?:cloud[-_]?init|seed).*\.iso$/i.test(resource.physical_id.split('/').pop() || '') ? 'Boot seed' : resource.kind === 'volume' ? 'Workspace volume' : resource.kind === 'file' ? 'Workspace file' : 'Workspace disk'}`
+            ? `${resource.workspace.name} · ${/(?:cloud[-_]?init|seed).*\.iso$/i.test(resource.physical_id.split('/').pop() || '') ? 'Boot seed' : resource.kind === 'file' ? 'Workspace file' : 'Workspace disk'}`
             : resource.workspace.name
           : shortLabel(resource.physical_id),
         column,
@@ -116,13 +114,12 @@ export function buildRunnerTopology(
         aliases.set(alias, aliases.has(alias) && aliases.get(alias) !== node ? null : node)
       }
     for (const [alias, node] of aliases) if (node && !lookup.has(alias)) lookup.set(alias, node)
-    for (const node of nodes.filter((n) => n.runtime === type && n.resource)) {
+    for (const node of nodes.filter((n) => n.resource)) {
       for (const dependency of node.resource!.dependencies) {
         let target = lookup.get(dependency)
         if (!target) {
           target = {
-            key: keyFor(type, 'physical', dependency),
-            runtime: type,
+            key: keyFor('physical', dependency),
             label: `Unresolved · ${shortLabel(dependency)}`,
             column: 1,
             unresolved: true,
@@ -133,22 +130,17 @@ export function buildRunnerTopology(
         connect(node.key, target.key, 'physical')
       }
     }
-    for (const generation of images.filter(
-      (g) => g.runtime_type === type && g.status !== 'deleted',
-    )) {
+    for (const generation of images.filter((g) => g.status !== 'deleted')) {
       const candidates = nodes.filter(
         (n) =>
-          n.runtime === type &&
-          n.resource &&
-          !['workspace', 'container'].includes(n.resource.kind) &&
-          n.resource.image_id === generation.id,
+          n.resource && !(n.resource.kind === 'workspace') && n.resource.image_id === generation.id,
       )
       const reference = lookup.get(generation.runner_ref)
       const target =
         candidates[0] ||
         (reference?.resource &&
         (reference.resource.kind === 'image' ||
-          (type === 'qemu' && generation.is_legacy && reference.resource.kind === 'disk')) &&
+          (generation.is_legacy && reference.resource.kind === 'disk')) &&
         (!reference.resource.image_id || reference.resource.image_id === generation.id)
           ? reference
           : undefined)
@@ -160,13 +152,10 @@ export function buildRunnerTopology(
     }
   }
   for (const generation of images) {
-    const targets = nodes.filter(
-      (n) => n.generation?.id === generation.id && n.runtime === generation.runtime_type,
-    )
+    const targets = nodes.filter((n) => n.generation?.id === generation.id)
     if (!targets.length) {
       const node = {
-        key: keyFor(generation.runtime_type, 'generation', generation.id),
-        runtime: generation.runtime_type,
+        key: keyFor('generation', generation.id),
         label: generation.name,
         column: 2,
         generation,
@@ -177,13 +166,10 @@ export function buildRunnerTopology(
     // Tombstones are isolated historical records, never evidence of current dependencies.
     if (generation.status === 'deleted') continue
     for (const workspace of generation.dependencies) {
-      let consumers = nodes.filter(
-        (n) => n.runtime === generation.runtime_type && n.workspace?.id === workspace.id,
-      )
+      let consumers = nodes.filter((n) => n.workspace?.id === workspace.id)
       if (!consumers.length) {
         const node = {
-          key: keyFor(generation.runtime_type, 'workspace', workspace.id),
-          runtime: generation.runtime_type,
+          key: keyFor('workspace', workspace.id),
           label: workspace.name,
           column: 0,
           workspace,
@@ -230,19 +216,18 @@ export function projectRunnerTopology(graph: RunnerTopology): RunnerTopology {
     if (edge.kind !== 'physical') continue
     const from = byKey.get(edge.from)
     const to = byKey.get(edge.to)
-    if (!from || !to || from.runtime !== to.runtime) continue
+    if (!from || !to) continue
     incoming.set(edge.to, [...(incoming.get(edge.to) ?? []), edge.from])
   }
-  const isDomain = (node: RunnerTopologyNode) =>
-    ['workspace', 'container'].includes(node.resource?.kind ?? '')
+  const isDomain = (node: RunnerTopologyNode) => node.resource?.kind === 'workspace'
   const isImage = (node: RunnerTopologyNode) =>
     !!node.generation ||
     (!isDomain(node) && !!node.resource?.image_id) ||
     node.resource?.kind === 'image'
-  const identity = (node: Pick<RunnerTopologyNode, 'key' | 'runtime' | 'resource'>) => {
+  const identity = (node: Pick<RunnerTopologyNode, 'key' | 'resource'>) => {
     const resource = node.resource
     return resource?.file_identity && resource.filesystem_id
-      ? JSON.stringify([node.runtime, resource.filesystem_id, resource.file_identity])
+      ? JSON.stringify([resource.filesystem_id, resource.file_identity])
       : node.key
   }
   // Hardlink aliases share ownership evidence even without physical dependency
@@ -263,9 +248,7 @@ export function projectRunnerTopology(graph: RunnerTopology): RunnerTopology {
       isImage(node) ||
       node.unresolved ||
       node.resource?.kind === 'foreign_reference' ||
-      (!node.workspace &&
-        (['workspace', 'container'].includes(node.resource?.kind ?? '') ||
-          !incoming.get(node.key)?.length))
+      (!node.workspace && (node.resource?.kind === 'workspace' || !incoming.get(node.key)?.length))
     )
       foreign.add(node.key)
   }
@@ -298,7 +281,7 @@ export function projectRunnerTopology(graph: RunnerTopology): RunnerTopology {
   const workspaceRanks = new Map<string, number>()
   for (const node of graph.nodes) {
     if (!node.workspace) continue
-    const key = keyFor(node.runtime, 'workspace', node.workspace.id)
+    const key = keyFor('workspace', node.workspace.id)
     const rank = isDomain(node) ? 2 : !node.resource ? 1 : 0
     const existing = workspaces.get(key)
     if (existing && rank > workspaceRanks.get(key)!) {
@@ -309,7 +292,6 @@ export function projectRunnerTopology(graph: RunnerTopology): RunnerTopology {
     if (!existing)
       workspaces.set(key, {
         key,
-        runtime: node.runtime,
         label: node.workspace.name,
         column: 0,
         workspace: node.workspace,
@@ -329,15 +311,14 @@ export function projectRunnerTopology(graph: RunnerTopology): RunnerTopology {
     const own = owners.get(node.key)!
     const owner = [...own][0]
     const exclusive = own.size === 1 && !foreign.has(node.key) && !isImage(node)
-    const workspace = owner ? workspaces.get(keyFor(node.runtime, 'workspace', owner)) : undefined
+    const workspace = owner ? workspaces.get(keyFor('workspace', owner)) : undefined
     if (node.generation) {
-      key = keyFor(node.runtime, 'generation', node.generation.id)
+      key = keyFor('generation', node.generation.id)
       nodes.push({ ...node, key })
     } else if (
       workspace &&
       exclusive &&
-      (!node.resource ||
-        ['workspace', 'container', 'disk', 'file', 'volume'].includes(node.resource.kind))
+      (!node.resource || ['workspace', 'disk', 'file'].includes(node.resource.kind))
     ) {
       key = workspace.key
       if (node.resource) {
@@ -357,8 +338,7 @@ export function projectRunnerTopology(graph: RunnerTopology): RunnerTopology {
     const members = new Map<string, StorageResource[]>()
     for (const resource of storage.resources) {
       const id = identity({
-        key: keyFor(workspace.runtime, 'physical', resource.physical_id),
-        runtime: workspace.runtime,
+        key: keyFor('physical', resource.physical_id),
         resource,
       })
       members.set(id, [...(members.get(id) ?? []), resource])
@@ -436,12 +416,7 @@ export function orderTopologyNodes(
 ): RunnerTopologyNode[] {
   const consumers = [...nodes]
     .filter((node) => node.column === 0)
-    .sort(
-      (a, b) =>
-        a.runtime.localeCompare(b.runtime) ||
-        a.label.localeCompare(b.label) ||
-        a.key.localeCompare(b.key),
-    )
+    .sort((a, b) => a.label.localeCompare(b.label) || a.key.localeCompare(b.key))
   const ranks = new Map(consumers.map((node, index) => [node.key, index]))
   const incoming = new Map<string, string[]>()
   for (const edge of edges) incoming.set(edge.to, [...(incoming.get(edge.to) ?? []), edge.from])
@@ -467,7 +442,6 @@ export function orderTopologyNodes(
   }
   return [...nodes].sort(
     (a, b) =>
-      a.runtime.localeCompare(b.runtime) ||
       a.column - b.column ||
       anchors.get(a.key)! - anchors.get(b.key)! ||
       a.label.localeCompare(b.label) ||

@@ -23,8 +23,6 @@ from common.utils import hash_token
 class _WorkspaceService:
     """Minimal runner service for the WebSocket handler, no guest or network."""
 
-    supported_runtimes: list[str] = []
-
     def __init__(self) -> None:
         self.ensure_runtime_artifact = AsyncMock(
             return_value={
@@ -86,7 +84,6 @@ def backend_sio_artifact_handler(db, monkeypatch: pytest.MonkeyPatch):
         status=RunnerStatus.ONLINE,
         sid="artifact-rpc-sid",
         organization=organization,
-        available_runtimes=["docker"],
     )
     workspace = Workspace.objects.create(
         runner=runner,

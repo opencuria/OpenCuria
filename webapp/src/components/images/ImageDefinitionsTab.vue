@@ -28,7 +28,6 @@ import {
 } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
 import { ApiRequestError, get } from '@/services/api'
-import { filterRunnersByRuntime } from '@/lib/runtimeSupport'
 import ImageDeletionDialog from './ImageDeletionDialog.vue'
 import type { DeletionTarget } from '@/types/runnerStorage'
 const deletionTarget = ref<DeletionTarget | null>(null)
@@ -226,10 +225,6 @@ function getBuild(definitionId: string, runnerId: string): RunnerImageBuild | nu
   return buildsByDefinition.value[definitionId]?.find((b) => b.runner_id === runnerId) ?? null
 }
 
-function compatibleRunners(definition: ImageDefinition): Runner[] {
-  return filterRunnersByRuntime(runners.value, definition.runtime_type)
-}
-
 function isRunnerOnline(runner: Runner): boolean {
   return runner.status === RunnerStatus.ONLINE
 }
@@ -363,12 +358,6 @@ async function onExpandChange(definitionId: string, open: boolean): Promise<void
   ensureRefresh()
 }
 
-function formatRuntimeType(runtime: string): string {
-  if (runtime === 'qemu') return 'QEMU'
-  if (!runtime) return runtime
-  return runtime.charAt(0).toUpperCase() + runtime.slice(1)
-}
-
 function definitionKindLabel(definition: ImageDefinition): string {
   return definition.is_standard ? 'Standard' : 'Custom'
 }
@@ -454,7 +443,6 @@ onUnmounted(() => {
             <div class="min-w-0 space-y-1">
               <div class="flex flex-wrap items-center gap-2">
                 <span class="text-sm font-medium text-foreground">{{ definition.name }}</span>
-                <Badge variant="default">{{ formatRuntimeType(definition.runtime_type) }}</Badge>
                 <Badge variant="secondary">{{ definitionKindLabel(definition) }}</Badge>
                 <Badge v-if="definition.status === 'deactivated'" variant="outline">
                   {{ definitionStatusLabel(definition.status) }}
@@ -544,7 +532,7 @@ onUnmounted(() => {
                     </tr>
                   </thead>
                   <tbody class="divide-y divide-border">
-                    <tr v-for="runner in compatibleRunners(definition)" :key="runner.id">
+                    <tr v-for="runner in runners" :key="runner.id">
                       <td class="py-2 pr-3">
                         <div class="flex items-center gap-2">
                           <span>{{ runner.name || runner.id.slice(0, 8) }}</span>
@@ -647,7 +635,7 @@ onUnmounted(() => {
                       </td>
                     </tr>
                     <tr
-                      v-for="runner in compatibleRunners(definition).filter(
+                      v-for="runner in runners.filter(
                         (r) => buildVersions(definition.id, r.id).length,
                       )"
                       :key="`${runner.id}-versions`"
@@ -666,12 +654,8 @@ onUnmounted(() => {
                   </tbody>
                 </table>
               </div>
-              <p
-                v-if="compatibleRunners(definition).length === 0"
-                class="mt-3 text-xs text-muted-foreground"
-              >
-                No runners in this organization currently support the
-                {{ formatRuntimeType(definition.runtime_type) }} runtime.
+              <p v-if="runners.length === 0" class="mt-3 text-xs text-muted-foreground">
+                No runners are registered in this organization.
               </p>
               <p
                 v-else-if="!isDefinitionLocked(definition.status)"

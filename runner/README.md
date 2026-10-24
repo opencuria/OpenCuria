@@ -1,9 +1,9 @@
 # Runner
 
-The runner executes Docker/QEMU workspaces and exposes lifecycle, execution,
+The runner executes QEMU/KVM workspaces and exposes lifecycle, execution,
 files, terminal, desktop, and git interfaces. Agent and plugin policy belongs to
 the backend. See the root [distributed setup](../README.md#-distributed-setup)
-for Docker and native QEMU installation, or [source setup](../README.md)
+for native Linux installation, or [source setup](../README.md)
 for local development.
 
 ## Operations

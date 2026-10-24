@@ -6,7 +6,7 @@ Run from the repository root (or runner venv) with
 both the real runner service and its existing ``FakeGitRuntime`` test helper.
 All Git work is local; a temporary HOME and disabled system/global Git config
 keep user configuration out of the measurement. Delay is simulated per
-runtime call, not a Docker/SSH measurement.
+runtime call, not a QEMU/SSH measurement.
 """
 
 from __future__ import annotations
@@ -144,7 +144,7 @@ async def _measure_case(
         with tempfile.TemporaryDirectory(prefix="oc-git-discovery-state-") as state:
             runtime = _DelayedFakeRuntime(tests, root, delay_ms / 1000)
             service = WorkspaceService(
-                runtimes={"docker": runtime}, settings=RunnerSettings(state_dir=state)
+                runtime=runtime, settings=RunnerSettings(state_dir=state)
             )
             workspace_id = uuid.uuid5(
                 uuid.NAMESPACE_URL, f"opencuria-git-discovery/{repo_count}"
@@ -153,7 +153,6 @@ async def _measure_case(
                 workspace_id=workspace_id,
                 instance_id="instance-1",
                 status="running",
-                runtime_type="docker",
             )
 
             elapsed: list[float] = []
@@ -246,7 +245,7 @@ async def _run(args: argparse.Namespace, tests: Any) -> dict[str, Any]:
         "notes": [
             "Real local Git fixtures; test fake maps /workspace and runs local Git subprocesses.",
             "No network, provider, external service, or user Git config is used.",
-            "Delay is simulated asyncio sleep, not Docker/SSH latency.",
+            "Delay is simulated asyncio sleep, not QEMU/SSH latency.",
             "No alternate subprocess runtime: find/realpath are emulated by FakeGitRuntime.",
             "Digest covers canonical response JSON; raw response and command text are omitted.",
             "Runtime counts are outside timing; optional allocation tracing is a separate probe.",

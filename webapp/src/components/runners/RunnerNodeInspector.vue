@@ -65,7 +65,7 @@ function openWorkspace() {
         <h4 class="truncate text-sm font-semibold">{{ node.label }}</h4>
         <div class="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
           <span
-            >{{ node.runtime?.toUpperCase() }} ·
+            >
             {{ resource?.kind || (workspace ? 'workspace' : 'image') }}</span
           >
           <Badge v-if="image" variant="secondary">{{ generationLabel(image) }}</Badge>
@@ -126,7 +126,7 @@ function openWorkspace() {
             </dd>
           </div>
         </template>
-        <template v-else-if="resource && !['workspace', 'container'].includes(resource.kind)">
+        <template v-else-if="resource && resource.kind !== 'workspace'">
           <div
             v-for="(value, label) in {
               Allocated: resource.allocated_bytes,

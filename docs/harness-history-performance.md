@@ -15,7 +15,6 @@ by measured impact, frequency, evidence, implementation risk and architectural f
 | Rank | Candidate | Evidence / impact | Risk |
 | --- | --- | --- | --- |
 | 1 | Backend history reconstruction | Every native follow-up; 50 assistant turns produced 101 queries, or 56 even with only five retained turns | Moderate: checkpoint selection, replay order, memory |
-| 2 | Runner Docker observations | Actual Docker SDK with intercepted low-level API: seven workspace identity lookups made 84 API calls / 49 container inspections; one inventory needed 12 calls / seven inspections | Moderate: journal proof completeness and concurrency |
 | 3 | Backend plugin runtime snapshot | Real SQLite runtime/repositories: 1/5/20 effective plugins made 6/18/63 queries; p50 3.887/10.598/36.539 ms | Low, but smaller typical plugin counts |
 | 4 | Mobile streaming snapshot identity | Every publish clones sessions; changed row props invalidate historical memoized rows | Immutable ownership and device verification |
 | 5 | Shared Agent-S projection | Existing helper benchmark: 100/250/500/1,000 synthetic plans took about 0.44/2.38/9.39/43.64 ms | Legacy status semantics; less frequent large histories |

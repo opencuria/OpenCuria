@@ -53,7 +53,6 @@ function runningWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     status: WorkspaceStatus.RUNNING,
     runner_online: true,
     active_operation: null,
-    runtime_type: 'docker',
     qemu_vcpus: null,
     qemu_memory_mb: null,
     qemu_disk_size_gb: null,

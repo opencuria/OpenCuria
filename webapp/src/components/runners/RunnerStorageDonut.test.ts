@@ -45,7 +45,6 @@ const file = (
 function fixture(): StorageRuntime[] {
   return [
     {
-      runtime_type: 'qemu',
       fresh: true,
       snapshot_id: 1,
       collected_at: null,
@@ -203,7 +202,7 @@ describe('RunnerStorageDonut', () => {
       id: 'missing',
       name: 'Missing image',
       owner_label: 'Owner',
-      runtime_type: 'qemu',
+
       definition_id: null,
       definition_name: null,
       build_job_id: null,

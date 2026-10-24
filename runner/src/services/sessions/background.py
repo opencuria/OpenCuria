@@ -91,14 +91,14 @@ class BackgroundProcessManager:
 
     def __init__(
         self,
-        runtimes: dict[str, RuntimeBackend] | None = None,
+        runtime: RuntimeBackend | None = None,
         get_cached: Callable[[uuid.UUID], WorkspaceInfo] | None = None,
         get_runtime: Callable[[uuid.UUID], RuntimeBackend] | None = None,
         sanitize_exec_workdir: Callable[[str], str] | None = None,
         credential_env_file: str = _CREDENTIAL_ENV_FILE,
     ) -> None:
         self.capture_fence: CaptureFence | None = None
-        self._runtimes = runtimes if runtimes is not None else {}
+        self._runtime = runtime
         self._get_cached = get_cached
         self._get_runtime = get_runtime
         self._sanitize_exec_workdir = (

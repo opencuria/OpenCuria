@@ -17,7 +17,6 @@ from django.utils import timezone
 from .enums import (
     ProcessStatus,
     RunnerStatus,
-    RuntimeType,
     TaskStatus,
     TaskType,
     WorkspaceOperation,
@@ -27,7 +26,7 @@ from .enums import (
 
 class Runner(models.Model):
     """
-    A registered runner instance that manages workspace containers.
+    A registered runner instance that manages workspace VMs.
 
     Runners connect via WebSocket and authenticate with an API token.
     The backend tracks their connection state and capabilities.
@@ -39,11 +38,6 @@ class Runner(models.Model):
         max_length=64,
         unique=True,
         help_text="SHA-256 hash of the runner's API token.",
-    )
-    available_runtimes = models.JSONField(
-        default=list,
-        blank=True,
-        help_text="List of runtime types this runner supports (e.g. ['docker', 'qemu']).",
     )
     qemu_min_vcpus = models.PositiveSmallIntegerField(default=1)
     qemu_max_vcpus = models.PositiveSmallIntegerField(default=8)
@@ -110,7 +104,7 @@ class Runner(models.Model):
 
 class Workspace(models.Model):
     """
-    A workspace managed by a runner — maps to a Docker container or QEMU VM.
+    A workspace managed by a runner — maps to a QEMU/KVM VM.
 
     The backend is the source of truth for workspace state.
     """
@@ -120,12 +114,6 @@ class Workspace(models.Model):
         Runner,
         on_delete=models.CASCADE,
         related_name="workspaces",
-    )
-    runtime_type = models.CharField(
-        max_length=20,
-        choices=RuntimeType.choices,
-        default=RuntimeType.DOCKER,
-        help_text="Virtualisation backend: 'docker' or 'qemu'.",
     )
     status = models.CharField(
         max_length=20,
@@ -483,15 +471,9 @@ class ImageDefinition(models.Model):
     )
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True, default="")
-    runtime_type = models.CharField(
-        max_length=20,
-        choices=RuntimeType.choices,
-        default=RuntimeType.DOCKER,
-    )
     base_distro = models.CharField(max_length=255, default="ubuntu:22.04")
     packages = models.JSONField(default=list, blank=True)
     env_vars = models.JSONField(default=dict, blank=True)
-    custom_dockerfile = models.TextField(blank=True, default="")
     custom_init_script = models.TextField(blank=True, default="")
     status = models.CharField(
         max_length=20,
@@ -545,11 +527,8 @@ class ImageDefinition(models.Model):
 
     def __str__(self) -> str:
         if self.organization_id:
-            return (
-                f"ImageDefinition({self.name}, runtime={self.runtime_type}, "
-                f"org={self.organization_id})"
-            )
-        return f"ImageDefinition({self.name}, runtime={self.runtime_type})"
+            return f"ImageDefinition({self.name}, org={self.organization_id})"
+        return f"ImageDefinition({self.name})"
 
 
 class ImageRevision(models.Model):
@@ -738,11 +717,6 @@ class ImageInstance(models.Model):
         on_delete=models.CASCADE,
         related_name="image_instances",
     )
-    runtime_type = models.CharField(
-        max_length=20,
-        choices=RuntimeType.choices,
-        default=RuntimeType.DOCKER,
-    )
     origin_type = models.CharField(
         max_length=32,
         choices=OriginType.choices,
@@ -822,10 +796,7 @@ class ImageInstance(models.Model):
         max_length=512,
         blank=True,
         default="",
-        help_text=(
-            "Concrete runtime reference on the runner, e.g. a Docker image tag "
-            "or QCOW2 path."
-        ),
+        help_text=("QCOW2 image reference on the runner."),
     )
     name = models.CharField(
         max_length=255,
@@ -926,7 +897,6 @@ class ImageInstance(models.Model):
                         captured_image__isnull=False,
                         generation__gte=1,
                         generation__isnull=False,
-                        runtime_type="qemu",
                     )
                 ),
                 name="image_origin_valid",
@@ -938,7 +908,6 @@ class ImageInstance(models.Model):
         if not self._state.adding:
             identity_fields = (
                 "runner_id",
-                "runtime_type",
                 "origin_type",
                 "origin_definition_id",
                 "build_job_id",
@@ -1009,7 +978,6 @@ class InventoryRuntime(models.Model):
     snapshot = models.ForeignKey(
         InventorySnapshot, on_delete=models.CASCADE, related_name="runtimes"
     )
-    runtime_type = models.CharField(max_length=20)
     collected_at = models.DateTimeField()
     complete = models.BooleanField(default=False)
     errors = models.JSONField(default=list)
@@ -1018,9 +986,7 @@ class InventoryRuntime(models.Model):
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(
-                fields=["snapshot", "runtime_type"], name="inventory_unique_runtime"
-            )
+            models.UniqueConstraint(fields=["snapshot"], name="inventory_unique_scan")
         ]
 
 

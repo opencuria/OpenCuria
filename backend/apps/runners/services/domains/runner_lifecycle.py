@@ -16,7 +16,7 @@ from django.utils import timezone
 from common.exceptions import AuthenticationError
 from common.utils import generate_api_token, hash_token
 
-from ...enums import RunnerStatus, RuntimeType
+from ...enums import RunnerStatus
 from ...exceptions import RunnerNotFoundError, WorkspaceNotFoundError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
@@ -55,7 +55,6 @@ class RunnerLifecycleMixin:
         runner: "Runner",
         *,
         sid: str,
-        available_runtimes: list[str] | None = None,
         desktop_epoch: str | None = None,
     ) -> "Runner":
         """
@@ -64,12 +63,10 @@ class RunnerLifecycleMixin:
         Args:
             runner: The authenticated Runner instance.
             sid: Socket.IO session ID for targeted messaging.
-            available_runtimes: List of runtime types the runner supports.
         """
         runner = self.runners.set_online(
             runner,
             sid=sid,
-            available_runtimes=available_runtimes or ["docker"],
         )
         self._set_runner_desktop_epoch(str(runner.id), desktop_epoch)
         logger.info(
@@ -161,10 +158,6 @@ class RunnerLifecycleMixin:
         updated_fields = dict(fields)
         if not updated_fields:
             return runner
-        self._ensure_runner_supports_runtime(
-            runner=runner,
-            runtime_type=RuntimeType.QEMU,
-        )
         for key, value in updated_fields.items():
             setattr(runner, key, value)
         self._validate_runner_qemu_limits(runner)

@@ -52,7 +52,7 @@ def coordinated(method: Method) -> Method:
 class WorkspaceLifecycle:
     """Sole orchestrator of workspace lifecycle transitions.
 
-    Dependencies are the registry, runtime mapping, and canonical managers
+    Dependencies are the registry, runtime, and canonical managers
     used to carry out each lifecycle transition.
     """
 
@@ -60,7 +60,7 @@ class WorkspaceLifecycle:
         self,
         registry: WorkspaceRegistry,
         settings: Any | None = None,
-        runtimes: dict[str, RuntimeBackend] | None = None,
+        runtime: RuntimeBackend | None = None,
         credentials: Any | None = None,
         exec_kernel: Any | None = None,
         background: Any | None = None,
@@ -72,7 +72,7 @@ class WorkspaceLifecycle:
         self.scrub_proof_hook = None
         self._registry = registry
         self._settings = settings
-        self._runtimes = runtimes if runtimes is not None else {}
+        self._runtime = runtime
         self._credentials = credentials
         self._exec_kernel = exec_kernel
         self._background = background
@@ -88,7 +88,7 @@ class WorkspaceLifecycle:
     ) -> None:
         """Publish successful physical disposal before registry metadata disappears."""
         evidence = WorkspaceEndedEvidence(
-            info.workspace_id, info.instance_id, info.runtime_type, operation
+            info.workspace_id, info.instance_id, operation
         )
         confirm = getattr(self._streams, "confirm_workspace_ended", None)
         if confirm is None:
@@ -99,7 +99,7 @@ class WorkspaceLifecycle:
         if result is not True:
             raise RuntimeError("Managed stream physical disposal confirmation failed")
         await self._desktop.workspace_ended(
-            info.workspace_id, info.instance_id, info.runtime_type, evidence
+            info.workspace_id, info.instance_id, evidence
         )
 
     async def _close_managed_before_end(
@@ -157,8 +157,6 @@ class WorkspaceLifecycle:
         files: list[dict[str, Any]] | None = None,
         ssh_keys: list[str] | None = None,
         workspace_id: uuid.UUID | None = None,
-        runtime_type: str = "docker",
-        image_tag: str | None = None,
         base_image_path: str | None = None,
     ) -> tuple[uuid.UUID, bool]:
         """Create a new workspace, inject credentials, and clone repos.
@@ -172,48 +170,28 @@ class WorkspaceLifecycle:
             ssh_keys: SSH private keys persisted in the workspace until a
                 controlled stop.
             workspace_id: Workspace ID assigned by the backend.
-            runtime_type: Which runtime to use (``"docker"`` or ``"qemu"``).
 
         Returns the workspace UUID and whether credentials were injected.
         """
         if workspace_id is None:
             workspace_id = uuid.uuid4()
 
-        runtime = self._registry.get_runtime_by_type(runtime_type)
+        runtime = self._runtime
 
         log = logger.bind(
             workspace_id=str(workspace_id),
-            runtime=runtime_type,
         )
         log.info("creating_workspace", repos=repos)
 
-        # Build runtime-appropriate config
-        if runtime_type == "docker":
-            if not image_tag:
-                raise RuntimeError("Docker workspace creation requires an image tag")
-            volume_name = f"opencuria-workspace-{workspace_id}"
-            config = WorkspaceConfig(
-                workspace_id=str(workspace_id),
-                image=image_tag,
-                env_vars={},
-                volumes={volume_name: {"bind": "/workspace", "mode": "rw"}},
-                network=self._settings.docker_network,
-                labels={"opencuria.workspace-id": str(workspace_id)},
-            )
-        else:
-            if not base_image_path:
-                raise RuntimeError("QEMU workspace creation requires a base image path")
-            # QEMU — image is base QCOW2 path, no Docker volumes
-            config = WorkspaceConfig(
-                workspace_id=str(workspace_id),
-                image=base_image_path,
-                env_vars={},
-                network=self._settings.qemu_network,
-                qemu_vcpus=qemu_vcpus,
-                qemu_memory_mb=qemu_memory_mb,
-                qemu_disk_size_gb=qemu_disk_size_gb,
-                labels={"opencuria.workspace-id": str(workspace_id)},
-            )
+        if not base_image_path:
+            raise RuntimeError("QEMU workspace creation requires a base image path")
+        config = WorkspaceConfig(
+            workspace_id=str(workspace_id),
+            image=base_image_path,
+            qemu_vcpus=qemu_vcpus,
+            qemu_memory_mb=qemu_memory_mb,
+            qemu_disk_size_gb=qemu_disk_size_gb,
+        )
 
         # Register a "creating" cache entry *before* calling
         # runtime.create_workspace() so that heartbeat syncs during VM boot
@@ -224,7 +202,6 @@ class WorkspaceLifecycle:
             workspace_id=workspace_id,
             instance_id="",
             status="creating",
-            runtime_type=runtime_type,
         )
 
         try:
@@ -344,20 +321,15 @@ class WorkspaceLifecycle:
         if self.checkpoint_hook is not None:
             await self.checkpoint_hook(workspace_id, None, "injecting")
 
-        if info.runtime_type == "qemu":
-            if (
-                qemu_vcpus is None
-                or qemu_memory_mb is None
-                or qemu_disk_size_gb is None
-            ):
-                raise RuntimeError("Missing QEMU resource settings for resume")
-            await runtime.reconfigure_workspace(
-                info.instance_id,
-                qemu_vcpus=qemu_vcpus,
-                qemu_memory_mb=qemu_memory_mb,
-                qemu_disk_size_gb=qemu_disk_size_gb,
-                restart=False,
-            )
+        if qemu_vcpus is None or qemu_memory_mb is None or qemu_disk_size_gb is None:
+            raise RuntimeError("Missing QEMU resource settings for resume")
+        await runtime.reconfigure_workspace(
+            info.instance_id,
+            qemu_vcpus=qemu_vcpus,
+            qemu_memory_mb=qemu_memory_mb,
+            qemu_disk_size_gb=qemu_disk_size_gb,
+            restart=False,
+        )
 
         await runtime.start_workspace(info.instance_id)
         info.status = "running"
@@ -408,10 +380,6 @@ class WorkspaceLifecycle:
     ) -> None:
         """Reconfigure resources for an existing QEMU workspace."""
         info = self._registry.get_cached(workspace_id)
-        if info.runtime_type != "qemu":
-            raise RuntimeError(
-                "Workspace runtime does not support resource reconfiguration"
-            )
         runtime = self._registry.get_runtime(workspace_id)
         if not info.instance_id:
             raise RuntimeError("Workspace has no instance assigned")
@@ -443,7 +411,7 @@ class WorkspaceLifecycle:
             raise RuntimeError(
                 "Managed workspace removal requires physical registry identity"
             )
-        runtime = self._runtimes.get(info.runtime_type)
+        runtime = self._runtime
         if runtime is None or not info.instance_id:
             raise RuntimeError("Managed workspace removal requires runtime identity")
         await self._background._kill_all_background_processes(
@@ -466,7 +434,7 @@ class WorkspaceLifecycle:
 
         Uses a short timeout so the loop does not block for a long time.
         """
-        runtime = self._runtimes.get(info.runtime_type)
+        runtime = self._runtime
         if runtime is None or not info.instance_id:
             return True  # cannot check — assume reachable to avoid false restarts
 

@@ -802,7 +802,6 @@ async def test_claude_closing_callbacks_still_finalize_success_and_error(
         status=RunnerStatus.ONLINE,
         sid=f"closing-{uuid.uuid4().hex[:8]}",
         organization_id=harness_workspace.runner.organization_id,
-        available_runtimes=["docker"],
     )
     second_workspace = Workspace.objects.create(
         runner=runner,

@@ -72,7 +72,7 @@ function generation(patch: Partial<StorageGeneration> = {}): StorageGeneration {
     id: 'current',
     name: 'Base v2',
     owner_label: 'Admin',
-    runtime_type: 'qemu',
+
     definition_id: 'definition',
     definition_name: 'Recipe',
     build_job_id: 'assignment',
@@ -135,7 +135,6 @@ const runner: Runner = {
   id: 'r',
   name: 'Runner',
   status: RunnerStatus.OFFLINE,
-  available_runtimes: ['qemu'],
   qemu_min_vcpus: 1,
   qemu_max_vcpus: 8,
   qemu_default_vcpus: 2,
@@ -184,7 +183,6 @@ beforeEach(() => {
     latest_snapshot_id: 4,
     runtimes: [
       {
-        runtime_type: 'qemu',
         fresh: false,
         snapshot_id: 4,
         collected_at: '2026-10-01',
@@ -598,7 +596,7 @@ describe('runner cockpit progressive disclosure and safety', () => {
 
 describe('retained generation selection', () => {
   it('selects a generation without its runtime snapshot from Inventory and from the map', async () => {
-    data.value!.runtimes = [{ ...data.value!.runtimes[0]!, runtime_type: 'docker', resources: [] }]
+    data.value!.runtimes = []
     await setup()
     const map = w.findComponent(RunnerDependencyMap)
     expect(map.props('generations')).toEqual(data.value!.generations)
@@ -951,14 +949,5 @@ describe('storage chart selection integration', () => {
     assertGraph()
   })
 
-  it('never mounts the QEMU chart for a Docker-only runner', async () => {
-    data.value!.generations = [generation({ runtime_type: 'docker', dependencies: [] })]
-    data.value!.runtimes = [{ ...data.value!.runtimes[0]!, runtime_type: 'docker', resources: [] }]
-    await setup({ ...runner, available_runtimes: ['docker'] })
-    expect(w.findComponent(RunnerStorageDonut).exists()).toBe(false)
-    expect(w.find('[aria-label="QEMU storage breakdown"]').exists()).toBe(false)
-    await tab('Inventory')
-    await tab('Overview')
-    expect(w.findComponent(RunnerStorageDonut).exists()).toBe(false)
-  })
+
 })

@@ -21,12 +21,11 @@ def interface(tmp_path):
         reconfigure_workspace=AsyncMock(),
         workspace_incarnation=AsyncMock(return_value=(incarnation, "running")),
     )
-    service = WorkspaceService({"qemu": runtime}, RunnerSettings())
+    service = WorkspaceService(runtime, RunnerSettings())
     service.registry._cache[ws] = WorkspaceInfo(
         workspace_id=ws,
         instance_id="guest",
         status="exited",
-        runtime_type="qemu",
         credentials_present=False,
     )
     service.credentials.inject_workspace_credentials = AsyncMock(

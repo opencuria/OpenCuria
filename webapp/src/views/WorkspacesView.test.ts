@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import WorkspacesView from './WorkspacesView.vue'
 import WorkspaceCard from '@/components/workspaces/WorkspaceCard.vue'
 import { getRunnerMetricsLatest } from '@/services/runners.api'
-import { RuntimeType, WorkspaceStatus, type Runner, type RunnerSystemMetrics, type Workspace } from '@/types'
+import { WorkspaceStatus, type Runner, type RunnerSystemMetrics, type Workspace } from '@/types'
 
 const workspaceStore = {
   workspaces: [] as Workspace[],
@@ -30,7 +30,6 @@ function makeWorkspace(id: string, overrides: Partial<Workspace> = {}): Workspac
     name: id,
     status: WorkspaceStatus.RUNNING,
     active_operation: null,
-    runtime_type: RuntimeType.QEMU,
     qemu_vcpus: 2,
     qemu_memory_mb: 4096,
     qemu_disk_size_gb: 128,

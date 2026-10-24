@@ -31,14 +31,11 @@ PROCESS_DEFINITIONS = [
 ]
 
 
-def _make_image(
-    runner, user, *, source=None, process_definitions=None, runtime="docker"
-):
+def _make_image(runner, user, *, source=None, process_definitions=None, runtime="qemu"):
     """Create a ready legacy image with an explicit process snapshot."""
     return ImageInstance.objects.create(
         is_legacy=True,
         runner=runner,
-        runtime_type=runtime,
         origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
         origin_workspace=source,
         created_by=user,
@@ -89,7 +86,6 @@ def test_capture_snapshots_every_persistent_definition_without_runtime_state(
         runner=runner,
         created_by=user,
         name="Capture source",
-        runtime_type="qemu",
         status=source_status,
     )
     expected = {
@@ -152,7 +148,6 @@ def test_capture_snapshots_are_generation_specific_and_detached_from_source_muta
         runner=runner,
         created_by=user,
         name="Versioned capture source",
-        runtime_type="qemu",
         status=WorkspaceStatus.STOPPED,
     )
     api = _make_process(
@@ -258,7 +253,6 @@ async def test_workspace_creation_restores_snapshot_as_fresh_exited_processes(
         runner=runner,
         created_by=user,
         name="Deleted process source",
-        runtime_type="qemu",
         status=WorkspaceStatus.STOPPED,
     )
     source_processes = [
@@ -381,7 +375,6 @@ def test_workspace_configuration_rolls_back_workspace_processes_and_task_on_task
                 "workspace_id": workspace_id,
                 "runner": runner,
                 "name": "Must roll back",
-                "runtime_type": image.runtime_type,
                 "base_image_instance": image,
                 "created_by": user,
             },
@@ -411,7 +404,6 @@ def test_denied_capture_creates_no_snapshot_or_capture_artifacts(runner, user):
         runner=runner,
         created_by=user,
         name="Busy capture source",
-        runtime_type="qemu",
         status=WorkspaceStatus.RUNNING,
         active_operation="stopping",
     )
@@ -447,7 +439,6 @@ def test_image_process_snapshot_is_write_once(runner, user):
         runner=runner,
         created_by=user,
         name="Immutable snapshot source",
-        runtime_type="qemu",
         status=WorkspaceStatus.STOPPED,
     )
     _make_process(
@@ -476,7 +467,6 @@ def _running_qemu_workspace(runner, user, name):
         runner=runner,
         created_by=user,
         name=name,
-        runtime_type="qemu",
         status=WorkspaceStatus.RUNNING,
     )
 

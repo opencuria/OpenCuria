@@ -101,7 +101,6 @@ class OperationRepository:
                     "env_vars",
                     "files",
                     "ssh_keys",
-                    "dockerfile_content",
                     "init_script",
                 }
             }

@@ -25,8 +25,6 @@ def capture_setup(user, organization, workspace):
     Membership.objects.create(
         user=user, organization=organization, role=MembershipRole.MEMBER
     )
-    workspace.runtime_type = "qemu"
-    workspace.save(update_fields=["runtime_type"])
     return user, organization, workspace
 
 

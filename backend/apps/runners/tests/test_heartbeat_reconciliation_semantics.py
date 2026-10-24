@@ -53,7 +53,7 @@ def test_credential_resolution_failure_does_not_skip_process_or_desktop_reconcil
                         "pid": 1234,
                     }
                 ],
-                "desktop": {"port": 6901, "container_ip": "10.0.0.1"},
+                "desktop": {"port": 6901, "guest_ip": "10.0.0.1"},
             }
         ],
     )
@@ -62,7 +62,7 @@ def test_credential_resolution_failure_does_not_skip_process_or_desktop_reconcil
     assert process.status == ProcessStatus.EXITED
     desktop_sync.assert_called_once_with(
         str(workspace.id),
-        {"port": 6901, "container_ip": "10.0.0.1"},
+        {"port": 6901, "guest_ip": "10.0.0.1"},
         runner_id=str(runner.id),
     )
 

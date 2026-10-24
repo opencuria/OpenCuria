@@ -3,7 +3,6 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_WORKSPACE_IMAGE=0
 
 print_section() {
   local title="$1"
@@ -37,46 +36,6 @@ setup_python_component() {
   )
 }
 
-warn_runner_qemu_deps_skipped() {
-  printf '\nWARNING: Optional runner QEMU dependencies were not installed.\n' >&2
-  printf 'Docker-only development works with RUNNER_ENABLED_RUNTIMES=docker.\n' >&2
-  printf 'To enable QEMU later, install libvirt system libraries and rerun:\n' >&2
-  printf '  cd runner && source .venv/bin/activate && pip install -r requirements-qemu.txt\n' >&2
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    printf 'On macOS: brew install libvirt pkg-config\n' >&2
-  else
-    printf 'On Debian/Ubuntu: sudo apt-get install -y libvirt-dev pkg-config\n' >&2
-  fi
-}
-
-setup_runner_python_environment() {
-  local component_dir="$REPO_ROOT/runner"
-
-  print_section "Setting up runner Python environment"
-
-  if [[ ! -d "$component_dir/.venv" ]]; then
-    python3 -m venv "$component_dir/.venv"
-  fi
-
-  (
-    cd "$component_dir"
-    source .venv/bin/activate
-    python -m pip install --upgrade pip
-    pip install -r requirements.txt
-  )
-
-  print_section "Installing runner QEMU optional dependencies"
-  if (
-    cd "$component_dir"
-    source .venv/bin/activate
-    pip install -r requirements-qemu.txt
-  ); then
-    printf 'Runner QEMU dependencies installed.\n'
-  else
-    warn_runner_qemu_deps_skipped
-  fi
-}
-
 setup_node_component() {
   local component="$1"
   local component_dir="$REPO_ROOT/$component"
@@ -96,33 +55,6 @@ run_backend_migrations() {
     python manage.py migrate
   )
 }
-
-build_workspace_image() {
-  print_section "Building local workspace image"
-  docker build \
-    -t opencuria/workspace:latest \
-    "$REPO_ROOT/runner" \
-    -f "$REPO_ROOT/runner/Dockerfile"
-}
-
-print_next_steps() {
-  print_section "Setup complete"
-  printf 'Development environment is ready.\n'
-  printf 'If you need the local runner workspace image as well, rerun with --build-workspace-image.\n'
-}
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --build-workspace-image)
-      BUILD_WORKSPACE_IMAGE=1
-      shift
-      ;;
-    *)
-      printf 'Unknown argument: %s\n' "$1" >&2
-      exit 1
-      ;;
-  esac
-done
 
 require_command python3
 require_command npm
@@ -151,18 +83,19 @@ install_system_deps() {
     build-essential \
     python3-dev \
     pkg-config \
-    libvirt-dev
+    libvirt-dev \
+    qemu-kvm \
+    qemu-utils \
+    libvirt-daemon-system \
+    libvirt-clients \
+    genisoimage
 }
 
 install_system_deps
 setup_python_component backend
-setup_runner_python_environment
+setup_python_component runner
 setup_node_component .
 run_backend_migrations
 
-if [[ "$BUILD_WORKSPACE_IMAGE" -eq 1 ]]; then
-  require_command docker
-  build_workspace_image
-fi
-
-print_next_steps
+print_section "Setup complete"
+printf 'Configure runner/.env and start the native QEMU runner.\n'

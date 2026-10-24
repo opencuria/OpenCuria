@@ -18,13 +18,12 @@ from src.services.files import (
 
 def _service() -> tuple[WorkspaceService, DummyRuntime, uuid.UUID]:
     runtime = DummyRuntime()
-    svc = WorkspaceService(runtimes={"docker": runtime}, settings=RunnerSettings())
+    svc = WorkspaceService(runtime=runtime, settings=RunnerSettings())
     workspace_id = uuid.uuid4()
     svc.registry._cache[workspace_id] = WorkspaceInfo(
         workspace_id=workspace_id,
         instance_id="instance-1",
         status="running",
-        runtime_type="docker",
     )
     return svc, runtime, workspace_id
 

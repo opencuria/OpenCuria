@@ -39,7 +39,6 @@ class StorageResourceOut(Schema):
 
 
 class StorageRuntimeOut(Schema):
-    runtime_type: str
     fresh: bool
     snapshot_id: int | None
     epoch: str | None
@@ -56,7 +55,6 @@ class StorageGenerationOut(Schema):
     name: str
     owner_id: str | None
     owner_label: str
-    runtime_type: str
     build_job_id: str | None
     definition_id: str | None
     definition_name: str | None

@@ -558,7 +558,6 @@ class TestHandleGitReply:
             status=RunnerStatus.ONLINE,
             sid="other-sid",
             organization=organization,
-            available_runtimes=["docker"],
         )
         loop, fut = self._register_pending(
             service, workspace.id, "list_repos", "req-2"

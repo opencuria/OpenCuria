@@ -26,7 +26,6 @@ def result(service, runner, task, event, **extra):
 
 
 def test_automatic_stop_capture_resume(service, runner, workspace):
-    workspace.runtime_type = "qemu"
     workspace.credentials_present = True
     workspace.save()
     _, stop = CaptureRepository.allocate(
@@ -66,7 +65,6 @@ def test_unknown_capture_fences_and_suppressed_resume(
     service, runner, stopped_workspace
 ):
     ws = stopped_workspace
-    ws.runtime_type = "qemu"
     ws.save()
     _, task = CaptureRepository.allocate(
         ws.id, "capture", has_busy_agent=has_busy_agent
@@ -82,7 +80,6 @@ def test_unknown_capture_fences_and_suppressed_resume(
 def test_safe_capture_failure_resumes_but_unknown_failure_does_not(
     service, runner, workspace
 ):
-    workspace.runtime_type = "qemu"
     workspace.save()
     _, stop = CaptureRepository.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
@@ -101,7 +98,6 @@ def test_safe_capture_failure_resumes_but_unknown_failure_does_not(
 
 def test_journal_interruption_failure_retains_fence(service, runner, stopped_workspace):
     ws = stopped_workspace
-    ws.runtime_type = "qemu"
     ws.save()
     _, task = CaptureRepository.allocate(
         ws.id, "capture", has_busy_agent=has_busy_agent
@@ -126,12 +122,10 @@ def test_retirement_after_clean_stop_preserves_restart_approval(
 
     base = ImageInstance.objects.create(
         runner=runner,
-        runtime_type="qemu",
         name="base",
         status="ready",
         **capture_version_fields(runner, workspace.created_by, "base"),
     )
-    workspace.runtime_type = "qemu"
     workspace.base_image_instance = base
     workspace.save()
     _, stop = CaptureRepository.allocate(
@@ -150,7 +144,6 @@ def test_retirement_after_clean_stop_preserves_restart_approval(
 def test_unknown_handler_failure_and_delayed_unknown_result_hold_fence(
     service, runner, workspace
 ):
-    workspace.runtime_type = "qemu"
     workspace.save()
     _, stop = CaptureRepository.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
@@ -185,7 +178,6 @@ def test_capture_resume_child_retains_exact_qemu_resources(
         raise RuntimeError("credential revoked")
 
     monkeypatch.setattr(CredentialSvc, "resolve_workspace_credentials", unresolvable)
-    workspace.runtime_type = "qemu"
     workspace.qemu_vcpus = 1
     workspace.qemu_memory_mb = 1024
     workspace.qemu_disk_size_gb = 20
@@ -243,8 +235,6 @@ def test_full_success_holds_parent_until_recovery(
     from apps.runners.repositories import TaskRepository, WorkspaceRepository
     from apps.runners.services import RunnerService
     from apps.runners.services.recovery import RecoveryService
-
-    workspace.runtime_type = "qemu"
     workspace.credentials_present = True
     workspace.save()
     frontend = Mock()
@@ -371,7 +361,6 @@ def test_stopped_capture_final_clear_without_resume(service, runner, stopped_wor
     from apps.runners.models import Task
 
     ws = stopped_workspace
-    ws.runtime_type = "qemu"
     ws.save()
     _, child = CaptureRepository.allocate(
         ws.id, "capture", has_busy_agent=has_busy_agent
@@ -422,8 +411,6 @@ def test_safe_failure_final_diagnostics_and_recovery_event(
 
     from apps.runners.services import RunnerService
     from apps.runners.services.recovery import RecoveryService
-
-    workspace.runtime_type = "qemu"
     workspace.save()
     _, stop = CaptureRepository.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent

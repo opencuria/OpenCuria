@@ -73,7 +73,7 @@ against identical fixtures; p95 is nearest rank. Full response SHA-256 digests m
 | 15 | 123 → 78 | 458.263 → 278.074 | 1130.754 → 708.027 |
 
 At 15 repositories: **39.3% lower p50, 37.4% lower p95**. These are local process
-measurements including one chroot/shell launch per runtime call, not actual Docker,
+measurements including one chroot/shell launch per runtime call, not actual QEMU,
 QEMU/SSH or production latency. Host scheduling causes noisy tails: an earlier
 15-sample run had 15-repo p50 382.272 → 215.632 ms but p95 469.157 → 472.099 ms,
 and 5-repo p50 was essentially flat. The larger alternating run above improved all
@@ -96,7 +96,7 @@ runner/.venv/bin/python scripts/benchmark_git_discovery.py --repo /path/to/basel
 
 This portable harness uses the existing `FakeGitRuntime`: Git commands execute real
 local Git; find/realpath map the synthetic workspace using the test helper. Its
-optional 5 ms/call delay is **simulated**, not a Docker/SSH measurement. It uses fixed
+optional 5 ms/call delay is **simulated**, not a QEMU/SSH measurement. It uses fixed
 commit identities/dates and isolated Git config, checks response-digest stability,
 and keeps query/call accounting and optional allocation tracing outside latency.
 31 warmed samples per scenario; repeated before/after results:

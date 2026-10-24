@@ -22,7 +22,6 @@ class StorageResource:
 
 @dataclass
 class RuntimeInventory:
-    runtime_type: str
     complete: bool = False
     collected_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     resources: list[StorageResource] = field(default_factory=list)

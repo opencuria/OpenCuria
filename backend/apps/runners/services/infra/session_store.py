@@ -41,8 +41,7 @@ class SessionStoreMixin:
         """Normalize runner desktop payloads to the backend cache shape."""
         return {
             "port": desktop_state.get("port", 6901),
-            "container_ip": desktop_state.get("container_ip", ""),
-            "network_name": desktop_state.get("network_name", ""),
+            "guest_ip": desktop_state.get("guest_ip", ""),
             "viewer": bool(desktop_state.get("viewer", False)),
             "computer_use": bool(desktop_state.get("computer_use", False)),
             "mcp": bool(

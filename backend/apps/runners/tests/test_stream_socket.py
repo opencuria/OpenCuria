@@ -56,7 +56,6 @@ def _make_runner_workspace(*, sid: str, prefix: str):
         status=RunnerStatus.ONLINE,
         sid=sid,
         organization=org,
-        available_runtimes=["docker"],
     )
     workspace = Workspace.objects.create(
         runner=runner,
@@ -168,7 +167,6 @@ async def test_stream_service_validation_rejects_bad_chunks():
             status=RunnerStatus.ONLINE,
             sid="stream-val-sid",
             organization=org,
-            available_runtimes=["docker"],
         )
         workspace = Workspace.objects.create(
             runner=runner,

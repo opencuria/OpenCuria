@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import CreateImageArtifactDialog from './CreateImageArtifactDialog.vue'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useRunnerStore } from '@/stores/runners'
-import { WorkspaceOperation, WorkspaceStatus, RuntimeType, type Workspace } from '@/types'
+import { WorkspaceOperation, WorkspaceStatus, type Workspace } from '@/types'
 
 vi.mock('@/services/workspaces.api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/workspaces.api')>()),
@@ -22,18 +22,16 @@ it.each([WorkspaceStatus.RUNNING, WorkspaceStatus.STOPPED])(
         name: 'Guest',
         runner_id: 'r',
         status,
-        runtime_type: RuntimeType.QEMU,
         active_operation: null,
         credentials_present: false,
       },
     ] as Workspace[]
     const runners = useRunnerStore()
     runners.runners = [
-      { id: 'r', available_runtimes: ['qemu'], capabilities: { runtimes: ['qemu'] } },
+      { id: 'r', capabilities: { runtimes: ['qemu'] } },
     ] as never
     vi.spyOn(runners, 'runnerById').mockReturnValue({
       id: 'r',
-      available_runtimes: ['qemu'],
     } as never)
     const create = vi.spyOn(workspaces, 'createImageArtifact').mockResolvedValue(true)
     const wrapper = mount(CreateImageArtifactDialog, {
@@ -79,9 +77,9 @@ it.each([WorkspaceStatus.RUNNING, WorkspaceStatus.STOPPED])(
 
 it('selects a workspace with the real Reka select', async () => {
   const workspaces = useWorkspaceStore()
-  workspaces.workspaces = [{ id: 'w', name: 'Guest', runner_id: 'r', status: WorkspaceStatus.RUNNING, runtime_type: RuntimeType.QEMU, active_operation: null, credentials_present: false }] as Workspace[]
+  workspaces.workspaces = [{ id: 'w', name: 'Guest', runner_id: 'r', status: WorkspaceStatus.RUNNING, active_operation: null, credentials_present: false }] as Workspace[]
   const runners = useRunnerStore()
-  runners.runners = [{ id: 'r', available_runtimes: ['qemu'] }] as never
+  runners.runners = [{ id: 'r', }] as never
   const create = vi.spyOn(workspaces, 'createImageArtifact').mockResolvedValue(true)
   const wrapper = mount(CreateImageArtifactDialog, { attachTo: document.body })
   await wrapper.get('button').trigger('click')

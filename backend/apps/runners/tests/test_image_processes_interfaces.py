@@ -94,7 +94,6 @@ def _captured_line_with_process_generations(runner, user):
         runner=runner,
         created_by=user,
         name="Imported process source",
-        runtime_type="qemu",
         status=WorkspaceStatus.STOPPED,
     )
     api = WorkspaceProcess.objects.create(

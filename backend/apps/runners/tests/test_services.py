@@ -23,7 +23,6 @@ from apps.organizations.models import Organization
 from apps.runners.enums import (
     ProcessStatus,
     RunnerStatus,
-    RuntimeType,
     TaskStatus,
     TaskType,
     WorkspaceOperation,
@@ -99,8 +98,7 @@ class TestDesktopStateCleanup:
             str(task.id),
             str(workspace.id),
             port=6901,
-            container_ip="172.19.0.3",
-            network_name="workspace-net",
+            guest_ip="172.19.0.3",
             runner_id=str(runner.id),
         )
 
@@ -108,8 +106,7 @@ class TestDesktopStateCleanup:
         assert task.status == TaskStatus.COMPLETED
         assert service.get_desktop_info(str(workspace.id)) == {
             "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
+            "guest_ip": "172.19.0.3",
             "viewer": True,
             "computer_use": False,
             "mcp": False,
@@ -126,7 +123,7 @@ class TestDesktopStateCleanup:
         workspace,
         monkeypatch,
     ):
-        """QEMU desktops use the same runner-proxied state model as Docker."""
+        """QEMU desktops use runner-proxied state."""
         task = Task.objects.create(
             runner=runner,
             workspace=workspace,
@@ -142,15 +139,13 @@ class TestDesktopStateCleanup:
             str(task.id),
             str(workspace.id),
             port=6901,
-            container_ip="10.100.0.2",
-            network_name="",
+            guest_ip="10.100.0.2",
             runner_id=str(runner.id),
         )
 
         assert service.get_desktop_info(str(workspace.id)) == {
             "port": 6901,
-            "container_ip": "10.100.0.2",
-            "network_name": "",
+            "guest_ip": "10.100.0.2",
             "viewer": True,
             "computer_use": False,
             "mcp": False,
@@ -169,8 +164,7 @@ class TestDesktopStateCleanup:
         workspace_id = str(workspace.id)
         service._active_desktops[workspace_id] = {
             "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
+            "guest_ip": "172.19.0.3",
         }
         service._desktop_workspace_runner[workspace_id] = str(runner.id)
 
@@ -196,8 +190,7 @@ class TestDesktopStateCleanup:
         workspace_id = str(workspace.id)
         service._active_desktops[workspace_id] = {
             "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
+            "guest_ip": "172.19.0.3",
         }
         service._desktop_workspace_runner[workspace_id] = str(runner.id)
 
@@ -225,11 +218,9 @@ class TestDesktopStateCleanup:
                 {
                     "workspace_id": str(workspace.id),
                     "status": "running",
-                    "runtime_type": "docker",
                     "desktop": {
                         "port": 6901,
-                        "container_ip": "172.19.0.3",
-                        "network_name": "workspace-net",
+                        "guest_ip": "172.19.0.3",
                     },
                 }
             ],
@@ -237,8 +228,7 @@ class TestDesktopStateCleanup:
 
         assert service.get_desktop_info(str(workspace.id)) == {
             "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
+            "guest_ip": "172.19.0.3",
             "viewer": False,
             "computer_use": False,
             "mcp": False,
@@ -256,8 +246,7 @@ class TestDesktopStateCleanup:
         workspace_id = str(workspace.id)
         service._active_desktops[workspace_id] = {
             "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
+            "guest_ip": "172.19.0.3",
         }
         service._desktop_workspace_runner[workspace_id] = str(runner.id)
 
@@ -267,15 +256,13 @@ class TestDesktopStateCleanup:
                 {
                     "workspace_id": workspace_id,
                     "status": "running",
-                    "runtime_type": "docker",
                 }
             ],
         )
 
         assert service.get_desktop_info(workspace_id) == {
             "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
+            "guest_ip": "172.19.0.3",
         }
 
     def test_heartbeat_explicit_null_desktop_cleans_existing_state(
@@ -288,8 +275,7 @@ class TestDesktopStateCleanup:
         workspace_id = str(workspace.id)
         service._active_desktops[workspace_id] = {
             "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
+            "guest_ip": "172.19.0.3",
         }
         service._desktop_workspace_runner[workspace_id] = str(runner.id)
 
@@ -299,7 +285,6 @@ class TestDesktopStateCleanup:
                 {
                     "workspace_id": workspace_id,
                     "status": "running",
-                    "runtime_type": "docker",
                     "desktop": None,
                 }
             ],
@@ -316,11 +301,9 @@ class TestDesktopStateCleanup:
                 {
                     "workspace_id": str(workspace.id),
                     "status": "running",
-                    "runtime_type": "docker",
                     "desktop": {
                         "port": 6901,
-                        "container_ip": "172.19.0.3",
-                        "network_name": "workspace-net",
+                        "guest_ip": "172.19.0.3",
                         "viewer": False,
                         "computer_use": True,
                     },
@@ -330,8 +313,7 @@ class TestDesktopStateCleanup:
 
         assert service.get_desktop_info(str(workspace.id)) == {
             "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
+            "guest_ip": "172.19.0.3",
             "viewer": False,
             "computer_use": True,
             "mcp": False,
@@ -356,8 +338,7 @@ class TestDesktopStateCleanup:
         await service.handle_desktop_process(
             str(workspace.id),
             port=6901,
-            container_ip="172.19.0.3",
-            network_name="workspace-net",
+            guest_ip="172.19.0.3",
             runner_id=str(runner.id),
             viewer=False,
             computer_use=True,
@@ -365,8 +346,7 @@ class TestDesktopStateCleanup:
 
         assert service.get_desktop_info(str(workspace.id)) == {
             "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
+            "guest_ip": "172.19.0.3",
             "viewer": False,
             "computer_use": True,
             "mcp": False,
@@ -384,8 +364,7 @@ class TestDesktopStateCleanup:
         await service.handle_desktop_process(
             str(workspace.id),
             port=6901,
-            container_ip="172.19.0.3",
-            network_name="workspace-net",
+            guest_ip="172.19.0.3",
             runner_id=str(runner.id),
             viewer=False,
             computer_use=True,
@@ -417,7 +396,6 @@ class TestDesktopStateCleanup:
             api_token_hash="foreign-hash",
             status=RunnerStatus.ONLINE,
             organization=organization,
-            available_runtimes=["docker"],
         )
         foreign_workspace = Workspace.objects.create(
             runner=foreign_runner,
@@ -435,8 +413,7 @@ class TestDesktopStateCleanup:
         await service.handle_desktop_process(
             foreign_ws_id,
             port=6901,
-            container_ip="10.0.0.9",
-            network_name="evil-net",
+            guest_ip="10.0.0.9",
             runner_id=str(runner.id),
             viewer=False,
             computer_use=True,
@@ -464,8 +441,7 @@ class TestDesktopStateCleanup:
         await service.handle_desktop_process(
             missing_ws_id,
             port=6901,
-            container_ip="10.0.0.9",
-            network_name="evil-net",
+            guest_ip="10.0.0.9",
             runner_id=str(runner.id),
             viewer=False,
             computer_use=True,
@@ -494,7 +470,6 @@ class TestDesktopStateCleanup:
             api_token_hash="foreign-stop-hash",
             status=RunnerStatus.ONLINE,
             organization=organization,
-            available_runtimes=["docker"],
         )
         foreign_workspace = Workspace.objects.create(
             runner=foreign_runner,
@@ -507,8 +482,7 @@ class TestDesktopStateCleanup:
             foreign_ws_id,
             {
                 "port": 6901,
-                "container_ip": "172.19.0.3",
-                "network_name": "workspace-net",
+                "guest_ip": "172.19.0.3",
                 "viewer": False,
                 "computer_use": True,
             },
@@ -527,8 +501,7 @@ class TestDesktopStateCleanup:
 
         assert service.get_desktop_info(foreign_ws_id) == {
             "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
+            "guest_ip": "172.19.0.3",
             "viewer": False,
             "computer_use": True,
             "mcp": False,
@@ -555,8 +528,7 @@ class TestDesktopStateCleanup:
             ws_id,
             {
                 "port": 6901,
-                "container_ip": "172.19.0.3",
-                "network_name": "workspace-net",
+                "guest_ip": "172.19.0.3",
                 "viewer": False,
                 "computer_use": True,
             },
@@ -591,8 +563,7 @@ class TestDesktopStateCleanup:
             str(workspace.id),
             {
                 "port": 6901,
-                "container_ip": "172.19.0.3",
-                "network_name": "workspace-net",
+                "guest_ip": "172.19.0.3",
                 "viewer": True,
                 "computer_use": False,
             },
@@ -602,16 +573,13 @@ class TestDesktopStateCleanup:
         await service.handle_desktop_process(
             str(workspace.id),
             port=6901,
-            container_ip="10.0.0.9",
-            network_name="evil-net",
+            guest_ip="10.0.0.9",
             runner_id="00000000-0000-0000-0000-000000000000",
             viewer=False,
             computer_use=True,
         )
 
-        assert service.get_desktop_info(str(workspace.id))["container_ip"] == (
-            "172.19.0.3"
-        )
+        assert service.get_desktop_info(str(workspace.id))["guest_ip"] == ("172.19.0.3")
         emit.assert_not_called()
 
     @pytest.mark.asyncio
@@ -650,8 +618,7 @@ class TestDesktopStateCleanup:
             str(workspace.id),
             {
                 "port": 6901,
-                "container_ip": "172.19.0.3",
-                "network_name": "workspace-net",
+                "guest_ip": "172.19.0.3",
                 "viewer": True,
                 "computer_use": False,
             },
@@ -696,8 +663,7 @@ class TestDesktopStateCleanup:
             ws_id,
             {
                 "port": 6901,
-                "container_ip": "10.0.0.5",
-                "network_name": "new-net",
+                "guest_ip": "10.0.0.5",
                 "generation": 5,
                 "epoch": "desktop-epoch",
             },
@@ -713,7 +679,7 @@ class TestDesktopStateCleanup:
         )
 
         assert service.get_desktop_info(ws_id)["generation"] == 5
-        assert service.get_desktop_info(ws_id)["container_ip"] == "10.0.0.5"
+        assert service.get_desktop_info(ws_id)["guest_ip"] == "10.0.0.5"
         emit.assert_not_called()
 
     @pytest.mark.asyncio
@@ -731,8 +697,7 @@ class TestDesktopStateCleanup:
             ws_id,
             {
                 "port": 6901,
-                "container_ip": "10.0.0.5",
-                "network_name": "net",
+                "guest_ip": "10.0.0.5",
                 "generation": 5,
                 "epoch": "desktop-epoch",
             },
@@ -773,8 +738,7 @@ class TestDesktopStateCleanup:
             ws_id,
             {
                 "port": 6901,
-                "container_ip": "10.0.0.5",
-                "network_name": "net",
+                "guest_ip": "10.0.0.5",
                 "generation": 5,
                 "epoch": "desktop-epoch",
             },
@@ -793,8 +757,7 @@ class TestDesktopStateCleanup:
         await service.handle_desktop_process(
             ws_id,
             port=6901,
-            container_ip="10.0.0.9",
-            network_name="late-active",
+            guest_ip="10.0.0.9",
             runner_id=runner_id,
             generation=5,
             epoch="desktop-epoch",
@@ -820,8 +783,7 @@ class TestDesktopStateCleanup:
             ws_id,
             {
                 "port": 6901,
-                "container_ip": "10.0.0.5",
-                "network_name": "net",
+                "guest_ip": "10.0.0.5",
                 "generation": 5,
                 "epoch": "desktop-epoch",
             },
@@ -836,7 +798,7 @@ class TestDesktopStateCleanup:
             desktop_generation=5,
             desktop_session_tracked=True,
         )
-        assert service.get_desktop_info(ws_id)["container_ip"] == "10.0.0.5"
+        assert service.get_desktop_info(ws_id)["guest_ip"] == "10.0.0.5"
 
         service._sync_desktop_state_from_heartbeat(
             ws_id,
@@ -870,8 +832,7 @@ class TestDesktopStateCleanup:
             ws_id,
             {
                 "port": 6901,
-                "container_ip": "10.0.0.5",
-                "network_name": "new-net",
+                "guest_ip": "10.0.0.5",
                 "generation": 5,
                 "epoch": "desktop-epoch",
             },
@@ -881,8 +842,7 @@ class TestDesktopStateCleanup:
         await service.handle_desktop_process(
             ws_id,
             port=6901,
-            container_ip="10.0.0.4",
-            network_name="stale-net",
+            guest_ip="10.0.0.4",
             runner_id=str(runner.id),
             generation=4,
             epoch="desktop-epoch",
@@ -891,8 +851,7 @@ class TestDesktopStateCleanup:
             ws_id,
             {
                 "port": 6901,
-                "container_ip": "10.0.0.3",
-                "network_name": "stale-heartbeat",
+                "guest_ip": "10.0.0.3",
                 "generation": 3,
                 "epoch": "desktop-epoch",
             },
@@ -906,7 +865,7 @@ class TestDesktopStateCleanup:
             desktop_epoch="desktop-epoch",
             desktop_generation=4,
         )
-        assert service.get_desktop_info(ws_id)["container_ip"] == "10.0.0.5"
+        assert service.get_desktop_info(ws_id)["guest_ip"] == "10.0.0.5"
         assert service._desktop_state_versions[ws_id] == (
             str(runner.id),
             "desktop-epoch",
@@ -916,15 +875,14 @@ class TestDesktopStateCleanup:
         await service.handle_desktop_process(
             ws_id,
             port=6901,
-            container_ip="10.0.0.2",
-            network_name="same-epoch-stale",
+            guest_ip="10.0.0.2",
             runner_id=str(runner.id),
             generation=4,
             epoch="desktop-epoch",
         )
 
         assert service.get_desktop_info(ws_id)["generation"] == 5
-        assert service.get_desktop_info(ws_id)["container_ip"] == "10.0.0.5"
+        assert service.get_desktop_info(ws_id)["guest_ip"] == "10.0.0.5"
         emit.assert_not_called()
 
     @pytest.mark.asyncio
@@ -945,8 +903,7 @@ class TestDesktopStateCleanup:
             str(workspace.id),
             {
                 "port": 6901,
-                "container_ip": "172.19.0.3",
-                "network_name": "workspace-net",
+                "guest_ip": "172.19.0.3",
                 "viewer": False,
                 "computer_use": True,
             },
@@ -987,8 +944,7 @@ class TestDesktopStateCleanup:
             str(workspace.id),
             {
                 "port": 6901,
-                "container_ip": "172.19.0.3",
-                "network_name": "workspace-net",
+                "guest_ip": "172.19.0.3",
                 "viewer": True,
                 "computer_use": True,
             },
@@ -1006,8 +962,7 @@ class TestDesktopStateCleanup:
         assert task.status == TaskStatus.COMPLETED
         assert service.get_desktop_info(str(workspace.id)) == {
             "port": 6901,
-            "container_ip": "172.19.0.3",
-            "network_name": "workspace-net",
+            "guest_ip": "172.19.0.3",
             "viewer": False,
             "computer_use": True,
             "mcp": False,
@@ -1040,8 +995,7 @@ class TestDesktopStateCleanup:
             str(workspace.id),
             {
                 "port": 6901,
-                "container_ip": "172.19.0.3",
-                "network_name": "workspace-net",
+                "guest_ip": "172.19.0.3",
                 "viewer": True,
                 "computer_use": False,
             },
@@ -1068,7 +1022,6 @@ class TestCreateWorkspace:
             organization=runner.organization,
             created_by=user,
             name="Base Workspace",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
         build = ImageBuildJob.objects.create(
@@ -1080,7 +1033,6 @@ class TestCreateWorkspace:
         artifact = ImageInstance.objects.create(
             is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             origin_definition=definition,
             created_by=user,
@@ -1130,7 +1082,6 @@ class TestCreateWorkspace:
             organization=runner.organization,
             created_by=user,
             name="Base Workspace",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
         build = ImageBuildJob.objects.create(
@@ -1141,7 +1092,6 @@ class TestCreateWorkspace:
         artifact = ImageInstance.objects.create(
             is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             origin_definition=definition,
             created_by=user,
@@ -1208,7 +1158,6 @@ class TestCreateWorkspace:
             status=RunnerStatus.ONLINE,
             sid="local-sid",
             organization=local_org,
-            available_runtimes=["docker"],
         )
         foreign_org = Organization.objects.create(
             name=f"Foreign Org {uuid.uuid4().hex[:6]}",
@@ -1220,13 +1169,11 @@ class TestCreateWorkspace:
             status=RunnerStatus.ONLINE,
             sid="foreign-sid",
             organization=foreign_org,
-            available_runtimes=["docker"],
         )
         definition = ImageDefinition.objects.create(
             organization=foreign_org,
             created_by=owner,
             name="Foreign Definition",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
         build = ImageBuildJob.objects.create(
@@ -1238,7 +1185,6 @@ class TestCreateWorkspace:
         artifact = ImageInstance.objects.create(
             is_legacy=True,
             runner=foreign_runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             origin_definition=definition,
             created_by=owner,
@@ -1269,13 +1215,11 @@ class TestCreateWorkspace:
             status=RunnerStatus.ONLINE,
             sid="other-sid",
             organization=runner.organization,
-            available_runtimes=["docker"],
         )
         definition = ImageDefinition.objects.create(
             organization=runner.organization,
             created_by=user,
             name="Definition Image",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
         build = ImageBuildJob.objects.create(
@@ -1287,7 +1231,6 @@ class TestCreateWorkspace:
         artifact = ImageInstance.objects.create(
             is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             origin_definition=definition,
             created_by=user,
@@ -1330,7 +1273,6 @@ class TestCreateWorkspace:
             status=RunnerStatus.ONLINE,
             sid="local-image-sid",
             organization=local_org,
-            available_runtimes=["docker"],
         )
         foreign_org = Organization.objects.create(
             name=f"Image Foreign Org {uuid.uuid4().hex[:6]}",
@@ -1342,19 +1284,16 @@ class TestCreateWorkspace:
             status=RunnerStatus.ONLINE,
             sid="foreign-image-sid",
             organization=foreign_org,
-            available_runtimes=["docker"],
         )
         foreign_workspace = Workspace.objects.create(
             runner=foreign_runner,
             name="Foreign Workspace",
             status=WorkspaceStatus.RUNNING,
             created_by=owner,
-            runtime_type="docker",
         )
         image = ImageInstance.objects.create(
             is_legacy=True,
             runner=foreign_runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
             origin_workspace=foreign_workspace,
             created_by=owner,
@@ -1378,7 +1317,6 @@ class TestCreateWorkspace:
         artifact = ImageInstance.objects.create(
             is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
             origin_workspace=None,
             created_by=user,
@@ -1396,9 +1334,8 @@ class TestCreateWorkspace:
         )
 
         assert workspace.status == WorkspaceStatus.CREATING
-        assert workspace.runtime_type == "docker"
         assert workspace.runner_id == runner.id
-        assert task.type == TaskType.CREATE_WORKSPACE
+        assert task.type == TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT
         sio_mock.emit.assert_called_once()
 
 
@@ -1464,14 +1401,12 @@ class TestCreateImageArtifactSecurity:
             status=RunnerStatus.ONLINE,
             sid="snapshot-foreign-sid",
             organization=foreign_org,
-            available_runtimes=["docker"],
         )
         foreign_workspace = Workspace.objects.create(
             runner=foreign_runner,
             name="Foreign Snapshot Workspace",
             status=WorkspaceStatus.RUNNING,
             created_by=user,
-            runtime_type="docker",
         )
 
         with pytest.raises(WorkspaceNotFoundError):
@@ -1504,7 +1439,6 @@ class TestWorkspaceOwnerScoping:
             status=RunnerStatus.ONLINE,
             sid="owner-scope-sid",
             organization=org,
-            available_runtimes=["docker"],
         )
         owner_workspace = Workspace.objects.create(
             runner=runner,
@@ -1541,7 +1475,6 @@ class TestImageDeletionLifecycle:
             organization=runner.organization,
             created_by=user,
             name="Build Deletion Base",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
         build = ImageBuildJob.objects.create(
@@ -1552,7 +1485,6 @@ class TestImageDeletionLifecycle:
         image = ImageInstance.objects.create(
             is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             origin_definition=definition,
             build_job=build,
@@ -1567,7 +1499,6 @@ class TestImageDeletionLifecycle:
             runner=runner,
             name="Deleting Build Workspace",
             status=WorkspaceStatus.DELETING,
-            runtime_type="docker",
             created_by=user,
             base_image_instance=image,
         )
@@ -1592,7 +1523,6 @@ class TestImageDeletionLifecycle:
         image = ImageInstance.objects.create(
             is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             name="Delete Confirmed",
             runner_ref="opencuria/custom/delete-confirmed:1",
@@ -1619,7 +1549,6 @@ class TestImageDeletionLifecycle:
             organization=runner.organization,
             created_by=user,
             name="Delete Failure Definition",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
             status=ImageDefinition.Status.DELETING,
         )
@@ -1637,7 +1566,6 @@ class TestImageDeletionLifecycle:
         image = ImageInstance.objects.create(
             is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             origin_definition=definition,
             build_job=build,
@@ -1674,7 +1602,6 @@ class TestImageDeletionLifecycle:
             organization=runner.organization,
             created_by=user,
             name=f"Delete Definition Failure {uuid.uuid4().hex[:6]}",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
         build = ImageBuildJob.objects.create(
@@ -1685,7 +1612,6 @@ class TestImageDeletionLifecycle:
         image = ImageInstance.objects.create(
             is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             origin_definition=definition,
             build_job=build,
@@ -1700,7 +1626,6 @@ class TestImageDeletionLifecycle:
             runner=runner,
             name="Dependent Definition Workspace",
             status=WorkspaceStatus.RUNNING,
-            runtime_type="docker",
             created_by=user,
             base_image_instance=image,
         )
@@ -1714,99 +1639,6 @@ class TestImageDeletionLifecycle:
         assert build.status == ImageBuildJob.Status.PENDING_DELETION
 
 
-@pytest.mark.django_db(transaction=True)
-class TestRuntimeCompatibilityGuards:
-    @pytest.mark.asyncio
-    async def test_resume_workspace_rejects_runner_without_workspace_runtime(
-        self, service, stopped_workspace
-    ):
-        """Resume should fail when the runner no longer supports the workspace runtime."""
-        stopped_workspace.runtime_type = "qemu"
-        stopped_workspace.save(update_fields=["runtime_type"])
-        runner = stopped_workspace.runner
-        runner.available_runtimes = ["docker"]
-        runner.save(update_fields=["available_runtimes"])
-
-        with pytest.raises(
-            ConflictError, match="Runner does not support runtime 'qemu'"
-        ):
-            await service.resume_workspace(stopped_workspace.id)
-
-    def test_update_runner_qemu_settings_rejects_docker_only_runner(
-        self, service, runner
-    ):
-        """QEMU runner settings cannot be updated on a runner without QEMU support."""
-        runner.available_runtimes = ["docker"]
-        runner.save(update_fields=["available_runtimes"])
-
-        with pytest.raises(
-            ConflictError, match="Runner does not support runtime 'qemu'"
-        ):
-            service.update_runner_qemu_settings(runner.id, qemu_default_vcpus=4)
-
-    @pytest.mark.asyncio
-    async def test_trigger_build_job_rejects_unsupported_runtime(
-        self, service, runner, user
-    ):
-        """Image definition builds must match a runner-supported runtime."""
-        runner.available_runtimes = ["docker"]
-        runner.save(update_fields=["available_runtimes"])
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name="QEMU Base",
-            runtime_type="qemu",
-            base_distro="ubuntu:24.04",
-        )
-
-        with pytest.raises(
-            ConflictError, match="Runner does not support runtime 'qemu'"
-        ):
-            await service.trigger_build_job(
-                image_definition=definition,
-                runner=runner,
-                activate=True,
-                created_by=user,
-            )
-
-    @pytest.mark.asyncio
-    async def test_clone_workspace_from_image_artifact_rejects_unsupported_runtime(
-        self, service, runner, user
-    ):
-        """Cloning from an artifact should fail if the runner no longer supports its runtime."""
-        source_workspace = Workspace.objects.create(
-            runner=runner,
-            name="QEMU Source",
-            status=WorkspaceStatus.RUNNING,
-            created_by=user,
-            runtime_type="qemu",
-            qemu_vcpus=2,
-            qemu_memory_mb=4096,
-            qemu_disk_size_gb=50,
-        )
-        artifact = ImageInstance.objects.create(
-            is_legacy=True,
-            runner=runner,
-            runtime_type="qemu",
-            origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
-            origin_workspace=source_workspace,
-            created_by=user,
-            name="QEMU Snapshot",
-            runner_ref="artifact-qemu-1",
-            status=ImageInstance.Status.READY,
-        )
-        runner.available_runtimes = ["docker"]
-        runner.save(update_fields=["available_runtimes"])
-
-        with pytest.raises(
-            ConflictError, match="Runner does not support runtime 'qemu'"
-        ):
-            await service.create_workspace_from_image_artifact(
-                image_artifact_id=artifact.id,
-                name="clone-qemu",
-                user=user,
-                organization_id=runner.organization_id,
-            )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1820,12 +1652,10 @@ class TestCreateWorkspaceFromImageArtifact:
             name="Source Workspace",
             status=WorkspaceStatus.RUNNING,
             created_by=user,
-            runtime_type="docker",
         )
         artifact = ImageInstance.objects.create(
             is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
             origin_workspace=source_workspace,
             created_by=user,
@@ -1893,7 +1723,6 @@ class TestCreateWorkspaceFromImageArtifact:
         artifact = ImageInstance.objects.create(
             is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
             origin_workspace=source,
             created_by=user,
@@ -1946,12 +1775,10 @@ class TestCreateWorkspaceFromImageArtifact:
             name="Source Workspace",
             status=WorkspaceStatus.RUNNING,
             created_by=user,
-            runtime_type="docker",
         )
         artifact = ImageInstance.objects.create(
             is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
             origin_workspace=source_workspace,
             created_by=user,
@@ -1994,12 +1821,10 @@ class TestCreateWorkspaceFromImageArtifact:
             name="Deleting Source",
             status=origin_status,
             created_by=user,
-            runtime_type="docker",
         )
         artifact = ImageInstance.objects.create(
             is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
             origin_workspace=source_workspace,
             created_by=user,
@@ -2027,7 +1852,6 @@ class TestCreateWorkspaceFromImageArtifact:
         artifact = ImageInstance.objects.create(
             is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.WORKSPACE_CAPTURE,
             origin_workspace=None,
             created_by=user,
@@ -2044,7 +1868,6 @@ class TestCreateWorkspaceFromImageArtifact:
         )
 
         assert workspace.status == WorkspaceStatus.CREATING
-        assert workspace.runtime_type == "docker"
         assert workspace.runner_id == runner.id
         assert task.type == TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT
         sio_mock.emit.assert_called_once()
@@ -2141,13 +1964,11 @@ class TestWorkspaceOperationState:
     @pytest.mark.asyncio
     async def test_running_qemu_update_sets_restart_operation(self, service, workspace):
         """Running QEMU resource updates should mark the workspace as restarting."""
-        workspace.runtime_type = "qemu"
         workspace.qemu_vcpus = 2
         workspace.qemu_memory_mb = 4096
         workspace.qemu_disk_size_gb = 50
         workspace.save(
             update_fields=[
-                "runtime_type",
                 "qemu_vcpus",
                 "qemu_memory_mb",
                 "qemu_disk_size_gb",
@@ -2173,14 +1994,11 @@ class TestWorkspaceOperationState:
         import os
 
         from django.core.exceptions import SynchronousOnlyOperation
-
-        workspace.runtime_type = "qemu"
         workspace.qemu_vcpus = 2
         workspace.qemu_memory_mb = 4096
         workspace.qemu_disk_size_gb = 50
         workspace.save(
             update_fields=[
-                "runtime_type",
                 "qemu_vcpus",
                 "qemu_memory_mb",
                 "qemu_disk_size_gb",
@@ -2220,13 +2038,11 @@ class TestWorkspaceOperationState:
     ):
         """No-op QEMU updates must not restart a running workspace."""
         service._dispatch_workspace_task = AsyncMock()
-        workspace.runtime_type = "qemu"
         workspace.qemu_vcpus = None
         workspace.qemu_memory_mb = None
         workspace.qemu_disk_size_gb = None
         workspace.save(
             update_fields=[
-                "runtime_type",
                 "qemu_vcpus",
                 "qemu_memory_mb",
                 "qemu_disk_size_gb",
@@ -2755,29 +2571,18 @@ class TestAgentSWorkspaceDependencies:
             "organization": runner.organization,
             "created_by": user,
             "name": "AgentS Deps",
-            "runtime_type": "docker",
             "base_distro": "ubuntu:24.04",
         }
         params.update(kw)
         return ImageDefinition.objects.create(**params)
 
-    def test_docker_block_pins_agent_s_packages(self, service, runner, user):
-        """Docker desktop block pins the Agent-S apt deps + pyautogui fallback."""
-        block = service._desktop_session_dockerfile_block()
-        for package in self._AGENT_S_APT:
-            assert package in block
-        assert "python3-pyautogui" in block
-        assert "python3 -m pip install --break-system-packages pyautogui" in block
-        assert "python3 -m pip install pyautogui" in block
-        # apt python3-pyperclip already provides `import pyperclip`.
-        assert "python3-pyperclip" in block
-        # pyautogui imports mouseinfo, which imports tkinter: without
-        # python3-tk every execute snippet dies at import time.
-        assert "python3-tk" in block
 
     def test_qemu_init_script_pins_agent_s_packages(self, service, runner, user):
         """QEMU init script carries the same Agent-S deps (xfce stack intact)."""
-        definition = self._definition(runner, user, runtime_type="qemu")
+        definition = self._definition(
+            runner,
+            user,
+        )
         script = service._build_qemu_init_script_content(definition)
         for package in self._AGENT_S_APT:
             assert package in script
@@ -2792,42 +2597,13 @@ class TestAgentSWorkspaceDependencies:
         # image so PyAutoGUI connects out of the box.
         assert "touch /root/.Xauthority" in script
 
-    def test_docker_block_pins_xauthority_for_xlib_clients(self, service):
-        """Docker desktop block bakes .Xauthority for the same reason."""
-        block = service._desktop_session_dockerfile_block()
-        assert "/root/.Xauthority" in block
 
-    def test_generated_dockerfile_includes_desktop_block(self, service, runner, user):
-        """The bootstrap default flows through the auto-appended desktop block."""
-        from apps.runners.management.commands.bootstrap_local_deploy import (
-            DEFAULT_WORKSPACE_PACKAGES,
-        )
 
-        definition = self._definition(
-            runner,
-            user,
-            runtime_type="docker",
-            base_distro="ubuntu:22.04",
-            packages=list(DEFAULT_WORKSPACE_PACKAGES),
-        )
-        dockerfile = service._generate_dockerfile_content(definition)
-        for package in self._AGENT_S_APT:
-            assert package in dockerfile
-        assert "python3-pyautogui" in dockerfile
-
-    def test_alpine_images_skip_desktop_agent_s_deps(self, service, runner, user):
-        """Alpine images stay minimal (no desktop block, no Agent-S deps)."""
-        definition = self._definition(
-            runner, user, runtime_type="docker", base_distro="alpine:3.20"
-        )
-        dockerfile = service._generate_dockerfile_content(definition)
-        assert "tesseract-ocr" not in dockerfile
-        assert "python3-pyautogui" not in dockerfile
 
 
 @pytest.mark.django_db
 class TestDesktopSessionImageContent:
-    """QEMU images get XFCE+WhiteSur; Docker keeps Openbox + Chrome."""
+    """QEMU images use XFCE and WhiteSur."""
 
     def test_qemu_init_script_uses_xfce_whitesur_stack(self, service, runner, user):
         """QEMU image builds must provision XFCE, WhiteSur, Plank, and no Openbox."""
@@ -2835,7 +2611,6 @@ class TestDesktopSessionImageContent:
             organization=runner.organization,
             created_by=user,
             name="QEMU Desktop",
-            runtime_type="qemu",
             base_distro="ubuntu:24.04",
         )
 
@@ -2858,41 +2633,7 @@ class TestDesktopSessionImageContent:
         assert "xfce4-session" in script
         assert 'cd "$THEME_WORKDIR/cursors" && ./install.sh' in script
 
-    def test_qemu_init_script_skipped_for_alpine(self, service, runner, user):
-        """Alpine QEMU images must not receive the XFCE desktop block."""
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name="Alpine QEMU",
-            runtime_type="qemu",
-            base_distro="alpine:3.20",
-        )
 
-        script = service._build_qemu_init_script_content(definition)
-
-        assert "startxfce4" not in script
-        assert "kasmvnc" not in script.lower()
-        assert "WhiteSur" not in script
-
-    def test_docker_dockerfile_keeps_openbox(self, service, runner, user):
-        """Docker workspace images must keep the Openbox + Chrome desktop."""
-        definition = ImageDefinition.objects.create(
-            organization=runner.organization,
-            created_by=user,
-            name="Docker Desktop",
-            runtime_type="docker",
-            base_distro="ubuntu:24.04",
-        )
-
-        dockerfile = service._generate_dockerfile_content(definition)
-
-        assert "openbox" in dockerfile
-        assert "openbox-session" in dockerfile
-        assert "ffmpeg" in dockerfile
-        assert "xdotool" in dockerfile
-        assert "startxfce4" not in dockerfile
-        assert "WhiteSur" not in dockerfile
-        assert "--start-maximized" in dockerfile
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2903,7 +2644,6 @@ class TestImageDefinitionLifecycle:
             organization=runner.organization,
             created_by=user,
             name="Activate Ready",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
         build = ImageBuildJob.objects.create(
@@ -2915,7 +2655,6 @@ class TestImageDefinitionLifecycle:
         legacy_image = ImageInstance.objects.create(
             is_legacy=True,
             runner=runner,
-            runtime_type="docker",
             origin_type=ImageInstance.OriginType.DEFINITION_BUILD,
             origin_definition=definition,
             build_job=build,
@@ -2944,7 +2683,6 @@ class TestImageDefinitionLifecycle:
             organization=runner.organization,
             created_by=user,
             name="Activate Never Built",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
         build = ImageBuildJob.objects.create(
@@ -2968,7 +2706,6 @@ class TestImageDefinitionLifecycle:
             organization=offline_runner.organization,
             created_by=user,
             name="Offline Pending",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
         )
 
@@ -2992,7 +2729,6 @@ class TestImageDefinitionLifecycle:
             organization=runner.organization,
             created_by=user,
             name="Deleting Definition",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
             status=ImageDefinition.Status.DELETING,
         )
@@ -3010,7 +2746,6 @@ class TestImageDefinitionLifecycle:
             organization=runner.organization,
             created_by=user,
             name="Restore Definition",
-            runtime_type="docker",
             base_distro="ubuntu:24.04",
             status=ImageDefinition.Status.DELETE_FAILED,
             delete_last_error="still used by 1 workspace(s)",
@@ -3103,7 +2838,6 @@ class TestPersistentWorkspaceCredentials:
                 {
                     "workspace_id": str(workspace.id),
                     "status": "exited",
-                    "runtime_type": "docker",
                 }
             ],
         )
@@ -3121,7 +2855,6 @@ class TestPersistentWorkspaceCredentials:
             name="Secret Workspace",
             status=WorkspaceStatus.STOPPED,
             created_by=user,
-            runtime_type="qemu",
             credentials_present=True,
         )
 
@@ -3140,7 +2873,6 @@ class TestPersistentWorkspaceCredentials:
             name="Clean Workspace",
             status=WorkspaceStatus.STOPPED,
             created_by=user,
-            runtime_type="qemu",
             credentials_present=False,
         )
 
@@ -3169,7 +2901,6 @@ class TestPersistentWorkspaceCredentials:
             name="Resume Creds",
             status=WorkspaceStatus.STOPPED,
             created_by=user,
-            runtime_type="docker",
             credentials_present=False,
         )
         credential_service = CredentialService.objects.create(
@@ -3538,7 +3269,6 @@ class TestPersistentWorkspaceCredentials:
         workspace = Workspace.objects.create(
             runner=offline_runner,
             name="Offline QEMU Workspace",
-            runtime_type=RuntimeType.QEMU,
             status=WorkspaceStatus.RUNNING,
             qemu_vcpus=1,
             qemu_memory_mb=1024,
@@ -3680,7 +3410,6 @@ class TestPersistentWorkspaceCredentials:
                 {
                     "workspace_id": str(workspace.id),
                     "status": "running",
-                    "runtime_type": "docker",
                 }
             ],
         )
@@ -3816,7 +3545,6 @@ class TestPersistentWorkspaceCredentials:
                 {
                     "workspace_id": str(workspace.id),
                     "status": "running",
-                    "runtime_type": "docker",
                 }
             ],
         )
@@ -3840,7 +3568,6 @@ class TestPersistentWorkspaceCredentials:
                 {
                     "workspace_id": str(workspace.id),
                     "status": "running",
-                    "runtime_type": "docker",
                 }
             ],
         )

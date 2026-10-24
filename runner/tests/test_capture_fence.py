@@ -16,13 +16,13 @@ from src.services.sessions.terminals import TerminalSession
 
 @pytest.fixture
 def service():
-    runtime = SimpleNamespace(
-        supports_image_artifacts=True, create_image_artifact=AsyncMock()
-    )
-    service = WorkspaceService({"qemu": runtime}, RunnerSettings())
+    runtime = SimpleNamespace(create_image_artifact=AsyncMock())
+    service = WorkspaceService(runtime, RunnerSettings())
     ws = uuid.uuid4()
     service.registry._cache[ws] = WorkspaceInfo(
-        workspace_id=ws, instance_id="guest", status="exited", runtime_type="qemu"
+        workspace_id=ws,
+        instance_id="guest",
+        status="exited",
     )
     service.images.scrub_proof_hook = AsyncMock(return_value=True)
     return service, ws, runtime

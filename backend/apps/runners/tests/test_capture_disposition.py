@@ -24,7 +24,6 @@ pytestmark = pytest.mark.django_db
 
 def interrupted_capture(service, runner, workspace, phase: str):
     """Allocate a real capture and fence its requested child phase."""
-    workspace.runtime_type = "qemu"
     workspace.credentials_present = True
     workspace.save()
     _, child = CaptureRepository.allocate(
