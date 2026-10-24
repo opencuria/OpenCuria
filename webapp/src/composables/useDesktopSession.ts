@@ -133,7 +133,9 @@ export function useDesktopSession(workspaceId: Ref<string>, options?: DesktopSes
     const id = workspaceId.value
     reconnectPending = (async () => {
       if (!desktopStore.isConnected || desktopStore.workspaceId !== id) {
-        await startDesktop()
+        // Recovery restores only a still-wanted intent; never restart a
+        // desktop this tab stopped (or never asked for) once its route ends.
+        if (session.value.wanted) await startDesktop()
         return
       }
 

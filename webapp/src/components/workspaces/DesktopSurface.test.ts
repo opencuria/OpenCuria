@@ -7,6 +7,7 @@ import DesktopSurface from './DesktopSurface.vue'
 import {
   closeDesktopViewer,
   desktopViewerSession,
+  refreshDesktopViewer,
 } from '@/composables/useDesktopSessionCoordinator'
 import { useDesktopStore } from '@/stores/desktop'
 import { sidebarDesktopHost, modalDesktopHost } from '@/lib/desktopSurfaceHost'
@@ -451,6 +452,48 @@ describe('DesktopSurface', () => {
     document.dispatchEvent(new Event('visibilitychange'))
     await nextTick()
     expect(store.viewerGeneration).toBe(0)
+  })
+
+  it('does not restart a stopped desktop when its viewer drops afterwards', async () => {
+    vi.useFakeTimers()
+    const store = useDesktopStore()
+    getDesktopStatus.mockImplementation(async () => ({
+      active: true,
+      proxy_url: '/ws/desktop/ws-1/',
+      viewer_held: true,
+      computer_use_active: false,
+      viewer_lease_state: 'held',
+      revision: desktopViewerSession('ws-1').revision,
+      epoch: 'epoch-1',
+    }))
+    mountSurface()
+    store.open()
+    await flushPromises()
+    expect(startDesktop).toHaveBeenCalledOnce()
+    connectionMessage(document.querySelector('iframe')!.contentWindow, 'connected')
+    await nextTick()
+
+    // Stop is acknowledged before the runner tears down Xvnc, so the viewer
+    // drops while the route is still published, then desktop:stopped lands.
+    await closeDesktopViewer('ws-1')
+    connectionMessage(document.querySelector('iframe')!.contentWindow, 'disconnected')
+    await nextTick()
+    getDesktopStatus.mockImplementation(async () => ({
+      active: false,
+      proxy_url: null,
+      viewer_held: false,
+      computer_use_active: false,
+      viewer_lease_state: 'released',
+      revision: desktopViewerSession('ws-1').revision,
+      epoch: 'epoch-1',
+    }))
+    await refreshDesktopViewer('ws-1')
+    expect(store.isConnected).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    expect(startDesktop).toHaveBeenCalledOnce()
+    expect(desktopViewerSession('ws-1').wanted).toBe(false)
   })
 
   it('does not stop a globally inherited session on unmount', async () => {

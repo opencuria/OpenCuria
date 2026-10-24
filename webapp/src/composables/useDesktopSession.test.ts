@@ -1159,6 +1159,25 @@ describe('viewer observation fencing and bounded startup', () => {
     expect(desktopViewerSession(id).wanted).toBe(false)
   })
 
+  it('reconnect reacquires only a still-wanted intent once its route is gone', async () => {
+    const id = `viewer-${++count}`
+    const { session } = surface(id)
+    const store = useDesktopStore()
+    await session.startDesktop()
+    desktopViewerSession(id).status = { ...status(id), active: false, proxy_url: null }
+    store.setDisconnected()
+
+    await session.handleReconnect()
+    expect(api.startDesktop).toHaveBeenCalledTimes(2)
+
+    await session.stopDesktop()
+    store.setDisconnected()
+    await session.handleReconnect()
+
+    expect(api.startDesktop).toHaveBeenCalledTimes(2)
+    expect(desktopViewerSession(id).wanted).toBe(false)
+  })
+
   it('does not restart after unmount while startup observation is pending', async () => {
     const id = `viewer-${++count}`
     let resolveStatus!: (value: ReturnType<typeof status>) => void
