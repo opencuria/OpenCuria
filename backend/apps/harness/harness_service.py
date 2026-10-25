@@ -27,6 +27,7 @@ import asyncio
 import contextvars
 import uuid
 from collections.abc import Awaitable, Callable
+from functools import partial
 from itertools import islice
 from typing import Any
 
@@ -40,11 +41,6 @@ from apps.skills.services import SkillService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .agents.definitions import get_agent
-from .commit_messages import (
-    STYLE_SUBJECTS,
-    build_commit_message_prompt,
-    normalize_commit_subject,
-)
 from .compaction import CHECKPOINT_PREFIX
 from .images import (
     build_tool_message_content,
@@ -70,10 +66,10 @@ from .repositories import (
 )
 from .run_events import publish_assistant_run_finished
 from .runner import HarnessRunner, RunOptions
+from .small_model_service import build_small_model_runner
 from .steering import NO_ACTIVE_RUN_CODE, SteerEntry, SteeringChannel
 from .todos.repositories import TodoRepository
 from .todos.service import TodoService
-from .tools import default_tool_registry
 from .tools.subagents import TaskArgs, validate_subagent_delegation
 from .tools.todos import TodoWriteTool
 from .tools.truncate import truncate_tool_output
@@ -5060,59 +5056,6 @@ class HarnessService:
                 )
             )
 
-    async def _small_model_runner(
-        self,
-        organization_id: uuid.UUID,
-        *,
-        user_id: int | None = None,
-        account_ids: dict[str, str] | None = None,
-        provider_turn_id: uuid.UUID | str | None = None,
-    ) -> tuple[HarnessRunner, str] | None:
-        """Build a text-only runner on the org's small model (None if unset)."""
-        from .providers.resolver import StaticModelResolver
-        from .services import ProviderConfigService
-
-        config_service = ProviderConfigService()
-        config = None
-        try:
-            config = await sync_to_async(config_service.get_config)(organization_id)
-        except NotFoundError:
-            config = None
-        small_model = ((config.small_model if config else "") or "").strip()
-        if not small_model:
-            return None
-        small_effort = normalize_reasoning_effort(
-            (config.small_effort if config else "") or ""
-        )
-        if self._provider_factory is not None:
-            model_resolver = StaticModelResolver(
-                self._provider_factory(organization_id)
-            ).resolve
-        else:
-
-            def register_used(account_id: str) -> None:
-                if provider_turn_id:
-                    self._provider_turn_service.register_use(
-                        provider_turn_id, account_id
-                    )
-
-            resolver = await sync_to_async(config_service.build_resolver)(
-                organization_id,
-                user_id=user_id,
-                account_ids=account_ids,
-                on_account_used=register_used if provider_turn_id else None,
-            )
-            await sync_to_async(resolver.prepare_adapters)()
-            model_resolver = resolver.resolve
-        runner = HarnessRunner(
-            model_resolver=model_resolver,
-            tools=default_tool_registry(),
-            chat_options=(
-                ChatOptions(reasoning_effort=small_effort) if small_effort else None
-            ),
-        )
-        return runner, small_model
-
     def _summary_material(self, session_id: uuid.UUID, assistant_id: uuid.UUID) -> str:
         """Collect user requests and closing replies through the settled turn."""
         message = self.messages.get_by_id(assistant_id)
@@ -5161,11 +5104,16 @@ class HarnessService:
                 self._provider_turn_service.cancellation_reason
             )(provider_turn_id):
                 return
-            small = await self._small_model_runner(
+            small = await build_small_model_runner(
                 organization_id,
                 user_id=initiated_by_id,
                 account_ids=account_ids,
-                provider_turn_id=provider_turn_id,
+                provider_factory=self._provider_factory,
+                on_account_used=(
+                    partial(self._provider_turn_service.register_use, provider_turn_id)
+                    if provider_turn_id
+                    else None
+                ),
             )
             if small is None:
                 return
@@ -5224,11 +5172,16 @@ class HarnessService:
                 self._provider_turn_service.cancellation_reason
             )(provider_turn_id):
                 return
-            small = await self._small_model_runner(
+            small = await build_small_model_runner(
                 organization_id,
                 user_id=initiated_by_id,
                 account_ids=account_ids,
-                provider_turn_id=provider_turn_id,
+                provider_factory=self._provider_factory,
+                on_account_used=(
+                    partial(self._provider_turn_service.register_use, provider_turn_id)
+                    if provider_turn_id
+                    else None
+                ),
             )
             if small is None:
                 return
@@ -5262,68 +5215,6 @@ class HarnessService:
                 await self._emit_conversations_changed(session.workspace_id)
         except Exception:  # pragma: no cover - title must never break runs
             log.warning("harness_title_generation_failed", session_id=str(session_id))
-
-    async def generate_commit_message(
-        self,
-        *,
-        workspace_id: uuid.UUID,
-        repo_path: str,
-        organization_id: uuid.UUID,
-        user_id: int | None = None,
-    ) -> str:
-        """Suggest a commit subject for one repo with the org's small model.
-
-        Describes the staged changes, or all working-tree changes when
-        nothing is staged; recent subjects steer format and language.
-
-        Raises:
-            ConflictError: No small model is configured, the repo could not
-                be read, nothing changed, or the model returned no subject.
-        """
-        small = await self._small_model_runner(organization_id, user_id=user_id)
-        if small is None:
-            raise ConflictError(
-                "Set a small model in the provider settings to generate "
-                "commit messages",
-                code="small_model_missing",
-            )
-        runner, small_model = small
-        git = get_runner_service()
-        diff = await git.run_git_operation(
-            workspace_id, "working_diff", repo_path=repo_path, args={}
-        )
-        if not diff.get("ok"):
-            raise ConflictError(
-                str(diff.get("message") or "Could not read the changes"),
-                code=str(diff.get("code") or "git_failed"),
-            )
-        history = await git.run_git_operation(
-            workspace_id,
-            "repo_history",
-            repo_path=repo_path,
-            args={"history_limit": STYLE_SUBJECTS},
-        )
-        subjects = [
-            str(commit.get("message") or "")
-            for commit in (history.get("commits") or [] if history.get("ok") else [])
-            if isinstance(commit, dict)
-        ]
-        prompt = build_commit_message_prompt(diff.get("diff"), subjects)
-        if not prompt:
-            raise ConflictError("There are no changes to describe", code="no_changes")
-        result = await runner.run(
-            prompt,
-            "commit_message",
-            small_model,
-            "build",
-            RunOptions(auto_approve=True),
-        )
-        subject = normalize_commit_subject(result.output or "")
-        if not subject:
-            raise ConflictError(
-                "The model returned no commit message", code="empty_commit_message"
-            )
-        return subject
 
     @staticmethod
     def _resolve_agent_s_run_config(organization_id: uuid.UUID, model: str):  # type: ignore[no-untyped-def]

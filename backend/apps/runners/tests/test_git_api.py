@@ -860,14 +860,14 @@ def test_git_service_busy_offline_maps_to_409(
 
 
 def _install_commit_message_fake(monkeypatch, *, result=None, side_effect=None):
-    """Patch the harness service used by POST /git/commit-message/."""
+    """Patch the commit suggestion service used by POST /git/commit-message/."""
     import apps.harness.commit_message_api as commit_message_api
 
     generate = AsyncMock(return_value=result, side_effect=side_effect)
     monkeypatch.setattr(
         commit_message_api,
-        "get_harness_service",
-        lambda: SimpleNamespace(generate_commit_message=generate),
+        "CommitMessageService",
+        lambda: SimpleNamespace(generate=generate),
     )
     return generate
 
@@ -899,7 +899,7 @@ def test_git_commit_message_openapi_contract() -> None:
 
 @pytest.mark.django_db
 def test_git_commit_message_happy_returns_subject(client: Client, monkeypatch):
-    """POST commit-message/ delegates to the harness with org and user scope."""
+    """POST commit-message/ delegates with organization and user scope."""
     user, org, runner, workspace = _make_context()
     token = _create_api_key(user=user, permissions=_commit_message_perms())
     generate = _install_commit_message_fake(monkeypatch, result="feat: add login")

@@ -22,7 +22,7 @@ from common.request_context import get_organization_id
 from common.schemas import ErrorOut
 
 from .commit_message_schemas import GitCommitMessageIn, GitCommitMessageOut
-from .harness_service import get_harness_service
+from .commit_message_service import CommitMessageService
 
 commit_message_router = Router(tags=["workspaces-git"])
 
@@ -67,7 +67,7 @@ async def git_commit_message(
         await sync_to_async(get_runner_service().get_workspace_for_user)(
             workspace_id, user=request.user, organization_id=org_id
         )
-        message = await get_harness_service().generate_commit_message(
+        message = await CommitMessageService().generate(
             workspace_id=workspace_id,
             repo_path=payload.repo_path,
             organization_id=org_id,

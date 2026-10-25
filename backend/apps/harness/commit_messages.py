@@ -1,6 +1,6 @@
 """Prompt material and output cleanup for small-model commit subjects.
 
-Pure helpers used by :meth:`HarnessService.generate_commit_message`: they
+Pure helpers used by :meth:`CommitMessageService.generate`: they
 turn a runner ``working_diff`` payload plus recent commit subjects into a
 bounded prompt and reduce the model reply to one plain subject line.
 """

@@ -6,6 +6,7 @@ import asyncio
 import uuid
 
 import pytest
+from asgiref.sync import sync_to_async
 
 from apps.harness.agents.definitions import get_agent
 from apps.harness.harness_service import (
@@ -15,7 +16,9 @@ from apps.harness.harness_service import (
 from apps.harness.models import HarnessMessageRole, HarnessSession, HarnessSessionStatus
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.service import PermissionService
+from apps.harness.provider_turns import ProviderTurnService
 from apps.harness.providers.base import Delta, ProviderAdapter, Usage
+from apps.harness.providers.openrouter import OpenRouterAdapter
 from apps.harness.repositories import (
     HarnessMessageRepository,
     HarnessPartRepository,
@@ -392,6 +395,55 @@ async def test_generate_summary_needs_a_small_model(harness_workspace) -> None:
 
     assert provider.summary_inputs == []
     assert HarnessSession.objects.get(id=session.id).summary == ""
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("follower", ["title", "summary"])
+async def test_metadata_registers_frozen_account_before_provider_request(
+    harness_workspace, provider_account_factory, monkeypatch, follower: str
+) -> None:
+    """Shared runner composition keeps title/summary authority on the answer."""
+    _configure_small_model(harness_workspace)
+    account = provider_account_factory("openrouter")
+    session, assistant = _session_with_answer(harness_workspace)
+    turns = ProviderTurnService()
+    account_ids = {"openrouter": str(account.id)}
+    turn = turns.admit(
+        assistant_message_id=assistant.id,
+        organization_id=session.organization_id,
+        user_id=harness_workspace.created_by_id,
+        account_ids=account_ids,
+    )
+    provider = RoleProvider()
+
+    async def stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+        stored_turn = await sync_to_async(turns.get)(turn.id)
+        assert stored_turn.used_account_ids == [str(account.id)]
+        async for delta in provider.chat_stream(model, messages, tools, opts):
+            yield delta
+
+    monkeypatch.setattr(OpenRouterAdapter, "chat_stream", stream)
+    monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+    service = HarnessService(emit=_drop_emit)
+    authority = {
+        "session_id": session.id,
+        "organization_id": session.organization_id,
+        "provider_turn_id": turn.id,
+        "account_ids": account_ids,
+        "initiated_by_id": harness_workspace.created_by_id,
+    }
+    if follower == "title":
+        await service._generate_title(prompt="Fix login", **authority)
+    else:
+        await service._generate_summary(
+            assistant_id=assistant.id, workspace_id=session.workspace_id, **authority
+        )
+
+    stored = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
+    if follower == "title":
+        assert stored.title == "Login fix"
+    else:
+        assert stored.summary == SENTENCE
 
 
 @pytest.mark.django_db(transaction=True)

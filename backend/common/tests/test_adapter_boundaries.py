@@ -35,6 +35,8 @@ Harness persistence never imports tool adapters; todo records and their storage
 port live in ``apps.harness.todos.domain`` and tools call its todo service.
 Provider wire adapters share context-error classification within ``providers``;
 neither they nor their dependencies import orchestration or persistence.
+Stateless commit suggestions and shared small-model composition are independent
+of chat session orchestration; their adapter calls ``CommitMessageService``.
 """
 
 from __future__ import annotations
@@ -182,6 +184,45 @@ def _adapter_modules(trees: dict[Path, ast.Module]) -> set[Path]:
         or _module_name(path).startswith("apps.mcp_app")
         or _module_name(path) in REALTIME_ADAPTERS
     }
+
+
+def test_commit_suggestions_are_independent_of_session_orchestration() -> None:
+    """Commit generation must not depend on chat lifecycle, even transitively."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    modules = {_module_name(path): path for path in trees}
+    workflow = {
+        "apps.harness.commit_message_api",
+        "apps.harness.commit_message_service",
+        "apps.harness.commit_messages",
+        "apps.harness.small_model_service",
+    }
+    lifecycle = "apps.harness.harness_service"
+    assert workflow <= modules.keys()
+    pending = set(workflow)
+    checked: set[str] = set()
+    violations = set()
+    while pending:
+        module = pending.pop()
+        checked.add(module)
+        path = modules[module]
+        for imported in _imported_modules(path, trees[path]):
+            if imported == lifecycle or imported.startswith(f"{lifecycle}."):
+                violations.add(f"{module} -> {imported}")
+            elif imported in modules and imported not in checked:
+                pending.add(imported)
+    violations.update(
+        f"{lifecycle} -> {imported}"
+        for imported in _imported_modules(modules[lifecycle], trees[modules[lifecycle]])
+        if any(
+            imported == owner or imported.startswith(f"{owner}.")
+            for owner in workflow - {"apps.harness.small_model_service"}
+        )
+    )
+    assert violations == set(), (
+        "Keep commit suggestions in CommitMessageService and share small-model "
+        "composition without coupling it to HarnessService:\n"
+        + "\n".join(sorted(violations))
+    )
 
 
 def test_provider_wire_adapters_never_import_harness_orchestration() -> None:

@@ -11,12 +11,12 @@ from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.agents.definitions import get_agent
+from apps.harness.commit_message_service import CommitMessageService
 from apps.harness.commit_messages import (
     MAX_DIFF_CHARS,
     build_commit_message_prompt,
     normalize_commit_subject,
 )
-from apps.harness.harness_service import HarnessService
 from apps.harness.providers.base import Delta, ProviderAdapter, Usage
 from apps.harness.services import ProviderConfigService
 from common.exceptions import ConflictError
@@ -75,8 +75,8 @@ class CommitProvider(ProviderAdapter):
         yield Delta(text=self.reply, usage=Usage(1, 1, 2))
 
 
-def _service(provider: ProviderAdapter) -> HarnessService:
-    return HarnessService(provider_factory=lambda _org: provider)
+def _service(provider: ProviderAdapter) -> CommitMessageService:
+    return CommitMessageService(provider_factory=lambda _org: provider)
 
 
 def _fake_git(monkeypatch, *, diff: dict, history: dict | None = None):
@@ -89,7 +89,9 @@ def _fake_git(monkeypatch, *, diff: dict, history: dict | None = None):
         return history or {"ok": True, "commits": []}
 
     fake = SimpleNamespace(run_git_operation=AsyncMock(side_effect=run_git_operation))
-    monkeypatch.setattr("apps.harness.harness_service.get_runner_service", lambda: fake)
+    monkeypatch.setattr(
+        "apps.harness.commit_message_service.get_runner_service", lambda: fake
+    )
     return calls
 
 
@@ -181,7 +183,7 @@ async def test_generate_commit_message_uses_diff_and_recent_subjects(
     )
     provider = CommitProvider()
 
-    message = await _service(provider).generate_commit_message(
+    message = await _service(provider).generate(
         workspace_id=harness_workspace.id,
         repo_path=REPO,
         organization_id=harness_workspace.runner.organization_id,
@@ -199,7 +201,7 @@ async def test_generate_commit_message_uses_diff_and_recent_subjects(
 
 
 @pytest.mark.django_db
-def test_commit_message_rest_uses_the_real_harness_service(
+def test_commit_message_rest_uses_the_real_commit_service(
     harness_workspace, monkeypatch
 ) -> None:
     """Exercise auth, routing, ownership, prompt generation and output together."""
@@ -212,7 +214,7 @@ def test_commit_message_rest_uses_the_real_harness_service(
     provider = CommitProvider('"fix(auth): return the right login code"\n')
     service = _service(provider)
     monkeypatch.setattr(
-        "apps.harness.commit_message_api.get_harness_service", lambda: service
+        "apps.harness.commit_message_api.CommitMessageService", lambda: service
     )
     token = "commit-message-test-key"
     APIKey.objects.create(
@@ -254,7 +256,7 @@ async def test_generate_commit_message_needs_a_small_model(
     provider = CommitProvider()
 
     with pytest.raises(ConflictError) as exc:
-        await _service(provider).generate_commit_message(
+        await _service(provider).generate(
             workspace_id=harness_workspace.id,
             repo_path=REPO,
             organization_id=harness_workspace.runner.organization_id,
@@ -263,6 +265,30 @@ async def test_generate_commit_message_needs_a_small_model(
     assert exc.value.code == "small_model_missing"
     assert calls == []
     assert provider.prompts == []
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_generate_commit_message_tolerates_missing_history(
+    harness_workspace, monkeypatch
+) -> None:
+    """A failed style-history lookup still describes the working diff."""
+    _configure_small_model(harness_workspace)
+    _fake_git(
+        monkeypatch,
+        diff={"ok": True, "diff": {"staged": [STAGED]}},
+        history={"ok": False, "code": "git_failed", "message": "No history"},
+    )
+    provider = CommitProvider()
+
+    subject = await _service(provider).generate(
+        workspace_id=harness_workspace.id,
+        repo_path=REPO,
+        organization_id=harness_workspace.runner.organization_id,
+    )
+
+    assert subject == "fix(auth): return the right login code"
+    assert "src/auth.py" in provider.prompts[0]
+    assert "Recent commit subjects" not in provider.prompts[0]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -275,6 +301,7 @@ async def test_generate_commit_message_needs_a_small_model(
             "unused",
             "not_a_repo",
         ),
+        ({"ok": False}, "unused", "git_failed"),
         (
             {"ok": True, "diff": {"staged": [STAGED]}},
             "```\n```",
@@ -290,7 +317,7 @@ async def test_generate_commit_message_failures(
     _fake_git(monkeypatch, diff=diff)
 
     with pytest.raises(ConflictError) as exc:
-        await _service(CommitProvider(reply)).generate_commit_message(
+        await _service(CommitProvider(reply)).generate(
             workspace_id=harness_workspace.id,
             repo_path=REPO,
             organization_id=harness_workspace.runner.organization_id,
