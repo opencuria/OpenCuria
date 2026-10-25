@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from django.db.models import Count, Q, QuerySet
+from django.db.models import Count, OuterRef, Q, QuerySet, Subquery
 
 from .models import (
     CapturedImage,
@@ -24,6 +24,13 @@ from .models import (
 PIN_TERMINAL_STATUSES = ["deleted", "removed"]
 DONE_DELETION_PHASES = ["completed", "cancelled"]
 ACTIVE_JOB_STATUSES = {"active"}
+
+
+def _kept_ids(
+    ready_ids: list[uuid.UUID], keep: int, latest: ImageInstance | None
+) -> set[uuid.UUID]:
+    """Apply the retention window to ready ids ordered newest first."""
+    return set(ready_ids[: max(keep, 1)]) | ({latest.id} if latest else set())
 
 
 @dataclass(frozen=True)
@@ -70,44 +77,47 @@ class ImageLineRepository:
         return ImageLine("captured", line.id, line.name, line.runner_id)
 
     @staticmethod
-    def versions(line: ImageLine) -> QuerySet[ImageInstance]:
-        """All non-deleted versions of a line, newest first."""
-        return (
-            ImageInstance.objects.filter(line.filter)
-            .exclude(status="deleted")
-            .order_by("-generation", "-created_at")
-        )
-
-    @staticmethod
     def latest(line: ImageLine | None) -> ImageInstance | None:
         """The version new workspaces and updates use; None when unavailable."""
         if line is None:
             return None
-        if line.kind == "captured":
-            if not CapturedImage.objects.filter(pk=line.id, status="active").exists():
-                return None
-            return (
-                ImageInstance.objects.filter(line.filter, status="ready")
+        return ImageLineRepository.latest_many([line])[line]
+
+    @staticmethod
+    def latest_many(
+        lines: list[ImageLine],
+    ) -> dict[ImageLine, ImageInstance | None]:
+        """Resolve selected versions in at most one query per line kind."""
+        selected_by_key: dict[tuple[str, uuid.UUID], ImageInstance] = {}
+        captured = {line.id for line in lines if line.kind == "captured"}
+        definitions = {line.id for line in lines if line.kind == "definition"}
+        if captured:
+            latest_id = (
+                ImageInstance.objects.filter(
+                    captured_image_id=OuterRef("pk"), status="ready"
+                )
                 .exclude(runner_ref="")
                 .order_by("-generation")
-                .first()
+                .values("id")[:1]
             )
-        job = (
-            ImageBuildJob.objects.select_related(
-                "current_generation", "image_definition"
+            selected = (
+                CapturedImage.objects.filter(pk__in=captured, status="active")
+                .order_by()
+                .annotate(latest_id=Subquery(latest_id))
+                .values("latest_id")
             )
-            .filter(pk=line.id)
-            .first()
-        )
-        if (
-            job is None
-            or job.status not in ACTIVE_JOB_STATUSES
-            or job.image_definition.status != "active"
-            or job.current_generation is None
-            or job.current_generation.status != "ready"
-        ):
-            return None
-        return job.current_generation
+            for image in ImageInstance.objects.filter(pk__in=Subquery(selected)):
+                selected_by_key[("captured", image.captured_image_id)] = image
+        if definitions:
+            jobs = ImageBuildJob.objects.filter(
+                pk__in=definitions,
+                status__in=ACTIVE_JOB_STATUSES,
+                image_definition__status="active",
+                current_generation__status="ready",
+            ).select_related("current_generation")
+            for job in jobs:
+                selected_by_key[("definition", job.id)] = job.current_generation
+        return {line: selected_by_key.get((line.kind, line.id)) for line in lines}
 
     @staticmethod
     def latest_for(image: ImageInstance | None) -> ImageInstance | None:
@@ -148,24 +158,56 @@ class ImageLineRepository:
             .values_list("id", flat=True)[: max(keep, 1)]
         )
         latest = ImageLineRepository.latest(line)
-        return set(ready) | ({latest.id} if latest else set())
+        return _kept_ids(ready, keep, latest)
 
     @staticmethod
     def retention_labels(line: ImageLine, keep: int) -> dict[uuid.UUID, str]:
         """Label ready versions ``latest``, ``kept`` or ``expires_when_unused``."""
-        latest = ImageLineRepository.latest(line)
-        kept = ImageLineRepository.kept_ids(line, keep)
-        labels = {}
-        for image_id in ImageInstance.objects.filter(
-            line.filter, status="ready"
-        ).values_list("id", flat=True):
-            if latest and image_id == latest.id:
-                labels[image_id] = "latest"
-            elif image_id in kept:
-                labels[image_id] = "kept"
-            else:
-                labels[image_id] = "expires_when_unused"
-        return labels
+        latest = ImageLineRepository.latest_many([line])
+        return ImageLineRepository.retention_labels_many({line: keep}, latest)[line]
+
+    @staticmethod
+    def _version_filter(lines: list[ImageLine]) -> Q:
+        """Match versions of the requested captured and definition lines."""
+        return Q(
+            captured_image_id__in=[line.id for line in lines if line.kind == "captured"]
+        ) | Q(build_job_id__in=[line.id for line in lines if line.kind == "definition"])
+
+    @staticmethod
+    def retention_labels_many(
+        keep_by_line: dict[ImageLine, int],
+        latest_by_line: dict[ImageLine, ImageInstance | None],
+    ) -> dict[ImageLine, dict[uuid.UUID, str]]:
+        """Label all requested lines with one ordered read of ready version ids."""
+        ready: dict[tuple[str, uuid.UUID], list[uuid.UUID]] = {
+            (line.kind, line.id): [] for line in keep_by_line
+        }
+        rows = (
+            ImageInstance.objects.filter(
+                ImageLineRepository._version_filter(list(keep_by_line)), status="ready"
+            )
+            .order_by("-generation")
+            .values_list("id", "captured_image_id", "build_job_id")
+        )
+        for image_id, captured_id, build_id in rows:
+            key = ("captured", captured_id) if captured_id else ("definition", build_id)
+            ready[key].append(image_id)
+        result = {}
+        for line, keep in keep_by_line.items():
+            ready_ids = ready[(line.kind, line.id)]
+            latest = latest_by_line[line]
+            kept = _kept_ids(ready_ids, keep, latest)
+            result[line] = {
+                image_id: (
+                    "latest"
+                    if latest and image_id == latest.id
+                    else "kept"
+                    if image_id in kept
+                    else "expires_when_unused"
+                )
+                for image_id in ready_ids
+            }
+        return result
 
     @staticmethod
     def retention_candidates(line: ImageLine, keep: int) -> list[ImageInstance]:
@@ -233,9 +275,20 @@ class ImageLineRepository:
     @staticmethod
     def version_rows(line: ImageLine) -> list[ImageInstance]:
         """Versions with the relations needed for presentation."""
+        return ImageLineRepository.version_rows_for_lines([line])
+
+    @staticmethod
+    def version_rows_for_lines(lines: list[ImageLine]) -> list[ImageInstance]:
+        """Load non-deleted versions and presentation relations in one query."""
         return list(
-            ImageLineRepository.versions(line).select_related(
-                "runner", "build_job__runner", "build_job__image_definition"
+            ImageInstance.objects.filter(ImageLineRepository._version_filter(lines))
+            .exclude(status="deleted")
+            .order_by("-generation", "-created_at")
+            .select_related(
+                "runner",
+                "captured_image",
+                "build_job__runner",
+                "build_job__image_definition",
             )
         )
 

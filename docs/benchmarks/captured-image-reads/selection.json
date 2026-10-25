@@ -1,0 +1,137 @@
+{
+  "method": "Python secrets.choice(top_three), one draw",
+  "candidates": [
+    {
+      "rank": 1,
+      "id": "captured-image-presentation",
+      "component": "backend",
+      "evidence": "Full authenticated captured-images REST request p50 about 391 ms for 30 lines / 150 versions in initial probe; per-version line fetches and repeated latest/retention queries.",
+      "approach": "Batch presentation reads with request-local data; preserve visibility, latest and retention rules.",
+      "risk": "Low to medium: read-only behavior; explicit lifecycle-state characterization required."
+    },
+    {
+      "rank": 2,
+      "id": "workspace-base-image-refs",
+      "component": "backend",
+      "evidence": "Workspace list calls version_ref separately for every base and pending image; latest() executes SQL on every call. Full authenticated path grows with workspace count.",
+      "approach": "Bulk load latest version references in the service/repository layer for workspace lists.",
+      "risk": "Medium: shared workspace serialization used by REST and socket events."
+    },
+    {
+      "rank": 3,
+      "id": "untracked-git-diffs",
+      "component": "runner",
+      "evidence": "Real temporary Git repository through production service and existing fake runtime: 1/10/30 untracked files => 6/15/35 runtime calls, p50 6.898/29.061/81.798 ms. QEMU SSH overhead not included.",
+      "approach": "Bounded concurrent independent per-file diffs under the existing repository lock.",
+      "risk": "Medium: cancellation and child process lifetime must remain correct."
+    },
+    {
+      "rank": 4,
+      "id": "heartbeat-workspace-refresh",
+      "component": "backend",
+      "evidence": "auto_stop_inactive_workspaces performs full workspace reload per candidate (relations and credentials), even for disabled policies; frequent heartbeat path.",
+      "approach": "Narrow, batch current eligibility reads while retaining admission checks.",
+      "risk": "Higher: stale-state and lifecycle safety; not chosen for shortlist."
+    },
+    {
+      "rank": 5,
+      "id": "mobile-stream-copy",
+      "component": "mobile",
+      "evidence": "Every part event clones every part in the current assistant message, recursively freezes and rebuilds session snapshots. Cost scales with long tool-heavy turns.",
+      "approach": "Profile and selectively copy changed parts while preserving immutable snapshots.",
+      "risk": "Higher: aliasing and native UI validation; no device measurement yet."
+    },
+    {
+      "rank": 6,
+      "id": "child-session-matching",
+      "component": "shared packages / webapp",
+      "evidence": "buildChildSessionIdMap filters unmatched children for every part and the Vue chat panel depends on all retained transcripts; fallback matching can be quadratic.",
+      "approach": "Index title matches per parent, reduce reactive invalidation after profiling.",
+      "risk": "Medium: only fallback/large-fanout workloads; lower confidence in real-world impact."
+    }
+  ],
+  "selected": "captured-image-presentation",
+  "starting_revision": "40c4980912fc1b4a8647a455f36f6d5ac3b00e33",
+  "exploratory_backend": [
+    {
+      "endpoint": "/api/v1/captured-images/",
+      "lines": 1,
+      "versions": 5,
+      "queries": 23,
+      "sql_ms": 9.682,
+      "p50_ms": 31.935,
+      "p95_ms": 45.515,
+      "response_bytes": 4265
+    },
+    {
+      "endpoint": "/api/v1/workspaces/",
+      "lines": 1,
+      "versions": 5,
+      "queries": 12,
+      "sql_ms": 4.649,
+      "p50_ms": 17.092,
+      "p95_ms": 22.053,
+      "response_bytes": 1194
+    },
+    {
+      "endpoint": "/api/v1/captured-images/",
+      "lines": 10,
+      "versions": 50,
+      "queries": 185,
+      "sql_ms": 20.17,
+      "p50_ms": 141.672,
+      "p95_ms": 162.876,
+      "response_bytes": 42650
+    },
+    {
+      "endpoint": "/api/v1/workspaces/",
+      "lines": 10,
+      "versions": 50,
+      "queries": 57,
+      "sql_ms": 6.34,
+      "p50_ms": 45.006,
+      "p95_ms": 47.692,
+      "response_bytes": 11940
+    },
+    {
+      "endpoint": "/api/v1/captured-images/",
+      "lines": 30,
+      "versions": 150,
+      "queries": 545,
+      "sql_ms": 40.107,
+      "p50_ms": 475.024,
+      "p95_ms": 597.7,
+      "response_bytes": 128150
+    },
+    {
+      "endpoint": "/api/v1/workspaces/",
+      "lines": 30,
+      "versions": 150,
+      "queries": 157,
+      "sql_ms": 12.766,
+      "p50_ms": 115.887,
+      "p95_ms": 137.321,
+      "response_bytes": 35880
+    }
+  ],
+  "exploratory_runner": [
+    {
+      "untracked_files": 1,
+      "runtime_calls": 6,
+      "p50_ms": 6.898,
+      "p95_ms": 8.192
+    },
+    {
+      "untracked_files": 10,
+      "runtime_calls": 15,
+      "p50_ms": 29.061,
+      "p95_ms": 47.448
+    },
+    {
+      "untracked_files": 30,
+      "runtime_calls": 35,
+      "p50_ms": 81.798,
+      "p95_ms": 99.968
+    }
+  ]
+}

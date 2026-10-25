@@ -1,0 +1,76 @@
+{
+  "pre_change_backend": {
+    "passed": 99,
+    "failed": 0
+  },
+  "pre_change_runner_git": {
+    "passed": 154,
+    "subtests_passed": 14,
+    "failed": 0
+  },
+  "broader_sqlite": {
+    "command": "cd backend && .venv/bin/pytest -q apps/runners apps/mcp_app/tests/test_plugins_and_workspaces.py common/tests/test_adapter_boundaries.py",
+    "passed": 1018,
+    "skipped": 19,
+    "failed": 0
+  },
+  "final_focused_sqlite": {
+    "command": "cd backend && .venv/bin/pytest -q apps/runners/tests/test_image_version_queries.py apps/runners/tests/test_image_versions.py apps/runners/tests/test_image_versions_api.py apps/runners/tests/test_image_generations.py apps/runners/tests/test_dependency_direction.py",
+    "passed": 73,
+    "failed": 0
+  },
+  "final_postgresql_regressions": {
+    "database": "Disposable PostgreSQL 16 cluster, private Unix socket, no live data",
+    "command": ".venv/bin/pytest --ds=opencuria_image_pg_settings -q apps/runners/tests/test_image_version_queries.py",
+    "passed": 23,
+    "failed": 0
+  },
+  "expanded_postgresql": {
+    "current": {
+      "passed": 61,
+      "failed": 23
+    },
+    "untouched_40c4980": {
+      "passed": 39,
+      "failed": 23
+    },
+    "failure_ids_match": true,
+    "preexisting_failure_ids": [
+      "apps/runners/tests/test_image_versions.py::test_create_failure_fails_workspace_on_target_and_reset_retries",
+      "apps/runners/tests/test_image_versions.py::test_heartbeat_does_not_override_status_during_recreate",
+      "apps/runners/tests/test_image_versions.py::test_legacy_workspace_without_base_image_cannot_recreate",
+      "apps/runners/tests/test_image_versions.py::test_recreate_rejects_undefined_states[deleted_version]",
+      "apps/runners/tests/test_image_versions.py::test_remove_failure_fails_workspace_keeps_target_and_allows_retry",
+      "apps/runners/tests/test_image_versions.py::test_reset_keeps_identity_and_reprovisions_same_version",
+      "apps/runners/tests/test_image_versions.py::test_stopped_workspace_ends_stopped_and_stop_failure_is_reported",
+      "apps/runners/tests/test_image_versions.py::test_update_moves_to_latest_and_releases_old_pin",
+      "apps/runners/tests/test_image_versions.py::test_update_rejects_stale_and_foreign_targets",
+      "apps/runners/tests/test_image_versions_api.py::test_recreate_requires_owner_and_delete_permission",
+      "apps/runners/tests/test_postgres_lifecycle_concurrency.py::test_capture_allocation_vs_harness_admission[child]",
+      "apps/runners/tests/test_postgres_lifecycle_concurrency.py::test_capture_allocation_vs_harness_admission[manual]",
+      "apps/runners/tests/test_postgres_lifecycle_concurrency.py::test_capture_allocation_vs_harness_admission[scheduled]",
+      "apps/runners/tests/test_postgres_lifecycle_concurrency.py::test_credential_injection_admission_vs_capture",
+      "apps/runners/tests/test_postgres_lifecycle_concurrency.py::test_duplicate_capture_completion_finishes_parent_once[False-advance]",
+      "apps/runners/tests/test_postgres_lifecycle_concurrency.py::test_duplicate_capture_completion_finishes_parent_once[False-callback]",
+      "apps/runners/tests/test_postgres_lifecycle_concurrency.py::test_duplicate_capture_completion_finishes_parent_once[False-tick]",
+      "apps/runners/tests/test_postgres_lifecycle_concurrency.py::test_duplicate_capture_completion_finishes_parent_once[True-advance]",
+      "apps/runners/tests/test_postgres_lifecycle_concurrency.py::test_duplicate_capture_completion_finishes_parent_once[True-callback]",
+      "apps/runners/tests/test_postgres_lifecycle_concurrency.py::test_duplicate_capture_completion_finishes_parent_once[True-tick]",
+      "apps/runners/tests/test_postgres_lifecycle_concurrency.py::test_stale_configuration_vs_inter_child_capture[credentials]",
+      "apps/runners/tests/test_postgres_lifecycle_concurrency.py::test_stale_configuration_vs_inter_child_capture[name]",
+      "apps/runners/tests/test_postgres_lifecycle_concurrency.py::test_stale_configuration_vs_inter_child_capture[plugins]"
+    ]
+  },
+  "checks": {
+    "django_system_check": "passed",
+    "targeted_ruff_lint": "passed",
+    "targeted_ruff_format": "passed",
+    "git_diff_check": "passed"
+  },
+  "rebased_on": "f4baebd",
+  "post_rebase_checks": {
+    "passed": 129,
+    "failed": 0,
+    "scope": "image/version/generation/query/dependency tests, workspace disk usage, REST API, MCP workspaces, adapter boundaries"
+  }
+}

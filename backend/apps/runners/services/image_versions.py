@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 
 from common.exceptions import ConflictError, NotFoundError
 
 from ..image_lines import ImageLine, ImageLineRepository
+from ..models import CapturedImage, ImageInstance
 from ..retention_repository import RetentionRepository
+
+
+@dataclass
+class _VersionFacts:
+    """Request-local facts shared by version rows and their owning lines."""
+
+    extras: dict[uuid.UUID, dict]
+    latest: dict[tuple[str, uuid.UUID], ImageInstance | None]
 
 
 class ImageVersionService:
@@ -37,8 +47,23 @@ class ImageVersionService:
 
     def version_extras(self, images) -> dict[uuid.UUID, dict]:
         """Latest/retention/usage facts per image, computed once per line."""
+        return self._version_facts(images).extras
+
+    def _version_facts(
+        self,
+        images: list[ImageInstance],
+        *,
+        requested_lines: list[ImageLine] | None = None,
+    ) -> _VersionFacts:
+        """Read the requested lines' latest, retention and pin facts in batches."""
         images = list(images)
-        lines: dict[ImageLine, list] = {}
+        if not images:
+            latest = self.lines.latest_many(requested_lines or [])
+            return _VersionFacts(
+                extras={},
+                latest={(line.kind, line.id): image for line, image in latest.items()},
+            )
+        lines: dict[ImageLine, list] = {line: [] for line in requested_lines or []}
         extras: dict[uuid.UUID, dict] = {}
         for image in images:
             line = self.lines.line_of(image)
@@ -47,18 +72,39 @@ class ImageVersionService:
             else:
                 lines.setdefault(line, []).append(image)
         usage = self.lines.pinning_workspace_refs(i.id for i in images)
+        keep_by_org = {
+            org_id: RetentionRepository.keep_for(org_id)
+            for org_id in {
+                members[0].runner.organization_id
+                for members in lines.values()
+                if members
+            }
+        }
+        latest_by_line = self.lines.latest_many(list(lines))
+        labels_by_line = self.lines.retention_labels_many(
+            {
+                line: keep_by_org[members[0].runner.organization_id]
+                for line, members in lines.items()
+                if members
+            },
+            latest_by_line,
+        )
         for line, members in lines.items():
-            org_id = members[0].runner.organization_id
-            labels = self.lines.retention_labels(
-                line, RetentionRepository.keep_for(org_id)
-            )
-            latest = self.lines.latest(line)
+            if not members:
+                continue
+            labels = labels_by_line[line]
+            latest = latest_by_line[line]
             for image in members:
                 extras[image.id] = self._extra(
                     image, line, labels, usage.get(image.id, [])
                 )
                 extras[image.id]["is_latest"] = bool(latest and latest.id == image.id)
-        return extras
+        return _VersionFacts(
+            extras=extras,
+            latest={
+                (line.kind, line.id): image for line, image in latest_by_line.items()
+            },
+        )
 
     @staticmethod
     def _extra(image, line, labels, workspaces) -> dict:
@@ -81,17 +127,37 @@ class ImageVersionService:
 
     def list_captured_images(self, user, org_id: uuid.UUID) -> list[dict]:
         """A user's captured images with all versions, newest first."""
+        lines = list(self.lines.captured_lines(org_id, user.id))
+        if not lines:
+            return []
+        refs = [
+            ImageLine("captured", line.id, line.name, line.runner_id) for line in lines
+        ]
+        versions = self.lines.version_rows_for_lines(refs)
+        facts = self._version_facts(versions, requested_lines=refs)
+        by_line: dict[uuid.UUID, list[ImageInstance]] = {line.id: [] for line in lines}
+        for version in versions:
+            by_line[version.captured_image_id].append(version)
         return [
-            self.captured_image(line)
-            for line in self.lines.captured_lines(org_id, user.id)
+            self._captured_image_view(line, by_line[line.id], facts) for line in lines
         ]
 
-    def captured_image(self, line) -> dict:
+    def captured_image(self, line: CapturedImage) -> dict:
         """Captured image with versions and usage."""
         ref = ImageLine("captured", line.id, line.name, line.runner_id)
         versions = self.lines.version_rows(ref)
-        extras = self.version_extras(versions)
-        latest = self.lines.latest(ref)
+        facts = self._version_facts(versions, requested_lines=[ref])
+        return self._captured_image_view(line, versions, facts)
+
+    @staticmethod
+    def _captured_image_view(
+        line: CapturedImage,
+        versions: list[ImageInstance],
+        facts: _VersionFacts,
+    ) -> dict:
+        """Assemble one line from the request's batched version facts."""
+        extras = {version.id: facts.extras[version.id] for version in versions}
+        latest = facts.latest.get(("captured", line.id))
         return {
             "line": line,
             "versions": versions,
