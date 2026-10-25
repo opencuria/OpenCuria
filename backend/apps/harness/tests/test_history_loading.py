@@ -53,7 +53,11 @@ def test_history_batches_only_load_retained_replay_parts(
             session=session, position=index * 2, role="user", content=f"user {index}"
         )
         assistant = HarnessMessage(
-            session=session, position=index * 2 + 1, role="assistant"
+            session=session,
+            position=index * 2 + 1,
+            role="assistant",
+            content="a" * 16384,
+            engine_meta={"unused": "m" * 32768},
         )
         messages.extend([user, assistant])
         for position, kind in enumerate(("text", "tool", "reasoning", "agent")):
@@ -84,19 +88,30 @@ def test_history_batches_only_load_retained_replay_parts(
     HarnessMessage.objects.bulk_create(messages)
     HarnessPart.objects.bulk_create(parts)
     loaded: list[HarnessPart] = []
+    loaded_messages: list[HarnessMessage] = []
 
     def record_loaded(sender: Any, instance: HarnessPart, **kwargs: Any) -> None:
         loaded.append(instance)
 
+    def record_message(sender: Any, instance: HarnessMessage, **kwargs: Any) -> None:
+        loaded_messages.append(instance)
+
     post_init.connect(record_loaded, sender=HarnessPart)
+    post_init.connect(record_message, sender=HarnessMessage)
     try:
         with CaptureQueriesContext(connection) as queries:
             history = async_to_sync(HarnessService()._build_history)(session)
     finally:
         post_init.disconnect(record_loaded, sender=HarnessPart)
+        post_init.disconnect(record_message, sender=HarnessMessage)
 
     query_budget = 3 if compacted else {1: 3, 8: 3, 9: 4, 50: 9}[turns]
     assert len(queries) <= query_budget
+    assert {message.id for message in loaded_messages} == {
+        message.id for message in messages[tail_index * 2 :]
+    }
+    assert all("engine_meta" in row.get_deferred_fields() for row in loaded_messages)
+    assert len(loaded_messages) == (turns - tail_index) * 2
     assert {part.id for part in loaded} == retained_ids
     assert len(loaded) == len(retained_ids)
     assert all("display" in part.get_deferred_fields() for part in loaded)
@@ -113,16 +128,16 @@ def test_history_batches_only_load_retained_replay_parts(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("has_user", [False, True])
-def test_history_without_assistants_only_reads_messages(
+def test_history_without_assistants_skips_replay_parts(
     harness_workspace: Any, has_user: bool
 ) -> None:
-    """Empty/new conversations do not query parts."""
+    """Empty/new conversations only check for a checkpoint and read messages."""
     session = _session(harness_workspace)
     if has_user:
         _message(session, 0, role="user", content="hello")
     with CaptureQueriesContext(connection) as queries:
         history = async_to_sync(HarnessService()._build_history)(session)
-    assert len(queries) == 1
+    assert len(queries) == 2
     assert [row.content for row in history] == (["hello"] if has_user else [])
 
 
@@ -197,18 +212,20 @@ def test_history_excludes_messages_before_checkpoint_selection(
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("tail", ["malformed", "missing", "excluded"])
+@pytest.mark.parametrize("tail", ["malformed", "missing", "excluded", "foreign"])
 def test_history_checkpoint_missing_tail_falls_back_to_assistant(
     harness_workspace: Any, tail: str
 ) -> None:
-    """Malformed, absent and excluded tails retain the checkpoint's assistant."""
+    """Invalid, absent, excluded and foreign tails retain the checkpoint assistant."""
     session = _session(harness_workspace)
     user = _message(session, 0, role="user", content="omit this user")
     assistant = _message(session, 1, role="assistant", content="summary")
+    foreign = _message(_session(harness_workspace), 0, role="user", content="private")
     tail_id = {
         "malformed": "not-a-uuid",
         "missing": str(uuid.uuid4()),
         "excluded": str(user.id),
+        "foreign": str(foreign.id),
     }[tail]
     _part(
         assistant,
@@ -279,6 +296,69 @@ def test_history_replay_keeps_text_tools_and_steers_in_position_order(
     assert history[4].tool_calls == [
         {"id": "failed", "name": "bash", "arguments": '{"command": "false"}'}
     ]
+
+
+@pytest.mark.django_db
+def test_history_tail_at_position_zero_and_position_gaps(
+    harness_workspace: Any,
+) -> None:
+    """An eligible tail may precede its checkpoint, including at position zero."""
+    session = _session(harness_workspace)
+    user = _message(session, 0, role="user", content="keep first")
+    assistant = _message(session, 9, role="assistant", content="checkpoint")
+    _part(
+        assistant,
+        0,
+        type="compaction",
+        state="completed",
+        output="checkpoint",
+        meta={"tail_start_id": str(user.id)},
+    )
+    _message(session, 20, role="user", content="keep last")
+    history = async_to_sync(HarnessService()._build_history)(session)
+    assert [row.content for row in history] == [
+        f"{CHECKPOINT_PREFIX}\ncheckpoint",
+        "keep first",
+        None,
+        "keep last",
+    ]
+
+
+@pytest.mark.django_db
+def test_history_range_failure_aborts_before_replay(
+    harness_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Database failures cannot silently change the replay boundary."""
+    from django.db import DatabaseError
+
+    session = _session(harness_workspace)
+    assistant = _message(session, 0, role="assistant", content="checkpoint")
+    _part(
+        assistant,
+        0,
+        type="compaction",
+        state="completed",
+        output="checkpoint",
+        meta={"tail_start_id": str(assistant.id)},
+    )
+    service = HarnessService()
+
+    def fail_range(*args: Any, **kwargs: Any) -> list[HarnessMessage]:
+        raise DatabaseError("synthetic range failure")
+
+    monkeypatch.setattr(service.messages, "list_for_history", fail_range)
+    loaded: list[HarnessMessage] = []
+
+    def record_loaded(sender: Any, instance: HarnessMessage, **kwargs: Any) -> None:
+        loaded.append(instance)
+
+    post_init.connect(record_loaded, sender=HarnessMessage)
+    try:
+        with pytest.raises(DatabaseError, match="synthetic range failure"):
+            async_to_sync(service._build_history)(session)
+    finally:
+        post_init.disconnect(record_loaded, sender=HarnessMessage)
+    assert loaded == []
 
 
 @pytest.mark.django_db

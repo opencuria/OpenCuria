@@ -2601,33 +2601,42 @@ class HarnessService:
         """
         import json
 
-        stored = await sync_to_async(self.messages.list_for_session)(session.id)
         excluded_ids = {
-            exclude_message_id,
-            exclude_user_message_id,
-            *(exclude_message_ids or []),
+            message_id
+            for message_id in (
+                exclude_message_id,
+                exclude_user_message_id,
+                *(exclude_message_ids or []),
+            )
+            if message_id is not None
         }
-        stored = [message for message in stored if message.id not in excluded_ids]
-        assistant_by_id = {
-            message.id: message for message in stored if message.role == "assistant"
-        }
-        # Find the checkpoint without reading every assistant's full tool output.
+        # Resolve compaction before loading message bodies, using only scoped
+        # positions. The unique (session, position) key defines the same suffix
+        # as slicing the complete ordered transcript.
         checkpoint = await sync_to_async(self.parts.get_latest_completed_compaction)(
-            list(assistant_by_id)
+            session.id, exclude_message_ids=excluded_ids
         )
-        compaction = (
-            (assistant_by_id[checkpoint.message_id], checkpoint)
-            if checkpoint is not None
-            else None
-        )
-        del assistant_by_id
         checkpoint_summary = ""
         compaction_msg_id: uuid.UUID | None = None
-        if compaction is not None:
-            compaction_msg, compaction_part = compaction
-            compaction_msg_id = compaction_msg.id
-            checkpoint_summary = str(compaction_part.output or "").strip()
-            stored = self._slice_messages_for_compaction(stored, compaction)
+        from_position = 0
+        tail_id: uuid.UUID | None = None
+        if checkpoint is not None:
+            compaction_msg_id = checkpoint.message_id
+            checkpoint_summary = str(checkpoint.output or "").strip()
+            from_position = checkpoint.message_position
+            raw_tail = str(
+                (checkpoint.meta or {}).get("tail_start_id", "") or ""
+            ).strip()
+            try:
+                tail_id = uuid.UUID(raw_tail)
+            except ValueError:
+                tail_id = None
+        stored = await sync_to_async(self.messages.list_for_history)(
+            session.id,
+            from_position=from_position,
+            from_message_id=tail_id,
+            exclude_message_ids=excluded_ids,
+        )
         history: list[LLMMessage] = []
         if checkpoint_summary:
             history.append(
@@ -2760,28 +2769,6 @@ class HarnessService:
                     pending_calls.append(part)
             flush_segment()
         return history
-
-    @staticmethod
-    def _slice_messages_for_compaction(
-        stored: list[HarnessMessage],
-        compaction: tuple[HarnessMessage, HarnessPart],
-    ) -> list[HarnessMessage]:
-        """Keep tail messages from the latest compaction checkpoint onward."""
-        compaction_msg, part = compaction
-        tail_start_id = str((part.meta or {}).get("tail_start_id", "") or "").strip()
-        if tail_start_id:
-            try:
-                tail_uuid = uuid.UUID(tail_start_id)
-            except ValueError:
-                tail_uuid = None
-            if tail_uuid is not None:
-                for index, message in enumerate(stored):
-                    if message.id == tail_uuid:
-                        return stored[index:]
-        for index, message in enumerate(stored):
-            if message.id == compaction_msg.id:
-                return stored[index:]
-        return stored
 
     @staticmethod
     def _assistant_history_content(

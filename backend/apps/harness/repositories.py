@@ -24,7 +24,7 @@ from django.db.models import (
     Value,
     When,
 )
-from django.db.models.functions import Concat
+from django.db.models.functions import Coalesce, Concat
 from django.db.utils import NotSupportedError
 from django.utils import timezone
 
@@ -939,6 +939,32 @@ class HarnessMessageRepository:
         )
 
     @staticmethod
+    def list_for_history(
+        session_id: uuid.UUID,
+        *,
+        from_position: int = 0,
+        from_message_id: uuid.UUID | None = None,
+        exclude_message_ids: set[uuid.UUID],
+    ) -> list[HarnessMessage]:
+        """Read replay fields from a start ID, falling back to *from_position*.
+
+        The caller chooses the fallback. Resolve only session-scoped, eligible
+        anchors in the body query, without loading the discarded prefix.
+        """
+        query = HarnessMessage.objects.filter(session_id=session_id).exclude(
+            id__in=exclude_message_ids
+        )
+        start: int | Coalesce = from_position
+        if from_message_id is not None:
+            anchor = query.filter(id=from_message_id).order_by().values("position")[:1]
+            start = Coalesce(Subquery(anchor), Value(from_position))
+        return list(
+            query.filter(position__gte=start)
+            .only("id", "role", "content")
+            .order_by("position", "created_at", "id")
+        )
+
+    @staticmethod
     def list_timeline_for_session(session_id: uuid.UUID) -> list[HarnessMessage]:
         """Load timeline metadata and only content lacking text-part backing."""
         has_text = Exists(
@@ -1570,13 +1596,20 @@ class HarnessPartRepository:
 
     @staticmethod
     def get_latest_completed_compaction(
-        message_ids: list[uuid.UUID],
+        session_id: uuid.UUID,
+        *,
+        exclude_message_ids: set[uuid.UUID],
     ) -> HarnessPart | None:
         """Read the last checkpoint without loading unrelated history payloads."""
         return (
             HarnessPart.objects.filter(
-                message_id__in=message_ids, type="compaction", state="completed"
+                message__session_id=session_id,
+                message__role=HarnessMessageRole.ASSISTANT,
+                type="compaction",
+                state="completed",
             )
+            .exclude(message_id__in=exclude_message_ids)
+            .annotate(message_position=F("message__position"))
             .only("message_id", "output", "meta")
             .order_by(
                 "-message__position",

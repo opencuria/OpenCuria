@@ -34,7 +34,9 @@ def _identity(value: str) -> uuid.UUID:
     )
 
 
-def _populate(turns: int, compacted: bool, workspace: Any, output_bytes: int) -> Any:
+def _populate(
+    turns: int, compacted: bool, workspace: Any, output_bytes: int, message_bytes: int
+) -> Any:
     from apps.harness.models import HarnessMessage, HarnessPart, HarnessSession
 
     key = f"{turns}/{compacted}"
@@ -49,6 +51,7 @@ def _populate(turns: int, compacted: bool, workspace: Any, output_bytes: int) ->
         user_id = _identity(f"{key}/{index}/user")
         assistant_id = _identity(f"{key}/{index}/assistant")
         before, after = f"Inspecting turn {index}.", f"Completed turn {index}."
+        before += "m" * max(0, message_bytes - len(before) - len(after))
         messages.extend(
             [
                 HarnessMessage(
@@ -117,7 +120,10 @@ async def _measure(
 ) -> dict[str, Any]:
     from asgiref.sync import sync_to_async
     from django.db import connection
+    from django.db.models.signals import post_init
     from django.test.utils import CaptureQueriesContext
+
+    from apps.harness.models import HarnessMessage
 
     def digest(history: Any) -> str:
         payload = json.dumps([asdict(row) for row in history], sort_keys=True)
@@ -155,10 +161,22 @@ async def _measure(
 
     results = {}
     for name, service in services.items():
+        message_reads = {"rows": 0, "content_bytes": 0}
+
+        def record_message(
+            sender: Any, instance: HarnessMessage, **kwargs: Any
+        ) -> None:
+            message_reads["rows"] += 1
+            message_reads["content_bytes"] += len(
+                instance.__dict__.get("content", "").encode()
+            )
+
         queries = await sync_to_async(start_queries)()
+        post_init.connect(record_message, sender=HarnessMessage)
         try:
             await service._build_history(session)
         finally:
+            post_init.disconnect(record_message, sender=HarnessMessage)
             query_count = await sync_to_async(finish_queries)(queries)
         gc.collect()
         tracemalloc.start()
@@ -169,6 +187,8 @@ async def _measure(
             tracemalloc.stop()
         results[name] = {
             "query_count": query_count,
+            "message_rows_loaded": message_reads["rows"],
+            "message_content_bytes_loaded": message_reads["content_bytes"],
             "p50_ms": round(statistics.median(elapsed[name]), 3),
             "p95_ms": round(sorted(elapsed[name])[math.ceil(samples * 0.95) - 1], 3),
             "peak_python_allocated_bytes": peak,
@@ -202,12 +222,13 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     import django
 
     django.setup()
-    from apps.harness.harness_service import HarnessService
-    from apps.organizations.models import Organization
-    from apps.runners.models import Runner, Workspace
     from django.conf import settings
     from django.contrib.auth import get_user_model
     from django.core.management import call_command
+
+    from apps.harness.harness_service import HarnessService
+    from apps.organizations.models import Organization
+    from apps.runners.models import Runner, Workspace
 
     call_command("migrate", verbosity=0)
     settings.DEBUG = False
@@ -228,10 +249,16 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         (
             turns,
             compacted,
-            _populate(turns, compacted, workspace, args.output_kib * 1024),
+            _populate(
+                turns,
+                compacted,
+                workspace,
+                args.output_kib * 1024,
+                args.message_kib * 1024,
+            ),
         )
         for turns in sorted(set(args.turns))
-        for compacted in (False, True)
+        for compacted in ((False, True) if turns else (False,))
     ]
 
     async def measurements() -> list[dict[str, Any]]:
@@ -255,13 +282,14 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         "warmups": 5,
         "paired": bool(args.baseline_repo),
         "tool_output_bytes_per_turn": args.output_kib * 1024,
+        "assistant_text_bytes_per_turn": args.message_kib * 1024,
         "parts_per_turn": 5,
         "compaction_tail_turns": 5,
         "results": asyncio.run(measurements()),
         "notes": [
             "No external services or provider calls.",
             "Warmed latency; SQL counting and allocation tracing measured separately.",
-            "Paired mode alternates version order on identical fixtures in one process.",
+            "Paired mode alternates versions on identical fixtures in one process.",
             (
                 "Timings are local integration measurements, not production SLOs; "
                 "memory is Python allocation peak, not RSS."
@@ -280,14 +308,25 @@ def main() -> None:
     parser.add_argument("--samples", type=int, default=31)
     parser.add_argument("--output-kib", type=int, default=32)
     parser.add_argument(
+        "--message-kib",
+        type=int,
+        default=0,
+        help="Minimum assistant text size in KiB (0 keeps the short fixture text)",
+    )
+    parser.add_argument(
         "--baseline-repo",
         type=Path,
-        help="Pair archived service/repositories with current code on the same fixtures",
+        help="Compare archived/current code using identical fixtures",
     )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    if min(args.turns) < 1 or args.samples < 2 or args.output_kib < 1:
-        parser.error("turns/output-kib must be positive and samples must be >= 2")
+    if (
+        min(args.turns) < 0
+        or args.samples < 2
+        or args.output_kib < 1
+        or args.message_kib < 0
+    ):
+        parser.error("turns/message-kib must be >= 0, output-kib > 0, samples >= 2")
     with tempfile.TemporaryDirectory(prefix="opencuria-history-bench-") as directory:
         os.environ.update(
             DJANGO_SETTINGS_MODULE="config.settings.development",

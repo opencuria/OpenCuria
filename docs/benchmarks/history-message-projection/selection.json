@@ -1,0 +1,34 @@
+{
+  "method": "secrets.choice over the ranked top three, one draw",
+  "top_three": [
+    {
+      "rank": 1,
+      "candidate": "runner_archive_upload",
+      "evidence": "4,000 files: event-loop gap p50 284.012 ms / p95 295.135 ms; upload p50 282.838 ms",
+      "risk": "low: pure archive work off the event loop; cancellation and capture-fence tests needed"
+    },
+    {
+      "rank": 2,
+      "candidate": "backend_compacted_history",
+      "evidence": "400 turns, 5 retained: 6,963,200 content bytes materialized; 8,122,847 traced peak bytes; p50 27.038 ms / p95 110.160 ms",
+      "risk": "medium: metadata projection and retained-body reads must preserve checkpoint fallbacks and exclusions"
+    },
+    {
+      "rank": 3,
+      "candidate": "runner_git_snapshot_roundtrips",
+      "evidence": "7 sequential guest execs; p50 71.043 ms with explicitly simulated 10 ms guest latency",
+      "risk": "medium: SSH channel pressure, cancellation and repository-lock semantics"
+    }
+  ],
+  "selected": {
+    "rank": 2,
+    "candidate": "backend_compacted_history",
+    "evidence": "400 turns, 5 retained: 6,963,200 content bytes materialized; 8,122,847 traced peak bytes; p50 27.038 ms / p95 110.160 ms",
+    "risk": "medium: metadata projection and retained-body reads must preserve checkpoint fallbacks and exclusions"
+  },
+  "rejected": {
+    "candidate": "runner_archive_upload",
+    "reason": "Default gzip iteration in a worker still caused 142 ms median / 247 ms p95 event-loop gaps in the probe. Streaming tar reduced p95 gaps to 16.309 ms, but full upload p50 regressed from 468.254 to 681.368 ms and runner CPU from 311.923 to 520.682 ms. Rejected instead of adding process infrastructure or workload-sensitive buffer tuning."
+  },
+  "second_draw_method": "secrets.choice over the remaining two candidates, one draw"
+}
