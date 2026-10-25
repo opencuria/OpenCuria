@@ -43,7 +43,6 @@ from .compaction import (
     build_compaction_prompt,
     ensure_current_user,
     find_previous_summary,
-    is_context_overflow_error,
     is_overflow,
     select,
 )
@@ -64,6 +63,7 @@ from .providers.base import (
     ToolSchema,
     Usage,
 )
+from .providers.context_errors import is_context_overflow_error
 from .providers.resolver import ResolvedModel, StaticModelResolver
 from .steering import SteeringChannel
 from .tools.base import ToolContext, ToolRegistry

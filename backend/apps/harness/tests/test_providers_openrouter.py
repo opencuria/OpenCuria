@@ -523,7 +523,7 @@ def test_parse_chunk_error_chunk_uses_code_message_format() -> None:
     """SSE error chunks raise 'code: message' and are compaction-visible."""
     import json
 
-    from apps.harness.compaction import is_context_overflow_error
+    from apps.harness.providers.context_errors import is_context_overflow_error
 
     adapter = OpenRouterAdapter(api_key="k")
     payload = json.dumps(
@@ -549,7 +549,7 @@ def test_parse_chunk_generic_error_chunk_raises_response_error() -> None:
 
 async def test_http_overflow_body_is_compaction_visible() -> None:
     """HTTP error bodies with overflow text are detected by compaction."""
-    from apps.harness.compaction import is_context_overflow_error
+    from apps.harness.providers.context_errors import is_context_overflow_error
 
     body = b'{"error": {"message": "This request exceeds the context window"}}'
     adapter = OpenRouterAdapter(api_key="k", client=_mock_client(body, 400))

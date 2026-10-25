@@ -509,7 +509,7 @@ async def test_response_failed_raises_provider_response_error() -> None:
 
 async def test_context_length_exceeded_stream_error_code_message_format() -> None:
     """Overflow stream errors use 'code: message' and are compaction-visible."""
-    from apps.harness.compaction import is_context_overflow_error
+    from apps.harness.providers.context_errors import is_context_overflow_error
 
     payload = _responses_sse(
         [

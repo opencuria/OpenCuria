@@ -13,13 +13,13 @@ import random
 import re
 import time
 
-from .compaction import is_context_overflow_error
 from .providers.base import (
     ProviderAuthError,
     ProviderRateLimitError,
     ProviderResponseError,
     ProviderTimeoutError,
 )
+from .providers.context_errors import is_context_overflow_error
 
 RETRY_INITIAL_DELAY = 2.0
 RETRY_BACKOFF_FACTOR = 2

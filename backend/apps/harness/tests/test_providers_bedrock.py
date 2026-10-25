@@ -21,7 +21,6 @@ from apps.harness.providers.base import (
 from apps.harness.providers.bedrock import (
     AUTH_SETTINGS_MESSAGE,
     BedrockAdapter,
-    is_context_overflow,
     resolve_bedrock_model_id,
 )
 
@@ -405,8 +404,8 @@ async def test_chat_stream_client_error_throttling() -> None:
 
 async def test_chat_stream_client_error_daily_token_quota() -> None:
     """Daily token caps stay rate-limits, are not overflow, and are not retried."""
-    from apps.harness.compaction import is_context_overflow_error
     from apps.harness.provider_retry import is_retryable_provider_error
+    from apps.harness.providers.context_errors import is_context_overflow_error
 
     error = ClientError(
         {
@@ -454,44 +453,9 @@ async def test_chat_stream_validation_overflow_non_retryable() -> None:
     assert exc.value.is_retryable is False
 
 
-def test_is_context_overflow_opencode_parity() -> None:
-    """Bedrock overflow matches OpenCode provider-error.ts patterns."""
-    from apps.harness.compaction import is_context_overflow_error
-
-    positives = [
-        "Input is too long for requested model",
-        "Prompt has 100 tokens, but the configured context size is 50 tokens",
-        "input (10 tokens) is longer than the model's context length (5 tokens)",
-        "tokens in request more than max tokens allowed",
-        "request entity too large",
-        "This model's maximum context length is 200000 tokens (of 100 tokens)",
-        "exceeds the limit of 100",
-        "context length is only 10 tokens",
-        "input length 10 exceeds the context length 5",
-        "prompt too long; exceeded max context length",
-        "too large for model with 5 maximum context length",
-        "This request exceeds the context window",
-        "model_context_window_exceeded",
-        "400 (no body)",
-        "413 status code (no body)",
-    ]
-    for message in positives:
-        assert is_context_overflow(message), message
-        assert is_context_overflow_error(RuntimeError(message)), message
-    negatives = [
-        "Throttling error: slow down",
-        "Service unavailable: busy",
-        "rate limit exceeded",
-        "too many requests, retry later",
-        "Too many tokens per day, please wait before trying again.",
-    ]
-    for message in negatives:
-        assert not is_context_overflow(message), message
-
-
 async def test_chat_stream_validation_overflow_stream_event_non_retryable() -> None:
     """In-stream validation overflow is non-retryable and compaction-visible."""
-    from apps.harness.compaction import is_context_overflow_error
+    from apps.harness.providers.context_errors import is_context_overflow_error
 
     events = [
         {
@@ -510,7 +474,7 @@ async def test_chat_stream_validation_overflow_stream_event_non_retryable() -> N
 
 async def test_chat_stream_throttling_stream_event_retryable() -> None:
     """In-stream throttling stays retryable and is not overflow."""
-    from apps.harness.compaction import is_context_overflow_error
+    from apps.harness.providers.context_errors import is_context_overflow_error
 
     adapter, _ = _adapter(session=_MockSession([]))
     error = adapter._stream_error_from_event(
@@ -523,8 +487,8 @@ async def test_chat_stream_throttling_stream_event_retryable() -> None:
 
 async def test_chat_stream_throttling_stream_event_daily_quota_not_retryable() -> None:
     """In-stream daily token caps are rate-limits, not overflow, and fail fast."""
-    from apps.harness.compaction import is_context_overflow_error
     from apps.harness.provider_retry import is_retryable_provider_error
+    from apps.harness.providers.context_errors import is_context_overflow_error
 
     adapter, _ = _adapter(session=_MockSession([]))
     error = adapter._stream_error_from_event(

@@ -155,7 +155,7 @@ def test_overflow_patterns_are_not_retried() -> None:
 
 def test_throttling_is_not_overflow_but_retryable() -> None:
     """Throttling/rate-limit prefixes are excluded from overflow detection."""
-    from apps.harness.compaction import is_context_overflow_error
+    from apps.harness.providers.context_errors import is_context_overflow_error
 
     throttling = RuntimeError("Throttling error: Too many tokens, please wait")
     assert not is_context_overflow_error(throttling)
@@ -260,7 +260,7 @@ def test_overflow_never_retried_despite_should_retry_hint() -> None:
 
 def test_daily_token_quota_rate_limit_is_not_retried() -> None:
     """Bedrock daily token caps fail fast instead of retrying or compacting."""
-    from apps.harness.compaction import is_context_overflow_error
+    from apps.harness.providers.context_errors import is_context_overflow_error
 
     daily = ProviderRateLimitError(
         "Too many tokens per day, please wait before trying again.",

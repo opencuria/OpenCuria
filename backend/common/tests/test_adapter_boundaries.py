@@ -33,11 +33,16 @@ Credential repositories are private to their context; consumers resolve
 catalog entries and workspace attachments through credential services.
 Harness persistence never imports tool adapters; todo records and their storage
 port live in ``apps.harness.todos.domain`` and tools call its todo service.
+Provider wire adapters share context-error classification within ``providers``;
+neither they nor their dependencies import orchestration or persistence.
 """
 
 from __future__ import annotations
 
 import ast
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -175,6 +180,79 @@ def _adapter_modules(trees: dict[Path, ast.Module]) -> set[Path]:
         or _module_name(path) == "apps.accounts.api_auth"
         or _module_name(path) in REALTIME_ADAPTERS
     }
+
+
+def test_provider_wire_adapters_never_import_harness_orchestration() -> None:
+    """Provider streams and their dependencies are independent of the control plane."""
+    package = "apps.harness.providers"
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    modules = {_module_name(path): path for path in trees}
+    # AccountBoundAdapter in resolver.py is service composition, not a wire adapter.
+    pending = {
+        module
+        for module, path in modules.items()
+        if module.startswith(f"{package}.")
+        and path.name != "resolver.py"
+        and any(
+            isinstance(node, ast.ClassDef)
+            and any(
+                isinstance(base, ast.Name) and base.id == "ProviderAdapter"
+                for base in node.bases
+            )
+            for node in trees[path].body
+        )
+    }
+    assert {
+        f"{package}.bedrock",
+        f"{package}.chatgpt",
+        f"{package}.openai_compatible",
+        f"{package}.openrouter",
+    } <= pending
+    checked: set[str] = set()
+    violations = set()
+    while pending:
+        module = pending.pop()
+        checked.add(module)
+        path = modules[module]
+        for imported in _imported_modules(path, trees[path]):
+            if imported.startswith("apps.") and not (
+                imported == package or imported.startswith(f"{package}.")
+            ):
+                violations.add(f"{module} -> {imported}")
+            elif imported == "django" or imported.startswith("django."):
+                violations.add(f"{module} -> {imported}")
+            elif imported in modules and imported not in checked:
+                pending.add(imported)
+    assert violations == set(), (
+        "Provider wire adapters and their transitive dependencies must not "
+        "import orchestration, workspace access or persistence. Put shared "
+        "provider error classification in the provider layer:\n"
+        + "\n".join(sorted(violations))
+    )
+
+
+def test_provider_wire_adapters_import_without_django_setup() -> None:
+    """A fresh interpreter can load every provider stream without app setup."""
+    env = os.environ.copy()
+    env.pop("DJANGO_SETTINGS_MODULE", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from apps.harness.providers.bedrock import BedrockAdapter\n"
+            "from apps.harness.providers.chatgpt import ChatGPTAdapter\n"
+            "from apps.harness.providers.openai_compatible "
+            "import OpenAICompatibleAdapter\n"
+            "from apps.harness.providers.openrouter import OpenRouterAdapter\n",
+        ],
+        cwd=BACKEND_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_harness_persistence_never_imports_tools() -> None:

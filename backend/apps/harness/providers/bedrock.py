@@ -17,15 +17,6 @@ from botocore import UNSIGNED
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from ..compaction import (
-    CONTEXT_OVERFLOW_PATTERNS as _SHARED_OVERFLOW_PATTERNS,
-)
-from ..compaction import (
-    NON_OVERFLOW_EXCLUSIONS as _SHARED_OVERFLOW_EXCLUSIONS,
-)
-from ..compaction import (
-    is_context_overflow_error as _shared_is_context_overflow_error,
-)
 from ._lowering import (
     bedrock_media_block,
     is_tool_error_text,
@@ -45,6 +36,7 @@ from .base import (
     ToolSchema,
     Usage,
 )
+from .context_errors import is_context_overflow_error
 from .openrouter import effective_timeout, positive_timeout, stream_deadline
 
 log = structlog.get_logger(__name__)
@@ -100,17 +92,6 @@ _AU_CLAUDE_MODELS = (
     "anthropic.claude-haiku",
 )
 
-#: Bedrock overflow detection reuses the shared OpenCode-parity patterns from
-#: :mod:`apps.harness.compaction` (single source of truth — no divergent list).
-#: Kept as module aliases so existing imports keep working.
-_CONTEXT_OVERFLOW_PATTERNS = tuple(
-    pattern.pattern for pattern in _SHARED_OVERFLOW_PATTERNS
-)
-
-_CONTEXT_OVERFLOW_EXCLUSIONS = tuple(
-    pattern.pattern for pattern in _SHARED_OVERFLOW_EXCLUSIONS
-)
-
 
 def resolve_bedrock_model_id(model_id: str, region: str) -> str:
     """Apply Bedrock cross-region inference profile prefixes when required.
@@ -159,17 +140,6 @@ def resolve_bedrock_model_id(model_id: str, region: str) -> str:
     if any(fragment in model_id for fragment in _APAC_PREFIX_MODELS):
         return f"apac.{model_id}"
     return model_id
-
-
-def is_context_overflow(message: str) -> bool:
-    """Return True when a Bedrock validation message indicates context overflow.
-
-    Delegates to the shared :func:`compaction.is_context_overflow_error`
-    classification (OpenCode ``provider-error.ts`` parity) so Bedrock and
-    compaction never diverge. Accepts a plain message string for the
-    validation/stream call sites.
-    """
-    return _shared_is_context_overflow_error(RuntimeError(message))
 
 
 def _is_daily_token_quota(message: str) -> bool:
@@ -839,9 +809,9 @@ class BedrockAdapter(ProviderAdapter):
         OpenCode ``bedrock-converse.ts`` parity: throttling is retryable,
         internal/server/stream errors are retryable, and validation errors
         are non-retryable only when they classify as context overflow
-        (``is_context_overflow``); other validation errors carry no retry
+        (``is_context_overflow_error``); other validation errors carry no retry
         hint. Overflow errors also carry ``response_body`` so
-        :func:`compaction.is_context_overflow_error` detects them.
+        retry and compaction policy can classify them.
         """
         throttling = event.get("throttlingException")
         if isinstance(throttling, dict):
@@ -872,7 +842,7 @@ class BedrockAdapter(ProviderAdapter):
         validation = event.get("validationException")
         if isinstance(validation, dict):
             message = str(validation.get("message", "") or "Bedrock validation error")
-            overflow = is_context_overflow(message)
+            overflow = is_context_overflow_error(RuntimeError(message))
             return ProviderResponseError(
                 message,
                 provider=self.name,
@@ -955,7 +925,7 @@ class BedrockAdapter(ProviderAdapter):
             )
 
         if code == "ValidationException":
-            overflow = is_context_overflow(message)
+            overflow = is_context_overflow_error(RuntimeError(message))
             return ProviderResponseError(
                 message,
                 provider=self.name,

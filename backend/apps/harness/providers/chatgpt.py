@@ -31,6 +31,7 @@ from .base import (
     Usage,
 )
 from .chatgpt_oauth import CODEX_API_ENDPOINT
+from .context_errors import is_context_overflow_error
 from .openrouter import (
     RESPONSE_BODY_MAX_CHARS,
     effective_timeout,
@@ -920,13 +921,11 @@ class ChatGPTAdapter(ProviderAdapter):
         Mirrors OpenCode ``openai-responses.ts`` ``providerError``: when both
         code and message are present the message is prefixed as
         ``"code: message"``; ``context_length_exceeded`` (or any overflow
-        text per :func:`compaction.is_context_overflow_error`) is raised as
+        text per :func:`is_context_overflow_error`) is raised as
         a non-retryable :class:`ProviderResponseError` whose message and
         ``response_body`` both carry the overflow text so downstream
         compaction detection finds it.
         """
-        from ..compaction import is_context_overflow_error as _is_overflow
-
         error = event.get("error")
         if not isinstance(error, dict):
             error = event
@@ -948,7 +947,9 @@ class ChatGPTAdapter(ProviderAdapter):
             text = f"{code}: {message}"
         else:
             text = message or code or "ChatGPT stream failed"
-        if code == "context_length_exceeded" or _is_overflow(RuntimeError(text)):
+        if code == "context_length_exceeded" or is_context_overflow_error(
+            RuntimeError(text)
+        ):
             raise ProviderResponseError(
                 text,
                 provider=self.name,

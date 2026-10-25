@@ -18,7 +18,6 @@ from apps.harness.compaction import (
     build_compaction_prompt,
     ensure_current_user,
     find_previous_summary,
-    is_context_overflow_error,
     is_overflow,
     max_output_tokens,
     preserve_recent_budget,
@@ -32,9 +31,7 @@ from apps.harness.providers.base import (
     Delta,
     LLMMessage,
     ProviderAdapter,
-    ProviderAuthError,
     ProviderRateLimitError,
-    ProviderTimeoutError,
     ToolSchema,
     Usage,
 )
@@ -104,69 +101,6 @@ def test_preserve_recent_budget_formula() -> None:
 
     tiny = ModelLimits(context_length=5_000, max_output_tokens=1_000)
     assert preserve_recent_budget(tiny) == 2_000
-
-
-def test_is_context_overflow_error_matches_phrases() -> None:
-    """Provider context errors are detected by message substring."""
-    assert is_context_overflow_error(RuntimeError("maximum context length exceeded"))
-    assert is_context_overflow_error(ValueError("prompt is too long: 999 > 100"))
-    assert not is_context_overflow_error(RuntimeError("rate limit exceeded"))
-
-
-def test_is_context_overflow_error_skips_rate_limit_auth_timeout() -> None:
-    """Typed rate-limit/auth/timeout errors are never treated as overflow."""
-    daily = "Too many tokens per day, please wait before trying again."
-    assert not is_context_overflow_error(ProviderRateLimitError(daily))
-    assert not is_context_overflow_error(
-        ProviderRateLimitError("slow", response_body="prompt is too long")
-    )
-    assert not is_context_overflow_error(ProviderAuthError("unauthorized"))
-    assert not is_context_overflow_error(ProviderTimeoutError("timed out"))
-    assert is_context_overflow_error(RuntimeError("too many tokens in request"))
-
-
-def test_is_context_overflow_error_pi_patterns() -> None:
-    """Pi OVERFLOW_PATTERNS mark overflow; NON_OVERFLOW exclusions win."""
-    positives = [
-        "prompt is too long: 213462 tokens > 200000 maximum",
-        "request_too_large: request exceeds the maximum size",
-        "Your input exceeds the context window of this model",
-        "Requested token count exceeds the model's maximum context length",
-        "The input token count (1196265) exceeds the maximum number",
-        "This model's maximum prompt length is 131072",
-        "Please reduce the length of the messages or completion",
-        "This endpoint's maximum context length is 100000 tokens",
-        "Input length 10 exceeds the maximum allowed input length of 5",
-        "The input (10 tokens) is longer than the model's context length",
-        "the request exceeds the available context size",
-        "tokens to keep is greater than the context length",
-        "context window exceeds limit",
-        "Your request exceeded model token limit: 10 (requested: 20)",
-        "Prompt contains 10 tokens too large for model with 5 maximum",
-        "Prompt has 10 tokens, but the configured context size is 5 tokens",
-        "model_context_window_exceeded",
-        "prompt too long; exceeded max context length by 10 tokens",
-        "Range of input length should be [1, 100]",
-        "context_length_exceeded",
-        "too many tokens in request",
-        "token limit exceeded for model",
-        "400 (no body)",
-        "413 status code (no body)",
-    ]
-    for message in positives:
-        assert is_context_overflow_error(RuntimeError(message)), message
-    negatives = [
-        "Throttling error: Too many tokens, please wait before trying again.",
-        "Service unavailable: Too many tokens, try later.",
-        "rate limit exceeded, slow down",
-        "too many requests, retry later",
-        "Too many tokens per day, please wait before trying again.",
-        "An error occurred (ThrottlingException) when calling the "
-        "ConverseStream operation: Too many tokens per day",
-    ]
-    for message in negatives:
-        assert not is_context_overflow_error(RuntimeError(message)), message
-    assert is_context_overflow_error(RuntimeError("too many tokens in request"))
 
 
 def test_serialize_replaces_images_with_placeholder() -> None:

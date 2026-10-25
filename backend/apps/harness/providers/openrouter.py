@@ -33,6 +33,7 @@ from .base import (
     ToolSchema,
     Usage,
 )
+from .context_errors import is_context_overflow_error
 
 log = structlog.get_logger(__name__)
 
@@ -696,19 +697,19 @@ class OpenRouterAdapter(ProviderAdapter):
 
         Mirrors the ChatGPT ``"code: message"`` format: when both code and
         message are present the message is prefixed. ``context_length_exceeded``
-        (or any overflow text per the shared compaction patterns) raises a
+        (or any overflow text per the shared provider error patterns) raises a
         non-retryable :class:`ProviderResponseError` whose message and
         ``response_body`` both carry the overflow text.
         """
-        from ..compaction import is_context_overflow_error as _is_overflow
-
         code = str(error.get("code", "") or "")
         message = str(error.get("message", "") or "")
         if code and message:
             text = f"{code}: {message}"
         else:
             text = message or code or "OpenRouter stream failed"
-        if code == "context_length_exceeded" or _is_overflow(RuntimeError(text)):
+        if code == "context_length_exceeded" or is_context_overflow_error(
+            RuntimeError(text)
+        ):
             raise ProviderResponseError(
                 text,
                 provider=self.name,
