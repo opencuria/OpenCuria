@@ -9,7 +9,7 @@ import math
 import os
 from typing import Any
 
-from .base import FileContent, guess_mime_type
+from .file_types import FileContent, guess_mime_type
 
 SAFE_MEDIA_READ_DEFAULT_MAX_SIZE = 10 * 1024 * 1024
 SAFE_MEDIA_READ_TIMEOUT = 20.0

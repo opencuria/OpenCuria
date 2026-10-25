@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from apps.harness.access.base import FileContent
+from apps.harness.access.file_types import FileContent
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.providers.base import ChatOptions, Delta, LLMMessage, ToolSchema
 from apps.harness.runner import HarnessRunner

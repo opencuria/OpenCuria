@@ -14,7 +14,7 @@ import pytest
 from mcp.server.lowlevel.server import request_ctx
 from pydantic import BaseModel
 
-from apps.harness.access.base import FileContent
+from apps.harness.access.file_types import FileContent
 from apps.harness.agents.definitions import get_agent
 from apps.harness.engines.claude.context import build_user_content, data_url_block
 from apps.harness.engines.claude.engine import ClaudeEngine

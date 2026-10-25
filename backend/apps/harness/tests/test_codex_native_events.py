@@ -181,7 +181,7 @@ async def test_image_generation_enriches_prompt_and_uses_authorized_no_follow_me
 
     class Accessor:
         async def read_file_no_follow(self, path, max_size):
-            from apps.harness.access.base import FileContent
+            from apps.harness.access.file_types import FileContent
 
             reads.append(path)
             return FileContent(content=TINY_PNG, size=len(TINY_PNG))

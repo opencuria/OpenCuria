@@ -11,7 +11,8 @@ from typing import Any
 
 import pytest
 
-from apps.harness.access.base import FileContent
+from apps.harness.access.base import WorkspaceAccessor
+from apps.harness.access.file_types import FileContent
 from apps.harness.access.safe_files import (
     SAFE_MEDIA_READ_DEFAULT_MAX_SIZE,
     SafeFileReadError,
@@ -130,6 +131,48 @@ async def safe_read(
     if path == "/workspace" or path.startswith("/workspace/"):
         path = str(root) + path[len("/workspace") :]
     return await read_file_no_follow(accessor, path, max_size, root=str(root), **kwargs)
+
+
+@pytest.mark.parametrize("limit", [None, 3, 0])
+async def test_accessor_default_safe_read_preserves_binary_metadata_and_closes_stream(
+    workspace_root: Path, monkeypatch: pytest.MonkeyPatch, limit: int | None
+) -> None:
+    """The accessor's default reader preserves bounded bytes and file metadata."""
+    monkeypatch.setattr(
+        "apps.harness.access.base.HARNESS_WORKSPACE_ROOT", str(workspace_root)
+    )
+    payload = b"\x00\xff\x89PNG\r\n\x1a\n"
+    path = workspace_root / "image.png"
+    path.write_bytes(payload)
+    accessor = LocalProcessAccessor()
+
+    result = await WorkspaceAccessor.read_file_no_follow(accessor, str(path), limit)
+
+    assert result == FileContent(
+        content=payload if limit is None else payload[:limit],
+        size=len(payload),
+        truncated=limit is not None and limit < len(payload),
+        mime="image/png",
+    )
+    assert accessor.calls[0][1:3] == (str(workspace_root), {})
+    assert accessor.streams[0].closed
+
+
+async def test_accessor_default_safe_read_rejects_paths_outside_its_root(
+    workspace_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default accessor must forward its workspace root to the safe reader."""
+    monkeypatch.setattr(
+        "apps.harness.access.base.HARNESS_WORKSPACE_ROOT", str(workspace_root)
+    )
+    outside = workspace_root.parent / "outside.bin"
+    outside.write_bytes(b"sensitive")
+    accessor = LocalProcessAccessor()
+
+    with pytest.raises(SafeFileReadError, match="Safe file read failed"):
+        await WorkspaceAccessor.read_file_no_follow(accessor, str(outside))
+
+    assert accessor.calls == []
 
 
 @pytest.mark.asyncio

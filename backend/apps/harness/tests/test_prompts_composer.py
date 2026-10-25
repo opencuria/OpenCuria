@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from apps.harness.access.base import FileContent
+from apps.harness.access.file_types import FileContent
 from apps.harness.agents.definitions import get_agent
 from apps.harness.prompts.composer import (
     MAX_CONTEXT_FILE_BYTES,

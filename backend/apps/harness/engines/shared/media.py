@@ -16,7 +16,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...access.base import FileContent, WorkspaceAccessor, sanitize_harness_path
+from ...access.base import WorkspaceAccessor, sanitize_harness_path
+from ...access.file_types import FileContent
 from ...access.runner_accessor import RunnerAccessorError
 from ...images import (
     MARKDOWN_IMAGE_RE,

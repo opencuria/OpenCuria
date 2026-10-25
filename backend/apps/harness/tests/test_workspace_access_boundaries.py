@@ -1,4 +1,4 @@
-"""Keep workspace access below the MCP protocols that consume its contracts."""
+"""Keep workspace file contracts and access below their protocol consumers."""
 
 from __future__ import annotations
 
@@ -54,7 +54,55 @@ def test_workspace_access_and_mcp_dependencies_point_downward(
 @pytest.mark.parametrize(
     ("module", "forbidden"),
     [
+        ("file_types", {"base", "runner_accessor", "safe_files"}),
+        ("safe_files", {"base", "runner_accessor"}),
+    ],
+)
+def test_workspace_file_dependencies_point_downward(
+    module: str, forbidden: set[str]
+) -> None:
+    """File values and safe reads never import the accessors that consume them."""
+    path = HARNESS_ROOT / "access" / f"{module}.py"
+    boundaries = {f"apps.harness.access.{name}" for name in forbidden}
+    violations = sorted(
+        imported
+        for imported in _imports(path)
+        if any(
+            imported == boundary or imported.startswith(f"{boundary}.")
+            for boundary in boundaries
+        )
+    )
+    assert violations == [], (
+        f"Keep {module} independent of its accessor consumers, including "
+        "function-local imports:\n" + "\n".join(violations)
+    )
+
+
+@pytest.mark.parametrize(
+    ("module", "forbidden"),
+    [
         ("common.stream_diagnostics", ["apps", "django", "mcp"]),
+        (
+            "apps.harness.access.file_types",
+            [
+                "apps.harness.access.base",
+                "apps.harness.access.safe_files",
+                "apps.harness.access.runner_accessor",
+                "apps.runners",
+                "django",
+                "mcp",
+            ],
+        ),
+        (
+            "apps.harness.access.safe_files",
+            [
+                "apps.harness.access.base",
+                "apps.harness.access.runner_accessor",
+                "apps.runners",
+                "django",
+                "mcp",
+            ],
+        ),
         (
             "apps.harness.access.base",
             [

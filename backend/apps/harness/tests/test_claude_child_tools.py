@@ -165,7 +165,7 @@ async def test_local_agent_task_type_preserves_hook_identity_for_child_read(
         child_events.append((parent, event))
 
     async def read_file(path: str, max_size: int | None = None):
-        from apps.harness.access.base import FileContent
+        from apps.harness.access.file_types import FileContent
         from apps.harness.access.runner_accessor import RunnerAccessorError
 
         if path != fixture_path:

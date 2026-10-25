@@ -10,13 +10,8 @@ from typing import Any
 
 import pytest
 
-from apps.harness.access.base import (
-    DirEntry,
-    ExecResult,
-    FileContent,
-    FileStat,
-    WorkspaceAccessor,
-)
+from apps.harness.access.base import ExecResult, WorkspaceAccessor
+from apps.harness.access.file_types import DirEntry, FileContent, FileStat
 from apps.harness.access.runner_accessor import RunnerAccessorError
 from apps.harness.models import ProviderConnection
 from apps.organizations.models import Organization

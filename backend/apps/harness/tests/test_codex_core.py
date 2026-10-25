@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 from aiohttp import web
 
-from apps.harness.access.base import FileContent
+from apps.harness.access.file_types import FileContent
 from apps.harness.engines.base import RunOptions
 from apps.harness.engines.codex.auth import CodexAuthConfiguration
 from apps.harness.engines.codex.engine import CodexEngine

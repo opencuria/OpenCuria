@@ -6,7 +6,8 @@ import base64
 import json
 from typing import TYPE_CHECKING, Any
 
-from ...access.base import guess_mime_type, sanitize_harness_path
+from ...access.base import sanitize_harness_path
+from ...access.file_types import guess_mime_type
 from ..shared.media import _read_media_no_follow, data_url_block
 
 if TYPE_CHECKING:

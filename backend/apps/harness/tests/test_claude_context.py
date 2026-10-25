@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from apps.harness.access.base import FileContent
+from apps.harness.access.file_types import FileContent
 from apps.harness.engines.claude import context
 from apps.harness.engines.claude.context import (
     MAX_CLAUDE_TOOL_ARGUMENT_BYTES,

@@ -1,4 +1,4 @@
-"""WorkspaceAccessor ABC and shared types for harness workspace access.
+"""WorkspaceAccessor ABC and process stream contracts for harness workspace access.
 
 All harness tools reach workspace files and processes exclusively through
 this interface. Relative file paths resolve from ``/workspace``; exec working
@@ -9,10 +9,12 @@ Stdout and stderr of executed commands stay strictly separated.
 from __future__ import annotations
 
 import abc
-import mimetypes
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
+
+from . import file_types
+from .safe_files import read_file_no_follow
 
 HARNESS_WORKSPACE_ROOT = "/workspace"
 
@@ -107,12 +109,6 @@ def sanitize_exec_workdir(path: str) -> str:
     return normalized
 
 
-def guess_mime_type(path: str) -> str:
-    """Return a best-effort MIME type for *path*."""
-    guessed, _ = mimetypes.guess_type(path)
-    return guessed or "application/octet-stream"
-
-
 @dataclass(frozen=True)
 class ExecResult:
     """Buffered result of a command execution."""
@@ -120,37 +116,6 @@ class ExecResult:
     exit_code: int
     stdout: str = ""
     stderr: str = ""
-
-
-@dataclass(frozen=True)
-class FileContent:
-    """Content returned by ``read_file``."""
-
-    content: bytes = b""
-    size: int = 0
-    truncated: bool = False
-    mime: str = "application/octet-stream"
-
-
-@dataclass(frozen=True)
-class DirEntry:
-    """A single entry returned by ``list_dir``."""
-
-    name: str
-    path: str
-    is_dir: bool = False
-    size: int = 0
-
-
-@dataclass(frozen=True)
-class FileStat:
-    """Metadata returned by ``stat``."""
-
-    path: str
-    is_dir: bool = False
-    size: int = 0
-    mime: str = "application/octet-stream"
-    extra: dict = field(default_factory=dict)
 
 
 class StreamClosedError(RuntimeError):
@@ -217,14 +182,14 @@ class WorkspaceAccessor(abc.ABC):
         self,
         path: str,
         max_size: int | None = None,
-    ) -> FileContent:
+    ) -> file_types.FileContent:
         """Read a file from the sandboxed workspace."""
 
     async def read_file_no_follow(
         self,
         path: str,
         max_size: int | None = None,
-    ) -> FileContent:
+    ) -> file_types.FileContent:
         """Read a regular workspace file without following any symlink.
 
         This media-specific primitive uses the existing binary-safe process
@@ -232,8 +197,6 @@ class WorkspaceAccessor(abc.ABC):
         contract. Paths must be lexically normalized and remain below
         ``/workspace``; every path component is opened with no-follow flags.
         """
-        from .safe_files import read_file_no_follow
-
         return await read_file_no_follow(
             self, path, max_size, root=HARNESS_WORKSPACE_ROOT
         )
@@ -248,11 +211,11 @@ class WorkspaceAccessor(abc.ABC):
         """Write a file atomically into the sandboxed workspace."""
 
     @abc.abstractmethod
-    async def list_dir(self, path: str) -> list[DirEntry]:
+    async def list_dir(self, path: str) -> list[file_types.DirEntry]:
         """List directory entries inside the sandboxed workspace."""
 
     @abc.abstractmethod
-    async def stat(self, path: str) -> FileStat:
+    async def stat(self, path: str) -> file_types.FileStat:
         """Stat a path inside the sandboxed workspace."""
 
     @abc.abstractmethod

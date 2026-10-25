@@ -149,7 +149,7 @@ async def test_read_pdf_happy_path() -> None:
 
 async def test_read_media_over_ingestion_limit_rejected() -> None:
     """Media larger than MAX_MEDIA_INGEST_BYTES raises ToolError."""
-    from apps.harness.access.base import FileContent
+    from apps.harness.access.file_types import FileContent
     from apps.harness.tools.files import MAX_MEDIA_INGEST_BYTES
 
     jpeg = b"\xff\xd8\xff" + b"x" * 8
@@ -284,7 +284,7 @@ async def test_write_external_path(fake_accessor) -> None:
 
 async def test_write_refuses_truncated_existing_file() -> None:
     """A partial read cannot produce a misleading replacement diff."""
-    from apps.harness.access.base import FileContent
+    from apps.harness.access.file_types import FileContent
 
     class TruncatedAccessor(FakeAccessor):
         async def read_file(self, path: str, max_size=None) -> FileContent:
@@ -321,7 +321,7 @@ async def test_edit_happy_path(fake_accessor) -> None:
 
 async def test_edit_refuses_truncated_existing_file() -> None:
     """An edit cannot use an incomplete file prefix as its current state."""
-    from apps.harness.access.base import FileContent
+    from apps.harness.access.file_types import FileContent
 
     class TruncatedAccessor(FakeAccessor):
         async def read_file(self, path: str, max_size=None) -> FileContent:

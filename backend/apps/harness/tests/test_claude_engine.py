@@ -18,7 +18,7 @@ import pytest
 from aiohttp import web
 from pydantic import BaseModel, Field
 
-from apps.harness.access.base import FileContent
+from apps.harness.access.file_types import FileContent
 from apps.harness.agents.definitions import get_agent
 from apps.harness.engines.catalog import (
     CLAUDE_AGENT_SDK_VERSION,

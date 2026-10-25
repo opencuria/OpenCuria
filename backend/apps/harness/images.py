@@ -8,7 +8,8 @@ from typing import Any
 
 import structlog
 
-from .access.base import WorkspaceAccessor, guess_mime_type, sanitize_harness_path
+from .access.base import WorkspaceAccessor, sanitize_harness_path
+from .access.file_types import guess_mime_type
 from .access.runner_accessor import RunnerAccessorError
 from .providers.base import LLMMessage
 

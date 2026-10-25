@@ -340,7 +340,7 @@ async def test_bash_nonzero_still_reports_exit_code() -> None:
 
 async def test_concurrent_edits_serialize_on_path_lock() -> None:
     """Concurrent edits on one path serialize (no lost update)."""
-    from apps.harness.access.base import FileContent
+    from apps.harness.access.file_types import FileContent
     from apps.harness.tools import EditTool
 
     class RmwAccessor(FakeAccessor):

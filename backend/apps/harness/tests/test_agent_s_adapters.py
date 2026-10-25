@@ -17,7 +17,8 @@ from typing import Any
 
 import pytest
 
-from apps.harness.access.base import ExecResult, FileContent
+from apps.harness.access.base import ExecResult
+from apps.harness.access.file_types import FileContent
 from apps.harness.agent_s.adapters import (
     ACTION_EXECUTE_MAX_CHARS,
     ACTION_EXECUTE_TIMEOUT_S,

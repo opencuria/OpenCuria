@@ -7,7 +7,8 @@ import difflib
 
 from pydantic import BaseModel, Field
 
-from ..access.base import guess_mime_type, sanitize_harness_path
+from ..access.base import sanitize_harness_path
+from ..access.file_types import guess_mime_type
 from ..access.runner_accessor import RunnerAccessorError
 from .base import Tool, ToolContext, ToolError, ToolResult
 from .file_locks import get_lock

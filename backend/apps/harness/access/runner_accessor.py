@@ -68,17 +68,14 @@ from common import stream_diagnostics
 from common.exceptions import ConflictError
 
 from .base import (
-    DirEntry,
     ExecResult,
-    FileContent,
-    FileStat,
     StreamClosedError,
     WorkspaceAccessor,
     WorkspaceByteStream,
-    guess_mime_type,
     sanitize_exec_workdir,
     sanitize_harness_path,
 )
+from .file_types import DirEntry, FileContent, FileStat, guess_mime_type
 
 log = structlog.get_logger(__name__)
 
