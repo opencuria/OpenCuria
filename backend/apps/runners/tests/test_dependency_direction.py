@@ -1,6 +1,6 @@
 """Guard the dependency direction between the runners app and its dependents.
 
-``harness`` and ``scheduled_tasks`` build on ``runners``; runners
+``harness``, ``scheduled_tasks`` and ``mcp_app`` build on ``runners``; runners
 reaches the harness only through the ``HarnessGateway`` port. The scan covers
 module-level and function-local imports as well as app-registry lookups, so
 cycles cannot be hidden behind lazy imports or ``get_model`` strings.
@@ -14,7 +14,7 @@ import ast
 from pathlib import Path
 
 RUNNERS_DIR = Path(__file__).resolve().parents[1]
-FORBIDDEN_APPS = {"harness", "scheduled_tasks"}
+FORBIDDEN_APPS = {"harness", "scheduled_tasks", "mcp_app"}
 ORM_QUERY_ATTRIBUTES = {
     "objects",
     "_default_manager",
@@ -97,6 +97,7 @@ def test_guard_detects_function_local_imports_and_registry_lookups():
         "def f():\n"
         "    from apps.harness.models import HarnessSession\n"
         "    import apps.scheduled_tasks.services\n"
+        "    import apps.mcp_app.server\n"
         "    from apps import scheduled_tasks\n"
         "    apps.get_model('harness', 'HarnessSession')\n"
     )

@@ -253,7 +253,8 @@ Recurring schedules skip DST gaps, while a one-time run in a gap is rejected;
 fall-back repeated times are executed once. Each occurrence
 creates a new root harness session. REST endpoints are under
 `/api/v1/scheduled-tasks/` (`harness:read` for listing/history, `harness:run` for
-create/edit/pause/delete/run-now).
+create/edit/pause/delete/run-now); the MCP server exposes the same as
+`scheduled_task_*` tools.
 
 For a local Linux setup with backend/webapp from source and a native QEMU
 runner on the same machine, use the same QEMU runner flow above, but point
@@ -290,6 +291,18 @@ Changes do not alter an active run's limit.
 REST: `GET/PUT /api/v1/subagent-config/` with `{"max_depth": 2}`.
 Reading requires `harness:read`; saving requires `harness:run` and organization
 membership. Run backend migrations before using this setting.
+
+## OpenCuria MCP server
+
+AI assistants (Claude Code, Claude Desktop, Cursor, ChatGPT, …) manage OpenCuria through
+the stateless Streamable HTTP endpoint `/mcp` on the backend. Authenticate with an API key
+(`Authorization: Bearer kai_…` or `X-API-Key`) that holds `mcp:access`; each tool also
+requires its own permission and is hidden otherwise. `X-Organization-Id` selects the
+organization (default: the owner's first). About 30 task-oriented tools cover workspaces,
+chats (start, read with bounded waiting, send/steer, answer questions and permissions),
+skills, plugins and scheduled tasks. Client setup and the tool list are in
+[webapp/src/docs/mcp.md](./webapp/src/docs/mcp.md); the implementation lives in
+`backend/apps/mcp_app/`.
 
 ## MCP OAuth integrations
 

@@ -1,7 +1,7 @@
 """Architecture guard: REST router and Socket.IO modules are leaf adapters.
 
-REST routers (``api.py``) are adapters over services.
-Shared request/response shapes live in ``schemas`` /
+REST routers (``api.py``) and the MCP server (``apps.mcp_app``) are sibling
+adapters over the same services. Shared request/response shapes live in ``schemas`` /
 presenter modules, so no application module may import a REST router
 module; only the URL composition root (``config/urls.py``) mounts them.
 Likewise the realtime adapters (the Socket.IO handler module and the desktop
@@ -20,8 +20,8 @@ selection (ID normalization, visibility, body rendering and merging) is owned
 by the skills context; the harness and scheduled tasks call ``SkillService``
 and never import skill repositories or models. Workspaces
 compose plugins, so workspace-scoped plugin endpoints and guards live in
-``apps.runners``. REST and realtime adapters never query the ORM
-themselves and never import repositories; REST authenticates API keys
+``apps.runners``. REST, MCP and realtime adapters never query the ORM
+themselves and never import repositories; REST and MCP authenticate API keys
 through ``apps.accounts.services.APIKeyService``, and
 the realtime adapters reach models and repositories only through services.
 Below the adapters, services, tools and engines of the repository-only apps
@@ -68,6 +68,7 @@ REPOSITORY_ONLY_APPS = {
     "apps.accounts",
     "apps.credentials",
     "apps.harness",
+    "apps.mcp_app",
     "apps.organizations",
     "apps.plugins",
     "apps.scheduled_tasks",
@@ -172,12 +173,13 @@ def _persistence_modules(trees: dict[Path, ast.Module]) -> set[str]:
 
 
 def _adapter_modules(trees: dict[Path, ast.Module]) -> set[Path]:
-    """Return REST router, API-key auth and realtime adapter modules."""
+    """Return REST router, API-key auth, MCP and realtime adapter modules."""
     return {
         path
         for path, tree in trees.items()
         if _defines_ninja_router(tree)
         or _module_name(path) == "apps.accounts.api_auth"
+        or _module_name(path).startswith("apps.mcp_app")
         or _module_name(path) in REALTIME_ADAPTERS
     }
 
@@ -362,12 +364,12 @@ def test_realtime_adapters_reach_persistence_only_through_services():
 
 
 def test_adapters_reach_image_recipes_only_through_their_service():
-    """REST uses ``ImageDefinitionService`` for recipes and builds."""
+    """REST and MCP share ``ImageDefinitionService`` for recipes and builds."""
     trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     adapters = {
         path
         for path, tree in trees.items()
-        if _defines_ninja_router(tree)
+        if _defines_ninja_router(tree) or _module_name(path).startswith("apps.mcp_app")
     }
     persistence = {
         "apps.runners.models.ImageBuildJob",
@@ -388,7 +390,7 @@ def test_adapters_reach_image_recipes_only_through_their_service():
 
 
 def test_adapters_never_query_the_orm():
-    """REST and realtime adapters call services; only repositories query."""
+    """REST, MCP and realtime adapters call services; only repositories query."""
     trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     adapters = _adapter_modules(trees)
     assert APPS_ROOT / "accounts" / "api.py" in adapters  # discovery sanity check
@@ -471,6 +473,7 @@ def test_adapters_reach_repositories_only_through_services():
     adapters = _adapter_modules(trees)
     repositories = _repository_modules(trees)
     assert APPS_ROOT / "accounts" / "api_auth.py" in adapters
+    assert APPS_ROOT / "mcp_app" / "server.py" in adapters
     assert {
         "apps.credentials.repositories",
         "apps.runners.disposition_repository",
@@ -509,7 +512,7 @@ def test_runner_service_never_imports_the_harness():
 
 def test_harness_never_imports_the_apps_built_on_it():
     """Consumers subscribe to harness run events; the harness never calls them."""
-    consumers = ("apps.scheduled_tasks",)
+    consumers = ("apps.scheduled_tasks", "apps.mcp_app")
     package = APPS_ROOT / "harness"
     violations = sorted(
         f"{_module_name(path)} -> {module}"

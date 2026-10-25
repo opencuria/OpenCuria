@@ -33,6 +33,9 @@ duplicating or bypassing them:
 - Harness: `backend/apps/harness/` (`providers/`, `tools/` + registry,
   `permissions/`, `agents/` definitions, `prompts/` composer, `runner.py` loop).
 - Runners: `runner/src/runtime/` and `interfaces/` abstractions (ABC + implementations).
+- MCP server: `backend/apps/mcp_app/` is a sibling adapter of REST over the same
+  services. Keep it to ~30 task-oriented tools (`<resource>_<verb>`); extend an
+  existing tool before adding one, and give every tool a precise description.
 
 Strictly follow SOLID, separation of concerns, and DRY. One concern per
 layer, one implementation per behavior, composition over duplication.
