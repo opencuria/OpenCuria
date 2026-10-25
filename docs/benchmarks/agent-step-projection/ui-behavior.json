@@ -1,0 +1,11 @@
+{
+  "real_api_detail_hydration": "Page 500 is ready",
+  "pagination_during_stream": {"before":"Page 18 of 19","after":"Page 18 of 19","mounted_agent_cards":27},
+  "new_step_status":"in_progress",
+  "after_finish_marker":"completed",
+  "after_final_abort":"error",
+  "previous_step_after_abort":"completed",
+  "late_event_after_completion_ignored":true,
+  "screenshot":"/workspace/screenshots/agent-step-projection-verified.png",
+  "scope":"Real Vue app and local REST fixture; streamed events injected through the existing store entry point, no live AI provider or runner."
+}

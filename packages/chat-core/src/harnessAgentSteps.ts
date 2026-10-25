@@ -70,12 +70,52 @@ export function hasStructuredAgentMeta(part: HarnessPart): boolean {
   return AGENT_META_KEYS.some((key) => meta[key] !== "");
 }
 
-/** True for error tool parts that belong to an Agent-S step. */
-function isStepErrorTool(part: HarnessPart, step: number | null): boolean {
-  if (part.type !== "tool" || part.state !== "error") return false;
-  if (step === null) return false;
-  const toolStep = part.meta?.["step"] ?? part.display?.step;
-  return typeof toolStep === "number" && toolStep === step;
+interface AgentStepFacts {
+  starts: Set<number>;
+  finishes: Set<number>;
+  errors: Set<number>;
+  active: Set<number>;
+  maxStep: number | null;
+}
+
+/** Collect message-wide facts once instead of rescanning parts for each plan. */
+function collectAgentStepFacts(parts: HarnessPart[]): AgentStepFacts {
+  const facts: AgentStepFacts = {
+    starts: new Set(),
+    finishes: new Set(),
+    errors: new Set(),
+    active: new Set(),
+    maxStep: null,
+  };
+  for (const part of parts) {
+    const step = part.meta?.["step"] ?? part.display?.step;
+    // Set treats NaN as equal to itself; the original marker comparisons use ===.
+    if (typeof step !== "number" || Number.isNaN(step)) continue;
+    switch (part.type) {
+      case "agent":
+        if (Number.isFinite(step)) {
+          facts.maxStep =
+            facts.maxStep === null ? step : Math.max(facts.maxStep, step);
+          facts.active.add(step);
+        }
+        break;
+      case "step-start":
+        facts.starts.add(step);
+        if (Number.isFinite(step)) facts.active.add(step);
+        break;
+      case "step-finish":
+        facts.finishes.add(step);
+        break;
+      case "tool":
+        if (part.state === "error") facts.errors.add(step);
+        break;
+      case "reasoning":
+        if (part.state === "running" && Number.isFinite(step))
+          facts.active.add(step);
+        break;
+    }
+  }
+  return facts;
 }
 
 /**
@@ -96,29 +136,27 @@ export function agentStepStatus(
   parts: HarnessPart[],
   step: number | null,
 ): AgentStepStatus {
+  return statusFromFacts(part, step, collectAgentStepFacts(parts));
+}
+
+function statusFromFacts(
+  part: HarnessPart,
+  step: number | null,
+  facts: AgentStepFacts,
+): AgentStepStatus {
   if (step !== null) {
-    if (parts.some((candidate) => isStepErrorTool(candidate, step)))
-      return "error";
-    const hasFinish = parts.some(
-      (candidate) =>
-        candidate.type === "step-finish" &&
-        (candidate.meta?.["step"] ?? candidate.display?.step) === step,
-    );
-    const hasStart = parts.some(
-      (candidate) =>
-        candidate.type === "step-start" &&
-        (candidate.meta?.["step"] ?? candidate.display?.step) === step,
-    );
-    const agentSteps = parts
-      .filter((candidate) => candidate.type === "agent")
-      .map((candidate) => agentStepNumber(candidate))
-      .filter((value): value is number => value !== null);
-    const maxStep = agentSteps.length > 0 ? Math.max(...agentSteps) : null;
+    if (facts.errors.has(step)) return "error";
+    const hasFinish = facts.finishes.has(step);
+    const hasStart = facts.starts.has(step);
     // A newer plan for a higher step supersedes this one: the older step is
     // done even when its explicit finish marker has not arrived yet. When no
     // explicit markers exist at all (legacy payloads), fall back to the
     // persisted part state so a lone running plan still reads as active.
-    if (maxStep !== null && maxStep > step && (hasStart || hasFinish))
+    if (
+      facts.maxStep !== null &&
+      facts.maxStep > step &&
+      (hasStart || hasFinish)
+    )
       return "completed";
     if (hasFinish) return "completed";
     if (hasStart) return "in_progress";
@@ -233,10 +271,12 @@ export function buildAgentStepViews(
   opts: AgentStepViewOptions = {},
 ): AgentStepView[] {
   const agents = parts.filter((part) => part.type === "agent");
+  if (agents.length === 0) return [];
+  const facts = collectAgentStepFacts(parts);
   const finalError = isFinalMessageError(opts);
   return agents.map((part, index) => {
     const step = agentStepNumber(part);
-    const markerStatus = agentStepStatus(part, parts, step);
+    const markerStatus = statusFromFacts(part, step, facts);
     const { legacy } = agentPrimaryAction(part);
     const isLast = index === agents.length - 1;
     const structured = hasStructuredAgentMeta(part);
@@ -259,37 +299,9 @@ export function buildAgentStepViews(
  * completed plan card (the step is still working).
  */
 export function hasRunningAgentSequence(parts: HarnessPart[]): boolean {
-  const steps = new Set<number>();
-  for (const part of parts) {
-    const step = part.meta?.["step"] ?? part.display?.step;
-    if (typeof step !== "number" || !Number.isFinite(step)) continue;
-    if (
-      part.type === "step-start" ||
-      part.type === "agent" ||
-      part.type === "reasoning"
-    ) {
-      steps.add(step);
-    }
-  }
-  for (const step of steps) {
-    const finished = parts.some(
-      (part) =>
-        part.type === "step-finish" &&
-        (part.meta?.["step"] ?? part.display?.step) === step,
-    );
-    if (finished) continue;
-    const started = parts.some(
-      (part) =>
-        (part.type === "step-start" || part.type === "agent") &&
-        (part.meta?.["step"] ?? part.display?.step) === step,
-    );
-    const liveReasoning = parts.some(
-      (part) =>
-        part.type === "reasoning" &&
-        part.state === "running" &&
-        (part.meta?.["step"] ?? part.display?.step) === step,
-    );
-    if (started || liveReasoning) return true;
+  const { active, finishes } = collectAgentStepFacts(parts);
+  for (const step of active) {
+    if (!finishes.has(step)) return true;
   }
   return false;
 }
