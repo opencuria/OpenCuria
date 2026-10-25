@@ -50,6 +50,9 @@ from .timeline import (
     build_part_display,
 )
 
+# Keep copy reads/allocations bounded and INSERTs below SQLite's parameter limit.
+FORK_COPY_BATCH_SIZE = 50
+
 
 class ProviderConfigRepository:
     """Data access for ProviderConfig records."""
@@ -1118,11 +1121,12 @@ class HarnessMessageRepository:
         The cutoff is exclusive by default; set *include_message* to include
         it. In exclusive mode, a missing or unknown cutoff copies the full
         history for backward compatibility. Inclusive mode requires a cutoff.
-        New UUIDs are generated; parts are copied per message with
+        New UUIDs are generated; parts are copied in bounded batches with
         ``meta.tail_start_id`` remapped via the id map (dropped when outside
         the prefix) and subtask ``child_session_id`` cleared. Positions are
-        reallocated sequentially via repo ``create`` to preserve chronological
-        order. Returns the message ID map.
+        reallocated sequentially to preserve chronological order. Destination
+        writes are atomic and concurrent copies serialize on its session row.
+        Returns the message ID map.
         """
         if include_message and cutoff_message_id is None:
             raise ValueError(
@@ -1140,65 +1144,62 @@ class HarnessMessageRepository:
             )
             if index is not None:
                 ordered = ordered[: index + int(include_message)]
-        id_map: dict[uuid.UUID, uuid.UUID] = {}
-        # Allocate message positions sequentially in chronological order.
-        snapshots: list[HarnessMessage] = list(ordered)
-        for src in snapshots:
-            dst = HarnessMessageRepository.create(
-                session_id=dst_session_id,
-                role=src.role,
-                content=src.content or "",
-                model=src.model or "",
-                reasoning_effort=src.reasoning_effort or "",
-                provider=src.provider or "",
-                skill_ids=list(getattr(src, "skill_ids", None) or []),
-                harness_id=getattr(src, "harness_id", "native") or "native",
-                engine_meta=dict(getattr(src, "engine_meta", None) or {}),
-            )
-            HarnessMessage.objects.filter(id=dst.id).update(
-                harness_id=getattr(src, "harness_id", "native") or "native",
-                engine_meta=dict(getattr(src, "engine_meta", None) or {}),
-                cost=float(src.cost or 0.0),
-                tokens=dict(src.tokens or {}),
-                finish=src.finish or "",
-                error=src.error or "",
-                notice_dismissed_at=src.notice_dismissed_at,
-                completed_at=src.completed_at,
-            )
-            dst.refresh_from_db()
-            id_map[src.id] = dst.id
-        for src in snapshots:
-            dst_id = id_map[src.id]
-            parts = list(
-                HarnessPart.objects.filter(message_id=src.id).order_by(
-                    "position", "created_at", "id"
-                )
-            )
-            for part in parts:
-                meta = dict(part.meta or {})
-                tail_raw = str(meta.get("tail_start_id", "") or "").strip()
-                if tail_raw:
-                    try:
-                        tail_uuid = uuid.UUID(tail_raw)
-                    except ValueError:
-                        tail_uuid = None
-                    if tail_uuid is not None and tail_uuid in id_map:
-                        meta["tail_start_id"] = str(id_map[tail_uuid])
-                    else:
-                        meta.pop("tail_start_id", None)
-                if part.type == "subtask":
-                    meta["child_session_id"] = ""
-                HarnessPartRepository.create(
-                    message_id=dst_id,
-                    type=part.type,
-                    state=part.state,
-                    call_id=part.call_id or "",
-                    title=part.title or "",
-                    input=dict(part.input or {}),
-                    output=part.output or "",
-                    meta=meta,
-                )
-        return id_map
+        if not ordered:
+            return {}
+        id_map = {src.id: uuid.uuid4() for src in ordered}
+        for attempt in range(5):
+            try:
+                with transaction.atomic():
+                    # Serialize copies without blocking appenders' FK checks.
+                    HarnessSession.objects.select_for_update(no_key=True).only(
+                        "id"
+                    ).get(id=dst_session_id)
+                    start = HarnessMessageRepository._next_message_position(
+                        dst_session_id
+                    )
+                    last_user_at = None
+                    for offset in range(0, len(ordered), FORK_COPY_BATCH_SIZE):
+                        batch = [
+                            HarnessMessage(
+                                id=id_map[src.id],
+                                session_id=dst_session_id,
+                                position=start + offset + index,
+                                role=src.role,
+                                content=src.content or "",
+                                model=src.model or "",
+                                reasoning_effort=src.reasoning_effort or "",
+                                provider=src.provider or "",
+                                skill_ids=list(src.skill_ids or []),
+                                harness_id=src.harness_id or "native",
+                                engine_meta=dict(src.engine_meta or {}),
+                                cost=float(src.cost or 0.0),
+                                tokens=dict(src.tokens or {}),
+                                finish=src.finish or "",
+                                error=src.error or "",
+                                notice_dismissed_at=src.notice_dismissed_at,
+                                completed_at=src.completed_at,
+                            )
+                            for index, src in enumerate(
+                                ordered[offset : offset + FORK_COPY_BATCH_SIZE]
+                            )
+                        ]
+                        HarnessMessage.objects.bulk_create(
+                            batch, batch_size=FORK_COPY_BATCH_SIZE
+                        )
+                        for message in batch:
+                            if message.role == HarnessMessageRole.USER:
+                                last_user_at = message.created_at
+                    HarnessPartRepository.copy_for_messages(id_map)
+                    if last_user_at is not None:
+                        HarnessSessionRepository.touch_last_message_at(
+                            dst_session_id, when=last_user_at
+                        )
+                return id_map
+            except IntegrityError:
+                # A concurrent ordinary message append can win a position race.
+                # Retry the entire transaction, never a partially copied prefix.
+                if attempt == 4:
+                    raise
 
     @staticmethod
     def latest_assistant_completed_at_by_session(
@@ -1327,6 +1328,88 @@ class HarnessPartRepository:
     model = HarnessPart
 
     @staticmethod
+    def _prepare_meta(part_type: str, meta: dict | None) -> dict:
+        part_meta = dict(meta or {})
+        if part_type == "patch":
+            part_meta.pop("old_content", None)
+            part_meta.pop("new_content", None)
+        return part_meta
+
+    @staticmethod
+    def copy_for_messages(message_id_map: dict[uuid.UUID, uuid.UUID]) -> None:
+        """Copy ordered parts and regenerate displays for a message prefix.
+
+        The caller owns the destination transaction and message allocation.
+        Read and write batches bound temporary part payloads; no part positions
+        need querying because each destination message is new.
+        """
+        source_ids = list(message_id_map)
+        pending: list[HarnessPart] = []
+        for offset in range(0, len(source_ids), FORK_COPY_BATCH_SIZE):
+            parts = (
+                HarnessPart.objects.filter(
+                    message_id__in=source_ids[offset : offset + FORK_COPY_BATCH_SIZE]
+                )
+                .order_by(
+                    "message__position",
+                    "message__created_at",
+                    "message_id",
+                    "position",
+                    "created_at",
+                    "id",
+                )
+                .iterator(chunk_size=FORK_COPY_BATCH_SIZE)
+            )
+            previous_message_id = None
+            position = 0
+            for part in parts:
+                if part.message_id != previous_message_id:
+                    previous_message_id = part.message_id
+                    position = 0
+                meta = HarnessPartRepository._prepare_meta(part.type, part.meta)
+                tail_raw = str(meta.get("tail_start_id", "") or "").strip()
+                if tail_raw:
+                    try:
+                        tail_uuid = uuid.UUID(tail_raw)
+                    except ValueError:
+                        tail_uuid = None
+                    if tail_uuid in message_id_map:
+                        meta["tail_start_id"] = str(message_id_map[tail_uuid])
+                    else:
+                        meta.pop("tail_start_id", None)
+                if part.type == "subtask":
+                    meta["child_session_id"] = ""
+                pending.append(
+                    HarnessPart(
+                        message_id=message_id_map[part.message_id],
+                        position=position,
+                        type=part.type,
+                        state=part.state,
+                        call_id=part.call_id or "",
+                        title=part.title or "",
+                        input=dict(part.input or {}),
+                        output=part.output or "",
+                        meta=meta,
+                        display=build_part_display(
+                            part_type=part.type,
+                            title=part.title or "",
+                            call_id=part.call_id or "",
+                            input_data=part.input or {},
+                            output=part.output or "",
+                            meta_data=meta,
+                        ),
+                    )
+                )
+                position += 1
+                if len(pending) == FORK_COPY_BATCH_SIZE:
+                    HarnessPart.objects.bulk_create(
+                        pending, batch_size=FORK_COPY_BATCH_SIZE
+                    )
+                    pending.clear()
+        if pending:
+            HarnessPart.objects.bulk_create(pending, batch_size=FORK_COPY_BATCH_SIZE)
+
+    @staticmethod
     def _next_part_position(message_id: uuid.UUID) -> int:
         """Return max(position)+1 for *message_id* (0 when empty)."""
         row = HarnessPart.objects.filter(message_id=message_id).aggregate(
@@ -1359,10 +1442,7 @@ class HarnessPartRepository:
             try:
                 with transaction.atomic():
                     position = HarnessPartRepository._next_part_position(message_id)
-                    part_meta = dict(meta or {})
-                    if type == "patch":
-                        part_meta.pop("old_content", None)
-                        part_meta.pop("new_content", None)
+                    part_meta = HarnessPartRepository._prepare_meta(type, meta)
                     return HarnessPart.objects.create(
                         message_id=message_id,
                         type=type,
