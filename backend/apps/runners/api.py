@@ -74,7 +74,6 @@ from .schemas import (
     ImageDefinitionOut,
     ImageDefinitionUpdateIn,
     ProcessOut,
-    ProcessStartIn,
     RunnerCreateIn,
     RunnerCreateOut,
     RunnerOut,
@@ -1085,84 +1084,6 @@ async def list_processes(
         processes = await service.list_processes(workspace_id, live=live)
         visible = _user_visible_processes(processes)
         return 200, [_process_to_out(process) for process in visible]
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-
-
-@workspace_router.post(
-    "/{workspace_id}/processes/",
-    response={
-        200: ProcessOut,
-        201: ProcessOut,
-        400: ErrorOut,
-        403: ErrorOut,
-        404: ErrorOut,
-        409: ErrorOut,
-    },
-    summary="Start or restart (upsert by name)",
-)
-async def start_process(
-    request: HttpRequest, workspace_id: uuid.UUID, payload: ProcessStartIn
-):
-    """Start a detached background process in a workspace (upsert by name).
-
-    A new ``name`` creates a fresh row (201); an existing ``name``
-    restarts the same row with ``run_count + 1`` (200, stable id).
-    Users always create persistent processes; temporary session-scoped
-    processes are agent-only and cannot be started here.
-    """
-    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_PROCESSES_RUN):
-        return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_RUN)
-    org_id = get_organization_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    service = _get_service()
-    try:
-        await _get_owned_workspace_async(request, org_id, workspace_id)
-        process = await service.start_process(
-            workspace_id,
-            payload.command,
-            workdir=payload.workdir,
-            env=dict(payload.env or {}),
-            name=payload.name,
-            user=request.user,
-        )
-        status = 201 if getattr(process, "_was_created", False) else 200
-        return status, _process_to_out(process)
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-    except ConflictError as e:
-        return 409, ErrorOut(detail=e.message, code=e.code)
-    except ValueError as e:
-        return 400, ErrorOut(detail=str(e), code="validation_error")
-
-
-@workspace_router.get(
-    "/{workspace_id}/processes/{process_id}/",
-    response={200: ProcessOut, 403: ErrorOut, 404: ErrorOut},
-    summary="Get a background process",
-)
-async def get_process(request: HttpRequest, workspace_id: uuid.UUID, process_id: str):
-    """Return one background process scoped to a workspace.
-
-    ``process_id`` accepts a process UUID or the exact process name.
-    Finished temp rows are hidden from users (404); running temps are
-    visible with their ``kind`` marker.
-    """
-    if not check_api_key_permission(
-        request, APIKeyPermission.WORKSPACES_PROCESSES_READ
-    ):
-        return _perm_denied(APIKeyPermission.WORKSPACES_PROCESSES_READ)
-    org_id = get_organization_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    service = _get_service()
-    try:
-        await _get_owned_workspace_async(request, org_id, workspace_id)
-        process = await service.get_process(workspace_id, process_id)
-        if _user_visible_processes([process]) == []:
-            return 404, ErrorOut(detail="Process not found", code="not_found")
-        return 200, _process_to_out(process)
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
 

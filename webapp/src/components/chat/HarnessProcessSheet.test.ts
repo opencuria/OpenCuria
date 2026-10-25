@@ -25,7 +25,6 @@ vi.mock('@/services/workspaces.api', async (importOriginal) => {
     listProcesses: vi.fn(),
     listLiveProcesses: vi.fn(),
     stopProcess: vi.fn(),
-    startProcess: vi.fn(),
     restartProcess: vi.fn(),
     deleteProcess: vi.fn(),
   }

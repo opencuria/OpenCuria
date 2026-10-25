@@ -12,7 +12,6 @@ import { computed, ref } from 'vue'
 import type { ProcessRemovedEvent, ProcessStatusChangedEvent, WorkspaceProcess } from '@/types'
 import { ProcessKind } from '@/types'
 import * as workspacesApi from '@/services/workspaces.api'
-import type { ProcessStartIn } from '@/services/workspaces.api'
 import { useWorkspaceStore } from './workspaces'
 import { useNotificationStore } from './notifications'
 
@@ -162,34 +161,6 @@ export const useProcessesStore = defineStore('processes', () => {
       const done = new Set(stoppingIds.value)
       done.delete(processId)
       stoppingIds.value = done
-    }
-  }
-
-  async function startProcess(
-    workspaceId: string,
-    data: ProcessStartIn,
-  ): Promise<{ ok: boolean; process?: WorkspaceProcess }> {
-    if (useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return { ok: false }
-    const notifications = useNotificationStore()
-    try {
-      const created = await workspacesApi.startProcess(workspaceId, data)
-      upsertProcess(workspaceId, created)
-      if ((created.run_count ?? 1) > 1) {
-        notifications.success(
-          'Process restarted',
-          `Process ${created.name || created.id.slice(0, 8)} was restarted.`,
-        )
-      } else {
-        notifications.success(
-          'Process started',
-          `Process ${created.name || created.id.slice(0, 8)} was started.`,
-        )
-      }
-      return { ok: true, process: created }
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to start process'
-      notifications.error('Start failed', msg)
-      return { ok: false }
     }
   }
 
@@ -401,7 +372,6 @@ export const useProcessesStore = defineStore('processes', () => {
     // Actions
     fetchProcesses,
     stopProcess,
-    startProcess,
     restartProcess,
     deleteProcess,
     upsertProcess,

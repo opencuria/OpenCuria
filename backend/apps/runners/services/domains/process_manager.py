@@ -417,8 +417,6 @@ class ProcessManagerMixin:
             refreshed.pid,
             run_count,
         )
-        # Row creation differs from a first run of a definition imported from an image.
-        refreshed._was_created = existing is None
         return refreshed
 
     async def _stop_running_process(

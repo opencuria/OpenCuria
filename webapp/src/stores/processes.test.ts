@@ -22,7 +22,6 @@ vi.mock('@/services/workspaces.api', async (importOriginal) => {
     listProcesses: vi.fn(),
     listLiveProcesses: vi.fn(),
     stopProcess: vi.fn(),
-    startProcess: vi.fn(),
     restartProcess: vi.fn(),
     deleteProcess: vi.fn(),
   }
@@ -225,61 +224,6 @@ describe('processes store', () => {
     expect(updated?.run_count).toBe(2)
   })
 
-  it('starts a new process and notifies "Process started"', async () => {
-    const store = useProcessesStore()
-    const created = makeProcess({ run_count: 1 })
-    vi.mocked(workspacesApi.startProcess).mockResolvedValue(created)
-
-    const result = await store.startProcess('workspace-1', {
-      command: 'npm run dev',
-      name: 'dev-server',
-    })
-
-    expect(result).toEqual({ ok: true, process: created })
-    expect(workspacesApi.startProcess).toHaveBeenCalledWith('workspace-1', {
-      command: 'npm run dev',
-      name: 'dev-server',
-    })
-    expect(store.processesFor('workspace-1')[0]).toEqual(created)
-    expect(toast.success).toHaveBeenCalledWith(
-      'Process started',
-      expect.objectContaining({ description: expect.any(String) }),
-    )
-  })
-
-  it('notifies "Process restarted" when start returns run_count > 1', async () => {
-    const store = useProcessesStore()
-    const restarted = makeProcess({ run_count: 2 })
-    vi.mocked(workspacesApi.startProcess).mockResolvedValue(restarted)
-
-    const result = await store.startProcess('workspace-1', {
-      command: 'npm run dev',
-      name: 'dev-server',
-    })
-
-    expect(result.ok).toBe(true)
-    expect(toast.success).toHaveBeenCalledWith(
-      'Process restarted',
-      expect.objectContaining({ description: expect.any(String) }),
-    )
-  })
-
-  it('notifies on start failure', async () => {
-    const store = useProcessesStore()
-    vi.mocked(workspacesApi.startProcess).mockRejectedValue(new Error('boom'))
-
-    const result = await store.startProcess('workspace-1', {
-      command: 'npm run dev',
-      name: 'dev-server',
-    })
-
-    expect(result).toEqual({ ok: false })
-    expect(toast.error).toHaveBeenCalledWith(
-      'Start failed',
-      expect.objectContaining({ description: 'boom' }),
-    )
-  })
-
   it('starts a not-yet-run process through restart and notifies "Process started"', async () => {
     const store = useProcessesStore()
     store.processesByWorkspace['workspace-1'] = [
@@ -413,14 +357,10 @@ it('blocks process mutations and live polling during optimistic capture', async 
   const workspaces = useWorkspaceStore()
   const processes = useProcessesStore()
   void workspaces.captureImage('workspace-1', () => new Promise(() => {}))
-  expect(await processes.startProcess('workspace-1', { command: 'test' } as never)).toEqual({
-    ok: false,
-  })
   expect(await processes.stopProcess('workspace-1', 'p')).toBe(false)
   expect(await processes.restartProcess('workspace-1', 'p')).toBe(false)
   expect(await processes.deleteProcess('workspace-1', 'p')).toBe(false)
   await processes.fetchProcesses('workspace-1', { live: true })
-  expect(workspacesApi.startProcess).not.toHaveBeenCalled()
   expect(workspacesApi.stopProcess).not.toHaveBeenCalled()
   expect(workspacesApi.listLiveProcesses).not.toHaveBeenCalled()
 })

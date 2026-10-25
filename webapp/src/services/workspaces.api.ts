@@ -170,13 +170,6 @@ export function listLiveProcesses(workspaceId: string): Promise<WorkspaceProcess
   return get<WorkspaceProcess[]>(`/workspaces/${workspaceId}/processes/?live=true`)
 }
 
-export function getProcess(
-  workspaceId: string,
-  processId: string,
-): Promise<WorkspaceProcess> {
-  return get<WorkspaceProcess>(`/workspaces/${workspaceId}/processes/${processId}/`)
-}
-
 export function stopProcess(
   workspaceId: string,
   processId: string,
@@ -184,21 +177,6 @@ export function stopProcess(
   return post<WorkspaceProcess>(
     `/workspaces/${workspaceId}/processes/${processId}/stop/`,
   )
-}
-
-/** Start a new process, or restart the existing one with the same name. `processId` params below accept UUID or name. */
-export interface ProcessStartIn {
-  command: string
-  name: string
-  workdir?: string
-  env?: Record<string, string>
-}
-
-export function startProcess(
-  workspaceId: string,
-  data: ProcessStartIn,
-): Promise<WorkspaceProcess> {
-  return post<WorkspaceProcess>(`/workspaces/${workspaceId}/processes/`, data)
 }
 
 export function restartProcess(

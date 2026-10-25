@@ -118,7 +118,6 @@ class TestStartProcess:
         assert process.pid == 4242
         assert process.log_path == ".opencuria/processes/abc.log"
         assert process.status == ProcessStatus.RUNNING
-        assert process._was_created is True
         assert WorkspaceProcess.objects.filter(id=process.id).exists()
         assert pushes
         assert pushes[0][0] == "process:status_changed"
@@ -144,7 +143,6 @@ class TestStartProcess:
 
         assert started.id == definition.id
         assert started.run_count == 1
-        assert started._was_created is False
         assert started.command == "python -m updated_app"
         assert started.workdir == "/srv/app"
         assert started.status == ProcessStatus.RUNNING
@@ -193,7 +191,6 @@ class TestStartProcess:
         create.assert_called_once()
         assert started.id == winner.id
         assert started.run_count == 1
-        assert started._was_created is False
         payload = transport.await_args.kwargs["payload"]
         assert payload["process_id"] == str(winner.id)
         assert payload["run_count"] == 1
