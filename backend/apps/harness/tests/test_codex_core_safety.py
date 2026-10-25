@@ -12,6 +12,7 @@ import pytest
 from asgiref.sync import async_to_sync
 
 from apps.harness.agents.definitions import get_agent
+from apps.harness.engines.base import RunOptions
 from apps.harness.engines.codex.auth import CodexAuthConfiguration
 from apps.harness.engines.codex.engine import CodexEngine
 from apps.harness.engines.codex.protocol import CodexProtocol, CodexProtocolError
@@ -22,7 +23,6 @@ from apps.harness.engines.codex.session_store import (
 )
 from apps.harness.engines.codex.tools import ManagedToolInvoker
 from apps.harness.providers.base import Usage
-from apps.harness.runner import RunOptions
 from apps.harness.tests.test_codex_core import QueueStream
 from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import ToolRegistry

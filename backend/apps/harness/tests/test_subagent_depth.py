@@ -10,13 +10,14 @@ import pytest
 from asgiref.sync import sync_to_async
 
 from apps.harness.constants import DEFAULT_MAX_DEPTH
+from apps.harness.engines.base import RunOptions
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessSession, Todo
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import Delta, LLMMessage, ToolSchema
 from apps.harness.repositories import HarnessSessionRepository
-from apps.harness.runner import HarnessRunner, RunOptions
+from apps.harness.runner import HarnessRunner
 from apps.harness.services import SubagentConfigService
 from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.tests.test_tools_task import FakeProvider, _text_step, _tool_step

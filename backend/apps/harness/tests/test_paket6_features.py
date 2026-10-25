@@ -17,6 +17,7 @@ from apps.harness.compaction import (
     is_overflow,
     select,
 )
+from apps.harness.engines.base import RunOptions
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import QuestionRequest
 from apps.harness.providers.base import (
@@ -27,7 +28,7 @@ from apps.harness.providers.base import (
     Usage,
 )
 from apps.harness.repositories import QuestionRequestRepository
-from apps.harness.runner import HarnessRunner, RunOptions
+from apps.harness.runner import HarnessRunner
 from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import ToolContext

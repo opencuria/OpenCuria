@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from apps.harness.engines.base import RunOptions
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.providers.base import (
     ChatOptions,
@@ -20,7 +21,7 @@ from apps.harness.providers.base import (
     ToolSchema,
     Usage,
 )
-from apps.harness.runner import HarnessRunner, RunOptions
+from apps.harness.runner import HarnessRunner
 from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.todos.memory_repository import InMemoryTodoRepository
 from apps.harness.todos.service import TodoService

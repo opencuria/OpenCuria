@@ -56,7 +56,7 @@ class _FakeClaudeEngine:
             await self.kwargs["emit"](
                 {"type": "part_updated", "step": 1, "delta": {"text": answer}}
             )
-            from apps.harness.runner import RunResult
+            from apps.harness.engines.base import RunResult
 
             return RunResult(
                 output=answer,

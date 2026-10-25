@@ -147,7 +147,8 @@ async def test_runner_dispatch_action_uses_original_name():
     # tool's ``original_name`` (never raw args). Exercised directly
     # against ``_dispatch_tool_call`` so no looping provider is needed.
     from apps.harness.agents.definitions import get_agent
-    from apps.harness.runner import RunOptions, _PendingToolCall
+    from apps.harness.engines.base import RunOptions
+    from apps.harness.runner import _PendingToolCall
     from apps.harness.tools import default_tool_registry
     from apps.harness.tools.base import ToolContext
 

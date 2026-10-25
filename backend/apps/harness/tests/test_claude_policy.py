@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 
 from apps.harness.agents.definitions import canonical_subagent_type, get_agent
+from apps.harness.engines.base import RunOptions
 from apps.harness.engines.claude.permissionbridge import PermissionBridge
 from apps.harness.engines.claude.policy import decide_tool
 from apps.harness.permissions.evaluator import PermissionEvaluator
-from apps.harness.runner import RunOptions
 from apps.harness.tools import default_tool_registry
 
 

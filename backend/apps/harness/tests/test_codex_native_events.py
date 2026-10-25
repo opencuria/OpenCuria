@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from apps.harness.agents.definitions import get_agent
+from apps.harness.engines.base import RunOptions
 from apps.harness.engines.codex.configuration import runtime_settings
 from apps.harness.engines.codex.engine import CodexEngine
 from apps.harness.engines.codex.session_store import (
@@ -23,7 +24,6 @@ from apps.harness.engines.codex.session_store import (
 from apps.harness.engines.codex.tools import ManagedToolInvoker
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.prompts.opencuria import opencuria_context
-from apps.harness.runner import RunOptions
 from apps.harness.tests.conftest import TINY_PNG
 from apps.harness.tests.test_codex_core import LocalAccessor, fixture_run
 from apps.harness.tests.test_codex_core_safety import auth

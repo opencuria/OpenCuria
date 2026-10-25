@@ -175,8 +175,8 @@ async def test_local_agent_task_type_preserves_hook_identity_for_child_read(
 
     accessor.read_file = read_file
 
+    from apps.harness.engines.base import RunOptions
     from apps.harness.engines.claude.engine import ClaudeEngine
-    from apps.harness.runner import RunOptions
 
     engine = ClaudeEngine(
         tools=default_tool_registry(),

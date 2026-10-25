@@ -17,12 +17,13 @@ from mcp.types import CallToolRequest, CallToolRequestParams, RequestParams
 from pydantic import BaseModel
 
 from apps.harness.agents.definitions import get_agent
+from apps.harness.engines.base import RunOptions
 from apps.harness.engines.claude.engine import ClaudeEngine
 from apps.harness.engines.claude.permissionbridge import PermissionBridge
 from apps.harness.engines.claude.policy import native_tools_for_claude
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.scopes import permission_scope_matches
-from apps.harness.runner import HarnessRunner, RunOptions
+from apps.harness.runner import HarnessRunner
 from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
 

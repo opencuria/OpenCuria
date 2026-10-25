@@ -530,10 +530,10 @@ async def test_task_started_keeps_only_strictly_canonical_child_identity(
     engine_events, hook_type, task_type, requested_type, expected
 ) -> None:
     from apps.harness.agents.definitions import canonical_subagent_type, get_agent
+    from apps.harness.engines.base import RunOptions
     from apps.harness.engines.claude.message_projector import ClaudeMessageProjector
     from apps.harness.engines.claude.permissionbridge import PermissionBridge
     from apps.harness.permissions.evaluator import PermissionEvaluator
-    from apps.harness.runner import RunOptions
 
     engine, events = engine_events
     call_id = "task-call"
@@ -929,9 +929,9 @@ async def test_early_tool_queue_is_updated_by_policy_hook_without_duplicate_queu
     from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
 
     from apps.harness.agents.definitions import get_agent
+    from apps.harness.engines.base import RunOptions
     from apps.harness.engines.claude.permissionbridge import PermissionBridge
     from apps.harness.permissions.evaluator import PermissionEvaluator
-    from apps.harness.runner import RunOptions
 
     events: list[dict[str, Any]] = []
     approvals: list[str] = []
@@ -1101,9 +1101,9 @@ async def test_verified_subagent_lifecycle_is_idempotent_after_parent_completes(
     engine_events, hook_first: bool, source: str
 ) -> None:
     from apps.harness.agents.definitions import get_agent
+    from apps.harness.engines.base import RunOptions
     from apps.harness.engines.claude.permissionbridge import PermissionBridge
     from apps.harness.permissions.evaluator import PermissionEvaluator
-    from apps.harness.runner import RunOptions
 
     engine, events = engine_events
     bridge = PermissionBridge(

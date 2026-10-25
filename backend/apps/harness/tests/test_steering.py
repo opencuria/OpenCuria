@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from apps.harness.engines.base import RunOptions
 from apps.harness.harness_service import (
     FRONTEND_EVENT_PART,
     FRONTEND_EVENT_STEER_QUEUE,
@@ -29,7 +30,7 @@ from apps.harness.repositories import (
     HarnessPartRepository,
     HarnessSessionRepository,
 )
-from apps.harness.runner import HarnessRunner, RunOptions
+from apps.harness.runner import HarnessRunner
 from apps.harness.steering import (
     MAX_PENDING_STEERS,
     NO_ACTIVE_RUN_CODE,

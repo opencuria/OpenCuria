@@ -11,9 +11,9 @@ from ...access.base import WorkspaceAccessor
 from ...agents.definitions import AgentDefinition
 from ...permissions.evaluator import PermissionEvaluator
 from ...permissions.scopes import is_permission_scope, permission_scope
-from ...runner import RunOptions
 from ...tools.base import Tool, ToolContext, ToolRegistry
 from ...tools.invocation import AuthorizedToolDispatcher, _PendingToolCall
+from ..base import RunOptions
 from ..shared.security import redact_action, redact_title
 from ..shared.shellpolicy import shell_command_is_explore_safe
 

@@ -19,7 +19,7 @@ from ..todos.service import TodoService
 from .base import ToolContext, ToolRegistry, ToolResult
 
 if TYPE_CHECKING:
-    from ..runner import RunOptions
+    from ..engines.base import RunOptions
 
 log = structlog.get_logger(__name__)
 EXTERNAL_PATH_TOOLS = frozenset({"bash", "process_start"})

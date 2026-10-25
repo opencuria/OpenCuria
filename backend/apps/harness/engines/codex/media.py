@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ...access.base import WorkspaceAccessor
-from ...runner import RunOptions
+from ..base import RunOptions
 from ..shared.media import (
     MAX_CLAUDE_DOCUMENT_BYTES,
     MAX_USER_CONTENT_BYTES,

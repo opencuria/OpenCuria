@@ -22,8 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from typing import Any, Protocol
 
 import structlog
@@ -47,6 +46,7 @@ from .compaction import (
     select,
 )
 from .constants import DEFAULT_MAX_DEPTH
+from .engines import base as engine_contracts
 from .images import hydrate_workspace_images
 from .max_steps import MAX_STEPS_PROMPT, MAX_STEPS_TOOL_ERROR
 from .permissions.evaluator import PermissionEvaluator
@@ -65,7 +65,6 @@ from .providers.base import (
 )
 from .providers.context_errors import is_context_overflow_error
 from .providers.resolver import ResolvedModel, StaticModelResolver
-from .steering import SteeringChannel
 from .tools.base import ToolContext, ToolRegistry
 
 # Compatibility exports for existing integrations and tests.
@@ -104,10 +103,6 @@ LENGTH_TRUNCATION_NOTICE = (
 #: How many consecutive identical tool+input calls trigger doom-loop ask.
 DOOM_LOOP_REPEATS = 3
 
-EmitCallback = Callable[[dict[str, Any]], Awaitable[None]]
-PermissionCallback = Callable[..., Awaitable[str]]
-QuestionCallback = Callable[..., Awaitable[list[Any]]]
-
 
 class ModelResolver(Protocol):
     """Resolve a model ref to an adapter plus bare provider model id."""
@@ -115,62 +110,6 @@ class ModelResolver(Protocol):
     def __call__(self, model_ref: str) -> ResolvedModel:
         """Return provider adapter and limits for *model_ref*."""
         ...
-
-
-@dataclass
-class RunOptions:
-    """Per-run settings for :meth:`HarnessRunner.run`."""
-
-    max_steps: int | None = None
-    history: list[LLMMessage] = field(default_factory=list)
-    session_id: str = ""
-    workspace_id: str = ""
-    organization_id: str = ""
-    cwd: str = HARNESS_WORKSPACE_ROOT
-    small_model: str = ""
-    skills: list[str] = field(default_factory=list)
-    permission_timeout: float | None = None
-    question_timeout: float | None = None
-    auto_approve: bool = False
-    on_permission: PermissionCallback | None = None
-    on_question: QuestionCallback | None = None
-    authorize_file_read: Callable[[str], Awaitable[bool]] | None = None
-    run_subagent: Any | None = None
-    depth: int = 0
-    max_depth: int = DEFAULT_MAX_DEPTH
-    # Optional Agent-S config port for ``computeruse`` runs (second-layer
-    # integration in ``agent_s/``). ``None`` resolves to the persisted
-    # org Agent-S config (``AgentSConfigService.to_run_config``) with
-    # controlled grounding fallback. Kept as ``Any`` here to avoid a
-    # runner<->agent_s import cycle.
-    agent_s_config: Any | None = None
-    # Per-run cache of once-approved (tool, action) pairs, reset at
-    # the start of every run() call. ``always`` continues to flow
-    # through the allowlist/service; this set only suppresses repeat
-    # ``once`` callbacks for identical calls in one run (never shared
-    # across runs, even when RunOptions is reused).
-    once_approved: set[tuple[str, str]] = field(default_factory=set)
-    context_length: int = 0
-    max_output_tokens: int = 0
-    auto_compact: bool = True
-    current_user_message_id: str = ""
-    last_step_prompt_tokens: int = 0
-    last_step_completion_tokens: int = 0
-    last_step_total_tokens: int = 0
-    #: Queue of user messages the model should see mid-run (root runs only).
-    steering: SteeringChannel | None = None
-
-
-@dataclass
-class RunResult:
-    """Outcome of one :meth:`HarnessRunner.run` call."""
-
-    output: str
-    steps: int
-    usage: Usage
-    cost: float
-    finish_reason: str
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def _slot_sort_key(key: Any) -> tuple[int, int, str]:
@@ -222,7 +161,7 @@ class HarnessRunner(AuthorizedToolDispatcher):
         tools: ToolRegistry,
         evaluator: PermissionEvaluator | None = None,
         accessor: WorkspaceAccessor | None = None,
-        emit: EmitCallback | None = None,
+        emit: engine_contracts.EmitCallback | None = None,
         chat_options: ChatOptions | None = None,
     ) -> None:
         """Create a runner.
@@ -276,7 +215,7 @@ class HarnessRunner(AuthorizedToolDispatcher):
         step: int,
         depth: int,
         max_depth: int,
-        opts: RunOptions,
+        opts: engine_contracts.RunOptions,
     ) -> list[_ToolCallOutcome]:
         """Execute *calls* concurrently; return outcomes in original order."""
         doom_flags: list[bool] = []
@@ -354,8 +293,8 @@ class HarnessRunner(AuthorizedToolDispatcher):
         agent_name: str,
         model: str,
         mode: str = "build",
-        opts: RunOptions | None = None,
-    ) -> RunResult:
+        opts: engine_contracts.RunOptions | None = None,
+    ) -> engine_contracts.RunResult:
         """Run one agent turn and return the aggregated result.
 
         Args:
@@ -374,7 +313,7 @@ class HarnessRunner(AuthorizedToolDispatcher):
             ValueError: For invalid modes or empty prompts.
             asyncio.CancelledError: On abort (after emitting ``aborted``).
         """
-        options = opts or RunOptions()
+        options = opts or engine_contracts.RunOptions()
         # Per-run once-approval cache: never shared across runs, even
         # when the caller reuses the same RunOptions object.
         options.once_approved = set()
@@ -435,12 +374,12 @@ class HarnessRunner(AuthorizedToolDispatcher):
         agent: AgentDefinition,
         model: str,
         mode: str,
-        opts: RunOptions,
+        opts: engine_contracts.RunOptions,
         cwd: str,
         max_steps: int | None,
         depth: int = 0,
         max_depth: int = DEFAULT_MAX_DEPTH,
-    ) -> RunResult:
+    ) -> engine_contracts.RunResult:
         """Execute the step loop (cancellation handled by :meth:`run`)."""
         if agent.name == "computeruse":
             return await self._run_computeruse_inner(
@@ -605,7 +544,7 @@ class HarnessRunner(AuthorizedToolDispatcher):
                     )
             if finish_reason == "content_filter":
                 messages.append(LLMMessage(role="assistant", content=text))
-                return RunResult(
+                return engine_contracts.RunResult(
                     output=f"{text}{CONTENT_FILTER_NOTICE}",
                     steps=step,
                     usage=total_usage,
@@ -614,7 +553,7 @@ class HarnessRunner(AuthorizedToolDispatcher):
                 )
             if finish_reason == "length":
                 messages.append(LLMMessage(role="assistant", content=text))
-                return RunResult(
+                return engine_contracts.RunResult(
                     output=f"{text}{LENGTH_TRUNCATION_NOTICE}",
                     steps=step,
                     usage=total_usage,
@@ -624,7 +563,7 @@ class HarnessRunner(AuthorizedToolDispatcher):
             if is_last:
                 if calls:
                     await self._reject_last_step_tools(calls, step)
-                return RunResult(
+                return engine_contracts.RunResult(
                     output=text,
                     steps=step,
                     usage=total_usage,
@@ -669,7 +608,7 @@ class HarnessRunner(AuthorizedToolDispatcher):
                         opts=opts,
                         limits=limits,
                     )
-                return RunResult(
+                return engine_contracts.RunResult(
                     output=text,
                     steps=step,
                     usage=total_usage,
@@ -722,7 +661,9 @@ class HarnessRunner(AuthorizedToolDispatcher):
             # the conversation only after every outcome (and any compaction).
             messages.extend(await self._take_steering(opts))
 
-    async def _take_steering(self, opts: RunOptions) -> list[LLMMessage]:
+    async def _take_steering(
+        self, opts: engine_contracts.RunOptions
+    ) -> list[LLMMessage]:
         """Deliver queued steers and return them as user messages."""
         if opts.steering is None:
             return []
@@ -742,12 +683,12 @@ class HarnessRunner(AuthorizedToolDispatcher):
         agent: AgentDefinition,
         model: str,
         mode: str,
-        opts: RunOptions,
+        opts: engine_contracts.RunOptions,
         cwd: str,
         max_steps: int | None,
         depth: int = 0,
         max_depth: int = DEFAULT_MAX_DEPTH,
-    ) -> RunResult:
+    ) -> engine_contracts.RunResult:
         """Execute the Agent-S computer-use loop (no OpenCuria tool loop).
 
         Delegates to :mod:`apps.harness.agent_s.harness`: the child-visible
@@ -845,7 +786,7 @@ class HarnessRunner(AuthorizedToolDispatcher):
             raise
         except Exception as exc:
             raise RuntimeError(f"Agent-S computer-use run failed: {exc}") from exc
-        return RunResult(
+        return engine_contracts.RunResult(
             output=result.output,
             steps=result.steps,
             usage=result.usage,
@@ -894,7 +835,7 @@ class HarnessRunner(AuthorizedToolDispatcher):
         step: int,
         agent: AgentDefinition,
         mode: str,
-        opts: RunOptions,
+        opts: engine_contracts.RunOptions,
         is_last_step: bool = False,
     ) -> tuple[str, list[_PendingToolCall], Usage, list[LLMMessage], str]:
         """Run one provider step, compacting and retrying once on overflow errors."""
@@ -956,7 +897,7 @@ class HarnessRunner(AuthorizedToolDispatcher):
         step: int,
         agent: AgentDefinition,
         mode: str,
-        opts: RunOptions,
+        opts: engine_contracts.RunOptions,
         text: str,
         calls: list[_PendingToolCall],
         usage: Usage,
@@ -1318,7 +1259,7 @@ class HarnessRunner(AuthorizedToolDispatcher):
         agent: AgentDefinition,
         model: str,
         mode: str,
-        opts: RunOptions,
+        opts: engine_contracts.RunOptions,
         limits: ModelLimits,
         overflow: bool = False,
     ) -> list[LLMMessage]:
@@ -1349,7 +1290,7 @@ class HarnessRunner(AuthorizedToolDispatcher):
                 "compaction",
                 model,
                 mode,
-                RunOptions(
+                engine_contracts.RunOptions(
                     auto_approve=True,
                     history=[],
                     auto_compact=False,

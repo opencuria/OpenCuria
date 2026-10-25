@@ -28,9 +28,9 @@ from ...permissions.evaluator import DEFAULT_GLOBAL_RULES, PermissionEvaluator
 from ...prompts.composer import ComposedPrompt
 from ...prompts.opencuria import opencuria_context
 from ...providers.base import ToolSchema, Usage
-from ...runner import RunOptions, RunResult
 from ...todos.service import TodoService
 from ...tools.base import ToolContext, ToolRegistry, ToolResult
+from ..base import RunOptions, RunResult
 from ..catalog import (
     CLAUDE_AGENT_SDK_VERSION,
     CLAUDE_CODE_CLI_VERSION,

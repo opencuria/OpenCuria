@@ -17,11 +17,11 @@ from asgiref.sync import sync_to_async
 
 from common.exceptions import NotFoundError
 
+from .engines.base import RunOptions
 from .models import HarnessMessage, HarnessPart
 from .provider_turns import ProviderTurnService
 from .providers.base import ProviderAdapter
 from .repositories import HarnessMessageRepository, HarnessSessionRepository
-from .runner import RunOptions
 from .services import ProviderConfigService
 from .small_model_service import build_small_model_runner
 

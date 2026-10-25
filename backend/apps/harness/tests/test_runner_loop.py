@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, Field
 
+from apps.harness.engines.base import RunOptions
 from apps.harness.max_steps import MAX_STEPS_PROMPT, MAX_STEPS_TOOL_ERROR
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.providers.base import (
@@ -23,11 +24,7 @@ from apps.harness.providers.base import (
     ToolSchema,
     Usage,
 )
-from apps.harness.runner import (
-    AgentRunner,
-    HarnessRunner,
-    RunOptions,
-)
+from apps.harness.runner import AgentRunner, HarnessRunner
 from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import Tool, ToolResult

@@ -10,8 +10,8 @@ from typing import Any
 from ...agents.definitions import AgentDefinition, canonical_subagent_type, get_agent
 from ...permissions.evaluator import ASK, DENY, PermissionEvaluator
 from ...permissions.scopes import is_permission_scope, permission_scope
-from ...runner import RunOptions
 from ...tools.base import ToolRegistry
+from ..base import RunOptions
 from .events import StepState
 from .policy import (
     NATIVE_TOOL_KEYS,

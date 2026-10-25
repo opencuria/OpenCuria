@@ -15,7 +15,7 @@ from common.exceptions import ConflictError
 
 from ..models import HarnessRunStatus, HarnessSessionStatus
 from ..providers.base import LLMMessage
-from ..runner import RunOptions
+from .base import RunOptions
 
 if TYPE_CHECKING:
     from ..harness_service import HarnessService

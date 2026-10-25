@@ -15,12 +15,12 @@ import pytest
 from aiohttp import web
 
 from apps.harness.access.base import FileContent
+from apps.harness.engines.base import RunOptions
 from apps.harness.engines.codex.auth import CodexAuthConfiguration
 from apps.harness.engines.codex.engine import CodexEngine
 from apps.harness.engines.codex.protocol import CodexProtocol, CodexProtocolError
 from apps.harness.engines.codex.session_store import home_for, validate_snapshot
 from apps.harness.permissions.evaluator import PermissionEvaluator
-from apps.harness.runner import RunOptions
 from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import ToolRegistry
 from apps.harness.tools.files import WriteTool

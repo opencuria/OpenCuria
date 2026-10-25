@@ -40,6 +40,7 @@ from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .agents.definitions import get_agent
 from .conversation_events import ConversationEvents
+from .engines.base import RunOptions
 from .images import (
     hydrate_user_messages,
     select_persisted_tool_attachments,
@@ -67,7 +68,7 @@ from .repositories import (
     QuestionRequestRepository,
 )
 from .run_events import publish_assistant_run_finished
-from .runner import HarnessRunner, RunOptions
+from .runner import HarnessRunner
 from .session_metadata_service import SessionMetadataService, title_from_prompt
 from .steering import NO_ACTIVE_RUN_CODE, SteerEntry, SteeringChannel
 from .todos.repositories import TodoRepository

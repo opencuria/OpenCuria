@@ -13,13 +13,14 @@ from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from apps.harness.agents.definitions import get_agent
+from apps.harness.engines.base import RunOptions
 from apps.harness.engines.codex import media
 from apps.harness.engines.codex.session_store import CodexSessionStore, home_for
 from apps.harness.engines.codex.tools import ManagedToolInvoker
 from apps.harness.engines.repositories import HarnessEngineRepository
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.scopes import permission_scope_matches
-from apps.harness.runner import HarnessRunner, RunOptions
+from apps.harness.runner import HarnessRunner
 from apps.harness.tests.test_codex_core_safety import snapshot
 from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import ToolContext, ToolResult

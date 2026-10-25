@@ -513,8 +513,8 @@ def test_cli_argv_fresh_run_mirrors_session_without_forcing_resume() -> None:
 
 @pytest.mark.asyncio
 async def test_run_rejects_oversized_skills_before_managed_processes() -> None:
+    from apps.harness.engines.base import RunOptions
     from apps.harness.engines.claude.runtime_state import MAX_SKILL_BODY_BYTES
-    from apps.harness.runner import RunOptions
 
     class RecordingAccessor:
         workspace_id = str(uuid.uuid4())
@@ -813,7 +813,7 @@ async def _run_local_cli_fixture(
             },
         ),
     )
-    from apps.harness.runner import RunOptions
+    from apps.harness.engines.base import RunOptions
 
     options = RunOptions(
         session_id=session_id or str(uuid.uuid4()),

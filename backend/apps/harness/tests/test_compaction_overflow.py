@@ -27,6 +27,7 @@ from apps.harness.compaction import (
     token_count,
     usable,
 )
+from apps.harness.engines.base import RunOptions
 from apps.harness.providers.base import (
     Delta,
     LLMMessage,
@@ -35,7 +36,7 @@ from apps.harness.providers.base import (
     ToolSchema,
     Usage,
 )
-from apps.harness.runner import HarnessRunner, RunOptions
+from apps.harness.runner import HarnessRunner
 from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.tests.test_paket6_features import ScriptProvider
 from apps.harness.tools import default_tool_registry

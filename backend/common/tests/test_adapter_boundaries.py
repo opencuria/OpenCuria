@@ -49,6 +49,9 @@ import live run orchestration, even through their dependencies.
 OAuth endpoint, registration and grant integrity rules live in
 ``apps.credentials.oauth_metadata``; persistence and protocol workflows never
 import their service consumers, even through function-local imports.
+Engine execution contracts live in ``apps.harness.engines.base``; external
+engines and shared tool dispatch never import the native inference loop,
+even through their dependencies.
 """
 
 from __future__ import annotations
@@ -458,6 +461,72 @@ def test_provider_wire_adapters_import_without_django_setup() -> None:
             "from apps.harness.providers.openai_compatible "
             "import OpenAICompatibleAdapter\n"
             "from apps.harness.providers.openrouter import OpenRouterAdapter\n",
+        ],
+        cwd=BACKEND_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_external_engines_never_import_the_native_loop() -> None:
+    """Sibling engines and shared contracts must not depend on native execution."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    modules = {_module_name(path): path for path in trees}
+    native = "apps.harness.runner"
+    roots = {
+        "apps.harness.engines.base",
+        "apps.harness.tools.invocation",
+    } | {
+        module
+        for module in modules
+        if module.startswith(
+            ("apps.harness.engines.claude.", "apps.harness.engines.codex.")
+        )
+    }
+    assert {
+        "apps.harness.engines.claude.engine",
+        "apps.harness.engines.codex.engine",
+    } <= roots
+    pending = set(roots)
+    checked: set[str] = set()
+    violations = set()
+    while pending:
+        module = pending.pop()
+        checked.add(module)
+        path = modules[module]
+        for imported in _imported_modules(path, trees[path]):
+            if imported == native or imported.startswith(f"{native}."):
+                violations.add(f"{module} -> {imported}")
+            elif imported in modules and imported not in checked:
+                pending.add(imported)
+    assert violations == set(), (
+        "Keep RunOptions/RunResult in engines.base; external engines and "
+        "shared tool dispatch must not import the native loop, including "
+        "transitively and inside functions:\n" + "\n".join(sorted(violations))
+    )
+
+
+def test_engine_contracts_import_without_application_setup() -> None:
+    """The engine protocol's annotations resolve without loading application code."""
+    env = os.environ.copy()
+    env.pop("DJANGO_SETTINGS_MODULE", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys\n"
+            "from typing import get_type_hints\n"
+            "from apps.harness.engines.base "
+            "import HarnessEngine, RunOptions, RunResult\n"
+            "hints = get_type_hints(HarnessEngine.run)\n"
+            "assert hints['opts'] is RunOptions\n"
+            "assert hints['return'] is RunResult\n"
+            "assert not {'apps.harness.runner', 'apps.harness.harness_service', "
+            "'django'} & sys.modules.keys()\n",
         ],
         cwd=BACKEND_ROOT,
         env=env,

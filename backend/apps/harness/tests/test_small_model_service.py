@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from apps.harness.engines.base import RunOptions
 from apps.harness.providers.base import (
     ChatOptions,
     Delta,
@@ -18,7 +19,6 @@ from apps.harness.providers.base import (
     ToolSchema,
 )
 from apps.harness.providers.resolver import AccountBoundAdapter, StaticModelResolver
-from apps.harness.runner import RunOptions
 from apps.harness.services import ProviderConfigService
 from apps.harness.small_model_service import build_small_model_runner
 from apps.organizations.models import Organization

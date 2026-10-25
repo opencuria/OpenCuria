@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from apps.harness.access.base import ExecResult
+from apps.harness.engines.base import RunOptions
 from apps.harness.providers.base import (
     ChatOptions,
     Delta,
@@ -24,7 +25,6 @@ from apps.harness.runner import (
     LENGTH_TRUNCATION_NOTICE,
     RECENT_CALLS_MAXLEN,
     HarnessRunner,
-    RunOptions,
 )
 from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.tools import BashTool, GlobTool, GrepTool, default_tool_registry

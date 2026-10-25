@@ -13,8 +13,8 @@ from .commit_messages import (
     build_commit_message_prompt,
     normalize_commit_subject,
 )
+from .engines.base import RunOptions
 from .providers.base import ProviderAdapter
-from .runner import RunOptions
 from .small_model_service import build_small_model_runner
 
 

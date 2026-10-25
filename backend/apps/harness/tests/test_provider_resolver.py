@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import pytest
 
+from apps.harness.engines.base import RunOptions
 from apps.harness.providers.bedrock import BedrockAdapter
 from apps.harness.providers.openrouter import OpenRouterAdapter
 from apps.harness.providers.resolver import StaticModelResolver
-from apps.harness.runner import HarnessRunner, RunOptions
+from apps.harness.runner import HarnessRunner
 from apps.harness.services import ProviderConfigService
 from apps.harness.tests.test_runner_loop import FakeProvider, _text_step
 

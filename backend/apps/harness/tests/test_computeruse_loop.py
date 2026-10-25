@@ -19,7 +19,8 @@ from apps.harness.agent_s.harness import (
     truncate_task_output,
 )
 from apps.harness.agents.definitions import get_agent
-from apps.harness.runner import HarnessRunner, RunOptions
+from apps.harness.engines.base import RunOptions
+from apps.harness.runner import HarnessRunner
 from apps.harness.tests.test_computeruse_tools import (
     FakeAccessor,
     assert_desktop_lifecycle,

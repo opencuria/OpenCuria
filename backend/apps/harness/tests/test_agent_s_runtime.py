@@ -8,7 +8,8 @@ import pytest
 
 from apps.harness.agent_s.config import AgentSRunConfig
 from apps.harness.agent_s.harness import resolve_run_config
-from apps.harness.runner import HarnessRunner, RunOptions
+from apps.harness.engines.base import RunOptions
+from apps.harness.runner import HarnessRunner
 from apps.harness.services import AgentSConfigService
 
 

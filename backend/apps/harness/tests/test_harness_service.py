@@ -1099,9 +1099,10 @@ async def test_execute_run_passes_catalog_limits_and_last_step_tokens(
     harness_workspace, provider_account_factory, monkeypatch
 ) -> None:
     """_execute_run always resolves model limits and prior step tokens."""
+    from apps.harness.engines.base import RunOptions, RunResult
     from apps.harness.providers.models_catalog import ProviderModel
     from apps.harness.providers.openrouter import OpenRouterAdapter
-    from apps.harness.runner import HarnessRunner, RunOptions, RunResult
+    from apps.harness.runner import HarnessRunner
     from apps.harness.services import ProviderConfigService
 
     org_id = harness_workspace.runner.organization_id

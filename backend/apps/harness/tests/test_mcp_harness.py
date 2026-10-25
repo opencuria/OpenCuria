@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from apps.harness.agents.definitions import get_agent
+from apps.harness.engines.base import RunOptions
 from apps.harness.harness_service import HarnessService
 from apps.harness.mcp_client.connection import McpTool, normalize_call_result
 from apps.harness.permissions.service import PermissionService
@@ -26,7 +27,7 @@ from apps.harness.providers.base import (
     ToolSchema,
     Usage,
 )
-from apps.harness.runner import HarnessRunner, RunOptions
+from apps.harness.runner import HarnessRunner
 from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import ToolContext, ToolRegistry, ToolResult
 
