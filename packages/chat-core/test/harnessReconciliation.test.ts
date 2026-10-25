@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import type { HarnessMessage, HarnessPart } from "../src/harness";
-import { mergeBusyFetchedMessages } from "../src/harnessReducer";
+import {
+  mergeBusyFetchedMessages,
+  settleOpenStreamParts,
+  sortHarnessMessages,
+  sortHarnessParts,
+} from "../src/harnessReducer";
 
 function part(id: string, overrides: Partial<HarnessPart> = {}): HarnessPart {
   return {
@@ -143,5 +148,183 @@ describe("busy snapshot reconciliation", () => {
       "assistant-2",
     ]);
     expect(merged[1]?.parts).toEqual(live.parts);
+  });
+});
+
+describe("timeline ordering and settlement", () => {
+  it("settles leftover running text and reasoning parts without touching tools", () => {
+    const messages: HarnessMessage[] = [
+      {
+        id: "msg-1",
+        session_id: "session-1",
+        role: "assistant",
+        content: "done",
+        parts: [
+          {
+            id: "r1",
+            session_id: "session-1",
+            type: "reasoning",
+            state: "running",
+            title: "",
+            output: "planning",
+          },
+          {
+            id: "t1",
+            session_id: "session-1",
+            type: "text",
+            state: "pending",
+            title: "",
+            output: "done",
+          },
+          {
+            id: "tool-1",
+            session_id: "session-1",
+            type: "tool",
+            state: "running",
+            title: "bash",
+            output: "",
+          },
+        ],
+      },
+    ];
+
+    const settled = settleOpenStreamParts(messages);
+    expect(settled[0]!.parts[0]!.state).toBe("completed");
+    expect(settled[0]!.parts[0]!.output).toBe("planning");
+    expect(settled[0]!.parts[1]!.state).toBe("completed");
+    expect(settled[0]!.parts[2]!.state).toBe("running");
+  });
+
+  it("sorts messages by position with creation-order fallback", () => {
+    const messages: HarnessMessage[] = [
+      {
+        id: "b",
+        session_id: "s",
+        role: "user",
+        content: "b",
+        parts: [],
+        position: 1,
+        created_at: "2026-03-29T10:00:01.000Z",
+      },
+      {
+        id: "a",
+        session_id: "s",
+        role: "user",
+        content: "a",
+        parts: [],
+        position: 0,
+        created_at: "2026-03-29T10:00:02.000Z",
+      },
+      { id: "local", session_id: "s", role: "user", content: "c", parts: [] },
+    ];
+    expect(sortHarnessMessages(messages).map((m) => m.id)).toEqual([
+      "a",
+      "b",
+      "local",
+    ]);
+  });
+
+  it("sorts parts by position while preserving live observed order", () => {
+    const parts = [
+      {
+        id: "p2",
+        session_id: "s",
+        type: "tool" as const,
+        state: "completed" as const,
+        title: "",
+        output: "",
+        position: 1,
+      },
+      {
+        id: "p1",
+        session_id: "s",
+        type: "text" as const,
+        state: "completed" as const,
+        title: "",
+        output: "",
+        position: 0,
+      },
+      {
+        id: "live-1",
+        session_id: "s",
+        type: "text" as const,
+        state: "running" as const,
+        title: "",
+        output: "",
+      },
+    ];
+    expect(sortHarnessParts(parts).map((p) => p.id)).toEqual([
+      "p1",
+      "p2",
+      "live-1",
+    ]);
+  });
+
+  it("carries the optimistic follow-up user across a busy fetch until echoed", () => {
+    const previous: HarnessMessage[] = [
+      {
+        id: "msg-user-1",
+        session_id: "session-1",
+        role: "user",
+        content: "first",
+        parts: [],
+        position: 0,
+      },
+      {
+        id: "assistant-1",
+        session_id: "session-1",
+        role: "assistant",
+        content: "done",
+        parts: [],
+        position: 1,
+        completed_at: "2026-03-29T10:00:00.000Z",
+      },
+      {
+        id: "local-user-session-1-9",
+        session_id: "session-1",
+        role: "user",
+        content: "follow up",
+        parts: [],
+      },
+    ];
+    const incoming: HarnessMessage[] = [
+      {
+        id: "msg-user-1",
+        session_id: "session-1",
+        role: "user",
+        content: "first",
+        parts: [],
+        position: 0,
+      },
+      {
+        id: "assistant-1",
+        session_id: "session-1",
+        role: "assistant",
+        content: "done",
+        parts: [],
+        position: 1,
+        completed_at: "2026-03-29T10:00:00.000Z",
+      },
+    ];
+
+    const merged = mergeBusyFetchedMessages(previous, incoming);
+    expect(merged.some((m) => m.id === "local-user-session-1-9")).toBe(true);
+
+    // Server echo arrives: the optimistic row drops (no duplicate).
+    const echoed = mergeBusyFetchedMessages(previous, [
+      ...incoming,
+      {
+        id: "msg-user-2",
+        session_id: "session-1",
+        role: "user",
+        content: "follow up",
+        parts: [],
+        position: 2,
+      },
+    ]);
+    expect(
+      echoed.filter((m) => m.role === "user" && m.content === "follow up"),
+    ).toHaveLength(1);
+    expect(echoed.some((m) => m.id === "local-user-session-1-9")).toBe(false);
   });
 });

@@ -13,7 +13,7 @@
  * - text/reasoning deltas additionally carry the persisted `part_id` of
  *   the running stream part;
  * - queued tools emit an initial `delta.tool_started` with `pending`
- *   state (or `queued: true`) followed by the actual `delta.tool_started`
+ *   state followed by the actual `delta.tool_started`
  *   with `running` state for the *same* `part_id`;
  * - `harness.session_status` busy/idle carries `message_id` of the
  *   current assistant (plus `user_message_id` for follow-up correlation);
@@ -31,42 +31,22 @@ import type {
   HarnessTodo,
   HarnessTodoUpdatedEvent,
 } from "./harness";
-import { deltaAttachments } from "./harnessAttachments";
-
-let partCounter = 0;
-
-/** Reset the local part-id counter (tests only). */
-export function resetHarnessPartCounter(): void {
-  partCounter = 0;
-}
-
-function nextLocalPartId(sessionId: string): string {
-  partCounter += 1;
-  return `local-${sessionId}-${partCounter}`;
-}
 
 /** True for optimistic local ids (`local-*`) with no backend row. */
 export function isLocalId(id: string | undefined): boolean {
   return typeof id === "string" && id.startsWith("local-");
 }
 
-/**
- * Ensure the session has a running assistant message; create one if missing.
- *
- * Legacy path for events without a backend `message_id`. Prefer
- * {@link routeAssistantMessage} when the event carries `message_id` so a
- * fresh turn never attaches to the previous answer.
- */
-export function ensureAssistantMessage(
+/** Route a live event to the assistant turn identified by the backend. */
+export function routeAssistantMessage(
   messages: HarnessMessage[],
   sessionId: string,
+  messageId: string,
 ): HarnessMessage {
-  const last = messages[messages.length - 1];
-  if (last?.role === "assistant" && last.completed_at == null) {
-    return last;
-  }
+  const existing = messages.find((message) => message.id === messageId);
+  if (existing?.role === "assistant") return existing;
   const created: HarnessMessage = {
-    id: `local-msg-${sessionId}-${messages.length}`,
+    id: messageId,
     session_id: sessionId,
     role: "assistant",
     content: "",
@@ -75,55 +55,6 @@ export function ensureAssistantMessage(
   };
   messages.push(created);
   return created;
-}
-
-/**
- * Deterministic per-turn routing keyed by the backend `message_id`.
- *
- * - When `messageId` matches an existing message, that turn owns the
- *   event — even when it is not the latest (late duplicates route to the
- *   correct old turn instead of the newest).
- * - When `messageId` is new, a fresh assistant shell is created with the
- *   *server* id (never reusing the previous answer), so the streaming
- *   cursor and Thinking indicator move to the fresh turn.
- * - When `messageId` is absent (legacy backend/tests), falls back to
- *   {@link ensureAssistantMessage}.
- */
-export function routeAssistantMessage(
-  messages: HarnessMessage[],
-  sessionId: string,
-  messageId?: string,
-): HarnessMessage {
-  if (messageId) {
-    const existing = messages.find((m) => m.id === messageId);
-    if (existing) {
-      if (existing.role === "assistant") return existing;
-      // A user row colliding with the assistant id should not happen;
-      // create the assistant right after it instead of hijacking it.
-      const created: HarnessMessage = {
-        id: messageId,
-        session_id: sessionId,
-        role: "assistant",
-        content: "",
-        parts: [],
-        created_at: new Date().toISOString(),
-      };
-      const index = messages.indexOf(existing);
-      messages.splice(index + 1, 0, created);
-      return created;
-    }
-    const created: HarnessMessage = {
-      id: messageId,
-      session_id: sessionId,
-      role: "assistant",
-      content: "",
-      parts: [],
-      created_at: new Date().toISOString(),
-    };
-    messages.push(created);
-    return created;
-  }
-  return ensureAssistantMessage(messages, sessionId);
 }
 
 /**
@@ -169,36 +100,11 @@ export function ensureBusyAssistant(
   return created;
 }
 
-/** Find a part by part_id, call_id, or subtask id (in `meta.subtask_id`). */
-export function findPart(
+function findPart(
   message: HarnessMessage,
-  opts: { partId?: string; callId?: string; subtaskId?: string },
+  partId: string,
 ): HarnessPart | undefined {
-  if (opts.partId) {
-    const byId = message.parts.find((p) => p.id === opts.partId);
-    if (byId) return byId;
-  }
-  if (opts.callId) {
-    const byCall = message.parts.find((p) => p.call_id === opts.callId);
-    if (byCall) return byCall;
-  }
-  if (opts.subtaskId) {
-    return message.parts.find(
-      (p) =>
-        p.type === "subtask" &&
-        (p.meta?.["subtask_id"] as string) === opts.subtaskId,
-    );
-  }
-  return undefined;
-}
-
-/** Find a tool part by call id (placeholder-aware). */
-function findToolPart(
-  message: HarnessMessage,
-  callId?: string,
-): HarnessPart | undefined {
-  if (!callId) return undefined;
-  return message.parts.find((p) => p.type === "tool" && p.call_id === callId);
+  return message.parts.find((part) => part.id === partId);
 }
 
 /** Queue entry id of a delivered `steer` part (`meta` live, `display` in timelines). */
@@ -218,69 +124,28 @@ export function hasDeliveredSteer(
   );
 }
 
-function ensureTextPart(
+function ensureStreamPart(
   message: HarnessMessage,
   sessionId: string,
-  partId?: string,
+  partId: string,
+  type: "text" | "reasoning",
+  step?: number,
 ): HarnessPart {
-  if (partId) {
-    const byId = message.parts.find((p) => p.id === partId);
-    if (byId && byId.type === "text") return byId;
+  let part = findPart(message, partId);
+  if (!part) {
+    part = {
+      id: partId,
+      message_id: message.id,
+      session_id: sessionId,
+      type,
+      state: "running",
+      title: "",
+      output: "",
+    };
+    message.parts.push(part);
   }
-  const part = message.parts.find(
-    (p) => p.type === "text" && p.state === "running",
-  );
-  if (part) {
-    // Adopt the server part_id for a local placeholder (same stream).
-    if (partId && isLocalId(part.id)) part.id = partId;
-    return part;
-  }
-  const created: HarnessPart = {
-    id: partId ?? nextLocalPartId(sessionId),
-    message_id: message.id,
-    session_id: sessionId,
-    type: "text",
-    state: "running",
-    title: "",
-    output: "",
-  };
-  message.parts.push(created);
-  return created;
-}
-
-function ensureReasoningPart(
-  message: HarnessMessage,
-  sessionId: string,
-  opts: { step?: number; partId?: string } = {},
-): HarnessPart {
-  if (opts.partId) {
-    const byId = message.parts.find((p) => p.id === opts.partId);
-    if (byId && byId.type === "reasoning") {
-      if (opts.step !== undefined)
-        byId.meta = { ...byId.meta, step: opts.step };
-      return byId;
-    }
-  }
-  const part = message.parts.find(
-    (p) => p.type === "reasoning" && p.state === "running",
-  );
-  if (part) {
-    if (opts.partId && isLocalId(part.id)) part.id = opts.partId;
-    if (opts.step !== undefined) part.meta = { ...part.meta, step: opts.step };
-    return part;
-  }
-  const created: HarnessPart = {
-    id: opts.partId ?? nextLocalPartId(sessionId),
-    message_id: message.id,
-    session_id: sessionId,
-    type: "reasoning",
-    state: "running",
-    title: "",
-    output: "",
-    ...(opts.step !== undefined ? { meta: { step: opts.step } } : {}),
-  };
-  message.parts.push(created);
-  return created;
+  if (step !== undefined) part.meta = { ...part.meta, step };
+  return part;
 }
 
 /** Complete running text/reasoning streams so nothing merges across a boundary. */
@@ -324,70 +189,15 @@ function sanitizeAgentMeta(value: unknown): Record<string, string> {
 const STEP_FINISH_META_KEYS = ["cost", "tokens", "step"] as const;
 
 /**
- * Resolve the lifecycle state for an incoming `tool_started` delta.
- *
- * Prefers an explicit `delta.state` (`pending`/`running`) when the backend
- * sends it; an explicit `queued: true` flag also forces pending. Otherwise
- * legacy single-emit callers (one `tool_started` per execution, no queued
- * pre-emit) default to `running` so old tests/payloads keep working. The
- * two-emit queued flow is detected by the caller: an initial `tool_started`
- * for an unknown part creates the queued (`pending`) row (see
- * `applyPartDelta`), and the repeat for the same `part_id` flips it to
- * `running` via `resolveQueuedRepeatState`.
- */
-export function resolveQueuedToolState(
-  delta: HarnessPartDelta,
-  _opts: { known: boolean },
-): HarnessPartState {
-  const raw =
-    typeof delta.state === "string" ? delta.state.trim().toLowerCase() : "";
-  if (raw === "pending" || raw === "queued") return "pending";
-  if (raw === "running") return "running";
-  if (raw === "completed" || raw === "error") return raw;
-  if (delta.queued === true) return "pending";
-  if (delta.queued === false) return "running";
-  return "running";
-}
-
-/** True when an initial `tool_started` is only the queued pre-emit. */
-function isQueuedToolStarted(delta: HarnessPartDelta): boolean {
-  const raw =
-    typeof delta.state === "string" ? delta.state.trim().toLowerCase() : "";
-  if (raw === "pending" || raw === "queued") return true;
-  if (raw === "running" || raw === "completed" || raw === "error") return false;
-  return delta.queued === true;
-}
-
-/** State for a repeated `tool_started` on an already-known part. */
-function resolveQueuedRepeatState(
-  delta: HarnessPartDelta,
-  current: HarnessPartState,
-): HarnessPartState {
-  const raw =
-    typeof delta.state === "string" ? delta.state.trim().toLowerCase() : "";
-  if (raw === "pending" || raw === "queued") return "pending";
-  if (raw === "running") return "running";
-  if (raw === "completed" || raw === "error") return raw;
-  if (delta.queued === true)
-    return current === "running" ? "running" : "pending";
-  // Repeat of the same part_id without an explicit state is the actual
-  // start following the queued pre-emit: flip pending → running.
-  if (current === "pending") return "running";
-  return current;
-}
-
-/**
  * Apply a `harness.part_updated` delta to its per-turn assistant message.
  *
  * Routing is deterministic on `opts.messageId` (backend `message_id`):
  * a fresh id creates a new server-id shell instead of appending to the
  * previous answer, and late events for an older id route to that old turn
  * (completed turns ignore further deltas so stale events can never attach
- * to the latest turn). Text/reasoning deltas append to the running part
- * (adopting the server `part_id` for local placeholders); the first
- * `tool_started` for an unknown part creates the queued (`pending`) row
- * and the repeat for the same `part_id` flips it to `running` without
- * duplicating; `tool_completed`/`tool_error` transition the matching part;
+ * to the latest turn). Parts are identified by persisted `part_id`;
+ * tool starts carry explicit pending/running states, and completions carry
+ * compact display projections. Full tool details load through REST.
  * `step_start`/`step_finish` create step marker parts; `agent` deltas
  * create (or idempotently update) the Agent-S plan part.
  */
@@ -397,22 +207,23 @@ export function applyPartDelta(
   delta: HarnessPartDelta,
   opts: {
     step?: number;
-    partId?: string;
+    partId?: string | null;
     partPosition?: number;
-    messageId?: string;
-  } = {},
+    messageId: string;
+  },
 ): HarnessMessage {
   const message = routeAssistantMessage(messages, sessionId, opts.messageId);
   // Completed turns are frozen: late/stale duplicates for an older
   // message_id must not resurrect them nor leak into the latest turn.
-  if (message.completed_at != null) return message;
+  if (message.completed_at != null || !opts.partId) return message;
+  const partId = opts.partId;
 
   const initialPartCount = message.parts.length;
   let partPositionChanged = false;
 
   if (delta.text) {
     closeRunningStreams(message, "text");
-    const part = ensureTextPart(message, sessionId, opts.partId);
+    const part = ensureStreamPart(message, sessionId, partId, "text");
     part.state = "running";
     part.output += delta.text;
     message.content += delta.text;
@@ -420,167 +231,78 @@ export function applyPartDelta(
 
   if (delta.reasoning) {
     closeRunningStreams(message, "reasoning");
-    const part = ensureReasoningPart(message, sessionId, {
-      step: opts.step,
-      partId: opts.partId,
-    });
+    const part = ensureStreamPart(
+      message,
+      sessionId,
+      partId,
+      "reasoning",
+      opts.step,
+    );
     part.state = "running";
     part.output += delta.reasoning;
-    if (opts.step !== undefined) {
-      part.meta = { ...part.meta, step: opts.step };
-    }
   }
 
-  if (delta.tool_started) {
+  if (
+    delta.tool_started &&
+    (delta.state === "pending" || delta.state === "running")
+  ) {
     closeRunningStreams(message);
-    const existing =
-      (opts.partId ? findPart(message, { partId: opts.partId }) : undefined) ??
-      findToolPart(message, delta.call_id);
-    if (existing && existing.type === "tool") {
-      // Queued → running for the same part_id: adopt the server id when
-      // the first sighting used a local placeholder, then flip state
-      // without duplicating the row.
-      if (opts.partId && isLocalId(existing.id)) existing.id = opts.partId;
-      existing.tool = delta.tool_started || existing.tool;
-      existing.title = delta.title ?? existing.title ?? delta.tool_started;
+    const existing = findPart(message, partId);
+    if (existing) {
+      existing.tool = delta.tool_started;
+      existing.title = delta.title ?? existing.title;
       existing.call_id = delta.call_id ?? existing.call_id;
-      // Live socket start/queued payloads intentionally omit arguments.
-      // Preserve legacy arguments when a legacy event supplied them, but
-      // leave server-backed modern parts explicitly detail-incomplete.
-      existing.input = {
-        ...existing.input,
-        tool: delta.tool_started,
-        ...(delta.arguments !== undefined
-          ? { arguments: delta.arguments }
-          : {}),
-      };
+      existing.input = { ...existing.input, tool: delta.tool_started };
       if (opts.step !== undefined)
         existing.meta = { ...existing.meta, step: opts.step };
-      existing.state = resolveQueuedRepeatState(delta, existing.state);
-      existing.detail_loaded = false;
+      existing.state = delta.state;
     } else {
-      // No known row for this tool: distinguish the initial queued
-      // pre-emit (explicit pending/queued signal) from a legacy/actual
-      // single start (defaults to running).
-      const queued = isQueuedToolStarted(delta);
-      const part: HarnessPart = {
-        id: opts.partId ?? nextLocalPartId(sessionId),
+      message.parts.push({
+        id: partId,
         message_id: message.id,
         session_id: sessionId,
         type: "tool",
-        state: queued ? "pending" : "running",
-        call_id: delta.call_id ?? opts.partId,
+        state: delta.state,
+        call_id: delta.call_id,
         tool: delta.tool_started,
         title: delta.title ?? delta.tool_started,
-        input: {
-          tool: delta.tool_started,
-          ...(delta.arguments !== undefined
-            ? { arguments: delta.arguments }
-            : {}),
-        },
+        input: { tool: delta.tool_started },
+        output: "",
+        meta: opts.step !== undefined ? { step: opts.step } : {},
+        detail_loaded: false,
+      });
+    }
+  }
+
+  if (delta.tool_completed || delta.tool_error) {
+    closeRunningStreams(message);
+    let part = findPart(message, partId);
+    if (!part) {
+      part = {
+        id: partId,
+        message_id: message.id,
+        session_id: sessionId,
+        type: "tool",
+        state: "pending",
+        title: "",
         output: "",
         meta: opts.step !== undefined ? { step: opts.step } : {},
         detail_loaded: false,
       };
       message.parts.push(part);
     }
-  }
-
-  if (delta.tool_completed) {
-    closeRunningStreams(message);
-    const liveAttachments = deltaAttachments(delta);
-    const part = findPart(message, {
-      partId: opts.partId,
-      callId: delta.call_id,
-    });
-    if (part) {
-      if (opts.partId && isLocalId(part.id)) part.id = opts.partId;
-      part.state = "completed";
-      part.tool = delta.tool_completed || part.tool;
-      part.title = delta.title ?? part.title;
-      part.call_id = delta.call_id ?? part.call_id;
-      if (delta.output !== undefined) part.output = delta.output;
-      if (delta.display) part.display = delta.display;
-      if (liveAttachments.length > 0) {
-        part.meta = { ...part.meta, attachments: liveAttachments };
-      }
-      if (delta.display) {
-        part.detail_loaded =
-          delta.output !== undefined || delta.attachments !== undefined;
-      } else if (delta.output !== undefined || liveAttachments.length > 0) {
-        // Preserve compatibility with legacy deltas carrying full fields.
-        part.detail_loaded = true;
-      }
-    } else {
-      message.parts.push({
-        id: opts.partId ?? nextLocalPartId(sessionId),
-        message_id: message.id,
-        session_id: sessionId,
-        type: "tool",
-        state: "completed",
-        call_id: delta.call_id,
-        tool: delta.tool_completed || delta.display?.tool,
-        title: delta.title ?? delta.display?.summary ?? delta.tool_completed,
-        input: delta.display?.tool ? { tool: delta.display.tool } : {},
-        output: delta.output ?? "",
-        ...(delta.display ? { display: delta.display } : {}),
-        meta: {
-          ...(opts.step !== undefined ? { step: opts.step } : {}),
-          ...(liveAttachments.length > 0
-            ? { attachments: liveAttachments }
-            : {}),
-        },
-        detail_loaded:
-          delta.display &&
-          delta.output === undefined &&
-          delta.attachments === undefined
-            ? false
-            : true,
-      });
-    }
-  }
-
-  if (delta.tool_error) {
-    closeRunningStreams(message);
-    const part = findPart(message, {
-      partId: opts.partId,
-      callId: delta.call_id,
-    });
-    if (part) {
-      if (opts.partId && isLocalId(part.id)) part.id = opts.partId;
-      part.state = "error";
-      part.call_id = delta.call_id ?? part.call_id;
-      part.tool = delta.display?.tool ?? part.tool;
-      part.title = delta.title ?? part.title;
-      part.output = delta.tool_error;
-      if (delta.display) {
-        part.display = delta.display;
-        part.detail_loaded = false;
-      }
-    } else {
-      message.parts.push({
-        id: opts.partId ?? nextLocalPartId(sessionId),
-        message_id: message.id,
-        session_id: sessionId,
-        type: "tool",
-        state: "error",
-        call_id: delta.call_id,
-        tool: delta.display?.tool,
-        title: delta.title ?? delta.display?.summary ?? "Tool failed",
-        input: delta.display?.tool ? { tool: delta.display.tool } : {},
-        output: delta.tool_error,
-        ...(delta.display ? { display: delta.display } : {}),
-        meta: opts.step !== undefined ? { step: opts.step } : {},
-        detail_loaded: delta.display ? false : undefined,
-      });
-    }
+    part.state = delta.tool_error ? "error" : "completed";
+    part.tool = delta.tool_completed || delta.display?.tool || part.tool;
+    part.title = delta.title ?? delta.display?.summary ?? part.title;
+    part.call_id = delta.call_id ?? part.call_id;
+    part.input = { ...part.input, ...(part.tool ? { tool: part.tool } : {}) };
+    if (delta.display) part.display = delta.display;
+    if (delta.tool_error && !part.detail_loaded) part.output = delta.tool_error;
   }
 
   if (delta.step_start !== undefined) {
     closeRunningStreams(message);
-    const existing = opts.partId
-      ? findPart(message, { partId: opts.partId })
-      : undefined;
+    const existing = findPart(message, partId);
     if (existing) {
       existing.type = "step-start";
       existing.state = "running";
@@ -588,7 +310,7 @@ export function applyPartDelta(
       existing.meta = { ...existing.meta, step: delta.step_start };
     } else {
       message.parts.push({
-        id: opts.partId ?? nextLocalPartId(sessionId),
+        id: partId,
         message_id: message.id,
         session_id: sessionId,
         type: "step-start",
@@ -608,7 +330,7 @@ export function applyPartDelta(
       if (value !== undefined) meta[key] = value;
     }
     message.parts.push({
-      id: opts.partId ?? nextLocalPartId(sessionId),
+      id: partId,
       message_id: message.id,
       session_id: sessionId,
       type: "step-finish",
@@ -627,34 +349,26 @@ export function applyPartDelta(
     // no per-event refetch is scheduled here.
     const step = toStepNumber(opts.step);
     const agentMeta = sanitizeAgentMeta(delta.agent_meta);
-    // The explicit `display` field is the protocol marker for a compact
-    // Agent-S projection. Never infer projection status from text equality:
-    // legacy full plan payloads can legitimately equal a parsed summary.
     const safeSummary = String(
       delta.display?.summary ??
         agentMeta.analysis ??
         agentMeta.next_action ??
         "Agent plan",
     ).slice(0, 240);
-    const compactAgent = delta.display !== undefined;
-    const display = compactAgent
-      ? {
-          ...delta.display,
-          summary: safeSummary,
-          ...(step !== undefined ? { step } : {}),
-          agent_meta: agentMeta,
-        }
-      : undefined;
-    const existing = opts.partId
-      ? findPart(message, { partId: opts.partId })
-      : undefined;
+    const display = {
+      ...delta.display,
+      summary: safeSummary,
+      ...(step !== undefined ? { step } : {}),
+      agent_meta: agentMeta,
+    };
+    const existing = findPart(message, partId);
     if (existing) {
       existing.type = "agent";
       existing.state = "completed";
       existing.title = "Agent plan";
-      existing.output = delta.agent;
+      existing.output = "";
       existing.display = display;
-      existing.detail_loaded = compactAgent ? false : true;
+      existing.detail_loaded = false;
       existing.meta = {
         ...existing.meta,
         ...(step !== undefined ? { step } : {}),
@@ -662,15 +376,15 @@ export function applyPartDelta(
       };
     } else {
       message.parts.push({
-        id: opts.partId ?? nextLocalPartId(sessionId),
+        id: partId,
         message_id: message.id,
         session_id: sessionId,
         type: "agent",
         state: "completed",
         title: "Agent plan",
-        output: delta.agent,
-        ...(display ? { display } : {}),
-        detail_loaded: compactAgent ? false : true,
+        output: "",
+        display,
+        detail_loaded: false,
         meta: {
           ...(step !== undefined ? { step } : {}),
           ...(Object.keys(agentMeta).length > 0
@@ -683,20 +397,16 @@ export function applyPartDelta(
 
   if (delta.patch !== undefined) {
     closeRunningStreams(message);
-    const existing = opts.partId
-      ? findPart(message, { partId: opts.partId })
-      : undefined;
+    const existing = findPart(message, partId);
     if (existing) {
       existing.type = "patch";
       existing.state = "completed";
       if (delta.patch) existing.title = delta.patch;
-      if (delta.display) {
-        existing.display = delta.display;
-        existing.detail_loaded = false;
-      }
+      existing.display = delta.display;
+      existing.detail_loaded = false;
     } else {
       message.parts.push({
-        id: opts.partId ?? nextLocalPartId(sessionId),
+        id: partId,
         message_id: message.id,
         session_id: sessionId,
         type: "patch",
@@ -704,9 +414,8 @@ export function applyPartDelta(
         title: delta.patch || "Patch",
         output: "",
         // The bounded preview renders the card; the full diff loads on expand.
-        ...(delta.display
-          ? { display: delta.display, detail_loaded: false }
-          : {}),
+        display: delta.display,
+        detail_loaded: false,
         meta: opts.step !== undefined ? { step: opts.step } : {},
       });
     }
@@ -714,15 +423,13 @@ export function applyPartDelta(
 
   if (delta.compaction !== undefined) {
     closeRunningStreams(message);
-    const existing = opts.partId
-      ? findPart(message, { partId: opts.partId })
-      : undefined;
+    const existing = findPart(message, partId);
     if (existing) {
       existing.type = "compaction";
       existing.state = "completed";
     } else {
       message.parts.push({
-        id: opts.partId ?? nextLocalPartId(sessionId),
+        id: partId,
         message_id: message.id,
         session_id: sessionId,
         type: "compaction",
@@ -740,22 +447,15 @@ export function applyPartDelta(
     // Idempotent: a replayed event or a REST snapshot may already hold it.
     closeRunningStreams(message);
     const steerId = delta.steer_id ?? "";
-    const existing =
-      (opts.partId ? findPart(message, { partId: opts.partId }) : undefined) ??
-      (steerId
-        ? message.parts.find(
-            (part) => part.type === "steer" && steerPartId(part) === steerId,
-          )
-        : undefined);
+    const existing = findPart(message, partId);
     if (existing) {
-      if (opts.partId && isLocalId(existing.id)) existing.id = opts.partId;
       existing.type = "steer";
       existing.state = "completed";
       if (!existing.output) existing.output = delta.steer;
       if (steerId) existing.meta = { ...existing.meta, steer_id: steerId };
     } else {
       message.parts.push({
-        id: opts.partId ?? nextLocalPartId(sessionId),
+        id: partId,
         message_id: message.id,
         session_id: sessionId,
         type: "steer",
@@ -770,8 +470,8 @@ export function applyPartDelta(
   // The server assigns a position when the part is created. REST fetches
   // may race later socket events; applying that position to the live row
   // keeps newly merged snapshots in the same chronological order.
-  if (opts.partId && opts.partPosition !== undefined) {
-    const positioned = message.parts.find((part) => part.id === opts.partId);
+  if (opts.partPosition !== undefined) {
+    const positioned = findPart(message, partId);
     if (positioned && positioned.position !== opts.partPosition) {
       positioned.position = opts.partPosition;
       partPositionChanged = true;
@@ -789,20 +489,6 @@ export function applyPartDelta(
   return message;
 }
 
-/** Transition a tool part to completed/error (direct state updates). */
-export function applyToolState(
-  message: HarnessMessage,
-  callId: string,
-  state: HarnessPartState,
-  output?: string,
-): HarnessPart | undefined {
-  const part = findPart(message, { callId });
-  if (!part) return undefined;
-  part.state = state;
-  if (output !== undefined) part.output = output;
-  return part;
-}
-
 /** Replace the todo list for a session (`harness.todo_updated`). */
 export function applyTodoUpdate(
   current: HarnessTodo[],
@@ -817,26 +503,16 @@ export function applySubtaskStarted(
   sessionId: string,
   event: HarnessSubtaskStartedEvent,
 ): HarnessPart {
-  const byPartId = event.part_id
-    ? findPart(message, { partId: event.part_id })
-    : undefined;
-  if (byPartId && byPartId.type === "subtask") {
-    byPartId.state = "running";
-    if (event.part_position !== undefined)
-      byPartId.position = event.part_position;
-    return byPartId;
-  }
-  const existing = findPart(message, { subtaskId: event.subtask_id });
+  const existing = findPart(message, event.part_id);
   if (existing) {
-    if (event.part_id && isLocalId(existing.id)) existing.id = event.part_id;
+    existing.state = "running";
     if (event.part_position !== undefined)
       existing.position = event.part_position;
-    existing.state = "running";
     return existing;
   }
   closeRunningStreams(message);
   const part: HarnessPart = {
-    id: event.part_id ?? nextLocalPartId(sessionId),
+    id: event.part_id,
     message_id: message.id,
     session_id: sessionId,
     position: event.part_position,
@@ -865,7 +541,10 @@ export function applySubtaskFinished(
   message: HarnessMessage,
   event: HarnessSubtaskFinishedEvent,
 ): HarnessPart | undefined {
-  const part = findPart(message, { subtaskId: event.subtask_id });
+  const part = message.parts.find(
+    (part) =>
+      part.type === "subtask" && part.meta?.["subtask_id"] === event.subtask_id,
+  );
   if (!part) return undefined;
   part.state = event.status === "completed" ? "completed" : "error";
   part.meta = {
@@ -923,8 +602,7 @@ function partPosition(part: HarnessPart): number | undefined {
 
 /**
  * Sort parts by backend `position`, preserving observed order when
- * positions are missing or tied (stable sort, no id comparison — local
- * `local-*` ids must never interleave server UUID order).
+ * positions are missing or tied (stable sort, no id comparison).
  */
 export function sortHarnessParts<T extends HarnessPart>(parts: T[]): T[] {
   return [...parts].sort((a, b) => {
@@ -982,7 +660,7 @@ function mergeAssistantParts(
         };
       }
       // A lightweight timeline refresh must not discard details fetched while
-      // the same session was idle (or attachments received over the socket).
+      // the same session was idle.
       if (liveSame.detail_loaded && !serverPart.detail_loaded) {
         serverPart.input = liveSame.input;
         serverPart.output = liveSame.output;

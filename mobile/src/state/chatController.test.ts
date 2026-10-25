@@ -280,7 +280,7 @@ describe("ChatController", () => {
     controller.dispose();
   });
 
-  it("refetches the timeline only for patch deltas without a preview", async () => {
+  it("renders patch previews without refetching and refreshes after compaction", async () => {
     const root = session("root");
     const { client, realtime } = makeClient([root]);
     vi.mocked(client.harness.timeline).mockResolvedValue(timeline(root));
@@ -306,8 +306,8 @@ describe("ChatController", () => {
 
     realtime.emit("harness.part_updated", {
       ...event,
-      part_id: "patch-2",
-      delta: { patch: "b.ts" },
+      part_id: "compaction-1",
+      delta: { compaction: true },
     });
     await vi.waitFor(() =>
       expect(client.harness.timeline).toHaveBeenCalledTimes(loads + 1),

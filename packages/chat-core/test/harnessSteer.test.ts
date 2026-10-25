@@ -106,7 +106,7 @@ describe("shared harness steering", () => {
       messages,
       "session-1",
       { steer: "Use pnpm", steer_id: "steer-1" },
-      { messageId: "assistant-1", partId: "steer-replay" },
+      { messageId: "assistant-1", partId: "steer-part-1" },
     );
     expect(
       assistant.parts.filter((part) => part.type === "steer"),

@@ -11,8 +11,6 @@ const props = defineProps<{
   messages: HarnessMessage[]
   loading?: boolean
   streamingMessageId?: string | null
-  /** @deprecated Prefer `streamingMessageId`; kept for compat. */
-  streamingSessionId?: string | null
   childSessionIds?: Record<string, string>
   /** State + next step of the finished run; shown under the last answer. */
   summary?: string
@@ -155,21 +153,8 @@ const lastMessageId = computed(() => {
 })
 
 const resolvedStreamingId = computed(() => {
-  if (props.streamingMessageId) {
-    const match = sortedMessages.value.find((message) => message.id === props.streamingMessageId)
-    return match?.role === 'assistant' && match.completed_at == null ? match.id : null
-  }
-  if (!props.streamingSessionId) return null
-  for (let i = sortedMessages.value.length - 1; i >= 0; i -= 1) {
-    const message = sortedMessages.value[i]
-    if (
-      message?.role === 'assistant' &&
-      message.session_id === props.streamingSessionId &&
-      message.completed_at == null
-    )
-      return message.id
-  }
-  return null
+  const match = sortedMessages.value.find((message) => message.id === props.streamingMessageId)
+  return match?.role === 'assistant' && match.completed_at == null ? match.id : null
 })
 
 function isNearBottom(el: HTMLElement): boolean {

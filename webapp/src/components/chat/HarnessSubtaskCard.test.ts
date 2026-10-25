@@ -295,6 +295,7 @@ describe('HarnessSubtaskCard', () => {
     })
 
     store.handleSubtaskFinished('session-parent', {
+      message_id: 'msg-1',
       subtask_id: 'sub-1',
       status: 'completed',
       summary: 'found it',

@@ -269,7 +269,11 @@ describe('harness store realtime reliability', () => {
       makeMessage({ id: 'user-2', content: 'follow up', position: 2 }),
     ]
 
-    store.handlePartUpdated('session-1', { text: 'new' }, { messageId: 'assistant-new' })
+    store.handlePartUpdated(
+      'session-1',
+      { text: 'new' },
+      { messageId: 'assistant-new', partId: 'text-new' },
+    )
 
     expect(
       store.messagesBySession['session-1']?.find((m) => m.id === 'assistant-old')?.content,
@@ -295,7 +299,11 @@ describe('harness store realtime reliability', () => {
       makeMessage({ id: 'assistant-new', role: 'assistant', content: '', parts: [] }),
     ]
 
-    store.handlePartUpdated('session-1', { text: 'stale' }, { messageId: 'assistant-old' })
+    store.handlePartUpdated(
+      'session-1',
+      { text: 'stale' },
+      { messageId: 'assistant-old', partId: 'text-old' },
+    )
 
     expect(
       store.messagesBySession['session-1']?.find((m) => m.id === 'assistant-old')?.content,
@@ -365,12 +373,17 @@ describe('harness store realtime reliability', () => {
     )
     store.handlePartUpdated(
       'session-1',
-      { tool_started: 'read', title: 'Read', call_id: 'c1', queued: true },
+      { tool_started: 'read', title: 'Read', call_id: 'c1', state: 'pending' },
       { partId: 'tool-1', messageId: 'assistant-1' },
     )
     store.handlePartUpdated(
       'session-1',
-      { tool_completed: 'read', call_id: 'c1', output: 'body' },
+      {
+        tool_completed: 'read',
+        call_id: 'c1',
+        state: 'completed',
+        display: { tool: 'read', summary: 'Read' },
+      },
       { partId: 'tool-1', messageId: 'assistant-1' },
     )
     store.handlePartUpdated(

@@ -1570,7 +1570,7 @@ describe('HarnessChatPanel', () => {
       expect(ensure).toHaveBeenCalledTimes(1)
     })
 
-    it('refetches the timeline only for patch deltas without a preview', async () => {
+    it('renders patch previews without refetching and refreshes after compaction', async () => {
       const handlers = socketHandlers()
       const { store } = await mountBusyRoot()
       const fetchParts = vi.spyOn(store, 'fetchParts').mockResolvedValue(undefined)
@@ -1583,7 +1583,7 @@ describe('HarnessChatPanel', () => {
       })
       expect(fetchParts).not.toHaveBeenCalled()
 
-      handlers['harness.part_updated']!({ ...event, part_id: 'patch-2', delta: { patch: 'b.ts' } })
+      handlers['harness.part_updated']!({ ...event, part_id: 'compaction-1', delta: { compaction: true } })
       expect(fetchParts).toHaveBeenCalledWith('session-root')
     })
   })

@@ -209,7 +209,11 @@ describe('harness store fork/edit', () => {
       message_id: 'new-answer',
       user_message_id: 'new-user',
     })
-    store.handlePartUpdated('session-1', { text: 'Fresh response' }, { messageId: 'new-answer' })
+    store.handlePartUpdated(
+      'session-1',
+      { text: 'Fresh response' },
+      { messageId: 'new-answer', partId: 'new-text' },
+    )
 
     const newMessages = [
       ...history,
@@ -228,10 +232,11 @@ describe('harness store fork/edit', () => {
     store.handlePartUpdated(
       'session-1',
       { text: 'Stale response' },
-      { messageId: 'discarded-answer' },
+      { messageId: 'discarded-answer', partId: 'discarded-text' },
     )
     store.handleSubtaskStarted('session-1', {
       subtask_id: 'stale-child',
+      part_id: 'stale-child-part',
       agent: 'explore',
       description: 'Discarded subtask',
       message_id: 'discarded-answer',
@@ -276,7 +281,11 @@ describe('harness store fork/edit', () => {
     await store.editMessage('session-1', 'msg-1', 'edited')
 
     expect(store.messagesBySession['session-1']).toEqual(original)
-    store.handlePartUpdated('session-1', { text: ' continued' }, { messageId: 'answer' })
+    store.handlePartUpdated(
+      'session-1',
+      { text: ' continued' },
+      { messageId: 'answer', partId: 'answer-text' },
+    )
     expect(store.messagesBySession['session-1']?.slice(-1)[0]?.content).toBe(
       'Original response continued',
     )

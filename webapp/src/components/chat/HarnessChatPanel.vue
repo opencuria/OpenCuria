@@ -58,7 +58,7 @@ const activeSession = computed(() => harness.activeSession)
  * Deterministic per-turn streaming anchor: the running (not completed)
  * assistant of the busy session. The container matches by message id so
  * the cursor/Thinking render only on the fresh turn — never on the
- * previous answer. Falls back to the session id for legacy streams.
+ * previous answer.
  */
 const streamingMessageId = computed(() => {
   if (activeSession.value?.status !== 'busy') return null
@@ -75,9 +75,6 @@ const streamingMessageId = computed(() => {
   }
   return null
 })
-const streamingSessionId = computed(() =>
-  activeSession.value?.status === 'busy' ? activeSession.value.id : null,
-)
 
 /** Skeleton only for the true initial workspace load (never over chat). */
 const chatLoading = computed(() => harness.loading && harness.activeMessages.length === 0)
@@ -356,9 +353,7 @@ function setupSocketListeners(): void {
           partPosition: data.part_position,
           messageId: data.message_id,
         })
-        // Patch deltas carry their bounded preview; only legacy patch events
-        // without it and compactions need the authoritative timeline.
-        if ((data.delta?.patch && !data.delta.display) || data.delta?.compaction) {
+        if (data.delta?.compaction) {
           void harness.fetchParts(data.session_id)
         }
       }
@@ -777,7 +772,6 @@ async function handleForkMessage(messageId: string): Promise<void> {
       :messages="harness.activeMessages"
       :loading="chatLoading"
       :streaming-message-id="streamingMessageId"
-      :streaming-session-id="streamingSessionId"
       :child-session-ids="childSessionIds"
       :summary="activeSession?.status === 'idle' ? activeSession.summary : ''"
       :disabled="messageActionsDisabled"

@@ -4,7 +4,6 @@ import type { HarnessPart } from '@/types/harness'
 import {
   attachmentByteSize,
   attachmentSizeLabel,
-  deltaAttachments,
   formatAttachmentSize,
   isImageAttachment,
   isPdfAttachment,
@@ -120,50 +119,6 @@ describe('toolAttachments', () => {
     for (const entry of toolAttachments(empties)) {
       expect(entry).not.toHaveProperty('filename')
     }
-  })
-})
-
-describe('deltaAttachments', () => {
-  it('returns [] for missing or malformed deltas', () => {
-    expect(deltaAttachments(undefined)).toEqual([])
-    expect(deltaAttachments(null)).toEqual([])
-    expect(deltaAttachments('nope')).toEqual([])
-    expect(deltaAttachments({})).toEqual([])
-    expect(deltaAttachments({ attachments: 'nope' })).toEqual([])
-    expect(deltaAttachments({ attachments: null })).toEqual([])
-    expect(deltaAttachments({ attachments: [{ nope: 1 }] })).toEqual([])
-  })
-
-  it('sanitizes live delta attachments like toolAttachments', () => {
-    expect(
-      deltaAttachments({
-        tool_completed: 'read',
-        attachments: [
-          { type: 'file', mime: 'image/png', url: IMAGE_URL, filename: 'cat.png' },
-          { type: 'text', mime: 'text/plain', url: 'data:text/plain;base64,aGk=' },
-          { type: 'file', mime: '', url: IMAGE_URL },
-          { type: 'file', mime: 'image/png', url: 'https://example.com/a.png' },
-          { type: 'file', mime: 'application/pdf', url: PDF_URL, filename: 'doc.pdf' },
-          'broken',
-          null,
-        ],
-      }),
-    ).toEqual([
-      { type: 'file', mime: 'image/png', url: IMAGE_URL, filename: 'cat.png' },
-      { type: 'file', mime: 'application/pdf', url: PDF_URL, filename: 'doc.pdf' },
-    ])
-  })
-
-  it(`caps the result at ${TOOL_ATTACHMENT_MAX_COUNT} entries`, () => {
-    const kept = deltaAttachments({
-      attachments: [
-        { type: 'file', mime: 'image/png', url: `${IMAGE_URL}1` },
-        { type: 'file', mime: 'image/jpeg', url: 'data:image/jpeg;base64,/9j/' },
-        { type: 'file', mime: 'application/pdf', url: PDF_URL },
-      ],
-    })
-    expect(kept).toHaveLength(2)
-    expect(kept.map((entry) => entry.mime)).toEqual(['image/png', 'image/jpeg'])
   })
 })
 

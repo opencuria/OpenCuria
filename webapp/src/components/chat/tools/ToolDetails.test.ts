@@ -190,51 +190,6 @@ describe('tool detail components', () => {
     )
   })
 
-  it('renders a live reducer part with meta.attachments as a thumbnail', async () => {
-    const { applyPartDelta } = await import('@/lib/harnessReducer')
-    const { resetHarnessPartCounter } = await import('@/lib/harnessReducer')
-    resetHarnessPartCounter()
-    const url = 'data:image/png;base64,iVBORw0KGgo='
-    const messages = [
-      {
-        id: 'msg-user-1',
-        session_id: 'session-1',
-        role: 'user' as const,
-        content: 'hello',
-        parts: [],
-      },
-    ]
-    applyPartDelta(
-      messages,
-      'session-1',
-      { tool_started: 'read', title: 'read cat.png', call_id: 'call-live' },
-      { step: 1, partId: 'part-live' },
-    )
-    const message = applyPartDelta(
-      messages,
-      'session-1',
-      {
-        tool_completed: 'read',
-        call_id: 'call-live',
-        output: 'Image read successfully',
-        attachments: [{ type: 'file', mime: 'image/png', url, filename: 'cat.png' }],
-      },
-      { step: 1, partId: 'part-live' },
-    )
-    const livePart = message.parts.find((p) => p.call_id === 'call-live')!
-
-    const wrapper = mount(ToolDetailRead, {
-      props: { part: livePart },
-      global: { stubs: { teleport: true } },
-    })
-    const img = wrapper.get('[data-testid="tool-detail-read-image"]')
-    expect(img.attributes('src')).toBe(url)
-    expect(img.attributes('alt')).toContain('cat.png')
-
-    await wrapper.get('button').trigger('click')
-    expect(wrapper.findComponent(ImageLightbox).exists()).toBe(true)
-  })
-
   it('renders only text when read meta attachments are broken', () => {
     const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {

@@ -39,17 +39,6 @@ export function toolAttachments(part: HarnessPart): ToolAttachment[] {
   return sanitizeAttachmentList(part.meta["attachments"]);
 }
 
-/**
- * Read sanitized attachments from a live `harness.part_updated` delta
- * (`delta.attachments` on `tool_completed`, same shape as `meta`).
- * Defensive: any broken payload yields `[]`, entries are sanitized and
- * capped exactly like `toolAttachments`.
- */
-export function deltaAttachments(delta: unknown): ToolAttachment[] {
-  if (!isRecord(delta)) return [];
-  return sanitizeAttachmentList(delta["attachments"]);
-}
-
 function sanitizeAttachmentEntry(
   entry: Record<string, unknown>,
 ): ToolAttachment | null {

@@ -12,7 +12,6 @@ import type {
   HarnessId,
   HarnessMessage,
   HarnessPart,
-  HarnessPartDelta,
   HarnessPermissionRequest,
   HarnessPermissionResponse,
   HarnessQuestionRequest,
@@ -1938,32 +1937,22 @@ export class ChatController {
       data.message_id,
     );
     const before = messages.length;
-    const matching = data.message_id
-      ? messages.find((message) => message.id === data.message_id)
-      : [...messages]
-          .reverse()
-          .find(
-            (message) =>
-              message.role === "assistant" && message.completed_at == null,
-          );
-    if (matching && matching.completed_at != null) return;
-    const routed = data.message_id
-      ? messages.find((message) => message.id === data.message_id)
-      : matching;
-    if (routed?.role === "user") return;
-    applyPartDelta(messages, data.session_id, data.delta as HarnessPartDelta, {
+    const matching = messages.find((message) => message.id === data.message_id);
+    if (
+      matching &&
+      (matching.role !== "assistant" || matching.completed_at != null)
+    )
+      return;
+    applyPartDelta(messages, data.session_id, data.delta, {
       step: data.step,
       partId: data.part_id,
       partPosition: data.part_position,
       messageId: data.message_id,
     });
     const session = this.sessions.find((item) => item.id === data.session_id);
-    const assistant = data.message_id
-      ? messages.find(
-          (message) =>
-            message.id === data.message_id && message.role === "assistant",
-        )
-      : messages[messages.length - 1];
+    const assistant = messages.find(
+      (message) => message.id === data.message_id,
+    );
     if (assistant?.role === "assistant" && assistant.completed_at == null) {
       if (!assistant.model && session?.model) assistant.model = session.model;
       if (!assistant.reasoning_effort && session?.reasoning_effort)
@@ -1975,10 +1964,7 @@ export class ChatController {
     ) {
       this.commitEventMessages(data.session_id, messages);
     }
-    if (
-      ((data.delta.patch && !data.delta.display) || data.delta.compaction) &&
-      this.isInActiveLineage(data.session_id)
-    ) {
+    if (data.delta.compaction && this.isInActiveLineage(data.session_id)) {
       const context = this.captureSelection();
       if (context)
         void this.fetchTimeline(data.session_id, context, true).catch(
@@ -2003,11 +1989,7 @@ export class ChatController {
       event.session_id,
       event.message_id,
     );
-    const message = event.message_id
-      ? messages.find((row) => row.id === event.message_id)
-      : [...messages]
-          .reverse()
-          .find((row) => row.role === "assistant" && row.completed_at == null);
+    const message = messages.find((row) => row.id === event.message_id);
     const target =
       message?.role === "assistant"
         ? message
@@ -2049,11 +2031,7 @@ export class ChatController {
       event.session_id,
       event.message_id,
     );
-    const message = event.message_id
-      ? messages.find((row) => row.id === event.message_id)
-      : [...messages]
-          .reverse()
-          .find((row) => row.role === "assistant" && row.completed_at == null);
+    const message = messages.find((row) => row.id === event.message_id);
     if (
       !message ||
       message.role !== "assistant" ||

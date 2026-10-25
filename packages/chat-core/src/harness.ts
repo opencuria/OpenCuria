@@ -302,10 +302,8 @@ export interface HarnessPartDelta {
   tool_error?: string;
   title?: string;
   call_id?: string;
-  arguments?: string;
-  output?: string;
   patch?: string;
-  /** Agent-S plan text; compact projections include the `display` marker. */
+  /** Bounded Agent-S plan summary; full plans load through part details. */
   agent?: string;
   /** Safe plan summary riding the live `agent` event (untrusted transport). */
   agent_meta?: Partial<HarnessAgentMeta>;
@@ -314,36 +312,21 @@ export interface HarnessPartDelta {
   steer?: string;
   /** Id of the delivered queue entry (`meta.steer_id` on the `steer` part). */
   steer_id?: string;
-  /**
-   * Live tool lifecycle state.
-   *
-   * The backend may send `pending` (queued/provider-placed row) followed by
-   * `running` (actual execution) for the same `part_id`. When absent, the
-   * frontend treats an unsignaled legacy `tool_started` as running.
-   * A repeated event for the same `part_id` advances pending to running.
-   */
-  state?: HarnessPartState | string;
-  /** `true` when this `tool_started` is only provider-queued (not running). */
-  queued?: boolean;
+  /** Explicit tool lifecycle state supplied by the backend. */
+  state?: HarnessPartState;
   /** Bounded, safe compact display projection for completed/error parts. */
   display?: HarnessPartDisplay;
-  /** Live tool attachments on legacy `tool_completed` deltas. */
-  attachments?: Array<{
-    type?: string;
-    mime?: string;
-    url?: string;
-    filename?: string;
-  }>;
 }
 
 export interface HarnessPartUpdatedEvent {
   workspace_id: string;
   session_id: string;
   /** Backend assistant shell id — the deterministic per-turn routing key. */
-  message_id?: string;
+  message_id: string;
   delta: HarnessPartDelta;
   step?: number;
-  part_id?: string;
+  /** Absent on notices without a persisted part (for example provider retries). */
+  part_id?: string | null;
   part_position?: number;
 }
 
@@ -425,11 +408,11 @@ export interface HarnessSubtaskStartedEvent {
   workspace_id: string;
   session_id: string;
   /** Backend assistant shell id — routes to the right turn. */
-  message_id?: string;
+  message_id: string;
   subtask_id: string;
   agent: string;
   description: string;
-  part_id?: string;
+  part_id: string;
   part_position?: number;
   child_session_id?: string;
   model?: string;
@@ -440,7 +423,7 @@ export interface HarnessSubtaskFinishedEvent {
   workspace_id: string;
   session_id: string;
   /** Backend assistant shell id — routes to the right turn. */
-  message_id?: string;
+  message_id: string;
   subtask_id: string;
   agent?: string;
   status: string;

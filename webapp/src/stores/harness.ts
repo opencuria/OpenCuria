@@ -48,7 +48,6 @@ import {
   applySubtaskFinished,
   applySubtaskStarted,
   applyTodoUpdate,
-  ensureAssistantMessage,
   ensureBusyAssistant,
   hasDeliveredSteer,
   mergeBusyFetchedMessages,
@@ -1220,24 +1219,13 @@ export const useHarnessStore = defineStore('harness', () => {
 
   // --- Real-time reducers (called from socket handlers) ---
 
-  /**
-   * Route a live delta to its per-turn assistant shell.
-   *
-   * Stale-event guard: a `messageId` that matches a *completed* older turn
-   * is dropped (it must never attach to the latest turn); a `messageId`
-   * that matches nothing while a fresh empty assistant already streams
-   * is also dropped when it looks older (prevents resurrection). The
-   * reducer itself owns the same-turn routing via `routeAssistantMessage`.
-   */
+  /** Route by persisted message ID, ignoring discarded or completed turns. */
   function resolveLiveMessage(
     sessionId: string,
-    messageId?: string,
+    messageId: string,
   ): { messages: HarnessMessage[]; message: HarnessMessage } | null {
     if (isDiscardedMessage(sessionId, messageId)) return null
     const messages = messagesFor(sessionId)
-    if (!messageId) {
-      return { messages, message: ensureAssistantMessage(messages, sessionId) }
-    }
     const existing = messages.find((m) => m.id === messageId)
     if (existing) {
       if (existing.role !== 'assistant') return null
@@ -1252,7 +1240,7 @@ export const useHarnessStore = defineStore('harness', () => {
   function handlePartUpdated(
     sessionId: string,
     delta: HarnessPartDelta,
-    opts: { step?: number; partId?: string; partPosition?: number; messageId?: string } = {},
+    opts: { step?: number; partId?: string | null; partPosition?: number; messageId: string },
   ): void {
     const routed = resolveLiveMessage(sessionId, opts.messageId)
     if (!routed) return
@@ -1289,12 +1277,12 @@ export const useHarnessStore = defineStore('harness', () => {
       subtask_id: string
       agent: string
       description: string
-      part_id?: string
+      part_id: string
       part_position?: number
       child_session_id?: string
       model?: string
       reasoning_effort?: string
-      message_id?: string
+      message_id: string
     },
   ): void {
     const routed = resolveLiveMessage(sessionId, event.message_id)
@@ -1302,6 +1290,7 @@ export const useHarnessStore = defineStore('harness', () => {
     applySubtaskStarted(routed.message, sessionId, {
       workspace_id: '',
       session_id: sessionId,
+      message_id: event.message_id,
       subtask_id: event.subtask_id,
       agent: event.agent,
       description: event.description,
@@ -1323,7 +1312,7 @@ export const useHarnessStore = defineStore('harness', () => {
       status: string
       summary: string
       child_session_id?: string
-      message_id?: string
+      message_id: string
     },
   ): void {
     const routed = resolveLiveMessage(sessionId, event.message_id)
@@ -1331,6 +1320,7 @@ export const useHarnessStore = defineStore('harness', () => {
     applySubtaskFinished(routed.message, {
       workspace_id: '',
       session_id: sessionId,
+      message_id: event.message_id,
       subtask_id: event.subtask_id,
       agent: event.agent,
       status: event.status,

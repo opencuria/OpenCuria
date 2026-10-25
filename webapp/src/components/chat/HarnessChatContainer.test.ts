@@ -482,54 +482,6 @@ describe('HarnessChatContainer', () => {
     expect(flags.every((flag) => flag.streaming === '0')).toBe(true)
   })
 
-  it('marks only the last assistant message as streaming', () => {
-    const wrapper = mount(HarnessChatContainer, {
-      props: {
-        streamingSessionId: 'session-1',
-        messages: [
-          makeMessage({
-            id: 'user-1',
-            content: 'first',
-            created_at: '2026-03-29T10:00:00.000Z',
-          }),
-          makeMessage({
-            id: 'assistant-1',
-            role: 'assistant',
-            content: 'previous reply',
-            created_at: '2026-03-29T10:00:01.000Z',
-          }),
-          makeMessage({
-            id: 'user-2',
-            content: 'second',
-            created_at: '2026-03-29T10:00:02.000Z',
-          }),
-          makeMessage({
-            id: 'assistant-2',
-            role: 'assistant',
-            content: 'live',
-            created_at: '2026-03-29T10:00:03.000Z',
-          }),
-        ],
-      },
-      global: {
-        stubs: {
-          HarnessMessageView: HarnessMessageViewStub,
-        },
-      },
-    })
-
-    const flags = wrapper.findAll('[data-message-id]').map((node) => ({
-      id: node.attributes('data-message-id'),
-      streaming: node.attributes('data-streaming'),
-    }))
-    expect(flags).toEqual([
-      { id: 'user-1', streaming: '0' },
-      { id: 'assistant-1', streaming: '0' },
-      { id: 'user-2', streaming: '0' },
-      { id: 'assistant-2', streaming: '1' },
-    ])
-  })
-
   it('passes the summary only to the final assistant answer', () => {
     const SummaryStub = {
       name: 'HarnessMessageView',
