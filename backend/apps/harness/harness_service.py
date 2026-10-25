@@ -5050,21 +5050,6 @@ class HarnessService:
         return child
 
 
-def computeruse_recording_path(output: str, child_id: str) -> str | None:
-    """Return the real recording path embedded in a computer-use child output.
-
-    The child assistant content already embeds the final ``record_stop``
-    path when recording was enabled — reuse the first
-    ``![Computer use](...)`` target so the parent card links the real
-    file. Returns ``None`` when no recording marker is present (recording
-    disabled): callers must not invent a video via a default path.
-    ``child_id`` is kept for backward compatibility and ignored.
-    """
-    from .agent_s.harness import extract_recording_path
-
-    return extract_recording_path(output)
-
-
 def _tail_remainder(existing: str, tail: str) -> str:
     """Return the genuinely-new suffix of a runner final ``output``.
 

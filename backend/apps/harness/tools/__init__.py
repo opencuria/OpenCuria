@@ -55,11 +55,6 @@ def agent_s_tool_registry() -> ToolRegistry:
     return ToolRegistry()
 
 
-def computeruse_tool_registry() -> ToolRegistry:
-    """Backwards-compatible alias for :func:`agent_s_tool_registry`."""
-    return agent_s_tool_registry()
-
-
 __all__ = [
     "BashTool",
     "EditTool",
@@ -79,6 +74,5 @@ __all__ = [
     "WebfetchTool",
     "WriteTool",
     "agent_s_tool_registry",
-    "computeruse_tool_registry",
     "default_tool_registry",
 ]

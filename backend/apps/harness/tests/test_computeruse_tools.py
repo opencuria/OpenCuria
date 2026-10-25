@@ -1,10 +1,4 @@
-"""Regression/backcompat tests for computer-use registries and routing.
-
-Replaces the legacy OpenComputer tool tests (``ViewScreenTool``,
-``LeftClickTool``, 1000-grid scaling): the desktop tool module is gone and
-Agent-S children intentionally see an empty tool registry. Model
-resolution/subagent-child DB coverage from the old file is ported below.
-"""
+"""Agent-S subagent routing, model resolution, cancellation and recording tests."""
 
 from __future__ import annotations
 
@@ -12,7 +6,8 @@ from typing import Any
 
 import pytest
 
-from apps.harness.agents.definitions import get_agent, subagent_descriptions
+from apps.harness.agents.definitions import subagent_descriptions
+from apps.harness.engines.base import RunOptions
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessSession
 from apps.harness.permissions.evaluator import PermissionEvaluator
@@ -23,7 +18,6 @@ from apps.harness.runner import HarnessRunner
 from apps.harness.tests.conftest import FakeAccessor as BaseFakeAccessor
 from apps.harness.tools import (
     agent_s_tool_registry,
-    computeruse_tool_registry,
     default_tool_registry,
 )
 from apps.harness.tools.base import ToolContext, ToolError
@@ -104,6 +98,7 @@ class ComputerUseTextProvider(ProviderAdapter):
 
     async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
         """Yield one DONE plan with usage (immediate Agent-S DONE)."""
+        assert tools == []
         yield Delta(
             text="finished\n```python\nagent.done()\n```",
             usage=Usage(1, 1, 2),
@@ -157,62 +152,30 @@ def _task_ctx(parent, workspace_id: str, *, model: str = "parent-model") -> Any:
     )()
 
 
-def test_agent_s_registry_empty_and_alias_in_sync() -> None:
-    """Agent-S registry offers no tools; the legacy alias stays empty too."""
+def test_agent_s_registry_is_empty() -> None:
+    """Agent-S plans use their own action syntax without function tools."""
     assert agent_s_tool_registry().names() == []
-    assert computeruse_tool_registry().names() == []
 
 
-def test_default_registry_excludes_legacy_computer_use_tools() -> None:
-    """Primary agents never see legacy OpenComputer tool names."""
-    names = set(default_tool_registry().names())
-    legacy = {
-        "view_screen",
-        "view_region",
-        "move_mouse",
-        "left_click",
-        "right_click",
-        "middle_click",
-        "double_click",
-        "drag",
-        "scroll",
-        "type_text",
-        "press_key",
-        "open_url",
-        "wait",
-        "ask_user",
-    }
-    assert not names.intersection(legacy)
-
-
-def test_computeruse_agent_definition_pins_agent_s_budget() -> None:
-    """Computeruse skips system prompts and pins the Agent-S step budget."""
-    agent = get_agent("computeruse")
-    assert agent.mode == "subagent"
-    assert agent.system_prompt == ""
-    assert agent.steps == 15
-    assert "Agent-S" in agent.description
-
-
-def test_filtered_schemas_hide_legacy_names_from_build_agent(
-    fake_accessor,
-) -> None:
-    """Build agent is not offered any legacy computer-use tool name."""
+async def test_runner_routes_computeruse_through_agent_s() -> None:
+    """The runner executes an Agent-S plan and releases its desktop lease."""
+    accessor = FakeAccessor()
     runner = HarnessRunner(
         provider=ComputerUseTextProvider(),
-        tools=default_tool_registry(),
-        evaluator=PermissionEvaluator(),
-        accessor=fake_accessor,
+        tools=agent_s_tool_registry(),
+        accessor=accessor,
     )
-    schemas = runner._filtered_schemas(
-        get_agent("build"),
+    result = await runner.run(
+        "finish",
+        "computeruse",
+        "fake/main",
         "build",
-        depth=0,
-        max_depth=1,
+        RunOptions(auto_approve=True, session_id="agent-s-routing"),
     )
-    names = [schema.name for schema in schemas]
-    assert "view_screen" not in names
-    assert "bash" in names
+    assert result.finish_reason == "stop"
+    assert_desktop_lifecycle(accessor, recording=False)
+    assert "![Computer use](" not in result.output
+    assert "recording_path" not in result.metadata
 
 
 async def test_task_accepts_computeruse_subagent(fake_accessor) -> None:
@@ -321,97 +284,6 @@ async def test_computeruse_subagent_model_resolution(
     assert "record_start" not in actions
     assert "record_stop" not in actions
     assert "release" in actions
-
-
-def test_computeruse_recording_path_prefers_embedded_final_path() -> None:
-    """Embedded final record_stop path wins; unrecorded output stays plain."""
-    from apps.harness.agent_s.harness import (
-        append_video_to_output,
-        default_recording_path,
-        sanitize_run_id,
-        truncate_task_output,
-    )
-    from apps.harness.harness_service import computeruse_recording_path
-    from apps.harness.tools.subagents import TASK_OUTPUT_MAX_CHARS
-
-    child_id = "child-123"
-    fallback = default_recording_path(sanitize_run_id(child_id))
-    assert fallback.startswith("/workspace/.opencuria/computeruse/")
-    assert fallback.endswith("/session.mp4")
-    assert fallback.count("/workspace") == 1
-
-    # No embed → no recording (never invent a phantom video path).
-    assert computeruse_recording_path("done", child_id) is None
-    # Empty / unterminated embeds → no recording (never empty).
-    assert computeruse_recording_path("![Computer use]()", child_id) is None
-    assert computeruse_recording_path("![Computer use](abc", child_id) is None
-
-    # Embedded final path wins verbatim (canonical runner path).
-    canonical = "/workspace/.opencuria/computeruse/child-123/session.mp4"
-    embedded_out = f"done\n\n![Computer use]({canonical})"
-    assert computeruse_recording_path(embedded_out, child_id) == canonical
-
-    marker = f"![Computer use]({fallback})"
-    once = append_video_to_output("done", fallback)
-    assert once.count(marker) == 1
-
-    display, truncated = truncate_task_output(
-        embedded_out,
-        computeruse_recording_path(embedded_out, child_id),
-        TASK_OUTPUT_MAX_CHARS,
-    )
-    assert truncated is False
-    assert display == embedded_out
-    assert display.count(f"![Computer use]({fallback})") == 1
-
-
-def test_computeruse_recording_path_truncation_adds_no_phantom_video() -> None:
-    """Long unrecorded child output truncates as plain text (no video)."""
-    from apps.harness.agent_s.harness import truncate_task_output
-    from apps.harness.harness_service import computeruse_recording_path
-
-    child_id = "child-123"
-    long_body = "x" * 9000
-    assert computeruse_recording_path(long_body, child_id) is None
-    display, truncated = truncate_task_output(
-        long_body, computeruse_recording_path(long_body, child_id), 8000
-    )
-    assert truncated is True
-    assert "![Computer use](" not in display
-
-
-def test_computeruse_recorded_output_truncation_keeps_marker_once() -> None:
-    """Long recorded child output truncates to one real marker."""
-    from apps.harness.agent_s.harness import truncate_task_output
-
-    canonical = "/workspace/.opencuria/computeruse/child-123/session.mp4"
-    recorded = "x" * 9000 + f"\n\n![Computer use]({canonical})"
-    display, truncated = truncate_task_output(recorded, canonical, 8000)
-    assert truncated is True
-    assert display.count(f"![Computer use]({canonical})") == 1
-
-
-def test_computeruse_recording_marker_trust_rejects_untrusted() -> None:
-    """Untrusted markers (URL, /etc, foreign workspace, .., bad ext) are None."""
-    from apps.harness.agent_s.harness import (
-        extract_recording_path,
-        truncate_task_output,
-    )
-    from apps.harness.harness_service import computeruse_recording_path
-
-    cases = [
-        "https://evil.example/r.mp4",
-        "/etc/passwd.mp4",
-        "/workspace/other/x.mp4",
-        "/workspace/.opencuria/computeruse/../evil.mp4",
-        "/workspace/.opencuria/computeruse/child-123/evil.avi",
-    ]
-    for target in cases:
-        output = f"done\n\n![Computer use]({target})"
-        assert extract_recording_path(output) is None, target
-        assert computeruse_recording_path(output, "child-123") is None, target
-        display, _ = truncate_task_output("x" * 9000 + f"\n\n{output}", target, 8000)
-        assert f"![Computer use]({target})" not in display, target
 
 
 @pytest.mark.parametrize("agent", ALLOWED_SUBAGENT_TYPES)

@@ -24,6 +24,7 @@ from apps.harness.agent_s.config import AgentSRunConfig
 from apps.harness.agent_s.harness import (
     append_video_to_output,
     classify_signal,
+    extract_recording_path,
     resolve_run_config,
     run_agent_s_computeruse,
     truncate_task_output,
@@ -977,9 +978,7 @@ async def test_truncate_without_recording_never_invents_video() -> None:
 
 async def test_truncate_ignores_unrelated_recording_path() -> None:
     """A default path for an unrecorded run is not appended as video."""
-    from apps.harness.harness_service import computeruse_recording_path
-
-    assert computeruse_recording_path("plain output", "child-123") is None
+    assert extract_recording_path("plain output") is None
     display, truncated = truncate_task_output(
         "plain output",
         "/workspace/.opencuria/computeruse/child-123/session.mp4",
@@ -991,11 +990,9 @@ async def test_truncate_ignores_unrelated_recording_path() -> None:
 
 async def test_truncate_preserves_real_recording_marker() -> None:
     """An actually recorded child output keeps its real video on truncate."""
-    from apps.harness.harness_service import computeruse_recording_path
-
     canonical = "/workspace/.opencuria/computeruse/child-123/session.mp4"
     recorded = f"done\n\n![Computer use]({canonical})"
-    assert computeruse_recording_path(recorded, "child-123") == canonical
+    assert extract_recording_path(recorded) == canonical
     display, truncated = truncate_task_output(
         "x" * 9000 + f"\n\n![Computer use]({canonical})",
         canonical,
@@ -1007,17 +1004,14 @@ async def test_truncate_preserves_real_recording_marker() -> None:
 
 async def test_recording_marker_trust_rejects_untrusted_paths() -> None:
     """URLs, /etc, foreign workspace paths, .., and bad extensions are None."""
-    from apps.harness.agent_s.harness import (
-        extract_recording_path,
-        is_valid_recording_path,
-    )
+    from apps.harness.agent_s.harness import is_valid_recording_path
     from apps.harness.agent_s.harness import truncate_task_output as _truncate
-    from apps.harness.harness_service import computeruse_recording_path
 
     legit = "/workspace/.opencuria/computeruse/child-123/session.mp4"
     assert is_valid_recording_path(legit) is True
     assert extract_recording_path(f"done\n\n![Computer use]({legit})") == legit
-    assert computeruse_recording_path(f"done\n\n![Computer use]({legit})", "x") == legit
+    assert extract_recording_path("![Computer use]()") is None
+    assert extract_recording_path("![Computer use](abc") is None
 
     bad = [
         "https://evil.example/r.mp4",
@@ -1035,7 +1029,6 @@ async def test_recording_marker_trust_rejects_untrusted_paths() -> None:
         assert is_valid_recording_path(target) is False, target
         output = f"done\n\n![Computer use]({target})"
         assert extract_recording_path(output) is None, target
-        assert computeruse_recording_path(output, "child-123") is None, target
         display, _ = _truncate("x" * 9000 + f"\n\n{output}", target, 8000)
         # No marker is preserved for untrusted paths: plain truncation only.
         assert f"![Computer use]({target})" not in display
