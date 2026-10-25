@@ -17,6 +17,7 @@ import re
 import uuid
 from dataclasses import replace
 
+from apps.credentials.services import CredentialSvc
 from common.exceptions import ConflictError
 from common.utils import decrypt_value
 
@@ -206,7 +207,9 @@ def _workspace_credentials_by_service(
     Directly attached foreign rows (DB corruption / cross-org M2M leak)
     are ignored, so they surface as missing-required gaps.
     """
-    attached = list(workspace.credentials.all().select_related("service"))
+    attached = CredentialSvc().list_workspace_credentials(
+        workspace.id, include_internal=True
+    )
     if any(row.service.credential_type == "provider_secret" for row in attached):
         raise ConflictError("Internal provider secrets cannot be used by plugins")
     by_service: dict[uuid.UUID, object] = {}

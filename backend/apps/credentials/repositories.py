@@ -172,23 +172,20 @@ class CredentialRepository:
         )
 
     @staticmethod
-    def list_all_for_workspace_internal(workspace_id: uuid.UUID) -> list[Credential]:
-        """List attached rows for server-side audits, including internal secrets."""
-        return list(
-            Credential.objects.filter(workspaces__id=workspace_id).select_related(
-                "service", "user", "organization"
-            )
-        )
-
-    @staticmethod
-    def list_for_workspace(workspace_id: uuid.UUID) -> list[Credential]:
-        """Return workspace attachments with service and OAuth metadata loaded."""
-        return list(
+    def list_for_workspace(
+        workspace_id: uuid.UUID, *, include_internal: bool = False
+    ) -> list[Credential]:
+        """Load ordered attachments, optionally including rows for internal audits."""
+        credentials = (
             Credential.objects.filter(workspaces__id=workspace_id)
-            .exclude(service__credential_type="provider_secret")
             .select_related("service", "oauth_registration", "user", "organization")
             .order_by("-created_at")
         )
+        if not include_internal:
+            credentials = credentials.exclude(
+                service__credential_type="provider_secret"
+            )
+        return list(credentials)
 
     @staticmethod
     def get_by_id(credential_id: uuid.UUID) -> Credential | None:

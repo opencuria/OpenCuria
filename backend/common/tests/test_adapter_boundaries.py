@@ -27,6 +27,8 @@ never query the ORM either: model managers and instance reloads appear only
 in ``models`` and ``repositories`` modules. Password/JWT authentication and
 SSO provisioning share the accounts user repository; profile writes and
 password checks (which can save upgraded hashes) stay there as well.
+Credential repositories are private to their context; consumers resolve
+catalog entries and workspace attachments through credential services.
 """
 
 from __future__ import annotations
@@ -420,5 +422,60 @@ def test_service_only_contexts_are_reached_through_their_services():
     assert violations == [], (
         "Call the context's service (e.g. apps.skills.services.SkillService) "
         "instead of importing its repositories, models or helpers:\n"
+        + "\n".join(violations)
+    )
+
+
+def test_credential_repositories_are_private_to_their_context() -> None:
+    """Plugin definitions and runtime reads use the credential service boundary."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    credentials = APPS_ROOT / "credentials"
+    repositories = {
+        module
+        for module in _repository_modules(trees)
+        if module.startswith("apps.credentials.")
+    }
+    assert "apps.credentials.repositories" in repositories
+    violations = sorted(
+        f"{_module_name(path)} -> {module}"
+        for path, tree in trees.items()
+        if not path.is_relative_to(credentials)
+        for module in _imported_modules(path, tree)
+        if any(module == repo or module.startswith(f"{repo}.") for repo in repositories)
+    )
+    assert violations == [], (
+        "Resolve credential catalog entries and workspace attachments through "
+        "apps.credentials.services; credential repositories are private:\n"
+        + "\n".join(violations)
+    )
+
+
+def test_credentials_and_plugins_delegate_queryset_operations_to_repositories() -> None:
+    """Related managers must not bypass the repository-only ORM rule."""
+    queryset_operations = {
+        "filter",
+        "exclude",
+        "select_related",
+        "prefetch_related",
+        "select_for_update",
+        "order_by",
+        "values_list",
+        "annotate",
+        "aggregate",
+        "bulk_create",
+        "bulk_update",
+        "raw",
+    }
+    violations = sorted(
+        f"{_module_name(path)}:{node.lineno} accesses {node.attr}"
+        for path in _source_files()
+        if path.relative_to(APPS_ROOT).parts[0] in {"credentials", "plugins"}
+        and not _is_persistence_module(path)
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.Attribute) and node.attr in queryset_operations
+    )
+    assert violations == [], (
+        "Move related-manager queries and queryset operations into repositories; "
+        "credential and plugin services consume their results:\n"
         + "\n".join(violations)
     )

@@ -275,6 +275,18 @@ class CredentialSvc:
         """
         return list(self.credentials.list_for_user_in_org(user.id, org_id))
 
+    def list_workspace_credentials(
+        self, workspace_id: uuid.UUID, *, include_internal: bool = False
+    ) -> list[Credential]:
+        """Load attachments for an authorized workspace, newest first.
+
+        Runtime validation includes internal rows so it can reject forbidden
+        provider-secret attachments rather than silently ignoring them.
+        """
+        return self.credentials.list_for_workspace(
+            workspace_id, include_internal=include_internal
+        )
+
     # -- Create -------------------------------------------------------------
 
     def create_personal_credential(
@@ -527,7 +539,9 @@ class CredentialSvc:
 
     def resolve_workspace_credentials(self, workspace) -> ResolvedCredentials:
         """Resolve ordinary credentials; reject any internal account attachment."""
-        credentials = list(workspace.credentials.all().select_related("service"))
+        credentials = self.list_workspace_credentials(
+            workspace.id, include_internal=True
+        )
         if any(
             credential.service.credential_type == CredentialType.PROVIDER_SECRET
             for credential in credentials

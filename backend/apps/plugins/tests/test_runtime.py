@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import uuid
 import uuid as _uuid  # noqa: F401  (service ids arrive as strings)
+from collections.abc import Callable
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -27,6 +28,7 @@ from apps.plugins import runtime as plugin_runtime
 from apps.plugins.models import Plugin
 from apps.plugins.services import PluginService
 from apps.runners.models import Runner, Workspace
+from common.exceptions import ConflictError, NotFoundError
 from common.utils import encrypt_value, hash_token
 
 
@@ -612,3 +614,132 @@ def test_resources_snapshot_is_typed_and_frozen():
     assert PluginResourcesSnapshot().desktop is None
     with pytest.raises(FrozenInstanceError):
         desktop.activation = "first_tool"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize(
+    "scope", ["global", "current", "foreign", "internal", "missing"]
+)
+def test_requirement_service_visibility_and_atomicity(
+    org_ctx: dict, operation: str, scope: str
+) -> None:
+    """Dependency lookup preserves visibility and rolls back rejected edits."""
+    service_id = uuid.uuid4()
+    if scope != "missing":
+        organization = None
+        if scope == "current":
+            organization = org_ctx["org"]
+        elif scope == "foreign":
+            organization = Organization.objects.create(name="Foreign", slug="foreign")
+        service_id = CredentialService.objects.create(
+            name="Dependency",
+            slug="boundary-dependency",
+            organization=organization,
+            credential_type="provider_secret" if scope == "internal" else "env",
+            env_var_name="BOUNDARY_TOKEN",
+        ).id
+
+    service = PluginService()
+    original = _make_plugin(org_ctx["org"], org_ctx["user"])
+    payload = {
+        "org_id": org_ctx["org"].id,
+        "user": org_ctx["user"],
+        "name": "Changed",
+        "credential_requirements": [{"key": "token", "service_id": str(service_id)}],
+    }
+
+    def write() -> dict:
+        if operation == "create":
+            return service.create_org_plugin(slug="changed", **payload)
+        return service.update_org_plugin(original["id"], **payload)
+
+    if scope in {"global", "current"}:
+        result = write()
+        assert result["credential_requirements"][0]["service_id"] == service_id
+    else:
+        with pytest.raises(NotFoundError) as error:
+            write()
+        assert error.value.code == "not_found"
+        assert error.value.message == f"CredentialService '{service_id}' not found"
+        assert not Plugin.objects.filter(slug="changed").exists()
+        assert service.get_visible(original["id"], org_id=org_ctx["org"].id) == original
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("foreign_owner", [False, True])
+def test_runtime_attachment_order_and_ownership(
+    org_ctx: dict, foreign_owner: bool
+) -> None:
+    """Newest valid attachment wins; a newer foreign personal row is ignored."""
+    payload = _make_plugin(org_ctx["org"], org_ctx["user"])
+    plugin_id = payload["id"]
+    service_id = payload["credential_requirements"][0]["service_id"]
+    service = PluginService()
+    service.set_org_activation(
+        plugin_id, org_id=org_ctx["org"].id, user=org_ctx["user"], active=True
+    )
+    org_ctx["workspace"].plugin_activations.create(plugin_id=plugin_id)
+    oldest = Credential.objects.create(
+        service_id=service_id,
+        organization=org_ctx["org"],
+        name="Oldest",
+        encrypted_value=encrypt_value("old-secret"),
+    )
+    owner = org_ctx["user"]
+    if foreign_owner:
+        owner = get_user_model().objects.create_user(email="foreign@example.test")
+    newest = Credential.objects.create(
+        service_id=service_id,
+        user=owner,
+        name="Newest",
+        encrypted_value=encrypt_value("new-secret"),
+    )
+    org_ctx["workspace"].credentials.add(oldest, newest)
+    snapshot = plugin_runtime.build_workspace_plugin_snapshot(
+        workspace=org_ctx["workspace"], org_id=org_ctx["org"].id
+    )
+    assert plugin_runtime.resolve_runtime_credentials(
+        snapshot, workspace=org_ctx["workspace"]
+    ) == {plugin_id: {"api_key": "old-secret" if foreign_owner else "new-secret"}}
+    assert (
+        next(
+            row
+            for row in service.list_workspace_plugins(
+                workspace=org_ctx["workspace"], org_id=org_ctx["org"].id
+            )
+            if row["id"] == plugin_id
+        )["ready"]
+        is True
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "resolve",
+    [
+        plugin_runtime.resolve_runtime_credentials,
+        plugin_runtime.resolve_runtime_oauth_credentials,
+    ],
+)
+def test_plugin_runtime_rejects_internal_provider_attachments(
+    org_ctx: dict, resolve: Callable
+) -> None:
+    """Even an empty plugin snapshot must reject an internal secret attachment."""
+    service = CredentialService.objects.create(
+        name="Internal", slug="boundary-internal", credential_type="provider_secret"
+    )
+    credential = Credential.objects.create(
+        service=service,
+        user=org_ctx["user"],
+        name="Internal",
+        encrypted_value=encrypt_value("internal-secret"),
+    )
+    org_ctx["workspace"].credentials.add(credential)
+    snapshot = plugin_runtime.build_workspace_plugin_snapshot(
+        workspace=org_ctx["workspace"], org_id=org_ctx["org"].id
+    )
+    with pytest.raises(
+        ConflictError, match="Internal provider secrets cannot be used by plugins"
+    ):
+        resolve(snapshot, workspace=org_ctx["workspace"])

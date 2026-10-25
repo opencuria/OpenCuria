@@ -14,6 +14,7 @@ import structlog
 from django.db import transaction
 from django.utils.text import slugify
 
+from apps.credentials.services import CredentialServiceSvc, CredentialSvc
 from common.exceptions import ConflictError, NotFoundError
 
 from .models import Plugin, PluginTransport
@@ -153,8 +154,6 @@ def normalize_skill_payload(item: dict, index: int) -> dict:
 
 def validate_oauth_server_url(value: str) -> str:
     """Plugin-level alias to credential-owned OAuth endpoint validation."""
-    from apps.credentials.services import CredentialServiceSvc
-
     return CredentialServiceSvc._validate_oauth_server_url(value)
 
 
@@ -341,8 +340,6 @@ class PluginService:
         credential_requirements: list[dict] | None = None,
     ):
         """Create an org-owned plugin with nested components, atomically."""
-        from apps.credentials.repositories import CredentialServiceRepository
-
         name = validate_name(name, field="Plugin name")
         normalized_slug = normalize_slug(slug or name, field="Plugin slug")
         if self.plugins.get_org_by_slug(normalized_slug, org_id):
@@ -365,7 +362,6 @@ class PluginService:
         prepared_requirements = self._prepare_requirement_inputs(
             credential_requirements or [],
             org_id=org_id,
-            service_repo=CredentialServiceRepository,
         )
         self._validate_oauth_requirements(
             normalized_mcps,
@@ -411,8 +407,6 @@ class PluginService:
         Only org-owned plugins of the caller's org may be updated; global or
         foreign plugins raise NotFoundError (404).
         """
-        from apps.credentials.repositories import CredentialServiceRepository
-
         plugin = self.plugins.get_visible_by_id(plugin_id, org_id)
         if plugin is None or plugin.organization_id != org_id:
             raise NotFoundError("Plugin", str(plugin_id))
@@ -465,7 +459,6 @@ class PluginService:
             prepared_requirements = self._prepare_requirement_inputs(
                 credential_requirements,
                 org_id=org_id,
-                service_repo=CredentialServiceRepository,
             )
         effective_mcps = (
             normalized_mcps
@@ -679,7 +672,7 @@ class PluginService:
         enabled_ids = self.org_activations.enabled_plugin_ids(org_id)
         plugins = [p for p in plugins if p.id in enabled_ids]
         ws_enabled = self.workspace_activations.enabled_plugin_ids(workspace.id)
-        attached_credentials = self.plugins.list_workspace_credentials(workspace.id)
+        attached_credentials = CredentialSvc().list_workspace_credentials(workspace.id)
         result = []
         for plugin in plugins:
             missing = self._workspace_required_gaps(
@@ -852,8 +845,6 @@ class PluginService:
                     f"OAuth server requirement '{key}' must reference a "
                     "required MCP OAuth service"
                 )
-            from apps.credentials.services import CredentialServiceSvc
-
             endpoint = CredentialServiceSvc._validate_oauth_server_url(
                 server.get("url", "")
             )
@@ -889,7 +880,6 @@ class PluginService:
         raw_requirements: list[dict],
         *,
         org_id: uuid.UUID,
-        service_repo,
     ) -> list[dict]:
         """Validate dependencies and resolve only existing visible services."""
         prepared, seen_keys, seen_services = [], set(), set()
@@ -904,9 +894,7 @@ class PluginService:
                 service_id = uuid.UUID(str(service_id or ""))
             except ValueError:
                 raise ValueError("service_id must be a UUID") from None
-            service = service_repo.get_visible_by_id(service_id, org_id)
-            if service is None:
-                raise NotFoundError("CredentialService", str(service_id))
+            service = CredentialServiceSvc().get_service(service_id, org_id=org_id)
             if service.id in seen_services:
                 raise ConflictError("Duplicate credential service in requirements")
             seen_services.add(service.id)

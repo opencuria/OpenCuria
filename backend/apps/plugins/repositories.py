@@ -73,13 +73,6 @@ class PluginRepository:
         return Plugin.objects.filter(organization_id=org_id)
 
     @staticmethod
-    def list_workspace_credentials(workspace_id: uuid.UUID):
-        """Return workspace credential metadata with service/OAuth rows loaded."""
-        from apps.credentials.repositories import CredentialRepository
-
-        return CredentialRepository.list_for_workspace(workspace_id)
-
-    @staticmethod
     def create(
         *,
         name: str,
