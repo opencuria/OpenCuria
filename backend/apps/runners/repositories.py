@@ -9,7 +9,7 @@ from data access and makes services easy to test with mock repositories.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Any
 
@@ -20,6 +20,7 @@ from django.utils import timezone
 
 from apps.plugins.repositories import WorkspacePluginActivationRepository
 
+from .disk_usage import WorkspaceDiskUsage
 from .enums import (
     RunnerStatus,
     TaskStatus,
@@ -613,6 +614,36 @@ class WorkspaceRepository:
             ]
         )
         return workspace
+
+    @staticmethod
+    def update_disk_usage(
+        runner_id: uuid.UUID,
+        usages: Mapping[uuid.UUID, WorkspaceDiskUsage],
+    ) -> list[uuid.UUID]:
+        """Persist observed filesystem usage for workspaces of *runner_id*.
+
+        Reports for workspaces owned by other runners are ignored. Returns
+        the IDs of the updated workspaces.
+        """
+        workspaces = list(
+            Workspace.objects.filter(runner_id=runner_id, id__in=usages).only("id")
+        )
+        for workspace in workspaces:
+            usage = usages[workspace.id]
+            workspace.disk_used_bytes = usage.used_bytes
+            workspace.disk_free_bytes = usage.free_bytes
+            workspace.disk_total_bytes = usage.total_bytes
+            workspace.disk_usage_observed_at = usage.observed_at
+        Workspace.objects.bulk_update(
+            workspaces,
+            [
+                "disk_used_bytes",
+                "disk_free_bytes",
+                "disk_total_bytes",
+                "disk_usage_observed_at",
+            ],
+        )
+        return [workspace.id for workspace in workspaces]
 
     @staticmethod
     def update_desktop_geometry(

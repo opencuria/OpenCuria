@@ -4,6 +4,8 @@
  *
  * No bar: transparent, no border. On the left the chat name is shown large,
  * below it the workspace name (inline editable via click/pencil) plus status.
+ * The status opens a resource popover; a nearly full disk adds a quiet hint
+ * next to it.
  * Inside a subagent session the title becomes a breadcrumb (root › … › parent
  * › current) with a back-arrow to the direct parent. On the right: new chat,
  * background processes, `…` menu with start/stop, capture and delete, then
@@ -19,8 +21,10 @@ import { WorkspaceStatus } from '@/types'
 import type { HarnessSession } from '@/types/harness'
 import { formatSubagentType } from '@/lib/harnessSubtaskActivity'
 import { versionLabel } from '@/lib/imageVersions'
+import { USAGE_LEVEL_CLASSES, describeDiskUsage } from '@/lib/workspaceDisk'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -30,6 +34,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { SidebarTrigger } from '@/components/ui/sidebar'
 import SidePanelToggle from '@/components/chat/SidePanelToggle.vue'
+import WorkspaceStatusPanel from '@/components/workspaces/WorkspaceStatusPanel.vue'
 import {
   ArrowLeft,
   Camera,
@@ -37,6 +42,7 @@ import {
   ChevronRight,
   Container,
   Ellipsis,
+  HardDrive,
   Loader2,
   Pencil,
   Play,
@@ -73,6 +79,7 @@ const emit = defineEmits<{
   'toggle-processes': []
   'capture-image': []
   'recreate-workspace': []
+  'increase-disk': []
   'delete-workspace': []
   'open-session': [sessionId: string]
 }>()
@@ -138,6 +145,19 @@ const statusDotClass = computed(() => {
   if (props.hasActiveSession) return 'bg-amber-500'
   return 'bg-green-500'
 })
+
+const statusOpen = ref(false)
+/** Only a nearly full disk is surfaced inline; everything else lives in the popover. */
+const diskAlert = computed(() => {
+  if (!props.workspace.disk_usage) return null
+  const disk = describeDiskUsage(props.workspace.disk_usage)
+  return disk.level === 'ok' ? null : disk
+})
+
+function handleIncreaseDisk(): void {
+  statusOpen.value = false
+  emit('increase-disk')
+}
 
 const baseVersionLabel = computed(() => versionLabel(props.workspace.base_image))
 const statusText = computed(() => {
@@ -331,9 +351,38 @@ watch(
           </Button>
         </template>
         <template v-else>
-          <span class="size-1.5 shrink-0 rounded-full" :class="statusDotClass" aria-hidden="true" />
-          <Loader2 v-if="transitionLabel" :size="11" class="shrink-0 animate-spin" />
-          <span class="shrink-0 truncate">{{ statusText }}</span>
+          <Popover v-model:open="statusOpen">
+            <PopoverTrigger as-child>
+              <button
+                type="button"
+                class="flex shrink-0 items-center gap-1.5 rounded-sm transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 data-[state=open]:text-foreground"
+                title="Workspace status"
+                data-testid="workspace-chat-header-status-trigger"
+              >
+                <span class="size-1.5 shrink-0 rounded-full" :class="statusDotClass" aria-hidden="true" />
+                <Loader2 v-if="transitionLabel" :size="11" class="shrink-0 animate-spin" />
+                <span class="truncate">{{ statusText }}</span>
+                <template v-if="diskAlert">
+                  <span aria-hidden="true">·</span>
+                  <span
+                    class="flex items-center gap-1"
+                    :class="USAGE_LEVEL_CLASSES[diskAlert.level].text"
+                    data-testid="workspace-chat-header-disk-alert"
+                  >
+                    <HardDrive :size="11" aria-hidden="true" />
+                    Disk {{ diskAlert.percent }}% full
+                  </span>
+                </template>
+              </button>
+            </PopoverTrigger>
+            <PopoverContent align="start" class="w-80" @open-auto-focus.prevent>
+              <WorkspaceStatusPanel
+                :workspace="workspace"
+                :runner-offline="runnerOffline"
+                @increase-disk="handleIncreaseDisk"
+              />
+            </PopoverContent>
+          </Popover>
           <span class="shrink-0">·</span>
           <button
             type="button"

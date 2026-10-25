@@ -6,16 +6,18 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { AlertTriangle, Container, Loader2, WifiOff } from '@lucide/vue'
 import { formatRelativeTime } from '@/lib/utils'
+import { USAGE_LEVEL_CLASSES, describeDiskUsage, isDiskUsageStale } from '@/lib/workspaceDisk'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import WorkspaceActions from './WorkspaceActions.vue'
 import WorkspaceImageArtifactDialog from './WorkspaceImageArtifactDialog.vue'
 import WorkspaceRecreateDialog from './WorkspaceRecreateDialog.vue'
 import ImageVersionBadge from '@/components/images/ImageVersionBadge.vue'
+import UsageMeter from '@/components/common/UsageMeter.vue'
+import { storageBytes } from '@/composables/useRunnerStorage'
 
 const props = withDefaults(
   defineProps<{
     workspace: Workspace
-    storageBytes?: number | null
     showResourceWarning?: boolean
     clickable?: boolean
   }>(),
@@ -96,13 +98,26 @@ const imminentAutoStopLabel = computed(() => {
   return `Stops ${formatRelativeTime(props.workspace.auto_stop_at)}`
 })
 
-function formatStorage(bytes?: number | null): string {
-  if (bytes == null) return '—'
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
-  return `${(bytes / 1024 ** 3).toFixed(2)} GB`
-}
+const disk = computed(() => {
+  const usage = props.workspace.disk_usage
+  if (
+    !usage ||
+    props.workspace.status === WorkspaceStatus.DELETED ||
+    props.workspace.status === WorkspaceStatus.REMOVED
+  ) {
+    return null
+  }
+  const view = describeDiskUsage(usage)
+  const measured =
+    props.workspace.status !== WorkspaceStatus.RUNNING || isDiskUsageStale(usage)
+      ? ` · measured ${formatRelativeTime(usage.observed_at)}`
+      : ''
+  return {
+    ...view,
+    free: storageBytes(view.freeBytes),
+    title: `${storageBytes(view.usedBytes)} of ${storageBytes(view.capacityBytes)} used (${view.percent}%)${measured}`,
+  }
+})
 </script>
 
 <template>
@@ -164,11 +179,21 @@ function formatStorage(bytes?: number | null): string {
         </div>
       </div>
 
-      <!-- Footer: Storage + Actions -->
+      <!-- Storage: last observed free space inside the workspace -->
+      <div
+        v-if="disk"
+        class="mb-3 flex items-center gap-2.5 text-xs"
+        :title="disk.title"
+        data-testid="workspace-card-disk"
+      >
+        <UsageMeter :percent="disk.percent" :level="disk.level" label="Storage used" class="h-1 flex-1" />
+        <span class="shrink-0 tabular-nums" :class="USAGE_LEVEL_CLASSES[disk.level].text">{{ disk.free }} free</span>
+      </div>
+
+      <!-- Footer: Auto-stop + Actions -->
       <div class="flex items-center justify-between gap-3">
-        <div class="min-w-0 text-xs text-muted-foreground font-mono">
-          <div title="Overlay storage used on disk">{{ formatStorage(storageBytes) }}</div>
-          <div v-if="imminentAutoStopLabel" class="mt-1 text-amber-600 dark:text-amber-400">
+        <div class="min-w-0 text-xs">
+          <div v-if="imminentAutoStopLabel" class="text-amber-600 dark:text-amber-400">
             {{ imminentAutoStopLabel }}
           </div>
         </div>

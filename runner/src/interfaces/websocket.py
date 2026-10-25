@@ -42,6 +42,13 @@ logger = structlog.get_logger(__name__)
 # workspace file payloads.
 SOCKETIO_MAX_HTTP_BUFFER_SIZE = 200 * 1024 * 1024
 
+# Optional per-VM guest filesystem counters forwarded with system metrics.
+_GUEST_DISK_METRIC_KEYS = (
+    "guest_disk_used_bytes",
+    "guest_disk_free_bytes",
+    "guest_disk_total_bytes",
+)
+
 
 class _ReconnectingAsyncClient(socketio.AsyncClient):
     """Socket.IO client whose reconnect loop survives transport failures.
@@ -791,6 +798,10 @@ class WebSocketInterface(Interface):
                 "disk_used_bytes": int(metric.get("disk_used_bytes", 0)),
                 "disk_total_bytes": int(metric.get("disk_total_bytes", 0)),
             }
+            # Guest filesystem usage is only known while the guest answers.
+            for key in _GUEST_DISK_METRIC_KEYS:
+                if key in metric:
+                    vm_metrics[workspace_id][key] = int(metric[key])
 
         # Remove stale CPU samples for VMs that no longer exist.
         for workspace_id in list(self._vm_cpu_samples.keys()):

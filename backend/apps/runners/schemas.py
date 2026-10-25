@@ -115,6 +115,15 @@ class ImageVersionRefOut(Schema):
     update_available: bool = False
 
 
+class WorkspaceDiskUsageOut(Schema):
+    """Last observed filesystem usage inside a workspace."""
+
+    used_bytes: int
+    free_bytes: int
+    total_bytes: int
+    observed_at: datetime
+
+
 class WorkspaceOut(Schema):
     """Response schema for a workspace."""
 
@@ -128,6 +137,7 @@ class WorkspaceOut(Schema):
     qemu_vcpus: int | None = None
     qemu_memory_mb: int | None = None
     qemu_disk_size_gb: int | None = None
+    disk_usage: WorkspaceDiskUsageOut | None = None
     desktop_width: int = DEFAULT_DESKTOP_WIDTH
     desktop_height: int = DEFAULT_DESKTOP_HEIGHT
     created_by_id: int

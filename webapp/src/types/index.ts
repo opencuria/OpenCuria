@@ -198,6 +198,14 @@ export interface VmSystemMetrics {
 
 // --- Workspace ---
 
+/** Last observed filesystem usage inside a workspace (`/workspace`). */
+export interface WorkspaceDiskUsage {
+  used_bytes: number
+  free_bytes: number
+  total_bytes: number
+  observed_at: string
+}
+
 export interface Workspace {
   intervention_required?: boolean
   lifecycle_diagnostic?: string
@@ -209,6 +217,7 @@ export interface Workspace {
   qemu_vcpus: number | null
   qemu_memory_mb: number | null
   qemu_disk_size_gb: number | null
+  disk_usage?: WorkspaceDiskUsage | null
   desktop_width: number
   desktop_height: number
   created_by_id: number

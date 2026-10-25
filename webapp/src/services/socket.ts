@@ -32,6 +32,7 @@ import type {
   FilesDownloadChunkEvent,
   ProcessRemovedEvent,
   ProcessStatusChangedEvent,
+  WorkspaceDiskUsage,
 } from '@/types'
 import type {
   HarnessPartUpdatedEvent,
@@ -114,6 +115,11 @@ export interface WorkspaceStatusEvent {
   credentials_present?: boolean
 }
 
+export interface WorkspaceDiskUsageEvent {
+  workspace_id: string
+  disk_usage: WorkspaceDiskUsage
+}
+
 export interface WorkspaceOperationEvent {
   workspace_id: string
   active_operation: string | null
@@ -176,6 +182,7 @@ export interface RunnerOnlineEvent {
 type EventMap = {
   'workspace:status_changed': WorkspaceStatusEvent
   'workspace:operation_changed': WorkspaceOperationEvent
+  'workspace:disk_usage_changed': WorkspaceDiskUsageEvent
   'workspace:error': WorkspaceErrorEvent
   'harness.part_updated': HarnessPartUpdatedEvent
   'harness.permission_required': HarnessPermissionRequiredEvent

@@ -433,6 +433,15 @@ class QemuRuntimeUsageTests(unittest.IsolatedAsyncioTestCase):
             }
             domain.blockInfo.return_value = (128 * 1024**3, 987654321, 0)
             self.runtime._get_domain = MagicMock(return_value=domain)
+            self.runtime.exec_command_wait = AsyncMock(
+                return_value=(
+                    0,
+                    (
+                        "Filesystem 1024-blocks Used Available Capacity Mounted on\n"
+                        "/dev/vda1 20000 15000 4000 79% /\n"
+                    ),
+                )
+            )
 
             usage = await self.runtime.get_workspace_usage("workspace")
 
@@ -445,9 +454,47 @@ class QemuRuntimeUsageTests(unittest.IsolatedAsyncioTestCase):
                 "ram_total_bytes": 4 * 1024 * 1024,
                 "disk_used_bytes": expected_used,
                 "disk_total_bytes": 128 * 1024**3,
+                "guest_disk_total_bytes": 20000 * 1024,
+                "guest_disk_used_bytes": 15000 * 1024,
+                "guest_disk_free_bytes": 4000 * 1024,
             },
         )
         domain.blockInfo.assert_called_once_with("vda", 0)
+        self.runtime.exec_command_wait.assert_awaited_once_with(
+            "workspace", ["df", "-Pk", "/workspace"]
+        )
+
+    async def test_usage_omits_guest_disk_when_guest_probe_fails(self) -> None:
+        async def slow_df(*args, **kwargs):
+            await asyncio.sleep(1)
+            return 0, ""
+
+        failures = {
+            "ssh_error": AsyncMock(side_effect=RuntimeError("SSH reconnect failed")),
+            "non_zero_exit": AsyncMock(return_value=(1, "df: /workspace: missing")),
+            "unparseable": AsyncMock(return_value=(0, "no df output")),
+            "timeout": AsyncMock(side_effect=slow_df),
+        }
+        for name, exec_mock in failures.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmpdir:
+                disk_path = Path(tmpdir) / "workspace.qcow2"
+                disk_path.write_bytes(b"overlay")
+                self.runtime._disk_path = MagicMock(return_value=disk_path)
+                domain = MagicMock()
+                domain.state.return_value = (libvirt.VIR_DOMAIN_RUNNING, 0)
+                domain.info.return_value = (1, 2048, 1024, 2, 50)
+                domain.memoryStats.return_value = {"actual": 2048, "rss": 1024}
+                domain.blockInfo.return_value = (16 * 1024**3, 0, 0)
+                self.runtime._get_domain = MagicMock(return_value=domain)
+                self.runtime.exec_command_wait = exec_mock
+
+                with patch(
+                    "src.runtime.qemu_runtime._GUEST_DISK_USAGE_TIMEOUT", 0.01
+                ):
+                    usage = await self.runtime.get_workspace_usage("workspace")
+
+                self.assertEqual(usage["disk_total_bytes"], 16 * 1024**3)
+                self.assertNotIn("guest_disk_used_bytes", usage)
 
     async def test_usage_returns_host_disk_usage_for_stopped_domain(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -458,6 +505,7 @@ class QemuRuntimeUsageTests(unittest.IsolatedAsyncioTestCase):
             domain = MagicMock()
             domain.state.return_value = (libvirt.VIR_DOMAIN_SHUTOFF, 0)
             self.runtime._get_domain = MagicMock(return_value=domain)
+            self.runtime.exec_command_wait = AsyncMock()
 
             usage = await self.runtime.get_workspace_usage("workspace")
 
@@ -475,6 +523,7 @@ class QemuRuntimeUsageTests(unittest.IsolatedAsyncioTestCase):
         domain.info.assert_not_called()
         domain.memoryStats.assert_not_called()
         domain.blockInfo.assert_not_called()
+        self.runtime.exec_command_wait.assert_not_called()
 
     async def test_usage_uses_xml_disk_target_when_default_bus_is_unavailable(
         self,
@@ -497,6 +546,7 @@ class QemuRuntimeUsageTests(unittest.IsolatedAsyncioTestCase):
                 "<target dev='sda' bus='scsi'/></disk></devices></domain>"
             )
             self.runtime._get_domain = MagicMock(return_value=domain)
+            self.runtime.exec_command_wait = AsyncMock(return_value=(1, ""))
 
             usage = await self.runtime.get_workspace_usage("workspace")
 

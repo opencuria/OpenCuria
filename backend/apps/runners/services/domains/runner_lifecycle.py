@@ -16,6 +16,7 @@ from django.utils import timezone
 from common.exceptions import AuthenticationError
 from common.utils import generate_api_token, hash_token
 
+from ...disk_usage import parse_vm_disk_usage
 from ...exceptions import RunnerNotFoundError, WorkspaceNotFoundError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
@@ -112,9 +113,15 @@ class RunnerLifecycleMixin:
         return self.runners.update_heartbeat(runner)
 
     def record_runner_system_metrics(self, runner: Runner, metrics: dict) -> None:
-        """Persist one host metrics sample and prune samples older than 24 h."""
+        """Persist one host metrics sample and prune samples older than 24 h.
+
+        Guest filesystem usage contained in the VM metrics is stored on each
+        workspace and pushed to its subscribed frontend clients.
+        """
         reported_at = metrics.get("timestamp")
         vm_metrics = metrics.get("vm_metrics")
+        if not isinstance(vm_metrics, dict):
+            vm_metrics = None
         self.runner_metrics.create(
             runner=runner,
             timestamp=(
@@ -127,9 +134,29 @@ class RunnerLifecycleMixin:
             ram_total_bytes=int(metrics.get("ram_total_bytes", 0)),
             disk_used_bytes=int(metrics.get("disk_used_bytes", 0)),
             disk_total_bytes=int(metrics.get("disk_total_bytes", 0)),
-            vm_metrics=vm_metrics if isinstance(vm_metrics, dict) else None,
+            vm_metrics=vm_metrics,
         )
         self.runner_metrics.purge_old(runner_id=runner.id)
+        self._record_workspace_disk_usage(runner, vm_metrics)
+
+    def _record_workspace_disk_usage(
+        self, runner: Runner, vm_metrics: dict | None
+    ) -> None:
+        """Store reported guest filesystem usage and notify open workspaces."""
+        # Server time: the UI derives staleness from it, so runner clock skew
+        # must not make an observation look fresher or older than it is.
+        usages = parse_vm_disk_usage(vm_metrics, observed_at=timezone.now())
+        if not usages:
+            return
+        for workspace_id in self.workspaces.update_disk_usage(runner.id, usages):
+            self._forward_to_frontend(
+                "workspace:disk_usage_changed",
+                {
+                    "workspace_id": str(workspace_id),
+                    "disk_usage": usages[workspace_id].to_payload(),
+                },
+                str(workspace_id),
+            )
 
     def get_latest_runner_metrics(
         self, runner_id: uuid.UUID

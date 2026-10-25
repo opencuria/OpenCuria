@@ -140,6 +140,41 @@ class WebSocketHandlerRegistrationTests(unittest.IsolatedAsyncioTestCase):
         }.isdisjoint(interface._sio.handlers["/"])
 
 
+class WebSocketVmMetricsPayloadTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.interface = WebSocketInterface(
+            DummyService(), RunnerSettings(state_dir=tempfile.mkdtemp())
+        )
+
+    def test_forwards_guest_disk_counters_when_reported(self) -> None:
+        payload = self.interface._build_vm_metrics_payload(
+            {
+                "ws-1": {
+                    "cpu_time_ns": 0,
+                    "vcpu_count": 2,
+                    "disk_used_bytes": 3,
+                    "disk_total_bytes": 4,
+                    "guest_disk_used_bytes": 10,
+                    "guest_disk_free_bytes": 20,
+                    "guest_disk_total_bytes": 31,
+                }
+            }
+        )
+
+        assert payload["ws-1"]["guest_disk_used_bytes"] == 10
+        assert payload["ws-1"]["guest_disk_free_bytes"] == 20
+        assert payload["ws-1"]["guest_disk_total_bytes"] == 31
+        assert payload["ws-1"]["disk_used_bytes"] == 3
+
+    def test_omits_guest_disk_counters_when_guest_did_not_answer(self) -> None:
+        payload = self.interface._build_vm_metrics_payload(
+            {"ws-1": {"disk_used_bytes": 3, "disk_total_bytes": 0}}
+        )
+
+        assert "guest_disk_used_bytes" not in payload["ws-1"]
+        assert payload["ws-1"]["disk_used_bytes"] == 3
+
+
 class WebSocketReconnectTests(unittest.IsolatedAsyncioTestCase):
     async def test_reconnect_loop_survives_handshake_timeouts(self) -> None:
         """A hanging backend must not kill the reconnect loop (and the runner)."""

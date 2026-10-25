@@ -289,6 +289,12 @@ function setupSocketListeners(): void {
   )
 
   cleanupFns.push(
+    onEvent('workspace:disk_usage_changed', (data) => {
+      workspaceStore.updateWorkspaceDiskUsage(data.workspace_id, data.disk_usage)
+    }),
+  )
+
+  cleanupFns.push(
     onEvent('runner:offline', (data) => {
       workspaceStore.updateWorkspaceRunnerOnline(data.workspace_id, false)
     }),

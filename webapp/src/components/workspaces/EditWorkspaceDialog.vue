@@ -32,6 +32,8 @@ const props = withDefaults(
     disabled?: boolean
     resumeDraftId?: string
     hideTrigger?: boolean
+    /** Open with the storage size focused, e.g. from a full-disk hint. */
+    focusDisk?: boolean
   }>(),
   { hideTrigger: false },
 )
@@ -63,6 +65,25 @@ const desktopHeight = ref(DEFAULT_DESKTOP_HEIGHT)
 const submitting = ref(false)
 let preserveDraftOnClose = false
 let resetTimer: ReturnType<typeof setTimeout> | undefined
+const diskSizeInput = ref<HTMLInputElement | null>(null)
+/** Focus the storage size and keep it in view while plugins and credentials load in. */
+function handleOpenAutoFocus(event: Event): void {
+  const input = diskSizeInput.value
+  if (!props.focusDisk || !input) return
+  event.preventDefault()
+  input.focus({ preventScroll: true })
+  input.select()
+  const reveal = () => input.scrollIntoView({ block: 'center' })
+  reveal()
+  const form = input.form
+  if (!form || typeof ResizeObserver === 'undefined') return
+  const observer = new ResizeObserver(reveal)
+  const settle = () => observer.disconnect()
+  observer.observe(form)
+  form.addEventListener('wheel', settle, { once: true, passive: true })
+  form.addEventListener('touchstart', settle, { once: true, passive: true })
+  setTimeout(settle, 2000)
+}
 const btnSize = computed(() => (props.size === 'sm' ? ('icon-sm' as const) : ('icon' as const)))
 const qemuDefaults = computed(() => {
   const runner = runnerStore.runnerById(props.workspace.runner_id)
@@ -301,7 +322,7 @@ const canSave = computed(
       </Button>
     </DialogTrigger>
 
-    <DialogContent class="sm:max-w-xl">
+    <DialogContent class="sm:max-w-xl" @open-auto-focus="handleOpenAutoFocus">
       <DialogHeader>
         <DialogTitle>Edit Workspace</DialogTitle>
         <DialogDescription
@@ -424,6 +445,7 @@ const canSave = computed(
                 step="1"
               />
               <input
+                ref="diskSizeInput"
                 v-model.number="qemuDiskSizeGb"
                 :disabled="submitting || props.disabled"
                 type="number"

@@ -55,31 +55,36 @@ function makeWorkspace(id: string, overrides: Partial<Workspace> = {}): Workspac
   }
 }
 
-function metrics(usedBytes = 2.5 * 1024 ** 3): RunnerSystemMetrics {
+const GIB = 1024 ** 3
+
+function metrics(cpuPercent = 85): RunnerSystemMetrics {
   return {
     runner_id: 'runner-1',
     timestamp: '2026-10-16T12:00:00Z',
     cpu_usage_percent: 10,
-    ram_used_bytes: 1024 ** 3,
-    ram_total_bytes: 8 * 1024 ** 3,
-    disk_used_bytes: 900 * 1024 ** 3,
-    disk_total_bytes: 1024 ** 4,
+    ram_used_bytes: GIB,
+    ram_total_bytes: 8 * GIB,
+    disk_used_bytes: 900 * GIB,
+    disk_total_bytes: 1024 * GIB,
     vm_metrics: {
       running: {
-        cpu_usage_percent: 85,
-        ram_used_bytes: 1024 ** 3,
-        ram_total_bytes: 4 * 1024 ** 3,
-        disk_used_bytes: usedBytes,
-        disk_total_bytes: 128 * 1024 ** 3,
-      },
-      stopped: {
-        cpu_usage_percent: 0,
-        ram_used_bytes: 0,
-        ram_total_bytes: 0,
-        disk_used_bytes: 1.25 * 1024 ** 3,
-        disk_total_bytes: 0,
+        cpu_usage_percent: cpuPercent,
+        ram_used_bytes: GIB,
+        ram_total_bytes: 4 * GIB,
+        // Host overlay allocation near capacity must not count as a full disk.
+        disk_used_bytes: 127 * GIB,
+        disk_total_bytes: 128 * GIB,
       },
     },
+  }
+}
+
+function diskUsage(usedGib: number, freeGib: number, observedAt = new Date().toISOString()) {
+  return {
+    used_bytes: usedGib * GIB,
+    free_bytes: freeGib * GIB,
+    total_bytes: (usedGib + freeGib) * GIB,
+    observed_at: observedAt,
   }
 }
 
@@ -93,14 +98,17 @@ function mountView() {
   return wrapper
 }
 
-describe('WorkspacesView overlay storage', () => {
+describe('WorkspacesView workspace storage', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
     workspaceStore.workspaces = [
-      makeWorkspace('running'),
-      makeWorkspace('stopped', { status: WorkspaceStatus.STOPPED }),
-      makeWorkspace('unknown', { runner_id: 'runner-2' }),
+      makeWorkspace('running', { disk_usage: diskUsage(4, 12) }),
+      makeWorkspace('stopped', {
+        status: WorkspaceStatus.STOPPED,
+        disk_usage: diskUsage(19, 1, new Date(Date.now() - 3 * 3600_000).toISOString()),
+      }),
+      makeWorkspace('unknown', { runner_id: 'runner-2', disk_usage: null }),
     ]
     latest.mockReset().mockImplementation(async (runnerId) => {
       if (runnerId === 'runner-2') throw new Error('No metrics available')
@@ -114,45 +122,39 @@ describe('WorkspacesView overlay storage', () => {
     vi.useRealTimers()
   })
 
-  it('renders each overlay allocation, not virtual capacity or host disk usage', async () => {
+  it('shows free space inside each workspace and hides unmeasured storage', async () => {
     const wrapper = mountView()
     await flushPromises()
     const cards = wrapper.findAllComponents(WorkspaceCard)
-    expect(cards[0]!.get('[title="Overlay storage used on disk"]').text()).toBe('2.50 GB')
-    expect(cards[1]!.get('[title="Overlay storage used on disk"]').text()).toBe('1.25 GB')
-    expect(cards[2]!.get('[title="Overlay storage used on disk"]').text()).toBe('—')
-    expect(cards[0]!.text()).toContain('High usage')
-    expect(cards[1]!.text()).not.toContain('High usage')
-    expect(latest).toHaveBeenCalledWith('runner-1')
-    expect(latest).toHaveBeenCalledWith('runner-2')
+    const running = cards[0]!.get('[data-testid="workspace-card-disk"]')
+    expect(running.text()).toBe('12.0 GiB free')
+    expect(running.attributes('title')).toBe('4.0 GiB of 16.0 GiB used (25%)')
+    expect(running.get('[role="progressbar"]').attributes('aria-valuenow')).toBe('25')
+    expect(cards[2]!.find('[data-testid="workspace-card-disk"]').exists()).toBe(false)
   })
 
-  it('keeps measured zero distinct from unavailable storage', async () => {
-    latest.mockResolvedValue(metrics(0))
+  it("highlights an almost full disk and dates a stopped workspace's last measurement", async () => {
     const wrapper = mountView()
     await flushPromises()
-    const cards = wrapper.findAllComponents(WorkspaceCard)
-    expect(cards[0]!.get('[title="Overlay storage used on disk"]').text()).toBe('0 B')
-    expect(cards[2]!.get('[title="Overlay storage used on disk"]').text()).toBe('—')
+    const stopped = wrapper
+      .findAllComponents(WorkspaceCard)[1]!
+      .get('[data-testid="workspace-card-disk"]')
+    expect(stopped.get('span').classes()).toContain('text-amber-600')
+    expect(stopped.attributes('title')).toBe('19.0 GiB of 20.0 GiB used (95%) · measured 3h ago')
   })
 
-  it('updates the displayed storage on the next metrics poll', async () => {
+  it('flags high CPU or memory but not a full host overlay as high usage', async () => {
     const wrapper = mountView()
     await flushPromises()
-    latest.mockResolvedValue(metrics(3 * 1024 ** 3))
-    await vi.advanceTimersByTimeAsync(10_000)
-    expect(wrapper.findAllComponents(WorkspaceCard)[0]!.text()).toContain('3.00 GB')
-  })
+    expect(wrapper.findAllComponents(WorkspaceCard)[0]!.text()).toContain('High usage')
 
-  it('shows unknown rather than fabricated usage when metrics fail or are forbidden', async () => {
-    const wrapper = mountView()
-    await flushPromises()
-    latest.mockRejectedValue(new Error('Forbidden'))
+    latest.mockResolvedValue(metrics(5))
     await vi.advanceTimersByTimeAsync(10_000)
     for (const card of wrapper.findAllComponents(WorkspaceCard)) {
-      expect(card.get('[title="Overlay storage used on disk"]').text()).toBe('—')
       expect(card.text()).not.toContain('High usage')
     }
+    expect(latest).toHaveBeenCalledWith('runner-1')
+    expect(latest).toHaveBeenCalledWith('runner-2')
   })
 
   it('still opens the selected workspace', async () => {

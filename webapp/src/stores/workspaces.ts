@@ -11,6 +11,7 @@ import { ref, computed } from 'vue'
 import type {
   Workspace,
   WorkspaceDetail,
+  WorkspaceDiskUsage,
   WorkspaceCreateIn,
   WorkspaceUpdateIn,
   ImageArtifactCreateIn,
@@ -783,6 +784,16 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     }
   }
 
+  /** Apply a pushed filesystem usage observation to a single workspace. */
+  function updateWorkspaceDiskUsage(workspaceId: string, diskUsage: WorkspaceDiskUsage): void {
+    const ws = workspaces.value.find((w) => w.id === workspaceId)
+    if (ws) ws.disk_usage = diskUsage
+
+    if (activeWorkspace.value?.id === workspaceId) {
+      activeWorkspace.value.disk_usage = diskUsage
+    }
+  }
+
   function handleWorkspaceError(workspaceId: string, errorMsg: string): void {
     const notifications = useNotificationStore()
     const workspaceName = getWorkspaceName(workspaceId)
@@ -833,6 +844,7 @@ export const useWorkspaceStore = defineStore('workspaces', () => {
     updateWorkspaceStatus,
     updateWorkspaceOperation,
     updateWorkspaceRunnerOnline,
+    updateWorkspaceDiskUsage,
     handleWorkspaceError,
   }
 })

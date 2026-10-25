@@ -262,7 +262,38 @@ class TestListWorkspaces:
         assert response.json()["last_activity_at"]
         assert response.json()["desktop_width"] == 1920
         assert response.json()["desktop_height"] == 1080
+        assert response.json()["disk_usage"] is None
         assert "sessions" not in response.json()
+
+    def test_list_and_detail_report_last_observed_disk_usage(
+        self, client, auth_context
+    ):
+        """Disk usage is the last observation, also for stopped workspaces."""
+        runner = Runner.objects.create(
+            api_token_hash=uuid.uuid4().hex,
+            organization=auth_context["organization"],
+        )
+        observed_at = timezone.now() - timedelta(hours=2)
+        workspace = Workspace.objects.create(
+            runner=runner,
+            status=WorkspaceStatus.STOPPED,
+            created_by=auth_context["user"],
+            disk_used_bytes=18 * 1024**3,
+            disk_free_bytes=1024**3,
+            disk_total_bytes=20 * 1024**3,
+            disk_usage_observed_at=observed_at,
+        )
+
+        listed = client.get("/api/v1/workspaces/").json()[0]["disk_usage"]
+        detail = client.get(f"/api/v1/workspaces/{workspace.id}/").json()
+
+        assert listed == detail["disk_usage"]
+        assert detail["disk_usage"]["used_bytes"] == 18 * 1024**3
+        assert detail["disk_usage"]["free_bytes"] == 1024**3
+        assert detail["disk_usage"]["total_bytes"] == 20 * 1024**3
+        assert detail["disk_usage"]["observed_at"].startswith(
+            observed_at.isoformat()[:19]
+        )
 
 
 @pytest.mark.django_db

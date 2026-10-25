@@ -24,7 +24,6 @@ function openWorkspace(workspace: Workspace): void {
 const searchQuery = ref('')
 const showDeleted = ref(false)
 const warningWorkspaceIds = ref<Record<string, boolean>>({})
-const storageBytesByWorkspaceId = ref<Record<string, number | null>>({})
 
 const VM_WARNING_THRESHOLD_PERCENT = 80
 
@@ -33,17 +32,17 @@ function toPercent(used: number, total: number): number {
   return (used / total) * 100
 }
 
+// Disk fullness is shown by the card's own storage meter (guest filesystem);
+// VM disk metrics only describe the host-side overlay allocation.
 function isVmMetricWarning(metric: VmSystemMetrics): boolean {
   return (
     metric.cpu_usage_percent >= VM_WARNING_THRESHOLD_PERCENT ||
-    toPercent(metric.ram_used_bytes, metric.ram_total_bytes) >= VM_WARNING_THRESHOLD_PERCENT ||
-    toPercent(metric.disk_used_bytes, metric.disk_total_bytes) >= VM_WARNING_THRESHOLD_PERCENT
+    toPercent(metric.ram_used_bytes, metric.ram_total_bytes) >= VM_WARNING_THRESHOLD_PERCENT
   )
 }
 
 async function fetchWorkspaceMetrics(): Promise<void> {
   const warnings: Record<string, boolean> = {}
-  const storageByWorkspace: Record<string, number | null> = {}
   const metricsPerRunner = await Promise.all(
     runnerStore.runners.map(async (runner) => {
       try {
@@ -58,12 +57,10 @@ async function fetchWorkspaceMetrics(): Promise<void> {
     if (!metrics?.vm_metrics) continue
     for (const [workspaceId, vmMetric] of Object.entries(metrics.vm_metrics)) {
       if (isVmMetricWarning(vmMetric)) warnings[workspaceId] = true
-      storageByWorkspace[workspaceId] = vmMetric.disk_used_bytes
     }
   }
 
   warningWorkspaceIds.value = warnings
-  storageBytesByWorkspaceId.value = storageByWorkspace
 }
 
 // ChatSidebar owns workspace-list loading/polling across authenticated routes.
@@ -182,7 +179,6 @@ onMounted(async () => {
     <WorkspaceList
       v-else
       :workspaces="filteredWorkspaces"
-      :storage-bytes-by-workspace-id="storageBytesByWorkspaceId"
       :warning-workspace-ids="warningWorkspaceIds"
       @select="openWorkspace"
     />

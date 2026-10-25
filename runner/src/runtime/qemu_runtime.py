@@ -56,6 +56,31 @@ _SSH_KEEPALIVE_INTERVAL = 30
 _SSH_KEEPALIVE_COUNT_MAX = 5
 _SSH_CLOSE_TIMEOUT = 2.0
 
+# Guest filesystem whose usage is reported with the VM metrics.
+_GUEST_DISK_PATH = "/workspace"
+_GUEST_DISK_USAGE_TIMEOUT = 5.0
+
+
+def _parse_df_usage(output: str) -> dict[str, int]:
+    """Parse ``df -Pk`` output into guest disk byte counters.
+
+    Returns an empty dict when no data line can be parsed.
+    """
+    for line in reversed(output.splitlines()):
+        fields = line.split()
+        if len(fields) < 6:
+            continue
+        try:
+            total_kib, used_kib, free_kib = (int(value) for value in fields[1:4])
+        except ValueError:
+            continue
+        return {
+            "guest_disk_total_bytes": total_kib * 1024,
+            "guest_disk_used_bytes": used_kib * 1024,
+            "guest_disk_free_bytes": free_kib * 1024,
+        }
+    return {}
+
 
 @dataclass
 class _SSHState:
@@ -1791,14 +1816,16 @@ class QemuRuntime(RuntimeBackend):
         return result
 
     async def get_workspace_usage(self, instance_id: str) -> dict[str, int] | None:
-        """Return host-observed VM usage stats for a workspace.
+        """Return VM usage stats for a workspace.
 
         Values are returned in bytes and nanoseconds so callers can derive
-        percentages over time without executing commands inside the VM. Disk
-        usage is the allocated host space used by the QCOW2 overlay.
+        percentages over time. ``disk_*`` is the allocated host space used by
+        the QCOW2 overlay. Running VMs additionally report the guest
+        filesystem usage of ``/workspace`` as ``guest_disk_*`` when the guest
+        answers in time.
         """
 
-        def _collect() -> dict[str, int] | None:
+        def _collect() -> tuple[dict[str, int], bool]:
             disk_stat = self._disk_path(instance_id).stat()
             disk_used_bytes = disk_stat.st_blocks * 512
 
@@ -1812,7 +1839,7 @@ class QemuRuntime(RuntimeBackend):
                     "ram_total_bytes": 0,
                     "disk_used_bytes": disk_used_bytes,
                     "disk_total_bytes": 0,
-                }
+                }, False
 
             # Domain info: (state, maxMemKiB, memoryKiB, nrVirtCpu, cpuTimeNs)
             info = domain.info()
@@ -1847,12 +1874,32 @@ class QemuRuntime(RuntimeBackend):
                 "ram_total_bytes": max(total_memory_kib, 0) * 1024,
                 "disk_used_bytes": disk_used_bytes,
                 "disk_total_bytes": max(int(disk_capacity_bytes), 0),
-            }
+            }, True
 
         try:
-            return await asyncio.to_thread(_collect)
+            usage, running = await asyncio.to_thread(_collect)
         except (libvirt.libvirtError, OSError):
             return None
+        if running:
+            usage.update(await self._guest_disk_usage(instance_id))
+        return usage
+
+    async def _guest_disk_usage(self, instance_id: str) -> dict[str, int]:
+        """Read the guest ``/workspace`` filesystem usage via ``df``.
+
+        Best effort: a booting, unreachable or slow guest yields no values
+        instead of delaying the metrics report.
+        """
+        try:
+            exit_code, output = await asyncio.wait_for(
+                self.exec_command_wait(instance_id, ["df", "-Pk", _GUEST_DISK_PATH]),
+                timeout=_GUEST_DISK_USAGE_TIMEOUT,
+            )
+        except (RuntimeError, OSError, asyncssh.Error, asyncio.TimeoutError):
+            return {}
+        if exit_code != 0:
+            return {}
+        return _parse_df_usage(output)
 
     async def put_archive(self, instance_id: str, path: str, data: bytes) -> None:
         """Upload a tar archive to the VM and extract it at the given path."""

@@ -11,18 +11,21 @@ import { formatRelativeTime } from '@/lib/utils'
 import { isComposerTransitionPending } from '@/lib/composerTransition'
 import HarnessChatPanel from '@/components/chat/HarnessChatPanel.vue'
 import WorkspaceChatHeader from '@/components/chat/WorkspaceChatHeader.vue'
+import EditWorkspaceDialog from '@/components/workspaces/EditWorkspaceDialog.vue'
 import WorkspaceImageArtifactDialog from '@/components/workspaces/WorkspaceImageArtifactDialog.vue'
 import WorkspaceRecreateDialog from '@/components/workspaces/WorkspaceRecreateDialog.vue'
 import WorkspaceToolsSplit from '@/components/workspaces/WorkspaceToolsSplit.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import { Button } from '@/components/ui/button'
 import { useSidePanelStore } from '@/stores/sidePanel'
+import { useRunnerStore } from '@/stores/runners'
 
 const route = useRoute()
 const router = useRouter()
 const workspaceStore = useWorkspaceStore()
 const processesStore = useProcessesStore()
 const sidePanelStore = useSidePanelStore()
+const runnerStore = useRunnerStore()
 
 const workspaceId = computed(() => route.params.id as string)
 const workspace = computed(() => workspaceStore.activeWorkspace)
@@ -31,6 +34,7 @@ const renamingWorkspace = ref(false)
 const processesOpen = ref(false)
 const imageArtifactDialogOpen = ref(false)
 const recreateDialogOpen = ref(false)
+const editDialogOpen = ref(false)
 /** Header entrance animation only when arriving from the home composer send. */
 const animateEntrance = ref(isComposerTransitionPending())
 
@@ -65,6 +69,12 @@ const activeChatTitle = computed(() => harnessStore.activeSession?.title?.trim()
 
 function handleNewHarnessChat(): void {
   harnessStore.setActiveSession(null)
+}
+
+async function handleIncreaseDisk(): Promise<void> {
+  // Resource limits come from the runner; load them before the form renders.
+  if (!runnerStore.runners.length) await runnerStore.fetchRunners()
+  editDialogOpen.value = true
 }
 
 function handleDeleteWorkspace(): void {
@@ -266,6 +276,7 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
           @toggle-processes="toggleProcessesPanel"
           @capture-image="imageArtifactDialogOpen = true"
           @recreate-workspace="recreateDialogOpen = true"
+          @increase-disk="handleIncreaseDisk"
           @delete-workspace="handleDeleteWorkspace"
         />
       </template>
@@ -304,5 +315,13 @@ async function handleSaveWorkspaceName(name: string): Promise<void> {
     :workspace="workspace"
     :open="recreateDialogOpen"
     @update:open="recreateDialogOpen = $event"
+  />
+  <!-- Stays mounted: the closed dialog keeps its form in sync with the workspace. -->
+  <EditWorkspaceDialog
+    v-if="workspace"
+    v-model:open="editDialogOpen"
+    :workspace="workspace"
+    hide-trigger
+    focus-disk
   />
 </template>

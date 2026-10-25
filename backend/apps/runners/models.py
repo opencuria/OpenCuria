@@ -206,6 +206,26 @@ class Workspace(models.Model):
         default=timezone.now,
         help_text="Timestamp of the most recent user- or session-driven activity.",
     )
+    disk_used_bytes = models.BigIntegerField(
+        null=True,
+        blank=True,
+        help_text="Last observed bytes used on the workspace filesystem.",
+    )
+    disk_free_bytes = models.BigIntegerField(
+        null=True,
+        blank=True,
+        help_text="Last observed writable bytes on the workspace filesystem.",
+    )
+    disk_total_bytes = models.BigIntegerField(
+        null=True,
+        blank=True,
+        help_text="Last observed size of the workspace filesystem.",
+    )
+    disk_usage_observed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the workspace filesystem usage was last observed.",
+    )
     delete_requested_at = models.DateTimeField(null=True, blank=True)
     delete_started_at = models.DateTimeField(null=True, blank=True)
     delete_confirmed_at = models.DateTimeField(null=True, blank=True)

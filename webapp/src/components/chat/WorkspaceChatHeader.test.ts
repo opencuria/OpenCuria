@@ -328,3 +328,63 @@ it('disables actions including an already-open rename during capture', async () 
   expect(wrapper.get('[data-testid="workspace-chat-header-name"]').attributes('disabled')).toBeDefined()
   wrapper.unmount()
 })
+
+describe('WorkspaceChatHeader workspace status', () => {
+  const GIB = 1024 ** 3
+  const popoverStubs = {
+    Popover: { template: '<div><slot /></div>' },
+    PopoverTrigger: { template: '<div><slot /></div>' },
+    PopoverContent: { template: '<div data-testid="status-popover"><slot /></div>' },
+    WorkspaceStatusPanel: {
+      template: '<button data-testid="panel-increase-disk" @click="$emit(\'increase-disk\')" />',
+    },
+  }
+
+  function mountWithDisk(usedGib: number, freeGib: number) {
+    return mount(WorkspaceChatHeader, {
+      props: baseProps({
+        workspace: {
+          ...makeWorkspace(),
+          disk_usage: {
+            used_bytes: usedGib * GIB,
+            free_bytes: freeGib * GIB,
+            total_bytes: (usedGib + freeGib) * GIB,
+            observed_at: '2026-10-25T12:00:00Z',
+          },
+        },
+      }),
+      global: { stubs: { ...sidebarStubs, ...dropdownStubs, ...popoverStubs } },
+    })
+  }
+
+  it('keeps the status line quiet while the disk has room', () => {
+    const wrapper = mountWithDisk(8, 12)
+    expect(wrapper.find('[data-testid="workspace-chat-header-disk-alert"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="workspace-chat-header-status-trigger"]').text()).toBe(
+      'running',
+    )
+  })
+
+  it('surfaces an almost full disk next to the status, escalating when full', async () => {
+    const wrapper = mountWithDisk(18.6, 1.4)
+    const alert = wrapper.get('[data-testid="workspace-chat-header-disk-alert"]')
+    expect(alert.text()).toBe('Disk 93% full')
+    expect(alert.classes()).toContain('text-amber-600')
+
+    await wrapper.setProps({
+      workspace: {
+        ...makeWorkspace(),
+        disk_usage: { used_bytes: 99 * GIB, free_bytes: GIB, total_bytes: 100 * GIB, observed_at: '' },
+      },
+    })
+    expect(wrapper.get('[data-testid="workspace-chat-header-disk-alert"]').classes()).toContain(
+      'text-destructive',
+    )
+  })
+
+  it('asks for more disk when the user requests it from the status panel', async () => {
+    const wrapper = mountWithDisk(19, 1)
+    await wrapper.get('[data-testid="panel-increase-disk"]').trigger('click')
+    expect(wrapper.emitted('increase-disk')).toHaveLength(1)
+  })
+})

@@ -5,7 +5,6 @@ import { Container } from '@lucide/vue'
 
 defineProps<{
   workspaces: Workspace[]
-  storageBytesByWorkspaceId?: Record<string, number | null>
   warningWorkspaceIds?: Record<string, boolean>
 }>()
 
@@ -19,7 +18,6 @@ const emit = defineEmits<{
     <div v-for="workspace in workspaces" :key="workspace.id" class="flex flex-col gap-2">
       <WorkspaceCard
         :workspace="workspace"
-        :storage-bytes="storageBytesByWorkspaceId?.[workspace.id]"
         :show-resource-warning="warningWorkspaceIds?.[workspace.id]"
         @click="emit('select', workspace)"
       />

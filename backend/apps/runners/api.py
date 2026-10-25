@@ -15,6 +15,7 @@ Split into separate routers to avoid URL path conflicts:
 from __future__ import annotations
 
 import uuid
+from dataclasses import asdict
 from datetime import timedelta
 
 from asgiref.sync import sync_to_async
@@ -33,6 +34,7 @@ from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.request_context import get_organization_id
 from common.schemas import ErrorOut
 
+from .disk_usage import WorkspaceDiskUsage
 from .enums import WorkspaceStatus
 from .exceptions import (
     AdminRoleRequiredError,
@@ -84,6 +86,7 @@ from .schemas import (
     TerminalStartOut,
     WorkspaceCreateIn,
     WorkspaceCreateOut,
+    WorkspaceDiskUsageOut,
     WorkspaceFromImageArtifactIn,
     WorkspaceFromImageArtifactOut,
     WorkspaceOut,
@@ -167,6 +170,8 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
             minutes=auto_stop_timeout_minutes
         )
 
+    disk_usage = WorkspaceDiskUsage.from_workspace(workspace)
+
     return WorkspaceOut(
         id=workspace.id,
         runner_id=workspace.runner_id,
@@ -178,6 +183,9 @@ def _workspace_to_out(workspace) -> WorkspaceOut:
         qemu_vcpus=workspace.qemu_vcpus,
         qemu_memory_mb=workspace.qemu_memory_mb,
         qemu_disk_size_gb=workspace.qemu_disk_size_gb,
+        disk_usage=(
+            WorkspaceDiskUsageOut(**asdict(disk_usage)) if disk_usage else None
+        ),
         desktop_width=workspace.desktop_width,
         desktop_height=workspace.desktop_height,
         created_by_id=workspace.created_by_id,

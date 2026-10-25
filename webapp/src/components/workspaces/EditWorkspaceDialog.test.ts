@@ -100,10 +100,15 @@ function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     ...overrides,
   }
 }
-function mountDialog(workspace = makeWorkspace(), resumeDraftId?: string) {
+function mountDialog(
+  workspace = makeWorkspace(),
+  resumeDraftId?: string,
+  options: { focusDisk?: boolean } = {},
+) {
   setActivePinia(createPinia())
   const wrapper = mount(EditWorkspaceDialog, {
-    props: { workspace, resumeDraftId },
+    props: { workspace, resumeDraftId, ...options },
+    attachTo: options.focusDisk ? document.body : undefined,
     global: {
       stubs: {
         WorkspacePluginCredentialSelection: selectionStub,
@@ -121,6 +126,7 @@ function mountDialog(workspace = makeWorkspace(), resumeDraftId?: string) {
   const vm = wrapper.vm as unknown as {
     handleOpen: () => Promise<void>
     handleSubmit: () => Promise<void>
+    handleOpenAutoFocus: (event: Event) => void
     name: string
     selectedPluginIds: string[]
     selectedCredentialIds: string[]
@@ -212,6 +218,31 @@ describe('EditWorkspaceDialog single-patch workspace configuration', () => {
     await vm.handleSubmit()
     expect(mocks.updateWorkspace).not.toHaveBeenCalled()
     expect(wrapper.find('[data-testid="edit-workspace-save"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('focuses the storage size when opened to increase the disk', async () => {
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+    const { wrapper, vm } = mountDialog(makeWorkspace({ qemu_disk_size_gb: 20 }), undefined, {
+      focusDisk: true,
+    })
+    const event = new Event('focus.autoFocusOnMount', { cancelable: true })
+
+    vm.handleOpenAutoFocus(event)
+
+    const input = document.activeElement as HTMLInputElement
+    expect(event.defaultPrevented).toBe(true)
+    expect(input.type).toBe('number')
+    expect(input.value).toBe('20')
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' })
+    wrapper.unmount()
+  })
+
+  it('keeps the default focus when not opened for the disk', () => {
+    const { vm } = mountDialog()
+    const event = new Event('focus.autoFocusOnMount', { cancelable: true })
+    vm.handleOpenAutoFocus(event)
+    expect(event.defaultPrevented).toBe(false)
   })
 
   it('keeps the edit dialog open when the single backend update fails', async () => {

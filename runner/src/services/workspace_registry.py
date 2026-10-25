@@ -304,20 +304,24 @@ class WorkspaceRegistry:
         if not callable(get_workspace_usage):
             return {}
 
-        metrics: dict[str, dict[str, Any]] = {}
-        for workspace_id, info in list(self._cache.items()):
+        async def collect(workspace_id, info) -> dict[str, Any] | None:
             try:
-                usage = await get_workspace_usage(info.instance_id)
+                return await get_workspace_usage(info.instance_id)
             except Exception:
                 logger.exception(
                     "vm_metrics_collect_failed",
                     workspace_id=str(workspace_id),
                 )
-                continue
+                return None
 
-            if usage is None:
-                continue
-
-            metrics[str(workspace_id)] = usage
-
-        return metrics
+        # Guest probes are bounded per VM; collect concurrently so one slow
+        # guest does not delay the report of all others.
+        entries = list(self._cache.items())
+        results = await asyncio.gather(
+            *(collect(workspace_id, info) for workspace_id, info in entries)
+        )
+        return {
+            str(workspace_id): usage
+            for (workspace_id, _), usage in zip(entries, results, strict=True)
+            if usage is not None
+        }
