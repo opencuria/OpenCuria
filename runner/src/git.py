@@ -338,6 +338,21 @@ def is_workspace_path(path: str) -> bool:
     return normalized == "/workspace" or normalized.startswith("/workspace/")
 
 
+def merge_state_probe_args(git_dir: str) -> list[str]:
+    """Check operation markers in one exec after metadata containment checks.
+
+    The script is fixed; the verified directory travels as a positional argument,
+    so spaces, quotes and shell metacharacters in repository paths stay literal.
+    """
+    script = (
+        'if test -e "$1/MERGE_HEAD"; then printf "merging\\n"; fi\n'
+        'if test -e "$1/rebase-merge" || test -e "$1/rebase-apply"; '
+        'then printf "rebasing\\n"; fi\n'
+        'if test -e "$1/CHERRY_PICK_HEAD"; then printf "cherry_picking\\n"; fi'
+    )
+    return ["sh", "-c", script, "opencuria-git-state", git_dir]
+
+
 def normalize_relative_path(path: str) -> str:
     """Validate a repo-relative file path (no absolute, no ``..`` escape)."""
     if not isinstance(path, str) or not path.strip():
@@ -1533,6 +1548,7 @@ __all__ = [
     "github_askpass_context",
     "is_network_operation",
     "is_workspace_path",
+    "merge_state_probe_args",
     "normalize_relative_path",
     "normalize_repo_arg",
     "parse_single_path_output",

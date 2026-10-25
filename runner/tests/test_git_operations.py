@@ -236,6 +236,12 @@ class FakeGitRuntime:
             else:
                 host = os.path.join(cwd, path)
             return (0, "") if os.path.exists(host) else (1, "")
+        if probe_argv[:2] == ["sh", "-c"] and probe_argv[3:4] == [
+            "opencuria-git-state"
+        ]:
+            # Execute the actual fixed script; only map its path argument.
+            mapped = [*probe_argv[:4], self._resolve_cwd(probe_argv[4])]
+            return await asyncio.to_thread(_run_git, mapped, cwd)
         if probe_argv[:1] == ["rm"]:
             return 0, ""
         if probe_argv[:1] == ["find"]:

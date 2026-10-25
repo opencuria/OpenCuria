@@ -742,9 +742,8 @@ class GitService:
         """Detect MERGE_HEAD / rebase / cherry-pick state files.
 
         Re-resolves the verified git dir (already sandbox-checked before
-        every operation) fail-closed so the ``test -e`` probes below can
-        never touch external metadata.  Any verification failure yields
-        the neutral (no-merge) state.
+        every operation) fail-closed, then checks all markers in one guest
+        exec. Any verification failure yields the neutral (no-merge) state.
         """
         state: dict[str, Any] = {
             "merging": False,
@@ -771,25 +770,18 @@ class GitService:
             )
         except (git_ops.GitError, ValueError):
             return state
-        checks = {
-            "merging": ["MERGE_HEAD"],
-            "rebasing": ["rebase-merge", "rebase-apply"],
-            "cherry_picking": ["CHERRY_PICK_HEAD"],
-        }
-        for flag, names in checks.items():
-            for name in names:
-                exit_code_t, _ = await self._git_exec(
-                    runtime,
-                    instance_id,
-                    ["test", "-e", f"{git_dir}/{name}"],
-                    workdir=repo_root,
-                    env=env,
-                    timeout=git_ops.GIT_READ_TIMEOUT_S,
-                )
-                if exit_code_t == 0:
-                    state[flag] = True
-                    break
-        return state
+        exit_code, output = await self._git_exec(
+            runtime,
+            instance_id,
+            git_ops.merge_state_probe_args(git_dir),
+            workdir=repo_root,
+            env=env,
+            timeout=git_ops.GIT_READ_TIMEOUT_S,
+        )
+        flags = set(output.splitlines())
+        if exit_code != 0 or not flags <= state.keys():
+            return state
+        return {flag: flag in flags for flag in state}
 
     # -- git diff assembly -----------------------------------------------------
 
