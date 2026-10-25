@@ -70,6 +70,12 @@ it does not decide model, prompt, tool or permission policy.
 
 ## Capabilities and limits
 
+Timeline edits come from native `fileChange` items, one patch per changed file.
+`turn/diff/updated` is a cumulative snapshot, so it never creates timeline rows:
+it repeats earlier edits and can arrive after the final answer. Migration `0040`
+removes these redundant snapshots from completed Codex messages that already
+have file patches, preserving the actual work and answer order.
+
 Build/General use native `dangerFullAccess`/`never`. Root Plan/Explore disable
 native shell under `readOnly`/`never`; explicit permission rules also require
 managed extension actions. Native subagents inherit the native sandbox.

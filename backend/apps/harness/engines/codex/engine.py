@@ -727,16 +727,10 @@ class CodexEngine:
                 }
             )
         elif method == "turn/diff/updated":
-            await self._send(
-                {
-                    "type": "patch",
-                    "step": 1,
-                    "call_id": self.turn_id,
-                    "tool": "edit",
-                    "path": "",
-                    "unified_diff": str(params.get("diff") or "")[:131072],
-                }
-            )
+            # This is a cumulative snapshot, repeated even after the final
+            # answer. Native fileChange items already project each edit with
+            # its file path and call ID in execution order.
+            return
 
     async def _item(self, item: dict[str, Any], *, completed: bool) -> None:
         """Emit balanced tool lifecycles and authoritative final text snapshots."""

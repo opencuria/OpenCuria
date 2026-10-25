@@ -347,6 +347,50 @@ def cold_service(data):
     )
 
 
+async def test_native_file_changes_persist_before_the_final_answer(
+    runtime: SimpleNamespace,
+) -> None:
+    """The persisted and live timelines contain each edit once, then the answer."""
+    data = runtime
+    data.provider.script = [
+        Responses.tool(
+            "exec_command",
+            cmd=(
+                "apply_patch <<'PATCH'\n"
+                "*** Begin Patch\n"
+                "*** Add File: first.txt\n+first\n"
+                "*** Add File: second.txt\n+second\n"
+                "*** End Patch\nPATCH"
+            ),
+        ),
+        Responses.tool("exec_command", cmd="cat first.txt second.txt"),
+        Responses.text(),
+    ]
+    session = new_session(data)
+    assistant = await finish(data, session)
+    assert_settled(data, session, assistant)
+    assert assistant.content == "Root done."
+    parts = list(assistant.parts.exclude(type__in=["step-start", "step-finish"]))
+    assert [part.type for part in parts] == ["tool", "patch", "patch", "tool", "text"]
+    patches = [part for part in parts if part.type == "patch"]
+    assert {part.meta["path"] for part in patches} == {
+        str(data.accessor.path("/workspace/first.txt")),
+        str(data.accessor.path("/workspace/second.txt")),
+    }
+    assert {part.call_id for part in patches} == {parts[0].call_id}
+    assert parts[-1].output == "Root done."
+    live = [
+        payload["delta"]
+        for name, payload in data.events
+        if name == "harness.part_updated" and payload["message_id"] == str(assistant.id)
+    ]
+    assert sum("patch" in delta for delta in live) == 2
+    last_patch = max(i for i, delta in enumerate(live) if "patch" in delta)
+    assert "".join(delta.get("text", "") for delta in live[last_patch + 1 :]) == (
+        "Root done."
+    )
+
+
 async def test_managed_write_usage_encrypted_checkpoint_and_cold_followup(runtime):
     data = runtime
     data.provider.script = [

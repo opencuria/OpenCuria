@@ -6,6 +6,7 @@ import base64
 import json
 import shutil
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -79,6 +80,41 @@ async def test_real_runtime_retains_native_base_prompt_search_and_delegation(tmp
     assert "exec_command" in names
     assert "write" not in names and "task" not in names and "bash" not in names
     assert any(x["type"] == "web_search" for x in request["tools"])
+
+
+@pytest.mark.asyncio
+async def test_real_native_patch_keeps_final_answer_after_file_changes(
+    tmp_path: Path,
+) -> None:
+    """Turn diff snapshots must not duplicate edits or bury the final answer."""
+    patch = (
+        "*** Begin Patch\n"
+        "*** Add File: first.txt\n+first\n"
+        "*** Add File: second.txt\n+second\n"
+        "*** End Patch\n"
+    )
+    result, events, accessor, requests, permissions, _ = await fixture_run(
+        tmp_path,
+        tool="exec_command",
+        args={"cmd": "apply_patch <<'PATCH'\n" + patch + "PATCH"},
+    )
+    assert result.output == "Local done."
+    assert not permissions
+    assert accessor.path("/workspace/first.txt").exists(), requests[-1]["input"]
+    assert accessor.path("/workspace/first.txt").read_text() == "first\n"
+    assert accessor.path("/workspace/second.txt").read_text() == "second\n"
+    patches = [event for event in events if event["type"] == "patch"]
+    assert len(patches) == 2
+    assert {event["path"] for event in patches} == {
+        str(accessor.path("/workspace/first.txt")),
+        str(accessor.path("/workspace/second.txt")),
+    }
+    assert len({event["call_id"] for event in patches}) == 1
+    last_patch = max(i for i, event in enumerate(events) if event["type"] == "patch")
+    answer = "".join(
+        event.get("delta", {}).get("text", "") for event in events[last_patch + 1 :]
+    )
+    assert answer == "Local done."
 
 
 @pytest.mark.asyncio
