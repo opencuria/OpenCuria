@@ -16,8 +16,11 @@ from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from apps.harness.compaction import CHECKPOINT_PREFIX
-from apps.harness.harness_service import HISTORY_PART_BATCH_SIZE, HarnessService
 from apps.harness.models import HarnessMessage, HarnessPart, HarnessSession
+from apps.harness.provider_history_service import (
+    HISTORY_PART_BATCH_SIZE,
+    ProviderHistoryService,
+)
 from apps.harness.repositories import HarnessPartRepository, HarnessSessionRepository
 
 
@@ -34,6 +37,57 @@ def _message(session: HarnessSession, position: int, **fields: Any) -> HarnessMe
 
 def _part(message: HarnessMessage, position: int, **fields: Any) -> HarnessPart:
     return HarnessPart.objects.create(message=message, position=position, **fields)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "meta",
+    ["invalid", [], {}, {"attachments": "invalid"}, {"attachments": [None, "bad"]}],
+)
+def test_history_ignores_malformed_tool_attachment_metadata(
+    harness_workspace: Any, meta: Any
+) -> None:
+    """Legacy malformed metadata must not prevent plain-text tool replay."""
+    session = _session(harness_workspace)
+    assistant = _message(session, 0, role="assistant")
+    _part(
+        assistant,
+        0,
+        type="tool",
+        state="completed",
+        call_id="read",
+        output="plain result",
+        meta=meta,
+    )
+    history = async_to_sync(ProviderHistoryService().build)(session)
+    assert history[-1].role == "tool"
+    assert history[-1].content == "plain result"
+
+
+@pytest.mark.django_db
+def test_history_restores_pdf_attachment_among_invalid_entries(
+    harness_workspace: Any,
+) -> None:
+    """PDF bytes and filenames survive persisted tool replay without extra keys."""
+    session = _session(harness_workspace)
+    assistant = _message(session, 0, role="assistant")
+    pdf = {
+        "type": "file",
+        "mime": "application/pdf",
+        "url": "data:application/pdf;base64,AAAA",
+        "filename": "report.pdf",
+    }
+    _part(
+        assistant,
+        0,
+        type="tool",
+        state="completed",
+        call_id="pdf",
+        output="PDF result",
+        meta={"attachments": [None, "invalid", {**pdf, "extra": "discard"}]},
+    )
+    history = async_to_sync(ProviderHistoryService().build)(session)
+    assert history[-1].content == [{"type": "text", "text": "PDF result"}, pdf]
 
 
 @pytest.mark.django_db
@@ -100,7 +154,7 @@ def test_history_batches_only_load_retained_replay_parts(
     post_init.connect(record_message, sender=HarnessMessage)
     try:
         with CaptureQueriesContext(connection) as queries:
-            history = async_to_sync(HarnessService()._build_history)(session)
+            history = async_to_sync(ProviderHistoryService().build)(session)
     finally:
         post_init.disconnect(record_loaded, sender=HarnessPart)
         post_init.disconnect(record_message, sender=HarnessMessage)
@@ -136,7 +190,7 @@ def test_history_without_assistants_skips_replay_parts(
     if has_user:
         _message(session, 0, role="user", content="hello")
     with CaptureQueriesContext(connection) as queries:
-        history = async_to_sync(HarnessService()._build_history)(session)
+        history = async_to_sync(ProviderHistoryService().build)(session)
     assert len(queries) == 2
     assert [row.content for row in history] == (["hello"] if has_user else [])
 
@@ -169,7 +223,7 @@ def test_history_selects_last_completed_checkpoint_in_timeline_order(
     HarnessMessage.objects.filter(id=old.id).update(
         created_at=timezone.now() + timedelta(days=1)
     )
-    history = async_to_sync(HarnessService()._build_history)(session)
+    history = async_to_sync(ProviderHistoryService().build)(session)
     expected = ["retained user", "retained answer"]
     if summary.strip():
         expected.insert(0, f"{CHECKPOINT_PREFIX}\n{summary}")
@@ -200,7 +254,7 @@ def test_history_excludes_messages_before_checkpoint_selection(
     latest = _message(session, 3, role="assistant", content="excluded")
     _part(latest, 0, type="compaction", state="completed", output="excluded summary")
     excluded = [latest.id] if exclude_keyword == "exclude_message_ids" else latest.id
-    history = async_to_sync(HarnessService()._build_history)(
+    history = async_to_sync(ProviderHistoryService().build)(
         session, **{exclude_keyword: excluded}
     )
     assert [row.content for row in history] == [
@@ -235,7 +289,7 @@ def test_history_checkpoint_missing_tail_falls_back_to_assistant(
         output="summary",
         meta={"tail_start_id": tail_id},
     )
-    history = async_to_sync(HarnessService()._build_history)(
+    history = async_to_sync(ProviderHistoryService().build)(
         session, exclude_user_message_id=user.id if tail == "excluded" else None
     )
     assert [row.content for row in history] == [f"{CHECKPOINT_PREFIX}\nsummary", None]
@@ -279,7 +333,7 @@ def test_history_replay_keeps_text_tools_and_steers_in_position_order(
     HarnessMessage.objects.filter(id=first.id).update(
         created_at=timezone.now() + timedelta(days=1)
     )
-    history = async_to_sync(HarnessService()._build_history)(session)
+    history = async_to_sync(ProviderHistoryService().build)(session)
     assert [(row.role, row.content) for row in history] == [
         ("assistant", "legacy answer"),
         ("assistant", "before"),
@@ -315,7 +369,7 @@ def test_history_tail_at_position_zero_and_position_gaps(
         meta={"tail_start_id": str(user.id)},
     )
     _message(session, 20, role="user", content="keep last")
-    history = async_to_sync(HarnessService()._build_history)(session)
+    history = async_to_sync(ProviderHistoryService().build)(session)
     assert [row.content for row in history] == [
         f"{CHECKPOINT_PREFIX}\ncheckpoint",
         "keep first",
@@ -341,7 +395,7 @@ def test_history_range_failure_aborts_before_replay(
         output="checkpoint",
         meta={"tail_start_id": str(assistant.id)},
     )
-    service = HarnessService()
+    service = ProviderHistoryService()
 
     def fail_range(*args: Any, **kwargs: Any) -> list[HarnessMessage]:
         raise DatabaseError("synthetic range failure")
@@ -355,7 +409,7 @@ def test_history_range_failure_aborts_before_replay(
     post_init.connect(record_loaded, sender=HarnessMessage)
     try:
         with pytest.raises(DatabaseError, match="synthetic range failure"):
-            async_to_sync(service._build_history)(session)
+            async_to_sync(service.build)(session)
     finally:
         post_init.disconnect(record_loaded, sender=HarnessMessage)
     assert loaded == []
@@ -374,7 +428,7 @@ def test_history_batches_include_assistants_without_parts(
     last = _message(session, turns, role="assistant", content="flattened")
     _part(last, 1, type="text", output="last answer")
     with CaptureQueriesContext(connection) as queries:
-        history = async_to_sync(HarnessService()._build_history)(session)
+        history = async_to_sync(ProviderHistoryService().build)(session)
     assert len(queries) == 2 + ceil((turns + 1) / HISTORY_PART_BATCH_SIZE)
     assert [row.content for row in history] == [
         *(f"legacy {index}" for index in range(turns)),
@@ -400,7 +454,7 @@ def test_history_batch_cannot_load_excluded_or_foreign_messages(
 
     post_init.connect(record_loaded, sender=HarnessPart)
     try:
-        history = async_to_sync(HarnessService()._build_history)(
+        history = async_to_sync(ProviderHistoryService().build)(
             session, exclude_message_id=excluded.id
         )
     finally:
@@ -417,7 +471,7 @@ def test_history_cancellation_stops_replay_between_assistants(
     session = _session(harness_workspace)
     for index in range(HISTORY_PART_BATCH_SIZE * 2 + 1):
         _message(session, index, role="assistant", content="answer")
-    service = HarnessService()
+    service = ProviderHistoryService()
     replayed: list[uuid.UUID] = []
 
     def cancel_after_first(message: HarnessMessage, *args: Any, **kwargs: Any) -> str:
@@ -431,7 +485,7 @@ def test_history_cancellation_stops_replay_between_assistants(
 
     async def cancel_history() -> None:
         with pytest.raises(asyncio.CancelledError):
-            await service._build_history(session)
+            await service.build(session)
 
     with CaptureQueriesContext(connection) as queries:
         async_to_sync(cancel_history)()
@@ -464,5 +518,5 @@ def test_history_propagates_later_batch_read_failure(
         HarnessPartRepository, "history_parts_by_message", fail_second_batch
     )
     with pytest.raises(DatabaseError, match="synthetic batch read failure"):
-        async_to_sync(HarnessService()._build_history)(session)
+        async_to_sync(ProviderHistoryService().build)(session)
     assert [len(batch) for batch in batches] == [HISTORY_PART_BATCH_SIZE, 1]

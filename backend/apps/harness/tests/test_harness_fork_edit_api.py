@@ -620,7 +620,7 @@ def test_edit_admission_failure_preserves_existing_state(
         async def fail_history(*args, **kwargs):
             raise ValueError("History preparation failed")
 
-        monkeypatch.setattr(service, "_build_history", fail_history)
+        monkeypatch.setattr(service.history, "build", fail_history)
 
     def fail_delete(sender, instance, **kwargs):
         # This fires inside the real edit transaction, after gate/child updates.

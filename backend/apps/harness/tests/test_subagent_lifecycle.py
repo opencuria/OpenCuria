@@ -240,7 +240,7 @@ async def test_user_abort_during_child_lifecycle_settles_entire_tree(
     service, _, _ = _service(provider=provider)
     parent = await _db_create_session(harness_workspace)
     entered = asyncio.Event()
-    original = service._build_history
+    original = service.history.build
 
     async def build_history(session, **kwargs):
         if session.parent_id and phase == "startup":
@@ -248,7 +248,7 @@ async def test_user_abort_during_child_lifecycle_settles_entire_tree(
             await asyncio.Event().wait()
         return await original(session, **kwargs)
 
-    monkeypatch.setattr(service, "_build_history", build_history)
+    monkeypatch.setattr(service.history, "build", build_history)
     assistant, task = await start(service, parent)
     await checkpoint(entered if phase == "startup" else provider.entered["child"])
     rows = children(parent)
@@ -490,7 +490,7 @@ async def test_direct_root_abort_during_history_admission(
         entered.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(service, "_build_history", blocked_history)
+    monkeypatch.setattr(service.history, "build", blocked_history)
     caller = asyncio.create_task(
         service.start_run(
             session,

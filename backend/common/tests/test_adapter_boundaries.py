@@ -41,6 +41,8 @@ Session metadata generation is independent as well; the lifecycle service only
 schedules it and supplies change notifications to ``SessionMetadataService``.
 Provider account management never imports its orchestration consumers; account
 validation stays with accounts and revocation wakeups use a leaf event module.
+Provider-history reconstruction is independent of run orchestration; its caller
+supplies persistence ports to ``ProviderHistoryService``.
 """
 
 from __future__ import annotations
@@ -252,6 +254,42 @@ def test_session_metadata_is_independent_of_run_orchestration() -> None:
     assert violations == set(), (
         "Keep title/summary generation in SessionMetadataService; it and its "
         "dependencies must not import HarnessService:\n" + "\n".join(sorted(violations))
+    )
+
+
+def test_provider_history_is_independent_of_run_orchestration() -> None:
+    """Transcript reconstruction must not import live execution, even indirectly."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    modules = {_module_name(path): path for path in trees}
+    history = "apps.harness.provider_history_service"
+    lifecycle = "apps.harness.harness_service"
+    execution = {
+        lifecycle,
+        "apps.harness.runner",
+        "apps.harness.engines.execution",
+        "apps.harness.engines.service_runtime",
+    }
+    assert history in modules
+    assert history in _imported_modules(modules[lifecycle], trees[modules[lifecycle]])
+    pending = {history}
+    checked: set[str] = set()
+    violations = set()
+    while pending:
+        module = pending.pop()
+        checked.add(module)
+        path = modules[module]
+        for imported in _imported_modules(path, trees[path]):
+            if any(
+                imported == owner or imported.startswith(f"{owner}.")
+                for owner in execution
+            ):
+                violations.add(f"{module} -> {imported}")
+            elif imported in modules and imported not in checked:
+                pending.add(imported)
+    assert violations == set(), (
+        "Keep provider-history reconstruction in ProviderHistoryService; it and "
+        "its dependencies must not import run orchestration:\n"
+        + "\n".join(sorted(violations))
     )
 
 

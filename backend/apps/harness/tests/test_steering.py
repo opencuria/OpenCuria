@@ -354,7 +354,7 @@ async def test_steer_is_persisted_in_order_and_seen_by_the_model(
     assert _queue_snapshots(events) == [["prefer tabs"], []]
 
     # Replay for the next turn keeps the interjection between the answers.
-    history = await service._build_history(session)
+    history = await service.history.build(session)
     assert [message.role for message in history] == [
         "user",
         "assistant",

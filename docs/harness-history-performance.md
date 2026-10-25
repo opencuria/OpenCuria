@@ -29,8 +29,9 @@ selecting backend history. No redraw was needed; other candidates remain unfixed
 
 ## Change and architectural boundaries
 
-`HarnessService._build_history` previously found the last completed compaction by
-loading **all parts of every assistant message**, including large tool outputs,
+Provider-history reconstruction (now `ProviderHistoryService.build`) previously
+found the last completed compaction by loading **all parts of every assistant
+message**, including large tool outputs,
 then loaded retained parts again to replay them. With `A` stored assistant messages
 and `R` retained assistants, this costs `1 + A + R` queries.
 
@@ -38,9 +39,9 @@ and `R` retained assistants, this costs `1 + A + R` queries.
   `get_latest_completed_compaction(message_ids)` query. Filter completed compaction
   rows, sort by the same message/part timeline keys as the old traversal, and load
   only the checkpoint's message ID, summary and metadata.
-- `backend/apps/harness/harness_service.py`: pass assistant IDs from the already
-  session-scoped, exclusion-filtered message list; reuse the existing slicing and
-  provider replay. Remove the obsolete per-message discovery implementation.
+- `backend/apps/harness/provider_history_service.py`: pass assistant IDs from the
+  already session-scoped, exclusion-filtered message list; reuse the existing
+  slicing and provider replay. Remove the obsolete discovery implementation.
 
 The new cost is `2 + R` queries when assistants exist, or one message query for a
 new/empty conversation. **Checkpoint discovery**, not all provider replay, is now

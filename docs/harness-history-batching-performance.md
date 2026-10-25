@@ -28,7 +28,7 @@ measurements are in [the benchmark record](benchmarks/harness-history-batching.j
 
 ## Implementation
 
-`HarnessService._build_history` still performs session-scoped message loading,
+`ProviderHistoryService.build` still performs session-scoped message loading,
 exclusions, checkpoint selection and compaction slicing first. It then requests
 parts for at most **eight retained assistants** at a time, removes each group
 after replay, and keeps a cancellation/scheduling point between assistants.

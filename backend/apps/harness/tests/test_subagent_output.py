@@ -145,7 +145,7 @@ async def test_persistent_parent_can_recover_output_subject_to_read_permissions(
         assert CONCLUSION not in assistant.content
         assert not accessor.reads
 
-    history = await service._build_history(parent)
+    history = await service.history.build(parent)
     assert any(
         m.role == "tool" and f"Full output: {provider.path}." in m.content
         for m in history

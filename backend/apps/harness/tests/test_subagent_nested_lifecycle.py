@@ -244,7 +244,7 @@ async def test_root_abort_covers_grandchild_admitted_after_descendant_snapshot(
     root = await _session(harness_workspace)
     admitted = asyncio.Event()
     release_snapshot = asyncio.Event()
-    original_history = service._build_history
+    original_history = service.history.build
     original_adapter = service_module.sync_to_async
     descendant_query = service.sessions.list_descendant_ids
     snapshots = []
@@ -272,7 +272,7 @@ async def test_root_abort_covers_grandchild_admitted_after_descendant_snapshot(
 
         return snapshot_then_admit
 
-    monkeypatch.setattr(service, "_build_history", history)
+    monkeypatch.setattr(service.history, "build", history)
     assistant, root_task = await start(service, root)
     await checkpoint(provider.child_entered)
     child = children(root)[0]

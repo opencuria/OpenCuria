@@ -35,7 +35,7 @@ rejection evidence are preserved in
 
 ## Implementation and boundaries
 
-`HarnessService._build_history` now selects the latest eligible completed
+`ProviderHistoryService.build` now selects the latest eligible completed
 assistant checkpoint before reading message bodies. The service still chooses
 the checkpoint summary, parses `tail_start_id`, and specifies the fallback to
 the checkpoint message's position. The old full-list slicing helper is removed.

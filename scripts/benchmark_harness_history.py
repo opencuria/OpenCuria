@@ -23,9 +23,12 @@ import tempfile
 import time
 import tracemalloc
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+
+HistoryBuilder = Callable[[Any], Awaitable[list[Any]]]
 
 
 def _identity(value: str) -> uuid.UUID:
@@ -116,7 +119,7 @@ def _populate(
 
 
 async def _measure(
-    services: dict[str, Any], session: Any, samples: int
+    builders: dict[str, HistoryBuilder], session: Any, samples: int
 ) -> dict[str, Any]:
     from asgiref.sync import sync_to_async
     from django.db import connection
@@ -130,14 +133,14 @@ async def _measure(
         return hashlib.sha256(payload.encode()).hexdigest()
 
     expected: str | None = None
-    elapsed: dict[str, list[float]] = {name: [] for name in services}
+    elapsed: dict[str, list[float]] = {name: [] for name in builders}
     for iteration in range(samples + 5):
-        order = list(services)
+        order = list(builders)
         if iteration % 2:
             order.reverse()
         for name in order:
             start = time.perf_counter()
-            history = await services[name]._build_history(session)
+            history = await builders[name](session)
             duration = (time.perf_counter() - start) * 1000
             if iteration >= 5:
                 elapsed[name].append(duration)
@@ -160,7 +163,7 @@ async def _measure(
         return len(context)
 
     results = {}
-    for name, service in services.items():
+    for name, build_history in builders.items():
         message_reads = {"rows": 0, "content_bytes": 0}
 
         def record_message(
@@ -174,14 +177,14 @@ async def _measure(
         queries = await sync_to_async(start_queries)()
         post_init.connect(record_message, sender=HarnessMessage)
         try:
-            await service._build_history(session)
+            await build_history(session)
         finally:
             post_init.disconnect(record_message, sender=HarnessMessage)
             query_count = await sync_to_async(finish_queries)(queries)
         gc.collect()
         tracemalloc.start()
         try:
-            await service._build_history(session)
+            await build_history(session)
             _, peak = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
@@ -196,14 +199,20 @@ async def _measure(
             "history_sha256": expected,
             "samples_ms": [round(value, 3) for value in elapsed[name]],
         }
-    return results if len(services) > 1 else results["after"]
+    return results if len(builders) > 1 else results["after"]
 
 
-def _baseline_service(repo: Path) -> Any:
+def _baseline_builder(repo: Path) -> HistoryBuilder:
     """Load archived service/repositories against the same unchanged model schema."""
+    package = repo / "backend" / "apps" / "harness"
+    service_name = (
+        "provider_history_service"
+        if (package / "provider_history_service.py").exists()
+        else "harness_service"
+    )
     modules = {}
-    for name in ("repositories", "harness_service"):
-        path = repo / "backend" / "apps" / "harness" / f"{name}.py"
+    for name in ("repositories", service_name):
+        path = package / f"{name}.py"
         module_name = f"apps.harness._benchmark_baseline_{name}"
         spec = importlib.util.spec_from_file_location(module_name, path)
         if spec is None or spec.loader is None:
@@ -212,10 +221,19 @@ def _baseline_service(repo: Path) -> Any:
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
         modules[name] = module
-    return modules["harness_service"].HarnessService(
+    service_type = (
+        modules[service_name].ProviderHistoryService
+        if service_name == "provider_history_service"
+        else modules[service_name].HarnessService
+    )
+    service = service_type(
         messages=modules["repositories"].HarnessMessageRepository,
         parts=modules["repositories"].HarnessPartRepository,
     )
+    if service_name == "provider_history_service":
+        return service.build
+    # Archived performance baselines predate the service extraction.
+    return service._build_history
 
 
 def _run(args: argparse.Namespace) -> dict[str, Any]:
@@ -226,7 +244,6 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     from django.contrib.auth import get_user_model
     from django.core.management import call_command
 
-    from apps.harness.harness_service import HarnessService
     from apps.organizations.models import Organization
     from apps.runners.models import Runner, Workspace
 
@@ -262,15 +279,22 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     ]
 
     async def measurements() -> list[dict[str, Any]]:
-        services = {}
+        builders = {}
         if args.baseline_repo:
-            services["before"] = _baseline_service(args.baseline_repo.resolve())
-        services["after"] = HarnessService()
+            builders["before"] = _baseline_builder(args.baseline_repo.resolve())
+        history_module = args.repo / "backend/apps/harness/provider_history_service.py"
+        if history_module.exists():
+            from apps.harness.provider_history_service import ProviderHistoryService
+
+            builders["after"] = ProviderHistoryService().build
+        else:
+            # --repo also supports running historical snapshots on their own.
+            builders["after"] = _baseline_builder(args.repo.resolve())
         return [
             {
                 "assistant_turns": turns,
                 "compacted": compacted,
-                **await _measure(services, session, args.samples),
+                **await _measure(builders, session, args.samples),
             }
             for turns, compacted, session in scenarios
         ]

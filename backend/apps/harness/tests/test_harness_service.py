@@ -344,7 +344,7 @@ async def test_scheduled_admission_error_returns_session_to_idle(
     async def fail_history(*args, **kwargs):  # type: ignore[no-untyped-def]
         raise RuntimeError("history unavailable")
 
-    monkeypatch.setattr(service, "_build_history", fail_history)
+    monkeypatch.setattr(service.history, "build", fail_history)
     with pytest.raises(RuntimeError, match="history unavailable"):
         await service.start_run(
             session,
@@ -1415,7 +1415,7 @@ async def test_history_built_from_db_not_params(harness_workspace) -> None:
 
 @pytest.mark.django_db(transaction=True)
 async def test_build_history_includes_tool_calls(harness_workspace) -> None:
-    """_build_history replays assistant tool_calls and tool results from parts."""
+    """Provider history replays assistant tool_calls and tool results from parts."""
     service, _, _ = _service()
     session = await _db_create_session(harness_workspace)
     HarnessMessageRepository.create(
@@ -1435,7 +1435,7 @@ async def test_build_history_includes_tool_calls(harness_workspace) -> None:
         input={"tool": "read", "arguments": '{"path":"a.txt"}'},
     )
     HarnessPartRepository.mark_state(part, "completed", output="file contents")
-    history = await service._build_history(session)
+    history = await service.history.build(session)
     roles = [m.role for m in history]
     assert roles == ["user", "assistant", "tool"]
     assistant_msg = history[1]
@@ -1468,7 +1468,7 @@ async def test_build_history_truncates_huge_tool_output(harness_workspace) -> No
         input={"tool": "grep", "arguments": '{"pattern":"Force"}'},
         output="x" * (MAX_BYTES + 8_000),
     )
-    history = await service._build_history(session)
+    history = await service.history.build(session)
     tool_msg = next(message for message in history if message.role == "tool")
     assert isinstance(tool_msg.content, str)
     preview = tool_msg.content.split("\n\n...", 1)[0]
@@ -1510,7 +1510,7 @@ async def test_build_history_rebuilds_tool_images_from_meta(
             ]
         },
     )
-    history = await service._build_history(session)
+    history = await service.history.build(session)
     tool_msg = next(message for message in history if message.role == "tool")
     assert isinstance(tool_msg.content, list)
     assert tool_msg.content[0] == {
@@ -3557,7 +3557,7 @@ async def test_build_history_keeps_text_between_tool_calls(harness_workspace) ->
             call_id=call_id,
             input={"tool": "read", "arguments": "{}"} if call_id else {},
         )
-    history = await service._build_history(session)
+    history = await service.history.build(session)
     assert [(m.role, m.content, m.tool_call_id) for m in history] == [
         ("user", "inspect files", None),
         ("assistant", "before ", None),
