@@ -14,7 +14,8 @@ import uuid
 from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 from ...exceptions import RunnerOfflineError
-from ...operations import LIFECYCLE_TYPES, OperationRepository, apply_result
+from ...operations import LIFECYCLE_TYPES, OperationRepository
+from ..operation_results import apply_result
 
 logger = logging.getLogger(__name__)
 

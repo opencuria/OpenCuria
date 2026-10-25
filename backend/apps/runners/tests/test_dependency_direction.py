@@ -6,6 +6,8 @@ module-level and function-local imports as well as app-registry lookups, so
 cycles cannot be hidden behind lazy imports or ``get_model`` strings.
 Runner services also delegate ORM queries to repositories, including filtering
 and existence checks on querysets returned by a repository.
+Lifecycle result policy belongs to its service; journal persistence never
+imports that service or its transport consumers.
 """
 
 from __future__ import annotations
@@ -145,4 +147,54 @@ def test_query_guard_detects_managers_and_repository_queryset_chaining() -> None
             "list(grouped.values())\n"
         )
         == []
+    )
+
+
+def test_lifecycle_result_persistence_never_imports_services() -> None:
+    """The result service owns dispatch; repositories only lock and persist."""
+    persistence = [
+        RUNNERS_DIR / "operations.py",
+        RUNNERS_DIR / "operation_result_repository.py",
+    ]
+    violations = []
+    for path in persistence:
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            modules = []
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                base = "apps.runners" if node.level else ""
+                module = ".".join(part for part in (base, node.module) if part)
+                modules = [module, *(f"{module}.{alias.name}" for alias in node.names)]
+            for module in modules:
+                if module == "apps.runners.services" or module.startswith(
+                    "apps.runners.services."
+                ):
+                    violations.append(f"{path.name}:{node.lineno} imports {module}")
+    assert violations == [], (
+        "Keep lifecycle result dispatch in services/operation_results.py; "
+        "persistence must not import service orchestration:\n" + "\n".join(violations)
+    )
+
+
+def test_lifecycle_result_service_never_imports_orm_modules() -> None:
+    """The service consumes loaded result state instead of lazy database models."""
+    path = RUNNERS_DIR / "services" / "operation_results.py"
+    violations = []
+    for node in ast.walk(ast.parse(path.read_text())):
+        modules = []
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            modules = [node.module or "", *(alias.name for alias in node.names)]
+        for module in modules:
+            if module.split(".")[0] == "django" or module.split(".")[-1] in {
+                "models",
+                "locking",
+            }:
+                violations.append(f"{path.name}:{node.lineno} imports {module}")
+    assert violations == [], (
+        "Keep result models, transactions and locking behind "
+        "OperationResultRepository:\n" + "\n".join(violations)
     )

@@ -9,8 +9,9 @@ from django.utils import timezone
 
 from apps.runners.enums import TaskType
 from apps.runners.models import ImageDefinition, LifecycleCommand, Task
-from apps.runners.operations import OperationRepository, apply_result
+from apps.runners.operations import OperationRepository
 from apps.runners.repositories import TaskRepository
+from apps.runners.services.operation_results import apply_result
 from apps.runners.services.recovery import RecoveryService
 from apps.runners.tests.test_services import service as service
 from apps.runners.tests.test_services import sio_mock as sio_mock

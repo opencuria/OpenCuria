@@ -10,7 +10,8 @@ from apps.harness.models import HarnessSession, QuestionRequest
 from apps.harness.permissions.models import PermissionRequest
 from apps.runners.capture_repository import CaptureRepository
 from apps.runners.models import CaptureRequest, ImageInstance, LifecycleCommand, Task
-from apps.runners.operations import OperationRepository, apply_result
+from apps.runners.operations import OperationRepository
+from apps.runners.services.operation_results import apply_result
 from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_capture_pipeline import result
 from apps.runners.tests.test_services import service as service

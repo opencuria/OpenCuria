@@ -6,11 +6,11 @@ from unittest.mock import patch
 import pytest
 
 from apps.credentials.services import CredentialSvc
-
 from apps.runners.capture_repository import CaptureRepository
 from apps.runners.enums import TaskStatus, WorkspaceStatus
 from apps.runners.models import CaptureRequest, LifecycleCommand
-from apps.runners.operations import OperationRepository, apply_result
+from apps.runners.operations import OperationRepository
+from apps.runners.services.operation_results import apply_result
 from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_services import service as service
 from apps.runners.tests.test_services import sio_mock as sio_mock

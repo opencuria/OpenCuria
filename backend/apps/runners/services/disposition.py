@@ -9,7 +9,8 @@ from apps.accounts.models import APIKeyPermission
 from common.exceptions import ConflictError
 
 from ..disposition_repository import DispositionRepository
-from ..operations import OperationRepository, apply_result
+from ..operations import OperationRepository
+from .operation_results import apply_result
 
 #: API-key scope a retry needs, per retryable lifecycle task type.
 RETRY_PERMISSIONS = {

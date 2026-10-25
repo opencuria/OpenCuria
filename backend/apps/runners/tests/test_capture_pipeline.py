@@ -8,7 +8,8 @@ from apps.runners.models import (
     LifecycleCommand,
     WorkspaceRecreateRequest,
 )
-from apps.runners.operations import OperationRepository, apply_result
+from apps.runners.operations import OperationRepository
+from apps.runners.services.operation_results import apply_result
 from apps.runners.tests.conftest import capture_version_fields, has_busy_agent
 from apps.runners.tests.test_services import service as service
 from apps.runners.tests.test_services import sio_mock as sio_mock

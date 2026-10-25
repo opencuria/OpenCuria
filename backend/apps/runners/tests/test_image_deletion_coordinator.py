@@ -20,9 +20,9 @@ from apps.runners.models import (
     Task,
     Workspace,
 )
-from apps.runners.operations import apply_result
 from apps.runners.services import RunnerService
 from apps.runners.services.deletion import DeletionService
+from apps.runners.services.operation_results import apply_result
 from apps.runners.tests.conftest import has_busy_agent
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 

@@ -18,9 +18,10 @@ from apps.runners.models import (
     RunnerSystemMetrics,
     Workspace,
 )
-from apps.runners.operations import RESULT_METHODS, OperationRepository
+from apps.runners.operations import OperationRepository
 from apps.runners.repositories import TaskRepository
 from apps.runners.services import RunnerService
+from apps.runners.services.operation_results import RESULT_METHODS
 from apps.runners.sio_server import _frontend_user_can_access_workspace
 from common.utils import hash_token
 

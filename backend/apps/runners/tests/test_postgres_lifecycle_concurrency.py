@@ -22,10 +22,11 @@ from apps.runners.models import (
     Task,
     Workspace,
 )
-from apps.runners.operations import OperationRepository, apply_result
+from apps.runners.operations import OperationRepository
 from apps.runners.repositories import ImageGenerationRepository as Generations
 from apps.runners.repositories import TaskRepository
 from apps.runners.services import RunnerService
+from apps.runners.services.operation_results import apply_result
 from apps.runners.services.workspace_configuration import WorkspaceConfigurationService
 from apps.runners.tests.test_image_deletion_coordinator import image
 from apps.runners.tests.test_image_deletion_coordinator import request as delete_request
