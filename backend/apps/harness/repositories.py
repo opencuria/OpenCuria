@@ -7,6 +7,7 @@ Encapsulates all database queries. Services never use the ORM directly.
 from __future__ import annotations
 
 import uuid
+from contextlib import nullcontext
 from datetime import datetime
 
 from django.db import IntegrityError, transaction
@@ -23,6 +24,7 @@ from django.db.models import (
     Value,
     When,
 )
+from django.db.models.functions import Concat
 from django.db.utils import NotSupportedError
 from django.utils import timezone
 
@@ -1220,10 +1222,36 @@ class HarnessMessageRepository:
         return {row["session_id"]: row["latest"] for row in rows}
 
     @staticmethod
-    def append_content(message: HarnessMessage, delta: str) -> HarnessMessage:
-        """Append a text delta to an assistant message."""
-        message.content = f"{message.content or ''}{delta or ''}"
-        message.save(update_fields=["content"])
+    def append_content(
+        message: HarnessMessage,
+        delta: str,
+        *,
+        text_part_id: uuid.UUID | str | None = None,
+    ) -> HarnessMessage:
+        """Append text, committing its stream part and message together when given.
+
+        Text deltas do not change the part's display, so mirroring them needs
+        only two writes and one commit, without loading either part column.
+        """
+        previous_content = message.content
+        try:
+            with transaction.atomic() if text_part_id is not None else nullcontext():
+                # Match turn finalization's message -> part row-lock order.
+                message.content = f"{previous_content or ''}{delta or ''}"
+                message.save(update_fields=["content"])
+                if text_part_id is not None:
+                    HarnessPart.objects.filter(
+                        id=text_part_id, message_id=message.id, type="text"
+                    ).update(
+                        output=Concat(
+                            F("output"), Value(delta or ""), output_field=TextField()
+                        ),
+                        updated_at=timezone.now(),
+                    )
+        except Exception:
+            if text_part_id is not None:
+                message.content = previous_content
+            raise
         return message
 
     @staticmethod
@@ -1548,8 +1576,6 @@ class HarnessPartRepository:
     @staticmethod
     def append_output_by_id(part_id: uuid.UUID, delta: str) -> None:
         """Append a stream delta without loading the growing output column."""
-        from django.db.models.functions import Concat
-
         delta = delta or ""
         if not delta:
             return

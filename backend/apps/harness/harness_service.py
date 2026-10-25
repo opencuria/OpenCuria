@@ -4473,8 +4473,9 @@ class HarnessService:
                 )
                 run_ctx["text_part_id"] = str(part.id)
                 part_id = str(part.id)
-            await sync_to_async(self.parts.append_output_by_id)(part_id, text)
-            await sync_to_async(self.messages.append_content)(assistant, text)
+            await sync_to_async(self.messages.append_content)(
+                assistant, text, text_part_id=part_id
+            )
             touched_id = str(part_id)
         if reasoning:
             await self._complete_stream_part(run_ctx, "text_part_id")

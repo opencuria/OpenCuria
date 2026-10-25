@@ -1,0 +1,823 @@
+{
+  "baseline_commit": "8609cb6",
+  "date": "2026-10-25",
+  "environment": {
+    "python": "3.12.3",
+    "django": "5.2.17",
+    "postgresql": "16.15",
+    "psycopg2": "2.9.12",
+    "sqlite": "3.45.1"
+  },
+  "selection": {
+    "method": "secrets.choice (OS randomness), one uniform draw among ranked top three",
+    "shortlist": [
+      {
+        "rank": 1,
+        "id": "plugin_catalog",
+        "reason": "Catalog used by settings/composers; confirmed 4N+1 SQL growth, simple batching, low regression risk."
+      },
+      {
+        "rank": 2,
+        "id": "fork_copy",
+        "reason": "User-visible fork delay: 1752 statements and p50 1750 ms for 50 turns; bulk persistence can remove per-row work, moderate risk."
+      },
+      {
+        "rank": 3,
+        "id": "stream_persistence",
+        "reason": "Every streamed text delta reads display then writes part and message; hot path, smaller expected gain and higher event-semantics risk."
+      }
+    ],
+    "selected": "stream_persistence"
+  },
+  "candidate_measurements": [
+    {
+      "name": "plugin catalog 10 org plugins (+seed globals)",
+      "queries": 49,
+      "p50_ms": 26.697,
+      "p95_ms": 27.208
+    },
+    {
+      "name": "plugin catalog 50 org plugins (+seed globals)",
+      "queries": 209,
+      "p50_ms": 111.14,
+      "p95_ms": 113.398
+    },
+    {
+      "name": "fork persistence 10 turns",
+      "queries": 352,
+      "p50_ms": 375.165,
+      "p95_ms": 573.629
+    },
+    {
+      "name": "fork persistence 50 turns",
+      "queries": 1752,
+      "p50_ms": 1750.283,
+      "p95_ms": 2597.028
+    },
+    {
+      "name": "500 persisted text deltas (steady growing output)",
+      "queries": 1500,
+      "p50_ms": 4425.468,
+      "p95_ms": 5434.813
+    }
+  ],
+  "initial_round": {
+    "order": [
+      "before",
+      "after"
+    ],
+    "initial_output_bytes": 31538,
+    "measurements": {
+      "postgres-before": {
+        "database": "postgresql",
+        "path": "HarnessService._on_runner_event, real repositories and emit seam",
+        "samples": 31,
+        "deltas_per_sample": 100,
+        "prefix_kib": 32,
+        "results": [
+          {
+            "kind": "text",
+            "p50_ms": 545.922,
+            "p95_ms": 698.298,
+            "sql_statements": {
+              "SELECT": 100,
+              "UPDATE": 200
+            },
+            "peak_python_allocated_bytes": 335103,
+            "persisted_and_emitted_sha256": "498dd2287bf40cb3991d532cba95090446c83092323623763c6ab814f86b96f5"
+          },
+          {
+            "kind": "reasoning",
+            "p50_ms": 306.77,
+            "p95_ms": 559.459,
+            "sql_statements": {
+              "SELECT": 100,
+              "UPDATE": 100
+            },
+            "peak_python_allocated_bytes": 168097,
+            "persisted_and_emitted_sha256": "2b179a1e64b4e41d0f48affc2d54ebe1d1830b3d892a739f242c9941775084a4"
+          }
+        ],
+        "notes": [
+          "Warmed latency excludes reset, verification, SQL counting and tracing.",
+          "No provider/network pacing; persistence overhead, not answer latency.",
+          "Every delta is persisted and forwarded immediately; no outer transaction."
+        ]
+      },
+      "postgres-after": {
+        "database": "postgresql",
+        "path": "HarnessService._on_runner_event, real repositories and emit seam",
+        "samples": 31,
+        "deltas_per_sample": 100,
+        "prefix_kib": 32,
+        "results": [
+          {
+            "kind": "text",
+            "p50_ms": 355.322,
+            "p95_ms": 391.699,
+            "sql_statements": {
+              "BEGIN": 100,
+              "UPDATE": 200,
+              "COMMIT": 100
+            },
+            "peak_python_allocated_bytes": 370257,
+            "persisted_and_emitted_sha256": "498dd2287bf40cb3991d532cba95090446c83092323623763c6ab814f86b96f5"
+          },
+          {
+            "kind": "reasoning",
+            "p50_ms": 317.626,
+            "p95_ms": 423.875,
+            "sql_statements": {
+              "SELECT": 100,
+              "UPDATE": 100
+            },
+            "peak_python_allocated_bytes": 160940,
+            "persisted_and_emitted_sha256": "2b179a1e64b4e41d0f48affc2d54ebe1d1830b3d892a739f242c9941775084a4"
+          }
+        ],
+        "notes": [
+          "Warmed latency excludes reset, verification, SQL counting and tracing.",
+          "No provider/network pacing; persistence overhead, not answer latency.",
+          "Every delta is persisted and forwarded immediately; no outer transaction."
+        ]
+      },
+      "sqlite-before": {
+        "database": "sqlite",
+        "path": "HarnessService._on_runner_event through real repositories and emit seam",
+        "samples": 31,
+        "deltas_per_sample": 100,
+        "prefix_kib": 32,
+        "results": [
+          {
+            "kind": "text",
+            "p50_ms": 938.275,
+            "p95_ms": 1241.786,
+            "sql_statements": {
+              "SELECT": 100,
+              "UPDATE": 200
+            },
+            "peak_python_allocated_bytes": 224864,
+            "persisted_and_emitted_sha256": "498dd2287bf40cb3991d532cba95090446c83092323623763c6ab814f86b96f5"
+          },
+          {
+            "kind": "reasoning",
+            "p50_ms": 527.027,
+            "p95_ms": 623.875,
+            "sql_statements": {
+              "SELECT": 100,
+              "UPDATE": 100
+            },
+            "peak_python_allocated_bytes": 161792,
+            "persisted_and_emitted_sha256": "2b179a1e64b4e41d0f48affc2d54ebe1d1830b3d892a739f242c9941775084a4"
+          }
+        ],
+        "notes": [
+          "Warmed latency; reset, verification, SQL counting and allocation tracing excluded.",
+          "No provider/network pacing; measures persistence overhead, not full answer latency.",
+          "Every delta is persisted and forwarded immediately; no outer transaction."
+        ]
+      },
+      "sqlite-after": {
+        "database": "sqlite",
+        "path": "HarnessService._on_runner_event, real repositories and emit seam",
+        "samples": 31,
+        "deltas_per_sample": 100,
+        "prefix_kib": 32,
+        "results": [
+          {
+            "kind": "text",
+            "p50_ms": 950.517,
+            "p95_ms": 1027.388,
+            "sql_statements": {
+              "BEGIN": 100,
+              "UPDATE": 200,
+              "COMMIT": 100
+            },
+            "peak_python_allocated_bytes": 235622,
+            "persisted_and_emitted_sha256": "498dd2287bf40cb3991d532cba95090446c83092323623763c6ab814f86b96f5"
+          },
+          {
+            "kind": "reasoning",
+            "p50_ms": 484.003,
+            "p95_ms": 683.806,
+            "sql_statements": {
+              "SELECT": 100,
+              "UPDATE": 100
+            },
+            "peak_python_allocated_bytes": 151424,
+            "persisted_and_emitted_sha256": "2b179a1e64b4e41d0f48affc2d54ebe1d1830b3d892a739f242c9941775084a4"
+          }
+        ],
+        "notes": [
+          "Warmed latency excludes reset, verification, SQL counting and tracing.",
+          "No provider/network pacing; persistence overhead, not answer latency.",
+          "Every delta is persisted and forwarded immediately; no outer transaction."
+        ]
+      }
+    }
+  },
+  "reverse_round": {
+    "order": [
+      "after",
+      "before"
+    ],
+    "initial_output_bytes": 32768,
+    "measurements": {
+      "postgres-before": {
+        "database": "postgresql",
+        "path": "HarnessService._on_runner_event, real repositories and emit seam",
+        "samples": 31,
+        "deltas_per_sample": 100,
+        "prefix_kib": 32,
+        "results": [
+          {
+            "kind": "text",
+            "initial_output_bytes": 32768,
+            "p50_ms": 461.631,
+            "p95_ms": 627.465,
+            "sql_statements": {
+              "SELECT": 100,
+              "UPDATE": 200
+            },
+            "peak_python_allocated_bytes": 337362,
+            "persisted_and_emitted_sha256": "67cc47211b479d751346a06b941f640e422e40bf12736fa71194e0caba561814",
+            "latencies_ms": [
+              461.631,
+              496.425,
+              502.961,
+              463.575,
+              431.899,
+              407.334,
+              398.423,
+              386.498,
+              384.133,
+              402.634,
+              406.947,
+              414.558,
+              400.536,
+              381.667,
+              383.991,
+              478.421,
+              470.813,
+              426.853,
+              627.465,
+              623.909,
+              582.566,
+              546.527,
+              546.397,
+              576.502,
+              523.084,
+              431.946,
+              427.206,
+              502.739,
+              433.252,
+              627.089,
+              1393.684
+            ]
+          }
+        ],
+        "notes": [
+          "Warmed latency excludes reset, verification, SQL counting and tracing.",
+          "No provider/network pacing; persistence overhead, not answer latency.",
+          "Every delta is persisted and forwarded immediately; no outer transaction."
+        ]
+      },
+      "postgres-after": {
+        "database": "postgresql",
+        "path": "HarnessService._on_runner_event, real repositories and emit seam",
+        "samples": 31,
+        "deltas_per_sample": 100,
+        "prefix_kib": 32,
+        "results": [
+          {
+            "kind": "text",
+            "initial_output_bytes": 32768,
+            "p50_ms": 379.689,
+            "p95_ms": 957.171,
+            "sql_statements": {
+              "BEGIN": 100,
+              "UPDATE": 200,
+              "COMMIT": 100
+            },
+            "peak_python_allocated_bytes": 372743,
+            "persisted_and_emitted_sha256": "67cc47211b479d751346a06b941f640e422e40bf12736fa71194e0caba561814",
+            "latencies_ms": [
+              364.056,
+              435.044,
+              433.22,
+              432.149,
+              440.364,
+              424.674,
+              430.57,
+              429.569,
+              382.516,
+              380.092,
+              329.088,
+              379.689,
+              339.029,
+              316.578,
+              354.526,
+              463.864,
+              1075.464,
+              957.171,
+              322.526,
+              325.654,
+              380.272,
+              303.189,
+              306.855,
+              342.009,
+              384.73,
+              368.531,
+              324.808,
+              358.268,
+              811.155,
+              318.336,
+              317.191
+            ]
+          }
+        ],
+        "notes": [
+          "Warmed latency excludes reset, verification, SQL counting and tracing.",
+          "No provider/network pacing; persistence overhead, not answer latency.",
+          "Every delta is persisted and forwarded immediately; no outer transaction."
+        ]
+      },
+      "sqlite-before": {
+        "database": "sqlite",
+        "path": "HarnessService._on_runner_event, real repositories and emit seam",
+        "samples": 31,
+        "deltas_per_sample": 100,
+        "prefix_kib": 32,
+        "results": [
+          {
+            "kind": "text",
+            "initial_output_bytes": 32768,
+            "p50_ms": 960.454,
+            "p95_ms": 1604.186,
+            "sql_statements": {
+              "SELECT": 100,
+              "UPDATE": 200
+            },
+            "peak_python_allocated_bytes": 224048,
+            "persisted_and_emitted_sha256": "67cc47211b479d751346a06b941f640e422e40bf12736fa71194e0caba561814",
+            "latencies_ms": [
+              1825.685,
+              1165.49,
+              861.145,
+              829.226,
+              784.377,
+              766.337,
+              913.357,
+              960.454,
+              1259.448,
+              1014.11,
+              1031.177,
+              1043.039,
+              1031.914,
+              849.053,
+              860.475,
+              804.932,
+              748.265,
+              841.891,
+              1114.519,
+              1323.482,
+              1177.67,
+              820.629,
+              955.751,
+              1077.043,
+              870.62,
+              1146.152,
+              1604.186,
+              864.526,
+              652.247,
+              1051.808,
+              1190.42
+            ]
+          }
+        ],
+        "notes": [
+          "Warmed latency excludes reset, verification, SQL counting and tracing.",
+          "No provider/network pacing; persistence overhead, not answer latency.",
+          "Every delta is persisted and forwarded immediately; no outer transaction."
+        ]
+      },
+      "sqlite-after": {
+        "database": "sqlite",
+        "path": "HarnessService._on_runner_event, real repositories and emit seam",
+        "samples": 31,
+        "deltas_per_sample": 100,
+        "prefix_kib": 32,
+        "results": [
+          {
+            "kind": "text",
+            "initial_output_bytes": 32768,
+            "p50_ms": 762.391,
+            "p95_ms": 1381.523,
+            "sql_statements": {
+              "BEGIN": 100,
+              "UPDATE": 200,
+              "COMMIT": 100
+            },
+            "peak_python_allocated_bytes": 234348,
+            "persisted_and_emitted_sha256": "67cc47211b479d751346a06b941f640e422e40bf12736fa71194e0caba561814",
+            "latencies_ms": [
+              673.525,
+              705.648,
+              677.404,
+              691.675,
+              721.191,
+              686.814,
+              856.936,
+              870.035,
+              1104.314,
+              1425.565,
+              1147.962,
+              1082.591,
+              696.985,
+              789.094,
+              761.169,
+              778.118,
+              744.746,
+              1217.584,
+              806.767,
+              732.273,
+              730.802,
+              697.257,
+              720.086,
+              776.5,
+              744.999,
+              762.391,
+              739.841,
+              765.377,
+              792.373,
+              785.364,
+              1381.523
+            ]
+          }
+        ],
+        "notes": [
+          "Warmed latency excludes reset, verification, SQL counting and tracing.",
+          "No provider/network pacing; persistence overhead, not answer latency.",
+          "Every delta is persisted and forwarded immediately; no outer transaction."
+        ]
+      }
+    }
+  },
+  "postgres_balanced_pairs": [
+    {
+      "pair": 0,
+      "version": "before",
+      "measurement": {
+        "database": "postgresql",
+        "path": "HarnessService._on_runner_event, real repositories and emit seam",
+        "samples": 7,
+        "deltas_per_sample": 100,
+        "prefix_kib": 32,
+        "results": [
+          {
+            "kind": "text",
+            "initial_output_bytes": 32768,
+            "p50_ms": 931.202,
+            "p95_ms": 1596.524,
+            "python_cpu_p50_ms": 515.087,
+            "sql_statements": {
+              "SELECT": 100,
+              "UPDATE": 200
+            },
+            "peak_python_allocated_bytes": 331820,
+            "persisted_and_emitted_sha256": "67cc47211b479d751346a06b941f640e422e40bf12736fa71194e0caba561814",
+            "latencies_ms": [
+              648.224,
+              395.682,
+              373.474,
+              1313.31,
+              1467.153,
+              1596.524,
+              931.202
+            ]
+          }
+        ],
+        "notes": [
+          "Warmed latency excludes reset, verification, SQL counting and tracing.",
+          "No provider/network pacing; persistence overhead, not answer latency.",
+          "Every delta is persisted and forwarded immediately; no outer transaction."
+        ]
+      }
+    },
+    {
+      "pair": 0,
+      "version": "after",
+      "measurement": {
+        "database": "postgresql",
+        "path": "HarnessService._on_runner_event, real repositories and emit seam",
+        "samples": 7,
+        "deltas_per_sample": 100,
+        "prefix_kib": 32,
+        "results": [
+          {
+            "kind": "text",
+            "initial_output_bytes": 32768,
+            "p50_ms": 344.183,
+            "p95_ms": 1188.775,
+            "python_cpu_p50_ms": 183.238,
+            "sql_statements": {
+              "BEGIN": 100,
+              "UPDATE": 200,
+              "COMMIT": 100
+            },
+            "peak_python_allocated_bytes": 373369,
+            "persisted_and_emitted_sha256": "67cc47211b479d751346a06b941f640e422e40bf12736fa71194e0caba561814",
+            "latencies_ms": [
+              1188.775,
+              1127.483,
+              749.371,
+              316.709,
+              274.795,
+              310.367,
+              344.183
+            ]
+          }
+        ],
+        "notes": [
+          "Warmed latency excludes reset, verification, SQL counting and tracing.",
+          "No provider/network pacing; persistence overhead, not answer latency.",
+          "Every delta is persisted and forwarded immediately; no outer transaction."
+        ]
+      }
+    },
+    {
+      "pair": 1,
+      "version": "after",
+      "measurement": {
+        "database": "postgresql",
+        "path": "HarnessService._on_runner_event, real repositories and emit seam",
+        "samples": 7,
+        "deltas_per_sample": 100,
+        "prefix_kib": 32,
+        "results": [
+          {
+            "kind": "text",
+            "initial_output_bytes": 32768,
+            "p50_ms": 285.449,
+            "p95_ms": 1164.485,
+            "python_cpu_p50_ms": 154.33,
+            "sql_statements": {
+              "BEGIN": 100,
+              "UPDATE": 200,
+              "COMMIT": 100
+            },
+            "peak_python_allocated_bytes": 379474,
+            "persisted_and_emitted_sha256": "67cc47211b479d751346a06b941f640e422e40bf12736fa71194e0caba561814",
+            "latencies_ms": [
+              1164.485,
+              832.962,
+              285.449,
+              282.87,
+              269.344,
+              282.64,
+              866.975
+            ]
+          }
+        ],
+        "notes": [
+          "Warmed latency excludes reset, verification, SQL counting and tracing.",
+          "No provider/network pacing; persistence overhead, not answer latency.",
+          "Every delta is persisted and forwarded immediately; no outer transaction."
+        ]
+      }
+    },
+    {
+      "pair": 1,
+      "version": "before",
+      "measurement": {
+        "database": "postgresql",
+        "path": "HarnessService._on_runner_event, real repositories and emit seam",
+        "samples": 7,
+        "deltas_per_sample": 100,
+        "prefix_kib": 32,
+        "results": [
+          {
+            "kind": "text",
+            "initial_output_bytes": 32768,
+            "p50_ms": 482.654,
+            "p95_ms": 1205.65,
+            "python_cpu_p50_ms": 280.887,
+            "sql_statements": {
+              "SELECT": 100,
+              "UPDATE": 200
+            },
+            "peak_python_allocated_bytes": 338206,
+            "persisted_and_emitted_sha256": "67cc47211b479d751346a06b941f640e422e40bf12736fa71194e0caba561814",
+            "latencies_ms": [
+              1205.65,
+              401.493,
+              361.261,
+              661.421,
+              693.407,
+              476.777,
+              482.654
+            ]
+          }
+        ],
+        "notes": [
+          "Warmed latency excludes reset, verification, SQL counting and tracing.",
+          "No provider/network pacing; persistence overhead, not answer latency.",
+          "Every delta is persisted and forwarded immediately; no outer transaction."
+        ]
+      }
+    },
+    {
+      "pair": 2,
+      "version": "before",
+      "measurement": {
+        "database": "postgresql",
+        "path": "HarnessService._on_runner_event, real repositories and emit seam",
+        "samples": 7,
+        "deltas_per_sample": 100,
+        "prefix_kib": 32,
+        "results": [
+          {
+            "kind": "text",
+            "initial_output_bytes": 32768,
+            "p50_ms": 477.325,
+            "p95_ms": 551.125,
+            "python_cpu_p50_ms": 280.575,
+            "sql_statements": {
+              "SELECT": 100,
+              "UPDATE": 200
+            },
+            "peak_python_allocated_bytes": 338442,
+            "persisted_and_emitted_sha256": "67cc47211b479d751346a06b941f640e422e40bf12736fa71194e0caba561814",
+            "latencies_ms": [
+              415.569,
+              391.939,
+              399.089,
+              551.125,
+              477.325,
+              498.441,
+              480.026
+            ]
+          }
+        ],
+        "notes": [
+          "Warmed latency excludes reset, verification, SQL counting and tracing.",
+          "No provider/network pacing; persistence overhead, not answer latency.",
+          "Every delta is persisted and forwarded immediately; no outer transaction."
+        ]
+      }
+    },
+    {
+      "pair": 2,
+      "version": "after",
+      "measurement": {
+        "database": "postgresql",
+        "path": "HarnessService._on_runner_event, real repositories and emit seam",
+        "samples": 7,
+        "deltas_per_sample": 100,
+        "prefix_kib": 32,
+        "results": [
+          {
+            "kind": "text",
+            "initial_output_bytes": 32768,
+            "p50_ms": 354.833,
+            "p95_ms": 724.024,
+            "python_cpu_p50_ms": 195.183,
+            "sql_statements": {
+              "BEGIN": 100,
+              "UPDATE": 200,
+              "COMMIT": 100
+            },
+            "peak_python_allocated_bytes": 373874,
+            "persisted_and_emitted_sha256": "67cc47211b479d751346a06b941f640e422e40bf12736fa71194e0caba561814",
+            "latencies_ms": [
+              724.024,
+              283.403,
+              267.459,
+              279.642,
+              355.831,
+              360.868,
+              354.833
+            ]
+          }
+        ],
+        "notes": [
+          "Warmed latency excludes reset, verification, SQL counting and tracing.",
+          "No provider/network pacing; persistence overhead, not answer latency.",
+          "Every delta is persisted and forwarded immediately; no outer transaction."
+        ]
+      }
+    },
+    {
+      "pair": 3,
+      "version": "after",
+      "measurement": {
+        "database": "postgresql",
+        "path": "HarnessService._on_runner_event, real repositories and emit seam",
+        "samples": 7,
+        "deltas_per_sample": 100,
+        "prefix_kib": 32,
+        "results": [
+          {
+            "kind": "text",
+            "initial_output_bytes": 32768,
+            "p50_ms": 306.33,
+            "p95_ms": 1123.213,
+            "python_cpu_p50_ms": 162.946,
+            "sql_statements": {
+              "BEGIN": 100,
+              "UPDATE": 200,
+              "COMMIT": 100
+            },
+            "peak_python_allocated_bytes": 378280,
+            "persisted_and_emitted_sha256": "67cc47211b479d751346a06b941f640e422e40bf12736fa71194e0caba561814",
+            "latencies_ms": [
+              1123.213,
+              318.429,
+              306.33,
+              664.711,
+              282.768,
+              288.105,
+              302.602
+            ]
+          }
+        ],
+        "notes": [
+          "Warmed latency excludes reset, verification, SQL counting and tracing.",
+          "No provider/network pacing; persistence overhead, not answer latency.",
+          "Every delta is persisted and forwarded immediately; no outer transaction."
+        ]
+      }
+    },
+    {
+      "pair": 3,
+      "version": "before",
+      "measurement": {
+        "database": "postgresql",
+        "path": "HarnessService._on_runner_event, real repositories and emit seam",
+        "samples": 7,
+        "deltas_per_sample": 100,
+        "prefix_kib": 32,
+        "results": [
+          {
+            "kind": "text",
+            "initial_output_bytes": 32768,
+            "p50_ms": 495.661,
+            "p95_ms": 1461.006,
+            "python_cpu_p50_ms": 288.647,
+            "sql_statements": {
+              "SELECT": 100,
+              "UPDATE": 200
+            },
+            "peak_python_allocated_bytes": 342110,
+            "persisted_and_emitted_sha256": "67cc47211b479d751346a06b941f640e422e40bf12736fa71194e0caba561814",
+            "latencies_ms": [
+              1461.006,
+              553.589,
+              395.868,
+              384.73,
+              674.148,
+              495.661,
+              477.013
+            ]
+          }
+        ],
+        "notes": [
+          "Warmed latency excludes reset, verification, SQL counting and tracing.",
+          "No provider/network pacing; persistence overhead, not answer latency.",
+          "Every delta is persisted and forwarded immediately; no outer transaction."
+        ]
+      }
+    }
+  ],
+  "postgres_paired_summary": {
+    "before": {
+      "samples": 28,
+      "p50_ms": 489.158,
+      "p95_ms": 1467.153,
+      "median_batch_cpu_p50_ms": 284.767,
+      "batch_p50_ms": [
+        931.202,
+        482.654,
+        477.325,
+        495.661
+      ]
+    },
+    "after": {
+      "samples": 28,
+      "p50_ms": 317.569,
+      "p95_ms": 1164.485,
+      "median_batch_cpu_p50_ms": 173.092,
+      "batch_p50_ms": [
+        344.183,
+        285.449,
+        354.833,
+        306.33
+      ]
+    },
+    "improvements_percent": {
+      "p50_ms": 35.08,
+      "p95_ms": 20.63,
+      "median_batch_cpu_p50_ms": 39.22
+    }
+  }
+}
