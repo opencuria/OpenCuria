@@ -766,6 +766,25 @@ class HarnessService:
             )
         return self.sessions.set_skill_ids(session, normalized)
 
+    def _available_session_skill_ids(
+        self,
+        session: HarnessSession,
+        *,
+        user_id: int | None,
+        organization_id: uuid.UUID,
+    ) -> list[str]:
+        """Return the session's persisted skills that still resolve.
+
+        Runs inherit the selection, so skills deleted since must not wedge
+        every later prompt of the chat.
+        """
+        stored = SkillService.normalize_ids(list(session.skill_ids or []))
+        if not stored or user_id is None:
+            return stored
+        return self.skills.filter_available_ids(
+            stored, user_id=user_id, organization_id=organization_id
+        )
+
     async def delete_session(self, session_id: uuid.UUID) -> None:
         """Delete a session only after external process ownership is settled."""
         session = await sync_to_async(self.get_session)(session_id)
@@ -954,7 +973,11 @@ class HarnessService:
         effective_skill_ids = (
             SkillService.normalize_ids(skill_ids)
             if skill_ids is not None
-            else SkillService.normalize_ids(list(session.skill_ids or []))
+            else await sync_to_async(self._available_session_skill_ids)(
+                session,
+                user_id=user_id,
+                organization_id=organization_id or session.organization_id,
+            )
         )
         claude_session = getattr(session, "harness_id", "native") == "claude"
         if (
@@ -1569,6 +1592,18 @@ class HarnessService:
             await sync_to_async(self._resolve_engine_auth)(
                 org_id, run_user_id, selected_claude
             )
+        if skill_ids is None and session.skill_ids:
+            available = await sync_to_async(self._available_session_skill_ids)(
+                session, user_id=user_id, organization_id=org_id
+            )
+            if available != list(session.skill_ids):
+                if _edit_message_id is not None:
+                    # Edits commit session options only once admitted.
+                    session.skill_ids = available
+                else:
+                    session = await sync_to_async(self.sessions.set_skill_ids)(
+                        session, available
+                    )
         if engine_id == "claude":
             effective_skill_ids = (
                 SkillService.normalize_ids(skill_ids)

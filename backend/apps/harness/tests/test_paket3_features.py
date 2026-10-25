@@ -228,6 +228,120 @@ def test_timeline_returns_per_message_skill_ids(paket3_setup, fake_harness_servi
 
 
 @pytest.mark.django_db(transaction=True)
+def test_followup_drops_deleted_skill_from_inherited_selection(
+    paket3_setup, fake_harness_service
+):
+    """A skill deleted after selection must not reject every later prompt."""
+    from apps.harness.repositories import HarnessMessageRepository
+
+    org_skill_id = str(paket3_setup["org_skill"].id)
+    personal_skill_id = str(paket3_setup["personal_skill"].id)
+    client = _client(
+        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN
+    )
+    created = client.post(
+        f"/api/v1/workspaces/{paket3_setup['owned'].id}/harness/sessions/",
+        data=json.dumps(
+            {"prompt": "first", "skill_ids": [org_skill_id, personal_skill_id]}
+        ),
+        content_type="application/json",
+    )
+    assert created.status_code == 201, created.content[:500]
+    session_id = created.json()["id"]
+    paket3_setup["personal_skill"].delete()
+
+    followup = client.post(
+        f"/api/v1/harness/sessions/{session_id}/message",
+        data=json.dumps({"prompt": "second", "skill_ids": []}),
+        content_type="application/json",
+    )
+    assert followup.status_code == 202, followup.content[:500]
+    assert followup.json()["skill_ids"] == [org_skill_id]
+    users = [
+        row
+        for row in HarnessMessageRepository.list_for_session(session_id)
+        if row.role == "user"
+    ]
+    assert list(users[-1].skill_ids or []) == [org_skill_id]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_edit_drops_deleted_skill_from_inherited_selection(
+    paket3_setup, fake_harness_service
+):
+    """Editing a message reruns without skills deleted since selection."""
+    from apps.harness.repositories import HarnessMessageRepository
+
+    org_skill_id = str(paket3_setup["org_skill"].id)
+    selection = [org_skill_id, str(paket3_setup["personal_skill"].id)]
+    session = fake_harness_service.create_session(
+        workspace_id=paket3_setup["owned"].id,
+        organization_id=paket3_setup["org"].id,
+        prompt="first",
+        skill_ids=selection,
+        user_id=paket3_setup["owner"].id,
+    )
+    first = HarnessMessageRepository.create(
+        session_id=session.id, role="user", content="first", skill_ids=selection
+    )
+    HarnessMessageRepository.create(
+        session_id=session.id, role="assistant", content="answer"
+    )
+    paket3_setup["personal_skill"].delete()
+    client = _client(
+        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN
+    )
+
+    response = client.post(
+        f"/api/v1/harness/sessions/{session.id}/messages/{first.id}/edit",
+        data=json.dumps({"prompt": "first edited"}),
+        content_type="application/json",
+    )
+    assert response.status_code == 202, response.content[:500]
+    session.refresh_from_db()
+    assert list(session.skill_ids) == [org_skill_id]
+    users = [
+        row
+        for row in HarnessMessageRepository.list_for_session(session.id)
+        if row.role == "user"
+    ]
+    assert [row.content for row in users] == ["first edited"]
+    assert list(users[0].skill_ids or []) == [org_skill_id]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("requested", ["deleted", "foreign_skill"])
+def test_followup_still_rejects_explicit_unavailable_skill(
+    paket3_setup, fake_harness_service, requested
+):
+    """Only the inherited selection is pruned; explicit requests stay strict."""
+    client = _client(
+        user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN
+    )
+    created = client.post(
+        f"/api/v1/workspaces/{paket3_setup['owned'].id}/harness/sessions/",
+        data=json.dumps({"prompt": "first"}),
+        content_type="application/json",
+    )
+    assert created.status_code == 201, created.content[:500]
+    if requested == "deleted":
+        skill_id = str(paket3_setup["personal_skill"].id)
+        paket3_setup["personal_skill"].delete()
+    else:
+        skill_id = str(paket3_setup[requested].id)
+
+    followup = client.post(
+        f"/api/v1/harness/sessions/{created.json()['id']}/message",
+        data=json.dumps({"prompt": "second", "skill_ids": [skill_id]}),
+        content_type="application/json",
+    )
+    assert followup.status_code == 400, followup.content[:500]
+    assert followup.json()["detail"] == (
+        f"Skill not found or not accessible: {skill_id}"
+    )
+
+
+@pytest.mark.django_db(transaction=True)
 async def test_fork_copies_per_message_skill_ids(paket3_setup, fake_harness_service):
     """Fork keeps the per-message skill snapshot of the copied prefix."""
     from apps.harness.repositories import HarnessMessageRepository

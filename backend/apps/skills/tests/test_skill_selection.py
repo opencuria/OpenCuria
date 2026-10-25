@@ -84,6 +84,30 @@ def test_resolve_bodies_rejects_invalid_and_unknown_ids(skill_setup):
         _resolve(skill_setup, [str(unknown)])
 
 
+@pytest.mark.django_db
+def test_filter_available_ids_drops_deleted_hidden_and_invalid_ids(skill_setup):
+    personal_id = str(skill_setup["personal"].id)
+    org_id = str(skill_setup["org_skill"].id)
+    owner = skill_setup["owner"]
+    deleted = Skill.objects.create(name="Gone", body="x", user=owner, created_by=owner)
+    deleted_id = str(deleted.id)
+    deleted.delete()
+    available = SkillService().filter_available_ids(
+        [
+            personal_id,
+            deleted_id,
+            str(skill_setup["foreign"].id),
+            str(skill_setup["other_org"].id),
+            "nope",
+            org_id,
+            personal_id,
+        ],
+        user_id=skill_setup["owner"].id,
+        organization_id=skill_setup["org"].id,
+    )
+    assert available == [personal_id, org_id]
+
+
 def test_merge_bodies_puts_plugin_skills_first_and_drops_duplicates():
     assert SkillService.merge_bodies(["b", "a", " "], ["p1", "a", "p1"]) == [
         "p1",

@@ -166,6 +166,30 @@ class SkillService:
             bodies.append(f"## {skill.name}\n{skill.body.strip()}")
         return bodies
 
+    def filter_available_ids(
+        self,
+        skill_ids: list[str],
+        *,
+        user_id: int,
+        organization_id: uuid.UUID,
+    ) -> list[str]:
+        """Return the normalized *skill_ids* still visible, in order.
+
+        Persisted selections outlive their skills: a skill deleted (or no
+        longer shared) after it was chosen must drop out instead of failing
+        every later run that inherits the selection.
+        """
+        visible = self.skills.visible_ids_for_user_in_org(user_id, organization_id)
+        available: list[str] = []
+        for raw in self.normalize_ids(skill_ids):
+            try:
+                skill_id = uuid.UUID(raw)
+            except ValueError:
+                continue
+            if skill_id in visible:
+                available.append(raw)
+        return available
+
     @staticmethod
     def merge_bodies(
         explicit: list[str] | None, plugin_bodies: list[str] | None
