@@ -14,8 +14,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     icon: "./assets/icon.png",
     ios: {
       bundleIdentifier: development
-        ? "org.opencuria.mobile.dev"
-        : "org.opencuria.mobile",
+        ? "com.opencuria.mobile.dev"
+        : "com.opencuria.mobile",
       supportsTablet: true,
       infoPlist: {
         NSCameraUsageDescription:
@@ -28,8 +28,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     },
     android: {
       package: development
-        ? "org.opencuria.mobile.dev"
-        : "org.opencuria.mobile",
+        ? "com.opencuria.mobile.dev"
+        : "com.opencuria.mobile",
       adaptiveIcon: {
         foregroundImage: "./assets/adaptive-icon.png",
         backgroundColor: "#F4F4F6",
