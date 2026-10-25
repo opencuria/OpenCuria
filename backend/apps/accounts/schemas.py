@@ -81,30 +81,6 @@ class UserOut(Schema):
     last_name: str
 
 
-class UserWithOrgsOut(Schema):
-    """Response schema for the current user with their organizations."""
-
-    id: int
-    email: str
-    first_name: str
-    last_name: str
-    organizations: list[UserOrgOut] = []
-
-
-class UserOrgOut(Schema):
-    """Organization info within a user response."""
-
-    id: uuid.UUID
-    name: str
-    slug: str
-    role: str
-    created_at: datetime
-
-
-# Fix forward reference
-UserWithOrgsOut.model_rebuild()
-
-
 # ---------------------------------------------------------------------------
 # API key schemas
 # ---------------------------------------------------------------------------

@@ -13,7 +13,9 @@ harness in turn never imports the apps built on it; they subscribe to its
 run events (``apps.harness.run_events``). Likewise the foundational contexts
 (organizations, credentials, skills, plugins) only import the contexts below
 them; apps built on them subscribe to ``apps.organizations.events`` and
-``apps.credentials.deletion_guards`` and share ``common.schemas``. Skill
+``apps.credentials.deletion_guards`` and share ``common.schemas``.
+Account identity never imports another app; organizations compose it with
+memberships and own the member profile adapter mounted at ``/auth/me/``. Skill
 selection (ID normalization, visibility, body rendering and merging) is owned
 by the skills context; the harness and scheduled tasks call ``SkillService``
 and never import skill repositories or models. Workspaces
@@ -44,6 +46,7 @@ REALTIME_ADAPTERS = ("apps.runners.sio_server", "apps.runners.desktop_proxy")
 
 #: Foundational bounded contexts and the only other apps each may import.
 FOUNDATION_DEPENDENCIES = {
+    "apps.accounts": set(),
     "apps.organizations": {"apps.accounts"},
     "apps.credentials": {"apps.accounts", "apps.organizations"},
     "apps.skills": {"apps.accounts", "apps.organizations"},

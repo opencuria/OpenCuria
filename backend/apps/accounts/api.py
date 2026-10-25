@@ -2,7 +2,7 @@
 REST API endpoints for authentication.
 
 Public endpoints (auth=None): register, login, refresh.
-Protected endpoint: me (requires valid JWT).
+API key management requires a valid JWT.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ from ninja import Router
 from apps.accounts.api_auth import JWTAuth
 from apps.accounts.auth_backends import DjangoJWTBackend, get_auth_backend
 from apps.accounts.sso import KeycloakSsoService, get_sso_provider_config
-from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, NotFoundError, ServiceError
 
 from .schemas import (
@@ -30,8 +29,6 @@ from .schemas import (
     SsoCallbackIn,
     SsoProviderOut,
     TokenOut,
-    UserOrgOut,
-    UserWithOrgsOut,
 )
 from .services import APIKeyService
 
@@ -143,35 +140,6 @@ def sso_callback(request: HttpRequest, payload: SsoCallbackIn):
     return 200, TokenOut(
         access_token=tokens.access_token,
         refresh_token=tokens.refresh_token,
-    )
-
-
-@auth_router.get(
-    "/me/",
-    response=UserWithOrgsOut,
-    summary="Get current user",
-)
-def me(request: HttpRequest):
-    """Return the authenticated user's profile with organization memberships."""
-    user = request.user
-    org_service = OrganizationService()
-    org_list = org_service.list_user_organizations(user)
-
-    return UserWithOrgsOut(
-        id=user.id,
-        email=user.email,
-        first_name=user.first_name,
-        last_name=user.last_name,
-        organizations=[
-            UserOrgOut(
-                id=o["id"],
-                name=o["name"],
-                slug=o["slug"],
-                role=o["role"],
-                created_at=o["created_at"],
-            )
-            for o in org_list
-        ],
     )
 
 
