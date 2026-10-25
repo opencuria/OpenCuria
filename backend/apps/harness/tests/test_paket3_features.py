@@ -483,12 +483,12 @@ async def test_title_agent_updates_session_title(
         small_model="small-model",
     )
     prompt = "Please help me build a feature"
-    from apps.harness.harness_service import _title_from_prompt
+    from apps.harness.session_metadata_service import title_from_prompt
 
     session = HarnessSessionRepository.create(
         workspace_id=harness_workspace.id,
         organization_id=harness_workspace.runner.organization_id,
-        title=_title_from_prompt(prompt),
+        title=title_from_prompt(prompt),
         agent_name="build",
         mode="build",
         model="big-model",
@@ -536,7 +536,7 @@ async def test_title_agent_does_not_overwrite_user_rename(harness_workspace) -> 
         prompt=prompt,
     )
     service.update_title(session.id, "User Renamed Early")
-    await service._generate_title(
+    await service.metadata.generate_title(
         session_id=session.id,
         prompt=prompt,
         organization_id=harness_workspace.runner.organization_id,

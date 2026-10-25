@@ -37,6 +37,8 @@ Provider wire adapters share context-error classification within ``providers``;
 neither they nor their dependencies import orchestration or persistence.
 Stateless commit suggestions and shared small-model composition are independent
 of chat session orchestration; their adapter calls ``CommitMessageService``.
+Session metadata generation is independent as well; the lifecycle service only
+schedules it and supplies change notifications to ``SessionMetadataService``.
 """
 
 from __future__ import annotations
@@ -222,6 +224,32 @@ def test_commit_suggestions_are_independent_of_session_orchestration() -> None:
         "Keep commit suggestions in CommitMessageService and share small-model "
         "composition without coupling it to HarnessService:\n"
         + "\n".join(sorted(violations))
+    )
+
+
+def test_session_metadata_is_independent_of_run_orchestration() -> None:
+    """Metadata generation must work without importing the run lifecycle."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    modules = {_module_name(path): path for path in trees}
+    lifecycle = "apps.harness.harness_service"
+    metadata = "apps.harness.session_metadata_service"
+    assert metadata in modules
+    assert metadata in _imported_modules(modules[lifecycle], trees[modules[lifecycle]])
+    pending = {metadata}
+    checked: set[str] = set()
+    violations = set()
+    while pending:
+        module = pending.pop()
+        checked.add(module)
+        path = modules[module]
+        for imported in _imported_modules(path, trees[path]):
+            if imported == lifecycle or imported.startswith(f"{lifecycle}."):
+                violations.add(f"{module} -> {imported}")
+            elif imported in modules and imported not in checked:
+                pending.add(imported)
+    assert violations == set(), (
+        "Keep title/summary generation in SessionMetadataService; it and its "
+        "dependencies must not import HarnessService:\n" + "\n".join(sorted(violations))
     )
 
 

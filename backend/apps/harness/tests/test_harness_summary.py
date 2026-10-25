@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from asgiref.sync import sync_to_async
 
 from apps.harness.agents.definitions import get_agent
-from apps.harness.harness_service import (
-    HarnessService,
-    _normalize_generated_summary,
-)
+from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessMessageRole, HarnessSession, HarnessSessionStatus
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.service import PermissionService
@@ -26,6 +25,10 @@ from apps.harness.repositories import (
 )
 from apps.harness.schemas import session_to_out
 from apps.harness.services import ProviderConfigService
+from apps.harness.session_metadata_service import (
+    SessionMetadataService,
+    _normalize_generated_summary,
+)
 from apps.harness.todos.domain import TodoItem
 from apps.harness.todos.repositories import TodoRepository
 
@@ -63,6 +66,24 @@ def _service(provider: ProviderAdapter, emit=_drop_emit) -> HarnessService:
         ),
         emit=emit,
         provider_factory=lambda _org: provider,
+    )
+
+
+def _metadata_service(
+    provider: ProviderAdapter | None, emit=_drop_emit
+) -> SessionMetadataService:
+    """Exercise metadata without constructing session run orchestration."""
+
+    async def emit_metadata(event: str, data: dict, workspace_id: str) -> None:
+        await emit(event, data)
+
+    async def conversations_changed(workspace_id: uuid.UUID) -> None:
+        await emit("harness.conversations_changed", {"workspace_id": str(workspace_id)})
+
+    return SessionMetadataService(
+        emit=emit_metadata,
+        conversations_changed=conversations_changed,
+        provider_factory=(lambda _org: provider) if provider is not None else None,
     )
 
 
@@ -209,7 +230,9 @@ def test_summary_material_carries_all_requests_and_closing_replies(
     _session_with_answer(harness_workspace, content="Other session answer")
 
     with django_assert_num_queries(3):
-        material = _service(RoleProvider())._summary_material(session.id, second.id)
+        material = _metadata_service(RoleProvider()).summary_material(
+            session.id, second.id
+        )
 
     assert material == (
         "User:\nFix the login\n\n"
@@ -258,7 +281,9 @@ def test_summary_material_only_uses_final_prose(harness_workspace, parts, expect
         HarnessPartRepository.create(
             message_id=assistant.id, type=part_type, output=output, state="completed"
         )
-    material = _service(RoleProvider())._summary_material(session.id, assistant.id)
+    material = _metadata_service(RoleProvider()).summary_material(
+        session.id, assistant.id
+    )
     user = "User:\nFix the login"
     if any(part_type == "steer" for part_type, _ in parts):
         user += "\n\nUser:\nUse pnpm"
@@ -284,9 +309,9 @@ def test_summary_ignores_tools_hidden_by_the_timeline(harness_workspace, hidden_
         state="pending" if hidden_tool == "question" else "completed",
         input={"tool": hidden_tool},
     )
-    assert _service(RoleProvider())._summary_material(session.id, assistant.id) == (
-        "User:\nFix the login\n\nAgent's final reply:\nFinal"
-    )
+    assert _metadata_service(RoleProvider()).summary_material(
+        session.id, assistant.id
+    ) == ("User:\nFix the login\n\nAgent's final reply:\nFinal")
 
 
 @pytest.mark.django_db
@@ -296,9 +321,9 @@ def test_summary_can_describe_request_without_answer(harness_workspace, finish):
     session, assistant = _session_with_answer(
         harness_workspace, content="", finish=finish, error="private error"
     )
-    assert _service(RoleProvider())._summary_material(session.id, assistant.id) == (
-        "User:\nFix the login"
-    )
+    assert _metadata_service(RoleProvider()).summary_material(
+        session.id, assistant.id
+    ) == ("User:\nFix the login")
 
 
 @pytest.mark.django_db
@@ -308,7 +333,7 @@ def test_summary_material_does_not_clip_user_requests(harness_workspace):
     prompt = "Details " * 500 + "Keep the existing login API unchanged."
     HarnessMessageRepository.create(session_id=session.id, role="user", content=prompt)
     last = HarnessMessageRepository.create(session_id=session.id, role="assistant")
-    material = _service(RoleProvider())._summary_material(session.id, last.id)
+    material = _metadata_service(RoleProvider()).summary_material(session.id, last.id)
     assert prompt in material
     assert "Fixed the login bug in auth.py." in material
 
@@ -318,11 +343,11 @@ def test_summary_material_rejects_foreign_missing_or_user_message(harness_worksp
     """Only an assistant in the requested session can anchor the recap."""
     session, assistant = _session_with_answer(harness_workspace)
     other, _ = _session_with_answer(harness_workspace)
-    service = _service(RoleProvider())
-    assert service._summary_material(other.id, assistant.id) == ""
-    assert service._summary_material(session.id, uuid.uuid4()) == ""
+    service = _metadata_service(RoleProvider())
+    assert service.summary_material(other.id, assistant.id) == ""
+    assert service.summary_material(session.id, uuid.uuid4()) == ""
     user = HarnessMessageRepository.list_for_session(session.id)[0]
-    assert service._summary_material(session.id, user.id) == ""
+    assert service.summary_material(session.id, user.id) == ""
 
 
 @pytest.mark.django_db
@@ -332,7 +357,10 @@ def test_summary_material_is_empty_without_requests(harness_workspace):
     user = HarnessMessageRepository.list_for_session(session.id)[0]
     user.content = ""
     user.save(update_fields=["content"])
-    assert _service(RoleProvider())._summary_material(session.id, assistant.id) == ""
+    assert (
+        _metadata_service(RoleProvider()).summary_material(session.id, assistant.id)
+        == ""
+    )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -348,7 +376,7 @@ async def test_generate_summary_stores_sentence_for_every_engine(
     async def emit(event: str, data: dict) -> None:
         events.append((event, data))
 
-    await _service(RoleProvider(), emit)._generate_summary(
+    await _metadata_service(RoleProvider(), emit).generate_summary(
         session_id=session.id,
         assistant_id=assistant.id,
         workspace_id=harness_workspace.id,
@@ -386,7 +414,7 @@ async def test_generate_summary_needs_a_small_model(harness_workspace) -> None:
     session, assistant = _session_with_answer(harness_workspace)
     provider = RoleProvider()
 
-    await _service(provider)._generate_summary(
+    await _metadata_service(provider).generate_summary(
         session_id=session.id,
         assistant_id=assistant.id,
         workspace_id=harness_workspace.id,
@@ -395,6 +423,107 @@ async def test_generate_summary_needs_a_small_model(harness_workspace) -> None:
 
     assert provider.summary_inputs == []
     assert HarnessSession.objects.get(id=session.id).summary == ""
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("follower", ["title", "summary"])
+@pytest.mark.parametrize(
+    "outcome", ["error", "empty", "revoked_before", "revoked_after"]
+)
+async def test_metadata_failure_or_revocation_never_writes_or_emits(
+    harness_workspace, monkeypatch, follower: str, outcome: str
+) -> None:
+    """Best-effort metadata cannot mutate a session after failure or revocation."""
+    session, assistant = _session_with_answer(harness_workspace)
+    events: list[tuple[str, dict]] = []
+
+    async def emit(event: str, data: dict) -> None:
+        events.append((event, data))
+
+    runner = SimpleNamespace(
+        run=AsyncMock(
+            return_value=SimpleNamespace(
+                output="" if outcome == "empty" else "Generated"
+            )
+        )
+    )
+    if outcome == "error":
+        runner.run.side_effect = RuntimeError("Provider unavailable")
+    build_runner = AsyncMock(return_value=(runner, "small-model"))
+    monkeypatch.setattr(
+        "apps.harness.session_metadata_service.build_small_model_runner", build_runner
+    )
+    reason = Mock(
+        side_effect=["revoked"]
+        if outcome == "revoked_before"
+        else ["", "revoked"]
+        if outcome == "revoked_after"
+        else ["", "", ""]
+    )
+    monkeypatch.setattr(ProviderTurnService, "cancellation_reason", reason)
+    service = _metadata_service(RoleProvider(), emit)
+    kwargs = {
+        "session_id": session.id,
+        "organization_id": session.organization_id,
+        "provider_turn_id": uuid.uuid4(),
+    }
+    if follower == "title":
+        await service.generate_title(prompt="Fix login", **kwargs)
+    else:
+        await service.generate_summary(
+            assistant_id=assistant.id, workspace_id=session.workspace_id, **kwargs
+        )
+
+    stored = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
+    assert stored.title == "Fix login"
+    assert stored.summary == ""
+    assert events == []
+    if outcome == "revoked_before":
+        build_runner.assert_not_awaited()
+    else:
+        runner.run.assert_awaited_once()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("follower", ["title", "summary"])
+async def test_metadata_rechecks_session_after_generation(
+    harness_workspace, monkeypatch, follower: str
+) -> None:
+    """A rename or newer answer during generation wins over its stale result."""
+    session, assistant = _session_with_answer(harness_workspace)
+    events: list[tuple[str, dict]] = []
+
+    async def emit(event: str, data: dict) -> None:
+        events.append((event, data))
+
+    async def generate(*args):
+        if follower == "title":
+            await sync_to_async(HarnessSessionRepository.set_title)(session, "My title")
+        else:
+            await sync_to_async(HarnessMessageRepository.create)(
+                session_id=session.id, role="assistant", content="New answer"
+            )
+        return SimpleNamespace(output="Stale metadata")
+
+    runner = SimpleNamespace(run=AsyncMock(side_effect=generate))
+    monkeypatch.setattr(
+        "apps.harness.session_metadata_service.build_small_model_runner",
+        AsyncMock(return_value=(runner, "small-model")),
+    )
+    service = _metadata_service(RoleProvider(), emit)
+    kwargs = {"session_id": session.id, "organization_id": session.organization_id}
+    if follower == "title":
+        await service.generate_title(prompt="Fix login", **kwargs)
+    else:
+        await service.generate_summary(
+            assistant_id=assistant.id, workspace_id=session.workspace_id, **kwargs
+        )
+
+    stored = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
+    assert stored.title == ("My title" if follower == "title" else "Fix login")
+    assert stored.summary == ""
+    assert events == []
+    runner.run.assert_awaited_once()
 
 
 @pytest.mark.django_db(transaction=True)
@@ -424,7 +553,7 @@ async def test_metadata_registers_frozen_account_before_provider_request(
 
     monkeypatch.setattr(OpenRouterAdapter, "chat_stream", stream)
     monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
-    service = HarnessService(emit=_drop_emit)
+    service = _metadata_service(None)
     authority = {
         "session_id": session.id,
         "organization_id": session.organization_id,
@@ -433,9 +562,9 @@ async def test_metadata_registers_frozen_account_before_provider_request(
         "initiated_by_id": harness_workspace.created_by_id,
     }
     if follower == "title":
-        await service._generate_title(prompt="Fix login", **authority)
+        await service.generate_title(prompt="Fix login", **authority)
     else:
-        await service._generate_summary(
+        await service.generate_summary(
             assistant_id=assistant.id, workspace_id=session.workspace_id, **authority
         )
 

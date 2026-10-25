@@ -473,7 +473,7 @@ async def test_follower_inherits_snapshot_and_remains_revocable_after_root_finis
         entered.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(service, f"_generate_{follower}", generate_follower)
+    monkeypatch.setattr(service.metadata, f"generate_{follower}", generate_follower)
 
     # Isolate the follower under test so it is the only remaining snapshot holder.
     async def no_follower(*_args, **_kwargs):
@@ -482,7 +482,7 @@ async def test_follower_inherits_snapshot_and_remains_revocable_after_root_finis
     if follower == "title":
         monkeypatch.setattr(service, "_schedule_summary", no_follower)
     else:
-        monkeypatch.setattr(service, "_generate_title", no_follower)
+        monkeypatch.setattr(service.metadata, "generate_title", no_follower)
 
     class Provider(ProviderAdapter):
         name = "local"

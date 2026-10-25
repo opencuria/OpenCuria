@@ -434,7 +434,9 @@ async def test_scheduled_plugin_credential_failure_finishes_run(
 
     service, _, events = _service()
     service._provider_factory = forbidden_provider
-    monkeypatch.setattr(service, "_generate_title", lambda **kw: asyncio.sleep(0))
+    monkeypatch.setattr(
+        service.metadata, "generate_title", lambda **kw: asyncio.sleep(0)
+    )
     scheduler = ScheduledTaskService(harness=service)
     run = await scheduler._create_and_start_run(task, ledger, service)
     background = service._tasks.get(str(run.session_id))
@@ -1318,9 +1320,9 @@ async def test_generate_title_loads_selected_provider_without_sync_orm(
     harness_workspace, provider_account_factory, monkeypatch
 ) -> None:
     """Title agent without provider_factory must not hit ORM from asyncio."""
-    from apps.harness.harness_service import _title_from_prompt
     from apps.harness.providers.openrouter import OpenRouterAdapter
     from apps.harness.services import ProviderConfigService
+    from apps.harness.session_metadata_service import title_from_prompt
 
     org_id = harness_workspace.runner.organization_id
     provider_account_factory("openrouter")
@@ -1332,7 +1334,7 @@ async def test_generate_title_loads_selected_provider_without_sync_orm(
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
         organization_id=org_id,
-        title=_title_from_prompt(prompt),
+        title=title_from_prompt(prompt),
         agent_name="build",
         mode="build",
         model="big-model",
@@ -1354,14 +1356,14 @@ async def test_generate_title_loads_selected_provider_without_sync_orm(
     )
     monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
     try:
-        await service._generate_title(
+        await service.metadata.generate_title(
             session_id=session.id,
             prompt=prompt,
             organization_id=org_id,
             initiated_by_id=harness_workspace.created_by_id,
         )
     except SynchronousOnlyOperation:
-        pytest.fail("_generate_title called Django ORM from an async context")
+        pytest.fail("generate_title called Django ORM from an async context")
     finally:
         os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
 

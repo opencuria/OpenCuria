@@ -555,7 +555,7 @@ async def test_cancelled_background_before_execution_entry_is_finalized(
         return task
 
     service._emit = emit
-    monkeypatch.setattr(service, "_generate_title", no_title)
+    monkeypatch.setattr(service.metadata, "generate_title", no_title)
     monkeypatch.setattr(service, "_spawn_background", spawn)
     assistant = await asyncio.wait_for(
         service.start_run(
@@ -688,7 +688,7 @@ async def test_real_client_session_scope_cancel_persists_before_async_teardown(
 
     monkeypatch.setattr(McpRuntime, "setup", setup)
     monkeypatch.setattr(accessor.processes["first"], "aclose", close_stream)
-    monkeypatch.setattr(service, "_generate_title", no_title)
+    monkeypatch.setattr(service.metadata, "generate_title", no_title)
     monkeypatch.setattr(
         service,
         "_prepare_mcp_snapshot_for_run",
@@ -931,7 +931,7 @@ async def test_concurrent_aborts_join_blocked_interruption_persistence(
         return None
 
     monkeypatch.setattr(service, "_record_run_interruption", record)
-    monkeypatch.setattr(service, "_generate_title", no_title)
+    monkeypatch.setattr(service.metadata, "generate_title", no_title)
     assistant, task = await start(service, session)
     await checkpoint(provider_entered)
     first_abort = asyncio.create_task(service.abort_run(session.id))

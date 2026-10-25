@@ -27,7 +27,6 @@ import asyncio
 import contextvars
 import uuid
 from collections.abc import Awaitable, Callable
-from functools import partial
 from itertools import islice
 from typing import Any
 
@@ -66,7 +65,7 @@ from .repositories import (
 )
 from .run_events import publish_assistant_run_finished
 from .runner import HarnessRunner, RunOptions
-from .small_model_service import build_small_model_runner
+from .session_metadata_service import SessionMetadataService, title_from_prompt
 from .steering import NO_ACTIVE_RUN_CODE, SteerEntry, SteeringChannel
 from .todos.repositories import TodoRepository
 from .todos.service import TodoService
@@ -125,7 +124,6 @@ FRONTEND_EVENT_PERMISSION = "harness.permission_required"
 FRONTEND_EVENT_QUESTION = "harness.question_required"
 FRONTEND_EVENT_STATUS = "harness.session_status"
 FRONTEND_EVENT_TODO = "harness.todo_updated"
-FRONTEND_EVENT_SUMMARY = "harness.session_summary"
 FRONTEND_EVENT_SUBTASK_STARTED = "harness.subtask_started"
 FRONTEND_EVENT_SUBTASK_FINISHED = "harness.subtask_finished"
 FRONTEND_EVENT_CONVERSATIONS_CHANGED = "harness.conversations_changed"
@@ -189,6 +187,13 @@ class HarnessService:
         self._provider_turns = None
         self._provider_turn_roots: dict[str, dict[str, Any]] = {}
         self._claude_child_contexts: dict[str, dict[str, Any]] = {}
+        self.metadata = SessionMetadataService(
+            sessions=self.sessions,
+            messages=self.messages,
+            provider_factory=provider_factory,
+            emit=self._emit_frontend,
+            conversations_changed=self._emit_conversations_changed,
+        )
 
     def _engine_registry_for_run(self) -> Any:
         """Return the configured factory or the default native/Claude adapter."""
@@ -582,7 +587,7 @@ class HarnessService:
         session_kwargs: dict[str, Any] = {
             "workspace_id": workspace_id,
             "organization_id": organization_id,
-            "title": title or _title_from_prompt(prompt),
+            "title": title or title_from_prompt(prompt),
             "mode": normalized_mode,
             "agent_name": resolved_agent,
             "model": normalized_model,
@@ -1908,7 +1913,7 @@ class HarnessService:
                     provider_turn_id, title_holder
                 ):
                     title_task = self._spawn_background(
-                        self._generate_title(
+                        self.metadata.generate_title(
                             session_id=session.id,
                             prompt=prompt.strip(),
                             organization_id=org_id,
@@ -5001,15 +5006,7 @@ class HarnessService:
         turn_id = context.get("provider_turn_id")
         if context.get("provider_revocation_message"):
             return
-        from .services import ProviderConfigService
-
-        try:
-            config = await sync_to_async(ProviderConfigService().get_config)(
-                session.organization_id
-            )
-        except NotFoundError:
-            return
-        if not (config.small_model or "").strip():
+        if not await self.metadata.is_enabled(session.organization_id):
             return
         holder = f"summary:{uuid.uuid4()}"
         if turn_id and not await sync_to_async(self._provider_turn_service.add_hold)(
@@ -5037,7 +5034,7 @@ class HarnessService:
                     turn_id, holder
                 ):
                     return
-            await self._generate_summary(
+            await self.metadata.generate_summary(
                 session_id=session.id,
                 assistant_id=assistant.id,
                 workspace_id=session.workspace_id,
@@ -5055,166 +5052,6 @@ class HarnessService:
                     self._finish_provider_hold(turn_id, holder)
                 )
             )
-
-    def _summary_material(self, session_id: uuid.UUID, assistant_id: uuid.UUID) -> str:
-        """Collect user requests and closing replies through the settled turn."""
-        message = self.messages.get_by_id(assistant_id)
-        if (
-            message is None
-            or message.session_id != session_id
-            or message.role != "assistant"
-        ):
-            return ""
-        sections: list[str] = []
-        has_request = False
-        for row in self.messages.list_for_summary(session_id, message.position):
-            if row.role == "user":
-                if row.content.strip():
-                    sections.append(f"User:\n{row.content.strip()}")
-                    has_request = True
-                continue
-            parts = row.summary_parts
-            for part in parts:
-                if part.type == "steer" and part.summary_text.strip():
-                    sections.append(f"User:\n{part.summary_text.strip()}")
-                    has_request = True
-            answer = _assistant_summary_content(row, parts)
-            if answer:
-                sections.append(f"Agent's final reply:\n{answer}")
-        return "\n\n".join(sections) if has_request else ""
-
-    async def _generate_summary(
-        self,
-        *,
-        session_id: uuid.UUID,
-        assistant_id: uuid.UUID,
-        workspace_id: uuid.UUID,
-        organization_id: uuid.UUID,
-        provider_turn_id: uuid.UUID | str | None = None,
-        account_ids: dict[str, str] | None = None,
-        initiated_by_id: int | None = None,
-    ) -> None:
-        """Store a brief recap of the user's goal after a run settles.
-
-        Runs for every engine (the small model comes from the org's provider
-        config, not from the session's engine) and never raises.
-        """
-        try:
-            if provider_turn_id and await sync_to_async(
-                self._provider_turn_service.cancellation_reason
-            )(provider_turn_id):
-                return
-            small = await build_small_model_runner(
-                organization_id,
-                user_id=initiated_by_id,
-                account_ids=account_ids,
-                provider_factory=self._provider_factory,
-                on_account_used=(
-                    partial(self._provider_turn_service.register_use, provider_turn_id)
-                    if provider_turn_id
-                    else None
-                ),
-            )
-            if small is None:
-                return
-            runner, small_model = small
-            material = await sync_to_async(self._summary_material)(
-                session_id, assistant_id
-            )
-            if not material:
-                return
-            result = await runner.run(
-                material,
-                "summary",
-                small_model,
-                "build",
-                RunOptions(auto_approve=True),
-            )
-            if provider_turn_id and await sync_to_async(
-                self._provider_turn_service.cancellation_reason
-            )(provider_turn_id):
-                return
-            summary = _normalize_generated_summary(result.output or "")
-            if not summary:
-                return
-            stored = await sync_to_async(self.sessions.set_summary_for_turn)(
-                session_id, assistant_id, summary
-            )
-            if stored:
-                await self._emit_frontend(
-                    FRONTEND_EVENT_SUMMARY,
-                    {
-                        "workspace_id": str(workspace_id),
-                        "session_id": str(session_id),
-                        "summary": summary,
-                    },
-                    str(workspace_id),
-                )
-        except Exception:  # pragma: no cover - summary must never break runs
-            log.warning("harness_summary_generation_failed", session_id=str(session_id))
-
-    async def _generate_title(
-        self,
-        *,
-        session_id: uuid.UUID,
-        prompt: str,
-        organization_id: uuid.UUID,
-        provider_turn_id: uuid.UUID | str | None = None,
-        account_ids: dict[str, str] | None = None,
-        initiated_by_id: int | None = None,
-    ) -> None:
-        """Run the hidden title agent on the initiating answer's snapshot."""
-        try:
-            session = await sync_to_async(self.sessions.get_by_id)(session_id)
-            if session is None or getattr(session, "harness_id", "native") != "native":
-                return
-            if provider_turn_id and await sync_to_async(
-                self._provider_turn_service.cancellation_reason
-            )(provider_turn_id):
-                return
-            small = await build_small_model_runner(
-                organization_id,
-                user_id=initiated_by_id,
-                account_ids=account_ids,
-                provider_factory=self._provider_factory,
-                on_account_used=(
-                    partial(self._provider_turn_service.register_use, provider_turn_id)
-                    if provider_turn_id
-                    else None
-                ),
-            )
-            if small is None:
-                return
-            runner, small_model = small
-            result = await runner.run(
-                prompt,
-                "title",
-                small_model,
-                "build",
-                RunOptions(auto_approve=True),
-            )
-            if provider_turn_id and await sync_to_async(
-                self._provider_turn_service.cancellation_reason
-            )(provider_turn_id):
-                return
-            title = _normalize_generated_title(result.output or "")
-            if not title:
-                return
-            session = await sync_to_async(self.sessions.get_by_id)(session_id)
-            if session is None:
-                return
-            if provider_turn_id and await sync_to_async(
-                self._provider_turn_service.cancellation_reason
-            )(provider_turn_id):
-                return
-            auto_title = _title_from_prompt(prompt)
-            if (session.title or "").strip() != auto_title:
-                return
-            await sync_to_async(self.sessions.set_title)(session, title)
-            if session.parent_id is None:
-                await self._emit_conversations_changed(session.workspace_id)
-        except Exception:  # pragma: no cover - title must never break runs
-            log.warning("harness_title_generation_failed", session_id=str(session_id))
 
     @staticmethod
     def _resolve_agent_s_run_config(organization_id: uuid.UUID, model: str):  # type: ignore[no-untyped-def]
@@ -5630,77 +5467,6 @@ def computeruse_recording_path(output: str, child_id: str) -> str | None:
     from .agent_s.harness import extract_recording_path
 
     return extract_recording_path(output)
-
-
-def _normalize_generated_title(text: str) -> str:
-    """Clamp a generated title to at most eight words and 255 chars."""
-    title = " ".join((text or "").strip().split())
-    words = title.split()
-    if len(words) > 8:
-        title = " ".join(words[:8])
-    return title[:255]
-
-
-def _title_from_prompt(prompt: str) -> str:
-    """Derive a short session title from the first prompt line."""
-    first_line = (prompt or "").strip().splitlines()[0] if prompt.strip() else ""
-    title = first_line.strip()[:80]
-    return title or "Harness session"
-
-
-def _normalize_generated_summary(text: str) -> str:
-    """Reduce model output to one plain line of at most 100 chars."""
-    lines = [line for line in (text or "").splitlines() if line.strip()]
-    summary = " ".join(lines[0].split()) if lines else ""
-    summary = summary.replace("*", "").replace("`", "").strip("\"'“”„ ")
-    if len(summary) > 100:
-        summary = summary[:100].rsplit(" ", 1)[0].rstrip(",;:- ") + "…"
-    return summary
-
-
-def _assistant_summary_content(
-    message: HarnessMessage, parts: list[HarnessPart]
-) -> str:
-    """Select closing prose outside Worked, like chat-core's message-copy rule.
-
-    Summary rows project only text/steer output into ``summary_text``. Walk
-    backwards through visible text; work, plans, compaction, and steers end the
-    final answer. Never fall back to aggregate content when parts exist.
-    """
-    if not parts:
-        return (message.content or "").strip()
-    has_subtask = any(part.type == "subtask" for part in parts)
-    patched_calls = {
-        part.call_id for part in parts if part.type == "patch" and part.call_id
-    }
-    answer: list[str] = []
-    for part in reversed(parts):
-        if part.type in {"step-start", "step-finish"}:
-            continue
-        text = part.summary_text
-        if part.type == "text":
-            if text:
-                answer.append(text)
-            continue
-        if part.type == "steer" and not text:
-            continue
-        if part.type == "tool":
-            tool = str((part.display or {}).get("tool") or "").strip().lower()
-            if tool in {"question", "ask_user"} and part.state in {
-                "pending",
-                "running",
-            }:
-                continue
-            if has_subtask and (tool == "task" or part.title.startswith("Subagent:")):
-                continue
-            if (
-                tool in {"edit", "write"}
-                and part.state != "error"
-                and part.call_id in patched_calls
-            ):
-                continue
-        break
-    return "".join(reversed(answer)).strip()
 
 
 def _tail_remainder(existing: str, tail: str) -> str:

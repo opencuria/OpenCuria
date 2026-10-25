@@ -82,7 +82,7 @@ def _service(provider: FakeProvider):
         runner_factory=lambda **kwargs: RecordingRunner(**kwargs),
         accessor_factory=accessor,
     )
-    service._generate_title = no_title
+    service.metadata.generate_title = no_title
     return service, runs, events
 
 
