@@ -15,6 +15,8 @@ from typing import Any
 import structlog
 from asgiref.sync import sync_to_async
 
+from common import stream_diagnostics
+
 from ...access.base import (
     HARNESS_WORKSPACE_ROOT,
     WorkspaceAccessor,
@@ -666,13 +668,13 @@ class ClaudeEngine:
 
     def _safe_error_text(self, error: Any, *, limit: int = 4000) -> str:
         """Return bounded, redacted error text safe for UI/model events."""
-        from ...mcp_client.stdio import sanitize_stderr_excerpt
-
         text = redact_text(str(error or "Claude run failed"))
         for secret in self.auth_env.values():
             if isinstance(secret, str) and len(secret) >= 4:
                 text = text.replace(secret, "[redacted]")
-        text = sanitize_stderr_excerpt(text.encode("utf-8", errors="replace"))
+        text = stream_diagnostics.sanitize_stderr_excerpt(
+            text.encode("utf-8", errors="replace")
+        )
         return text[:limit] or "Claude run failed"
 
     def _mcp_error(self, message: str) -> dict[str, Any]:

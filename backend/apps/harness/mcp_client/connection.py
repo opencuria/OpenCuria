@@ -29,6 +29,8 @@ import structlog
 from mcp.client.session import ClientSession
 from pydantic import BaseModel, ConfigDict
 
+from common import stream_diagnostics
+
 from ..desktop_leases import DesktopLease
 from ..tools.base import Tool, ToolContext, ToolError, ToolResult
 from .builtin import open_builtin_server
@@ -77,13 +79,9 @@ def _safe_stderr_excerpt(accessor: Any) -> str:
     except Exception:  # pragma: no cover - logs must never break
         return ""
     if isinstance(result, str):
-        from .stdio import MAX_STDERR_EXCERPT_CHARS
-
-        return result[:MAX_STDERR_EXCERPT_CHARS]
+        return result[: stream_diagnostics.MAX_STDERR_EXCERPT_CHARS]
     try:
-        from .stdio import sanitize_stderr_excerpt
-
-        return sanitize_stderr_excerpt(result)
+        return stream_diagnostics.sanitize_stderr_excerpt(result)
     except Exception:  # pragma: no cover - defensive
         return ""
 

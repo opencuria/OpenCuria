@@ -37,60 +37,11 @@ from anyio.streams.memory import (
 )
 from mcp.shared.message import SessionMessage
 
-from ..access.base import StreamClosedError
-from ..access.runner_accessor import STREAM_CHUNK_SIZE
+from common import stream_diagnostics
+
+from ..access.base import StreamClosedError, WorkspaceByteStream
 
 logger = structlog.get_logger(__name__)
-
-#: Max chars of sanitized stderr kept per stream for failure diagnosis.
-#: Stderr is captured per stream (bounded); on startup failure the
-#: excerpt is logged and attached to the skip note. Secrets are never
-#: logged verbatim: the excerpt is sanitized first (see
-#: :func:`sanitize_stderr_excerpt`).
-MAX_STDERR_EXCERPT_CHARS = 2000
-
-#: Max raw stderr bytes buffered per stream for the excerpt. Bounded so
-#: a chatty server cannot grow backend memory; the newest bytes win
-#: (crash reasons print at the end).
-MAX_STDERR_BUFFER_BYTES = 64 * 1024
-
-
-def sanitize_stderr_excerpt(raw: bytes | bytearray | None) -> str:
-    """Return a bounded, secret-free stderr excerpt for logs/skip notes.
-
-    Decoding is lossy (``errors="replace"``) so binary noise cannot
-    break logging. Control characters are collapsed to spaces, runs of
-    whitespace/newlines are folded, and common secret assignments
-    (``token=...``, ``--password ...``) are redacted — stderr of MCP
-    servers may echo env or CLI material on crash. The result is capped
-    at :data:`MAX_STDERR_EXCERPT_CHARS` chars.
-    """
-    import re as _re
-
-    if not raw:
-        return ""
-    try:
-        text = bytes(raw).decode("utf-8", errors="replace")
-    except Exception:  # pragma: no cover - defensive
-        return ""
-    text = "".join(ch if (ch.isprintable() or ch in "\n\t") else " " for ch in text)
-    text = _re.sub(r"[ \t]+", " ", text)
-    text = _re.sub(r"\n{2,}", "\n", text).strip()
-    text = _re.sub(
-        r"(?i)(token|secret|password|passwd|pwd|api[_-]?key|auth|bearer"
-        r"|credential|private[_-]?key)\s*[:=]\s*\S+",
-        r"\1=[redacted]",
-        text,
-    )
-    text = _re.sub(
-        r"(?i)(--(?:token|secret|password|api[_-]?key)\s+)\S+",
-        r"\1[redacted]",
-        text,
-    )
-    if len(text) > MAX_STDERR_EXCERPT_CHARS:
-        text = text[:MAX_STDERR_EXCERPT_CHARS] + "…"
-    return text
-
 
 #: Max bytes for one JSON-RPC line and for the undecoded tail buffer.
 MAX_STDIO_LINE_BYTES = 8 * 1024 * 1024
@@ -108,8 +59,8 @@ def _accessor_stderr_excerpt(accessor: Any) -> str:
     except Exception:  # pragma: no cover - never break teardown for logs
         return ""
     if isinstance(raw, str):
-        return raw[:MAX_STDERR_EXCERPT_CHARS]
-    return sanitize_stderr_excerpt(raw)
+        return raw[: stream_diagnostics.MAX_STDERR_EXCERPT_CHARS]
+    return stream_diagnostics.sanitize_stderr_excerpt(raw)
 
 
 async def _fail(
@@ -141,9 +92,9 @@ async def workspace_stdio_client(
     """Yield ``(read_stream, write_stream)`` for one workspace stdio server.
 
     Stderr is captured per stream (bounded to
-    :data:`MAX_STDERR_BUFFER_BYTES`, newest bytes win) for failure
-    diagnosis — but never logged verbatim: on early EOF the caller
-    sanitizes it via :func:`sanitize_stderr_excerpt` first.
+    :data:`common.stream_diagnostics.MAX_STDERR_BUFFER_BYTES`, newest bytes win)
+    for failure diagnosis — but never logged verbatim: on early EOF the caller
+    sanitizes it via :func:`common.stream_diagnostics.sanitize_stderr_excerpt` first.
 
     The pump task group is **not** nested inside this generator's
     ``async with``: ``AsyncExitStack`` drives ``__aexit__`` via
@@ -349,11 +300,10 @@ async def workspace_stdio_client(
                                     # larger; framing is byte-stream based, so
                                     # split without inserting newlines.
                                     encoded = payload.encode("utf-8")
-                                    for offset in range(
-                                        0, len(encoded), STREAM_CHUNK_SIZE
-                                    ):
+                                    chunk_size = WorkspaceByteStream.MAX_CHUNK_SIZE
+                                    for offset in range(0, len(encoded), chunk_size):
                                         await stream.send(
-                                            encoded[offset : offset + STREAM_CHUNK_SIZE]
+                                            encoded[offset : offset + chunk_size]
                                         )
                                 except (anyio.ClosedResourceError, StreamClosedError):
                                     break

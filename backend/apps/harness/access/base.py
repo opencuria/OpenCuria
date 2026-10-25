@@ -168,6 +168,9 @@ class WorkspaceByteStream(abc.ABC):
     ``on_stderr`` callback (logging only — never mixed into stdout).
     """
 
+    #: Max raw bytes per stream chunk in either direction.
+    MAX_CHUNK_SIZE = 64 * 1024
+
     def __init__(self, workspace_id: str, connection_id: str) -> None:
         self.workspace_id = workspace_id
         self.connection_id = connection_id
@@ -178,7 +181,7 @@ class WorkspaceByteStream(abc.ABC):
 
     @abc.abstractmethod
     async def send(self, data: bytes) -> None:
-        """Write raw bytes to the stream stdin (bounded chunks)."""
+        """Write at most ``MAX_CHUNK_SIZE`` raw bytes to the stream stdin."""
 
     @abc.abstractmethod
     async def send_eof(self) -> None:

@@ -18,9 +18,8 @@ try:  # The SDK is installed by the engine deployment, not the base harness.
 except ImportError:  # Keep native-engine imports usable before SDK installation.
     _SdkTransport = object  # type: ignore[assignment,misc]
 
-from ...access.base import StreamClosedError, WorkspaceAccessor
+from ...access.base import StreamClosedError, WorkspaceAccessor, WorkspaceByteStream
 
-STREAM_CHUNK_SIZE = 64 * 1024
 MAX_JSON_LINE_BYTES = 8 * 1024 * 1024
 
 
@@ -83,8 +82,10 @@ class ClaudeWorkspaceTransport(_SdkTransport):
         async with self._write_lock:
             if not self.is_ready() or self._input_ended:
                 raise StreamClosedError("Claude workspace transport is not writable")
-            for offset in range(0, len(encoded), STREAM_CHUNK_SIZE):
-                await self._stream.send(encoded[offset : offset + STREAM_CHUNK_SIZE])
+            for offset in range(0, len(encoded), WorkspaceByteStream.MAX_CHUNK_SIZE):
+                await self._stream.send(
+                    encoded[offset : offset + WorkspaceByteStream.MAX_CHUNK_SIZE]
+                )
 
     def read_messages(self) -> AsyncIterator[dict[str, Any]]:
         """Read complete JSON objects from the remote NDJSON stream."""
@@ -199,4 +200,4 @@ class ClaudeWorkspaceTransport(_SdkTransport):
                 pass
 
 
-__all__ = ["ClaudeWorkspaceTransport", "MAX_JSON_LINE_BYTES", "STREAM_CHUNK_SIZE"]
+__all__ = ["ClaudeWorkspaceTransport", "MAX_JSON_LINE_BYTES"]

@@ -1226,7 +1226,7 @@ class _DeadAccessor:
         return self.stream
 
     def get_stream_stderr_excerpt(self, connection_id: str = "") -> str:
-        from apps.harness.mcp_client.stdio import sanitize_stderr_excerpt
+        from common.stream_diagnostics import sanitize_stderr_excerpt
 
         return sanitize_stderr_excerpt(self._stderr)
 
@@ -1467,26 +1467,6 @@ async def test_open_success_then_aclose_closes_session_and_transport():
     # Idempotent: second close is a no-op.
     await conn.aclose()
     assert conn._stack is None
-
-
-@pytest.mark.asyncio
-async def test_sanitize_stderr_excerpt_redacts_and_bounds():
-    from apps.harness.mcp_client.stdio import (
-        MAX_STDERR_EXCERPT_CHARS,
-        sanitize_stderr_excerpt,
-    )
-
-    assert sanitize_stderr_excerpt(None) == ""
-    assert sanitize_stderr_excerpt(b"") == ""
-    excerpt = sanitize_stderr_excerpt(b"Error: api_key=hunter2\n--password s3cret\nok")
-    assert "hunter2" not in excerpt
-    assert "s3cret" not in excerpt
-    assert "[redacted]" in excerpt
-    assert "ok" in excerpt
-    long = sanitize_stderr_excerpt(b"x" * (MAX_STDERR_EXCERPT_CHARS + 500))
-    assert len(long) <= MAX_STDERR_EXCERPT_CHARS + 1
-    # Binary noise cannot break logging.
-    assert sanitize_stderr_excerpt(b"\xff\xfe\x00boom\n") != ""
 
 
 @pytest.mark.asyncio

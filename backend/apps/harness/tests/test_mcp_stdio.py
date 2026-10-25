@@ -16,6 +16,7 @@ import pytest
 from mcp.client.session import ClientSession
 from mcp.shared.message import SessionMessage
 
+from apps.harness.access.base import WorkspaceByteStream
 from apps.harness.mcp_client.stdio import (
     MAX_STDIO_LINE_BYTES,
     workspace_stdio_client,
@@ -268,16 +269,14 @@ async def test_stdio_cancellation_closes_stream():
 
 @pytest.mark.asyncio
 async def test_stdio_writer_splits_large_json_rpc_frames():
-    from apps.harness.access.runner_accessor import STREAM_CHUNK_SIZE
-
     class BoundedStream(FakeByteStream):
         async def send(self, data: bytes) -> None:
-            assert 0 < len(data) <= STREAM_CHUNK_SIZE
+            assert 0 < len(data) <= WorkspaceByteStream.MAX_CHUNK_SIZE
             await super().send(data)
 
     stream = BoundedStream()
     accessor = FakeAccessor(stream)
-    large_text = "x" * (STREAM_CHUNK_SIZE * 2)
+    large_text = "x" * (WorkspaceByteStream.MAX_CHUNK_SIZE * 2)
     async with workspace_stdio_client(accessor, ["cap"]) as (_read, write):
         request = types.JSONRPCRequest(
             jsonrpc="2.0", id=1, method="ping", params={"text": large_text}

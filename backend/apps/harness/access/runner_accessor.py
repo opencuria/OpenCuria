@@ -64,6 +64,7 @@ from apps.runners.exceptions import (
     WorkspaceNotFoundError,
 )
 from apps.runners.services import get_runner_service
+from common import stream_diagnostics
 from common.exceptions import ConflictError
 
 from .base import (
@@ -233,19 +234,11 @@ def _serialize_process(process: Any) -> dict[str, Any]:
     }
 
 
-#: Max raw bytes per stream chunk in either direction.
-STREAM_CHUNK_SIZE = 64 * 1024
-
 #: Bounded per-stream queue depth (chunks of at most 64KiB each).
 STREAM_QUEUE_DEPTH = 64
 
 #: ACK timeout for stream control events (start/input/close).
 STREAM_CALL_TIMEOUT = 15.0
-
-#: Bounded stderr capture per byte stream (newest bytes win). The newest
-#: bytes carry the crash reason; the sanitized excerpt (not verbatim
-#: content) is what failure logs and skip notes attach.
-MCP_STDERR_BUFFER_BYTES = 64 * 1024
 
 _TCP_HOST_RE = None  # compiled lazily in _validate_tcp_host
 
@@ -321,15 +314,13 @@ class _StreamState:
             return
         self.stderr_total += len(raw)
         self.stderr_buf.extend(raw)
-        overflow = len(self.stderr_buf) - MCP_STDERR_BUFFER_BYTES
+        overflow = len(self.stderr_buf) - stream_diagnostics.MAX_STDERR_BUFFER_BYTES
         if overflow > 0:
             del self.stderr_buf[:overflow]
 
     def stderr_excerpt(self) -> str:
         """Return the sanitized stderr excerpt (secret-free, bounded)."""
-        from apps.harness.mcp_client.stdio import sanitize_stderr_excerpt
-
-        return sanitize_stderr_excerpt(bytes(self.stderr_buf))
+        return stream_diagnostics.sanitize_stderr_excerpt(bytes(self.stderr_buf))
 
 
 class RunnerByteStream(WorkspaceByteStream):
@@ -1253,7 +1244,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
         """Return the sanitized stderr excerpt for *connection_id* (or last).
 
         Secret-free and bounded (see
-        :func:`apps.harness.mcp_client.stdio.sanitize_stderr_excerpt`):
+        :func:`common.stream_diagnostics.sanitize_stderr_excerpt`):
         safe to attach to logs and skip notes. With no id, the most
         recently registered stream wins; unknown ids yield ``""``.
         """
@@ -1346,7 +1337,7 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 "stream_output_bad_base64", connection_id=connection_id
             )
             return False
-        if decoded_len > STREAM_CHUNK_SIZE:
+        if decoded_len > WorkspaceByteStream.MAX_CHUNK_SIZE:
             log.warning(
                 "stream_output_oversize", connection_id=connection_id
             )
@@ -1585,10 +1576,10 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             raise StreamClosedError(f"stream {connection_id!r} is not open")
         if not isinstance(data, (bytes, bytearray)) or not data:
             raise ValueError("data must be non-empty bytes")
-        if len(data) > STREAM_CHUNK_SIZE:
+        if len(data) > WorkspaceByteStream.MAX_CHUNK_SIZE:
             raise ValueError(
                 "stream write exceeds "
-                f"{STREAM_CHUNK_SIZE} byte chunk limit"
+                f"{WorkspaceByteStream.MAX_CHUNK_SIZE} byte chunk limit"
             )
         payload = {
             "connection_id": connection_id,

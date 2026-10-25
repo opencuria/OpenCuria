@@ -8,9 +8,8 @@ import threading
 
 import pytest
 
-from apps.harness.access.base import StreamClosedError
+from apps.harness.access.base import StreamClosedError, WorkspaceByteStream
 from apps.harness.access.runner_accessor import (
-    STREAM_CHUNK_SIZE,
     RunnerWorkspaceAccessor,
     route_stream_closed,
     route_stream_output,
@@ -310,7 +309,7 @@ async def test_send_rejects_oversize() -> None:
     accessor = _accessor(transport)
     stream = await accessor.open_process(["cat"])
     with pytest.raises(ValueError):
-        await stream.send(b"x" * (STREAM_CHUNK_SIZE + 1))
+        await stream.send(b"x" * (WorkspaceByteStream.MAX_CHUNK_SIZE + 1))
     await stream.aclose()
 
 
@@ -618,6 +617,36 @@ async def test_stderr_excerpt_redacts_secrets() -> None:
     assert "hunter2" not in excerpt
     assert "s3cret" not in excerpt
     assert "[redacted]" in excerpt
+    await stream.aclose()
+
+
+async def test_stderr_capture_keeps_newest_64k_bytes() -> None:
+    """Diagnostics keep the newest bounded bytes and redact before display."""
+    transport = FakeCallTransport()
+    accessor = _accessor(transport)
+    stream = await accessor.open_process(["srv"])
+    header = b"token=private-value\n"
+    newest = header + b"z" * (64 * 1024 - len(header))
+    for chunk in (b"x" * (64 * 1024), newest):
+        assert route_stream_output(
+            {
+                "connection_id": stream.connection_id,
+                "workspace_id": "ws-1",
+                "stream": "stderr",
+                "data": _b64(chunk),
+            }
+        )
+    await asyncio.sleep(0)
+
+    diagnostics = accessor.get_stream_diagnostics(stream.connection_id)
+    assert diagnostics["stderr_bytes"] == 128 * 1024
+    assert diagnostics["stderr_buffered"] == 64 * 1024
+    excerpt = diagnostics["stderr_excerpt"]
+    assert excerpt.startswith("token=[redacted]\nzzz")
+    assert excerpt.endswith("…")
+    assert len(excerpt) == 2001
+    assert "private-value" not in excerpt
+    assert "x" not in excerpt
     await stream.aclose()
 
 

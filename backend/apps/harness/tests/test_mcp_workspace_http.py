@@ -13,6 +13,7 @@ import json
 
 import pytest
 
+from apps.harness.access.base import WorkspaceByteStream
 from apps.harness.mcp_client.workspace_http import (
     WorkspaceNetworkStream,
     build_workspace_http_client,
@@ -96,16 +97,14 @@ def _http_response(  # noqa: E501
 
 @pytest.mark.asyncio
 async def test_http_bridge_splits_large_writes_into_runner_chunks():
-    from apps.harness.access.runner_accessor import STREAM_CHUNK_SIZE
-
     class BoundedStream(FakeByteStream):
         async def send(self, data: bytes) -> None:
-            assert 0 < len(data) <= STREAM_CHUNK_SIZE
+            assert 0 < len(data) <= WorkspaceByteStream.MAX_CHUNK_SIZE
             await super().send(data)
 
     stream = BoundedStream([])
     bridge = WorkspaceNetworkStream(stream)
-    payload = b"x" * (STREAM_CHUNK_SIZE * 2 + 7)
+    payload = b"x" * (WorkspaceByteStream.MAX_CHUNK_SIZE * 2 + 7)
     await bridge.write(payload)
     assert stream.sent == payload
 
