@@ -1,4 +1,4 @@
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timezone
 
 import pytest
 
@@ -136,3 +136,46 @@ def test_cron_leap_day_and_invalid_expressions():
     assert normalize_cron_expression(" 0  9 * * 1-5 ;\n30 14 * * *") == (
         "0 9 * * 1-5; 30 14 * * *"
     )
+
+
+def test_once_returns_its_single_local_occurrence():
+    after = datetime(2026, 10, 24, 12, tzinfo=timezone.utc)
+    result = next_occurrence(
+        after=after,
+        local_time=time(9),
+        timezone_name="Europe/Berlin",
+        recurrence="once",
+        run_date=date(2026, 10, 25),
+    )
+    # 25 Oct 2026 is the fall-back day in Berlin; 09:00 is already CET.
+    assert result == datetime(2026, 10, 25, 8, tzinfo=timezone.utc)
+
+
+def test_once_ambiguous_fall_time_uses_first_fold():
+    result = next_occurrence(
+        after=datetime(2025, 11, 1, tzinfo=timezone.utc),
+        local_time=time(1, 30),
+        timezone_name="America/New_York",
+        recurrence="once",
+        run_date=date(2025, 11, 2),
+    )
+    assert result == datetime(2025, 11, 2, 5, 30, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("run_date", "local_time", "message"),
+    [
+        (None, time(9), "run_date is required"),
+        (date(2025, 3, 9), time(2, 30), "does not exist"),
+        (date(2025, 2, 28), time(9), "must be in the future"),
+    ],
+)
+def test_once_rejects_missing_nonexistent_or_past_time(run_date, local_time, message):
+    with pytest.raises(ValueError, match=message):
+        next_occurrence(
+            after=datetime(2025, 3, 1, 9, tzinfo=timezone.utc),
+            local_time=local_time,
+            timezone_name="America/New_York",
+            recurrence="once",
+            run_date=run_date,
+        )

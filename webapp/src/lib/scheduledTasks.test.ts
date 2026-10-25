@@ -4,12 +4,17 @@ import {
   defaultScheduleDraft,
   describeSchedule,
   describeScheduleDraft,
+  isScheduleEnded,
+  isValidDate,
   isValidTimeZone,
   maxRunsPerDay,
+  nextDateAt,
   nextLocalOccurrence,
+  onceOccurrence,
   scheduleDraftFromTask,
   scheduleDraftToCron,
   schedulePayload,
+  scheduleStateLabel,
   validateSchedule,
   validateScheduleDraft,
 } from './scheduledTasks'
@@ -77,11 +82,56 @@ describe('scheduled-task schedule helpers', () => {
 })
 
 describe('schedule drafts', () => {
-  const draft = (overrides: Partial<ScheduleDraft>): ScheduleDraft => ({ ...defaultScheduleDraft(), ...overrides })
+  const draft = (overrides: Partial<ScheduleDraft>): ScheduleDraft => ({ ...defaultScheduleDraft(), mode: 'times', ...overrides })
+
+  it('defaults new drafts to a one-time run at the next 09:00', () => {
+    const fresh = defaultScheduleDraft('UTC')
+    expect(fresh).toMatchObject({ mode: 'once', times: ['09:00'] })
+    expect(onceOccurrence(fresh.date, '09:00', 'UTC')!.getTime()).toBeGreaterThan(Date.now())
+    const now = new Date('2026-10-24T10:00:00Z')
+    expect(nextDateAt('09:00', 'UTC', now)).toBe('2026-10-25')
+    expect(nextDateAt('11:00', 'UTC', now)).toBe('2026-10-24')
+    expect(nextDateAt('09:00', 'Pacific/Kiritimati', now)).toBe('2026-10-25')
+  })
+
+  it('stores a one-time run as its local date and time', () => {
+    const once = draft({ mode: 'once', date: '2026-11-03', times: ['14:30'] })
+    expect(schedulePayload(once)).toEqual({
+      recurrence: 'once', weekdays: [], local_time: '14:30', cron_expression: '', run_date: '2026-11-03',
+    })
+    const task = { recurrence: 'once' as const, weekdays: [], local_time: '14:30', run_date: '2026-11-03' }
+    expect(scheduleDraftFromTask(task)).toMatchObject({ mode: 'once', date: '2026-11-03', times: ['14:30'] })
+    expect(describeSchedule(task)).toMatch(/^Once · .*2026 · 14:30$/)
+    expect(scheduleDraftToCron(once)).toBe('30 14 3 11 *')
+    expect(validateScheduleDraft(once)).toEqual({})
+    expect(validateScheduleDraft({ ...once, date: '2026-02-30' })).toEqual({ date: 'Choose a date.' })
+    expect(validateScheduleDraft({ ...once, times: [''] })).toEqual({ times: 'Enter a valid time.' })
+    expect([isValidDate('2028-02-29'), isValidDate('2026-02-29'), isValidDate('')]).toEqual([true, false, false])
+  })
+
+  it('resolves one-time runs in their zone with the backend DST policy', () => {
+    // Berlin falls back on 25 Oct 2026; 09:00 is already CET.
+    expect(onceOccurrence('2026-10-25', '09:00', 'Europe/Berlin')?.toISOString()).toBe('2026-10-25T08:00:00.000Z')
+    // Ambiguous 02:30 runs at the first (CEST) instant.
+    expect(onceOccurrence('2026-10-25', '02:30', 'Europe/Berlin')?.toISOString()).toBe('2026-10-25T00:30:00.000Z')
+    // 02:30 does not exist when Berlin springs forward.
+    expect(onceOccurrence('2026-03-29', '02:30', 'Europe/Berlin')).toBeNull()
+    expect(onceOccurrence('2026-10-25', '09:00', 'Not/AZone')).toBeNull()
+  })
+
+  it('labels finished one-time tasks as ended instead of paused', () => {
+    const now = new Date('2026-10-24T10:00:00Z')
+    const once = { recurrence: 'once' as const, run_date: '2026-10-24', local_time: '09:00', timezone_name: 'UTC' }
+    expect(isScheduleEnded(once, now)).toBe(true)
+    expect(scheduleStateLabel({ ...once, enabled: false }, now)).toBe('Ended')
+    expect(scheduleStateLabel({ ...once, run_date: '2026-10-25', enabled: false }, now)).toBe('Paused')
+    expect(scheduleStateLabel({ ...once, run_date: '2026-10-25', enabled: true }, now)).toBe('')
+    expect(scheduleStateLabel({ ...once, recurrence: 'daily', enabled: true }, now)).toBe('')
+  })
 
   it('keeps a single time as the classic daily/weekly payload', () => {
     expect(schedulePayload(draft({ times: ['07:30'] }))).toEqual({
-      recurrence: 'daily', weekdays: [], local_time: '07:30', cron_expression: '',
+      recurrence: 'daily', weekdays: [], local_time: '07:30', cron_expression: '', run_date: null,
     })
     expect(schedulePayload(draft({ weekdays: [0, 2], times: ['07:30'] }))).toMatchObject({
       recurrence: 'weekly', weekdays: [0, 2],
@@ -91,7 +141,7 @@ describe('schedule drafts', () => {
   it('compiles several times per day into compact cron expressions', () => {
     const multi = draft({ weekdays: [0, 1, 2, 3, 4], times: ['18:00', '09:00', '14:30'] })
     expect(schedulePayload(multi)).toEqual({
-      recurrence: 'cron', weekdays: [], local_time: '09:00', cron_expression: '0 9,18 * * 1-5; 30 14 * * 1-5',
+      recurrence: 'cron', weekdays: [], local_time: '09:00', cron_expression: '0 9,18 * * 1-5; 30 14 * * 1-5', run_date: null,
     })
     expect(scheduleDraftFromTask({ recurrence: 'cron', weekdays: [], local_time: '09:00', cron_expression: '0 9,18 * * 1-5; 30 14 * * 1-5' }))
       .toMatchObject({ mode: 'times', weekdays: [0, 1, 2, 3, 4], times: ['09:00', '14:30', '18:00'] })

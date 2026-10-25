@@ -260,7 +260,7 @@ const primaryTitle = computed(() => {
 const pickersLocked = computed(() => Boolean(props.disabled) || steering.value)
 const composerPlaceholder = computed(() => {
   if (isScheduledTask.value) {
-    return 'Describe the recurring work… Use / for skills and @ for context'
+    return 'Describe the work… Use / for skills and @ for context'
   }
   return steering.value ? 'Steer the agent…' : 'Plan or Build, / for skills, @ for context'
 })

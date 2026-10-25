@@ -1,4 +1,4 @@
-"""Pure recurring schedule calculations with explicit DST policy."""
+"""Pure one-time and recurring schedule calculations with explicit DST policy."""
 
 from __future__ import annotations
 
@@ -163,15 +163,33 @@ def normalize_cron_expression(value: object) -> str:
     return "; ".join(parts)
 
 
+def _local_instant(day: date, at: time, zone: ZoneInfo) -> datetime | None:
+    """UTC instant of a local wall time, or ``None`` inside a DST gap."""
+    naive = datetime.combine(day, at.replace(tzinfo=None))
+    instant = naive.replace(tzinfo=zone, fold=0).astimezone(timezone.utc)
+    if instant.astimezone(zone).replace(tzinfo=None) != naive:
+        return None  # Nonexistent wall time (spring-forward gap).
+    return instant
+
+
 def _first_instant(
     day: date, at: time, zone: ZoneInfo, after_utc: datetime
 ) -> datetime | None:
-    naive = datetime.combine(day, at)
-    candidate = naive.replace(tzinfo=zone, fold=0)
-    instant = candidate.astimezone(timezone.utc)
-    if instant.astimezone(zone).replace(tzinfo=None) != naive:
-        return None  # Nonexistent wall time (spring-forward gap).
-    return instant if instant > after_utc else None
+    instant = _local_instant(day, at, zone)
+    return instant if instant is not None and instant > after_utc else None
+
+
+def _once_occurrence(
+    after: datetime, run_date: date | None, at: time, zone: ZoneInfo
+) -> datetime:
+    if run_date is None:
+        raise ValueError("run_date is required for once recurrence")
+    instant = _local_instant(run_date, at, zone)
+    if instant is None:
+        raise ValueError("local_time does not exist on run_date in this timezone")
+    if instant <= after.astimezone(timezone.utc):
+        raise ValueError("run_date and local_time must be in the future")
+    return instant
 
 
 def _next_cron_occurrence(
@@ -211,19 +229,24 @@ def next_occurrence(
     recurrence: str,
     weekdays: list[int] | tuple[int, ...] = (),
     cron_expression: str = "",
+    run_date: date | None = None,
 ) -> datetime:
     """Find the next valid local occurrence strictly after an instant.
 
     Nonexistent wall times are skipped. Ambiguous times select fold=0, so the
-    occurrence is run once at the first instant matching that wall time.
+    occurrence is run once at the first instant matching that wall time. A
+    ``once`` schedule has exactly one occurrence on ``run_date``; a past or
+    nonexistent wall time raises instead of moving to another date.
     """
     if after.tzinfo is None:
         raise ValueError("after must be timezone-aware")
     zone = valid_timezone(timezone_name)
+    if recurrence == "once":
+        return _once_occurrence(after, run_date, local_time, zone)
     if recurrence == "cron":
         return _next_cron_occurrence(after, cron_expression, zone)
     if recurrence not in {"daily", "weekly"}:
-        raise ValueError("recurrence must be daily, weekly or cron")
+        raise ValueError("recurrence must be once, daily, weekly or cron")
     days = sorted(set(weekdays))
     if recurrence == "weekly" and (
         not days or any(day not in range(7) for day in days)

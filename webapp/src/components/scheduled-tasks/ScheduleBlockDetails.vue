@@ -6,7 +6,7 @@
 import { computed } from 'vue'
 import { CirclePlay, MessageSquare, Pause, Pencil, Play } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
-import { describeSchedule } from '@/lib/scheduledTasks'
+import { describeSchedule, isScheduleEnded } from '@/lib/scheduledTasks'
 import { describeSeries, formatMinutes, wallClock } from '@/lib/scheduleCalendar'
 import type { CalendarBlock } from '@/lib/scheduleCalendar'
 import type { ScheduledTask, ScheduledTaskRun } from '@/services/scheduledTasks.api'
@@ -45,6 +45,7 @@ const STATUS_CLASSES: Record<string, string> = {
 }
 
 const first = computed(() => props.block.occurrences[0]!)
+const ended = computed(() => isScheduleEnded(props.task))
 const isSeries = computed(() => props.block.occurrences.length > 1)
 const singleRun = computed(() => (isSeries.value ? null : (first.value.run ?? null)))
 
@@ -151,7 +152,7 @@ const runError = computed(() => {
         ><Play />Run now</Button
       >
       <Button
-        v-if="block.kind === 'planned'"
+        v-if="block.kind === 'planned' && !ended"
         size="sm"
         variant="ghost"
         :disabled="busy"

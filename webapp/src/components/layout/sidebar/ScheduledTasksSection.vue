@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { nextTick } from 'vue'
-import { CalendarClock, CalendarDays, CirclePause, Plus } from '@lucide/vue'
+import { CalendarCheck, CalendarClock, CalendarDays, CirclePause, Plus } from '@lucide/vue'
 import { useSidebar } from '@/components/ui/sidebar'
 import { Button } from '@/components/ui/button'
 import { useScheduledTaskStore } from '@/stores/scheduledTasks'
-import { describeSchedule } from '@/lib/scheduledTasks'
+import { describeSchedule, scheduleStateLabel } from '@/lib/scheduledTasks'
 import type { ScheduledTask } from '@/services/scheduledTasks.api'
 
 defineProps<{ tasks: ScheduledTask[] }>()
@@ -72,7 +72,11 @@ function cadence(task: ScheduledTask): string {
         :key="task.id"
         type="button"
         class="flex min-h-11 min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-primary"
-        :aria-label="`Open scheduled task ${task.name} · ${cadence(task)}${task.enabled ? '' : ' · Paused'}`"
+        :aria-label="
+          [`Open scheduled task ${task.name}`, cadence(task), scheduleStateLabel(task)]
+            .filter(Boolean)
+            .join(' · ')
+        "
         :data-testid="`scheduled-task-${task.id}`"
         @click="openTask(task.id)"
       >
@@ -81,8 +85,13 @@ function cadence(task: ScheduledTask): string {
           <span class="block truncate text-[13px]">{{ task.name }}</span>
           <span class="block truncate text-[11px] text-muted-foreground">{{ cadence(task) }}</span>
         </span>
+        <CalendarCheck
+          v-if="scheduleStateLabel(task) === 'Ended'"
+          class="size-3.5 shrink-0 text-muted-foreground"
+          aria-label="Ended"
+        />
         <CirclePause
-          v-if="!task.enabled"
+          v-else-if="!task.enabled"
           class="size-3.5 shrink-0 text-muted-foreground"
           :aria-label="`Paused`"
         />

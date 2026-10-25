@@ -269,6 +269,74 @@ def test_cron_schedule_round_trips_and_switches_back_to_daily(
     assert daily.json()["cron_expression"] == ""
 
 
+def test_once_schedule_round_trips_and_rejects_past_or_missing_date(
+    schedule_api_setup, monkeypatch
+):
+    from datetime import date, datetime, timedelta, timezone
+
+    from apps.harness.harness_service import HarnessService
+
+    monkeypatch.setattr(
+        HarnessService,
+        "validate_provider_for_run",
+        lambda self, organization_id, session, provider=None: "openrouter/test",
+    )
+    org, owner, _, workspace = schedule_api_setup
+    client = schedule_client(
+        owner,
+        org,
+        [APIKeyPermission.HARNESS_READ.value, APIKeyPermission.HARNESS_RUN.value],
+    )
+    run_date = date.today() + timedelta(days=7)
+    payload = {
+        "name": "Release check",
+        "workspace_id": str(workspace.id),
+        "prompt": "Check the release",
+        "recurrence": "once",
+        "run_date": run_date.isoformat(),
+        "local_time": "16:45",
+        "timezone_name": "UTC",
+    }
+    created = client.post(
+        "/api/v1/scheduled-tasks/", data=payload, content_type="application/json"
+    )
+    assert created.status_code == 201, created.content
+    task = created.json()
+    assert (task["recurrence"], task["run_date"], task["local_time"]) == (
+        "once",
+        run_date.isoformat(),
+        "16:45",
+    )
+    assert datetime.fromisoformat(task["next_run_at"]) == datetime(
+        run_date.year, run_date.month, run_date.day, 16, 45, tzinfo=timezone.utc
+    )
+
+    past = client.post(
+        "/api/v1/scheduled-tasks/",
+        data={**payload, "run_date": "2020-01-01"},
+        content_type="application/json",
+    )
+    assert past.status_code == 400, past.content
+    assert "future" in past.json()["detail"]
+    missing = client.post(
+        "/api/v1/scheduled-tasks/",
+        data={key: value for key, value in payload.items() if key != "run_date"},
+        content_type="application/json",
+    )
+    assert missing.status_code == 400, missing.content
+
+    url = f"/api/v1/scheduled-tasks/{task['id']}/"
+    moved = client.patch(
+        url, data={"run_date": "2020-01-01"}, content_type="application/json"
+    )
+    assert moved.status_code == 400, moved.content
+    daily = client.patch(
+        url, data={"recurrence": "daily"}, content_type="application/json"
+    )
+    assert daily.status_code == 200, daily.content
+    assert (daily.json()["recurrence"], daily.json()["run_date"]) == ("daily", None)
+
+
 def test_claude_harness_id_round_trips_through_api(schedule_api_setup, monkeypatch):
     from apps.harness.engines.connections import EngineConnectionService
     from apps.harness.harness_service import HarnessService

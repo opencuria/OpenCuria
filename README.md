@@ -241,13 +241,16 @@ rejects duplicate workers before recovery starts; SQLite uses a renewed TTL-row 
 (best effort, not suitable for separate hosts without shared locking semantics).
 Raw Django `runserver` has no scheduler startup hook and is not suitable for production.
 Scheduled tasks are personal
-recurring prompts in an IANA timezone: daily or selected weekdays at a local `HH:MM`,
-or `recurrence: "cron"` with five-field cron expressions (`cron_expression`, several
-joined by `;`) for multiple runs per day, intervals and monthly/yearly cadences. The
-UI offers set times, repeating intervals and a raw cron editor; the `/scheduled-tasks`
+prompts in an IANA timezone: `recurrence: "once"` runs a single time on `run_date`
+(`YYYY-MM-DD`) at a local `HH:MM` and then disables itself; daily or selected weekdays
+run at a local `HH:MM`; `recurrence: "cron"` uses five-field cron expressions
+(`cron_expression`, several joined by `;`) for multiple runs per day, intervals and
+monthly/yearly cadences. The UI defaults new tasks to a single run and also offers set
+times, repeating intervals and a raw cron editor; the `/scheduled-tasks`
 page shows past runs and upcoming occurrences per workspace in a week calendar
-(click a free slot to plan a task, drag a set-time run to move it). DST gaps are skipped
-and fall-back repeated times executed once. Each occurrence
+(click a free slot to plan a run there, drag a one-time or set-time run to move it).
+Recurring schedules skip DST gaps, while a one-time run in a gap is rejected;
+fall-back repeated times are executed once. Each occurrence
 creates a new root harness session. REST endpoints are under
 `/api/v1/scheduled-tasks/` (`harness:read` for listing/history, `harness:run` for
 create/edit/pause/delete/run-now).

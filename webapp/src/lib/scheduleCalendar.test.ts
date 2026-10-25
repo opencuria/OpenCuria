@@ -106,6 +106,25 @@ describe('schedule calendar', () => {
     ])
   })
 
+  it('places a one-time task on its date only, replaced by its recorded run', () => {
+    const once = task({
+      recurrence: 'once',
+      weekdays: [],
+      run_date: '2026-06-17',
+      local_time: '14:30',
+    })
+    const summary = (runs: ScheduledTaskRun[], start = RANGE_START, end = RANGE_END) =>
+      calendarOccurrences([once], { 'task-1': runs }, start, end).map((item) => [
+        item.kind,
+        item.at.getTime(),
+      ])
+    expect(summary([])).toEqual([['planned', local(17, 14, 30).getTime()]])
+    expect(summary([run(local(17, 14, 30), 'running')])).toEqual([
+      ['run', local(17, 14, 30).getTime()],
+    ])
+    expect(summary([], local(22, 0), local(29, 0))).toEqual([])
+  })
+
   it('shows hourly daily slots on every visible day, including Monday through Friday', () => {
     const items = calendarOccurrences(
       [task({ name: 'Test2', recurrence: 'cron', cron_expression: '0 9-17 * * *' })],
@@ -232,7 +251,36 @@ describe('schedule calendar', () => {
       weekdays: [0, 1, 2, 3, 4],
       local_time: '10:30',
       cron_expression: '',
+      run_date: null,
     })
+  })
+
+  it('moves a one-time run to the dropped date and time', () => {
+    const once = task({
+      timezone_name: 'Europe/Berlin',
+      recurrence: 'once',
+      weekdays: [],
+      run_date: '2026-06-16',
+      local_time: '09:00',
+    })
+    expect(canReschedule(once)).toBe(true)
+    // Tue Jun 16 09:00 Berlin (07:00 UTC) → Thu Jun 18 14:15 Berlin
+    expect(
+      rescheduleTask(
+        once,
+        new Date(Date.UTC(2026, 5, 16, 7)),
+        new Date(Date.UTC(2026, 5, 18, 12, 15)),
+      ),
+    ).toEqual({
+      recurrence: 'once',
+      weekdays: [],
+      local_time: '14:15',
+      cron_expression: '',
+      run_date: '2026-06-18',
+    })
+    expect(
+      rescheduleTask(once, new Date(Date.UTC(2026, 5, 16, 7)), new Date(Date.UTC(2026, 5, 16, 7))),
+    ).toBeNull()
   })
 
   it('swaps the dragged day on weekly schedules and ignores the day on daily ones', () => {
@@ -275,6 +323,7 @@ describe('schedule calendar', () => {
       weekdays: [],
       local_time: '08:30',
       cron_expression: '30 8 * * 1-5; 0 18 * * 1-5',
+      run_date: null,
     })
     const interval = task({ recurrence: 'cron', cron_expression: '*/15 * * * *' })
     expect(canReschedule(interval)).toBe(false)

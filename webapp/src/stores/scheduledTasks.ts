@@ -16,6 +16,8 @@ import type {
 /** Initial values for a new task, e.g. from a calendar slot. */
 export interface ScheduledTaskPrefill {
   workspace_id?: string
+  /** YYYY-MM-DD of a one-time run */
+  date?: string
   /** 0 = Monday … 6 = Sunday */
   weekdays?: number[]
   /** HH:MM */

@@ -158,3 +158,44 @@ def test_workspace_resume_snapshot_includes_unresolved_lifecycle_task():
         False,
         None,
     )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("outcome", ["claim", "mark_missed"])
+def test_one_time_task_disables_itself_after_its_occurrence(outcome):
+    organization = Organization.objects.create(
+        name="Org", slug=f"org-{uuid.uuid4().hex}"
+    )
+    owner = User.objects.create_user(
+        email=f"{uuid.uuid4().hex}@example.com", password="secret"
+    )
+    runner = Runner.objects.create(
+        organization=organization, api_token_hash=uuid.uuid4().hex
+    )
+    workspace = Workspace.objects.create(runner=runner, created_by=owner, name="w")
+    scheduled_for = datetime(2025, 1, 1, 9, tzinfo=timezone.utc)
+    schedule = ScheduledTask.objects.create(
+        organization=organization,
+        owner=owner,
+        workspace=workspace,
+        name="once",
+        prompt="Inspect the repo",
+        recurrence="once",
+        run_date="2025-01-01",
+        local_time="09:00",
+        timezone_name="UTC",
+        next_run_at=scheduled_for,
+    )
+
+    getattr(ScheduledTaskRepository, outcome)(
+        schedule, scheduled_for=scheduled_for, next_run_at=None
+    )
+
+    schedule.refresh_from_db()
+    assert schedule.enabled is False
+    assert schedule.next_run_at == scheduled_for
+    run = schedule.runs.get()
+    assert run.scheduled_for == scheduled_for
+    if outcome == "claim":
+        assert run.configuration_snapshot["run_date"] == "2025-01-01"
+    assert ScheduledTaskRepository.due(datetime.now(timezone.utc)) == []

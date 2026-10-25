@@ -9,6 +9,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useScheduledTaskStore } from '@/stores/scheduledTasks'
 import type { ScheduledTaskPrefill } from '@/stores/scheduledTasks'
 import type { ScheduledTask, ScheduledTaskRun } from '@/services/scheduledTasks.api'
+import { nextDateAt } from '@/lib/scheduledTasks'
 
 const providerMocks = vi.hoisted(() => ({ load: vi.fn() }))
 const api = vi.hoisted(() => ({
@@ -350,8 +351,74 @@ describe('ScheduledTaskDialog', () => {
     expect(wrapper.find('[data-testid="workspace-files"]').exists()).toBe(false)
   })
 
-  it('defaults to seven days and saves daily with empty API weekdays', async () => {
+  it('defaults to a one-time run at the next 09:00 and saves its date', async () => {
     const { wrapper } = await mountDialog('new')
+    expect(wrapper.get('[data-testid="schedule-mode-once"]').attributes('aria-checked')).toBe(
+      'true',
+    )
+    expect(wrapper.find('[data-testid="weekday-picker"]').exists()).toBe(false)
+    const zone = (wrapper.get('[data-testid="task-timezone"]').element as HTMLInputElement).value
+    const date = nextDateAt('09:00', zone)
+    expect((wrapper.get('[data-testid="task-date"]').element as HTMLInputElement).value).toBe(date)
+    expect(wrapper.get('[data-testid="schedule-summary"]').text()).toMatch(/Once · .* · 09:00/)
+    expect(wrapper.get('[data-testid="schedule-summary"]').text()).toContain(`in ${zone}`)
+    await wrapper.get('[data-testid="task-time"]').setValue('10:15')
+    await wrapper.get('[data-testid="task-name"]').setValue('Release check')
+    await wrapper.get('[data-testid="task-prompt"]').setValue('Check the release')
+    await wrapper.get('[data-testid="save-task"]').trigger('click')
+    await flushPromises()
+    expect(api.createScheduledTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recurrence: 'once',
+        run_date: date,
+        local_time: '10:15',
+        weekdays: [],
+        cron_expression: '',
+      }),
+    )
+  })
+
+  it('blocks an enabled one-time run in the past', async () => {
+    const { wrapper } = await mountDialog('new')
+    await wrapper.get('[data-testid="task-name"]').setValue('Too late')
+    await wrapper.get('[data-testid="task-prompt"]').setValue('Review issues')
+    await wrapper.get('[data-testid="task-date"]').setValue('2020-01-01')
+    expect(wrapper.get('[data-testid="task-date-error"]').text()).toBe(
+      'Choose a future date and time.',
+    )
+    expect(wrapper.get('[data-testid="schedule-summary"]').text()).toContain('Next run · None')
+    await wrapper.get('[data-testid="save-task"]').trigger('click')
+    await flushPromises()
+    expect(api.createScheduledTask).not.toHaveBeenCalled()
+  })
+
+  it('keeps an ended one-time task editable until it is enabled again', async () => {
+    const ended: ScheduledTask = {
+      ...task,
+      recurrence: 'once',
+      weekdays: [],
+      run_date: '2020-01-01',
+      enabled: false,
+    }
+    const { wrapper } = await mountDialog('edit', ended)
+    expect(wrapper.text()).toContain('Ended · no runs will start')
+    expect(wrapper.find('[data-testid="task-date-error"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="task-name"]').setValue('Renamed release check')
+    await wrapper.get('[data-testid="save-task"]').trigger('click')
+    await flushPromises()
+    expect(api.updateScheduledTask).toHaveBeenCalledWith(
+      ended.id,
+      expect.objectContaining({ recurrence: 'once', run_date: '2020-01-01', enabled: false }),
+    )
+    await wrapper.get('[data-testid="task-enabled"]').trigger('click')
+    expect(wrapper.get('[data-testid="task-date-error"]').text()).toBe(
+      'Choose a future date and time.',
+    )
+  })
+
+  it('defaults set times to seven days and saves daily with empty API weekdays', async () => {
+    const { wrapper } = await mountDialog('new')
+    await wrapper.get('[data-testid="schedule-mode-times"]').trigger('click')
     expect(wrapper.find('[data-testid="recurrence-daily"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="recurrence-weekly"]').exists()).toBe(false)
     for (let day = 0; day < 7; day += 1) {
@@ -374,17 +441,24 @@ describe('ScheduledTaskDialog', () => {
   it('starts a new task from a calendar slot prefill', async () => {
     const { wrapper } = await mountDialog('new', task, {
       workspace_id: 'ws-1',
+      date: '2099-06-20',
       weekdays: [5],
       times: ['14:30'],
     })
+    expect((wrapper.get('[data-testid="task-date"]').element as HTMLInputElement).value).toBe(
+      '2099-06-20',
+    )
+    expect((wrapper.get('[data-testid="task-time"]').element as HTMLInputElement).value).toBe(
+      '14:30',
+    )
+    // The slot's weekday carries over when the run should repeat instead.
+    await wrapper.get('[data-testid="schedule-mode-times"]').trigger('click')
     for (let day = 0; day < 7; day += 1) {
       expect(wrapper.get(`[data-testid="weekday-${day}"]`).attributes('aria-pressed')).toBe(
         String(day === 5),
       )
     }
-    expect((wrapper.get('[data-testid="task-time"]').element as HTMLInputElement).value).toBe(
-      '14:30',
-    )
+    await wrapper.get('[data-testid="schedule-mode-once"]').trigger('click')
     await wrapper.get('[data-testid="task-name"]').setValue('Weekend review')
     await wrapper.get('[data-testid="task-prompt"]').setValue('Review issues')
     await wrapper.get('[data-testid="save-task"]').trigger('click')
@@ -392,8 +466,8 @@ describe('ScheduledTaskDialog', () => {
     expect(api.createScheduledTask).toHaveBeenCalledWith(
       expect.objectContaining({
         workspace_id: 'ws-1',
-        recurrence: 'weekly',
-        weekdays: [5],
+        recurrence: 'once',
+        run_date: '2099-06-20',
         local_time: '14:30',
       }),
     )
@@ -502,6 +576,7 @@ describe('ScheduledTaskDialog', () => {
 
   it('previews only selected days and rejects an empty selection', async () => {
     const { wrapper } = await mountDialog('new')
+    await wrapper.get('[data-testid="schedule-mode-times"]').trigger('click')
     await wrapper.get('[data-testid="task-name"]').setValue('Monday review')
     await wrapper.get('[data-testid="task-prompt"]').setValue('Review issues')
     await wrapper.get('[data-testid="task-timezone"]').setValue('UTC')
@@ -518,6 +593,7 @@ describe('ScheduledTaskDialog', () => {
 
   it('saves several times a day as a cron schedule', async () => {
     const { wrapper } = await mountDialog('new')
+    await wrapper.get('[data-testid="schedule-mode-times"]').trigger('click')
     await wrapper.get('[data-testid="task-name"]').setValue('Twice daily')
     await wrapper.get('[data-testid="task-prompt"]').setValue('Review issues')
     await wrapper.get('[data-testid="add-time"]').trigger('click')
@@ -580,6 +656,7 @@ describe('ScheduledTaskDialog', () => {
 
   it('saves a weekly task through shared store, but does not run it', async () => {
     const { wrapper, store } = await mountDialog('new')
+    await wrapper.get('[data-testid="schedule-mode-times"]').trigger('click')
     await wrapper.get('[data-testid="task-name"]').setValue('Morning check')
     await wrapper.get('[data-testid="task-prompt"]').setValue('Check build health')
     await wrapper.get('[data-testid="task-timezone"]').setValue('Europe/Berlin')

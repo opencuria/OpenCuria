@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from asgiref.sync import sync_to_async
 from django.http import HttpRequest
@@ -66,6 +66,7 @@ class ScheduledTaskIn(Schema):
     recurrence: str = "daily"
     weekdays: list[int] = []
     cron_expression: str = ""
+    run_date: date | None = None
     local_time: str = "09:00"
     timezone_name: str = "UTC"
     enabled: bool = True
@@ -83,6 +84,7 @@ class ScheduledTaskPatchIn(Schema):
     recurrence: str | None = None
     weekdays: list[int] | None = None
     cron_expression: str | None = None
+    run_date: date | None = None
     local_time: str | None = None
     timezone_name: str | None = None
     enabled: bool | None = None
@@ -101,6 +103,7 @@ class ScheduledTaskOut(Schema):
     recurrence: str
     weekdays: list[int]
     cron_expression: str
+    run_date: date | None = None
     local_time: str
     timezone_name: str
     enabled: bool
@@ -138,6 +141,7 @@ def _task_out(task: ScheduledTask) -> ScheduledTaskOut:
         recurrence=task.recurrence,
         weekdays=list(task.weekdays or []),
         cron_expression=task.cron_expression,
+        run_date=task.run_date,
         local_time=task.local_time.strftime("%H:%M"),
         timezone_name=task.timezone_name,
         enabled=task.enabled,

@@ -257,16 +257,27 @@ class ScheduledTaskRepository:
             "recurrence": task.recurrence,
             "weekdays": list(task.weekdays or []),
             "cron_expression": task.cron_expression,
+            "run_date": task.run_date.isoformat() if task.run_date else None,
             "local_time": task.local_time.strftime("%H:%M"),
             "timezone_name": task.timezone_name,
         }
+
+    @staticmethod
+    def _advance_fields(next_run_at: datetime | None) -> dict[str, object]:
+        """Move to the next occurrence, or disable a task that has none left.
+
+        A finished one-time task keeps ``next_run_at`` at its only occurrence.
+        """
+        if next_run_at is None:
+            return {"enabled": False}
+        return {"next_run_at": next_run_at}
 
     @staticmethod
     def claim(
         task: ScheduledTask,
         *,
         scheduled_for: datetime,
-        next_run_at: datetime,
+        next_run_at: datetime | None,
     ) -> ScheduledTaskRun | None:
         try:
             with transaction.atomic():
@@ -307,8 +318,10 @@ class ScheduledTaskRepository:
                         "This scheduled task already has an active run" if active else ""
                     ),
                 )
-                locked.next_run_at = next_run_at
-                locked.save(update_fields=["next_run_at", "updated_at"])
+                fields = ScheduledTaskRepository._advance_fields(next_run_at)
+                for key, value in fields.items():
+                    setattr(locked, key, value)
+                locked.save(update_fields=[*fields, "updated_at"])
                 return run
         except IntegrityError:
             return None
@@ -550,7 +563,7 @@ class ScheduledTaskRepository:
 
     @staticmethod
     def mark_missed(
-        task: ScheduledTask, *, scheduled_for: datetime, next_run_at: datetime
+        task: ScheduledTask, *, scheduled_for: datetime, next_run_at: datetime | None
     ) -> None:
         with transaction.atomic():
             try:
@@ -569,4 +582,7 @@ class ScheduledTaskRepository:
                 enabled=True,
                 is_deleted=False,
                 next_run_at=scheduled_for,
-            ).update(next_run_at=next_run_at, updated_at=timezone.now())
+            ).update(
+                **ScheduledTaskRepository._advance_fields(next_run_at),
+                updated_at=timezone.now(),
+            )

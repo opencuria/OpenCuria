@@ -7,9 +7,10 @@ from django.db import models
 
 
 class ScheduledTask(models.Model):
-    """A user's recurring prompt bound to an owned workspace."""
+    """A user's one-time or recurring prompt bound to an owned workspace."""
 
     class Recurrence(models.TextChoices):
+        ONCE = "once", "Once"
         DAILY = "daily", "Daily"
         WEEKLY = "weekly", "Weekly"
         CRON = "cron", "Cron"
@@ -35,6 +36,9 @@ class ScheduledTask(models.Model):
     weekdays = models.JSONField(default=list, blank=True)
     # Only used by CRON recurrence; ``;``-separated five-field expressions.
     cron_expression = models.CharField(max_length=1000, blank=True, default="")
+    # Only used by ONCE recurrence; the local date of its single occurrence.
+    # The task disables itself once that occurrence is claimed or missed.
+    run_date = models.DateField(null=True, blank=True)
     local_time = models.TimeField()
     timezone_name = models.CharField(max_length=64, default="UTC")
     enabled = models.BooleanField(default=True)

@@ -1,8 +1,8 @@
 /**
  * Calendar model for the scheduled-tasks week view: planned occurrences and
  * past runs placed on the days of a display time zone, dense cadences merged
- * into series blocks, overlap columns, and drag-to-reschedule for set-time
- * schedules.
+ * into series blocks, overlap columns, and drag-to-reschedule for one-time
+ * and set-time schedules.
  */
 import type {
   ScheduledTask,
@@ -10,7 +10,13 @@ import type {
   ScheduledTaskRun,
 } from '@/services/scheduledTasks.api'
 import { cronOccurrencesBetween, formatClock } from '@/lib/cron'
-import { scheduleDraftFromTask, scheduleDraftToCron, schedulePayload } from '@/lib/scheduledTasks'
+import {
+  onceOccurrence,
+  scheduleDraftFromTask,
+  scheduleDraftToCron,
+  schedulePayload,
+} from '@/lib/scheduledTasks'
+import type { ScheduleDraft, ScheduleFields } from '@/lib/scheduledTasks'
 
 export const MINUTES_PER_DAY = 24 * 60
 /** Shortest drawn event; used for overlap layout so chips never cover each other. */
@@ -50,7 +56,7 @@ export interface CalendarBlock {
 
 export type SchedulePatch = Pick<
   ScheduledTaskInput,
-  'recurrence' | 'weekdays' | 'local_time' | 'cron_expression'
+  'recurrence' | 'weekdays' | 'local_time' | 'cron_expression' | 'run_date'
 >
 
 /**
@@ -79,6 +85,11 @@ export function weekdayIndex(day: CalendarDay): number {
 
 export function isSameDay(a: CalendarDay, b: CalendarDay): boolean {
   return a.getTime() === b.getTime()
+}
+
+/** YYYY-MM-DD of a calendar day. */
+export function isoDate(day: CalendarDay): string {
+  return day.toISOString().slice(0, 10)
 }
 
 export function browserTimeZone(): string {
@@ -156,14 +167,26 @@ export function formatWeekLabel(start: CalendarDay, end: CalendarDay): string {
   return `${month(start, 'long')} ${startYear}`
 }
 
-/** Five-field cron equivalent of any stored schedule. */
-export function taskCronExpression(
-  task: Pick<ScheduledTask, 'recurrence' | 'weekdays' | 'local_time'> & {
-    cron_expression?: string
-  },
-): string {
+/** Five-field cron equivalent of a recurring stored schedule. */
+export function taskCronExpression(task: ScheduleFields): string {
   if (task.recurrence === 'cron') return task.cron_expression ?? ''
   return scheduleDraftToCron(scheduleDraftFromTask(task))
+}
+
+/** Planned instants of a task within `[start, end)`. */
+function plannedOccurrences(task: ScheduledTask, start: Date, end: Date): Date[] {
+  if (task.recurrence === 'once') {
+    const at = onceOccurrence(task.run_date ?? '', task.local_time, task.timezone_name)
+    return at && at >= start && at < end ? [at] : []
+  }
+  return cronOccurrencesBetween(
+    taskCronExpression(task),
+    task.timezone_name,
+    start,
+    end,
+    // The visible range bounds the search; a fixed cap drops dense schedules.
+    Number.POSITIVE_INFINITY,
+  )
 }
 
 /**
@@ -185,14 +208,7 @@ export function calendarOccurrences(
       taken.add(at.getTime())
       result.push({ taskId: task.id, at, kind: 'run', run })
     }
-    for (const at of cronOccurrencesBetween(
-      taskCronExpression(task),
-      task.timezone_name,
-      start,
-      end,
-      // The visible range bounds the search; a fixed cap drops dense schedules.
-      Number.POSITIVE_INFINITY,
-    )) {
+    for (const at of plannedOccurrences(task, start, end)) {
       if (!taken.has(at.getTime())) result.push({ taskId: task.id, at, kind: 'planned' })
     }
   }
@@ -345,13 +361,10 @@ export function wallClock(date: Date, timezone: string): { weekday: number; time
   return { weekday, time: formatClock(Number(parts.hour), Number(parts.minute)) }
 }
 
-/** Only set-time schedules map a single dragged run back to their fields. */
-export function canReschedule(
-  task: Pick<ScheduledTask, 'recurrence' | 'weekdays' | 'local_time'> & {
-    cron_expression?: string
-  },
-): boolean {
-  return scheduleDraftFromTask(task).mode === 'times'
+/** Only one-time and set-time schedules map a dragged run back to their fields. */
+export function canReschedule(task: ScheduleFields): boolean {
+  const { mode } = scheduleDraftFromTask(task)
+  return mode === 'once' || mode === 'times'
 }
 
 /** Single planned slots of reschedulable tasks can be dragged. */
@@ -368,28 +381,36 @@ export function currentSchedulePatch(task: ScheduledTask): SchedulePatch {
     weekdays: [...task.weekdays],
     local_time: task.local_time,
     cron_expression: task.cron_expression ?? '',
+    run_date: task.run_date ?? null,
   }
 }
 
 /**
- * Schedule fields after moving one occurrence from `from` to `to`. The run's
- * time changes for every selected day; on non-daily schedules the run's day is
+ * Schedule fields after moving one occurrence from `from` to `to`. A one-time
+ * run moves to the target date and time. On set-time schedules the run's time
+ * changes for every selected day; on non-daily schedules the run's day is
  * swapped for the target day. Returns null when nothing would change.
  */
 export function rescheduleTask(task: ScheduledTask, from: Date, to: Date): SchedulePatch | null {
   const draft = scheduleDraftFromTask(task)
-  if (draft.mode !== 'times') return null
-  const before = wallClock(from, task.timezone_name)
-  const after = wallClock(to, task.timezone_name)
-  if (!draft.times.includes(before.time) || before.weekday < 0 || after.weekday < 0) return null
-  const times = draft.times.map((time) => (time === before.time ? after.time : time))
-  let weekdays = draft.weekdays
-  if (weekdays.length < 7 && before.weekday !== after.weekday) {
-    weekdays = [
-      ...new Set([...weekdays.filter((day) => day !== before.weekday), after.weekday]),
-    ].sort((a, b) => a - b)
-  }
-  const next = schedulePayload({ ...draft, times, weekdays })
+  let moved: ScheduleDraft
+  if (draft.mode === 'once') {
+    const target = zonedTime(to, task.timezone_name)
+    moved = { ...draft, date: isoDate(target.day), times: [formatMinutes(target.minute)] }
+  } else if (draft.mode === 'times') {
+    const before = wallClock(from, task.timezone_name)
+    const after = wallClock(to, task.timezone_name)
+    if (!draft.times.includes(before.time) || before.weekday < 0 || after.weekday < 0) return null
+    const times = draft.times.map((time) => (time === before.time ? after.time : time))
+    let weekdays = draft.weekdays
+    if (weekdays.length < 7 && before.weekday !== after.weekday) {
+      weekdays = [
+        ...new Set([...weekdays.filter((day) => day !== before.weekday), after.weekday]),
+      ].sort((a, b) => a - b)
+    }
+    moved = { ...draft, times, weekdays }
+  } else return null
+  const next = schedulePayload(moved)
   return JSON.stringify(next) === JSON.stringify(schedulePayload(draft)) ? null : next
 }
 

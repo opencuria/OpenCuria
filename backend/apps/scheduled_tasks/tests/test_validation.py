@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -66,7 +66,7 @@ async def test_update_model_and_skill_changes_are_validated_without_chat_creatio
 
 
 def test_cron_schedule_normalizes_expression_and_ignores_weekdays():
-    recurrence, weekdays, _, zone, cron = ScheduledTaskService._validate_schedule(
+    schedule = ScheduledTaskService._validate_schedule(
         {
             "recurrence": "cron",
             "weekdays": [1, 2],
@@ -74,16 +74,104 @@ def test_cron_schedule_normalizes_expression_and_ignores_weekdays():
             "timezone_name": "Europe/Berlin",
         }
     )
-    assert (recurrence, weekdays, zone, cron) == (
-        "cron",
-        [],
-        "Europe/Berlin",
-        "*/15 8-17 * * 1-5",
-    )
-    _, _, _, _, cleared = ScheduledTaskService._validate_schedule(
+    assert schedule == {
+        "recurrence": "cron",
+        "weekdays": [],
+        "cron_expression": "*/15 8-17 * * 1-5",
+        "run_date": None,
+        "local_time": time(9),
+        "timezone_name": "Europe/Berlin",
+    }
+    cleared = ScheduledTaskService._validate_schedule(
         {"recurrence": "daily", "cron_expression": "* * * * *"}
     )
-    assert cleared == ""
+    assert cleared["cron_expression"] == ""
+
+
+@pytest.mark.parametrize("run_date", ["2026-11-03", date(2026, 11, 3)])
+def test_once_schedule_keeps_only_date_and_time(run_date):
+    schedule = ScheduledTaskService._validate_schedule(
+        {
+            "recurrence": "once",
+            "run_date": run_date,
+            "weekdays": [1],
+            "cron_expression": "* * * * *",
+            "local_time": "14:30",
+            "timezone_name": "Europe/Berlin",
+        }
+    )
+    assert schedule == {
+        "recurrence": "once",
+        "weekdays": [],
+        "cron_expression": "",
+        "run_date": date(2026, 11, 3),
+        "local_time": time(14, 30),
+        "timezone_name": "Europe/Berlin",
+    }
+    daily = ScheduledTaskService._validate_schedule(
+        {"recurrence": "daily", "run_date": "2026-11-03"}
+    )
+    assert daily["run_date"] is None
+
+
+@pytest.mark.parametrize(
+    "run_date",
+    [
+        None,
+        "",
+        "2026-02-30",
+        "03.11.2026",
+        "2026-11-03T09:00",
+        20261103,
+        datetime(2026, 11, 3, tzinfo=timezone.utc),
+    ],
+)
+def test_once_schedule_rejects_missing_or_invalid_date(run_date):
+    with pytest.raises(ValueError, match="run_date"):
+        ScheduledTaskService._validate_schedule(
+            {"recurrence": "once", "run_date": run_date}
+        )
+
+
+def test_once_update_requires_future_time_only_while_enabled():
+    class Repository:
+        def update(self, task, **fields):
+            for key, value in fields.items():
+                setattr(task, key, value)
+            return task
+
+    past = datetime(2020, 1, 1, 9, tzinfo=timezone.utc)
+    task = SimpleNamespace(
+        name="once",
+        prompt="review",
+        mode="build",
+        model="",
+        reasoning_effort="",
+        skill_ids=[],
+        recurrence="once",
+        weekdays=[],
+        run_date=date(2020, 1, 1),
+        local_time=time(9),
+        timezone_name="UTC",
+        enabled=False,
+        next_run_at=past,
+        workspace_id="workspace",
+        organization_id="org",
+        owner_id=1,
+    )
+    service = ScheduledTaskService(repository=Repository())
+    # A finished one-time task stays editable while it is disabled.
+    assert service.update(task, {"name": "renamed"}).next_run_at == past
+    with pytest.raises(ValueError, match="must be in the future"):
+        service.update(task, {"enabled": True})
+    future = date.today() + timedelta(days=30)
+    updated = service.update(
+        task, {"run_date": future.isoformat(), "enabled": True}
+    )
+    assert updated.enabled is True
+    assert updated.next_run_at == datetime.combine(
+        future, time(9), tzinfo=timezone.utc
+    )
 
 
 @pytest.mark.parametrize("expression", [None, "", "61 * * * *", 5])

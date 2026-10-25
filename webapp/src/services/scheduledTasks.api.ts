@@ -2,7 +2,7 @@
 import { del, get, patch, post } from './api'
 import type { HarnessId } from '@/types/harness'
 
-export type ScheduleRecurrence = 'daily' | 'weekly' | 'cron'
+export type ScheduleRecurrence = 'once' | 'daily' | 'weekly' | 'cron'
 
 export interface ScheduledTask {
   id: string
@@ -18,8 +18,11 @@ export interface ScheduledTask {
   weekdays: number[]
   /** `;`-separated five-field cron expressions; only used by `cron`. */
   cron_expression?: string
+  /** Local YYYY-MM-DD date of the single run; only used by `once`. */
+  run_date?: string | null
   local_time: string
   timezone_name: string
+  /** A `once` task turns itself off after its run. */
   enabled: boolean
   next_run_at: string
   created_at: string
@@ -38,6 +41,7 @@ export interface ScheduledTaskInput {
   recurrence: ScheduleRecurrence
   weekdays: number[]
   cron_expression?: string
+  run_date?: string | null
   local_time: string
   timezone_name: string
   enabled: boolean

@@ -1,6 +1,6 @@
 import asyncio
 import uuid
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -746,3 +746,42 @@ async def test_admission_conflict_uses_fresh_lifecycle_state(
     assert len(cleaned) == (admission == "start")
     if admission == "start":
         assert run.session is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("now", "expected"),
+    [
+        (datetime(2025, 1, 1, 9, 0, 30, tzinfo=timezone.utc), "claimed"),
+        (datetime(2025, 1, 3, 12, tzinfo=timezone.utc), "missed_occurrence"),
+    ],
+)
+async def test_one_time_task_claims_or_misses_its_only_occurrence(now, expected):
+    due = datetime(2025, 1, 1, 9, tzinfo=timezone.utc)
+    task = SimpleNamespace(
+        id=uuid.uuid4(),
+        next_run_at=due,
+        local_time=time(9),
+        timezone_name="UTC",
+        recurrence="once",
+        run_date=date(2025, 1, 1),
+        weekdays=[],
+        enabled=True,
+    )
+    repo = FakeRepository()
+    repo.rows = [task]
+    outcomes = []
+
+    def claim(task, *, scheduled_for, next_run_at):
+        outcomes.append(("claimed", next_run_at))
+        return SimpleNamespace(status="claimed")
+
+    def mark_missed(task, *, scheduled_for, next_run_at):
+        outcomes.append(("missed_occurrence", next_run_at))
+
+    repo.claim = claim
+    repo.mark_missed = mark_missed
+    service = ScheduledTaskService(repository=repo)
+    await service.dispatch_due(now=now, on_claim=lambda *_args: None)
+    # No following occurrence: the repository disables the finished task.
+    assert outcomes == [(expected, None)]

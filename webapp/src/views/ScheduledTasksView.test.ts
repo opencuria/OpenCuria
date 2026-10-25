@@ -139,6 +139,7 @@ describe('ScheduledTasksView', () => {
     expect(store.selectedTaskId).toBeNull()
     expect(store.newTaskPrefill).toEqual({
       workspace_id: undefined,
+      date: '2026-06-20',
       weekdays: [5],
       times: ['14:30'],
       timezone_name: LOCAL_ZONE,
@@ -166,6 +167,7 @@ describe('ScheduledTasksView', () => {
       weekdays: [2],
       local_time: '11:15',
       cron_expression: '',
+      run_date: null,
     })
     const options = vi.mocked(toast.success).mock.calls[0]![1] as {
       action: { label: string; onClick: () => void }
@@ -178,6 +180,7 @@ describe('ScheduledTasksView', () => {
       weekdays: [2],
       local_time: '09:00',
       cron_expression: '',
+      run_date: null,
     })
   })
 

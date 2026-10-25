@@ -1,6 +1,7 @@
 import type { ScheduledTask, ScheduledTaskInput } from '@/services/scheduledTasks.api'
 import {
   cronMatchesDate,
+  cronOccurrencesBetween,
   describeCron,
   describeCronWeekdays,
   formatClock,
@@ -80,10 +81,17 @@ export function nextLocalOccurrence(
 }
 
 // ---------------------------------------------------------------------------
-// Schedule drafts: the dialog's friendly modes, stored as daily/weekly or cron
+// Schedule drafts: the dialog's friendly modes, stored as once, daily/weekly
+// or cron
 // ---------------------------------------------------------------------------
 
-export type ScheduleMode = 'times' | 'interval' | 'cron'
+/** Stored schedule fields of a task. */
+export type ScheduleFields = Pick<
+  ScheduledTask,
+  'recurrence' | 'weekdays' | 'local_time' | 'cron_expression' | 'run_date'
+>
+
+export type ScheduleMode = 'once' | 'times' | 'interval' | 'cron'
 
 export const INTERVAL_OPTIONS = [
   { value: '5m', label: '5 minutes', minutes: 5 },
@@ -111,9 +119,11 @@ export const MAX_SCHEDULE_TIMES = 24
 
 export interface ScheduleDraft {
   mode: ScheduleMode
+  /** Local YYYY-MM-DD date; used by `once` together with the first time. */
+  date: string
   /** 0 = Monday … 6 = Sunday; used by `times` and `interval`. */
   weekdays: number[]
-  /** HH:MM wall-clock times; used by `times`. */
+  /** HH:MM wall-clock times; used by `times`, the first one by `once`. */
   times: string[]
   interval: string
   window_enabled: boolean
@@ -123,14 +133,98 @@ export interface ScheduleDraft {
   cron_expression: string
 }
 
-export type ScheduleDraftErrors = Partial<Record<'weekdays' | 'times' | 'window' | 'cron_expression', string>>
+export type ScheduleDraftErrors = Partial<
+  Record<'date' | 'weekdays' | 'times' | 'window' | 'cron_expression', string>
+>
 
 const CLOCK = /^([01]\d|2[0-3]):[0-5]\d$/
+const DATE = /^(\d{4})-(\d{2})-(\d{2})$/
 const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6]
+const DAY_MS = 86_400_000
 
-export function defaultScheduleDraft(): ScheduleDraft {
+/** Whether `value` is a real YYYY-MM-DD calendar date. */
+export function isValidDate(value: string): boolean {
+  const match = DATE.exec(value)
+  if (!match) return false
+  const [year, month, day] = match.slice(1).map(Number) as [number, number, number]
+  const date = new Date(Date.UTC(year, month - 1, day))
+  return (
+    date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+  )
+}
+
+function localDate(instant: Date, timezone: string): string {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    })
+      .formatToParts(instant)
+      .map((part) => [part.type, part.value]),
+  )
+  return `${parts.year}-${parts.month}-${parts.day}`
+}
+
+/** Local YYYY-MM-DD date of the next `time` (HH:MM) after `now` in `timezone`. */
+export function nextDateAt(time: string, timezone: string, now = new Date()): string {
+  const zone = isValidTimeZone(timezone) ? timezone : 'UTC'
+  const [hour, minute] = CLOCK.test(time) ? time.split(':').map(Number) : [9, 0]
+  return localDate(nextCronOccurrences(`${minute} ${hour} * * *`, zone, now)[0] ?? now, zone)
+}
+
+/**
+ * Instant of a one-time run, or null for an invalid date or time or a wall
+ * time inside a DST gap (which the backend rejects). The date's yearly cron is
+ * searched only around that date to reuse the zone-aware cron resolution, so
+ * an ambiguous fall-back time runs at its first instant, as in the backend.
+ */
+export function onceOccurrence(date: string, time: string, timezone: string): Date | null {
+  if (!isValidDate(date) || !CLOCK.test(time)) return null
+  const [, month, day] = date.split('-').map(Number) as [number, number, number]
+  const [hour, minute] = time.split(':').map(Number) as [number, number]
+  const midnight = new Date(`${date}T00:00:00Z`).getTime()
+  return (
+    cronOccurrencesBetween(
+      `${minute} ${hour} ${day} ${month} *`,
+      timezone,
+      new Date(midnight - DAY_MS),
+      new Date(midnight + 2 * DAY_MS),
+      1,
+    )[0] ?? null
+  )
+}
+
+/** A one-time task whose run time has passed; it will not run again. */
+export function isScheduleEnded(
+  task: Pick<ScheduledTask, 'recurrence' | 'run_date' | 'local_time' | 'timezone_name'>,
+  now = new Date(),
+): boolean {
+  if (task.recurrence !== 'once') return false
+  const at = onceOccurrence(task.run_date ?? '', task.local_time, task.timezone_name)
+  return !at || at <= now
+}
+
+/** "Ended" for a finished one-time task, "Paused" for a disabled one, else "". */
+export function scheduleStateLabel(
+  task: Pick<
+    ScheduledTask,
+    'enabled' | 'recurrence' | 'run_date' | 'local_time' | 'timezone_name'
+  >,
+  now = new Date(),
+): '' | 'Paused' | 'Ended' {
+  if (isScheduleEnded(task, now)) return 'Ended'
+  return task.enabled ? '' : 'Paused'
+}
+
+/** New tasks run once, at the next 09:00 in `timezone`. */
+export function defaultScheduleDraft(
+  timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+): ScheduleDraft {
   return {
-    mode: 'times',
+    mode: 'once',
+    date: nextDateAt('09:00', timezone),
     weekdays: [...ALL_DAYS],
     times: ['09:00'],
     interval: '1h',
@@ -174,9 +268,19 @@ function intervalMinutes(value: string): number {
   return INTERVAL_OPTIONS.find((option) => option.value === value)?.minutes ?? 60
 }
 
-/** Build the cron expression equivalent to a draft in any mode. */
+/**
+ * Build the cron expression equivalent to a draft in any mode. A one-time run
+ * maps to its yearly date and time, a starting point for the cron editor.
+ */
 export function scheduleDraftToCron(draft: ScheduleDraft): string {
   if (draft.mode === 'cron') return splitCronExpressions(draft.cron_expression).join('; ')
+  if (draft.mode === 'once') {
+    const time = draft.times[0] ?? ''
+    if (!CLOCK.test(time) || !isValidDate(draft.date)) return ''
+    const [, month, day] = draft.date.split('-').map(Number)
+    const [hour, minute] = time.split(':').map(Number)
+    return `${minute} ${hour} ${day} ${month} *`
+  }
   const days = cronWeekdayField(draft.weekdays)
   if (draft.mode === 'interval') {
     const every = intervalMinutes(draft.interval)
@@ -218,7 +322,7 @@ function parseTimesDraft(parts: string[]): ScheduleDraft | null {
   }
   const weekdays = dayField === null ? null : uiWeekdays(dayField)
   if (!weekdays?.length || times.length > MAX_SCHEDULE_TIMES) return null
-  return { ...defaultScheduleDraft(), weekdays, times: sortedTimes(times) }
+  return { ...defaultScheduleDraft(), mode: 'times', weekdays, times: sortedTimes(times) }
 }
 
 function parseIntervalDraft(part: string): ScheduleDraft | null {
@@ -242,12 +346,19 @@ function parseIntervalDraft(part: string): ScheduleDraft | null {
 }
 
 /** Derive the friendliest editor mode that reproduces a stored schedule. */
-export function scheduleDraftFromTask(
-  task: Pick<ScheduledTask, 'recurrence' | 'weekdays' | 'local_time'> & { cron_expression?: string },
-): ScheduleDraft {
+export function scheduleDraftFromTask(task: ScheduleFields): ScheduleDraft {
+  if (task.recurrence === 'once') {
+    return {
+      ...defaultScheduleDraft(),
+      mode: 'once',
+      date: task.run_date ?? '',
+      times: [task.local_time],
+    }
+  }
   if (task.recurrence !== 'cron') {
     return {
       ...defaultScheduleDraft(),
+      mode: 'times',
       weekdays: task.recurrence === 'daily' ? [...ALL_DAYS] : [...task.weekdays],
       times: [task.local_time],
     }
@@ -263,6 +374,11 @@ export function scheduleDraftFromTask(
 
 export function validateScheduleDraft(draft: ScheduleDraft): ScheduleDraftErrors {
   const errors: ScheduleDraftErrors = {}
+  if (draft.mode === 'once') {
+    if (!isValidDate(draft.date)) errors.date = 'Choose a date.'
+    if (!CLOCK.test(draft.times[0] ?? '')) errors.times = 'Enter a valid time.'
+    return errors
+  }
   if (draft.mode === 'cron') {
     const error = validateCronExpression(draft.cron_expression)
     if (error) errors.cron_expression = error
@@ -282,7 +398,19 @@ export function validateScheduleDraft(draft: ScheduleDraft): ScheduleDraftErrors
 /** API fields for a draft; a single daily time keeps the classic format. */
 export function schedulePayload(
   draft: ScheduleDraft,
-): Pick<ScheduledTaskInput, 'recurrence' | 'weekdays' | 'local_time' | 'cron_expression'> {
+): Pick<
+  ScheduledTaskInput,
+  'recurrence' | 'weekdays' | 'local_time' | 'cron_expression' | 'run_date'
+> {
+  if (draft.mode === 'once') {
+    return {
+      recurrence: 'once',
+      weekdays: [],
+      local_time: draft.times[0] ?? '09:00',
+      cron_expression: '',
+      run_date: draft.date,
+    }
+  }
   const times = sortedTimes(draft.times)
   if (draft.mode === 'times' && times.length === 1) {
     const daily = ALL_DAYS.every((day) => draft.weekdays.includes(day))
@@ -291,6 +419,7 @@ export function schedulePayload(
       weekdays: daily ? [] : [...draft.weekdays].sort((a, b) => a - b),
       local_time: times[0]!,
       cron_expression: '',
+      run_date: null,
     }
   }
   return {
@@ -298,6 +427,7 @@ export function schedulePayload(
     weekdays: [],
     local_time: times.find((time) => CLOCK.test(time)) ?? '09:00',
     cron_expression: scheduleDraftToCron(draft),
+    run_date: null,
   }
 }
 
@@ -309,9 +439,20 @@ function hourLabel(hour: number): string {
   return `${String(hour).padStart(2, '0')}:00`
 }
 
-/** Compact cadence label such as "Weekdays · 09:00, 14:30". */
+/** Compact cadence label such as "Weekdays · 09:00, 14:30" or "Once · Oct 25, 2026 · 09:00". */
 export function describeScheduleDraft(draft: ScheduleDraft): string {
   if (draft.mode === 'cron') return describeCron(draft.cron_expression)
+  if (draft.mode === 'once') {
+    const time = draft.times[0] ?? ''
+    if (!isValidDate(draft.date)) return `Once · ${time}`
+    const day = new Intl.DateTimeFormat(undefined, {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      timeZone: 'UTC',
+    }).format(new Date(`${draft.date}T00:00:00Z`))
+    return `Once · ${day} · ${time}`
+  }
   const days = uiDaysLabel(draft.weekdays)
   if (draft.mode === 'times') return `${days} · ${sortedTimes(draft.times).join(', ')}`
   const every = intervalMinutes(draft.interval)
@@ -320,9 +461,7 @@ export function describeScheduleDraft(draft: ScheduleDraft): string {
   return `${days} · ${cadence}${window}`
 }
 
-export function describeSchedule(
-  task: Pick<ScheduledTask, 'recurrence' | 'weekdays' | 'local_time'> & { cron_expression?: string },
-): string {
+export function describeSchedule(task: ScheduleFields): string {
   return describeScheduleDraft(scheduleDraftFromTask(task))
 }
 

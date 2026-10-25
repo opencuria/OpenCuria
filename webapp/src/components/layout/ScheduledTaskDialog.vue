@@ -49,6 +49,8 @@ import {
   isValidTimeZone,
   maxRunsPerDay,
   MAX_SCHEDULE_TIMES,
+  nextDateAt,
+  onceOccurrence,
   scheduleDraftFromTask,
   scheduleDraftToCron,
   schedulePayload,
@@ -114,6 +116,7 @@ function blankForm(): FormState {
 }
 const form = ref<FormState>(blankForm())
 const SCHEDULE_MODES: { value: ScheduleMode; label: string }[] = [
+  { value: 'once', label: 'Once' },
   { value: 'times', label: 'At set times' },
   { value: 'interval', label: 'Repeating' },
   { value: 'cron', label: 'Custom (cron)' },
@@ -174,9 +177,33 @@ const scheduleSummary = computed(() => describeScheduleDraft(form.value.schedule
 const runsPerDay = computed(() =>
   Object.keys(scheduleErrors.value).length ? 0 : maxRunsPerDay(scheduleCron.value),
 )
+const onceAt = computed(() =>
+  form.value.schedule.mode === 'once'
+    ? onceOccurrence(
+        form.value.schedule.date,
+        form.value.schedule.times[0] ?? '',
+        form.value.timezone_name,
+      )
+    : null,
+)
+const onceEnded = computed(() => onceAt.value !== null && onceAt.value <= new Date())
+/** A one-time run must exist and, while enabled, lie ahead. */
+function onceTimingError(now = new Date()): string {
+  if (
+    form.value.schedule.mode !== 'once' ||
+    !timezoneValid.value ||
+    Object.keys(scheduleErrors.value).length
+  )
+    return ''
+  if (!onceAt.value) return 'This time does not exist on that date.'
+  return form.value.enabled && onceAt.value <= now ? 'Choose a future date and time.' : ''
+}
+const onceError = computed(() => onceTimingError())
 const upcomingRuns = computed<Date[]>(() => {
   if (!timezoneValid.value || Object.keys(scheduleErrors.value).length) return []
   const zone = form.value.timezone_name
+  if (form.value.schedule.mode === 'once')
+    return onceAt.value && !onceEnded.value ? [onceAt.value] : []
   if (!dirty.value && selectedTask.value) {
     const authoritative = new Date(selectedTask.value.next_run_at)
     if (!Number.isNaN(authoritative.getTime()))
@@ -194,9 +221,11 @@ function formatRunTime(date: Date, withDay: boolean): string {
 }
 const localDayKey = (date: Date): string =>
   new Intl.DateTimeFormat('en-CA', { timeZone: form.value.timezone_name }).format(date)
-const previewText = computed(() =>
-  upcomingRuns.value[0] ? formatRunTime(upcomingRuns.value[0], true) : 'Choose a valid time',
-)
+const previewText = computed(() => {
+  if (upcomingRuns.value[0])
+    return `${formatRunTime(upcomingRuns.value[0], true)} in ${form.value.timezone_name}`
+  return onceEnded.value ? 'None' : 'Choose a valid time'
+})
 const laterRunsText = computed(() =>
   upcomingRuns.value
     .slice(1)
@@ -245,6 +274,8 @@ function applyBlank(): void {
   if (prefill?.weekdays?.length) form.value.schedule.weekdays = [...prefill.weekdays]
   if (prefill?.times?.length) form.value.schedule.times = [...prefill.times]
   if (prefill?.timezone_name) form.value.timezone_name = prefill.timezone_name
+  form.value.schedule.date =
+    prefill?.date ?? nextDateAt(form.value.schedule.times[0]!, form.value.timezone_name)
   dirty.value = false
   errors.value = {}
   apiError.value = ''
@@ -311,10 +342,17 @@ function updateSchedule<K extends keyof ScheduleDraft>(key: K, value: ScheduleDr
   apiError.value = ''
 }
 function setScheduleMode(mode: ScheduleMode): void {
-  if (mode === form.value.schedule.mode) return
+  const { schedule, timezone_name: zone } = form.value
+  if (mode === schedule.mode) return
   // Carry the current cadence into the cron editor so it can be fine-tuned.
-  if (mode === 'cron' && !form.value.schedule.cron_expression.trim())
+  if (mode === 'cron' && !schedule.cron_expression.trim())
     updateSchedule('cron_expression', scheduleCron.value)
+  // A one-time run starts at the next occurrence of its time.
+  if (mode === 'once') {
+    const time = schedule.times[0] ?? '09:00'
+    const at = onceOccurrence(schedule.date, time, zone)
+    if (!at || at <= new Date()) updateSchedule('date', nextDateAt(time, zone))
+  }
   updateSchedule('mode', mode)
 }
 function setTime(index: number, value: string): void {
@@ -345,6 +383,8 @@ function updateForm<K extends keyof FormState>(key: K, value: FormState[K]): voi
 function validate(): boolean {
   const result = validateSchedule({ ...form.value, ...schedulePayload(form.value.schedule) })
   errors.value = { ...result.errors, ...scheduleErrors.value }
+  const timing = onceTimingError()
+  if (timing) errors.value.date = timing
   if (isNew.value && !form.value.workspace_id && visibleWorkspaces.value.length === 0)
     errors.value.workspace_id = 'Create a workspace before scheduling a task.'
   return Object.keys(errors.value).length === 0
@@ -832,7 +872,10 @@ onMounted(async () => {
                   </div>
                 </div>
 
-                <div v-if="form.schedule.mode !== 'cron'" class="space-y-1.5">
+                <div
+                  v-if="form.schedule.mode === 'times' || form.schedule.mode === 'interval'"
+                  class="space-y-1.5"
+                >
                   <span class="block text-xs font-medium">Days</span>
                   <div class="flex flex-wrap items-center gap-1.5" data-testid="weekday-picker">
                     <Button
@@ -872,7 +915,37 @@ onMounted(async () => {
                   }}</span>
                 </div>
 
-                <div v-if="form.schedule.mode === 'times'" class="space-y-1.5">
+                <div
+                  v-if="form.schedule.mode === 'once'"
+                  class="flex flex-wrap items-end gap-x-3 gap-y-1.5"
+                >
+                  <label class="block space-y-1.5"
+                    ><span class="block text-xs font-medium">Date</span
+                    ><Input
+                      type="date"
+                      :model-value="form.schedule.date"
+                      class="h-9 w-[10.5rem] rounded-lg"
+                      data-testid="task-date"
+                      @update:model-value="updateSchedule('date', String($event))"
+                  /></label>
+                  <label class="block space-y-1.5"
+                    ><span class="block text-xs font-medium">Time</span
+                    ><Input
+                      type="time"
+                      :model-value="form.schedule.times[0]"
+                      class="h-9 w-[9.5rem] rounded-lg"
+                      data-testid="task-time"
+                      @update:model-value="setTime(0, String($event))"
+                  /></label>
+                  <span
+                    v-if="scheduleErrors.date || scheduleErrors.times || onceError"
+                    class="w-full text-xs text-destructive"
+                    data-testid="task-date-error"
+                    >{{ scheduleErrors.date || scheduleErrors.times || onceError }}</span
+                  >
+                </div>
+
+                <div v-else-if="form.schedule.mode === 'times'" class="space-y-1.5">
                   <span class="block text-xs font-medium">Times</span>
                   <div class="flex flex-wrap items-center gap-1.5" data-testid="time-list">
                     <div
@@ -1065,10 +1138,7 @@ onMounted(async () => {
                       · up to {{ runsPerDay }} runs a day</span
                     >
                   </p>
-                  <p class="text-muted-foreground">
-                    Next run · {{ previewText }} in
-                    {{ form.timezone_name || 'the selected time zone' }}
-                  </p>
+                  <p class="text-muted-foreground">Next run · {{ previewText }}</p>
                   <p v-if="laterRunsText" class="text-muted-foreground" data-testid="later-runs">
                     Then {{ laterRunsText }}
                   </p>
@@ -1083,7 +1153,7 @@ onMounted(async () => {
                       {{
                         form.enabled
                           ? 'Run automatically on this schedule.'
-                          : 'Paused · no runs will start'
+                          : `${onceEnded ? 'Ended' : 'Paused'} · no runs will start`
                       }}
                     </p>
                   </div>

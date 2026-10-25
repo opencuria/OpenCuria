@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -179,22 +179,14 @@ class ScheduledTaskService:
             raise ValueError("name must be at most 255 characters")
         if not isinstance(values.get("enabled", True), bool):
             raise ValueError("enabled must be a boolean")
-        recurrence, weekdays, local_time, zone, cron = self._validate_schedule(values)
+        schedule = self._validate_schedule(values)
         raw_mode = values.get("mode", "build")
         if not isinstance(raw_mode, str):
             raise ValueError("mode must be plan or build")
         mode = raw_mode.strip().lower()
         if mode not in {"plan", "build"}:
             raise ValueError("mode must be plan or build")
-        now = timezone.now()
-        next_at = next_occurrence(
-            after=now,
-            local_time=local_time,
-            timezone_name=zone,
-            recurrence=recurrence,
-            weekdays=weekdays,
-            cron_expression=cron,
-        )
+        next_at = next_occurrence(after=timezone.now(), **schedule)
         harness_id, model, effort, skills = self._validate_engine_config(
             organization_id=organization_id,
             owner_id=owner_id,
@@ -216,11 +208,7 @@ class ScheduledTaskService:
             reasoning_effort=effort,
             harness_id=harness_id,
             skill_ids=skills,
-            recurrence=recurrence,
-            weekdays=weekdays,
-            cron_expression=cron,
-            local_time=local_time,
-            timezone_name=zone,
+            **schedule,
             enabled=bool(values.get("enabled", True)),
             next_run_at=next_at,
         )
@@ -244,6 +232,7 @@ class ScheduledTaskService:
             "recurrence",
             "weekdays",
             "cron_expression",
+            "run_date",
             "local_time",
             "timezone_name",
             "enabled",
@@ -253,7 +242,7 @@ class ScheduledTaskService:
         if workspace_changed:
             changes["workspace"] = workspace
         target_workspace_id = workspace.id if workspace_changed else task.workspace_id
-        defaults = {"harness_id": "native", "cron_expression": ""}
+        defaults = {"harness_id": "native", "cron_expression": "", "run_date": None}
         combined = {key: getattr(task, key, defaults.get(key)) for key in allowed}
         combined.update(changes)
         if "name" in changes:
@@ -270,17 +259,9 @@ class ScheduledTaskService:
             changes["prompt"] = changes["prompt"].strip()
             if not changes["prompt"]:
                 raise ValueError("prompt must not be empty")
-        recurrence, weekdays, local_time, zone, cron = self._validate_schedule(
-            combined
-        )
-        changes.update(
-            recurrence=recurrence,
-            weekdays=weekdays,
-            cron_expression=cron,
-            local_time=local_time,
-            timezone_name=zone,
-        )
-        combined.update(cron_expression=cron)
+        schedule = self._validate_schedule(combined)
+        changes.update(schedule)
+        combined.update(schedule)
         if "mode" in changes and not isinstance(changes["mode"], str):
             raise ValueError("mode must be plan or build")
         if "mode" in changes:
@@ -346,25 +327,12 @@ class ScheduledTaskService:
             if not isinstance(changes["enabled"], bool):
                 raise ValueError("enabled must be a boolean")
         cadence_changed = any(
-            combined[field] != getattr(task, field, defaults.get(field))
-            for field in (
-                "recurrence",
-                "weekdays",
-                "cron_expression",
-                "local_time",
-                "timezone_name",
-            )
+            schedule[field] != getattr(task, field, defaults.get(field))
+            for field in schedule
         )
         resumed = not task.enabled and combined.get("enabled", True)
         changes["next_run_at"] = (
-            next_occurrence(
-                after=timezone.now(),
-                local_time=local_time,
-                timezone_name=zone,
-                recurrence=recurrence,
-                weekdays=weekdays,
-                cron_expression=cron,
-            )
+            next_occurrence(after=timezone.now(), **schedule)
             if combined.get("enabled", True) and (cadence_changed or resumed)
             else task.next_run_at
         )
@@ -443,7 +411,10 @@ class ScheduledTaskService:
             )
 
     @staticmethod
-    def _next_for(task: ScheduledTask, *, after: datetime) -> datetime:
+    def _next_for(task: ScheduledTask, *, after: datetime) -> datetime | None:
+        """Occurrence following a due one; ``None`` ends a one-time task."""
+        if task.recurrence == ScheduledTask.Recurrence.ONCE:
+            return None
         return next_occurrence(
             after=after,
             local_time=task.local_time,
@@ -905,16 +876,19 @@ class ScheduledTaskService:
                 )
 
     @staticmethod
-    def _validate_schedule(
-        values: dict[str, Any],
-    ) -> tuple[str, list[int], Any, str, str]:
+    def _validate_schedule(values: dict[str, Any]) -> dict[str, Any]:
+        """Normalize cadence fields, keyed like the model and ``next_occurrence``.
+
+        Fields unused by the chosen recurrence are cleared.
+        """
         from datetime import time as dt_time
 
         recurrence = values.get("recurrence", "daily")
-        if not isinstance(recurrence, str):
-            raise ValueError("recurrence must be daily, weekly or cron")
-        if recurrence not in {"daily", "weekly", "cron"}:
-            raise ValueError("recurrence must be daily, weekly or cron")
+        if (
+            not isinstance(recurrence, str)
+            or recurrence not in ScheduledTask.Recurrence.values
+        ):
+            raise ValueError("recurrence must be once, daily, weekly or cron")
         raw_weekdays = values.get("weekdays")
         if raw_weekdays is None:
             raw_weekdays = []
@@ -924,7 +898,11 @@ class ScheduledTaskService:
             raise ValueError("weekdays must contain integers from 0 (Mon) to 6 (Sun)")
         weekdays = list(raw_weekdays)
         cron = ""
-        if recurrence == "cron":
+        run_date = None
+        if recurrence == "once":
+            weekdays = []
+            run_date = ScheduledTaskService._validate_run_date(values.get("run_date"))
+        elif recurrence == "cron":
             # The cron expression carries the whole cadence, including days.
             weekdays = []
             cron = normalize_cron_expression(values.get("cron_expression"))
@@ -953,7 +931,26 @@ class ScheduledTaskService:
             raise ValueError("timezone_name must be a valid IANA timezone")
         zone = zone.strip()
         valid_timezone(zone)
-        return recurrence, sorted(set(weekdays)), local_time, zone, cron
+        return {
+            "recurrence": recurrence,
+            "weekdays": sorted(set(weekdays)),
+            "cron_expression": cron,
+            "run_date": run_date,
+            "local_time": local_time,
+            "timezone_name": zone,
+        }
+
+    @staticmethod
+    def _validate_run_date(value: Any) -> date:
+        """Accept a calendar date or an ISO ``YYYY-MM-DD`` string."""
+        if isinstance(value, date) and not isinstance(value, datetime):
+            return value
+        if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            try:
+                return date.fromisoformat(value)
+            except ValueError:
+                pass
+        raise ValueError("run_date must be a YYYY-MM-DD date for once recurrence")
 
 
 class ScheduledTaskScheduler:

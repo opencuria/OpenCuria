@@ -32,6 +32,7 @@ import {
   currentSchedulePatch,
   formatMinutes,
   formatWeekLabel,
+  isoDate,
   isSameDay,
   rescheduleTask,
   startOfWeek,
@@ -168,6 +169,7 @@ function createAt(day: CalendarDay, minute: number): void {
   selection.value = null
   taskStore.openNew({
     workspace_id: filteredWorkspaceId(),
+    date: isoDate(day),
     weekdays: [weekdayIndex(day)],
     times: [formatMinutes(minute)],
     timezone_name: zone.value,

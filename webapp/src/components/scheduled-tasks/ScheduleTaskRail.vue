@@ -1,11 +1,12 @@
 <!--
   ScheduleTaskRail — scheduled tasks grouped by workspace. Hover highlights a
   task in the calendar, click opens its settings, the switch pauses it.
+  Ended one-time tasks need a new date before they can run again.
 -->
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Switch } from '@/components/ui/switch'
-import { describeSchedule } from '@/lib/scheduledTasks'
+import { describeSchedule, scheduleStateLabel } from '@/lib/scheduledTasks'
 import type { ScheduledTask } from '@/services/scheduledTasks.api'
 
 const props = defineProps<{
@@ -68,12 +69,12 @@ const groups = computed(() => {
             >{{ task.name }}</span
           >
           <span class="block truncate text-[11px] text-muted-foreground">{{
-            task.enabled ? describeSchedule(task) : `Paused · ${describeSchedule(task)}`
+            [scheduleStateLabel(task), describeSchedule(task)].filter(Boolean).join(' · ')
           }}</span>
         </button>
         <Switch
           :model-value="task.enabled"
-          :disabled="busyTaskIds.has(task.id)"
+          :disabled="busyTaskIds.has(task.id) || scheduleStateLabel(task) === 'Ended'"
           class="scale-75"
           :aria-label="`${task.enabled ? 'Pause' : 'Resume'} ${task.name}`"
           :data-testid="`schedule-rail-toggle-${task.id}`"
