@@ -43,6 +43,9 @@ Provider account management never imports its orchestration consumers; account
 validation stays with accounts and revocation wakeups use a leaf event module.
 Provider-history reconstruction is independent of run orchestration; its caller
 supplies persistence ports to ``ProviderHistoryService``.
+OAuth endpoint, registration and grant integrity rules live in
+``apps.credentials.oauth_metadata``; persistence and protocol workflows never
+import their service consumers, even through function-local imports.
 """
 
 from __future__ import annotations
@@ -747,6 +750,45 @@ def test_credential_repositories_are_private_to_their_context() -> None:
         "Resolve credential catalog entries and workspace attachments through "
         "apps.credentials.services; credential repositories are private:\n"
         + "\n".join(violations)
+    )
+
+
+def test_oauth_persistence_and_protocol_never_import_their_consumers() -> None:
+    """OAuth dependencies point toward shared integrity rules and persistence."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    modules = {_module_name(path): path for path in trees}
+    services = "apps.credentials.services"
+    workflow = "apps.credentials.mcp_oauth"
+    boundaries = {
+        "apps.credentials.repositories": {services, workflow},
+        workflow: {services},
+        "apps.credentials.oauth_metadata": {
+            services,
+            workflow,
+            "apps.credentials.repositories",
+        },
+    }
+    assert boundaries.keys() <= modules.keys()
+    violations = set()
+    for owner, forbidden in boundaries.items():
+        pending = {owner}
+        checked: set[str] = set()
+        while pending:
+            module = pending.pop()
+            checked.add(module)
+            path = modules[module]
+            for imported in _imported_modules(path, trees[path]):
+                if any(
+                    imported == target or imported.startswith(f"{target}.")
+                    for target in forbidden
+                ):
+                    violations.add(f"{owner}: {module} -> {imported}")
+                elif imported in modules and imported not in checked:
+                    pending.add(imported)
+    assert violations == set(), (
+        "Share OAuth validation through apps.credentials.oauth_metadata; "
+        "repositories must not import protocol/workflow code and neither may "
+        "import their service consumers:\n" + "\n".join(sorted(violations))
     )
 
 

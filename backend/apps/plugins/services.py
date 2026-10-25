@@ -15,6 +15,7 @@ import structlog
 from django.db import transaction
 from django.utils.text import slugify
 
+from apps.credentials.oauth_metadata import validate_oauth_server_url
 from apps.credentials.services import CredentialServiceSvc, CredentialSvc
 from common.exceptions import ConflictError, NotFoundError
 
@@ -160,11 +161,6 @@ def normalize_skill_payload(item: dict, index: int) -> dict:
     if position < 0 or position > 10_000:
         raise ValueError("Skill position must be between 0 and 10000")
     return {"name": name, "slug": slug, "body": body, "position": position}
-
-
-def validate_oauth_server_url(value: str) -> str:
-    """Plugin-level alias to credential-owned OAuth endpoint validation."""
-    return CredentialServiceSvc._validate_oauth_server_url(value)
 
 
 def normalize_mcp_payload(item: dict) -> dict:
@@ -899,9 +895,7 @@ class PluginService:
                     f"OAuth server requirement '{key}' must reference a "
                     "required MCP OAuth service"
                 )
-            endpoint = CredentialServiceSvc._validate_oauth_server_url(
-                server.get("url", "")
-            )
+            endpoint = validate_oauth_server_url(server.get("url", ""))
             if service.oauth_server_url != endpoint:
                 raise ValueError(
                     "OAuth server URL must exactly match the credential "

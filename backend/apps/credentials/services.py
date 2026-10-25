@@ -20,6 +20,11 @@ from common.utils import decrypt_value, encrypt_value, generate_ssh_keypair
 from .deletion_guards import collect_deletion_blockers
 from .enums import CredentialType
 from .models import Credential, CredentialService
+from .oauth_metadata import (
+    registration_fingerprint,
+    registration_metadata_safe,
+    validate_oauth_server_url,
+)
 from .repositories import CredentialRepository, CredentialServiceRepository
 
 logger = structlog.get_logger(__name__)
@@ -111,7 +116,7 @@ class CredentialServiceSvc:
         ):
             raise ValueError("Invalid credential type")
         if credential_type == CredentialType.MCP_OAUTH:
-            cleaned_server_url = self._validate_oauth_server_url(oauth_server_url)
+            cleaned_server_url = validate_oauth_server_url(oauth_server_url)
             cleaned_env = ""
             cleaned_target_path = ""
             return self.services.create(
@@ -157,40 +162,6 @@ class CredentialServiceSvc:
             label=label.strip(),
             organization_id=organization_id,
         )
-
-    @staticmethod
-    def _validate_oauth_server_url(value: str) -> str:
-        """Validate a fixed public HTTPS MCP URL without plugin dependencies."""
-        from urllib.parse import urlsplit
-
-        if not isinstance(value, str):
-            raise ValueError("OAuth MCP endpoint must be an HTTPS URL")
-        url = value.strip()
-        parsed = urlsplit(url)
-        try:
-            port = parsed.port
-        except ValueError:
-            raise ValueError("OAuth MCP endpoint has an invalid port") from None
-        if (
-            not url
-            or any(ord(char) < 0x21 for char in url)
-            or parsed.scheme.lower() != "https"
-            or not parsed.hostname
-            or not parsed.netloc
-            or parsed.username
-            or parsed.password
-            or "@" in parsed.netloc
-            or parsed.query
-            or parsed.fragment
-            or "?" in url
-            or "#" in url
-            or (port is not None and not 1 <= port <= 65535)
-        ):
-            raise ValueError(
-                "OAuth MCP endpoint must be an HTTPS URL without query, "
-                "userinfo, or fragment"
-            )
-        return url
 
     def _validate_target_path(self, target_path: str) -> None:
         """Validate a workspace file target path."""
@@ -978,8 +949,6 @@ class CredentialOAuthSvc:
             OAuthError,
             _consume_callback_state,
             _post_token,
-            _registration_fingerprint,
-            _registration_metadata_safe,
             _token_auth,
         )
 
@@ -1016,13 +985,13 @@ class CredentialOAuthSvc:
                 or not self.oauth.service_visible_to_org(
                     state.service_id, state.organization_id
                 )
-                or not _registration_metadata_safe(
+                or not registration_metadata_safe(
                     registration,
                     expected_url=state.server_url,
                     expected_issuer=state.issuer,
                     expected_callback=state.redirect_uri,
                 )
-                or _registration_fingerprint(registration)
+                or registration_fingerprint(registration)
                 != state.registration_fingerprint
             ):
                 raise AuthenticationError("OAuth endpoint or registration changed")

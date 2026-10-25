@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import hmac
-import re
 import uuid
 
 from django.db import IntegrityError, connection, transaction
@@ -19,6 +17,7 @@ from .models import (
     McpOAuthAuthorizationState,
     McpOAuthClientRegistration,
 )
+from .oauth_metadata import registration_fingerprint, registration_metadata_safe
 
 
 def _lock_queryset_self(query: QuerySet) -> QuerySet:
@@ -655,154 +654,6 @@ class McpOAuthRepository:
         return query.exists()
 
     @staticmethod
-    def _registration_fingerprint(registration) -> str:
-        values = (
-            registration.server_url,
-            registration.issuer,
-            registration.client_id,
-            registration.authorization_endpoint,
-            registration.token_endpoint,
-            registration.registration_endpoint,
-            registration.token_endpoint_auth_method,
-            registration.encrypted_client_secret,
-        )
-        return hashlib.sha256("\\0".join(values).encode()).hexdigest()
-
-    @staticmethod
-    def _safe_https_url(value) -> bool:
-        from urllib.parse import urlsplit
-
-        if not isinstance(value, str) or not value:
-            return False
-        try:
-            parsed = urlsplit(value)
-            port = parsed.port
-        except (TypeError, ValueError):
-            return False
-        return bool(
-            parsed.scheme == "https"
-            and parsed.hostname
-            and parsed.netloc
-            and not parsed.username
-            and not parsed.password
-            and "@" not in parsed.netloc
-            and not parsed.query
-            and not parsed.fragment
-            and (port is None or 1 <= port <= 65535)
-        )
-
-    @staticmethod
-    def _resource_matches(endpoint: str, resource: str) -> bool:
-        from urllib.parse import urlsplit
-
-        if not McpOAuthRepository._safe_https_url(
-            endpoint
-        ) or not McpOAuthRepository._safe_https_url(resource):
-            return False
-        root, candidate = urlsplit(endpoint), urlsplit(resource)
-        if root.hostname.lower() != candidate.hostname.lower() or (
-            root.port or 443
-        ) != (candidate.port or 443):
-            return False
-        root_path = (root.path or "/").rstrip("/") or "/"
-        resource_path = (candidate.path or "/").rstrip("/") or "/"
-        return root_path == resource_path or root_path.startswith(
-            resource_path.rstrip("/") + "/"
-        )
-
-    @staticmethod
-    def grant_metadata(
-        credential: Credential, *, expected_url: str | None = None
-    ) -> dict | None:
-        """Validate registration and grant envelope; keep grant material internal."""
-        import json
-        from datetime import datetime
-
-        from django.utils import timezone
-
-        from common.utils import decrypt_value
-
-        try:
-            endpoint = credential.service.oauth_server_url
-            registration = credential.oauth_registration
-            if (
-                not isinstance(endpoint, str)
-                or not endpoint
-                or credential.oauth_server_url != endpoint
-                or (expected_url is not None and endpoint != expected_url)
-                or registration is None
-                or registration.server_url != endpoint
-                or not McpOAuthRepository._safe_https_url(registration.issuer)
-                or not McpOAuthRepository._safe_https_url(
-                    registration.authorization_endpoint
-                )
-                or not McpOAuthRepository._safe_https_url(registration.token_endpoint)
-                or (
-                    registration.registration_endpoint
-                    and not McpOAuthRepository._safe_https_url(
-                        registration.registration_endpoint
-                    )
-                )
-                or not isinstance(registration.client_id, str)
-                or not registration.client_id
-                or registration.token_endpoint_auth_method
-                not in {"none", "client_secret_basic", "client_secret_post"}
-                or not isinstance(registration.encrypted_client_secret, str)
-                or (
-                    registration.token_endpoint_auth_method == "none"
-                    and bool(registration.encrypted_client_secret)
-                )
-                or (
-                    registration.token_endpoint_auth_method != "none"
-                    and not registration.encrypted_client_secret
-                )
-                or not isinstance(registration.scopes_supported, list)
-            ):
-                return None
-            grant = json.loads(decrypt_value(credential.encrypted_value))
-            if not isinstance(grant, dict):
-                return None
-            access, refresh = grant.get("access_token"), grant.get("refresh_token", "")
-            resource, server_url = grant.get("resource"), grant.get("server_url")
-            expiry_text, identity = (
-                grant.get("expires_at", ""),
-                grant.get("identity", {}),
-            )
-            token_type = grant.get("token_type", "Bearer")
-            scope = grant.get("scope", "")
-            if (
-                not isinstance(access, str)
-                or not access
-                or not isinstance(refresh, str)
-                or not isinstance(expiry_text, str)
-                or not isinstance(identity, dict)
-                or any(not isinstance(value, str) for value in identity.values())
-                or token_type.lower() != "bearer"
-                or not isinstance(scope, str)
-                or not isinstance(resource, str)
-                or server_url != endpoint
-                or resource != credential.oauth_resource
-                or not McpOAuthRepository._resource_matches(endpoint, resource)
-                or grant.get("service_id") != str(credential.service_id)
-                or grant.get("registration_id") != str(registration.id)
-            ):
-                return None
-            if len(scope) > 2048 or any(
-                not re.fullmatch(r"[\x21\x23-\x5B\x5D-\x7E]+", part)
-                for part in scope.split()
-            ):
-                return None
-            expiry = datetime.fromisoformat(expiry_text) if expiry_text else None
-            if expiry is not None and expiry.tzinfo is None:
-                expiry = expiry.replace(tzinfo=timezone.get_current_timezone())
-            if expiry is not None and expiry <= timezone.now() and not refresh:
-                return None
-            grant["_expires_at"] = expiry
-            return grant
-        except Exception:
-            return None
-
-    @staticmethod
     def get_credential(credential_id: uuid.UUID, *, lock: bool = False):
         query = Credential.objects.select_related(
             "service", "oauth_registration", "user", "organization"
@@ -878,7 +729,6 @@ class McpOAuthRepository:
             membership = MembershipRepository.get_for_user_and_org(
                 state.user_id, state.organization_id, lock=True
             )
-            from apps.credentials.mcp_oauth import _registration_fingerprint
 
             if (
                 service is None
@@ -891,10 +741,12 @@ class McpOAuthRepository:
                 or not McpOAuthRepository.service_visible_to_org(
                     state.service_id, state.organization_id
                 )
-                or not McpOAuthRepository._registration_valid(
-                    registration, state.server_url, state.issuer
+                or not registration_metadata_safe(
+                    registration,
+                    expected_url=state.server_url,
+                    expected_issuer=state.issuer,
                 )
-                or _registration_fingerprint(registration)
+                or registration_fingerprint(registration)
                 != state.registration_fingerprint
             ):
                 raise ValueError("OAuth service, registration, or membership changed")
@@ -951,38 +803,6 @@ class McpOAuthRepository:
                 encrypted_value=encrypted_value,
                 created_by=state.user,
             ).id
-
-    @staticmethod
-    def _registration_valid(registration, endpoint: str, issuer: str) -> bool:
-        return bool(
-            registration.server_url == endpoint
-            and registration.issuer == issuer
-            and McpOAuthRepository._safe_https_url(registration.issuer)
-            and McpOAuthRepository._safe_https_url(registration.authorization_endpoint)
-            and McpOAuthRepository._safe_https_url(registration.token_endpoint)
-            and (
-                not registration.registration_endpoint
-                or McpOAuthRepository._safe_https_url(
-                    registration.registration_endpoint
-                )
-            )
-            and isinstance(registration.client_id, str)
-            and bool(registration.client_id)
-            and isinstance(registration.encrypted_client_secret, str)
-            and registration.token_endpoint_auth_method
-            in {"none", "client_secret_basic", "client_secret_post"}
-            and (
-                (
-                    registration.token_endpoint_auth_method == "none"
-                    and not registration.encrypted_client_secret
-                )
-                or (
-                    registration.token_endpoint_auth_method != "none"
-                    and bool(registration.encrypted_client_secret)
-                )
-            )
-            and isinstance(registration.scopes_supported, list)
-        )
 
     @staticmethod
     def update_oauth(credential_id: uuid.UUID, **values) -> int:

@@ -25,6 +25,13 @@ from django.utils import timezone
 from common.utils import decrypt_value, encrypt_value
 
 from .models import Credential
+from .oauth_metadata import (
+    grant_metadata,
+    is_safe_registration_url,
+    registration_fingerprint,
+    registration_metadata_safe,
+    validate_oauth_server_url,
+)
 from .repositories import McpOAuthRepository
 
 STATE_TTL = timedelta(minutes=10)
@@ -334,12 +341,9 @@ def _validate_resource_metadata_endpoint(server_url: str, endpoint: str) -> None
 def _discover(server_url: str):
     if not isinstance(server_url, str) or not server_url:
         raise OAuthError("OAuth MCP server URL is invalid")
-    from apps.credentials.services import CredentialServiceSvc
 
     try:
-        normalized_server_url = CredentialServiceSvc._validate_oauth_server_url(
-            server_url
-        )
+        normalized_server_url = validate_oauth_server_url(server_url)
     except ValueError:
         raise OAuthError("OAuth MCP server URL must be a valid HTTPS URL") from None
     if normalized_server_url != server_url:
@@ -561,14 +565,11 @@ def start_flow(
     credential_name: str = "",
 ) -> tuple[str, str, str]:
     """Discover provider metadata and persist a pending service-bound state."""
-    from apps.credentials.services import CredentialServiceSvc
 
     if service.credential_type != "mcp_oauth":
         raise OAuthError("Credential service does not support OAuth")
     try:
-        endpoint = CredentialServiceSvc._validate_oauth_server_url(
-            service.oauth_server_url
-        )
+        endpoint = validate_oauth_server_url(service.oauth_server_url)
     except ValueError:
         raise OAuthError("OAuth service endpoint is invalid") from None
     if endpoint != service.oauth_server_url:
@@ -579,11 +580,11 @@ def start_flow(
     if (
         not isinstance(registration.authorization_endpoint, str)
         or not isinstance(registration.token_endpoint, str)
-        or not _safe_registration_url(registration.authorization_endpoint)
-        or not _safe_registration_url(registration.token_endpoint)
+        or not is_safe_registration_url(registration.authorization_endpoint)
+        or not is_safe_registration_url(registration.token_endpoint)
     ):
         raise OAuthError("OAuth registration endpoint must use valid HTTPS")
-    if not _registration_metadata_safe(
+    if not registration_metadata_safe(
         registration,
         expected_url=endpoint,
         expected_issuer=metadata["issuer"],
@@ -629,7 +630,7 @@ def start_flow(
             credential.oauth_server_url if credential else ""
         ),
         reconnect_existing=credential is not None,
-        registration_fingerprint=_registration_fingerprint(registration),
+        registration_fingerprint=registration_fingerprint(registration),
         server_url=endpoint,
         resource=resource,
         issuer=metadata["issuer"],
@@ -685,79 +686,6 @@ def _token_auth(registration, secret: str) -> tuple[tuple[str, str] | None, str]
     if registration.token_endpoint_auth_method == "client_secret_post" and secret:
         return None, secret
     raise OAuthError("OAuth client credentials are unavailable")
-
-
-def _registration_metadata_safe(
-    registration,
-    *,
-    expected_url: str,
-    expected_issuer: str | None = None,
-    expected_callback: str | None = None,
-) -> bool:
-    """Validate persisted provider endpoints and token authentication metadata."""
-    try:
-        method = registration.token_endpoint_auth_method
-        secret = registration.encrypted_client_secret
-        return bool(
-            registration.server_url == expected_url
-            and (
-                expected_callback is None
-                or registration.callback_url == expected_callback
-            )
-            and isinstance(registration.issuer, str)
-            and (expected_issuer is None or registration.issuer == expected_issuer)
-            and _safe_registration_url(registration.issuer)
-            and _safe_registration_url(registration.authorization_endpoint)
-            and _safe_registration_url(registration.token_endpoint)
-            and (
-                not registration.registration_endpoint
-                or _safe_registration_url(registration.registration_endpoint)
-            )
-            and isinstance(registration.client_id, str)
-            and registration.client_id
-            and method in {"none", "client_secret_basic", "client_secret_post"}
-            and isinstance(secret, str)
-            and (
-                (method == "none" and not secret) or (method != "none" and bool(secret))
-            )
-            and isinstance(registration.scopes_supported, list)
-        )
-    except (AttributeError, TypeError, ValueError):
-        return False
-
-
-def _safe_registration_url(value: str) -> bool:
-    try:
-        parsed = urlparse(value)
-        port = parsed.port
-        return bool(
-            parsed.scheme == "https"
-            and parsed.hostname
-            and parsed.netloc
-            and not parsed.username
-            and not parsed.password
-            and "@" not in parsed.netloc
-            and not parsed.query
-            and not parsed.fragment
-            and (port is None or 1 <= port <= 65535)
-        )
-    except (AttributeError, TypeError, ValueError):
-        return False
-
-
-def _registration_fingerprint(registration) -> str:
-    """Hash security-sensitive registration metadata for callback integrity."""
-    values = [
-        registration.server_url,
-        registration.issuer,
-        registration.client_id,
-        registration.authorization_endpoint,
-        registration.token_endpoint,
-        registration.registration_endpoint,
-        registration.token_endpoint_auth_method,
-        registration.encrypted_client_secret,
-    ]
-    return hashlib.sha256("\0".join(values).encode()).hexdigest()
 
 
 _TOKEN_IDENTITY_FIELDS = (
@@ -854,8 +782,6 @@ def _mark_reconnect(credential_id: uuid.UUID) -> None:
 
 def oauth_credential_status(credential: Credential) -> dict:
     """Return validated nonsecret OAuth metadata for API and readiness consumers."""
-    from .repositories import McpOAuthRepository
-
     current = getattr(credential, "oauth_status", "") or "disconnected"
     result = {
         "connected": False,
@@ -869,7 +795,7 @@ def oauth_credential_status(credential: Credential) -> dict:
         or not credential.encrypted_value
     ):
         return result
-    grant = McpOAuthRepository.grant_metadata(credential)
+    grant = grant_metadata(credential)
     if grant is None:
         result.update(status="reconnect_required", reconnect_required=True)
         return result
@@ -884,8 +810,6 @@ def access_token_for_request(
     credential_id: uuid.UUID, service_id: uuid.UUID, server_url: str
 ) -> str | None:
     """Resolve a validated bearer token and refresh atomically when needed."""
-    from .repositories import McpOAuthRepository
-
     with transaction.atomic():
         credential = McpOAuthRepository.get_credential(credential_id, lock=True)
         if credential is None or (
@@ -895,7 +819,7 @@ def access_token_for_request(
             or credential.service.oauth_server_url != server_url
         ):
             return None
-        grant = McpOAuthRepository.grant_metadata(credential, expected_url=server_url)
+        grant = grant_metadata(credential, expected_url=server_url)
         if grant is None:
             McpOAuthRepository.update_locked_grant(
                 credential, oauth_status="reconnect_required", encrypted_value=""
