@@ -107,6 +107,7 @@ class ScheduledTaskOut(Schema):
     local_time: str
     timezone_name: str
     enabled: bool
+    is_running: bool = False
     next_run_at: datetime
     created_at: datetime
     updated_at: datetime
@@ -145,6 +146,7 @@ def _task_out(task: ScheduledTask) -> ScheduledTaskOut:
         local_time=task.local_time.strftime("%H:%M"),
         timezone_name=task.timezone_name,
         enabled=task.enabled,
+        is_running=getattr(task, "is_running", False),
         next_run_at=task.next_run_at,
         created_at=task.created_at,
         updated_at=task.updated_at,

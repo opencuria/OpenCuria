@@ -124,6 +124,7 @@ describe('schedule drafts', () => {
     const once = { recurrence: 'once' as const, run_date: '2026-10-24', local_time: '09:00', timezone_name: 'UTC' }
     expect(isScheduleEnded(once, now)).toBe(true)
     expect(scheduleStateLabel({ ...once, enabled: false }, now)).toBe('Ended')
+    expect(scheduleStateLabel({ ...once, enabled: false, is_running: true }, now)).toBe('Running')
     expect(scheduleStateLabel({ ...once, run_date: '2026-10-25', enabled: false }, now)).toBe('Paused')
     expect(scheduleStateLabel({ ...once, run_date: '2026-10-25', enabled: true }, now)).toBe('')
     expect(scheduleStateLabel({ ...once, recurrence: 'daily', enabled: true }, now)).toBe('')

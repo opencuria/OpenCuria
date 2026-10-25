@@ -1,16 +1,25 @@
 <script setup lang="ts">
-import { nextTick } from 'vue'
-import { CalendarCheck, CalendarClock, CalendarDays, CirclePause, Plus } from '@lucide/vue'
+import { computed, nextTick } from 'vue'
+import { useNow } from '@vueuse/core'
+import { CalendarClock, CalendarDays, CirclePause, LoaderCircle, Plus } from '@lucide/vue'
 import { useSidebar } from '@/components/ui/sidebar'
 import { Button } from '@/components/ui/button'
 import { useScheduledTaskStore } from '@/stores/scheduledTasks'
-import { describeSchedule, scheduleStateLabel } from '@/lib/scheduledTasks'
+import {
+  describeSchedule,
+  isScheduleVisibleInSidebar,
+  scheduleStateLabel,
+} from '@/lib/scheduledTasks'
 import type { ScheduledTask } from '@/services/scheduledTasks.api'
 
-defineProps<{ tasks: ScheduledTask[] }>()
+const props = defineProps<{ tasks: ScheduledTask[] }>()
 const emit = defineEmits<{ 'open-all': [] }>()
 const tasksStore = useScheduledTaskStore()
 const { isMobile, setOpenMobile } = useSidebar()
+const now = useNow({ interval: 15_000 })
+const visibleTasks = computed(() =>
+  props.tasks.filter((task) => isScheduleVisibleInSidebar(task, now.value)),
+)
 
 async function afterMobileDrawerCloses(): Promise<void> {
   await nextTick()
@@ -66,9 +75,9 @@ function cadence(task: ScheduledTask): string {
       <div class="h-8 animate-pulse rounded-lg bg-muted/60" />
       <div class="h-8 w-3/4 animate-pulse rounded-lg bg-muted/40" />
     </div>
-    <div v-else-if="tasks.length" class="flex flex-col gap-0.5">
+    <div v-else-if="visibleTasks.length" class="flex flex-col gap-0.5">
       <button
-        v-for="task in tasks"
+        v-for="task in visibleTasks"
         :key="task.id"
         type="button"
         class="flex min-h-11 min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-primary"
@@ -80,18 +89,20 @@ function cadence(task: ScheduledTask): string {
         :data-testid="`scheduled-task-${task.id}`"
         @click="openTask(task.id)"
       >
-        <CalendarClock class="size-4 shrink-0 text-muted-foreground" />
+        <LoaderCircle
+          v-if="task.is_running"
+          class="size-4 shrink-0 animate-spin text-primary motion-reduce:animate-none"
+          aria-hidden="true"
+        />
+        <CalendarClock v-else class="size-4 shrink-0 text-muted-foreground" />
         <span class="min-w-0 flex-1">
           <span class="block truncate text-[13px]">{{ task.name }}</span>
-          <span class="block truncate text-[11px] text-muted-foreground">{{ cadence(task) }}</span>
+          <span class="block truncate text-[11px] text-muted-foreground">{{
+            [task.is_running ? 'Running' : '', cadence(task)].filter(Boolean).join(' · ')
+          }}</span>
         </span>
-        <CalendarCheck
-          v-if="scheduleStateLabel(task) === 'Ended'"
-          class="size-3.5 shrink-0 text-muted-foreground"
-          aria-label="Ended"
-        />
         <CirclePause
-          v-else-if="!task.enabled"
+          v-if="!task.enabled && !task.is_running"
           class="size-3.5 shrink-0 text-muted-foreground"
           :aria-label="`Paused`"
         />

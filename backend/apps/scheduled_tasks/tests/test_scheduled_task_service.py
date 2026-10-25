@@ -12,6 +12,9 @@ from common.exceptions import ConflictError
 
 
 class FakeRepository:
+    def run_number(self, run):
+        return 1
+
     def __init__(self):
         self.rows = []
         self.advanced = []
@@ -127,6 +130,7 @@ async def test_dispatch_skips_missed_occurrence_and_advances_without_catchup():
     repo = FakeRepository()
     due = datetime(2025, 1, 1, 9, tzinfo=timezone.utc)
     task = SimpleNamespace(
+        name="Daily review",
         id=uuid.uuid4(),
         next_run_at=due,
         local_time=time(9),
@@ -163,6 +167,7 @@ async def test_stopped_workspace_resumes_then_starts_a_new_root_session():
             return None
 
     task = SimpleNamespace(
+        name="Daily review",
         id=uuid.uuid4(),
         workspace_id=uuid.uuid4(),
         organization_id=uuid.uuid4(),
@@ -214,6 +219,7 @@ async def test_heartbeat_running_status_does_not_end_own_resume_wait(monkeypatch
 
     monkeypatch.setattr(asyncio, "sleep", runner_confirms_resume)
     task = SimpleNamespace(
+        name="Daily review",
         id=uuid.uuid4(),
         workspace_id=uuid.uuid4(),
         organization_id=uuid.uuid4(),
@@ -262,6 +268,7 @@ async def test_existing_starting_operation_waits_for_resume_confirmation(monkeyp
             return None
 
     task = SimpleNamespace(
+        name="Daily review",
         id=uuid.uuid4(),
         workspace_id=uuid.uuid4(),
         organization_id=uuid.uuid4(),
@@ -303,6 +310,7 @@ async def test_running_workspace_is_skipped_when_runner_unavailable_or_busy(stat
         None,
     )
     task = SimpleNamespace(
+        name="Daily review",
         id=uuid.uuid4(),
         workspace_id=uuid.uuid4(),
         organization_id=uuid.uuid4(),
@@ -348,6 +356,7 @@ async def test_resume_revalidates_state_before_start(monkeypatch):
 
     monkeypatch.setattr(asyncio, "sleep", no_sleep)
     task = SimpleNamespace(
+        name="Daily review",
         id=uuid.uuid4(),
         workspace_id=uuid.uuid4(),
         organization_id=uuid.uuid4(),
@@ -411,6 +420,7 @@ async def test_cancelled_launch_is_interrupted_not_left_claimed():
 async def test_manual_launch_cancellation_is_interrupted_not_left_claimed():
     repo = FakeRepository()
     task = SimpleNamespace(
+        name="Daily review",
         id=uuid.uuid4(),
         workspace_id=uuid.uuid4(),
         organization_id=uuid.uuid4(),
@@ -515,6 +525,7 @@ async def test_started_run_survives_activity_touch_failure():
             pytest.fail("started session must not be deleted")
 
     task = SimpleNamespace(
+        name="Daily review",
         id=uuid.uuid4(),
         workspace_id=uuid.uuid4(),
         organization_id=uuid.uuid4(),
@@ -542,6 +553,7 @@ async def test_resume_is_skipped_when_runner_offline():
             raise AssertionError("must not ask an offline runner to resume")
 
     task = SimpleNamespace(
+        name="Daily review",
         id=uuid.uuid4(),
         workspace_id=uuid.uuid4(),
         organization_id=uuid.uuid4(),
@@ -570,6 +582,7 @@ async def test_resume_is_skipped_when_runner_offline():
 async def test_second_manual_run_of_same_task_is_skipped():
     repo = FakeRepository()
     task = SimpleNamespace(
+        name="Daily review",
         id=uuid.uuid4(),
         workspace_id=uuid.uuid4(),
         organization_id=uuid.uuid4(),
@@ -622,6 +635,7 @@ async def test_manual_run_skips_busy_workspace_without_changing_schedule():
     repo.busy = True
     scheduled = datetime(2025, 1, 4, 9, tzinfo=timezone.utc)
     task = SimpleNamespace(
+        name="Daily review",
         id=uuid.uuid4(),
         workspace_id=uuid.uuid4(),
         organization_id=uuid.uuid4(),
@@ -653,6 +667,7 @@ async def test_manual_run_skips_busy_workspace_without_changing_schedule():
 
 def lifecycle_task():
     return SimpleNamespace(
+        name="Daily review",
         id=uuid.uuid4(),
         workspace_id=uuid.uuid4(),
         organization_id=uuid.uuid4(),
@@ -759,6 +774,7 @@ async def test_admission_conflict_uses_fresh_lifecycle_state(
 async def test_one_time_task_claims_or_misses_its_only_occurrence(now, expected):
     due = datetime(2025, 1, 1, 9, tzinfo=timezone.utc)
     task = SimpleNamespace(
+        name="Daily review",
         id=uuid.uuid4(),
         next_run_at=due,
         local_time=time(9),

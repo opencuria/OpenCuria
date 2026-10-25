@@ -726,10 +726,13 @@ class ScheduledTaskService:
     ) -> ScheduledTaskRun:
         """Create, persist, and admit a chat before exposing cancellation."""
         harness_id = getattr(task, "harness_id", "native")
+        number = await sync_to_async(self.repository.run_number)(run)
+        suffix = f" #{number}"
         session_values = {
             "workspace_id": task.workspace_id,
             "organization_id": task.organization_id,
             "prompt": task.prompt,
+            "title": f"{task.name[:255 - len(suffix)]}{suffix}",
             "mode": task.mode,
             "model": task.model or "",
             "reasoning_effort": task.reasoning_effort or "",

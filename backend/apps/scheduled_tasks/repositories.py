@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 
 from django.db import IntegrityError, transaction
-from django.db.models import Exists, OuterRef
+from django.db.models import Exists, OuterRef, Q, QuerySet
 from django.utils import timezone
 
 from .models import ScheduledTask, ScheduledTaskRun
@@ -16,11 +16,25 @@ class ScheduledTaskRepository:
     """ORM boundary for schedule rows and claims."""
 
     @staticmethod
+    def _with_run_state() -> QuerySet[ScheduledTask]:
+        return ScheduledTask.objects.annotate(
+            is_running=Exists(
+                ScheduledTaskRun.objects.filter(
+                    scheduled_task_id=OuterRef("pk"),
+                    status__in=[
+                        ScheduledTaskRun.Status.CLAIMED,
+                        ScheduledTaskRun.Status.RUNNING,
+                    ],
+                )
+            )
+        )
+
+    @staticmethod
     def list_for_owner(
         *, organization_id: uuid.UUID, owner_id: int
     ) -> list[ScheduledTask]:
         return list(
-            ScheduledTask.objects.filter(
+            ScheduledTaskRepository._with_run_state().filter(
                 organization_id=organization_id,
                 owner_id=owner_id,
                 is_deleted=False,
@@ -35,7 +49,7 @@ class ScheduledTaskRepository:
         owner_id: int,
         include_deleted: bool = False,
     ) -> ScheduledTask | None:
-        queryset = ScheduledTask.objects.filter(
+        queryset = ScheduledTaskRepository._with_run_state().filter(
             id=task_id, organization_id=organization_id, owner_id=owner_id
         )
         if not include_deleted:
@@ -130,6 +144,15 @@ class ScheduledTaskRepository:
                 "-scheduled_for"
             )[:limit]
         )
+
+    @staticmethod
+    def run_number(run: ScheduledTaskRun) -> int:
+        """Return this task's ledger ordinal, including skipped and manual runs."""
+        return ScheduledTaskRun.objects.filter(
+            Q(created_at__lt=run.created_at)
+            | Q(created_at=run.created_at, pk__lte=run.pk),
+            scheduled_task_id=run.scheduled_task_id,
+        ).count()
 
     @staticmethod
     def due(now: datetime) -> list[ScheduledTask]:

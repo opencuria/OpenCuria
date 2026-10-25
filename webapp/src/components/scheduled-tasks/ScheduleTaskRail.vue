@@ -6,7 +6,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Switch } from '@/components/ui/switch'
-import { describeSchedule, scheduleStateLabel } from '@/lib/scheduledTasks'
+import { describeSchedule, isScheduleEnded, scheduleStateLabel } from '@/lib/scheduledTasks'
 import type { ScheduledTask } from '@/services/scheduledTasks.api'
 
 const props = defineProps<{
@@ -74,7 +74,7 @@ const groups = computed(() => {
         </button>
         <Switch
           :model-value="task.enabled"
-          :disabled="busyTaskIds.has(task.id) || scheduleStateLabel(task) === 'Ended'"
+          :disabled="busyTaskIds.has(task.id) || isScheduleEnded(task)"
           class="scale-75"
           :aria-label="`${task.enabled ? 'Pause' : 'Resume'} ${task.name}`"
           :data-testid="`schedule-rail-toggle-${task.id}`"

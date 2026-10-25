@@ -58,6 +58,13 @@ def test_claim_is_unique_and_advances_schedule_atomically():
     schedule.refresh_from_db()
     assert schedule.next_run_at == next_run
     assert schedule.runs.count() == 1
+    assert ScheduledTaskRepository.run_number(claimed) == 1
+    manual = ScheduledTaskRepository.create_manual_run(
+        schedule, datetime(2024, 12, 31, 9, tzinfo=timezone.utc)
+    )
+    assert manual.status == ScheduledTaskRun.Status.SKIPPED
+    assert ScheduledTaskRepository.run_number(manual) == 2
+    assert ScheduledTaskRepository.run_number(claimed) == 1
 
 
 @pytest.mark.django_db

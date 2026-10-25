@@ -1905,6 +1905,7 @@ class HarnessService:
                 and session.parent_id is None
                 and prior_user_messages == 0
                 and provider_turn_id
+                and not scheduled
             ):
                 title_holder = f"title:{uuid.uuid4()}"
                 if await sync_to_async(self._provider_turn_service.add_hold)(

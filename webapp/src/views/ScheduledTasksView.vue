@@ -130,6 +130,10 @@ const gridBlocks = computed(() =>
     ? [(weekBlocks.value[anchorIndex.value] ?? []).map((block) => ({ ...block, day: 0 }))]
     : weekBlocks.value,
 )
+const railTasks = computed(() => {
+  const taskIds = new Set(gridBlocks.value.flat().map((block) => block.taskId))
+  return visibleTasks.value.filter((task) => taskIds.has(task.id))
+})
 const rangeLabel = computed(() =>
   isMobile.value
     ? new Intl.DateTimeFormat(undefined, {
@@ -339,7 +343,7 @@ onMounted(async () => {
       <aside class="hidden w-60 shrink-0 flex-col border-r border-border lg:flex">
         <div class="flex h-12 shrink-0 items-center gap-1.5 border-b border-border px-4">
           <h3 class="text-sm font-medium">Tasks</h3>
-          <span class="text-sm text-muted-foreground tabular-nums">{{ visibleTasks.length }}</span>
+          <span class="text-sm text-muted-foreground tabular-nums">{{ railTasks.length }}</span>
         </div>
         <div class="min-h-0 flex-1 overflow-y-auto">
           <div
@@ -364,14 +368,14 @@ onMounted(async () => {
             >
           </div>
           <EmptyState
-            v-else-if="!visibleTasks.length"
+            v-else-if="!railTasks.length"
             :icon="CalendarClock"
             title="Nothing scheduled"
-            description="Click a time in the calendar to plan your first run."
+            description="No tasks in this period. Click a time to plan a run."
           />
           <ScheduleTaskRail
             v-else
-            :tasks="visibleTasks"
+            :tasks="railTasks"
             :workspace-names="workspaceNames"
             :colors="colors"
             :focus-task-id="focusTaskId"

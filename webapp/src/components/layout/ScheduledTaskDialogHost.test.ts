@@ -9,13 +9,20 @@ import { useScheduledTaskStore } from '@/stores/scheduledTasks'
 import type { ScheduledTask } from '@/services/scheduledTasks.api'
 
 const api = vi.hoisted(() => ({ list: vi.fn() }))
+const socket = vi.hoisted(() => ({ listeners: new Map<string, () => void>() }))
 vi.mock('@/services/scheduledTasks.api', () => ({
   listScheduledTasks: api.list,
   createScheduledTask: vi.fn(),
   updateScheduledTask: vi.fn(),
   deleteScheduledTask: vi.fn(),
 }))
-vi.mock('@/services/socket', () => ({ onReconnect: vi.fn(() => () => {}) }))
+vi.mock('@/services/socket', () => ({
+  onReconnect: vi.fn(() => () => {}),
+  onEvent: vi.fn((event: string, callback: () => void) => {
+    socket.listeners.set(event, callback)
+    return () => socket.listeners.delete(event)
+  }),
+}))
 vi.mock('@/composables/usePolling', () => ({
   usePolling: () => ({ start: vi.fn(), stop: vi.fn() }),
 }))
@@ -98,6 +105,18 @@ beforeEach(() => {
 })
 
 describe('ScheduledTaskDialogHost', () => {
+  it('refreshes run state after session events and removes listeners on unmount', async () => {
+    const { store } = await mountHost('/')
+    api.list.mockResolvedValue([{ ...task('task-1'), is_running: true }])
+    socket.listeners.get('harness.session_status')!()
+    socket.listeners.get('harness.conversations_changed')!()
+    await vi.waitFor(() => expect(store.tasks[0]?.is_running).toBe(true))
+    expect(api.list).toHaveBeenCalledTimes(1)
+    wrapper!.unmount()
+    wrapper = null
+    expect(socket.listeners.size).toBe(0)
+  })
+
   it('opens legacy and deep-link queries and preserves unrelated query params', async () => {
     const { router, store } = await mountHost('/?session=chat-1&scheduledTask=task-1')
 

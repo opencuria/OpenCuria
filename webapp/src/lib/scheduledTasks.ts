@@ -206,14 +206,20 @@ export function isScheduleEnded(
   return !at || at <= now
 }
 
-/** "Ended" for a finished one-time task, "Paused" for a disabled one, else "". */
+/** Running dispatches stay in navigation until their ledger settles. */
+export function isScheduleVisibleInSidebar(task: ScheduledTask, now = new Date()): boolean {
+  return !!task.is_running || task.enabled || !isScheduleEnded(task, now)
+}
+
+/** Run state takes precedence over the schedule's enabled flag. */
 export function scheduleStateLabel(
   task: Pick<
     ScheduledTask,
-    'enabled' | 'recurrence' | 'run_date' | 'local_time' | 'timezone_name'
+    'enabled' | 'is_running' | 'recurrence' | 'run_date' | 'local_time' | 'timezone_name'
   >,
   now = new Date(),
-): '' | 'Paused' | 'Ended' {
+): '' | 'Paused' | 'Ended' | 'Running' {
+  if (task.is_running) return 'Running'
   if (isScheduleEnded(task, now)) return 'Ended'
   return task.enabled ? '' : 'Paused'
 }

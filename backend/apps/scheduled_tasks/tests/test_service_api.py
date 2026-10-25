@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.test import Client
+from django.utils import timezone
 
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.harness_service import HarnessService
@@ -96,6 +99,12 @@ def test_run_now_links_provider_backed_chat_and_terminal_outcome(
 ):
     org, owner, _, workspace, task = scheduled_run_setup
     service = HarnessService(provider_factory=lambda _org: TestProvider())
+    service.metadata.generate_title = AsyncMock()
+    ScheduledTaskRun.objects.create(
+        scheduled_task=task,
+        scheduled_for=timezone.now() - timedelta(days=1),
+        status=ScheduledTaskRun.Status.SKIPPED,
+    )
     monkeypatch.setattr(
         "apps.scheduled_tasks.services.get_harness_service", lambda: service
     )
@@ -131,6 +140,8 @@ def test_run_now_links_provider_backed_chat_and_terminal_outcome(
     assert assistant.reasoning_effort == "high"
     assert session.workspace_id == workspace.id
     assert session.organization_id == org.id
+    assert session.title == "Integration run #2"
+    service.metadata.generate_title.assert_not_awaited()
     assert session.messages.count() == 2
     assistant.refresh_from_db()
     assert assistant.completed_at is not None

@@ -24,6 +24,8 @@ export interface ScheduledTask {
   timezone_name: string
   /** A `once` task turns itself off after its run. */
   enabled: boolean
+  /** A claimed or running dispatch, including a one-time task already disabled. */
+  is_running?: boolean
   next_run_at: string
   created_at: string
   updated_at: string

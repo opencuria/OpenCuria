@@ -9,6 +9,7 @@ import { useScheduledTaskStore } from '@/stores/scheduledTasks'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { WorkspaceStatus } from '@/types'
 import type { HarnessConversation } from '@/types/harness'
+import type { ScheduledTask } from '@/services/scheduledTasks.api'
 
 enableAutoUnmount(afterEach)
 
@@ -569,6 +570,40 @@ describe('ChatSidebar', () => {
     await wrapper.get('[data-testid="collapsed-scheduled-tasks"]').trigger('click')
     expect(routerPush).toHaveBeenLastCalledWith('/scheduled-tasks')
     expect(useScheduledTaskStore().dialogOpen).toBe(false)
+  })
+
+  it('keeps active once tasks visible until completion and marks recurring runs', async () => {
+    const wrapper = mountSidebar()
+    const store = useScheduledTaskStore()
+    const once: ScheduledTask = {
+      id: 'once', name: 'One-time check', workspace_id: 'ws-1', prompt: 'Check',
+      mode: 'build', model: '', reasoning_effort: '', skill_ids: [],
+      recurrence: 'once', weekdays: [], run_date: '2020-01-01', local_time: '09:00',
+      timezone_name: 'UTC', enabled: false, is_running: true,
+      next_run_at: '2020-01-01T09:00:00Z', created_at: '', updated_at: '',
+    }
+    store.tasks = [
+      once,
+      { ...once, id: 'done', name: 'Completed check', is_running: false },
+      { ...once, id: 'future', run_date: '2099-01-01', enabled: true, is_running: false },
+      { ...once, id: 'recurring', recurrence: 'daily', enabled: true },
+      { ...once, id: 'paused', recurrence: 'daily', is_running: false },
+    ]
+    await nextTick()
+    for (const id of ['once', 'recurring']) {
+      const row = wrapper.get(`[data-testid="scheduled-task-${id}"]`)
+      expect(row.text()).toContain('Running')
+      expect(row.attributes('aria-label')).toContain('Running')
+      expect(row.find('.animate-spin').exists()).toBe(true)
+      expect(row.find('.lucide-circle-pause').exists()).toBe(false)
+    }
+    expect(wrapper.find('[data-testid="scheduled-task-done"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="scheduled-task-future"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="scheduled-task-paused"]').exists()).toBe(true)
+    store.upsert({ ...once, is_running: false })
+    await nextTick()
+    expect(wrapper.find('[data-testid="scheduled-task-once"]').exists()).toBe(false)
+    expect(store.tasks.some((task) => task.id === 'once')).toBe(true)
   })
 
   it('shows empty chat state for a running workspace', () => {

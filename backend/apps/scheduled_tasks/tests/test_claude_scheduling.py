@@ -13,6 +13,9 @@ from apps.skills.services import SkillService
 
 
 class Repository:
+    def run_number(self, run):
+        return 3
+
     def __init__(self):
         self.created = None
         self.updated = None
@@ -181,7 +184,8 @@ def test_switch_to_claude_keeps_skills_and_resets_engine_defaults(
     assert allow_claude_connection == [(task.organization_id, task.owner_id, None)]
 
 
-def test_claude_run_dispatch_passes_harness_and_owner_without_secret():
+@pytest.mark.parametrize("name", ["Claude review", "x" * 255])
+def test_claude_run_dispatch_passes_harness_and_owner_without_secret(name):
     captured = {}
 
     class FakeHarness:
@@ -199,6 +203,7 @@ def test_claude_run_dispatch_passes_harness_and_owner_without_secret():
     service = ScheduledTaskService(repository=repo, harness=FakeHarness())
     task = SimpleNamespace(
         id=uuid.uuid4(),
+        name=name,
         workspace_id=Workspace.id,
         organization_id=uuid.uuid4(),
         owner_id=37,
@@ -220,5 +225,7 @@ def test_claude_run_dispatch_passes_harness_and_owner_without_secret():
     assert result.status == ScheduledTaskRun.Status.RUNNING
     assert captured["harness_id"] == "claude"
     assert captured["user_id"] == task.owner_id
+    assert captured["title"] == f"{name[:252]} #3"
+    assert len(captured["title"]) <= 255
     assert "connection_id" not in captured
     assert "token" not in captured

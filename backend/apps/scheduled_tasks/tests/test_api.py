@@ -10,7 +10,7 @@ from apps.accounts.models import APIKey, APIKeyPermission
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
-from apps.scheduled_tasks.models import ScheduledTaskRun
+from apps.scheduled_tasks.models import ScheduledTask, ScheduledTaskRun
 from common.utils import generate_api_token, hash_token
 
 
@@ -52,6 +52,49 @@ def schedule_client(user, organization, permissions):
         permissions=permissions,
     )
     return Client(HTTP_X_API_KEY=token, HTTP_X_ORGANIZATION_ID=str(organization.id))
+
+
+@pytest.mark.parametrize("status", ScheduledTaskRun.Status.values)
+def test_task_endpoints_report_dispatch_state(schedule_api_setup, status):
+    from django.utils import timezone
+
+    org, owner, stranger, workspace = schedule_api_setup
+    task = ScheduledTask.objects.create(
+        organization=org,
+        owner=owner,
+        workspace=workspace,
+        name="Once",
+        prompt="Check",
+        recurrence="once",
+        run_date=timezone.now().date(),
+        local_time="09:00",
+        timezone_name="UTC",
+        enabled=False,
+        next_run_at=timezone.now(),
+    )
+    run = ScheduledTaskRun.objects.create(
+        scheduled_task=task,
+        scheduled_for=timezone.now(),
+        status=status,
+    )
+    # A newer skip must not hide an older active dispatch.
+    ScheduledTaskRun.objects.create(
+        scheduled_task=task,
+        scheduled_for=timezone.now(),
+        status=ScheduledTaskRun.Status.SKIPPED,
+        trigger="manual",
+    )
+    client = schedule_client(owner, org, [APIKeyPermission.HARNESS_READ.value])
+    running = status in {"claimed", "running"}
+    assert client.get("/api/v1/scheduled-tasks/").json()[0]["is_running"] is running
+    detail = client.get(f"/api/v1/scheduled-tasks/{task.id}/").json()
+    assert detail["is_running"] is running
+    if running:
+        run.status = ScheduledTaskRun.Status.ERROR
+        run.save(update_fields=["status"])
+        assert client.get("/api/v1/scheduled-tasks/").json()[0]["is_running"] is False
+    outsider = schedule_client(stranger, org, [APIKeyPermission.HARNESS_READ.value])
+    assert outsider.get("/api/v1/scheduled-tasks/").json() == []
 
 
 def test_create_list_and_pause_schedule_owner_scoped(schedule_api_setup, monkeypatch):

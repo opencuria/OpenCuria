@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { onReconnect } from '@/services/socket'
+import { onEvent, onReconnect } from '@/services/socket'
 import { usePolling } from '@/composables/usePolling'
 import { useScheduledTaskStore } from '@/stores/scheduledTasks'
 import { useAuthStore } from '@/stores/auth'
@@ -15,14 +15,26 @@ let lastHandledQuery: string | null = null
 let stripping = false
 let opener: HTMLElement | null = null
 let disposed = false
+let refreshTimer: ReturnType<typeof setTimeout> | null = null
 
 async function fetchTasks(): Promise<void> {
   await taskStore.refresh()
 }
-const { start, stop } = usePolling(fetchTasks, 60_000)
+const { start, stop } = usePolling(fetchTasks, 15_000)
 const cleanupReconnect = onReconnect(() => {
   void fetchTasks().catch(() => undefined)
 })
+// Session events precede some ledger writes. Coalesce bursts and let the
+// dispatch settle before reading its state; polling repairs missed events.
+function scheduleRefresh(): void {
+  if (refreshTimer !== null) clearTimeout(refreshTimer)
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null
+    void taskStore.refresh(true).catch(() => undefined)
+  }, 250)
+}
+const cleanupStatus = onEvent('harness.session_status', scheduleRefresh)
+const cleanupConversations = onEvent('harness.conversations_changed', scheduleRefresh)
 const open = computed(() => taskStore.dialogOpen)
 
 async function openFromQuery(): Promise<void> {
@@ -108,6 +120,9 @@ onUnmounted(() => {
   disposed = true
   stop()
   cleanupReconnect()
+  cleanupStatus()
+  cleanupConversations()
+  if (refreshTimer !== null) clearTimeout(refreshTimer)
 })
 </script>
 

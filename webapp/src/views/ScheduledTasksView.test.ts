@@ -146,6 +146,32 @@ describe('ScheduledTasksView', () => {
     })
   })
 
+  it('limits the rail to planned and recorded occurrences in the displayed week', async () => {
+    api.list.mockResolvedValue([
+      task('past', { recurrence: 'once', run_date: '2026-06-10', enabled: false }),
+      task('once', { recurrence: 'once', run_date: '2026-06-16', enabled: false }),
+      task('future', { recurrence: 'once', run_date: '2026-06-24' }),
+      task('monthly', { recurrence: 'cron', cron_expression: '0 9 24 * *' }),
+      task('recorded', { recurrence: 'once', run_date: '2026-07-01' }),
+    ])
+    api.runs.mockImplementation(async (id: string) => id === 'recorded' ? [{
+      id: 'run-1', scheduled_for: '2026-06-16T09:00:00Z', status: 'succeeded',
+      session_id: 'session-1', started_at: null, finished_at: null,
+      error: '', reason: '', assistant_finish: '', assistant_error: '',
+    }] : [])
+    await useScheduledTaskStore().refresh()
+    const { wrapper } = await mountView()
+    const railIds = () => wrapper.findAll('[data-testid^="schedule-rail-task-"]')
+      .map((row) => row.attributes('data-testid'))
+    expect(railIds()).toEqual(['schedule-rail-task-once', 'schedule-rail-task-recorded'])
+    await wrapper.get('[data-testid="schedule-next"]').trigger('click')
+    expect(railIds()).toEqual(['schedule-rail-task-future', 'schedule-rail-task-monthly'])
+    await wrapper.get('[data-testid="schedule-prev"]').trigger('click')
+    await wrapper.get('[data-testid="schedule-prev"]').trigger('click')
+    expect(railIds()).toEqual(['schedule-rail-task-past'])
+    wrapper.unmount()
+  })
+
   it('pauses a task from the rail', async () => {
     await useScheduledTaskStore().refresh()
     const { wrapper } = await mountView()
