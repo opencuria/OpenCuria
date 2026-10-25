@@ -230,7 +230,6 @@ async def runtime(harness_workspace, tmp_path, monkeypatch):
             organization_id=harness_workspace.runner.organization_id,
             plugins=(),
         ),
-        workspace=None,
         plaintexts={},
     )
     catalog = normalize_openrouter_catalog(
@@ -344,7 +343,6 @@ def cold_service(data):
             organization_id=data.workspace.runner.organization_id,
             plugins=(),
         ),
-        workspace=None,
         plaintexts={},
     )
 

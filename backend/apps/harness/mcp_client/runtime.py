@@ -8,14 +8,9 @@ from typing import Any
 from uuid import uuid4
 
 import structlog
-from asgiref.sync import sync_to_async
 
 from apps.plugins import runtime as plugin_runtime
-from apps.plugins.runtime_snapshot import (
-    PreparedPluginRuntime,
-    WorkspacePluginSnapshot,
-    prepared_is_empty,
-)
+from apps.plugins.runtime_snapshot import PreparedPluginRuntime
 
 from ..desktop_leases import DesktopLease
 from ..tools.base import ToolRegistry
@@ -51,27 +46,6 @@ def _record_skip(
     )
 
 
-def _resolve_pending_credentials(prepared: PreparedPluginRuntime) -> None:
-    """Resolve plaintext and OAuth maps. Sync ORM; call via sync_to_async.
-
-    Only for a runtime ``setup`` constructed itself. A prepared runtime
-    from the harness is already resolved. An empty OAuth map is a valid
-    result and must not be resolved again.
-    """
-    if prepared.workspace is None:
-        return
-    prepared.plaintexts.update(
-        plugin_runtime.resolve_runtime_credentials(
-            prepared.snapshot, workspace=prepared.workspace
-        )
-    )
-    prepared.oauth_credentials.update(
-        plugin_runtime.resolve_runtime_oauth_credentials(
-            prepared.snapshot, workspace=prepared.workspace
-        )
-    )
-
-
 class McpRuntime:
     """Owns one harness run's MCP connections (no cross-workspace pool)."""
 
@@ -79,75 +53,26 @@ class McpRuntime:
         self._stack = AsyncExitStack()
         self.connections: list[McpServerConnection] = []
         self.skipped: list[dict[str, str]] = []
-        self._snapshot = None
-        self._prepared: PreparedPluginRuntime | None = None
-
-    @property
-    def tools(self) -> list[McpTool]:
-        """All discovered tools across healthy connections."""
-        collected: list[McpTool] = []
-        for connection in self.connections:
-            if not connection.healthy:
-                continue
-            collected.extend(connection.harness_tools)
-        return collected
 
     async def setup(
         self,
         *,
-        workspace,
-        organization_id,
+        prepared: PreparedPluginRuntime,
         accessor: Any,
         core_tool_names: list[str] | None = None,
-        snapshot: PreparedPluginRuntime | WorkspacePluginSnapshot | None = None,
-        **kwargs: Any,
-    ):
-        """Open connections and discover tools for the effective snapshot.
+        owner_id: str | None = None,
+    ) -> None:
+        """Open connections using the harness's already resolved credentials.
 
-        *snapshot* is a :class:`PreparedPluginRuntime` built exactly once
-        by the caller (the normal run path, possibly empty) or a bare
-        :class:`WorkspacePluginSnapshot` (legacy/test path: credentials
-        resolve exactly once here, off the event loop). An empty OAuth
-        map on a prepared runtime means resolution already ran and
-        nothing matched — it is not resolved again. Extra *kwargs* are
-        ignored for forward compatibility with stub runtimes. Individual
-        server failures are logged as health warnings and skipped —
+        Individual server failures are logged as health warnings and skipped —
         including servers with duplicate normalized names within their own
         discovery result or collisions with already-kept names (first server
         wins deterministically, the colliding server is closed and skipped).
         """
-        already_prepared = isinstance(snapshot, PreparedPluginRuntime)
-        if isinstance(snapshot, PreparedPluginRuntime):
-            prepared: PreparedPluginRuntime | None = snapshot
-        elif isinstance(snapshot, WorkspacePluginSnapshot):
-            # Bare snapshot (tests/legacy): wrap it; credentials resolve
-            # exactly once below, off the event loop.
-            prepared = PreparedPluginRuntime(
-                snapshot=snapshot,
-                workspace=workspace,
-                plaintexts={},
-            )
-        else:
-            prepared = None
-        if prepared is None:
-            if workspace is None:
-                # No prepared snapshot and no workspace: nothing to do.
-                self._snapshot = None
-                return None
-            snapshot_built = await sync_to_async(
-                plugin_runtime.build_workspace_plugin_snapshot
-            )(workspace=workspace, org_id=organization_id)
-            prepared = PreparedPluginRuntime(
-                snapshot=snapshot_built, workspace=workspace, plaintexts={}
-            )
-        self._snapshot = prepared.snapshot
-        self._prepared = prepared
-        if prepared_is_empty(prepared):
-            return prepared.snapshot
-        if not already_prepared:
-            await sync_to_async(_resolve_pending_credentials)(prepared)
         snapshot = prepared.snapshot
-        owner_id = str(kwargs.get("owner_id") or uuid4())
+        if not snapshot.plugins:
+            return
+        owner_id = owner_id or str(uuid4())
         owner_task = asyncio.current_task()
         await self._stack.__aenter__()
         try:
@@ -299,7 +224,6 @@ class McpRuntime:
                     skipped=self.skipped,
                     servers=len(self.connections),
                 )
-            return snapshot
         except BaseException:
             try:
                 await self._stack.aclose()
@@ -334,14 +258,6 @@ class McpRuntime:
                 names.append(tool.name)
         return names
 
-    @property
-    def skill_bodies(self) -> list[str]:
-        """Ordered skill bodies for prompt composition (set by setup)."""
-        snapshot = getattr(self, "_snapshot", None)
-        if snapshot is None:
-            return []
-        return list(snapshot.plugin_skills)
-
     async def aclose(self) -> None:
         """Close all connections (idempotent, never raises).
 
@@ -356,5 +272,3 @@ class McpRuntime:
             log.warning("mcp_runtime_close_failed")
         finally:
             self.connections = []
-            self._snapshot = None
-            self._prepared = None

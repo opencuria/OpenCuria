@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -118,27 +118,21 @@ class WorkspacePluginSnapshot:
 
 @dataclass(frozen=True)
 class PreparedPluginRuntime:
-    """A snapshot plus its workspace and decrypted requirement plaintexts.
+    """A snapshot plus its resolved credentials for one harness run.
 
     Built exactly once per harness run by
     :meth:`HarnessService._prepare_mcp_snapshot_for_run` (sync ORM
     context) and consumed by :meth:`McpRuntime.setup` without a second
     ORM/decrypt round. The ``plaintexts`` map (``plugin_id ->
     {requirement key: secret}``) is ``repr=False`` so secrets never
-    surface in logs, tracebacks, or persisted events; ``workspace`` is
-    the already-loaded row (runner relation included).
+    surface in logs, tracebacks, or persisted events.
 
     ``oauth_credentials`` may be empty. That means resolution already
     ran and no connected OAuth credential matched. Emptiness is not a
     signal to resolve again.
     """
 
-    snapshot: WorkspacePluginSnapshot = field(
-        default_factory=lambda: WorkspacePluginSnapshot(
-            workspace_id=uuid.uuid4(), organization_id=uuid.uuid4(), plugins=()
-        )
-    )
-    workspace: Any = None
+    snapshot: WorkspacePluginSnapshot
     plaintexts: dict[uuid.UUID, dict[str, str]] = field(
         default_factory=dict, repr=False
     )
@@ -149,10 +143,3 @@ class PreparedPluginRuntime:
     def plaintexts_for(self, plugin_id: uuid.UUID) -> dict[str, str]:
         """Return the decrypted requirement map for one plugin (copy)."""
         return dict(self.plaintexts.get(plugin_id, {}))
-
-
-def prepared_is_empty(prepared: PreparedPluginRuntime | None) -> bool:
-    """Return True when *prepared* carries no effective plugins."""
-    if prepared is None:
-        return True
-    return not prepared.snapshot.plugins

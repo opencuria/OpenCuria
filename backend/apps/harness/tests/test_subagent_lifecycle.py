@@ -342,7 +342,7 @@ async def test_child_mcp_startup_deadline_does_not_cancel_healthy_parent(
     async def accessor_factory(workspace_id):
         return next(accessors)
 
-    def snapshot(session, organization_id, accessor):
+    def snapshot(session, organization_id):
         return (
             prepared_servers("first", "bad")
             if session.agent_name == "general"

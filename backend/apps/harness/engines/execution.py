@@ -97,7 +97,7 @@ async def execute_external_run(
         accessor = await service._accessor_factory(str(session.workspace_id))
         # The same credential snapshot is fail-closed for native and SDK tools.
         mcp_snapshot = await sync_to_async(service._prepare_mcp_snapshot_for_run)(
-            session, organization_id, accessor
+            session, organization_id
         )
         tools = service._tools_for_session(key, session.agent_name or session.mode)
         if accessor is not None and (session.agent_name or "").lower() not in {
@@ -110,11 +110,9 @@ async def execute_external_run(
 
             mcp_runtime = mcp_runtime_module.McpRuntime()
             await mcp_runtime.setup(
-                workspace=None,
-                organization_id=organization_id,
                 accessor=accessor,
                 core_tool_names=tools.names(),
-                snapshot=mcp_snapshot,
+                prepared=mcp_snapshot,
                 owner_id=str(uuid.uuid4()),
             )
             mcp_runtime.register_tools(tools)

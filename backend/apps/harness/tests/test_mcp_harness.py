@@ -289,17 +289,12 @@ async def test_harness_service_mcp_wiring_success_and_cleanup(harness_workspace)
         async def setup(  # type: ignore[no-untyped-def]
             self,
             *,
-            workspace,
-            organization_id,
+            prepared,
             accessor,
             core_tool_names,
-            snapshot=None,
             owner_id=None,
         ):
-            seen["skills"] = (
-                snapshot.snapshot.plugin_skills if snapshot is not None else []
-            )
-            return snapshot.snapshot if snapshot is not None else None
+            seen["skills"] = prepared.snapshot.plugin_skills
 
         def register_tools(self, registry: ToolRegistry) -> list[str]:
             fake_tool = FakeMcpTool("mcp_demo_srv_echo")
@@ -413,14 +408,12 @@ async def test_harness_service_mcp_partial_discovery_failure(harness_workspace):
         async def setup(  # type: ignore[no-untyped-def]
             self,
             *,
-            workspace,
-            organization_id,
+            prepared,
             accessor,
             core_tool_names,
-            snapshot=None,
             owner_id=None,
         ):
-            return snapshot.snapshot if snapshot is not None else None
+            return None
 
         def register_tools(self, registry: ToolRegistry) -> list[str]:  # type: ignore[no-untyped-def]
             fake_tool = FakeMcpTool("mcp_demo_good_echo")
@@ -490,14 +483,11 @@ async def test_harness_run_survives_failing_http_mcp_startup(harness_workspace):
     class FailingHttpRuntime(real_mcp_runtime):  # type: ignore[misc,valid-type]
         async def setup(self, **kwargs):  # type: ignore[no-untyped-def]
             prepared = prepared_with_http()
-            result = await super().setup(
-                workspace=None,
-                organization_id=prepared.snapshot.organization_id,
+            await super().setup(
                 accessor=FailingRelayAccessor({}),
-                snapshot=prepared,
+                prepared=prepared,
             )
             assert [item["server"] for item in self.skipped] == ["web"]
-            return result
 
     class TextProvider(FakeProvider):
         async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]

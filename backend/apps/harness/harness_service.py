@@ -2908,7 +2908,7 @@ class HarnessService:
             agent_key = (session.agent_name or "").strip().lower()
             if agent_key not in {"computeruse", "title", "summary", "compaction"}:
                 mcp_snapshot = await sync_to_async(self._prepare_mcp_snapshot_for_run)(
-                    session, organization_id, None
+                    session, organization_id
                 )
             model_resolver = None
             small_model = ""
@@ -3021,11 +3021,9 @@ class HarnessService:
                 # Reuse the already validated snapshot; setup does not repeat
                 # credential lookup/decryption.
                 await mcp_runtime.setup(
-                    workspace=None,
-                    organization_id=organization_id,
                     accessor=accessor,
                     core_tool_names=tools.names(),
-                    snapshot=mcp_snapshot,
+                    prepared=mcp_snapshot,
                     owner_id=str(uuid.uuid4()),
                 )
                 mcp_runtime.register_tools(tools)
@@ -3664,7 +3662,7 @@ class HarnessService:
         return WorkspaceRepository.get_by_id(workspace_id)
 
     @staticmethod
-    def _prepare_mcp_snapshot_for_run(session, organization_id, accessor):  # type: ignore[no-untyped-def]
+    def _prepare_mcp_snapshot_for_run(session, organization_id):  # type: ignore[no-untyped-def]
         """Build the effective plugin snapshot + resolve credentials once.
 
         Runs in the sync ORM context (called via ``sync_to_async``):
@@ -3673,22 +3671,16 @@ class HarnessService:
         run path never issues a second workspace query. ``setup`` reuses
         the snapshot + decrypted requirement map without another
         ORM/decrypt round.
-
-        ``accessor`` is accepted for signature symmetry only (the
-        workspace row comes from the repository); it is unused.
         """
         from apps.plugins import runtime as plugin_runtime
         from apps.plugins.runtime_snapshot import PreparedPluginRuntime
 
-        del accessor
         workspace = HarnessService._run_workspace(session.workspace_id)
         snapshot = plugin_runtime.build_workspace_plugin_snapshot(
             workspace=workspace, org_id=organization_id
         )
         if not snapshot.plugins:
-            return PreparedPluginRuntime(
-                snapshot=snapshot, workspace=workspace, plaintexts={}
-            )
+            return PreparedPluginRuntime(snapshot=snapshot)
         resolved = plugin_runtime.resolve_runtime_credentials(
             snapshot, workspace=workspace
         )
@@ -3697,7 +3689,6 @@ class HarnessService:
         )
         return PreparedPluginRuntime(
             snapshot=snapshot,
-            workspace=workspace,
             plaintexts=dict(resolved or {}),
             oauth_credentials=oauth_credentials,
         )

@@ -569,7 +569,6 @@ def test_prepared_runtime_repr_hides_plaintexts(org_ctx):
     )
     prepared = PreparedPluginRuntime(
         snapshot=snapshot,
-        workspace=org_ctx["workspace"],
         plaintexts=dict(resolved),
     )
     assert "prepared-top-secret" not in repr(prepared)

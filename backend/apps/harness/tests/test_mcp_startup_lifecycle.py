@@ -17,6 +17,7 @@ from mcp.client.session import ClientSession
 
 from apps.harness.mcp_client.connection import McpServerConnection, McpServerHealthError
 from apps.harness.mcp_client.runtime import McpRuntime
+from apps.harness.tools.base import ToolRegistry
 from apps.plugins.runtime_snapshot import (
     EffectivePluginSnapshot,
     PluginMcpServerSnapshot,
@@ -136,7 +137,6 @@ def prepared_servers(*names: str) -> PreparedPluginRuntime:
         snapshot=WorkspacePluginSnapshot(
             workspace_id=uuid.uuid4(), organization_id=uuid.uuid4(), plugins=(plugin,)
         ),
-        workspace=None,
         plaintexts={plugin.id: {}},
     )
 
@@ -144,10 +144,8 @@ def prepared_servers(*names: str) -> PreparedPluginRuntime:
 async def setup(runtime: McpRuntime, accessor: ScriptedAccessor) -> None:
     prepared = prepared_servers(*accessor.processes)
     await runtime.setup(
-        workspace=None,
-        organization_id=prepared.snapshot.organization_id,
         accessor=accessor,
-        snapshot=prepared,
+        prepared=prepared,
     )
 
 
@@ -214,7 +212,9 @@ async def test_runtime_skips_later_timeout_and_closes_healthy_lifo(phase: str) -
         assert all(
             isinstance(conn._session, ClientSession) for conn in runtime.connections
         )
-        assert len(runtime.tools) == 2
+        registry = ToolRegistry()
+        assert len(runtime.register_tools(registry)) == 2
+        assert len(registry.schemas()) == 2
         assert len(runtime.skipped) == 1
         assert runtime.skipped[0]["server"] == "bad"
         assert "McpServerHealthError" in runtime.skipped[0]["error"]
@@ -395,7 +395,6 @@ def prepared_with_http(*stdio: str, http: str = "web") -> PreparedPluginRuntime:
             organization_id=prepared.snapshot.organization_id,
             plugins=(plugin,),
         ),
-        workspace=None,
         plaintexts={plugin.id: {}},
     )
 
@@ -417,10 +416,8 @@ async def test_runtime_skips_failing_http_server_and_keeps_others() -> None:
     prepared = prepared_with_http("first")
     try:
         await runtime.setup(
-            workspace=None,
-            organization_id=prepared.snapshot.organization_id,
             accessor=accessor,
-            snapshot=prepared,
+            prepared=prepared,
         )
         assert [conn.server_slug for conn in runtime.connections] == ["first"]
         assert [item["server"] for item in runtime.skipped] == ["web"]

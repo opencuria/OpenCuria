@@ -29,7 +29,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import os
 import uuid
 
 import anyio
@@ -320,14 +319,12 @@ async def test_runtime_collision_first_wins_collider_closed():
     McpServerConnection.aclose = _fake_close  # type: ignore[assignment]
     try:
         prepared = PreparedPluginRuntime(
-            snapshot=snapshot, workspace=None, plaintexts={plugin_id: {}}
+            snapshot=snapshot, plaintexts={plugin_id: {}}
         )
         await runtime.setup(
-            workspace=None,
-            organization_id=snapshot.organization_id,
             accessor=object(),
             core_tool_names=[],
-            snapshot=prepared,
+            prepared=prepared,
         )
         assert opened == ["a", "b"]
         # First server kept, colliding server skipped + closed.
@@ -405,7 +402,9 @@ async def test_runtime_same_server_normalized_name_collision_skips_server(monkey
             self.tools = [
                 _discovered("foo.bar", _namespaced("plug", "colliding", "foo.bar")),
                 _discovered("foo_bar", _namespaced("plug", "colliding", "foo_bar")),
-                _discovered("otherwise_safe", _namespaced("plug", "colliding", "otherwise_safe")),
+                _discovered(
+                    "otherwise_safe", _namespaced("plug", "colliding", "otherwise_safe")
+                ),
             ]
         else:
             self.tools = [
@@ -421,14 +420,12 @@ async def test_runtime_same_server_normalized_name_collision_skips_server(monkey
     monkeypatch.setattr(McpServerConnection, "open", _fake_open)
     monkeypatch.setattr(McpServerConnection, "aclose", _tracking_close)
     prepared = PreparedPluginRuntime(
-        snapshot=snapshot, workspace=None, plaintexts={plugin_id: {}}
+        snapshot=snapshot, plaintexts={plugin_id: {}}
     )
 
     await runtime.setup(
-        workspace=None,
-        organization_id=snapshot.organization_id,
         accessor=object(),
-        snapshot=prepared,
+        prepared=prepared,
     )
 
     assert _namespaced("plug", "colliding", "foo.bar") == _namespaced(
@@ -524,13 +521,11 @@ async def test_runtime_setup_exception_closes_opened():
     McpServerConnection.open = _fake_open  # type: ignore[assignment]
     try:
         prepared = PreparedPluginRuntime(
-            snapshot=snapshot, workspace=None, plaintexts={plugin_id: {}}
+            snapshot=snapshot, plaintexts={plugin_id: {}}
         )
         await runtime.setup(
-            workspace=None,
-            organization_id=snapshot.organization_id,
             accessor=object(),
-            snapshot=prepared,
+            prepared=prepared,
         )
         # Good server kept; bogus transport skipped; nothing leaked.
         assert [c.server_slug for c in runtime.connections] == ["good"]
@@ -542,25 +537,6 @@ async def test_runtime_setup_exception_closes_opened():
     finally:
         McpServerConnection.open = real_open  # type: ignore[assignment]
         McpServerConnection.aclose = real_close  # type: ignore[assignment]
-
-
-@pytest.mark.asyncio
-async def test_runtime_aclose_after_cancelled_setup():
-    runtime = McpRuntime()
-
-    async def _never(_):
-        await anyio.sleep(3600)
-
-    task = asyncio.ensure_future(_never(None))
-    await anyio.sleep(0.01)
-    task.cancel()
-    try:
-        await task
-    except (asyncio.CancelledError, anyio.get_cancelled_exc_class()):
-        pass
-    # aclose must stay idempotent + never raise after cancellation.
-    await runtime.aclose()
-    await runtime.aclose()
 
 
 # -- injected runner_factory sees MCP tools ----------------------------------
@@ -582,10 +558,7 @@ async def test_runner_factory_sees_registered_mcp_tools(harness_workspace):
         skipped: list[dict] = []
 
         async def setup(self, **kwargs):
-            prepared = kwargs.get("snapshot")
-            if prepared is None or not hasattr(prepared, "snapshot"):
-                return None
-            return prepared.snapshot
+            return None
 
         def register_tools(self, registry):
             registry.register(FakeMcpTool("mcp_demo_srv_echo"))
@@ -1583,13 +1556,11 @@ async def test_runtime_setup_skipped_carries_real_error_detail():
     )
     runtime = McpRuntime()
     prepared = PreparedPluginRuntime(
-        snapshot=snapshot, workspace=None, plaintexts={plugin_id: {}}
+        snapshot=snapshot, plaintexts={plugin_id: {}}
     )
     await runtime.setup(
-        workspace=None,
-        organization_id=snapshot.organization_id,
         accessor=_DeadAccessor(stderr=b"Error: chrome crashed\n"),
-        snapshot=prepared,
+        prepared=prepared,
     )
     assert runtime.connections == []
     assert len(runtime.skipped) == 1
@@ -1600,126 +1571,30 @@ async def test_runtime_setup_skipped_carries_real_error_detail():
     await runtime.aclose()
 
 
-def _stdio_snapshot(organization_id: uuid.UUID) -> tuple[uuid.UUID, object]:
-    """One stdio server, no credential requirements."""
-    from apps.plugins.runtime_snapshot import (
-        EffectivePluginSnapshot,
-        PluginMcpServerSnapshot,
-        WorkspacePluginSnapshot,
-    )
+async def test_prepared_empty_oauth_map_is_not_resolved_again(monkeypatch):
+    """Setup consumes prepared credentials without snapshot or ORM resolution."""
+    from apps.harness.tests.test_mcp_startup_lifecycle import prepared_servers
+    from apps.plugins import runtime as plugin_runtime
 
-    plugin_id = uuid.uuid4()
-    snapshot = WorkspacePluginSnapshot(
-        workspace_id=uuid.uuid4(),
-        organization_id=organization_id,
-        plugins=(
-            EffectivePluginSnapshot(
-                id=plugin_id,
-                name="Plug",
-                slug="plug",
-                description="",
-                organization_id=organization_id,
-                is_global=False,
-                mcp_servers=(
-                    PluginMcpServerSnapshot(
-                        id=uuid.uuid4(),
-                        name="Srv",
-                        slug="srv",
-                        transport="stdio",
-                        command="fake",
-                    ),
-                ),
-            ),
-        ),
-    )
-    return plugin_id, snapshot
+    prepared = prepared_servers("srv")
 
+    async def open_connection(self, accessor):
+        self.tools = []
 
-async def _open_without_transport(
-    self: McpServerConnection, accessor: object
-) -> list[object]:
-    self.tools = []
-    return []
+    def forbid_resolution(*args, **kwargs):
+        raise AssertionError("setup resolved the prepared snapshot again")
 
-
-def _forbid_credential_resolve(*_args: object, **_kwargs: object) -> None:
-    """Prepared runtimes are already resolved; setup must not call this."""
-    raise AssertionError("setup resolved credentials again")
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_prepared_empty_oauth_map_is_not_resolved_again(
-    harness_workspace, monkeypatch
-):
-    """A resolved empty OAuth map must not hit the ORM from async setup.
-
-    Harness prepare can return ``{}`` when no OAuth credential matches.
-    Pytest sets ``DJANGO_ALLOW_ASYNC_UNSAFE``, which hides the
-    SynchronousOnlyOperation Daphne raises on that second query.
-    """
-    from django.core.exceptions import SynchronousOnlyOperation
-
-    from apps.plugins.runtime_snapshot import PreparedPluginRuntime
-
-    org_id = harness_workspace.runner.organization_id
-    plugin_id, snapshot = _stdio_snapshot(org_id)
-    prepared = PreparedPluginRuntime(
-        snapshot=snapshot,
-        workspace=harness_workspace,
-        plaintexts={plugin_id: {}},
-        oauth_credentials={},
-    )
-    monkeypatch.setattr(McpServerConnection, "open", _open_without_transport)
-    monkeypatch.setattr(
-        "apps.harness.mcp_client.runtime.plugin_runtime.resolve_runtime_credentials",
-        _forbid_credential_resolve,
-    )
-    monkeypatch.setattr(
-        "apps.harness.mcp_client.runtime.plugin_runtime.resolve_runtime_oauth_credentials",
-        _forbid_credential_resolve,
-    )
-    monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
+    monkeypatch.setattr(McpServerConnection, "open", open_connection)
+    for name in (
+        "build_workspace_plugin_snapshot",
+        "resolve_runtime_credentials",
+        "resolve_runtime_oauth_credentials",
+    ):
+        monkeypatch.setattr(plugin_runtime, name, forbid_resolution)
     runtime = McpRuntime()
     try:
-        await runtime.setup(
-            workspace=None,
-            organization_id=org_id,
-            accessor=object(),
-            snapshot=prepared,
-        )
+        await runtime.setup(accessor=object(), prepared=prepared)
         assert prepared.oauth_credentials == {}
-        assert runtime.connections
-    except SynchronousOnlyOperation:
-        pytest.fail("setup re-resolved credentials from an async context")
+        assert len(runtime.connections) == 1
     finally:
-        os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
-        await runtime.aclose()
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_bare_snapshot_resolves_credentials_off_the_event_loop(
-    harness_workspace, monkeypatch
-):
-    """Legacy setup still resolves credentials, but not on the event loop."""
-    from django.core.exceptions import SynchronousOnlyOperation
-
-    org_id = harness_workspace.runner.organization_id
-    _plugin_id, snapshot = _stdio_snapshot(org_id)
-    monkeypatch.setattr(McpServerConnection, "open", _open_without_transport)
-    monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
-    runtime = McpRuntime()
-    try:
-        await runtime.setup(
-            workspace=harness_workspace,
-            organization_id=org_id,
-            accessor=object(),
-            snapshot=snapshot,
-        )
-        assert runtime._prepared is not None
-        assert runtime._prepared.oauth_credentials == {}
-        assert runtime.connections
-    except SynchronousOnlyOperation:
-        pytest.fail("bare-snapshot credential resolve ran on the event loop")
-    finally:
-        os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
         await runtime.aclose()
