@@ -1524,6 +1524,34 @@ class HarnessPartRepository:
         return list(HarnessPart.objects.filter(message_id__in=message_ids))
 
     @staticmethod
+    def history_parts_by_message(
+        message_ids: list[uuid.UUID],
+    ) -> dict[uuid.UUID, list[HarnessPart]]:
+        """Read ordered replay parts, including empty groups, for a message batch."""
+        grouped: dict[uuid.UUID, list[HarnessPart]] = {
+            message_id: [] for message_id in message_ids
+        }
+        parts = (
+            HarnessPart.objects.filter(
+                message_id__in=message_ids, type__in=("text", "steer", "tool")
+            )
+            .only(
+                "message_id",
+                "type",
+                "state",
+                "call_id",
+                "title",
+                "input",
+                "output",
+                "meta",
+            )
+            .order_by("message_id", "position", "created_at", "id")
+        )
+        for part in parts:
+            grouped[part.message_id].append(part)
+        return grouped
+
+    @staticmethod
     def list_open_for_message(
         message_id: uuid.UUID, *, types: tuple[str, ...] | None = None
     ) -> list[HarnessPart]:

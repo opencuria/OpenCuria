@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import timedelta
+from math import ceil
 from typing import Any
 
 import pytest
@@ -14,9 +16,9 @@ from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from apps.harness.compaction import CHECKPOINT_PREFIX
-from apps.harness.harness_service import HarnessService
+from apps.harness.harness_service import HISTORY_PART_BATCH_SIZE, HarnessService
 from apps.harness.models import HarnessMessage, HarnessPart, HarnessSession
-from apps.harness.repositories import HarnessSessionRepository
+from apps.harness.repositories import HarnessPartRepository, HarnessSessionRepository
 
 
 def _session(workspace: Any) -> HarnessSession:
@@ -35,12 +37,12 @@ def _part(message: HarnessMessage, position: int, **fields: Any) -> HarnessPart:
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("turns", [1, 10, 50])
+@pytest.mark.parametrize("turns", [1, 8, 9, 50])
 @pytest.mark.parametrize("compacted", [False, True])
-def test_history_checkpoint_lookup_never_loads_discarded_parts(
+def test_history_batches_only_load_retained_replay_parts(
     harness_workspace: Any, turns: int, compacted: bool
 ) -> None:
-    """Checkpoint discovery costs one read, independent of full history size."""
+    """Batch reads skip unused payloads and stay within a fixed query budget."""
     session = _session(harness_workspace)
     messages: list[HarnessMessage] = []
     parts: list[HarnessPart] = []
@@ -66,7 +68,7 @@ def test_history_checkpoint_lookup_never_loads_discarded_parts(
                 display={"unused": "y" * 10000},
             )
             parts.append(part)
-            if index >= tail_index:
+            if index >= tail_index and kind in ("text", "tool"):
                 retained_ids.add(part.id)
         if compacted and index == tail_index:
             checkpoint = HarnessPart(
@@ -93,9 +95,11 @@ def test_history_checkpoint_lookup_never_loads_discarded_parts(
     finally:
         post_init.disconnect(record_loaded, sender=HarnessPart)
 
-    assert len(queries) == 2 + turns - tail_index
+    query_budget = 3 if compacted else {1: 3, 8: 3, 9: 4, 50: 9}[turns]
+    assert len(queries) <= query_budget
     assert {part.id for part in loaded} == retained_ids
-    assert len(loaded) == len(retained_ids) + int(compacted)
+    assert len(loaded) == len(retained_ids)
+    assert all("display" in part.get_deferred_fields() for part in loaded)
     if compacted:
         checkpoint_row = loaded[0]
         assert checkpoint_row.id == checkpoint.id
@@ -275,3 +279,110 @@ def test_history_replay_keeps_text_tools_and_steers_in_position_order(
     assert history[4].tool_calls == [
         {"id": "failed", "name": "bash", "arguments": '{"command": "false"}'}
     ]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("turns", [8, 9, 17])
+def test_history_batches_include_assistants_without_parts(
+    harness_workspace: Any, turns: int
+) -> None:
+    """Empty groups must not skip later assistants or trigger extra batch reads."""
+    session = _session(harness_workspace)
+    for index in range(turns):
+        _message(session, index, role="assistant", content=f"legacy {index}")
+    # The last assistant owns replayable parts after batches of empty groups.
+    last = _message(session, turns, role="assistant", content="flattened")
+    _part(last, 1, type="text", output="last answer")
+    with CaptureQueriesContext(connection) as queries:
+        history = async_to_sync(HarnessService()._build_history)(session)
+    assert len(queries) == 2 + ceil((turns + 1) / HISTORY_PART_BATCH_SIZE)
+    assert [row.content for row in history] == [
+        *(f"legacy {index}" for index in range(turns)),
+        "last answer",
+    ]
+
+
+@pytest.mark.django_db
+def test_history_batch_cannot_load_excluded_or_foreign_messages(
+    harness_workspace: Any,
+) -> None:
+    """Batch inputs come only from the retained, session-scoped message list."""
+    session = _session(harness_workspace)
+    retained = _message(session, 0, role="assistant")
+    excluded = _message(session, 1, role="assistant")
+    foreign = _message(_session(harness_workspace), 0, role="assistant")
+    for message in (retained, excluded, foreign):
+        _part(message, 0, type="text", output=str(message.id))
+    loaded: list[uuid.UUID] = []
+
+    def record_loaded(sender: Any, instance: HarnessPart, **kwargs: Any) -> None:
+        loaded.append(instance.message_id)
+
+    post_init.connect(record_loaded, sender=HarnessPart)
+    try:
+        history = async_to_sync(HarnessService()._build_history)(
+            session, exclude_message_id=excluded.id
+        )
+    finally:
+        post_init.disconnect(record_loaded, sender=HarnessPart)
+    assert loaded == [retained.id]
+    assert [row.content for row in history] == [str(retained.id)]
+
+
+@pytest.mark.django_db
+def test_history_cancellation_stops_replay_between_assistants(
+    harness_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Batching must preserve cancellation points without preloading all parts."""
+    session = _session(harness_workspace)
+    for index in range(HISTORY_PART_BATCH_SIZE * 2 + 1):
+        _message(session, index, role="assistant", content="answer")
+    service = HarnessService()
+    replayed: list[uuid.UUID] = []
+
+    def cancel_after_first(message: HarnessMessage, *args: Any, **kwargs: Any) -> str:
+        replayed.append(message.id)
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()
+        return message.content
+
+    monkeypatch.setattr(service, "_assistant_history_content", cancel_after_first)
+
+    async def cancel_history() -> None:
+        with pytest.raises(asyncio.CancelledError):
+            await service._build_history(session)
+
+    with CaptureQueriesContext(connection) as queries:
+        async_to_sync(cancel_history)()
+    assert len(replayed) == 1
+    assert len(queries) == 3  # Messages, checkpoint, first part batch only.
+
+
+@pytest.mark.django_db
+def test_history_propagates_later_batch_read_failure(
+    harness_workspace: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed batch must abort history construction, never return partial replay."""
+    from django.db import DatabaseError
+
+    session = _session(harness_workspace)
+    for index in range(HISTORY_PART_BATCH_SIZE + 1):
+        _message(session, index, role="assistant", content="answer")
+    original = HarnessPartRepository.history_parts_by_message
+    batches: list[list[uuid.UUID]] = []
+
+    def fail_second_batch(
+        message_ids: list[uuid.UUID],
+    ) -> dict[uuid.UUID, list[HarnessPart]]:
+        batches.append(message_ids)
+        if len(batches) == 2:
+            raise DatabaseError("synthetic batch read failure")
+        return original(message_ids)
+
+    monkeypatch.setattr(
+        HarnessPartRepository, "history_parts_by_message", fail_second_batch
+    )
+    with pytest.raises(DatabaseError, match="synthetic batch read failure"):
+        async_to_sync(HarnessService()._build_history)(session)
+    assert [len(batch) for batch in batches] == [HISTORY_PART_BATCH_SIZE, 1]

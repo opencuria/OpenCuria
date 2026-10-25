@@ -3,6 +3,8 @@
 Run with ``backend/.venv/bin/python scripts/benchmark_harness_history.py``.
 Only synthetic data is created; the database is always removed on exit. Use
 ``--repo`` to run the same benchmark against an archived baseline checkout.
+Use ``--baseline-repo`` to alternate archived/current service and repositories
+against identical fixtures in one process (requires an unchanged model schema).
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ import argparse
 import asyncio
 import gc
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -109,7 +112,9 @@ def _populate(turns: int, compacted: bool, workspace: Any, output_bytes: int) ->
     return session
 
 
-async def _measure(service: Any, session: Any, samples: int) -> dict[str, Any]:
+async def _measure(
+    services: dict[str, Any], session: Any, samples: int
+) -> dict[str, Any]:
     from asgiref.sync import sync_to_async
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
@@ -118,15 +123,23 @@ async def _measure(service: Any, session: Any, samples: int) -> dict[str, Any]:
         payload = json.dumps([asdict(row) for row in history], sort_keys=True)
         return hashlib.sha256(payload.encode()).hexdigest()
 
-    history = await service._build_history(session)
-    expected = digest(history)
-    elapsed = []
-    for _ in range(samples):
-        start = time.perf_counter()
-        history = await service._build_history(session)
-        elapsed.append((time.perf_counter() - start) * 1000)
-        if digest(history) != expected:
-            raise RuntimeError("Provider history changed between samples")
+    expected: str | None = None
+    elapsed: dict[str, list[float]] = {name: [] for name in services}
+    for iteration in range(samples + 5):
+        order = list(services)
+        if iteration % 2:
+            order.reverse()
+        for name in order:
+            start = time.perf_counter()
+            history = await services[name]._build_history(session)
+            duration = (time.perf_counter() - start) * 1000
+            if iteration >= 5:
+                elapsed[name].append(duration)
+            actual = digest(history)
+            if expected is None:
+                expected = actual
+            elif actual != expected:
+                raise RuntimeError("Provider history changed across versions/samples")
 
     # Django connections are thread-local: capture queries on the same
     # thread-sensitive executor used by the service's repository calls.
@@ -140,26 +153,49 @@ async def _measure(service: Any, session: Any, samples: int) -> dict[str, Any]:
         context.__exit__(None, None, None)
         return len(context)
 
-    queries = await sync_to_async(start_queries)()
-    try:
-        await service._build_history(session)
-    finally:
-        query_count = await sync_to_async(finish_queries)(queries)
-    gc.collect()
-    tracemalloc.start()
-    try:
-        await service._build_history(session)
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-    return {
-        "query_count": query_count,
-        "p50_ms": round(statistics.median(elapsed), 3),
-        "p95_ms": round(sorted(elapsed)[math.ceil(samples * 0.95) - 1], 3),
-        "peak_python_allocated_bytes": peak,
-        "history_rows": len(history),
-        "history_sha256": expected,
-    }
+    results = {}
+    for name, service in services.items():
+        queries = await sync_to_async(start_queries)()
+        try:
+            await service._build_history(session)
+        finally:
+            query_count = await sync_to_async(finish_queries)(queries)
+        gc.collect()
+        tracemalloc.start()
+        try:
+            await service._build_history(session)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        results[name] = {
+            "query_count": query_count,
+            "p50_ms": round(statistics.median(elapsed[name]), 3),
+            "p95_ms": round(sorted(elapsed[name])[math.ceil(samples * 0.95) - 1], 3),
+            "peak_python_allocated_bytes": peak,
+            "history_rows": len(history),
+            "history_sha256": expected,
+            "samples_ms": [round(value, 3) for value in elapsed[name]],
+        }
+    return results if len(services) > 1 else results["after"]
+
+
+def _baseline_service(repo: Path) -> Any:
+    """Load archived service/repositories against the same unchanged model schema."""
+    modules = {}
+    for name in ("repositories", "harness_service"):
+        path = repo / "backend" / "apps" / "harness" / f"{name}.py"
+        module_name = f"apps.harness._benchmark_baseline_{name}"
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Cannot load baseline module: {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        modules[name] = module
+    return modules["harness_service"].HarnessService(
+        messages=modules["repositories"].HarnessMessageRepository,
+        parts=modules["repositories"].HarnessPartRepository,
+    )
 
 
 def _run(args: argparse.Namespace) -> dict[str, Any]:
@@ -199,12 +235,15 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     ]
 
     async def measurements() -> list[dict[str, Any]]:
-        service = HarnessService()
+        services = {}
+        if args.baseline_repo:
+            services["before"] = _baseline_service(args.baseline_repo.resolve())
+        services["after"] = HarnessService()
         return [
             {
                 "assistant_turns": turns,
                 "compacted": compacted,
-                **await _measure(service, session, args.samples),
+                **await _measure(services, session, args.samples),
             }
             for turns, compacted, session in scenarios
         ]
@@ -213,6 +252,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         "benchmark": "provider-history reconstruction; real service and repositories, "
         "temporary file-backed SQLite",
         "samples": args.samples,
+        "warmups": 5,
+        "paired": bool(args.baseline_repo),
         "tool_output_bytes_per_turn": args.output_kib * 1024,
         "parts_per_turn": 5,
         "compaction_tail_turns": 5,
@@ -220,6 +261,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         "notes": [
             "No external services or provider calls.",
             "Warmed latency; SQL counting and allocation tracing measured separately.",
+            "Paired mode alternates version order on identical fixtures in one process.",
             (
                 "Timings are local integration measurements, not production SLOs; "
                 "memory is Python allocation peak, not RSS."
@@ -237,6 +279,11 @@ def main() -> None:
     parser.add_argument("--turns", type=int, nargs="+", default=[1, 10, 50])
     parser.add_argument("--samples", type=int, default=31)
     parser.add_argument("--output-kib", type=int, default=32)
+    parser.add_argument(
+        "--baseline-repo",
+        type=Path,
+        help="Pair archived service/repositories with current code on the same fixtures",
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if min(args.turns) < 1 or args.samples < 2 or args.output_kib < 1:

@@ -27,6 +27,7 @@ import asyncio
 import contextvars
 import uuid
 from collections.abc import Awaitable, Callable
+from itertools import islice
 from typing import Any
 
 import anyio
@@ -80,6 +81,9 @@ from .tools.truncate import truncate_tool_output
 log = structlog.get_logger(__name__)
 
 EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
+
+# Bound raw tool-output retention while amortizing queries and executor hops.
+HISTORY_PART_BATCH_SIZE = 8
 
 
 def _event_tool_attachments(event: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2634,6 +2638,10 @@ class HarnessService:
                     content=f"{CHECKPOINT_PREFIX}\n{checkpoint_summary}",
                 )
             )
+        assistant_ids = iter(
+            message.id for message in stored if message.role == "assistant"
+        )
+        parts_by_message: dict[uuid.UUID, list[HarnessPart]] = {}
         for message in stored:
             if message.role == "user":
                 history.append(
@@ -2646,7 +2654,14 @@ class HarnessService:
                 continue
             if message.role != "assistant":
                 continue
-            parts = await sync_to_async(self.parts.list_for_message)(message.id)
+            if not parts_by_message:
+                parts_by_message = await sync_to_async(
+                    self.parts.history_parts_by_message
+                )(list(islice(assistant_ids, HISTORY_PART_BATCH_SIZE)))
+            else:
+                # Keep cancellation and scheduling points between assistant replays.
+                await asyncio.sleep(0)
+            parts = parts_by_message.pop(message.id)
             tool_parts = [
                 part
                 for part in parts
