@@ -54,6 +54,10 @@ from .models import (
     HarnessSessionStatus,
 )
 from .permissions.service import PermissionService
+from .provider_account_events import (
+    register_revocation_listener,
+    unregister_revocation_listener,
+)
 from .providers.base import ChatOptions, LLMMessage, ProviderAdapter, Usage
 from .providers.model_ref import namespaced_model_id, parse_model_ref
 from .providers.models_catalog import normalize_reasoning_effort
@@ -341,8 +345,6 @@ class HarnessService:
             watched = root.get("provider_revocation_accounts")
             event = root.get("provider_revocation_event")
             if watched and event is not None:
-                from .provider_turns import unregister_revocation_listener
-
                 unregister_revocation_listener(watched, event=event)
             self._provider_turn_roots.pop(str(turn_id), None)
 
@@ -362,8 +364,6 @@ class HarnessService:
         watched_accounts: set[uuid.UUID],
     ) -> None:
         """Poll revocation and abort the root tree, then cancel its followers."""
-        from .provider_turns import unregister_revocation_listener
-
         turn_id = context.get("provider_turn_id")
         try:
             while turn_id:
@@ -1805,8 +1805,6 @@ class HarnessService:
                 )
                 provider_turn_id = sidecar.id
                 provider_turn_holder = str(sidecar.holder_tokens[0])
-                from .provider_turns import register_revocation_listener
-
                 revocation_event = asyncio.Event()
                 watched_accounts = register_revocation_listener(
                     account_ids.values(),
@@ -2008,8 +2006,6 @@ class HarnessService:
                 watched = run_context.get("provider_revocation_accounts")
                 event = run_context.get("provider_revocation_event")
                 if watched and event is not None:
-                    from .provider_turns import unregister_revocation_listener
-
                     unregister_revocation_listener(watched, event=event)
             durable_owner = run_context.get("ownership")
             if durable_owner is not None:

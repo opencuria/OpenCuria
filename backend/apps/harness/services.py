@@ -19,6 +19,7 @@ from .agent_s.config import AgentSRunConfig
 from .agents.definitions import AGENT_DEFINITIONS
 from .constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
 from .models import AgentSConfig, ProviderConfig, RecentModel
+from .provider_accounts import ProviderAccountService
 from .providers.bedrock import BedrockAdapter
 from .providers.chatgpt import ChatGPTAdapter
 from .providers.model_ref import parse_model_ref
@@ -472,8 +473,6 @@ class ProviderConfigService:
     ) -> str:
         """Validate a provider against the caller's selected/frozen account."""
         provider_id, _ = parse_model_ref(model)
-        from .provider_accounts import ProviderAccountService
-
         account_service = ProviderAccountService()
         account_id = (account_ids or {}).get(provider_id)
         if account_ids is not None:
@@ -489,37 +488,6 @@ class ProviderConfigService:
         if connection is None or connection.provider != provider_id:
             raise ValueError(f"Provider '{provider_id}' is not connected")
         return provider_id
-
-    # ------------------------------------------------------------------
-    # OpenAI-compatible account validation
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def normalize_openai_compatible_models(models: object) -> list[str]:
-        """Deduplicate/trim manual model ids (empty list stays empty).
-
-        Raises:
-            ValueError: If any provided id is empty after trimming.
-        """
-        raw = models if isinstance(models, list) else []
-        cleaned: list[str] = []
-        seen: set[str] = set()
-        for entry in raw:
-            item = str(entry or "").strip()
-            if not item:
-                raise ValueError("models must not contain empty entries")
-            if item in seen:
-                continue
-            seen.add(item)
-            cleaned.append(item)
-        return cleaned
-
-    @staticmethod
-    def validate_openai_compatible_base_url(base_url: str) -> str:
-        """Validate an http/https base URL (raises ValueError)."""
-        from .providers.openai_compatible import validate_base_url
-
-        return validate_base_url(base_url)
 
 
 class RecentModelService:

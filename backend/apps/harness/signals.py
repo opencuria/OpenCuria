@@ -11,9 +11,9 @@ from django.dispatch import receiver
 
 from apps.organizations.models import Membership
 
+from .provider_account_events import notify_account_revoked
 from .provider_account_repository import ProviderAccountRepository
 from .provider_turn_repository import ProviderTurnRepository
-from .provider_turns import notify_account_revoked
 
 
 @receiver(pre_delete, sender=get_user_model())

@@ -224,15 +224,14 @@ def test_openai_compatible_requires_base_url() -> None:
 
 def test_validate_base_url_reuses_adapter_rule() -> None:
     """Service validation reuses the pure provider helper (single rule)."""
+    from apps.harness.provider_accounts import ProviderAccountService
     from apps.harness.providers.openai_compatible import validate_base_url
-    from apps.harness.services import ProviderConfigService
 
-    assert (
-        ProviderConfigService.validate_openai_compatible_base_url(
-            "https://x.example/v1/"
-        )
-        == "https://x.example/v1"
+    config = {"base_url": "https://x.example/v1/"}
+    ProviderAccountService.validate_credentials(
+        "openai-compatible", {}, None, config, {}
     )
+    assert config["base_url"] == "https://x.example/v1"
     assert validate_base_url("http://localhost:8080/v1/") == (
         "http://localhost:8080/v1"
     )
@@ -240,7 +239,9 @@ def test_validate_base_url_reuses_adapter_rule() -> None:
         with pytest.raises(ValueError, match="base_url"):
             validate_base_url(bad)
         with pytest.raises(ValueError, match="base_url"):
-            ProviderConfigService.validate_openai_compatible_base_url(bad)
+            ProviderAccountService.validate_credentials(
+                "openai-compatible", {}, None, {"base_url": bad}, {}
+            )
 
 
 @pytest.mark.asyncio

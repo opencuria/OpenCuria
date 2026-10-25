@@ -39,6 +39,8 @@ Stateless commit suggestions and shared small-model composition are independent
 of chat session orchestration; their adapter calls ``CommitMessageService``.
 Session metadata generation is independent as well; the lifecycle service only
 schedules it and supplies change notifications to ``SessionMetadataService``.
+Provider account management never imports its orchestration consumers; account
+validation stays with accounts and revocation wakeups use a leaf event module.
 """
 
 from __future__ import annotations
@@ -251,6 +253,48 @@ def test_session_metadata_is_independent_of_run_orchestration() -> None:
         "Keep title/summary generation in SessionMetadataService; it and its "
         "dependencies must not import HarnessService:\n" + "\n".join(sorted(violations))
     )
+
+
+def test_provider_accounts_never_import_their_orchestration_consumers() -> None:
+    """Accounts stay below model discovery, turn orchestration and configuration."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    modules = {_module_name(path): path for path in trees}
+    consumers = {
+        "apps.harness.services",
+        "apps.harness.provider_turns",
+        "apps.harness.harness_service",
+        "apps.harness.engines",
+        "apps.harness.providers.models_catalog",
+        "apps.harness.providers.resolver",
+    }
+    pending = {"apps.harness.provider_accounts"}
+    checked: set[str] = set()
+    violations = set()
+    while pending:
+        module = pending.pop()
+        checked.add(module)
+        path = modules[module]
+        for imported in _imported_modules(path, trees[path]):
+            if any(
+                imported == consumer or imported.startswith(f"{consumer}.")
+                for consumer in consumers
+            ):
+                violations.add(f"{module} -> {imported}")
+            elif imported in modules and imported not in checked:
+                pending.add(imported)
+    assert violations == set(), (
+        "Keep account validation in provider_accounts and publish revocation "
+        "wakeups through provider_account_events; account management must not "
+        "import its consumers, even transitively or inside functions:\n"
+        + "\n".join(sorted(violations))
+    )
+
+
+def test_provider_account_events_remain_independent_of_application_code() -> None:
+    """Account publishers and run subscribers share a leaf notification module."""
+    path = APPS_ROOT / "harness" / "provider_account_events.py"
+    imports = _imported_modules(path, ast.parse(path.read_text()))
+    assert {module.split(".")[0] for module in imports} <= sys.stdlib_module_names
 
 
 def test_provider_wire_adapters_never_import_harness_orchestration() -> None:

@@ -352,8 +352,7 @@ def test_scope_unshare_revoke_notify_is_post_commit_and_revokes_before_secret_mo
         ),
     )
     monkeypatch.setattr(
-        service,
-        "_notify_revoked",
+        "apps.harness.provider_accounts.notify_account_revoked",
         lambda account_id: calls.append(("notify", account_id)),
     )
     service.save_account(

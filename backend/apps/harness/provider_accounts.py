@@ -13,7 +13,11 @@ from common.exceptions import AuthenticationError, NotFoundError
 
 from .enums import ProviderType
 from .models import ProviderConnection
+from .provider_account_events import notify_account_revoked
 from .provider_account_repository import ProviderAccountRepository
+from .provider_turn_repository import ProviderTurnRepository
+from .providers.openai_compatible import validate_base_url
+from .providers.openrouter import DEFAULT_BASE_URL
 
 CLAUDE_AGENT = "claude-agent"
 SUPPORTED_PROVIDERS = (*ProviderType.values, CLAUDE_AGENT)
@@ -36,6 +40,22 @@ CONFIG_FIELDS: dict[str, tuple[str, ...]] = {
     "openai-compatible": ("base_url", "models"),
     CLAUDE_AGENT: ("auth_type",),
 }
+
+
+def _normalize_openai_compatible_models(models: object) -> list[str]:
+    """Trim and deduplicate manual model IDs, rejecting empty entries."""
+    raw = models if isinstance(models, list) else []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for entry in raw:
+        item = str(entry or "").strip()
+        if not item:
+            raise ValueError("models must not contain empty entries")
+        if item in seen:
+            continue
+        seen.add(item)
+        cleaned.append(item)
+    return cleaned
 
 
 class ProviderAccountService:
@@ -77,8 +97,6 @@ class ProviderAccountService:
     @staticmethod
     def _lock_fence() -> None:
         """Serialize account mutations with provider-turn admission and use."""
-        from .provider_turn_repository import ProviderTurnRepository
-
         ProviderTurnRepository.lock_mutex()
 
     @staticmethod
@@ -345,7 +363,7 @@ class ProviderAccountService:
                     raise NotFoundError("ProviderAccount", str(account.id))
             if scope_changed and old_user_id is None:
                 self.repository.clear_selections_for_others(account.id, user_id)
-                transaction.on_commit(lambda: self._notify_revoked(account.id))
+                transaction.on_commit(lambda: notify_account_revoked(account.id))
             return account
 
     @staticmethod
@@ -358,24 +376,16 @@ class ProviderAccountService:
     ) -> None:
         """Validate provider-specific fields while accepting partial updates."""
         if provider == "openai-compatible":
-            from .services import ProviderConfigService
-
             if not config.get("base_url") and existing is not None:
                 config["base_url"] = str((existing.config or {}).get("base_url") or "")
             if not config.get("base_url"):
                 raise ValueError("base_url is required")
-            config["base_url"] = (
-                ProviderConfigService.validate_openai_compatible_base_url(
-                    str(config["base_url"])
-                )
-            )
+            config["base_url"] = validate_base_url(str(config["base_url"]))
             if not isinstance(config.get("models", []), list):
                 raise ValueError("models must be a list")
             try:
-                config["models"] = (
-                    ProviderConfigService.normalize_openai_compatible_models(
-                        config.get("models", [])
-                    )
+                config["models"] = _normalize_openai_compatible_models(
+                    config.get("models", [])
                 )
             except ValueError:
                 if existing is None or "models" in payload:
@@ -411,8 +421,6 @@ class ProviderAccountService:
                 )
             return
         if provider == "openrouter":
-            from .providers.openrouter import DEFAULT_BASE_URL
-
             config["base_url"] = str(config.get("base_url") or DEFAULT_BASE_URL)
         if provider == "amazon-bedrock":
             config["region"] = str(config.get("region") or "us-east-1")
@@ -480,7 +488,7 @@ class ProviderAccountService:
                 )
             self.repository.clear_selections(account.id)
             self.repository.soft_delete(account)
-            transaction.on_commit(lambda: self._notify_revoked(account.id))
+            transaction.on_commit(lambda: notify_account_revoked(account.id))
 
     def select_account(
         self,
@@ -618,15 +626,6 @@ class ProviderAccountService:
         account_id: uuid.UUID, allowed_user_id: int | None = None
     ) -> None:
         """Revoke affected active turns in the caller's DB transaction."""
-        from .provider_turn_repository import ProviderTurnRepository
-
         ProviderTurnRepository.revoke_account(
             account_id, allowed_user_id=allowed_user_id
         )
-
-    @staticmethod
-    def _notify_revoked(account_id: uuid.UUID) -> None:
-        """Wake local answer listeners after the account change commits."""
-        from .provider_turns import notify_account_revoked
-
-        notify_account_revoked(account_id)
