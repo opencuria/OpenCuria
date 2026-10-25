@@ -115,6 +115,8 @@ class ScheduledTaskService:
             validation_session = HarnessSession(
                 workspace_id=workspace_id,
                 organization_id=organization_id,
+                # Provider accounts are personal: validate the owner's selection.
+                created_by_id=owner_id,
                 mode=mode,
                 agent_name=mode,
                 model=raw_model,

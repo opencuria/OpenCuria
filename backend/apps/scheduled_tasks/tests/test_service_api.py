@@ -441,3 +441,33 @@ def test_projection_failure_preserves_live_run_and_idle_cleanup_then_history_rep
     assert repaired.status == ScheduledTaskRun.Status.SUCCEEDED
     assert repaired.finished_at == assistant.completed_at
     assert repaired.error == ""
+
+
+@pytest.mark.django_db
+def test_create_validates_the_owners_personal_provider_account(scheduled_run_setup):
+    from datetime import date, timedelta
+
+    org, owner, outsider, workspace, _ = scheduled_run_setup
+    owner_workspace = workspace
+    values = {
+        "name": "One-time review",
+        "prompt": "Review this workspace",
+        "model": "openrouter/openai/gpt-test",
+        "recurrence": "once",
+        "run_date": (date.today() + timedelta(days=2)).isoformat(),
+        "local_time": "09:00",
+    }
+    created = ScheduledTaskService().create(
+        organization_id=org.id,
+        owner_id=owner.id,
+        workspace=owner_workspace,
+        values=values,
+    )
+    assert (created.recurrence, created.enabled) == ("once", True)
+    with pytest.raises(ValueError, match="not connected"):
+        ScheduledTaskService().create(
+            organization_id=org.id,
+            owner_id=outsider.id,
+            workspace=owner_workspace,
+            values=values,
+        )
