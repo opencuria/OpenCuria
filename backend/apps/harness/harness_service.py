@@ -31,7 +31,7 @@ from typing import Any
 
 import anyio
 import structlog
-from asgiref.sync import ThreadSensitiveContext, async_to_sync, sync_to_async
+from asgiref.sync import ThreadSensitiveContext, sync_to_async
 
 from apps.runners.services import get_runner_service
 from apps.runners.services.infra import realtime
@@ -39,6 +39,7 @@ from apps.skills.services import SkillService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .agents.definitions import get_agent
+from .conversation_events import ConversationEvents
 from .images import (
     hydrate_user_messages,
     select_persisted_tool_attachments,
@@ -113,7 +114,6 @@ FRONTEND_EVENT_STATUS = "harness.session_status"
 FRONTEND_EVENT_TODO = "harness.todo_updated"
 FRONTEND_EVENT_SUBTASK_STARTED = "harness.subtask_started"
 FRONTEND_EVENT_SUBTASK_FINISHED = "harness.subtask_finished"
-FRONTEND_EVENT_CONVERSATIONS_CHANGED = "harness.conversations_changed"
 FRONTEND_EVENT_STEER_QUEUE = "harness.steer_queue"
 
 
@@ -153,6 +153,7 @@ class HarnessService:
         self.permissions = permissions or PermissionService()
         self.skills = skills or SkillService()
         self._emit = emit
+        self.conversation_events = ConversationEvents(emit=self._emit_frontend)
         self._runner_factory = runner_factory
         self._provider_factory = provider_factory
         self._accessor_factory = accessor_factory
@@ -180,7 +181,7 @@ class HarnessService:
             messages=self.messages,
             provider_factory=provider_factory,
             emit=self._emit_frontend,
-            conversations_changed=self._emit_conversations_changed,
+            conversations_changed=self.conversation_events.emit,
         )
 
     def _engine_registry_for_run(self) -> Any:
@@ -616,7 +617,7 @@ class HarnessService:
         session = self.sessions.create(**session_kwargs)
         log.info("harness_session_created", session_id=str(session.id))
         if session.parent_id is None:
-            self._emit_conversations_changed_sync(session.workspace_id)
+            self.conversation_events.emit_sync(session.workspace_id)
         return session
 
     def get_session(self, session_id: uuid.UUID) -> HarnessSession:
@@ -656,7 +657,7 @@ class HarnessService:
         self.sessions.ensure_interactions_available(session.workspace_id)
         updated = self.sessions.set_mode(session, normalized)
         if updated.parent_id is None:
-            self._emit_conversations_changed_sync(updated.workspace_id)
+            self.conversation_events.emit_sync(updated.workspace_id)
         return updated
 
     @staticmethod
@@ -733,7 +734,7 @@ class HarnessService:
             raise ValueError("title must not be empty")
         updated = self.sessions.set_title(session, normalized)
         if updated.parent_id is None:
-            self._emit_conversations_changed_sync(updated.workspace_id)
+            self.conversation_events.emit_sync(updated.workspace_id)
         return updated
 
     def update_skill_ids(
@@ -799,7 +800,7 @@ class HarnessService:
         await self._ensure_external_attempt_reconciled(session, force=True)
         await sync_to_async(self.sessions.delete)(session)
         if session.parent_id is None:
-            await self._emit_conversations_changed(session.workspace_id)
+            await self.conversation_events.emit(session.workspace_id)
 
     async def _ensure_external_attempt_reconciled(
         self, session: HarnessSession, *, force: bool = False
@@ -884,7 +885,7 @@ class HarnessService:
             session_id=str(session.id),
             fork_id=str(forked.id),
         )
-        await self._emit_conversations_changed(forked.workspace_id)
+        await self.conversation_events.emit(forked.workspace_id)
         return forked
 
     async def edit_user_message(
@@ -1074,153 +1075,6 @@ class HarnessService:
             except ValueError:
                 continue
         return child_ids
-
-    def list_conversations(
-        self,
-        *,
-        organization_id: uuid.UUID,
-        workspace_ids: list[uuid.UUID],
-    ) -> list[dict[str, Any]]:
-        """List root sessions across owned workspaces (conversations feed)."""
-        sessions = self.sessions.list_for_workspaces(workspace_ids)
-        unread_map = self.unread_for_sessions(sessions)
-        attention_map = self.attention_for_sessions(sessions)
-        return [
-            {
-                "session_id": str(session.id),
-                "workspace_id": str(session.workspace_id),
-                "workspace_name": session.workspace_name or "",
-                "title": session.title or "",
-                "status": session.status,
-                "mode": session.mode,
-                "agent_name": session.agent_name,
-                "harness_id": session.harness_id or "native",
-                "model": session.model or "",
-                "reasoning_effort": session.reasoning_effort or "",
-                "unread": unread_map.get(session.id, False),
-                "manual_unread": session.manual_unread_at is not None,
-                "needs_attention": attention_map.get(session.id, {}).get(
-                    "needs_attention", False
-                ),
-                "attention_kind": attention_map.get(session.id, {}).get(
-                    "attention_kind", ""
-                ),
-                "updated_at": session.updated_at.isoformat(),
-                "last_message_at": (
-                    session.last_message_at or session.created_at
-                ).isoformat(),
-            }
-            for session in sessions
-        ]
-
-    def mark_session_read(self, session_id: uuid.UUID) -> HarnessSession:
-        """Persist that the user opened a harness session."""
-        session = self.get_session(session_id)
-        updated = self.sessions.mark_read(session)
-        if updated.parent_id is None:
-            self._emit_conversations_changed_sync(updated.workspace_id)
-        return updated
-
-    def mark_session_unread(self, session_id: uuid.UUID) -> HarnessSession:
-        """Persist that the user explicitly marked a session unread."""
-        session = self.get_session(session_id)
-        updated = self.sessions.mark_unread(session)
-        if updated.parent_id is None:
-            self._emit_conversations_changed_sync(updated.workspace_id)
-        return updated
-
-    def dismiss_notice(
-        self, session_id: uuid.UUID, message_id: uuid.UUID
-    ) -> HarnessMessage:
-        """Dismiss the stopped/failed notice of one session message."""
-        session = self.get_session(session_id)
-        message = self.messages.get_by_id(message_id)
-        if message is None or message.session_id != session.id:
-            raise NotFoundError("HarnessMessage", str(message_id))
-        return self.messages.dismiss_notice(message)
-
-    def unread_for_sessions(
-        self, sessions: list[HarnessSession]
-    ) -> dict[uuid.UUID, bool]:
-        """Return unread flags keyed by session id."""
-        if not sessions:
-            return {}
-        latest_assistant_at = self.messages.latest_assistant_completed_at_by_session(
-            [session.id for session in sessions]
-        )
-        return {
-            session.id: self._is_conversation_unread(
-                session,
-                latest_assistant_at.get(session.id),
-            )
-            for session in sessions
-        }
-
-    def is_session_unread(self, session: HarnessSession) -> bool:
-        """Return whether a single session has unread assistant work."""
-        return self.unread_for_sessions([session]).get(session.id, False)
-
-    @staticmethod
-    def _is_conversation_unread(
-        session: HarnessSession,
-        latest_assistant_completed_at,
-    ) -> bool:
-        """Return True when the session is manually unread or has new work."""
-        if session.manual_unread_at is not None:
-            return True
-        if session.status != HarnessSessionStatus.IDLE:
-            return False
-        if latest_assistant_completed_at is None:
-            return False
-        if session.last_read_at is None:
-            return True
-        return latest_assistant_completed_at > session.last_read_at
-
-    def attention_for_sessions(
-        self, sessions: list[HarnessSession]
-    ) -> dict[uuid.UUID, dict[str, Any]]:
-        """Return pending-gate attention flags keyed by session id.
-
-        Child (subagent) gates count toward every ancestor in *sessions*,
-        so a root conversation is marked when a descendant is waiting.
-        """
-        if not sessions:
-            return {}
-        workspace_ids = list({session.workspace_id for session in sessions})
-        id_parents = self.sessions.list_id_parent_for_workspaces(workspace_ids)
-        children_map: dict[uuid.UUID, list[uuid.UUID]] = {}
-        all_ids: list[uuid.UUID] = []
-        for session_id, parent_id in id_parents:
-            all_ids.append(session_id)
-            if parent_id is None:
-                continue
-            children_map.setdefault(parent_id, []).append(session_id)
-        pending_perm_ids = {
-            row.session_id
-            for row in self.permissions.requests.list_pending_for_sessions(all_ids)
-        }
-        pending_question_ids = {
-            row.session_id
-            for row in QuestionRequestRepository.list_pending_for_sessions(all_ids)
-        }
-        result: dict[uuid.UUID, dict[str, Any]] = {}
-        for session in sessions:
-            tree = _descendant_ids(session.id, children_map)
-            has_permission = any(sid in pending_perm_ids for sid in tree)
-            has_question = any(sid in pending_question_ids for sid in tree)
-            if has_permission and has_question:
-                kind = "both"
-            elif has_permission:
-                kind = "permission"
-            elif has_question:
-                kind = "question"
-            else:
-                kind = ""
-            result[session.id] = {
-                "needs_attention": bool(kind),
-                "attention_kind": kind,
-            }
-        return result
 
     @staticmethod
     def _agent_configs_map(organization_id: uuid.UUID) -> dict[str, dict[str, Any]]:
@@ -3049,7 +2903,7 @@ class HarnessService:
                     str(session.workspace_id),
                 )
                 if session.parent_id is None:
-                    await self._emit_conversations_changed(session.workspace_id)
+                    await self.conversation_events.emit(session.workspace_id)
                     await self._schedule_summary(session, assistant)
         finally:
             context = self._runs.get(key, {})
@@ -3361,7 +3215,7 @@ class HarnessService:
                     str(session.workspace_id),
                 )
                 if session.parent_id is None:
-                    await self._emit_conversations_changed(session.workspace_id)
+                    await self.conversation_events.emit(session.workspace_id)
         finally:
             leftovers = self._close_steering(key)
             followup = bool(leftovers) and not self._user_abort_requested(session)
@@ -4708,29 +4562,6 @@ class HarnessService:
             payload["user_message_id"] = user_message_id
         return payload
 
-    async def _emit_conversations_changed(self, workspace_id: uuid.UUID | str) -> None:
-        """Notify workspace subscribers that the conversation feed may have changed."""
-        workspace = str(workspace_id)
-        await self._emit_frontend(
-            FRONTEND_EVENT_CONVERSATIONS_CHANGED,
-            {"workspace_id": workspace},
-            workspace,
-        )
-
-    def _emit_conversations_changed_sync(self, workspace_id: uuid.UUID | str) -> None:
-        """Dispatch a feed change from synchronous service/API entry points.
-
-        ``async_to_sync`` bridges sync Django views and sync-to-async worker
-        threads back to the request loop. If called directly from an async
-        context, schedule on that loop instead of blocking it.
-        """
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            async_to_sync(self._emit_conversations_changed)(workspace_id)
-        else:
-            loop.create_task(self._emit_conversations_changed(workspace_id))
-
     async def _emit_frontend(
         self, event: str, data: dict[str, Any], workspace_id: str
     ) -> None:
@@ -5296,25 +5127,6 @@ def create_default_harness_service() -> HarnessService:
     return HarnessService(
         accessor_factory=accessor_factory, process_cleanup=process_cleanup
     )
-
-
-def _descendant_ids(
-    session_id: uuid.UUID,
-    children_map: dict[uuid.UUID, list[uuid.UUID]],
-) -> list[uuid.UUID]:
-    """Return *session_id* followed by descendant ids from *children_map*."""
-    ids: list[uuid.UUID] = [session_id]
-    queue: list[uuid.UUID] = [session_id]
-    seen: set[uuid.UUID] = {session_id}
-    while queue:
-        current = queue.pop(0)
-        for child_id in children_map.get(current, []):
-            if child_id in seen:
-                continue
-            seen.add(child_id)
-            ids.append(child_id)
-            queue.append(child_id)
-    return ids
 
 
 def get_harness_service() -> HarnessService:

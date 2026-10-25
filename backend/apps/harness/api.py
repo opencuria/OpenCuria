@@ -31,6 +31,7 @@ from apps.organizations.services import OrganizationService
 from apps.runners.services import get_runner_service
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
+from .conversation_service import ConversationService
 from .schemas import (
     AgentConfigOut,
     AgentConfigSaveIn,
@@ -177,8 +178,9 @@ def list_harness_sessions(request: HttpRequest, workspace_id: uuid.UUID):
         _owned_workspace(request, org_id, workspace_id)
         service = _resolve_harness_service()
         sessions = service.list_sessions(workspace_id)
-        unread_map = service.unread_for_sessions(sessions)
-        attention_map = service.attention_for_sessions(sessions)
+        conversations = ConversationService()
+        unread_map = conversations.unread_for_sessions(sessions)
+        attention_map = conversations.attention_for_sessions(sessions)
         return 200, [
             session_to_out(
                 session,
@@ -244,7 +246,9 @@ async def create_harness_session(
             skill_ids=payload.skill_ids or [],
         )
         fresh = await sync_to_async(service.get_session)(session.id)
-        return 201, await sync_to_async(session_to_out_with_unread)(service, fresh)
+        return 201, await sync_to_async(session_to_out_with_unread)(
+            ConversationService(), fresh
+        )
     except AuthenticationError as exc:
         status = 403 if exc.code == "authentication_error" else 401
         return status, {"detail": exc.message, "code": exc.code}
@@ -310,7 +314,9 @@ async def send_harness_message(
             skill_ids=payload.skill_ids if payload.skill_ids else None,
         )
         fresh = await sync_to_async(service.get_session)(session.id)
-        return 202, await sync_to_async(session_to_out_with_unread)(service, fresh)
+        return 202, await sync_to_async(session_to_out_with_unread)(
+            ConversationService(), fresh
+        )
     except AuthenticationError as exc:
         return 403, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -420,7 +426,9 @@ async def fork_harness_session(
             payload.message_id,
             include_message=payload.include_message,
         )
-        out = await sync_to_async(session_to_out_with_unread)(service, forked)
+        out = await sync_to_async(session_to_out_with_unread)(
+            ConversationService(), forked
+        )
         return 201, out
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
@@ -475,7 +483,9 @@ async def edit_harness_message(
             user_id=request.user.id,
         )
         fresh = await sync_to_async(service.get_session)(session.id)
-        return 202, await sync_to_async(session_to_out_with_unread)(service, fresh)
+        return 202, await sync_to_async(session_to_out_with_unread)(
+            ConversationService(), fresh
+        )
     except AuthenticationError as exc:
         return 403, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -509,7 +519,9 @@ async def patch_harness_session(
         if not (payload.title or "").strip():
             raise ValueError("title must not be empty")
         updated = await sync_to_async(service.update_title)(session.id, payload.title)
-        return 200, await sync_to_async(session_to_out_with_unread)(service, updated)
+        return 200, await sync_to_async(session_to_out_with_unread)(
+            ConversationService(), updated
+        )
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
     except (ValueError, KeyError) as exc:
@@ -558,7 +570,7 @@ def list_harness_conversations(request: HttpRequest):
         organization_id=org_id,
         user=request.user,
     )
-    service = _resolve_harness_service()
+    service = ConversationService()
     workspace_ids = [workspace.id for workspace in workspaces]
     rows = service.list_conversations(
         organization_id=org_id,
@@ -599,7 +611,7 @@ def mark_harness_session_read(request: HttpRequest, session_id: uuid.UUID):
     org_id = _get_org_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
-        service = _resolve_harness_service()
+        service = ConversationService()
         session = service.get_session(session_id)
         _owned_workspace(request, org_id, session.workspace_id)
         service.mark_session_read(session.id)
@@ -620,7 +632,7 @@ def mark_harness_session_unread(request: HttpRequest, session_id: uuid.UUID):
     org_id = _get_org_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
-        service = _resolve_harness_service()
+        service = ConversationService()
         session = service.get_session(session_id)
         _owned_workspace(request, org_id, session.workspace_id)
         service.mark_session_unread(session.id)
@@ -643,7 +655,7 @@ def dismiss_harness_notice(
     org_id = _get_org_id(request)
     OrganizationService().require_membership(request.user, org_id)
     try:
-        service = _resolve_harness_service()
+        service = ConversationService()
         session = service.get_session(session_id)
         _owned_workspace(request, org_id, session.workspace_id)
         service.dismiss_notice(session.id, message_id)
@@ -677,7 +689,9 @@ async def set_harness_session_mode(
                 f"Harness session '{session.id}' already has an active run"
             )
         updated = await sync_to_async(service.set_mode)(session.id, payload.mode)
-        return 200, await sync_to_async(session_to_out_with_unread)(service, updated)
+        return 200, await sync_to_async(session_to_out_with_unread)(
+            ConversationService(), updated
+        )
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
     except ConflictError as exc:
@@ -705,7 +719,9 @@ async def abort_harness_session(request: HttpRequest, session_id: uuid.UUID):
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         aborted = await service.abort_run(session.id)
-        return 200, await sync_to_async(session_to_out_with_unread)(service, aborted)
+        return 200, await sync_to_async(session_to_out_with_unread)(
+            ConversationService(), aborted
+        )
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
     except ConflictError as exc:
@@ -727,7 +743,9 @@ def get_harness_timeline(request: HttpRequest, session_id: uuid.UUID):
         service = _resolve_harness_service()
         session = service.get_session(session_id)
         _owned_workspace(request, org_id, session.workspace_id)
-        return 200, timeline_to_out(service, session)
+        return 200, timeline_to_out(
+            service, session, conversations=ConversationService()
+        )
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
 

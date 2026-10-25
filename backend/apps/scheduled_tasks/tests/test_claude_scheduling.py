@@ -196,9 +196,6 @@ def test_claude_run_dispatch_passes_harness_and_owner_without_secret(name):
         async def start_run(self, session, prompt, **values):
             return SimpleNamespace(id=uuid.uuid4())
 
-        async def _emit_conversations_changed(self, workspace_id):
-            return None
-
     repo = Repository()
     service = ScheduledTaskService(repository=repo, harness=FakeHarness())
     task = SimpleNamespace(

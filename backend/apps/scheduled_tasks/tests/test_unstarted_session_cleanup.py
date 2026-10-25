@@ -53,7 +53,7 @@ def test_real_harness_admission_rollback_under_lifecycle_fence(
 ):
     harness = HarnessService()
     notify = AsyncMock()
-    monkeypatch.setattr(harness, "_emit_conversations_changed", notify)
+    monkeypatch.setattr(harness.conversation_events, "emit", notify)
     start = harness.start_run
     lifecycle = Task.objects.create(
         runner=schedule.workspace.runner, type="create_image_artifact", status="failed"

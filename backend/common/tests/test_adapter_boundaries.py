@@ -43,6 +43,9 @@ Provider account management never imports its orchestration consumers; account
 validation stays with accounts and revocation wakeups use a leaf event module.
 Provider-history reconstruction is independent of run orchestration; its caller
 supplies persistence ports to ``ProviderHistoryService``.
+Saved conversation feeds, unread/attention state and notice dismissal belong to
+``ConversationService``. It and the shared conversation event publisher never
+import live run orchestration, even through their dependencies.
 OAuth endpoint, registration and grant integrity rules live in
 ``apps.credentials.oauth_metadata``; persistence and protocol workflows never
 import their service consumers, even through function-local imports.
@@ -294,6 +297,61 @@ def test_provider_history_is_independent_of_run_orchestration() -> None:
         "its dependencies must not import run orchestration:\n"
         + "\n".join(sorted(violations))
     )
+
+
+def test_saved_conversations_are_independent_of_run_orchestration() -> None:
+    """Saved-state queries and navigation must not load agent execution."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    modules = {_module_name(path): path for path in trees}
+    lifecycle = "apps.harness.harness_service"
+    owners = {
+        "apps.harness.conversation_service",
+        "apps.harness.conversation_events",
+    }
+    execution = {
+        lifecycle,
+        "apps.harness.runner",
+        "apps.harness.engines.execution",
+        "apps.harness.engines.service_runtime",
+    }
+    assert owners <= modules.keys()
+    pending = set(owners)
+    checked: set[str] = set()
+    violations = set()
+    while pending:
+        module = pending.pop()
+        checked.add(module)
+        path = modules[module]
+        for imported in _imported_modules(path, trees[path]):
+            if any(
+                imported == owner or imported.startswith(f"{owner}.")
+                for owner in execution
+            ):
+                violations.add(f"{module} -> {imported}")
+            elif imported in modules and imported not in checked:
+                pending.add(imported)
+    assert violations == set(), (
+        "ConversationService and ConversationEvents must work independently "
+        "of live run orchestration:\n" + "\n".join(sorted(violations))
+    )
+
+    moved_operations = {
+        "list_conversations",
+        "mark_session_read",
+        "mark_session_unread",
+        "dismiss_notice",
+        "unread_for_sessions",
+        "is_session_unread",
+        "_is_conversation_unread",
+        "attention_for_sessions",
+        "_emit_conversations_changed",
+        "_emit_conversations_changed_sync",
+    }
+    assert not {
+        node.name
+        for node in ast.walk(trees[modules[lifecycle]])
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    } & moved_operations, "Keep saved-conversation operations out of HarnessService"
 
 
 def test_provider_accounts_never_import_their_orchestration_consumers() -> None:

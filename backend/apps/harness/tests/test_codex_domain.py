@@ -51,7 +51,7 @@ def codex_setup(harness_workspace):
         },
     )
     service = HarnessService()
-    service._emit_conversations_changed_sync = lambda *_: None
+    service.conversation_events.emit_sync = lambda *_: None
     clear_models_cache()
     return SimpleNamespace(
         workspace=workspace,

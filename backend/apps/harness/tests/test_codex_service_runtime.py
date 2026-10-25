@@ -214,7 +214,7 @@ async def runtime(harness_workspace, tmp_path, monkeypatch):
         }
         for key, ctx in service._runs.items()
     }
-    service._emit_conversations_changed_sync = lambda *_: None
+    service.conversation_events.emit_sync = lambda *_: None
     original_tools = HarnessService._tools_for_session
 
     def registered_mcp_tools(self, *args, **kwargs):

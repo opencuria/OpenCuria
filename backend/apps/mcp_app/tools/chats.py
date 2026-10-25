@@ -18,6 +18,7 @@ import structlog
 from asgiref.sync import sync_to_async
 
 from apps.accounts.models import APIKeyPermission
+from apps.harness.conversation_service import ConversationService
 from apps.harness.harness_service import get_harness_service
 from apps.harness.schemas import part_to_out, timeline_to_out
 from apps.runners.enums import WorkspaceStatus
@@ -318,7 +319,9 @@ def _message(index: int, message: dict[str, Any], detail: str) -> dict[str, Any]
 
 
 def _timeline(session: Any) -> dict[str, Any]:
-    return timeline_to_out(get_harness_service(), session)
+    return timeline_to_out(
+        get_harness_service(), session, conversations=ConversationService()
+    )
 
 
 def _transcript(
@@ -427,7 +430,7 @@ def _list(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
         workspaces = [resolve.workspace(ctx, args["workspace"])]
     else:
         workspaces = resolve.list_workspaces(ctx)
-    rows = get_harness_service().list_conversations(
+    rows = ConversationService().list_conversations(
         organization_id=ctx.organization_id,
         workspace_ids=[w.id for w in workspaces],
     )

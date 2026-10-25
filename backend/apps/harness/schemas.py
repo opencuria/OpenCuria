@@ -21,6 +21,7 @@ from .timeline import (
 )
 
 if TYPE_CHECKING:
+    from .conversation_service import ConversationService
     from .harness_service import HarnessService
     from .models import HarnessPart, HarnessSession
 
@@ -461,19 +462,26 @@ def session_to_out(
     )
 
 
-def session_to_out_with_unread(service, session) -> HarnessSessionOut:  # type: ignore[no-untyped-def]
+def session_to_out_with_unread(
+    conversations: ConversationService, session: HarnessSession
+) -> HarnessSessionOut:
     """Map a session and compute its unread and attention flags."""
-    attention = service.attention_for_sessions([session]).get(session.id, {})
+    attention = conversations.attention_for_sessions([session]).get(session.id, {})
     return session_to_out(
         session,
-        unread=service.is_session_unread(session),
+        unread=conversations.is_session_unread(session),
         manual_unread=session.manual_unread_at is not None,
         needs_attention=attention.get("needs_attention", False),
         attention_kind=attention.get("attention_kind", ""),
     )
 
 
-def timeline_to_out(service: HarnessService, session: HarnessSession) -> dict[str, Any]:
+def timeline_to_out(
+    service: HarnessService,
+    session: HarnessSession,
+    *,
+    conversations: ConversationService,
+) -> dict[str, Any]:
     """Build the lightweight REST timeline from service reads."""
     messages = service.list_timeline_messages(session.id)
     parts = service.list_timeline_parts(session.id)
@@ -502,7 +510,9 @@ def timeline_to_out(service: HarnessService, session: HarnessSession) -> dict[st
         for question in pending_questions
     ]
     return {
-        "session": session_to_out_with_unread(service, session).model_dump(mode="json"),
+        "session": session_to_out_with_unread(conversations, session).model_dump(
+            mode="json"
+        ),
         "messages": [
             {
                 **HarnessMessageOut(

@@ -12,6 +12,7 @@ from django.utils import timezone
 
 import apps.harness.api as harness_api
 from apps.accounts.models import APIKey, APIKeyPermission
+from apps.harness.conversation_service import ConversationService
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import (
     HarnessMessage,
@@ -186,7 +187,7 @@ def test_list_conversations_service_projects_public_engine(
         external_session_id="private-external-session",
     )
 
-    rows = fake_harness_service.list_conversations(
+    rows = ConversationService().list_conversations(
         organization_id=conv_setup["org"].id,
         workspace_ids=[conv_setup["owned"].id],
     )
@@ -285,6 +286,39 @@ def test_list_conversations_requires_harness_read(conv_setup, fake_harness_servi
     client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=RUN)
     response = client.get("/api/v1/harness/conversations/")
     assert response.status_code == 403
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("action", ["feed", "read", "unread", "notice-dismiss"])
+def test_saved_conversation_endpoints_do_not_resolve_live_harness(
+    conv_setup, monkeypatch, action: str
+) -> None:
+    """Feed and navigation work without constructing agent run orchestration."""
+    session = HarnessSessionRepository.create(
+        workspace_id=conv_setup["owned"].id,
+        organization_id=conv_setup["org"].id,
+    )
+    client = _client(user=conv_setup["owner"], org=conv_setup["org"], permissions=READ)
+
+    def unexpected_harness():
+        raise AssertionError("Saved conversation operations must use their service")
+
+    monkeypatch.setattr(harness_api, "_resolve_harness_service", unexpected_harness)
+    if action == "feed":
+        response = client.get("/api/v1/harness/conversations/")
+        assert response.status_code == 200
+        assert response.json()[0]["session_id"] == str(session.id)
+    else:
+        path = f"/api/v1/harness/sessions/{session.id}/{action}"
+        if action == "notice-dismiss":
+            message = HarnessMessageRepository.create(
+                session_id=session.id, role="assistant", content="Stopped"
+            )
+            path = (
+                f"/api/v1/harness/sessions/{session.id}/messages/"
+                f"{message.id}/notice-dismiss"
+            )
+        assert client.post(path).status_code == 204
 
 
 @pytest.mark.django_db

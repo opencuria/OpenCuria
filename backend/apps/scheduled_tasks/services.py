@@ -503,7 +503,7 @@ class ScheduledTaskService:
             )
             if deleted:
                 run.session = None
-                await service._emit_conversations_changed(task.workspace_id)
+                await service.conversation_events.emit(task.workspace_id)
         except Exception:
             log.exception(
                 "scheduled_task_unstarted_session_cleanup_failed",

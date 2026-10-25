@@ -11,7 +11,7 @@ from asgiref.sync import sync_to_async
 
 from apps.accounts.models import APIKeyPermission
 from apps.credentials.services import CredentialSvc
-from apps.harness.harness_service import get_harness_service
+from apps.harness.conversation_service import ConversationService
 from apps.plugins.services import PluginService
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.services import get_runner_service
@@ -169,7 +169,7 @@ def _details(ctx: ToolContext, workspace: Any) -> dict[str, Any]:
             )
         ]
     if ctx.can(APIKeyPermission.HARNESS_READ):
-        chats = get_harness_service().list_conversations(
+        chats = ConversationService().list_conversations(
             organization_id=ctx.organization_id, workspace_ids=[workspace.id]
         )
         data["recent_chats"] = [

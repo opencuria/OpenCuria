@@ -7,8 +7,8 @@ from typing import Any
 from asgiref.sync import sync_to_async
 
 from apps.accounts.models import APIKeyPermission
+from apps.harness.conversation_service import ConversationService
 from apps.harness.engines.service import EngineCatalogService
-from apps.harness.harness_service import get_harness_service
 from apps.harness.providers.base import ProviderError
 from apps.organizations.services import OrganizationService
 from apps.scheduled_tasks.services import ScheduledTaskService
@@ -76,7 +76,7 @@ def _context(ctx: ToolContext) -> dict[str, Any]:
             1 for w in workspaces if str(w.status) == "running"
         )
     if ctx.can(APIKeyPermission.HARNESS_READ):
-        chats = get_harness_service().list_conversations(
+        chats = ConversationService().list_conversations(
             organization_id=ctx.organization_id,
             workspace_ids=[w.id for w in resolve.list_workspaces(ctx)],
         )

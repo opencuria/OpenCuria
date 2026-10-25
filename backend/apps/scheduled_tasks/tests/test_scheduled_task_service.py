@@ -737,7 +737,12 @@ async def test_admission_conflict_uses_fresh_lifecycle_state(
         # Deliberately unrelated wording: persisted state determines the reason.
         raise ConflictError("Admission denied")
 
+    async def notify(workspace_id):
+        cleaned.append(workspace_id)
+
     class Harness:
+        conversation_events = SimpleNamespace(emit=notify)
+
         def create_session(self, **values):
             if admission == "create":
                 conflict()
@@ -745,9 +750,6 @@ async def test_admission_conflict_uses_fresh_lifecycle_state(
 
         async def start_run(self, session, prompt, **values):
             conflict()
-
-        async def _emit_conversations_changed(self, workspace_id):
-            cleaned.append(workspace_id)
 
     service = ScheduledTaskService(repository=repo, harness=Harness())
     if manual:

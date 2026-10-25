@@ -9,8 +9,9 @@ from typing import Any
 import pytest
 from asgiref.sync import sync_to_async
 
+from apps.harness.conversation_events import FRONTEND_EVENT_CONVERSATIONS_CHANGED
+from apps.harness.conversation_service import ConversationService
 from apps.harness.harness_service import (
-    FRONTEND_EVENT_CONVERSATIONS_CHANGED,
     FRONTEND_EVENT_PART,
     FRONTEND_EVENT_PERMISSION,
     FRONTEND_EVENT_STATUS,
@@ -116,8 +117,9 @@ async def test_conversation_changes_emit_for_lifecycle_mutations(harness_workspa
         title="initial title",
     )
     await sync_to_async(service.update_title)(session.id, "Renamed")
-    await sync_to_async(service.mark_session_read)(session.id)
-    await sync_to_async(service.mark_session_unread)(session.id)
+    conversations = ConversationService(events=service.conversation_events)
+    await sync_to_async(conversations.mark_session_read)(session.id)
+    await sync_to_async(conversations.mark_session_unread)(session.id)
     forked = await service.fork_session(session.id)
     await service.delete_session(session.id)
 

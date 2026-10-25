@@ -4,6 +4,7 @@ import pytest
 from asgiref.sync import sync_to_async
 
 from apps.harness.access.runner_accessor import create_harness_accessor
+from apps.harness.conversation_service import ConversationService
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessSession
 from apps.harness.repositories import HarnessMessageRepository, HarnessSessionRepository
@@ -91,7 +92,7 @@ def test_saved_history_and_navigation_allowed_during_capture(harness_workspace):
     assert service.get_session(session.id).id == session.id
     assert service.list_timeline_messages(session.id)[0].timeline_content == "saved"
     assert service.list_sessions(harness_workspace.id)
-    service.mark_session_read(session.id)
+    ConversationService().mark_session_read(session.id)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -206,7 +207,7 @@ def test_mode_change_preserves_inbox_notifications_and_capture_guard(
     service = HarnessService()
     notifications = []
     monkeypatch.setattr(
-        service, "_emit_conversations_changed_sync", notifications.append
+        service.conversation_events, "emit_sync", notifications.append
     )
     Workspace.objects.filter(id=harness_workspace.id).update(
         active_operation="capturing_image"
