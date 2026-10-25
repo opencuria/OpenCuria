@@ -1,6 +1,6 @@
 """Who may reach a workspace, shared by RunnerService and every adapter.
 
-REST and MCP resolve workspaces through :meth:`get_workspace_for_user`; the
+REST resolves workspaces through :meth:`get_workspace_for_user`; the
 realtime adapters (Socket.IO frontend namespace and the desktop proxy) only
 know the authenticated user ID and use the boolean predicates. Owners must
 be members of the workspace runner's organization; organization admins may

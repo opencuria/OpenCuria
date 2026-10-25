@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import uuid
-from types import SimpleNamespace
 
 import pytest
 from django.utils import timezone
@@ -53,12 +51,11 @@ def test_review_explains_the_actual_next_step(
     assert message in DispositionService.review_message(evidence, actions)
 
 
-def test_rest_and_mcp_expose_the_same_grouped_activity(
+def test_rest_exposes_grouped_activity(
     runner: Runner, workspace: Workspace, user: User
 ) -> None:
-    """The shared storage service must serialize identically in both interfaces."""
+    """Runner storage exposes grouped activities without private task payloads."""
     from apps.accounts.models import APIKeyPermission
-    from apps.mcp_app.tools.runners import _call_get_runner_storage
     from apps.runners.tests.test_workspace_access_controls import _make_client
 
     command(workspace, "intervention")
@@ -70,23 +67,6 @@ def test_rest_and_mcp_expose_the_same_grouped_activity(
     )
     response = client.get(f"/api/v1/runners/{runner.id}/storage/")
     assert response.status_code == 200
-    mcp = _call_get_runner_storage(
-        SimpleNamespace(user=user),
-        runner.organization_id,
-        {"runner_id": str(runner.id)},
-    )
-    # REST timestamps use millisecond precision; compare the activity contract.
-    rest_activities = [
-        activity.model_dump(exclude={"created_at"})
-        for activity in RunnerStorageOut.model_validate(response.json()).activities
-    ]
-    mcp_activities = [
-        activity.model_dump(exclude={"created_at"})
-        for activity in RunnerStorageOut.model_validate(
-            json.loads(mcp[0].text)
-        ).activities
-    ]
-    assert rest_activities == mcp_activities
     assert response.json()["activities"][0]["state"] == "attention"
     assert "must-not-be-returned" not in response.content.decode()
 
@@ -114,7 +94,7 @@ def command(workspace: Workspace, phase: str, status: str = "failed") -> Task:
 
 
 def detail(user: User, runner: Runner) -> dict:
-    """Use the same authorized service as REST and MCP."""
+    """Use the authorized runner storage service."""
     Membership.objects.get_or_create(
         user=user,
         organization=runner.organization,

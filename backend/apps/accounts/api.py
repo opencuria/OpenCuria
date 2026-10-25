@@ -338,7 +338,6 @@ def list_api_key_permissions(request: HttpRequest):
         APIKeyPermission.HARNESS_RUN: "Create harness sessions and send prompts",
         APIKeyPermission.HARNESS_PERMISSIONS: "Resolve harness permission requests",
         APIKeyPermission.HARNESS_PROVIDERS: "Manage provider connections",
-        APIKeyPermission.MCP_ACCESS: "Connect via MCP interface",
     }
 
     return [

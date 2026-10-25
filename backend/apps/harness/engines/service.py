@@ -1,4 +1,4 @@
-"""Shared engine discovery/model business logic for REST, MCP and admission."""
+"""Engine discovery/model business logic for REST and admission."""
 
 from __future__ import annotations
 

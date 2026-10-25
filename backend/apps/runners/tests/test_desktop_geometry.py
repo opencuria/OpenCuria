@@ -10,7 +10,6 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
-from apps.mcp_app.tools.workspaces import _call_get_workspace, _call_update_workspace
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.desktop import validate_desktop_dimension
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
@@ -30,8 +29,6 @@ def test_validate_desktop_dimension_rejects_odd_and_out_of_range() -> None:
         validate_desktop_dimension(1921, kind="width")
     with pytest.raises(ValueError, match="between"):
         validate_desktop_dimension(200, kind="width")
-
-
 
 
 @pytest.fixture
@@ -132,36 +129,6 @@ async def test_update_workspace_service_persists_geometry(desktop_api) -> None:
     )
     assert updated.desktop_width == 1600
     assert updated.desktop_height == 900
-
-
-@pytest.mark.django_db(transaction=True)
-def test_mcp_get_and_update_workspace_desktop_size(desktop_api) -> None:
-    """MCP get/update expose the fixed desktop framebuffer size."""
-    from types import SimpleNamespace
-
-    workspace = desktop_api["workspace"]
-    api_key = SimpleNamespace(user=desktop_api["user"])
-    org_id = desktop_api["org"].id
-
-    listed = _call_get_workspace(
-        api_key, org_id, {"workspace_id": str(workspace.id)}
-    )
-    payload = json.loads(listed[0].text)
-    assert payload["desktop_width"] == 1920
-    assert payload["desktop_height"] == 1080
-
-    updated = _call_update_workspace(
-        api_key,
-        org_id,
-        {
-            "workspace_id": str(workspace.id),
-            "desktop_width": 1280,
-            "desktop_height": 720,
-        },
-    )
-    body = json.loads(updated[0].text)
-    assert body["desktop_width"] == 1280
-    assert body["desktop_height"] == 720
 
 
 @pytest.mark.django_db(transaction=True)

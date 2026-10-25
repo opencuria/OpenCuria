@@ -1,8 +1,7 @@
-"""REST/MCP regressions for restoring captured-image process snapshots."""
+"""REST regressions for restoring captured-image process snapshots."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
 from unittest.mock import AsyncMock
@@ -12,9 +11,6 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
-from apps.mcp_app.server import create_mcp_server
-from apps.mcp_app.tools.images import _call_create_workspace_from_captured_image
-from apps.mcp_app.tools.workspaces import _call_create_workspace
 from apps.organizations.models import Membership, MembershipRole
 from apps.runners.capture_repository import CaptureRepository
 from apps.runners.enums import ProcessStatus, TaskType, WorkspaceStatus
@@ -163,59 +159,15 @@ def _captured_line_with_process_generations(runner, user):
     return line, first, second
 
 
-def _mcp_clone(api_key, organization, line):
-    """Call the registered MCP operation directly, without its network transport."""
-    result = _call_create_workspace_from_captured_image(
-        api_key,
-        organization.id,
-        {"captured_image_id": str(line.id), "name": "Imported process clone"},
+def _clone(headers, line):
+    response = Client().post(
+        f"/api/v1/captured-images/{line.id}/workspaces/",
+        data=json.dumps({"name": "Imported process clone"}),
+        content_type="application/json",
+        **headers,
     )
-    assert len(result) == 1
-    if result[0].text.startswith("Error:"):
-        return result[0].text
-    return json.loads(result[0].text)
-
-
-def _mcp_general_create(api_key, organization, image):
-    """Call create_workspace with an explicit base image (no MCP transport)."""
-    result = _call_create_workspace(
-        api_key,
-        organization.id,
-        {
-            "name": "General endpoint foreign image",
-            "image_artifact_id": str(image.id),
-        },
-    )
-    assert len(result) == 1
-    return result[0].text
-
-
-def _mcp_tool_call(api_key, arguments):
-    """Exercise MCP's registered tool dispatch and API-key permission check."""
-    from mcp import types
-
-    server = create_mcp_server(api_key)
-    request = types.CallToolRequest(
-        params=types.CallToolRequestParams(
-            name="create_workspace_from_captured_image", arguments=arguments
-        )
-    )
-    result = asyncio.run(server.request_handlers[types.CallToolRequest](request))
-    return result.root
-
-
-def _clone(interface, api_key, headers, organization, line):
-    if interface == "rest":
-        response = Client().post(
-            f"/api/v1/captured-images/{line.id}/workspaces/",
-            data=json.dumps({"name": "Imported process clone"}),
-            content_type="application/json",
-            **headers,
-        )
-        assert response.status_code == 202, response.content
-        return response.json()
-
-    return _mcp_clone(api_key, organization, line)
+    assert response.status_code == 202, response.content
+    return response.json()
 
 
 @pytest.fixture
@@ -227,21 +179,19 @@ def runner_service_with_mocked_transport(monkeypatch):
     return service, emit
 
 
-@pytest.mark.parametrize("interface", ["rest", "mcp"])
 def test_clone_restores_latest_captured_process_generation_without_runtime_state(
-    interface,
     member,
     runner,
     organization,
     api_key_factory,
     runner_service_with_mocked_transport,
 ):
-    api_key, headers = api_key_factory(
+    _, headers = api_key_factory(
         member, organization, [APIKeyPermission.IMAGES_CLONE]
     )
     line, first, latest = _captured_line_with_process_generations(runner, member)
 
-    payload = _clone(interface, api_key, headers, organization, line)
+    payload = _clone(headers, line)
     workspace = Workspace.objects.get(pk=payload["workspace_id"])
     task = Task.objects.get(pk=payload["task_id"])
     assert task.type == TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT
@@ -283,31 +233,24 @@ def test_clone_restores_latest_captured_process_generation_without_runtime_state
     assert dispatch_payload["ssh_keys"] == []
 
 
-@pytest.mark.parametrize("interface", ["rest", "mcp"])
 def test_clone_requires_images_clone_permission_without_creating_workspace(
-    interface, member, runner, organization, api_key_factory
+    member, runner, organization, api_key_factory
 ):
     line, _, _ = _captured_line_with_process_generations(runner, member)
-    api_key, headers = api_key_factory(member, organization, [])
+    _, headers = api_key_factory(member, organization, [])
     before = (
         Workspace.objects.count(),
         Task.objects.count(),
         WorkspaceProcess.objects.count(),
     )
 
-    if interface == "rest":
-        response = Client().post(
-            f"/api/v1/captured-images/{line.id}/workspaces/",
-            data=json.dumps({"name": "Unauthorized clone"}),
-            content_type="application/json",
-            **headers,
-        )
-        assert response.status_code == 403, response.content
-    else:
-        result = _mcp_tool_call(api_key, {"captured_image_id": str(line.id)})
-        assert result.content[0].text == (
-            "Error: Permission denied: images:clone required"
-        )
+    response = Client().post(
+        f"/api/v1/captured-images/{line.id}/workspaces/",
+        data=json.dumps({"name": "Unauthorized clone"}),
+        content_type="application/json",
+        **headers,
+    )
+    assert response.status_code == 403, response.content
     assert (
         Workspace.objects.count(),
         Task.objects.count(),
@@ -315,9 +258,7 @@ def test_clone_requires_images_clone_permission_without_creating_workspace(
     ) == before
 
 
-@pytest.mark.parametrize("interface", ["rest", "mcp"])
 def test_general_workspace_create_rejects_foreign_captured_image_without_dispatch(
-    interface,
     member,
     runner,
     organization,
@@ -332,7 +273,7 @@ def test_general_workspace_create_rejects_foreign_captured_image_without_dispatc
     Membership.objects.create(
         user=foreign, organization=organization, role=MembershipRole.MEMBER
     )
-    api_key, headers = api_key_factory(
+    _, headers = api_key_factory(
         foreign, organization, [APIKeyPermission.WORKSPACES_CREATE]
     )
     line, _, latest = _captured_line_with_process_generations(runner, image_owner)
@@ -347,46 +288,18 @@ def test_general_workspace_create_rejects_foreign_captured_image_without_dispatc
     )
     _, emit = runner_service_with_mocked_transport
 
-    if interface == "rest":
-        response = Client().post(
-            "/api/v1/workspaces/",
-            data=json.dumps(
-                {
-                    "name": "Foreign image import",
-                    "image_artifact_id": str(latest.id),
-                }
-            ),
-            content_type="application/json",
-            **headers,
-        )
-        assert response.status_code == 404, response.content
-    else:
-        from apps.mcp_app.tools import TOOL_PERMISSIONS
-
-        assert (
-            TOOL_PERMISSIONS["create_workspace"] == APIKeyPermission.WORKSPACES_CREATE
-        )
-        # MCP exposes the generic create tool to this correctly-scoped key;
-        # invoke its operation handler without the MCP network transport.
-        from mcp import types
-
-        server = create_mcp_server(api_key)
-        listed_tools = asyncio.run(
-            server.request_handlers[types.ListToolsRequest](None)
-        )
-        assert "create_workspace" in {tool.name for tool in listed_tools.root.tools}
-        result = _call_create_workspace(
-            api_key,
-            organization.id,
+    response = Client().post(
+        "/api/v1/workspaces/",
+        data=json.dumps(
             {
                 "name": "Foreign image import",
                 "image_artifact_id": str(latest.id),
-            },
-        )
-        assert len(result) == 1
-        payload = json.loads(result[0].text)
-        assert "error" in payload
-        assert "Image artifact" in payload["error"]
+            }
+        ),
+        content_type="application/json",
+        **headers,
+    )
+    assert response.status_code == 404, response.content
 
     assert (
         Workspace.objects.count(),
@@ -397,9 +310,8 @@ def test_general_workspace_create_rejects_foreign_captured_image_without_dispatc
     emit.assert_not_awaited()
 
 
-@pytest.mark.parametrize("interface", ["rest", "mcp"])
 def test_clone_does_not_disclose_or_clone_foreign_users_captured_image(
-    interface, member, runner, organization, api_key_factory
+    member, runner, organization, api_key_factory
 ):
     line, _, _ = _captured_line_with_process_generations(runner, member)
     foreign = get_user_model().objects.create_user(
@@ -408,7 +320,7 @@ def test_clone_does_not_disclose_or_clone_foreign_users_captured_image(
     Membership.objects.create(
         user=foreign, organization=organization, role=MembershipRole.MEMBER
     )
-    api_key, headers = api_key_factory(
+    _, headers = api_key_factory(
         foreign, organization, [APIKeyPermission.IMAGES_CLONE]
     )
     before = (
@@ -417,18 +329,13 @@ def test_clone_does_not_disclose_or_clone_foreign_users_captured_image(
         WorkspaceProcess.objects.count(),
     )
 
-    if interface == "rest":
-        response = Client().post(
-            f"/api/v1/captured-images/{line.id}/workspaces/",
-            data=json.dumps({"name": "Foreign clone"}),
-            content_type="application/json",
-            **headers,
-        )
-        assert response.status_code == 404
-    else:
-        result = _mcp_clone(api_key, organization, line)
-        assert isinstance(result, str)
-        assert result.startswith("Error: Captured image ")
+    response = Client().post(
+        f"/api/v1/captured-images/{line.id}/workspaces/",
+        data=json.dumps({"name": "Foreign clone"}),
+        content_type="application/json",
+        **headers,
+    )
+    assert response.status_code == 404
 
     assert (
         Workspace.objects.count(),

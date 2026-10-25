@@ -72,8 +72,7 @@ streams it to the CLI as a `next`-priority user message, which the CLI folds
 into the turn after the current tool call. Delivered messages appear inline in
 the transcript where the agent received them. If the turn ends first, the queued
 message starts a follow-up run automatically; **Stop** discards the queue.
-`POST /harness/sessions/{id}/steer` and the MCP tool `steer_harness_session`
-expose the same behavior.
+`POST /harness/sessions/{id}/steer` exposes this behavior.
 
 ## Runtime and updates
 

@@ -1,4 +1,4 @@
-"""REST/MCP contracts for versioned images, recreate and retention policy."""
+"""REST contracts for versioned images, recreate and retention policy."""
 
 import json
 from types import SimpleNamespace
@@ -8,9 +8,6 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
-from apps.mcp_app.tools.images import _call_list_captured_images
-from apps.mcp_app.tools.organizations import _call_update_workspace_policy
-from apps.mcp_app.tools.workspaces import _call_recreate_workspace
 from apps.organizations.models import Membership, MembershipRole
 from apps.runners.models import WorkspaceRecreateRequest
 from apps.runners.services import get_runner_service
@@ -214,24 +211,6 @@ def test_recreate_refuses_offline_runner(member, runner, organization):
     assert not WorkspaceRecreateRequest.objects.exists()
 
 
-@pytest.mark.django_db(transaction=True)
-def test_mcp_recreate_and_list_captured_images(member, runner, organization):
-    line, (v1, v2) = make_line(runner, member, ("ready", "ready"))
-    ws = qemu_workspace(runner, member, v1)
-    key = SimpleNamespace(user=member)
-    [listed] = json.loads(_call_list_captured_images(key, organization.id, {})[0].text)
-    assert listed["id"] == str(line.id) and listed["latest_id"] == str(v2.id)
-    payload = json.loads(
-        _call_recreate_workspace(
-            key,
-            organization.id,
-            {"workspace_id": str(ws.id), "image_id": str(v2.id)},
-        )[0].text
-    )
-    assert payload["active_operation"] == "updating"
-    assert WorkspaceRecreateRequest.objects.get(workspace=ws).reason == "update"
-
-
 def test_policy_patch_is_partial_and_validated(user, organization):
     Membership.objects.create(
         user=user, organization=organization, role=MembershipRole.ADMIN
@@ -260,9 +239,12 @@ def test_policy_patch_is_partial_and_validated(user, organization):
 
 
 def test_policy_update_requires_admin(member, organization):
-    result = _call_update_workspace_policy(
-        SimpleNamespace(user=member), organization.id, {"image_versions_to_keep": 5}
+    response = Client().patch(
+        f"/api/v1/organizations/{organization.id}/workspace-policy/",
+        data=json.dumps({"image_versions_to_keep": 5}),
+        content_type="application/json",
+        **headers(member, organization, [APIKeyPermission.ORGANIZATIONS_WRITE]),
     )
-    assert result[0].text.startswith("Error:")
+    assert response.status_code == 403
     organization.refresh_from_db()
     assert organization.image_versions_to_keep == 2

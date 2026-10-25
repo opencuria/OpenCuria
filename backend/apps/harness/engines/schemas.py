@@ -1,7 +1,6 @@
 """Request/response schemas and DTO mappers for the harness engine adapters.
 
-Shared by the REST router (``engines/api.py``) and the MCP tools so both
-expose identical payloads without importing each other.
+Pure mapping for the REST router (``engines/api.py``).
 """
 
 from __future__ import annotations

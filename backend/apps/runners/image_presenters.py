@@ -1,7 +1,6 @@
 """Map image artifacts and captured-image lines to their public schemas.
 
-Shared by the REST routers (``api.py``) and the MCP tools so both expose
-identical image payloads without importing each other.
+Pure mapping for REST image payloads.
 """
 
 from __future__ import annotations

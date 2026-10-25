@@ -1,8 +1,7 @@
-"""Org-wide subagent config service, REST, and MCP contract tests."""
+"""Org-wide subagent config service and REST contract tests."""
 
 import json
 import uuid
-from types import SimpleNamespace
 
 import pytest
 from django.db import IntegrityError, transaction
@@ -148,55 +147,3 @@ def test_rest_permissions_and_membership(agent_s_setup) -> None:
         anonymous.put(URL, data="{}", content_type="application/json").status_code
         == 401
     )
-
-
-def test_mcp_parity(agent_s_setup) -> None:
-    """MCP metadata, defaults, writes, and membership match REST."""
-    from apps.mcp_app.tools import TOOL_HANDLERS, TOOL_PERMISSIONS, TOOLS
-    from apps.mcp_app.tools.harness_settings import (
-        _call_get_subagent_config,
-        _call_save_subagent_config,
-    )
-
-    tools = {tool.name: tool for tool in TOOLS}
-    for name, permission in (
-        ("get_subagent_config", APIKeyPermission.HARNESS_READ),
-        ("save_subagent_config", APIKeyPermission.HARNESS_RUN),
-    ):
-        assert name in tools
-        assert name in TOOL_HANDLERS
-        assert TOOL_PERMISSIONS[name] == permission
-    depth_schema = tools["save_subagent_config"].inputSchema["properties"]["max_depth"]
-    assert depth_schema == {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": MAX_SUBAGENT_DEPTH,
-        "default": 2,
-    }
-    key = SimpleNamespace(user=agent_s_setup["owner"])
-    org_id = agent_s_setup["org"].id
-    assert json.loads(_call_get_subagent_config(key, org_id, {})[0].text) == {
-        "max_depth": 2
-    }
-    assert not SubagentConfig.objects.exists()
-    saved = _call_save_subagent_config(key, org_id, {"max_depth": 6})
-    assert json.loads(saved[0].text) == {"max_depth": 6}
-    client = _client(user=key.user, org=agent_s_setup["org"], permissions=READ + RUN)
-    assert client.get(URL).json() == {"max_depth": 6}
-    client.put(URL, data='{"max_depth": 4}', content_type="application/json")
-    assert json.loads(_call_get_subagent_config(key, org_id, {})[0].text) == {
-        "max_depth": 4
-    }
-    for value in INVALID:
-        assert _call_save_subagent_config(key, org_id, {"max_depth": value})[
-            0
-        ].text.startswith("Error:")
-        assert SubagentConfigService().get_or_default(org_id) == {"max_depth": 4}
-    assert json.loads(_call_save_subagent_config(key, org_id, {})[0].text) == {
-        "max_depth": 2
-    }
-    outsider = SimpleNamespace(user=agent_s_setup["outsider"])
-    with pytest.raises(NotFoundError):
-        _call_get_subagent_config(outsider, org_id, {})
-    with pytest.raises(NotFoundError):
-        _call_save_subagent_config(outsider, org_id, {"max_depth": 3})

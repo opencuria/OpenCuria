@@ -20,8 +20,7 @@ Backend services own business orchestration; repositories own ORM/locking.
 `services/recovery.py` is the independent durable worker. The runner is execution
 only: `journal.py` records identity, outcomes, checkpoints and publication proof;
 `runtime/storage.py` serializes scans/mutations. Storage, capture, deletion and
-operator disposition repositories/services are separate concerns. Frontend and
-MCP call those same services, not independent state machines.
+operator disposition repositories/services are separate concerns. Frontend requests use those services through the REST API.
 
 ## Preserving migration
 
@@ -188,16 +187,15 @@ optimized immutable-file caching needs independent validation.
 - `POST /api/v1/runners/{runner_id}/storage/refresh/` returns 202 with requested,
   runner_id, requested_at. Coalesced durable request accepts offline runners;
   independent worker sends inventory:refresh with backoff on the current SID.
-  Only a subsequently received complete aggregate scan fulfills it. MCP tools
-  `get_runner_storage` and `refresh_runner_storage` share StorageService and
-  authorization. Unknown inventory sizes remain null; fresh managed matching
+  Only a subsequently received complete aggregate scan fulfills it.
+  Unknown inventory sizes remain null; fresh managed matching
   physical observations update generation sizes.
 - Managed QEMU domain
   resources now include metadata.workspace_id, allowing actual workspace joins.
 
 ### Capture pipeline
 
-Artifact-create REST/MCP automatically stops and restarts running QEMU sources;
+Artifact-create REST automatically stops and restarts running QEMU sources;
 stopped sources remain stopped. No restart flag is accepted. Request, deterministic
 image ID, first child Task/current_task and sanitized outbox are committed atomically.
 Independent worker advances stop → capture → resume after each terminal callback;
@@ -210,7 +208,7 @@ suppress automatic restart. Active agents and pending credential synchronization
 must finish before capture is admitted.
 
 API migration: callers must stop sending `stop_and_restart`; it is removed from
-REST/MCP schemas. Capturing a running source now restarts it automatically, without
+REST schemas. Capturing a running source now restarts it automatically, without
 opt-in. The webapp displays one Capturing operation through stop/capture/resume;
 only navigation and saved history remain available until completion.
 
@@ -219,7 +217,7 @@ no blind resume is attempted. A stopped source with credential presence returns 
 controlled resume/stop diagnostic rather than inventing scrub proof. Runner cold
 cache still independently refuses capture without scrub evidence. Capture request phase/diagnostic is exposed in runner storage inspection.
 
-## Deletion API / MCP
+## Deletion API
 
 Base URL: `/api/v1/image-artifacts/deletions/`. All new routes require
 `images:delete` API-key permission and organization membership. Preview and force
@@ -239,12 +237,6 @@ Cross-organization IDs return not-found.
   release. Retirement restores previous state only if still pending_deletion;
   deleted state is never resurrected.
 - Errors: HTTP 403/404/409 `{detail: string, code: string}`.
-
-MCP equivalents: `preview_image_deletion`, `request_image_deletion`,
-`cancel_image_deletion`, `list_image_deletions` (optional request_id also gives
-status), with identical arguments/results/authorization. Existing assignment and
-recipe MCP delete tools also use the coordinator. The old assignment tool now
-returns the durable Request, not a misleading `deleted: true` result.
 
 `Request` fields:
 ```
@@ -289,7 +281,7 @@ cancel where allowed. `executing` refers to prepared/active child execution;
 reflects retirement independently of availability pointers; use Request as
 single deletion progress truth, not duplicate stale assignment error labels.
 
-## Operator API / MCP
+## Operator API
 
 - `GET /api/v1/runners/operations/` lists sanitized visible operations.
 - `GET /api/v1/runners/operations/{operation_id}/` requests current-session
@@ -309,9 +301,7 @@ single deletion progress truth, not duplicate stale assignment error labels.
   disk intact; subsequent removal is a separate explicit action. Stop without
   an exact scrub checkpoint stays unknown, never invents clean credentials.
 
-MCP parity: `list_lifecycle_operations`, `inspect_lifecycle_operation`,
-`dispose_lifecycle_operation` (`action`: `reconcile`, `retry`,
-`acknowledge_interrupted`). List/inspect require `runners:read`; disposition
+List/inspect require `runners:read`; disposition
 requires `workspaces:update` plus the operation-specific lifecycle scope for
 retry. Workspace owners inspect/reconcile their own; org admins inspect all;
 interruption acknowledgment always admin. No resolved credentials/recipes

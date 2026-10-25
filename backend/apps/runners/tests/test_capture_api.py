@@ -1,15 +1,12 @@
-"""REST/MCP capture contracts and desktop capture-fence regression tests."""
+"""REST capture contracts and desktop capture-fence regression tests."""
 
 import json
-from types import SimpleNamespace
 
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
-from apps.mcp_app.tools import TOOLS
-from apps.mcp_app.tools.images import _call_create_image_artifact
 from apps.organizations.models import Membership, MembershipRole
 from apps.runners.enums import WorkspaceStatus
 from apps.runners.models import CaptureRequest
@@ -103,32 +100,10 @@ def test_capture_hides_another_members_workspace(capture_setup):
     assert not CaptureRequest.objects.exists()
 
 
-def test_capture_rest_and_mcp_schemas_have_no_restart_flag():
-    fields = {"name", "workspace_id", "captured_image_id", "message"}
-    assert set(ImageArtifactCreateIn.model_fields) == fields - {"workspace_id"}
-    tool = next(tool for tool in TOOLS if tool.name == "create_image_artifact")
-    assert set(tool.inputSchema["properties"]) == fields
-
-
-def test_mcp_capture_calls_service_without_restart_flag(capture_setup, monkeypatch):
-    user, org, workspace = capture_setup
-    calls = []
-    task = SimpleNamespace(id=workspace.id)
-
-    async def create(
-        *, workspace_id, name, organization_id, captured_image_id, message
-    ):
-        calls.append((workspace_id, name, organization_id, captured_image_id))
-        return workspace, task
-
-    monkeypatch.setattr(get_runner_service(), "create_image_artifact", create)
-    result = _call_create_image_artifact(
-        SimpleNamespace(user=user),
-        org.id,
-        {"workspace_id": str(workspace.id), "name": "Capture"},
-    )
-    assert json.loads(result[0].text)["task_id"] == str(task.id)
-    assert calls == [(workspace.id, "Capture", org.id, None)]
+def test_capture_schema_has_no_restart_flag():
+    assert set(ImageArtifactCreateIn.model_fields) == {
+        "name", "captured_image_id", "message"
+    }
 
 
 @pytest.mark.parametrize("action", ["status", "take-control"])

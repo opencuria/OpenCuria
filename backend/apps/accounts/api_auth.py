@@ -2,7 +2,7 @@
 Django Ninja authentication classes for JWT-based and API key-based protection.
 
 Uses the pluggable AuthBackend to validate JWT tokens. API key auth
-delegates to ``APIKeyService``, the same service the MCP adapter uses.
+delegates to ``APIKeyService``.
 
 Pass all three to NinjaAPI(auth=[JWTAuth(), APIKeyBearer(), APIKeyInHeader()])
 so Django Ninja tries each in order and accepts the first that succeeds.

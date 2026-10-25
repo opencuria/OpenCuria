@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 import uuid
 from types import SimpleNamespace
@@ -94,12 +93,7 @@ def test_pinned_default_and_per_model_ultra_allowlist():
 
 
 @pytest.mark.django_db(transaction=True)
-def test_discovery_rest_and_mcp_share_account_scoped_catalog(codex_setup):
-    from apps.mcp_app.tools.harness_settings import (
-        _call_list_engine_models,
-        _call_list_harness_engines,
-    )
-
+def test_discovery_uses_account_scoped_catalog(codex_setup):
     data = codex_setup
     from apps.accounts.models import APIKey, APIKeyPermission
     from common.utils import generate_api_token, hash_token
@@ -116,14 +110,8 @@ def test_discovery_rest_and_mcp_share_account_scoped_catalog(codex_setup):
     response = client.get("/api/v1/harness/engines/codex/models/")
     assert response.status_code == 200, response.content
     assert {m["id"] for m in response.json()} == {m.id for m in chatgpt_models()}
-    api_key = SimpleNamespace(user=data.owner)
-    mcp = _call_list_engine_models(api_key, data.org, {"engine_id": "codex"})
-    assert json.loads(mcp[0].text) == response.json()
     engines = client.get("/api/v1/harness/engines/").json()
     assert engines[-1]["connected"] is True
-    assert (
-        json.loads(_call_list_harness_engines(api_key, data.org, {})[0].text) == engines
-    )
     assert client.get("/api/v1/harness/engines/unknown/models/").status_code == 404
     assert "access-secret" not in response.content.decode()
     data.accounts.select_account(data.org, data.owner.id, "chatgpt", None)
@@ -393,7 +381,6 @@ def test_generic_catalog_provider_failures_do_not_leak_secrets(
 ):
     from apps.accounts.models import APIKey, APIKeyPermission
     from apps.harness.providers.base import ProviderAuthError
-    from apps.mcp_app.tools.harness_settings import _call_list_engine_models
     from common.utils import generate_api_token, hash_token
 
     data = codex_setup
@@ -414,8 +401,3 @@ def test_generic_catalog_provider_failures_do_not_leak_secrets(
     response = client.get(f"/api/v1/harness/engines/{engine_id}/models/")
     assert response.status_code == 502
     assert "access-secret" not in response.content.decode()
-    mcp = _call_list_engine_models(
-        SimpleNamespace(user=data.owner), data.org, {"engine_id": engine_id}
-    )
-    assert "access-secret" not in mcp[0].text
-    assert "temporarily unavailable" in mcp[0].text

@@ -250,7 +250,7 @@ page shows past runs and upcoming occurrences per workspace in a week calendar
 and fall-back repeated times executed once. Each occurrence
 creates a new root harness session. REST endpoints are under
 `/api/v1/scheduled-tasks/` (`harness:read` for listing/history, `harness:run` for
-create/edit/pause/delete/run-now); matching MCP tools are exposed.
+create/edit/pause/delete/run-now).
 
 For a local Linux setup with backend/webapp from source and a native QEMU
 runner on the same machine, use the same QEMU runner flow above, but point
@@ -273,10 +273,7 @@ workspace is gone. Raising the setting does not restore already deleted
 versions.
 
 REST: `GET/PATCH /api/v1/captured-images/`, `POST /api/v1/workspaces/{id}/recreate/`,
-`PATCH /api/v1/organizations/{id}/workspace-policy/`. Matching MCP tools:
-`list_captured_images`, `update_captured_image`,
-`create_workspace_from_captured_image`, `recreate_workspace`,
-`get_workspace_policy`, `update_workspace_policy`.
+`PATCH /api/v1/organizations/{id}/workspace-policy/`.
 
 ## Subagent nesting
 
@@ -288,7 +285,6 @@ inherit their root run's limit, and resumed tasks retain their persisted depth.
 Changes do not alter an active run's limit.
 
 REST: `GET/PUT /api/v1/subagent-config/` with `{"max_depth": 2}`.
-Matching MCP tools: `get_subagent_config` and `save_subagent_config`.
 Reading requires `harness:read`; saving requires `harness:run` and organization
 membership. Run backend migrations before using this setting.
 
@@ -362,6 +358,5 @@ and requiring fresh resource evidence. Organization admins can explicitly
 complete current-session runtime scan. Acknowledgment preserves all resources;
 partial creation stays failed, with disks intact. Removal is a separate explicit
 request. No full create/build/capture rerun or external-stop auto-start occurs.
-Equivalent MCP tools: `list_lifecycle_operations`, `inspect_lifecycle_operation`,
-`dispose_lifecycle_operation`. Details, authorization and return shapes are in
+Details, authorization and return shapes are in
 [Lifecycle implementation](docs/image-lifecycle-implementation.md#recovery-hardening-operator-workflow).

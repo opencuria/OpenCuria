@@ -236,7 +236,7 @@ class ProcessManagerMixin:
         is unique per ``(workspace, name, session_id)`` and requires
         ``session_id``. Temp rows are stopped by the harness cleanup
         hook when the owning run finishes and are never started,
-        restarted, or deleted by users (REST/MCP reject those actions).
+        restarted, or deleted by users (REST rejects those actions).
 
         Raises:
             WorkspaceNotFoundError: Unknown workspace.

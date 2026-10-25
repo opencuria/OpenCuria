@@ -359,7 +359,6 @@ seconds server-side. It fails rather than returning an old clipboard snapshot.
 
 **Response 200:** `{ "text": "copied text" }`.
 **Response 409:** selection unavailable or timed out; no clipboard text returned.
-The MCP equivalent is `read_desktop_clipboard` with the same options.
 
 ---
 

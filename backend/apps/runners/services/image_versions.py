@@ -1,4 +1,4 @@
-"""Version presentation and captured-image management shared by REST and MCP."""
+"""Version presentation and captured-image management."""
 
 from __future__ import annotations
 

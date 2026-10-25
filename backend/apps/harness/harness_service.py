@@ -5839,7 +5839,7 @@ _default_harness_service: HarnessService | None = None
 def create_default_harness_service() -> HarnessService:
     """Build the production service with runner-backed workspace access.
 
-    REST and MCP both use :func:`get_harness_service` so abort, permissions,
+    REST uses :func:`get_harness_service` so abort, permissions,
     and in-flight runs share one task registry.
     """
     from .access.runner_accessor import create_harness_accessor

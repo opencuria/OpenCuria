@@ -1,4 +1,4 @@
-"""Tests for AgentSConfig service, migration defaults, and REST/MCP parity."""
+"""Tests for AgentSConfig service, migration defaults, and REST settings."""
 
 from __future__ import annotations
 
@@ -258,57 +258,8 @@ def test_agent_s_config_rest_validation_and_auth(agent_s_setup) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-def test_agent_s_config_mcp_parity(agent_s_setup) -> None:
-    """MCP get/save_agent_s_config mirror the REST views."""
-    import json as _json
-    from types import SimpleNamespace
-
-    from apps.mcp_app.tools import TOOL_HANDLERS, TOOL_PERMISSIONS, TOOLS
-    from apps.mcp_app.tools.harness_settings import (
-        _call_get_agent_s_config,
-        _call_save_agent_s_config,
-    )
-
-    names = {tool.name for tool in TOOLS}
-    assert "get_agent_s_config" in names
-    assert "save_agent_s_config" in names
-    assert "get_agent_s_config" in TOOL_HANDLERS
-    assert "save_agent_s_config" in TOOL_HANDLERS
-    assert TOOL_PERMISSIONS["get_agent_s_config"] == APIKeyPermission.HARNESS_READ
-    assert TOOL_PERMISSIONS["save_agent_s_config"] == APIKeyPermission.HARNESS_RUN
-
-    api_key = SimpleNamespace(user=agent_s_setup["owner"])
-    org_id = agent_s_setup["org"].id
-    fetched = _call_get_agent_s_config(api_key, org_id, {})
-    assert _json.loads(fetched[0].text)["max_steps"] == 15
-    assert _json.loads(fetched[0].text)["enable_recording"] is False
-
-    saved = _call_save_agent_s_config(
-        api_key,
-        org_id,
-        {
-            "grounding_model": "openai-compatible/uitars",
-            "max_steps": 6,
-            "enable_recording": True,
-        },
-    )
-    payload = _json.loads(saved[0].text)
-    assert payload["grounding_model"] == "openai-compatible/uitars"
-    assert payload["max_steps"] == 6
-    assert payload["enable_recording"] is True
-    assert payload["model_temperature"] is None
-
-    invalid = _call_save_agent_s_config(api_key, org_id, {"max_steps": 0})
-    assert invalid[0].text.startswith("Error:")
-    invalid_recording = _call_save_agent_s_config(
-        api_key, org_id, {"enable_recording": "yes"}
-    )
-    assert invalid_recording[0].text.startswith("Error:")
-
-
-@pytest.mark.django_db(transaction=True)
-def test_agent_s_config_rest_then_mcp_partial(agent_s_setup) -> None:
-    """REST partial PUT keeps the rest; MCP partial only touches given keys."""
+def test_agent_s_config_rest_partial_update(agent_s_setup) -> None:
+    """REST partial PUT changes only the supplied keys."""
     run_client = _client(
         user=agent_s_setup["owner"], org=agent_s_setup["org"], permissions=RUN
     )
@@ -358,32 +309,10 @@ def test_agent_s_config_rest_then_mcp_partial(agent_s_setup) -> None:
     assert body["wait_delay"] == 1.5
     assert read_client.get(URL).json()["max_steps"] == 4
 
-    import json as _json
-    from types import SimpleNamespace
-
-    from apps.mcp_app.tools.harness_settings import _call_save_agent_s_config
-
-    api_key = SimpleNamespace(user=agent_s_setup["owner"])
-    saved = _call_save_agent_s_config(
-        api_key, agent_s_setup["org"].id, {"wait_delay": 2.5}
-    )
-    payload = _json.loads(saved[0].text)
-    assert payload["wait_delay"] == 2.5
-    assert payload["max_steps"] == 4
-    assert payload["grounding_model"] == "openai-compatible/uitars"
-    assert payload["enable_reflection"] is False
-    assert payload["enable_recording"] is True
-    assert read_client.get(URL).json()["wait_delay"] == 2.5
-
 
 @pytest.mark.django_db(transaction=True)
 def test_agent_s_config_recording_roundtrip_and_run_config(agent_s_setup) -> None:
-    """enable_recording round-trips via REST/MCP and reaches the run config."""
-    import json as _json
-    from types import SimpleNamespace
-
-    from apps.mcp_app.tools.harness_settings import _call_save_agent_s_config
-
+    """enable_recording round-trips via REST and reaches the run config."""
     service = AgentSConfigService()
     assert service.get_or_default(agent_s_setup["org"].id)["enable_recording"] is False
 
@@ -402,11 +331,13 @@ def test_agent_s_config_recording_roundtrip_and_run_config(agent_s_setup) -> Non
     )
     assert run_config.enable_recording is True
 
-    api_key = SimpleNamespace(user=agent_s_setup["owner"])
-    saved = _call_save_agent_s_config(
-        api_key, agent_s_setup["org"].id, {"enable_recording": False}
+    saved = run_client.put(
+        URL,
+        data=json.dumps({"enable_recording": False}),
+        content_type="application/json",
     )
-    assert _json.loads(saved[0].text)["enable_recording"] is False
+    assert saved.status_code == 200
+    assert saved.json()["enable_recording"] is False
     assert (
         service.to_run_config(
             agent_s_setup["org"].id, main_model="openrouter/acme/main"

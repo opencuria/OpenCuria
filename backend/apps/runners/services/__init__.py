@@ -14,7 +14,7 @@ logic lives in the :class:`Mixin <apps.runners.services.domains>` modules
 shared ``_PendingGitRequest`` record and the public re-exports so that
 ``from apps.runners.services import RunnerService, _PendingGitRequest``
 keeps working unchanged. ``get_runner_service()`` is the process-wide
-singleton every adapter (REST, Socket.IO, MCP) and other app resolves.
+singleton every adapter (REST, Socket.IO) and other app resolves.
 
 Phase 4: the constructor additionally accepts optional injected ports
 (``credential_resolver``, ``harness_gateway``, ``frontend_bus`` — all

@@ -311,7 +311,7 @@ class InteractiveSessionsMixin:
     async def _viewer_workspace(
         self, workspace_id: uuid.UUID, *, user, organization_id: uuid.UUID
     ):
-        """Apply shared REST, MCP and proxy workspace authorization."""
+        """Apply shared REST and proxy workspace authorization."""
         from apps.organizations.services import OrganizationService
 
         orgs = OrganizationService()

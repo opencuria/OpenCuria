@@ -33,8 +33,6 @@ duplicating or bypassing them:
 - Harness: `backend/apps/harness/` (`providers/`, `tools/` + registry,
   `permissions/`, `agents/` definitions, `prompts/` composer, `runner.py` loop).
 - Runners: `runner/src/runtime/` and `interfaces/` abstractions (ABC + implementations).
-- REST/MCP parity: every new REST capability needs the matching MCP tool in
-  its domain module under `backend/apps/mcp_app/tools/`.
 
 Strictly follow SOLID, separation of concerns, and DRY. One concern per
 layer, one implementation per behavior, composition over duplication.

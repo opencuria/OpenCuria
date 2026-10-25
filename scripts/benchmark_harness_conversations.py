@@ -2,8 +2,7 @@
 
 Run with ``backend/.venv/bin/python scripts/benchmark_harness_conversations.py``.
 Creates only synthetic data in a temporary database, removed on exit. REST uses
-an authenticated Django HTTP test client; MCP measures its service-backed handler
-including JSON serialization, not the MCP transport or authentication middleware.
+an authenticated Django HTTP test client, including JSON serialization.
 """
 
 from __future__ import annotations
@@ -63,8 +62,7 @@ def _measure(request: Any, samples: int) -> dict[str, Any]:
     request()
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    # REST's datetime encoder uses Z; MCP's service projection uses +00:00.
-    # Normalize only those equivalent spellings for payload parity/digests.
+    # Normalize equivalent datetime spellings for stable payload digests.
     normalized = [
         {
             **row,
@@ -86,7 +84,7 @@ def _measure(request: Any, samples: int) -> dict[str, Any]:
 
 
 def _run(args: argparse.Namespace) -> dict[str, Any]:
-    """Populate a disposable database and exercise both adapters without runners."""
+    """Populate a disposable database and exercise REST without runners."""
     import django
 
     django.setup()
@@ -97,7 +95,6 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
 
     from apps.accounts.models import APIKey, APIKeyPermission
     from apps.harness.models import HarnessSession
-    from apps.mcp_app.tools.harness_sessions import _call_list_harness_conversations
     from apps.organizations.models import Membership, Organization
     from apps.runners.models import Runner, Workspace
     from common.utils import generate_api_token, hash_token
@@ -113,7 +110,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         api_token_hash=hash_token(uuid.uuid4().hex),
     )
     token = generate_api_token()
-    key = APIKey.objects.create(
+    APIKey.objects.create(
         user=owner,
         name="Disposable benchmark key",
         key_hash=hash_token(token),
@@ -127,9 +124,6 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         if response.status_code != 200:
             raise RuntimeError(f"REST feed failed: HTTP {response.status_code}")
         return response.json()
-
-    def mcp() -> list[dict[str, Any]]:
-        return json.loads(_call_list_harness_conversations(key, org.id, {})[0].text)
 
     results = []
     created = 0
@@ -165,20 +159,16 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         created = count
         HarnessSession.objects.update(updated_at=FIXTURE_TIME)
         rest_result = _measure(rest, args.samples)
-        mcp_result = _measure(mcp, args.samples)
-        if rest_result["response_sha256"] != mcp_result["response_sha256"]:
-            raise RuntimeError("REST and MCP feed payloads differ")
-        results.append({"workspaces": count, "rest": rest_result, "mcp": mcp_result})
+        results.append({"workspaces": count, "rest": rest_result})
     return {
         "benchmark": "isolated file-backed SQLite conversation feed",
-        "samples_per_adapter": args.samples,
+        "samples": args.samples,
         "children_per_workspace": args.children,
         "roots_per_workspace": 1,
         "results": results,
         "notes": [
             "Warm local fixtures, DEBUG=False; no external services or provider calls.",
             "REST includes authentication, ownership checks and JSON serialization.",
-            "MCP includes membership, ownership and JSON serialization, not transport.",
             "Query counts and tracemalloc peaks measured separately from timings.",
             "Allocation peak is not process RSS; timings are not production SLOs.",
         ],

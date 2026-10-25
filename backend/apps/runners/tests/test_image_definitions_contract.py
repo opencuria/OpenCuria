@@ -1,7 +1,7 @@
 """REST contract for image recipe management (``/api/v1/image-definitions/``).
 
 Characterizes status codes, error details and payloads of the recipe and
-runner-build endpoints so the shared service behind REST and MCP keeps
+runner-build endpoints so the service behind REST keeps
 both adapters' contracts identical.
 """
 
@@ -361,8 +361,7 @@ def test_runner_build_log_is_scoped_to_visible_builds(client, recipe_org):
 
 
 def test_workspace_and_recipe_contracts_expose_vm_configuration_only():
-    """REST and MCP share one workspace format without runtime selection."""
-    from apps.mcp_app.tools import TOOLS
+    """Workspace and recipe schemas expose VM configuration without runtime selection."""
     from apps.runners.schemas import (
         ImageDefinitionCreateIn,
         ImageDefinitionUpdateIn,
@@ -375,12 +374,3 @@ def test_workspace_and_recipe_contracts_expose_vm_configuration_only():
     for schema in (WorkspaceCreateIn, ImageDefinitionCreateIn, ImageDefinitionUpdateIn):
         assert "runtime_type" not in schema.model_fields
         assert "custom_dockerfile" not in schema.model_fields
-    for tool in TOOLS:
-        if tool.name in {
-            "create_workspace",
-            "create_image_definition",
-            "update_image_definition",
-        }:
-            properties = tool.inputSchema["properties"]
-            assert "runtime_type" not in properties
-            assert "custom_dockerfile" not in properties

@@ -1,6 +1,6 @@
 """Runner storage inventory: runner scan intake and admin inspection.
 
-Runners report scans over Socket.IO; REST and MCP share the admin views.
+Runners report scans over Socket.IO; REST exposes the admin views.
 """
 
 from asgiref.sync import sync_to_async

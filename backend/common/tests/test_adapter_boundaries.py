@@ -1,7 +1,7 @@
 """Architecture guard: REST router and Socket.IO modules are leaf adapters.
 
-REST (``api.py``) and MCP (``apps.mcp_app``) are sibling adapters over the
-same services. Shared request/response shapes live in ``schemas`` /
+REST routers (``api.py``) are adapters over services.
+Shared request/response shapes live in ``schemas`` /
 presenter modules, so no application module may import a REST router
 module; only the URL composition root (``config/urls.py``) mounts them.
 Likewise the realtime adapters (the Socket.IO handler module and the desktop
@@ -18,9 +18,9 @@ selection (ID normalization, visibility, body rendering and merging) is owned
 by the skills context; the harness and scheduled tasks call ``SkillService``
 and never import skill repositories or models. Workspaces
 compose plugins, so workspace-scoped plugin endpoints and guards live in
-``apps.runners``. REST, MCP and realtime adapters never query the ORM
-themselves and never import repositories; e.g. REST and MCP both
-authenticate API keys through ``apps.accounts.services.APIKeyService``, and
+``apps.runners``. REST and realtime adapters never query the ORM
+themselves and never import repositories; REST authenticates API keys
+through ``apps.accounts.services.APIKeyService``, and
 the realtime adapters reach models and repositories only through services.
 Below the adapters, services, tools and engines of the repository-only apps
 never query the ORM either: model managers and instance reloads appear only
@@ -58,7 +58,6 @@ REPOSITORY_ONLY_APPS = {
     "apps.accounts",
     "apps.credentials",
     "apps.harness",
-    "apps.mcp_app",
     "apps.organizations",
     "apps.plugins",
     "apps.scheduled_tasks",
@@ -118,7 +117,7 @@ def _imported_modules(path: Path, tree: ast.Module) -> set[str]:
 
 
 def test_no_application_module_imports_a_rest_router_module():
-    """Adapters never import REST routers; MCP shares schemas/services instead."""
+    """Adapters never import REST routers; shared code lives in schemas/services."""
     trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     router_modules = {
         _module_name(path)
@@ -163,13 +162,12 @@ def _persistence_modules(trees: dict[Path, ast.Module]) -> set[str]:
 
 
 def _adapter_modules(trees: dict[Path, ast.Module]) -> set[Path]:
-    """Return REST router, API-key auth, MCP and realtime adapter modules."""
+    """Return REST router, API-key auth and realtime adapter modules."""
     return {
         path
         for path, tree in trees.items()
         if _defines_ninja_router(tree)
         or _module_name(path) == "apps.accounts.api_auth"
-        or _module_name(path).startswith("apps.mcp_app")
         or _module_name(path) in REALTIME_ADAPTERS
     }
 
@@ -216,12 +214,12 @@ def test_realtime_adapters_reach_persistence_only_through_services():
 
 
 def test_adapters_reach_image_recipes_only_through_their_service():
-    """REST and MCP share ``ImageDefinitionService`` for recipes and builds."""
+    """REST uses ``ImageDefinitionService`` for recipes and builds."""
     trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     adapters = {
         path
         for path, tree in trees.items()
-        if _defines_ninja_router(tree) or _module_name(path).startswith("apps.mcp_app")
+        if _defines_ninja_router(tree)
     }
     persistence = {
         "apps.runners.models.ImageBuildJob",
@@ -242,7 +240,7 @@ def test_adapters_reach_image_recipes_only_through_their_service():
 
 
 def test_adapters_never_query_the_orm():
-    """REST, MCP and realtime adapters call services; only repositories query."""
+    """REST and realtime adapters call services; only repositories query."""
     trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     adapters = _adapter_modules(trees)
     assert APPS_ROOT / "accounts" / "api.py" in adapters  # discovery sanity check
@@ -257,7 +255,7 @@ def test_adapters_never_query_the_orm():
     )
     assert violations == [], (
         "Move ORM access into the app's repositories and call it through its "
-        "service from REST and MCP alike:\n" + "\n".join(violations)
+        "service from adapters:\n" + "\n".join(violations)
     )
 
 
@@ -320,11 +318,11 @@ def test_account_services_persist_changes_only_through_repositories():
 
 
 def test_adapters_reach_repositories_only_through_services():
-    """REST and MCP call the owning service; neither imports a repository."""
+    """Adapters call the owning service instead of importing a repository."""
     trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     adapters = _adapter_modules(trees)
     repositories = _repository_modules(trees)
-    assert APPS_ROOT / "mcp_app" / "server.py" in adapters  # discovery sanity check
+    assert APPS_ROOT / "accounts" / "api_auth.py" in adapters
     assert {
         "apps.credentials.repositories",
         "apps.runners.disposition_repository",
@@ -340,8 +338,8 @@ def test_adapters_reach_repositories_only_through_services():
         )
     )
     assert violations == [], (
-        "Call the owning app's service instead of its repository, so REST and "
-        "MCP share one implementation:\n" + "\n".join(violations)
+        "Call the owning app's service instead of its repository:\n"
+        + "\n".join(violations)
     )
 
 
@@ -363,7 +361,7 @@ def test_runner_service_never_imports_the_harness():
 
 def test_harness_never_imports_the_apps_built_on_it():
     """Consumers subscribe to harness run events; the harness never calls them."""
-    consumers = ("apps.scheduled_tasks", "apps.mcp_app")
+    consumers = ("apps.scheduled_tasks",)
     package = APPS_ROOT / "harness"
     violations = sorted(
         f"{_module_name(path)} -> {module}"

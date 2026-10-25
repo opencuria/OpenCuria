@@ -1,4 +1,4 @@
-"""Organization-scoped image recipe management shared by REST and MCP.
+"""Organization-scoped image recipe management.
 
 Owns who may see or change an image definition and its runner builds,
 recipe validation and duplicate naming. Recipes and builds are read and

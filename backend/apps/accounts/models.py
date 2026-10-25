@@ -18,7 +18,7 @@ class APIKeyPermission(str, enum.Enum):
     """
     Fine-grained permissions that can be assigned to an API key.
 
-    Applies to both the REST API and MCP interface.
+    Applies to the REST API.
     """
 
     # Workspaces
@@ -78,9 +78,6 @@ class APIKeyPermission(str, enum.Enum):
     HARNESS_RUN = "harness:run"
     HARNESS_PERMISSIONS = "harness:permissions"
     HARNESS_PROVIDERS = "harness:providers"
-
-    # MCP
-    MCP_ACCESS = "mcp:access"
 
     @classmethod
     def all_values(cls) -> list[str]:

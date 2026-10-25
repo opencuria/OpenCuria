@@ -1,9 +1,7 @@
 """
 Request/response schemas and DTO mappers for the harness adapters.
 
-Shared by the REST routers (``api.py``) and the MCP tools
-(``apps.mcp_app``) so both expose identical payloads without importing
-each other. Pure mapping only: no business rules, no ORM queries.
+Pure mapping for REST responses: no business rules, no ORM queries.
 """
 
 from __future__ import annotations
@@ -476,7 +474,7 @@ def session_to_out_with_unread(service, session) -> HarnessSessionOut:  # type: 
 
 
 def timeline_to_out(service: HarnessService, session: HarnessSession) -> dict[str, Any]:
-    """Build the shared lightweight REST/MCP timeline from service reads."""
+    """Build the lightweight REST timeline from service reads."""
     messages = service.list_timeline_messages(session.id)
     parts = service.list_timeline_parts(session.id)
     message_positions = {

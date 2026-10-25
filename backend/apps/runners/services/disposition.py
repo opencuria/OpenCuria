@@ -1,4 +1,4 @@
-"""One safe operator workflow shared by REST, MCP and automatic reconciliation."""
+"""Operator workflow shared by REST and automatic reconciliation."""
 
 import uuid
 from typing import Any

@@ -43,7 +43,7 @@ includes the selected answer and all preceding messages/parts, opens with an
 empty composer, and never automatically sends a prompt. The source conversation
 is unchanged. This copies chat history only, not workspace files or snapshots.
 
-The REST and MCP fork contracts add `include_message: true` with `message_id`.
+The REST fork contract supports `include_message: true` with `message_id`.
 The default remains an exclusive cutoff for existing clients; no message ID
 still copies the entire session. Legacy user cutoffs retain prompt prefill.
 

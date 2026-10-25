@@ -528,17 +528,12 @@ def test_changed_graph_withheld_before_outbox_emission(runner, user):
     )
 
 
-def test_rest_mcp_contract_and_owner_force_denial(runner, user):
+def test_rest_contract_and_owner_force_denial(runner, user):
     import json
-    from types import SimpleNamespace
 
     from django.test import Client
 
     from apps.accounts.models import APIKey, APIKeyPermission
-    from apps.mcp_app.tools.images import (
-        _call_list_image_deletions,
-        _call_preview_image_deletion,
-    )
     from common.utils import generate_api_token, hash_token
 
     base = image(runner, user)
@@ -572,14 +567,6 @@ def test_rest_mcp_contract_and_owner_force_denial(runner, user):
         content_type="application/json",
     )
     assert preview.status_code == 200
-    assert (
-        json.loads(
-            _call_preview_image_deletion(
-                SimpleNamespace(user=user), runner.organization_id, payload
-            )[0].text
-        )["fingerprint"]
-        == preview.json()["fingerprint"]
-    )
     response = client.post(
         "/api/v1/image-artifacts/deletions/",
         json.dumps(payload),
@@ -588,14 +575,6 @@ def test_rest_mcp_contract_and_owner_force_denial(runner, user):
     assert response.status_code == 200
     row = response.json()
     assert row["can_cancel"] and row["phase"] == "waiting_inventory"
-    assert (
-        json.loads(
-            _call_list_image_deletions(
-                SimpleNamespace(user=user), runner.organization_id, {}
-            )[0].text
-        )[0]["id"]
-        == row["id"]
-    )
     assert (
         client.get("/api/v1/image-artifacts/deletions/" + row["id"] + "/").json()[0][
             "id"

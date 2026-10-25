@@ -126,16 +126,6 @@ async def test_service_auth_rejects_other_owner_and_org(monkeypatch):
         )
 
 
-@pytest.mark.django_db
-@pytest.mark.parametrize("action", ["start", "stop", "renew", "status"])
-def test_mcp_requires_terminal_permission(action):
-    from apps.mcp_app.tools.desktop import _call_viewer_desktop
-
-    api_key = SimpleNamespace(has_permission=lambda permission: False)
-    result = _call_viewer_desktop(api_key, uuid.uuid4(), {}, action)
-    assert "Permission denied" in result[0].text
-
-
 @pytest.mark.asyncio
 async def test_desktop_events_preserve_process_aggregates(monkeypatch):
     """Partial viewer events must not erase MCP or remaining viewer holders."""

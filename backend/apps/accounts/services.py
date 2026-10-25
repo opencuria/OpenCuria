@@ -1,8 +1,8 @@
 """
 Service layer for the accounts app.
 
-All business logic for API keys lives here. REST and MCP authenticate
-API keys through the same ``APIKeyService``.
+All business logic for API keys lives here. REST authentication uses
+``APIKeyService``.
 """
 
 from __future__ import annotations
@@ -78,16 +78,11 @@ class APIKeyService:
         """Deactivate a key owned by *user*."""
         self.keys.deactivate(self._get_owned(key_id, user))
 
-    def authenticate(
-        self,
-        token: str,
-        *,
-        required_permission: APIKeyPermission | None = None,
-    ) -> APIKey | None:
+    def authenticate(self, token: str) -> APIKey | None:
         """Return the active, unexpired key for *token* and record its use.
 
-        Returns None when the token is unknown, revoked, expired or lacks
-        *required_permission*; rejected attempts never count as a use.
+        Returns None when the token is unknown, revoked or expired;
+        rejected attempts never count as a use.
         """
         if not token:
             return None
@@ -95,10 +90,6 @@ class APIKeyService:
         if api_key is None:
             return None
         if api_key.expires_at is not None and timezone.now() > api_key.expires_at:
-            return None
-        if required_permission is not None and not api_key.has_permission(
-            required_permission
-        ):
             return None
         return self.keys.touch_last_used(api_key)
 

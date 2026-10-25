@@ -104,12 +104,8 @@ async def test_offline_inspection_never_dispatches(
 
 
 @pytest.mark.django_db(transaction=True)
-def test_rest_mcp_owner_admin_cross_org_and_scopes(runner, workspace, user):
-    from types import SimpleNamespace
-
+def test_rest_operation_inspection_and_scopes(runner, workspace, user):
     from apps.accounts.models import APIKeyPermission
-    from apps.mcp_app.tools import TOOL_PERMISSIONS
-    from apps.mcp_app.tools.runners import _call_inspect_lifecycle_operation
     from apps.organizations.models import Membership
     from apps.runners.tests.test_workspace_access_controls import _make_client
 
@@ -135,28 +131,11 @@ def test_rest_mcp_owner_admin_cross_org_and_scopes(runner, workspace, user):
         client.post(f"/api/v1/runners/operations/{task.id}/retry/").status_code == 403
     )
     assert client.get("/api/v1/runners/operations/").status_code == 200
-    assert (
-        TOOL_PERMISSIONS["inspect_lifecycle_operation"]
-        == APIKeyPermission.RUNNERS_READ
-    )
-    result = _call_inspect_lifecycle_operation(
-        SimpleNamespace(user=user),
-        runner.organization_id,
-        {"operation_id": str(task.id)},
-    )
-    assert "unknown" in result[0].text
 
 
 @pytest.mark.django_db(transaction=True)
-def test_rest_and_mcp_retry_require_the_task_specific_scope(runner, workspace, user):
-    import json
-    from types import SimpleNamespace
-
+def test_rest_retry_requires_the_task_specific_scope(runner, workspace, user):
     from apps.accounts.models import APIKeyPermission
-    from apps.mcp_app.tools.runners import (
-        _call_dispose_lifecycle_operation,
-        _call_list_lifecycle_operations,
-    )
     from apps.organizations.models import Membership
     from apps.runners.tests.test_workspace_access_controls import _make_client
 
@@ -185,25 +164,6 @@ def test_rest_and_mcp_retry_require_the_task_specific_scope(runner, workspace, u
         permissions=[update, APIKeyPermission.WORKSPACES_STOP],
     )
     assert scoped.post(retry_url).status_code == 409
-
-    def mcp_key(*permissions):
-        return SimpleNamespace(
-            user=user, has_permission=lambda permission: permission in permissions
-        )
-
-    args = {"operation_id": str(task.id), "action": "retry"}
-    with pytest.raises(PermissionError, match="Operation-specific"):
-        _call_dispose_lifecycle_operation(mcp_key(), runner.organization_id, args)
-    with pytest.raises(ConflictError):
-        _call_dispose_lifecycle_operation(
-            mcp_key(APIKeyPermission.WORKSPACES_STOP), runner.organization_id, args
-        )
-
-    listed = json.loads(
-        _call_list_lifecycle_operations(mcp_key(), runner.organization_id, {})[0].text
-    )
-    assert [row["operation_id"] for row in listed["operations"]] == [str(task.id)]
-    assert listed["operations"][0]["task_type"] == "stop_workspace"
 
 
 def test_retry_permission_maps_task_types(runner, workspace, user):

@@ -1,4 +1,4 @@
-"""Shared ChatGPT device OAuth lifecycle for REST and MCP clients."""
+"""ChatGPT device OAuth lifecycle for provider accounts."""
 
 from __future__ import annotations
 

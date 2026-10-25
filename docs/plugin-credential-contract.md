@@ -6,19 +6,17 @@ unchanged; an explicit empty array clears that selection. Plugin activation is
 independent of credential/service activation. A single credential per service
 may be attached to a workspace and may satisfy multiple selected plugins.
 
-Both REST (`POST /api/v1/workspaces/`, `PATCH /api/v1/workspaces/{id}/`) and
-MCP (`create_workspace`, `update_workspace`) use these same selection rules.
-REST returns the persisted `plugin_ids` in `WorkspaceOut`, `WorkspaceCreateOut`,
-and `WorkspaceUpdateOut`; the corresponding MCP responses include both final
-`plugin_ids` and `credential_ids`.
+REST (`POST /api/v1/workspaces/`, `PATCH /api/v1/workspaces/{id}/`) uses these
+selection rules and returns persisted `plugin_ids` in `WorkspaceOut`,
+`WorkspaceCreateOut`, and `WorkspaceUpdateOut`.
 
 When a selected plugin has a missing required credential—including an OAuth
 credential without a connected, endpoint-matching grant—the selection is
 rejected with HTTP 409 and `code: "missing_plugin_credentials"`. The optional
 `gaps` array contains only safe metadata objects with `plugin_id`,
-`plugin_name`, `key`, `service_id`, `service_name`, and `credential_type`. MCP
-returns the same `code` and `gaps` object. Optional requirements do not block.
-The legacy plugin-write route/tool is removed; selection is only changed with
+`plugin_name`, `key`, `service_id`, `service_name`, and `credential_type`.
+Optional requirements do not block.
+Selection is only changed with
 workspace create/update. Plugin details link to Credentials with `add_credential=<service_id>`
 to open the new-credential flow for that service; `reconnect_credential=<credential_id>`
 opens reconnection for that existing credential. Both deep links include

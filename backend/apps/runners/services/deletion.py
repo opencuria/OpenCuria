@@ -1,4 +1,4 @@
-"""Shared authorization boundary for REST and MCP deletion commands."""
+"""Authorization boundary for image deletion commands."""
 
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError

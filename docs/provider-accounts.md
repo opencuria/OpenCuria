@@ -34,12 +34,10 @@ acting admin becomes the account's personal owner; the UI requires confirmation.
   exact account. ChatGPT accounts are created using the device OAuth endpoints.
 - `PUT /api/v1/provider-config/selection/{provider}/` with `account_id` (UUID or
   `null`): select an account or none. The choice is scoped to the caller and org.
-- MCP tools `list_provider_accounts`, `save_provider_account`,
-  `delete_provider_account`, `select_provider_account` use the same service.
 
 `GET` / `PUT /api/v1/provider-config/` only read/write model and reasoning-effort
 defaults; credentials and connection metadata belong to the account APIs above.
-Provider-wide and Claude-specific connection CRUD endpoints and MCP tools are
+Provider-wide and Claude-specific connection CRUD endpoints are
 removed; all providers use the account APIs above.
 
 ChatGPT device flows return a `flow_id`; status/cancel must address that flow.
@@ -61,7 +59,7 @@ secrets requires the same configured encryption key as the old installation.
 
 ## Verification
 
-Backend tests cover account permissions, API/MCP integration, legacy migrations,
+Backend tests cover account permissions, API integration, legacy migrations,
 and snapshot/revocation flows against a loopback-only HTTP/SSE provider. Run them
 from `backend/` with `.venv/bin/pytest -q apps/harness/tests/test_provider*.py`.
 They use disposable test databases and do not need real provider credentials.
