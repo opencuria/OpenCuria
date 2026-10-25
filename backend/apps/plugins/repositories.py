@@ -330,18 +330,14 @@ class OrgPluginActivationRepository:
     """Data access for OrgPluginActivation records."""
 
     @staticmethod
-    def is_enabled(org_id: uuid.UUID, plugin_id: uuid.UUID) -> bool:
-        return OrgPluginActivation.objects.filter(
-            organization_id=org_id, plugin_id=plugin_id
-        ).exists()
-
-    @staticmethod
-    def enabled_plugin_ids(org_id: uuid.UUID) -> set[uuid.UUID]:
-        return set(
-            OrgPluginActivation.objects.filter(organization_id=org_id).values_list(
-                "plugin_id", flat=True
-            )
-        )
+    def enabled_plugin_ids(
+        org_id: uuid.UUID, *, plugin_ids: list[uuid.UUID] | None = None
+    ) -> set[uuid.UUID]:
+        """Return org activations, optionally restricted to requested plugins."""
+        queryset = OrgPluginActivation.objects.filter(organization_id=org_id)
+        if plugin_ids is not None:
+            queryset = queryset.filter(plugin_id__in=plugin_ids)
+        return set(queryset.values_list("plugin_id", flat=True))
 
     @staticmethod
     def set_enabled(*, org_id: uuid.UUID, plugin, enabled_by, active: bool) -> bool:

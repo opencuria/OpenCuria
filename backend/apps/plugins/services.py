@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections import defaultdict
 
 import structlog
 from django.db import transaction
@@ -17,7 +18,13 @@ from django.utils.text import slugify
 from apps.credentials.services import CredentialServiceSvc, CredentialSvc
 from common.exceptions import ConflictError, NotFoundError
 
-from .models import Plugin, PluginTransport
+from .models import (
+    Plugin,
+    PluginCredentialRequirement,
+    PluginMcpServer,
+    PluginSkill,
+    PluginTransport,
+)
 from .repositories import (
     OrgPluginActivationRepository,
     PluginCredentialRequirementRepository,
@@ -302,14 +309,14 @@ class PluginService:
     def list_visible(self, *, org_id: uuid.UUID) -> list[dict]:
         """Return visible plugin definitions and their service dependencies."""
         plugins = list(self.plugins.list_visible_to_org(org_id))
-        return [self._serialize(p, org_id=org_id) for p in plugins]
+        return self._serialize_plugins(plugins, org_id=org_id)
 
     def get_visible(self, plugin_id: uuid.UUID, *, org_id: uuid.UUID) -> dict:
         """Return one visible plugin or raise NotFoundError (cross-org 404)."""
         plugin = self.plugins.get_visible_by_id(plugin_id, org_id)
         if plugin is None:
             raise NotFoundError("Plugin", str(plugin_id))
-        return self._serialize(plugin, org_id=org_id)
+        return self._serialize_plugins([plugin], org_id=org_id)[0]
 
     def get_visible_model(self, plugin_id: uuid.UUID, *, org_id: uuid.UUID):
         """Return the visible plugin model or raise NotFoundError."""
@@ -384,7 +391,9 @@ class PluginService:
         self.mcp_servers.replace_for_plugin(plugin, normalized_mcps)
         self._create_requirements(plugin, prepared_requirements)
         logger.info("Plugin created: %s (org=%s)", plugin.id, org_id)
-        return self._serialize(self.plugins.get_by_id(plugin.id), org_id=org_id)
+        return self._serialize_plugins(
+            [self.plugins.get_by_id(plugin.id)], org_id=org_id
+        )[0]
 
     @transaction.atomic
     def update_org_plugin(
@@ -510,7 +519,9 @@ class PluginService:
             self._replace_requirements(plugin, prepared_requirements)
 
         logger.info("Plugin updated: %s (org=%s)", plugin.id, org_id)
-        return self._serialize(self.plugins.get_by_id(plugin.id), org_id=org_id)
+        return self._serialize_plugins(
+            [self.plugins.get_by_id(plugin.id)], org_id=org_id
+        )[0]
 
     @transaction.atomic
     def delete_org_plugin(self, plugin_id: uuid.UUID, *, org_id: uuid.UUID) -> None:
@@ -552,7 +563,9 @@ class PluginService:
         self.org_activations.set_enabled(
             org_id=org_id, plugin=plugin, enabled_by=user, active=bool(active)
         )
-        return self._serialize(self.plugins.get_by_id(plugin.id), org_id=org_id)
+        return self._serialize_plugins(
+            [self.plugins.get_by_id(plugin.id)], org_id=org_id
+        )[0]
 
     # -- Workspace activation -------------------------------------------------
 
@@ -731,11 +744,46 @@ class PluginService:
 
     # -- Internal helpers ----------------------------------------------------
 
-    def _serialize(self, plugin, *, org_id: uuid.UUID) -> dict:
-        """Serialize a plugin definition and dependency mapping."""
-        skills = list(self.skills.list_for_plugin(plugin.id))
-        mcps = list(self.mcp_servers.list_for_plugin(plugin.id))
-        reqs = list(self.requirements.list_for_plugin(plugin.id))
+    def _serialize_plugins(
+        self, plugins: list[Plugin], *, org_id: uuid.UUID
+    ) -> list[dict]:
+        """Load components once for the requested definitions, preserving order."""
+        if not plugins:
+            return []
+        plugin_ids = [plugin.id for plugin in plugins]
+        skills: dict[uuid.UUID, list[PluginSkill]] = defaultdict(list)
+        mcps: dict[uuid.UUID, list[PluginMcpServer]] = defaultdict(list)
+        reqs: dict[uuid.UUID, list[PluginCredentialRequirement]] = defaultdict(list)
+        for skill in self.skills.list_for_plugins(plugin_ids):
+            skills[skill.plugin_id].append(skill)
+        for server in self.mcp_servers.list_for_plugins(plugin_ids):
+            mcps[server.plugin_id].append(server)
+        for requirement in self.requirements.list_for_plugins(plugin_ids):
+            reqs[requirement.plugin_id].append(requirement)
+        enabled_ids = self.org_activations.enabled_plugin_ids(
+            org_id, plugin_ids=plugin_ids
+        )
+        return [
+            self._serialize_plugin(
+                plugin,
+                skills=skills[plugin.id],
+                mcps=mcps[plugin.id],
+                reqs=reqs[plugin.id],
+                org_enabled=plugin.id in enabled_ids,
+            )
+            for plugin in plugins
+        ]
+
+    @staticmethod
+    def _serialize_plugin(
+        plugin: Plugin,
+        *,
+        skills: list[PluginSkill],
+        mcps: list[PluginMcpServer],
+        reqs: list[PluginCredentialRequirement],
+        org_enabled: bool,
+    ) -> dict:
+        """Serialize a fully loaded definition without further repository reads."""
         return {
             "id": plugin.id,
             "name": plugin.name,
@@ -745,7 +793,7 @@ class PluginService:
             "published": plugin.published,
             "organization_id": plugin.organization_id,
             "is_global": plugin.organization_id is None,
-            "org_enabled": self.org_activations.is_enabled(org_id, plugin.id),
+            "org_enabled": org_enabled,
             "skills": [
                 {
                     "id": s.id,
