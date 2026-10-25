@@ -276,31 +276,6 @@ describe('SettingsSheet', () => {
     expect(wrapper.text()).toContain('Providers')
   })
 
-  it('maps legacy org-settings tabs onto sheet tabs', async () => {
-    const wrapper = mountSheet()
-
-    window.dispatchEvent(
-      new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'workspace-policies' } }),
-    )
-    await flushPromises()
-    await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('General')
-
-    window.dispatchEvent(
-      new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'credential-services' } }),
-    )
-    await flushPromises()
-    await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Credential Services')
-
-    window.dispatchEvent(
-      new CustomEvent(OPEN_SETTINGS_EVENT, { detail: { tab: 'image-definitions' } }),
-    )
-    await flushPromises()
-    await wrapper.vm.$nextTick()
-    expect(wrapper.find('[data-testid="settings-sheet-title"]').text()).toBe('Image Definitions')
-  })
-
   it('falls back to general for unknown tabs and hides runners for non-admins', async () => {
     authMock.isAdmin = false
     const wrapper = mountSheet()

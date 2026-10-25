@@ -64,14 +64,16 @@ const image: CapturedImage = {
   ],
 }
 
+const imageStore = {
+  capturedImages: [image],
+  loading: false,
+  error: null,
+  fetchCapturedImages,
+  renameCapturedImage,
+}
+
 vi.mock('@/stores/images', () => ({
-  useImageStore: () => ({
-    capturedImages: [image],
-    loading: false,
-    error: null,
-    fetchCapturedImages,
-    renameCapturedImage,
-  }),
+  useImageStore: () => imageStore,
 }))
 
 vi.mock('@/composables/usePolling', () => ({
@@ -105,6 +107,26 @@ function mountPanel() {
 describe('CapturedImagesPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    imageStore.capturedImages = [image]
+  })
+
+  it('shows a capture in progress without offering a workspace before a ready version exists', () => {
+    imageStore.capturedImages = [
+      {
+        ...image,
+        latest_id: null,
+        latest_version: null,
+        versions: [version({ status: 'capturing' })],
+      },
+    ]
+    const wrapper = mountPanel()
+    try {
+      expect(wrapper.text()).toContain('Capturing…')
+      expect(wrapper.text()).toContain('No ready version')
+      expect(wrapper.find('[data-testid="new-workspace"]').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
   })
 
   it('shows one row per image with its versions, usage and latest version', async () => {

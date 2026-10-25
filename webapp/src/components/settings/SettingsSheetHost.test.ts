@@ -143,7 +143,7 @@ describe('SettingsSheetHost', () => {
       setQuery({})
       await flush()
       expect(ctx.events).toHaveLength(1)
-      // Neue Navigation mit demselben Wert (z. B. zweiter Legacy-Link-Klick):
+      // Neue Navigation mit demselben Wert:
       // Event feuert ein zweites Mal + zweites Replace.
       setQuery({ settings: 'provider' })
       await flush()

@@ -1,18 +1,4 @@
-<!--
-  SettingsSheetHost — Globales Settings-Sheet (Schritt 5).
-
-  EINMAL in AppLayout eingebunden: öffnet das Sheet von überall
-  (Sidebar-UserMenu feuert `opencuria:open-settings`), inkl.
-  Deep-Link `/?settings=<tab>` (Query wird nach dem Öffnen entfernt).
-
-  Genau EINE Behandlung pro Query: nur der Watcher auf
-  `route.query.settings` löst aus (plus Mount für eine bereits vorhandene
-  Query, z. B. nach Router-Redirect `/org-settings?tab=…` → `/?settings=…`).
-  Ein `router.afterEach`-Hook darf hier NICHT zusätzlich ersetzen: Sein
-  `router.replace` würde die Push-Navigation des auslösenden Links abbrechen
-  und jede Navigation erneut durch den Host jagen
-  (gemeldeter "Page Unresponsive"-Hänger beim Banner-Klick).
--->
+<!-- Global Settings sheet host. Consume each ?settings=<tab> deep link once. -->
 <script setup lang="ts">
 import { onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -89,8 +75,7 @@ watch(
 )
 
 onMounted(() => {
-  // Bereits vorhandene ?settings=…-Query beim Mount verarbeiten
-  // (z. B. nach Router-Redirect von /org-settings?tab=… → /?settings=…).
+  // Handle a deep link already present when the layout mounts.
   openFromQuery()
 })
 </script>

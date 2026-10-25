@@ -7,7 +7,7 @@
   Open:  (a) global via Window event `opencuria:open-settings`
              (CustomEvent, detail `{ tab?: string }`),
            (b) controlled via v-model:open (defineModel).
-  Tab selection: `resolveSettingsTab()` — also maps old OrgSettings tabs.
+  Tab selection: `resolveSettingsTab()` validates event and deep-link input.
   Runners tab is admin-only (authStore.isAdmin).
   Focus trap / Esc / backdrop come from Dialog (reka-ui).
 -->

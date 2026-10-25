@@ -1,6 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
-import { resolveSettingsTab } from '@/components/settings/settingsTabs'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -42,12 +41,6 @@ const router = createRouter({
           meta: { title: 'New Chat', fullBleed: true },
         },
         {
-          path: 'runners',
-          name: 'runners',
-          redirect: { path: '/', query: { settings: 'runners' } },
-          meta: { title: 'Runners' },
-        },
-        {
           path: 'workspaces',
           name: 'workspaces',
           component: () => import('@/views/WorkspacesView.vue'),
@@ -65,45 +58,6 @@ const router = createRouter({
           name: 'workspace-detail',
           component: () => import('@/views/WorkspaceDetailView.vue'),
           meta: { title: 'Workspace', hideTopBar: true, fullBleed: true },
-        },
-        {
-          path: 'images',
-          name: 'images',
-          redirect: { path: '/', query: { settings: 'images' } },
-          meta: { title: 'Captured Images' },
-        },
-        {
-          path: 'skills',
-          name: 'skills',
-          redirect: { path: '/', query: { settings: 'skills' } },
-          meta: { title: 'Skills' },
-        },
-        {
-          path: 'credentials',
-          name: 'credentials',
-          redirect: { path: '/', query: { settings: 'credentials' } },
-          meta: { title: 'Credentials' },
-        },
-        {
-          path: 'plugins',
-          name: 'plugins',
-          redirect: { path: '/', query: { settings: 'plugins' } },
-          meta: { title: 'Plugins' },
-        },
-        {
-          path: 'api-keys',
-          name: 'api-keys',
-          redirect: { path: '/', query: { settings: 'api-keys' } },
-          meta: { title: 'API Keys' },
-        },
-        {
-          path: 'org-settings',
-          name: 'org-settings',
-          redirect: (to) => ({
-            path: '/',
-            query: { settings: resolveSettingsTab(to.query.tab) },
-          }),
-          meta: { title: 'Organization Settings' },
         },
         {
           path: 'docs/:slug(.*)*',
