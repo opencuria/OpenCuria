@@ -10,6 +10,8 @@ from pydantic import ValidationError
 from apps.harness.access.base import ExecResult
 from apps.harness.access.runner_accessor import RunnerAccessorError
 from apps.harness.tests.conftest import FakeAccessor
+from apps.harness.todos.memory_repository import InMemoryTodoRepository
+from apps.harness.todos.service import TodoService
 from apps.harness.tools import (
     BashTool,
     EditTool,
@@ -30,7 +32,6 @@ from apps.harness.tools.shell import (
     BashArgs,
     truncate_output,
 )
-from apps.harness.tools.todos import InMemoryTodoRepository
 
 
 def _ctx(accessor: FakeAccessor) -> ToolContext:
@@ -547,7 +548,7 @@ async def test_list_external_path() -> None:
 async def test_todowrite_happy_path(fake_accessor) -> None:
     """Todos validate and persist behind the repository seam."""
     repo = InMemoryTodoRepository()
-    tool = TodoWriteTool(repository=repo)
+    tool = TodoWriteTool(service=TodoService(repository=repo))
     result = await tool.execute(
         {
             "todos": [
@@ -565,7 +566,7 @@ async def test_todowrite_happy_path(fake_accessor) -> None:
 
 async def test_todowrite_invalid_status_rejected(fake_accessor) -> None:
     """Unknown statuses raise a ToolError."""
-    tool = TodoWriteTool(repository=InMemoryTodoRepository())
+    tool = TodoWriteTool(service=TodoService(repository=InMemoryTodoRepository()))
     with pytest.raises(ToolError, match="Invalid status"):
         await tool.execute(
             {"todos": [{"content": "x", "status": "bogus"}]},

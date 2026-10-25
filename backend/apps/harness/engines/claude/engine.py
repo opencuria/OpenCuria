@@ -27,8 +27,8 @@ from ...prompts.composer import ComposedPrompt
 from ...prompts.opencuria import opencuria_context
 from ...providers.base import ToolSchema, Usage
 from ...runner import RunOptions, RunResult
+from ...todos.service import TodoService
 from ...tools.base import ToolContext, ToolRegistry, ToolResult
-from ...tools.todos import repository_for_session
 from ..catalog import (
     CLAUDE_AGENT_SDK_VERSION,
     CLAUDE_CODE_CLI_VERSION,
@@ -1052,8 +1052,8 @@ class ClaudeEngine:
     async def _send_todos(self, parent_tool_use_id: str | None = None) -> None:
         try:
             sid = self._options.session_id if self._options else ""
-            repo = repository_for_session(sid)
-            stored = await sync_to_async(repo.list)(sid)
+            todos_service = TodoService.for_session(sid)
+            stored = await sync_to_async(todos_service.list)(sid)
             todos = [
                 {
                     "content": x.content,

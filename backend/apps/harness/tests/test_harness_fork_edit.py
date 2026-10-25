@@ -35,9 +35,9 @@ from apps.harness.repositories import (
     HarnessPartRepository,
     HarnessSessionRepository,
     QuestionRequestRepository,
-    TodoRepository,
 )
 from apps.harness.tests.helpers import parts_for_session
+from apps.harness.todos.repositories import TodoRepository
 from common.exceptions import ConflictError
 
 

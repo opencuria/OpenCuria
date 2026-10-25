@@ -48,7 +48,7 @@ class ToolContext:
 
     ``model`` carries the parent's effective model for inheritance.
     ``run_subagent`` delegates child execution to the persistent harness
-    service; ``registry`` supplies the active todo repository for events.
+    service; ``registry`` supplies the active todo service for events.
     """
 
     session_id: str

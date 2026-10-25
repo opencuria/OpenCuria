@@ -14,10 +14,9 @@ from apps.harness.repositories import (
     HarnessMessageRepository,
     HarnessPartRepository,
     HarnessSessionRepository,
-    TodoRepository,
-    TodoRepositoryDjango,
 )
-from apps.harness.tools.todos import TodoItem
+from apps.harness.todos.domain import TodoItem
+from apps.harness.todos.repositories import TodoRepository
 
 
 @pytest.mark.django_db
@@ -251,14 +250,14 @@ def test_descendant_ids_query_per_level_not_per_session(
 
 @pytest.mark.django_db
 def test_django_todo_repository_replaces_list(harness_workspace) -> None:
-    """TodoRepositoryDjango persists via the Todo model (M3 seam)."""
+    """TodoRepository persists through the shared todo storage port."""
     workspace = harness_workspace
     session = HarnessSessionRepository.create(
         workspace_id=workspace.id,
         organization_id=workspace.runner.organization_id,
         title="todos",
     )
-    repo = TodoRepositoryDjango()
+    repo = TodoRepository()
     stored = repo.save(
         str(session.id),
         [
@@ -289,6 +288,6 @@ def test_django_todo_repository_replaces_list(harness_workspace) -> None:
 @pytest.mark.django_db
 def test_todo_save_rejects_non_uuid_session() -> None:
     """Saving todos without a real session UUID raises ValueError."""
-    repo = TodoRepositoryDjango()
+    repo = TodoRepository()
     with pytest.raises(ValueError, match="real session UUID"):
         repo.save("plain-session", [TodoItem(content="x")])

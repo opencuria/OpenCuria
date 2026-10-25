@@ -66,14 +66,15 @@ from .repositories import (
     HarnessPartRepository,
     HarnessSessionRepository,
     QuestionRequestRepository,
-    TodoRepository,
 )
 from .run_events import publish_assistant_run_finished
 from .runner import HarnessRunner, RunOptions
 from .steering import NO_ACTIVE_RUN_CODE, SteerEntry, SteeringChannel
+from .todos.repositories import TodoRepository
+from .todos.service import TodoService
 from .tools import default_tool_registry
 from .tools.subagents import TaskArgs, validate_subagent_delegation
-from .tools.todos import TodoWriteTool, repository_for_session
+from .tools.todos import TodoWriteTool
 from .tools.truncate import truncate_tool_output
 
 log = structlog.get_logger(__name__)
@@ -2896,7 +2897,7 @@ class HarnessService:
         registry = default_tool_registry()
         try:
             registry._tools["todowrite"] = TodoWriteTool(
-                repository=repository_for_session(session_id)
+                service=TodoService.for_session(session_id)
             )
         except KeyError:  # pragma: no cover - registry always has todowrite
             pass

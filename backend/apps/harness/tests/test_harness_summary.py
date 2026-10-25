@@ -20,11 +20,11 @@ from apps.harness.repositories import (
     HarnessMessageRepository,
     HarnessPartRepository,
     HarnessSessionRepository,
-    TodoRepositoryDjango,
 )
 from apps.harness.schemas import session_to_out
 from apps.harness.services import ProviderConfigService
-from apps.harness.tools.todos import TodoItem
+from apps.harness.todos.domain import TodoItem
+from apps.harness.todos.repositories import TodoRepository
 
 SENTENCE = "Login-Fehler und zugehörige Tests korrigieren."
 
@@ -196,7 +196,7 @@ def test_summary_material_carries_all_requests_and_closing_replies(
             message_id=second.id, type=part_type, output=text, state="completed"
         )
     HarnessMessageRepository.complete(second, finish="error", error="private error")
-    TodoRepositoryDjango().save(
+    TodoRepository().save(
         str(session.id), [TodoItem(content="unrelated next step", status="pending")]
     )
     # A slow recap may not include a newer turn or another session.

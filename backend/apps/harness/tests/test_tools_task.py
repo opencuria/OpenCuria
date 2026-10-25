@@ -22,7 +22,9 @@ from apps.harness.providers.base import (
 )
 from apps.harness.runner import HarnessRunner, RunOptions
 from apps.harness.tests.conftest import FakeAccessor
-from apps.harness.tools import TaskTool, default_tool_registry
+from apps.harness.todos.memory_repository import InMemoryTodoRepository
+from apps.harness.todos.service import TodoService
+from apps.harness.tools import TaskTool, TodoWriteTool, default_tool_registry
 from apps.harness.tools.base import ToolContext, ToolError, ToolResult
 from apps.harness.tools.subagents import (
     TASK_OUTPUT_MAX_CHARS,
@@ -297,11 +299,9 @@ async def test_task_envelope_carries_resumable_task_id(fake_accessor) -> None:
 
 async def test_todo_updated_event_after_todowrite(fake_accessor) -> None:
     """todowrite completion emits todo_updated with the stored list."""
-    from apps.harness.tools.todos import InMemoryTodoRepository
-
     repo = InMemoryTodoRepository()
     registry = default_tool_registry()
-    registry.get("todowrite")._repository = repo  # type: ignore[attr-defined]
+    registry._tools["todowrite"] = TodoWriteTool(service=TodoService(repository=repo))
     provider = FakeProvider(
         [
             _tool_step(

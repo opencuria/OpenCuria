@@ -31,6 +31,8 @@ SSO provisioning share the accounts user repository; profile writes and
 password checks (which can save upgraded hashes) stay there as well.
 Credential repositories are private to their context; consumers resolve
 catalog entries and workspace attachments through credential services.
+Harness persistence never imports tool adapters; todo records and their storage
+port live in ``apps.harness.todos.domain`` and tools call its todo service.
 """
 
 from __future__ import annotations
@@ -173,6 +175,71 @@ def _adapter_modules(trees: dict[Path, ast.Module]) -> set[Path]:
         or _module_name(path) == "apps.accounts.api_auth"
         or _module_name(path) in REALTIME_ADAPTERS
     }
+
+
+def test_harness_persistence_never_imports_tools() -> None:
+    """Repositories depend on domain records instead of their tool consumers."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    persistence = _persistence_modules(trees)
+    assert "apps.harness.todos.repositories" in persistence
+    assert "apps.harness.repositories" in persistence
+    violations = sorted(
+        f"{_module_name(path)} -> {module}"
+        for path, tree in trees.items()
+        if _module_name(path).startswith("apps.harness.")
+        and _module_name(path) in persistence
+        for module in _imported_modules(path, tree)
+        if module == "apps.harness.tools" or module.startswith("apps.harness.tools.")
+    )
+    assert violations == [], (
+        "Move shared records and storage ports out of tool adapters; harness "
+        "repositories must never import tools (including function-local "
+        "imports):\n" + "\n".join(violations)
+    )
+
+
+def test_todo_domain_never_imports_its_consumers() -> None:
+    """Todo policy and storage cannot depend on tools or engine orchestration."""
+    package = APPS_ROOT / "harness" / "todos"
+    consumers = {
+        "apps.harness.tools",
+        "apps.harness.engines",
+        "apps.harness.harness_service",
+    }
+    violations = sorted(
+        f"{_module_name(path)} -> {module}"
+        for path in package.rglob("*.py")
+        for module in _imported_modules(path, ast.parse(path.read_text()))
+        if any(module == name or module.startswith(f"{name}.") for name in consumers)
+    )
+    assert violations == [], (
+        "Tools and engines consume the todo service; dependencies must not "
+        "point back to those consumers:\n" + "\n".join(violations)
+    )
+
+
+def test_todo_tools_and_engines_use_the_service_boundary() -> None:
+    """Tool adapters and engines must not select or access todo stores directly."""
+    harness = APPS_ROOT / "harness"
+    consumers = [
+        *(harness / "tools").rglob("*.py"),
+        *(harness / "engines").rglob("*.py"),
+    ]
+    stores = {
+        "apps.harness.todos.repositories",
+        "apps.harness.todos.memory_repository",
+    }
+    violations = sorted(
+        f"{_module_name(path)} -> {module}"
+        for path in consumers
+        for module in _imported_modules(path, ast.parse(path.read_text()))
+        if any(module == store or module.startswith(f"{store}.") for store in stores)
+    )
+    assert violations == [], (
+        "Read and replace todos through apps.harness.todos.service.TodoService "
+        "instead of importing its stores from a tool or engine:\n"
+        + "\n".join(violations)
+    )
 
 
 def test_no_application_module_imports_a_realtime_adapter():

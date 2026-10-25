@@ -15,9 +15,11 @@ from apps.harness.tests.test_claude_engine import (
     _run_local_cli_fixture,
     require_pinned_cli,
 )
+from apps.harness.todos.memory_repository import InMemoryTodoRepository
+from apps.harness.todos.service import TodoService
 from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import ToolRegistry
-from apps.harness.tools.todos import InMemoryTodoRepository, TodoWriteTool
+from apps.harness.tools.todos import TodoWriteTool
 
 
 def _provider_schemas(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -228,7 +230,7 @@ async def test_real_cli_mcp_todowrite_updates_open_curia_session_state(
     require_pinned_cli()
     repository = InMemoryTodoRepository()
     registry = ToolRegistry()
-    registry.register(TodoWriteTool(repository=repository))
+    registry.register(TodoWriteTool(service=TodoService(repository=repository)))
     session_id = "claude-upgrade-todo-contract"
     (
         result,

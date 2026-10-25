@@ -43,7 +43,6 @@ from .models import (
     QuestionRequestStatus,
     RecentModel,
     SubagentConfig,
-    Todo,
 )
 from .timeline import (
     TIMELINE_TEXT_PART_TYPES,
@@ -1652,77 +1651,6 @@ class HarnessPartRepository:
         fields.append("display")
         part.save(update_fields=fields)
         return part
-
-
-class TodoRepositoryDjango:
-    """Persistent ``TodoRepository`` (M3 interface) backed by ``Todo``.
-
-    Drop-in replacement for the M3 ``InMemoryTodoRepository``: the only
-    seam ``TodoWriteTool`` talks to. Once a run carries a real session
-    UUID, ``HarnessService`` builds tools with this repository wired in
-    (see ``services._tools_for_session``); the tool code itself is
-    untouched.
-    """
-
-    def list(self, session_id: str):  # type: ignore[no-untyped-def]
-        """Return the todo list for *session_id* (empty if none)."""
-        from .tools.todos import TodoList
-
-        try:
-            session_uuid = uuid.UUID(str(session_id))
-        except (TypeError, ValueError):
-            return TodoList(session_id=str(session_id))
-        rows = list(
-            Todo.objects.filter(session_id=session_uuid).order_by("order", "created_at")
-        )
-        return TodoList(
-            session_id=str(session_id),
-            items=[_todo_row_to_item(row) for row in rows if row is not None],
-        )
-
-    def save(self, session_id: str, items: list) -> object:  # type: ignore[no-untyped-def]
-        """Replace the todo list for *session_id* and return it."""
-        try:
-            session_uuid = uuid.UUID(str(session_id))
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"Todo save needs a real session UUID, got {session_id!r}"
-            ) from exc
-        Todo.objects.filter(session_id=session_uuid).delete()
-        for order, item in enumerate(items):
-            Todo.objects.create(
-                session_id=session_uuid,
-                content=item.content,
-                status=item.status,
-                priority=item.priority or "medium",
-                order=order,
-            )
-        return self.list(str(session_id))
-
-
-def _todo_row_to_item(row: Todo):  # type: ignore[no-untyped-def]
-    """Map a ``Todo`` ORM row to the M3 ``TodoItem`` dataclass."""
-    from .tools.todos import TodoItem
-
-    return TodoItem(
-        content=row.content,
-        status=row.status,
-        priority=row.priority or "medium",
-        order=row.order,
-    )
-
-
-class TodoRepository:
-    """Data access for ``Todo`` records (explicit CRUD for API/tests)."""
-
-    model = Todo
-
-    @staticmethod
-    def list_for_session(session_id: uuid.UUID) -> list[Todo]:
-        """Return all todos of a session in display order."""
-        return list(
-            Todo.objects.filter(session_id=session_id).order_by("order", "created_at")
-        )
 
 
 class QuestionRequestRepository:

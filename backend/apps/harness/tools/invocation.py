@@ -15,6 +15,7 @@ from ..agents.definitions import AgentDefinition
 from ..images import build_tool_message_content
 from ..permissions.evaluator import ASK, DEFAULT_GLOBAL_RULES, DENY, PermissionEvaluator
 from ..providers.base import LLMMessage, ToolSchema
+from ..todos.service import TodoService
 from .base import ToolContext, ToolRegistry, ToolResult
 
 if TYPE_CHECKING:
@@ -112,18 +113,16 @@ def _with_args(message: str, call: _PendingToolCall) -> str:
 async def _todos_payload(ctx: ToolContext) -> list[dict[str, Any]]:
     """Best-effort todo list for the ``todo_updated`` event."""
     try:
-        repository = None
+        todos = None
         if ctx.registry is not None:
             try:
                 tool = ctx.registry.get("todowrite")
             except KeyError:
                 tool = None
-            repository = getattr(tool, "_repository", None)
-        if repository is None:
-            from .todos import repository_for_session
-
-            repository = repository_for_session(ctx.session_id)
-        stored = await sync_to_async(repository.list)(ctx.session_id)
+            todos = getattr(tool, "todos", None)
+        if todos is None:
+            todos = TodoService.for_session(ctx.session_id)
+        stored = await sync_to_async(todos.list)(ctx.session_id)
         return [
             {
                 "content": item.content,
