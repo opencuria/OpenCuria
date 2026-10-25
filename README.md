@@ -302,7 +302,9 @@ organization (default: the owner's first). About 30 task-oriented tools cover wo
 chats (start, read with bounded waiting, send/steer, answer questions and permissions),
 skills, plugins and scheduled tasks. Client setup and the tool list are in
 [webapp/src/docs/mcp.md](./webapp/src/docs/mcp.md); the implementation lives in
-`backend/apps/mcp_app/`.
+`backend/apps/mcp_app/`. Agents inside OpenCuria get the same server through the
+built-in, non-deletable **OpenCuria** plugin (enable it per organization and workspace):
+it runs in-process as the workspace owner, without API key or credentials.
 
 ## MCP OAuth integrations
 

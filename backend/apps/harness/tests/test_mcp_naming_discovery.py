@@ -101,6 +101,16 @@ def test_normalize_text_and_structured():
         structuredContent={"answer": 42},
     )
     assert json.loads(normalize_call_result(structured).output) == {"answer": 42}
+    serialized = types.CallToolResult(
+        content=[types.TextContent(type="text", text='{"b": 1,"a": [2]}')],
+        structuredContent={"a": [2], "b": 1},
+    )
+    assert normalize_call_result(serialized).output == '{"b": 1,"a": [2]}'
+    supplemented = types.CallToolResult(
+        content=[types.TextContent(type="text", text="summary")],
+        structuredContent={"answer": 42},
+    )
+    assert normalize_call_result(supplemented).output == 'summary\n{"answer": 42}'
     with pytest.raises(ToolError, match="boom"):
         normalize_call_result(_text_result("boom", is_error=True))
 

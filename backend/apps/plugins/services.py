@@ -68,6 +68,9 @@ PLAYWRIGHT_MCP_ARGS = [
 PLAYWRIGHT_MCP_ENV = {}
 PLAYWRIGHT_MCP_RESOURCES = {"desktop": {"activation": "first_tool"}}
 
+#: Seeded global plugin exposing OpenCuria's own MCP server to agents.
+OPENCURIA_PLUGIN_ID = uuid.UUID("128eb61c-0bc6-4c64-8a1b-2c9dc4e440b6")
+
 
 # ---------------------------------------------------------------------------
 # Validation helpers
@@ -171,7 +174,10 @@ def normalize_mcp_payload(item: dict) -> dict:
         item.get("slug") or item.get("name", ""), field="MCP server slug"
     )
     transport = (item.get("transport") or "stdio").strip()
-    valid_transports = {c.value for c in PluginTransport}
+    # ``builtin`` is reserved for the seeded OpenCuria plugin.
+    valid_transports = {
+        c.value for c in PluginTransport if c is not PluginTransport.BUILTIN
+    }
     if transport not in valid_transports:
         raise ValueError(f"MCP transport must be one of {sorted(valid_transports)}")
 

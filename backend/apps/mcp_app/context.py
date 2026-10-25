@@ -1,10 +1,10 @@
-"""Per-request caller context: API key, user and active organization."""
+"""Per-request caller context: principal, user and active organization."""
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
@@ -16,19 +16,34 @@ class ContextError(Exception):
     """The authenticated key cannot act in any (or the requested) organization."""
 
 
+class Principal(Protocol):
+    """Who calls the tools: an API key or a workspace agent (see ``inprocess``)."""
+
+    user: Any
+    permissions: Any
+
+    def has_permission(self, permission: APIKeyPermission | str) -> bool:
+        """Return whether the principal grants *permission*."""
+        ...
+
+
 @dataclass(frozen=True)
 class ToolContext:
-    """Identity and scope every tool call runs with."""
+    """Identity and scope every tool call runs with.
 
-    api_key: Any
+    ``workspace_id`` is set when an agent inside that workspace is the caller.
+    """
+
+    principal: Principal
     organization_id: uuid.UUID
     organization_name: str
     role: str
+    workspace_id: uuid.UUID | None = None
 
     @property
     def user(self) -> Any:
-        """The user who owns the API key."""
-        return self.api_key.user
+        """The user the principal acts for."""
+        return self.principal.user
 
     @property
     def is_admin(self) -> bool:
@@ -36,8 +51,8 @@ class ToolContext:
         return self.role == "admin"
 
     def can(self, permission: APIKeyPermission) -> bool:
-        """Return whether the API key grants *permission*."""
-        return bool(self.api_key.has_permission(permission))
+        """Return whether the principal grants *permission*."""
+        return bool(self.principal.has_permission(permission))
 
     def require(self, *permissions: APIKeyPermission) -> None:
         """Raise a ToolError naming every missing API key permission."""
@@ -82,7 +97,7 @@ def resolve_context(api_key: Any, requested_org_id: str | None) -> ToolContext:
     else:
         selected = memberships[0]
     return ToolContext(
-        api_key=api_key,
+        principal=api_key,
         organization_id=selected["id"],
         organization_name=selected["name"],
         role=str(selected["role"]),

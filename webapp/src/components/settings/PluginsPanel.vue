@@ -133,6 +133,7 @@ function availabilityLabel(plugin: Plugin): string {
 }
 
 function transportLabel(transport: string): string {
+  if (transport === 'builtin') return 'Built-in'
   return transport === 'streamable_http'
     ? 'Streamable HTTP'
     : transport === 'stdio'
@@ -249,7 +250,10 @@ function credentialTypeLabel(type: string): string {
             ><Badge variant="outline">{{ transportLabel(server.transport) }}</Badge
             ><Badge v-if="server.auth_type === 'oauth'" variant="secondary">OAuth</Badge>
           </div>
-          <p class="mt-1 break-all font-mono text-xs text-muted-foreground">
+          <p
+            v-if="mcpEndpoint(server)"
+            class="mt-1 break-all font-mono text-xs text-muted-foreground"
+          >
             {{ mcpEndpoint(server) }}
           </p>
         </div>

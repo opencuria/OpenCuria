@@ -127,6 +127,8 @@ class McpRuntime:
                         headers=rendered_headers,
                         oauth_credential_id=oauth_credential_id,
                         oauth_service_id=server.oauth_service_id,
+                        workspace_id=snapshot.workspace_id,
+                        organization_id=snapshot.organization_id,
                         startup_timeout_seconds=float(
                             server.startup_timeout_seconds or 30
                         ),

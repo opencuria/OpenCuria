@@ -5,7 +5,7 @@ A ``Plugin`` is either global (``organization`` null, managed by platform
 staff) or org-owned. Plugins carry relational components:
 
 - ``PluginSkill`` -- Markdown prompt fragments, ordered by ``position``.
-- ``PluginMcpServer`` -- MCP server definitions (stdio or HTTP/SSE).
+- ``PluginMcpServer`` -- MCP server definitions (stdio, HTTP/SSE or built-in).
   ``command`` is a single executable; ``args`` are never joined into a
   shell string. ``env``/``headers`` values may contain credential
   placeholders of the form ``{{credential.KEY}}``.
@@ -29,11 +29,16 @@ from django.db import models
 
 
 class PluginTransport(models.TextChoices):
-    """Supported MCP transports for a plugin MCP server."""
+    """Supported MCP transports for a plugin MCP server.
+
+    ``builtin`` is reserved for the seeded OpenCuria plugin: OpenCuria's own
+    management MCP server, served in-process to the workspace agent.
+    """
 
     STDIO = "stdio", "STDIO"
     STREAMABLE_HTTP = "streamable_http", "Streamable HTTP"
     SSE = "sse", "SSE"
+    BUILTIN = "builtin", "Built-in"
 
 
 class Plugin(models.Model):

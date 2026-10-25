@@ -516,7 +516,10 @@ export interface PluginResources {
   desktop?: { activation?: DesktopActivation }
 }
 
+/** Transports a plugin author can choose. */
 export type PluginMcpTransport = 'stdio' | 'streamable_http' | 'sse'
+/** `builtin` is OpenCuria's own MCP server, served to the agent by the backend. */
+export type PluginMcpServerTransport = PluginMcpTransport | 'builtin'
 
 export type PluginCredentialServiceType = 'env' | 'file' | 'ssh_key' | 'mcp_oauth'
 
@@ -541,7 +544,7 @@ export interface PluginMcpServer {
   id: string
   name: string
   slug: string
-  transport: PluginMcpTransport
+  transport: PluginMcpServerTransport
   command: string
   args: string[]
   cwd: string

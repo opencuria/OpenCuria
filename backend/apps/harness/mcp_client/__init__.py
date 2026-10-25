@@ -1,7 +1,9 @@
 """MCP client runtime for harness runs (workspace-local transports).
 
-All MCP traffic leaves the backend through a
-:class:`~apps.harness.access.base.WorkspaceAccessor`:
+All plugin MCP traffic leaves the backend through a
+:class:`~apps.harness.access.base.WorkspaceAccessor`, except for the
+``builtin`` transport, which serves OpenCuria's own management MCP server
+in-process (registered through :mod:`.builtin`):
 
 - ``stdio`` servers run as workspace-local processes opened via
   :meth:`WorkspaceAccessor.open_process`; their stdout is a

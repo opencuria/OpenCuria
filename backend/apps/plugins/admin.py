@@ -1,7 +1,8 @@
 """Django admin configuration for the plugins app.
 
 Global plugins are editable by staff here; org-owned plugins are managed
-by org admins through the REST API.
+by org admins through the REST API. The built-in OpenCuria plugin and its
+MCP server cannot be deleted.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from .models import (
     PluginSkill,
     WorkspacePluginActivation,
 )
+from .services import OPENCURIA_PLUGIN_ID
 
 
 class PluginSkillInline(admin.TabularInline):
@@ -28,6 +30,11 @@ class PluginMcpServerInline(admin.TabularInline):
     model = PluginMcpServer
     extra = 0
     fields = ["name", "slug", "transport", "command", "url"]
+
+    def has_delete_permission(self, request, obj=None) -> bool:
+        if obj is not None and obj.id == OPENCURIA_PLUGIN_ID:
+            return False
+        return super().has_delete_permission(request, obj)
 
 
 class PluginCredentialRequirementInline(admin.TabularInline):
@@ -56,6 +63,16 @@ class PluginAdmin(admin.ModelAdmin):
         PluginCredentialRequirementInline,
     ]
 
+    def has_delete_permission(self, request, obj=None) -> bool:
+        if obj is not None and obj.id == OPENCURIA_PLUGIN_ID:
+            return False
+        return super().has_delete_permission(request, obj)
+
+    def delete_queryset(self, request, queryset) -> None:
+        for plugin in queryset:
+            if self.has_delete_permission(request, plugin):
+                plugin.delete()
+
 
 @admin.register(PluginSkill)
 class PluginSkillAdmin(admin.ModelAdmin):
@@ -71,6 +88,16 @@ class PluginMcpServerAdmin(admin.ModelAdmin):
     list_filter = ["transport", "plugin"]
     search_fields = ["name", "slug"]
     readonly_fields = ["id", "created_at", "updated_at"]
+
+    def has_delete_permission(self, request, obj=None) -> bool:
+        if obj is not None and obj.plugin_id == OPENCURIA_PLUGIN_ID:
+            return False
+        return super().has_delete_permission(request, obj)
+
+    def delete_queryset(self, request, queryset) -> None:
+        for server in queryset:
+            if self.has_delete_permission(request, server):
+                server.delete()
 
 
 @admin.register(PluginCredentialRequirement)

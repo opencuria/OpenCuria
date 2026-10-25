@@ -55,12 +55,15 @@ def _context(ctx: ToolContext) -> dict[str, Any]:
             "role": ctx.role,
         },
     }
+    if ctx.workspace_id is not None:
+        # Agents are bound to their workspace's organization.
+        data["current_workspace_id"] = ctx.workspace_id
     others = [
         {"organization_id": m["id"], "name": m["name"], "role": m["role"]}
         for m in OrganizationService().list_user_organizations(user)
         if m["id"] != ctx.organization_id
     ]
-    if others:
+    if others and ctx.workspace_id is None:
         data["other_organizations"] = others
         data["switch_organization"] = (
             "Send the X-Organization-Id header with another organization_id."
@@ -91,7 +94,7 @@ def _context(ctx: ToolContext) -> dict[str, Any]:
     if ctx.can(APIKeyPermission.SKILLS_READ):
         counts["skills"] = len(SkillService().list_skills(user, ctx.organization_id))
     data["counts"] = counts
-    data["api_key_permissions"] = sorted(ctx.api_key.permissions or [])
+    data["api_key_permissions"] = sorted(ctx.principal.permissions or [])
     return data
 
 
@@ -107,7 +110,8 @@ def _context(ctx: ToolContext) -> dict[str, Any]:
         role), counts of workspaces, chats (running / waiting for input),
         scheduled tasks and skills, the chat engines with their connection
         status, and the permissions of this API key (a tool you cannot see
-        needs a permission the key lacks).
+        needs a permission the key lacks). Agents running inside an OpenCuria
+        workspace also get current_workspace_id, the workspace they run in.
     """,
 )
 async def opencuria_context(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:

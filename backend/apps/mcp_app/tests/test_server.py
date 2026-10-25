@@ -23,7 +23,7 @@ class _User:
 
 def _ctx(*permissions: APIKeyPermission) -> ToolContext:
     return ToolContext(
-        api_key=FakeKey(user=_User(), permissions=[p.value for p in permissions]),
+        principal=FakeKey(user=_User(), permissions=[p.value for p in permissions]),
         organization_id=uuid.uuid4(),
         organization_name="Acme",
         role="member",

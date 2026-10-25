@@ -61,3 +61,8 @@ OpenCuria agents use MCP tools from the plugins selected for a workspace.
 The backend connects the selected MCP servers when an agent needs them.
 Plugin definitions support stdio processes in the workspace and HTTP services.
 Browser automation is available through the Playwright plugin.
+
+The built-in **OpenCuria** plugin gives agents this MCP server without any setup: no API
+key, no credentials. Turn it on per organization and per workspace; the agent then acts
+as the workspace owner with every tool, within the owner's organization role. It cannot
+be edited or deleted.

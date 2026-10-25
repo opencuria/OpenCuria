@@ -217,4 +217,25 @@ describe('PluginsPanel overview and details', () => {
     expect(wrapper.find('[data-testid="plugin-edit-detail"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="plugin-delete-detail"]').exists()).toBe(true)
   })
+  it('shows the built-in OpenCuria server without an endpoint and only an activation switch', async () => {
+    auth.isAdmin = true
+    const base = plugin()
+    const builtin = plugin({
+      id: 'opencuria',
+      name: 'OpenCuria',
+      skills: [],
+      credential_requirements: [],
+      mcp_servers: [
+        { ...base.mcp_servers[0]!, name: 'OpenCuria MCP', transport: 'builtin', url: '' },
+      ],
+    })
+    pluginStore.plugins = [builtin]
+    const wrapper = mountPanel()
+    await wrapper.find('[data-testid="plugin-open-opencuria"]').trigger('click')
+    const server = wrapper.get('section[aria-label="MCP servers"]')
+    expect(server.text()).toContain('Built-in')
+    expect(server.find('p').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="plugin-toggle-opencuria"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="plugin-delete-detail"]').exists()).toBe(false)
+  })
 })

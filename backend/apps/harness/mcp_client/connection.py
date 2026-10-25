@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ..desktop_leases import DesktopLease
 from ..tools.base import Tool, ToolContext, ToolError, ToolResult
+from .builtin import open_builtin_server
 from .naming import TOOL_NAME_RE, mcp_tool_name
 from .stdio import workspace_stdio_client
 from .workspace_http import build_workspace_http_client, parse_mcp_http_url
@@ -353,7 +354,11 @@ def normalize_call_result(result: types.CallToolResult) -> ToolResult:
             rendered = str(structured)
         if not texts:
             texts.append(rendered)
-        elif rendered and rendered not in "\n".join(texts):
+        elif (
+            rendered
+            and rendered not in "\n".join(texts)
+            and not _serializes(texts, structured)
+        ):
             texts.append(rendered)
     output = "\n".join(part for part in texts if part).strip()
     if not output:
@@ -364,6 +369,17 @@ def normalize_call_result(result: types.CallToolResult) -> ToolResult:
         image_jpeg=image_jpeg,
         attachments=attachments,
     )
+
+
+def _serializes(texts: list[str], structured: Any) -> bool:
+    """Whether a text block already is *structured* as JSON (MCP spec advice)."""
+    for text in texts:
+        try:
+            if json.loads(text) == structured:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def _decode_image_block(
@@ -465,6 +481,9 @@ class McpServerConnection:
     headers: dict[str, str] = field(default_factory=dict, repr=False)
     oauth_credential_id: Any = field(default=None, repr=False)
     oauth_service_id: Any = field(default=None, repr=False)
+    #: Run scope; the ``builtin`` transport binds its server to it.
+    workspace_id: Any = None
+    organization_id: Any = None
     startup_timeout_seconds: float = 30.0
     request_timeout_seconds: float = 60.0
     tools: list[DiscoveredMcpTool] = field(default_factory=list)
@@ -630,6 +649,11 @@ class McpServerConnection:
             self._read, self._write = read, write
         elif transport in ("streamable_http", "sse"):
             await self._open_http_transport(stack, accessor, transport)
+        elif transport == "builtin":
+            # OpenCuria's own management server, served in this process for
+            # the workspace owner: no network hop, no credentials.
+            ctx = open_builtin_server(self.workspace_id, self.organization_id)
+            self._read, self._write = await stack.enter_async_context(ctx)
         else:
             raise McpServerHealthError(
                 f"MCP server {self.desc} has unsupported transport '{self.transport}'"

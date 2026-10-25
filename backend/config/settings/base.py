@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     "apps.scheduled_tasks",
     "apps.plugins",
     "apps.skills",
+    "apps.mcp_app",
 ]
 
 MIDDLEWARE = [

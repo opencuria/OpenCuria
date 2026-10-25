@@ -36,6 +36,8 @@ duplicating or bypassing them:
 - MCP server: `backend/apps/mcp_app/` is a sibling adapter of REST over the same
   services. Keep it to ~30 task-oriented tools (`<resource>_<verb>`); extend an
   existing tool before adding one, and give every tool a precise description.
+  Workspace agents reach it in-process through the seeded OpenCuria plugin
+  (MCP transport `builtin`, `mcp_app/inprocess.py`).
 
 Strictly follow SOLID, separation of concerns, and DRY. One concern per
 layer, one implementation per behavior, composition over duplication.

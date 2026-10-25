@@ -54,7 +54,7 @@ class World:
             permissions=list(ALL_PERMISSIONS if permissions is None else permissions),
         )
         return ToolContext(
-            api_key=key,
+            principal=key,
             organization_id=self.org.id,
             organization_name=self.org.name,
             role=role,

@@ -25,6 +25,7 @@ from apps.credentials.models import (
 from apps.credentials.services import CredentialSvc
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.plugins.models import Plugin, WorkspacePluginActivation
+from apps.plugins.services import OPENCURIA_PLUGIN_ID
 from apps.runners.models import Runner, Workspace
 from common.utils import generate_api_token, hash_token
 
@@ -439,6 +440,95 @@ def test_global_plugin_readable_but_not_editable_via_rest(client: Client):
     assert response.status_code == 403
     response = client.delete(f"/api/v1/plugins/{playwright['id']}/", **ctx["headers"])
     assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_builtin_opencuria_plugin_needs_no_setup_and_cannot_be_deleted(
+    client: Client,
+):
+    ctx = _ctx()
+    plugin = client.get(f"/api/v1/plugins/{OPENCURIA_PLUGIN_ID}/", **ctx["headers"])
+    assert plugin.status_code == 200
+    payload = plugin.json()
+    assert payload["is_global"] is True
+    assert payload["org_enabled"] is False  # explicit opt-in
+    assert payload["credential_requirements"] == []
+    assert [s["transport"] for s in payload["mcp_servers"]] == ["builtin"]
+
+    path = f"/api/v1/plugins/{OPENCURIA_PLUGIN_ID}/"
+    assert _patch(client, path, ctx["headers"], {"name": "X"}).status_code == 403
+    assert client.delete(path, **ctx["headers"]).status_code == 403
+    assert Plugin.objects.filter(id=OPENCURIA_PLUGIN_ID).exists()
+
+    # Org and workspace switches are the only configuration.
+    workspace = _create_workspace(ctx)
+    plugins_path = f"/api/v1/workspaces/{workspace.id}/plugins/"
+    activation = f"{path}activation/"
+    assert _post(client, activation, ctx["headers"], {"active": True}).json()[
+        "org_enabled"
+    ]
+    workspace_path = f"/api/v1/workspaces/{workspace.id}/"
+    enabled = _put(
+        client, workspace_path, ctx["headers"], {"plugin_ids": [payload["id"]]}
+    )
+    assert enabled.status_code == 200, enabled.content[:500]
+    entry = next(
+        p
+        for p in client.get(plugins_path, **ctx["headers"]).json()
+        if p["id"] == payload["id"]
+    )
+    assert entry["workspace_enabled"] is True
+    assert entry["ready"] is True
+    disabled = _put(client, workspace_path, ctx["headers"], {"plugin_ids": []})
+    assert disabled.json()["plugin_ids"] == []
+    assert not _post(client, activation, ctx["headers"], {"active": False}).json()[
+        "org_enabled"
+    ]
+
+
+@pytest.mark.django_db
+def test_builtin_transport_is_reserved(client: Client):
+    ctx = _ctx()
+    body = {
+        "name": "Impostor",
+        "mcp_servers": [{"name": "Server", "transport": "builtin"}],
+    }
+    response = _post(client, "/api/v1/plugins/", ctx["headers"], body)
+    assert response.status_code == 400
+    assert "builtin" not in response.json()["detail"]
+    assert not Plugin.objects.filter(organization=ctx["org"]).exists()
+
+
+@pytest.mark.django_db
+def test_admin_cannot_delete_builtin_opencuria_plugin(rf):
+    from django.contrib.admin.sites import site
+
+    from apps.plugins.models import PluginMcpServer
+
+    request = rf.get("/")
+    request.user = get_user_model().objects.create_superuser(
+        email=f"staff-{uuid.uuid4().hex[:8]}@example.com", password="secret"
+    )
+    plugin = Plugin.objects.get(id=OPENCURIA_PLUGIN_ID)
+    server = plugin.mcp_servers.get()
+    plugin_admin = site._registry[Plugin]
+    server_admin = site._registry[PluginMcpServer]
+    assert plugin_admin.has_delete_permission(request, plugin) is False
+    assert server_admin.has_delete_permission(request, server) is False
+    server_inline = next(
+        inline
+        for inline in plugin_admin.get_inline_instances(request, plugin)
+        if inline.model is PluginMcpServer
+    )
+    assert server_inline.has_delete_permission(request, plugin) is False
+
+    # Bulk "delete selected" skips the built-in plugin and its server.
+    plugin_admin.delete_queryset(request, Plugin.objects.filter(id=plugin.id))
+    server_admin.delete_queryset(request, PluginMcpServer.objects.filter(id=server.id))
+    assert Plugin.objects.filter(id=plugin.id).exists()
+    assert PluginMcpServer.objects.filter(id=server.id).exists()
+    playwright = Plugin.objects.get(slug="playwright", organization__isnull=True)
+    assert plugin_admin.has_delete_permission(request, playwright) is True
 
 
 @pytest.mark.django_db
