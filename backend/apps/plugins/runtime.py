@@ -15,12 +15,14 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from collections import defaultdict
 from dataclasses import replace
 
 from apps.credentials.services import CredentialSvc
 from common.exceptions import ConflictError
 from common.utils import decrypt_value
 
+from .models import PluginCredentialRequirement, PluginMcpServer, PluginSkill
 from .repositories import (
     OrgPluginActivationRepository,
     PluginCredentialRequirementRepository,
@@ -102,7 +104,7 @@ def build_workspace_plugin_snapshot(
     Effective = visible to *org_id* (global or org-owned) AND
     ``enabled`` + ``published`` AND org-activated AND workspace-activated.
     Skills/servers/requirements are ordered deterministically (by name /
-    position / key).
+    position / key). Components are loaded once per kind, not per plugin.
     """
     workspace_org_id = _verify_workspace_org(workspace, org_id)
     visible = [
@@ -117,6 +119,21 @@ def build_workspace_plugin_snapshot(
     org_enabled = OrgPluginActivationRepository.enabled_plugin_ids(org_id)
     ws_enabled = WorkspacePluginActivationRepository.enabled_plugin_ids(workspace.id)
     effective = [p for p in visible if p.id in org_enabled and p.id in ws_enabled]
+    plugin_ids = [plugin.id for plugin in effective]
+    skills_by_plugin: dict[uuid.UUID, list[PluginSkill]] = defaultdict(list)
+    servers_by_plugin: dict[uuid.UUID, list[PluginMcpServer]] = defaultdict(list)
+    requirements_by_plugin: dict[uuid.UUID, list[PluginCredentialRequirement]] = (
+        defaultdict(list)
+    )
+    if plugin_ids:
+        for skill in PluginSkillRepository.list_for_plugins(plugin_ids):
+            skills_by_plugin[skill.plugin_id].append(skill)
+        for server in PluginMcpServerRepository.list_for_plugins(plugin_ids):
+            servers_by_plugin[server.plugin_id].append(server)
+        for requirement in PluginCredentialRequirementRepository.list_for_plugins(
+            plugin_ids
+        ):
+            requirements_by_plugin[requirement.plugin_id].append(requirement)
     snapshots: list[EffectivePluginSnapshot] = []
     for plugin in effective:
         skills = tuple(
@@ -127,11 +144,9 @@ def build_workspace_plugin_snapshot(
                 body=skill.body,
                 position=skill.position,
             )
-            for skill in PluginSkillRepository.list_for_plugin(plugin.id)
+            for skill in skills_by_plugin.pop(plugin.id, [])
         )
-        plugin_requirements = list(
-            PluginCredentialRequirementRepository.list_for_plugin(plugin.id)
-        )
+        plugin_requirements = requirements_by_plugin.pop(plugin.id, [])
         service_by_key = {
             req.key: req.credential_service_id for req in plugin_requirements
         }
@@ -164,7 +179,7 @@ def build_workspace_plugin_snapshot(
                 startup_timeout_seconds=server.startup_timeout_seconds,
                 request_timeout_seconds=server.request_timeout_seconds,
             )
-            for server in PluginMcpServerRepository.list_for_plugin(plugin.id)
+            for server in servers_by_plugin.pop(plugin.id, [])
         )
         requirements = tuple(
             PluginRequirementSnapshot(
