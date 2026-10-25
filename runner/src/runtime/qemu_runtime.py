@@ -1268,19 +1268,26 @@ class QemuRuntime(RuntimeBackend):
             domain = None
         try:
             if domain is not None:
-                state, _ = await asyncio.to_thread(domain.state)
-            else:
-                state = libvirt.VIR_DOMAIN_SHUTOFF
-            if state == libvirt.VIR_DOMAIN_RUNNING:
-                await asyncio.to_thread(domain.destroy)
-            if domain is not None:
-                await asyncio.to_thread(
-                    domain.undefineFlags,
-                    libvirt.VIR_DOMAIN_UNDEFINE_NVRAM
-                    | libvirt.VIR_DOMAIN_UNDEFINE_MANAGED_SAVE,
+                # Paused guests are active too. Destroying a transient domain
+                # removes its definition, so only undefine persistent guests.
+                persistent = await asyncio.to_thread(domain.isPersistent)
+                if await asyncio.to_thread(domain.isActive):
+                    await asyncio.to_thread(domain.destroy)
+                if persistent:
+                    await asyncio.to_thread(
+                        domain.undefineFlags,
+                        libvirt.VIR_DOMAIN_UNDEFINE_NVRAM
+                        | libvirt.VIR_DOMAIN_UNDEFINE_MANAGED_SAVE,
+                    )
+            domains = await asyncio.to_thread(
+                lambda: self._libvirt_conn().listAllDomains(0)
+            )
+            if any(d.name() == self._domain_name(instance_id) for d in domains):
+                raise RuntimeError(
+                    "Domain removal could not be verified; disks retained"
                 )
-        except libvirt.libvirtError:
-            raise RuntimeError("Domain removal failed; disks retained")
+        except libvirt.libvirtError as exc:
+            raise RuntimeError("Domain removal failed; disks retained") from exc
 
         # ── Tear down the per-workspace network ───────────────────────
         # Must happen *after* the domain is destroyed so libvirt doesn't

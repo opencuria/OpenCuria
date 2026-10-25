@@ -691,11 +691,11 @@ class WebSocketInterface(Interface):
                                 "epoch": self._desktop_epoch,
                             },
                         )
-                for workspace_id, info in registry._cache.items():
+                for workspace_id, info in list(registry._cache.items()):
                     observed = await self._service.workspace_incarnation(
                         str(workspace_id)
                     )
-                    if observed:
+                    if observed and registry._cache.get(workspace_id) is info:
                         proof = self._operations.journal.proof(
                             str(workspace_id), observed[0]
                         )

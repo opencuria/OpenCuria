@@ -17,6 +17,7 @@ except ImportError:
     libvirt = types.ModuleType("libvirt")
     libvirt.VIR_DOMAIN_SHUTOFF = 5
     libvirt.VIR_DOMAIN_RUNNING = 1
+    libvirt.VIR_DOMAIN_PAUSED = 3
     libvirt.VIR_DOMAIN_UNDEFINE_NVRAM = 4
     libvirt.VIR_DOMAIN_UNDEFINE_MANAGED_SAVE = 2
     libvirt.VIR_ERR_NO_DOMAIN = 42
@@ -284,20 +285,187 @@ def source_domain(r, workspace_id, disk):
     )
     domain.state.return_value = (libvirt.VIR_DOMAIN_SHUTOFF, 0)
     domain.isActive.return_value = False
+    domain.isPersistent.return_value = True
     r._libvirt_conn.return_value.listAllDomains.return_value = [domain]
+    domain.undefineFlags.side_effect = lambda _: (
+        r._libvirt_conn.return_value.listAllDomains.return_value.remove(domain)
+    )
     r._get_domain = lambda _: domain
     return domain
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "persistent"),
+    [
+        (libvirt.VIR_DOMAIN_RUNNING, True),
+        (libvirt.VIR_DOMAIN_PAUSED, True),
+        (libvirt.VIR_DOMAIN_PAUSED, False),
+        (libvirt.VIR_DOMAIN_SHUTOFF, True),
+    ],
+)
+async def test_workspace_remove_confirms_domain_gone_before_cleanup(
+    tmp_path: Path, state: int, persistent: bool
+) -> None:
+    """Paused and transient guests must release their disks before cleanup."""
+    r = runtime(tmp_path)
+    ws = str(uuid.uuid4())
+    disk = r._disk_path(ws)
+    qcow(disk)
+    domain, iso = cloud_init_domain(r, ws, disk)
+    domains = r._libvirt_conn.return_value.listAllDomains.return_value
+    active = state != libvirt.VIR_DOMAIN_SHUTOFF
+    domain.state.return_value = (state, 0)
+    domain.isActive.return_value = active
+    domain.isPersistent.return_value = persistent
+    r._ssh_states = {}
+    r._host_key_cache = {ws: "host-key"}
+    key = tmp_path / "host-key"
+    key.write_text("host-key")
+    r._host_key_file = lambda _: key
+
+    def destroy() -> None:
+        assert disk.exists() and iso.exists() and key.exists()
+        domain.isActive.return_value = False
+        if not persistent:
+            domains.remove(domain)
+
+    def undefine(_flags: int) -> None:
+        assert not domain.isActive()
+        assert disk.exists() and iso.exists() and key.exists()
+        domains.remove(domain)
+
+    async def remove_network(_instance_id: str) -> None:
+        assert not domains
+        assert disk.exists() and iso.exists() and key.exists()
+
+    domain.destroy.side_effect = destroy
+    domain.undefineFlags.side_effect = undefine
+    r._destroy_workspace_network = AsyncMock(side_effect=remove_network)
+
+    await r.remove_workspace(ws)
+
+    assert domain.destroy.call_count == int(active)
+    assert domain.undefineFlags.call_count == int(persistent)
+    r._destroy_workspace_network.assert_awaited_once_with(ws)
+    assert not domains
+    assert not disk.exists() and not iso.exists() and not key.exists()
+    assert ws not in r._host_key_cache
+    assert (await r.inventory()).complete
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["destroy", "undefine", "present", "enumeration"])
+async def test_unverified_domain_removal_retains_network_disk_seed_and_key(
+    tmp_path: Path, failure: str
+) -> None:
+    """Failed disposal or absence verification must preserve recovery material."""
+    r = runtime(tmp_path)
+    ws = str(uuid.uuid4())
+    disk = r._disk_path(ws)
+    qcow(disk)
+    domain, iso = cloud_init_domain(r, ws, disk)
+    domains = r._libvirt_conn.return_value.listAllDomains.return_value
+    domain.state.return_value = (libvirt.VIR_DOMAIN_PAUSED, 0)
+    domain.isActive.return_value = True
+    r._ssh_states = {}
+    r._host_key_cache = {ws: "host-key"}
+    key = tmp_path / "host-key"
+    key.write_text("host-key")
+    r._host_key_file = lambda _: key
+    r._destroy_workspace_network = AsyncMock()
+
+    if failure == "destroy":
+        domain.destroy.side_effect = libvirt.libvirtError("stop denied")
+    elif failure == "undefine":
+        domain.undefineFlags.side_effect = libvirt.libvirtError("undefine denied")
+    elif failure == "present":
+        domain.undefineFlags.side_effect = None
+    else:
+        r._libvirt_conn.return_value.listAllDomains.side_effect = [
+            domains,
+            libvirt.libvirtError("enumeration denied"),
+        ]
+
+    with pytest.raises(RuntimeError, match="retained"):
+        await r.remove_workspace(ws)
+
+    assert disk.exists() and iso.exists() and key.exists()
+    assert r._host_key_cache[ws] == "host-key"
+    r._destroy_workspace_network.assert_not_awaited()
+    if failure == "destroy":
+        domain.undefineFlags.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persistent", [True, False])
+async def test_paused_workspace_removal_with_libvirt_test_driver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, persistent: bool
+) -> None:
+    """Exercise paused persistent/transient removal with the real libvirt API."""
+    if not hasattr(libvirt, "open"):
+        pytest.skip("requires libvirt test driver")
+    host = tmp_path / "host.xml"
+    host.write_text("<node/>")
+    try:
+        connection = libvirt.open("test://" + str(host))
+    except libvirt.libvirtError:
+        pytest.skip("requires libvirt test driver")
+    try:
+        # The test driver has no NVRAM support; destroy/undefine remain real calls.
+        monkeypatch.setattr(libvirt, "VIR_DOMAIN_UNDEFINE_NVRAM", 0)
+        r = runtime(tmp_path)
+        r._libvirt_conn = lambda: connection
+        r._ssh_states = {}
+        r._host_key_cache = {}
+        r._host_key_file = lambda _: tmp_path / "host-key"
+        r._destroy_workspace_network = AsyncMock()
+        ws = str(uuid.uuid4())
+        disk = r._disk_path(ws)
+        qcow(disk)
+        iso = r._cloud_init_iso_path(ws)
+        iso.write_bytes(bytes(2048))
+        xml = (
+            f'<domain type="test"><name>{r._domain_name(ws)}</name>'
+            '<memory unit="KiB">65536</memory><vcpu>1</vcpu>'
+            '<os><type>hvm</type></os><devices><disk type="file" device="disk">'
+            f'<source file="{disk}"/><target dev="vda" bus="virtio"/></disk>'
+            f'<disk type="file" device="cdrom"><source file="{iso}"/>'
+            '<target dev="sda" bus="sata"/></disk></devices></domain>'
+        )
+        if persistent:
+            domain = connection.defineXML(xml)
+            domain.create()
+        else:
+            domain = connection.createXML(xml, 0)
+        domain.suspend()
+        assert domain.state()[0] == libvirt.VIR_DOMAIN_PAUSED
+        assert domain.isActive()
+
+        await r.remove_workspace(ws)
+
+        assert not connection.listAllDomains(0)
+        assert not disk.exists() and not iso.exists()
+        assert (await r.inventory()).complete
+    finally:
+        connection.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("blocker", ["foreign", "overlay", "partial"])
-async def test_workspace_remove_checks_graph_before_destroy(tmp_path, blocker):
+@pytest.mark.parametrize(
+    "state", [libvirt.VIR_DOMAIN_RUNNING, libvirt.VIR_DOMAIN_PAUSED]
+)
+async def test_workspace_remove_checks_graph_before_destroy(
+    tmp_path: Path, blocker: str, state: int
+) -> None:
     r = runtime(tmp_path)
     workspace_id = str(uuid.uuid4())
     disk = r._disk_path(workspace_id)
     qcow(disk)
     domain = source_domain(r, workspace_id, disk)
-    domain.state.return_value = (libvirt.VIR_DOMAIN_RUNNING, 0)
+    domain.state.return_value = (state, 0)
+    domain.isActive.return_value = True
     if blocker == "foreign":
         foreign = MagicMock()
         foreign.name.return_value = "foreign"
@@ -325,9 +493,12 @@ async def test_workspace_delete_rechecks_after_undefine(tmp_path):
     domain = source_domain(r, ws, disk)
     r._ssh_states = {}
     r._destroy_workspace_network = AsyncMock()
-    domain.undefineFlags.side_effect = lambda _: qcow(
-        r._snapshot_dir / "late.qcow2", disk
-    )
+
+    def undefine(_flags: int) -> None:
+        r._libvirt_conn.return_value.listAllDomains.return_value.remove(domain)
+        qcow(r._snapshot_dir / "late.qcow2", disk)
+
+    domain.undefineFlags.side_effect = undefine
     with pytest.raises(RuntimeError, match="dependents"):
         await r.remove_workspace(ws)
     assert disk.exists()
@@ -650,7 +821,11 @@ async def test_cloud_init_shared_consumer_blocks_workspace_unlink(tmp_path, late
     )
     domains = r._libvirt_conn.return_value.listAllDomains.return_value
     if late:
-        domain.undefineFlags.side_effect = lambda _: domains.append(foreign)
+        def undefine(_flags: int) -> None:
+            domains.remove(domain)
+            domains.append(foreign)
+
+        domain.undefineFlags.side_effect = undefine
     else:
         domains.append(foreign)
     with pytest.raises(RuntimeError, match="dependents"):

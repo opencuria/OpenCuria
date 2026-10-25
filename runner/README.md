@@ -19,6 +19,11 @@ executables and display `:1`; arbitrary argv text such as the agent wrapper's
 `profile` must never match `rofi`. Image helper copies are checked against this
 canonical script. Restart the runner after updating; no image rebuild is needed.
 
+Workspace removal stops active VMs, including paused guests, and verifies that
+their libvirt domain is gone before removing the network, disk, seed ISO, or host
+key. Failed stop, undefine, or domain enumeration retains those resources for
+retry. Incomplete storage inventories and physical dependents still block removal.
+
 ## Workspace Git
 
 Git integration requires Git 2.31+ inside the workspace (`--porcelain=v2` and

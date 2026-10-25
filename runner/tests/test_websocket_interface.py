@@ -212,6 +212,67 @@ class WebSocketMetricsPathTests(unittest.TestCase):
         self.assertEqual(interface._resolve_disk_usage_path(), "/tmp")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["removed", "replaced"])
+async def test_observation_tolerates_workspace_changes_during_probe(
+    tmp_path: Path, change: str
+) -> None:
+    """Lifecycle changes must not abort heartbeats or update stale cache objects."""
+    service = DummyService()
+    workspace_id = uuid.uuid4()
+    other_id = uuid.uuid4()
+    previous = WorkspaceInfo(workspace_id, "old-guest", "running")
+    service.registry._cache = {
+        workspace_id: previous,
+        other_id: WorkspaceInfo(other_id, "other-guest", "running"),
+    }
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    heartbeat = asyncio.Event()
+    identity = {"domain_uuid": "old-guest"}
+
+    async def incarnation(observed_id: str) -> tuple[dict, str] | None:
+        if observed_id == str(workspace_id):
+            entered.set()
+            await release.wait()
+            return identity, "running"
+        return None
+
+    async def statuses() -> list[dict]:
+        heartbeat.set()
+        return []
+
+    service.workspace_incarnation = AsyncMock(side_effect=incarnation)
+    service.get_workspace_heartbeat_statuses.side_effect = statuses
+    interface = WebSocketInterface(
+        service,
+        RunnerSettings(state_dir=str(tmp_path), inventory_interval=10**12),
+    )
+    interface._operations.journal.checkpoint(
+        str(workspace_id),
+        identity,
+        {"state": "running", "credentials_present": True},
+    )
+    observation = asyncio.create_task(interface._observation_loop())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        if change == "removed":
+            service.registry._cache.pop(workspace_id)
+        else:
+            service.registry._cache[workspace_id] = WorkspaceInfo(
+                workspace_id, "new-guest", "running"
+            )
+        release.set()
+        await asyncio.wait_for(heartbeat.wait(), timeout=2)
+        assert previous.credentials_present is None
+        if change == "replaced":
+            assert service.registry._cache[workspace_id].credentials_present is None
+    finally:
+        observation.cancel()
+        await asyncio.gather(observation, return_exceptions=True)
+        interface._operations.journal.close()
+
+
 class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
     async def test_observation_announces_desktop_ended_by_maintenance(self) -> None:
         """Observe maintenance stop using the canonical registry cache."""
