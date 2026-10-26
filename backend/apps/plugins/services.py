@@ -585,7 +585,7 @@ class PluginService:
         valid_by_service: dict[uuid.UUID, list] = {}
         for credential in credentials:
             service = credential.service
-            if service.credential_type == "provider_secret":
+            if service.credential_type in {"provider_secret", "server_secret"}:
                 continue
             if service.organization_id not in {None, org_id}:
                 continue
@@ -943,6 +943,10 @@ class PluginService:
             except ValueError:
                 raise ValueError("service_id must be a UUID") from None
             service = CredentialServiceSvc().get_service(service_id, org_id=org_id)
+            if service.credential_type == "server_secret":
+                raise ValueError(
+                    "Server-only credentials cannot be plugin requirements"
+                )
             if service.id in seen_services:
                 raise ConflictError("Duplicate credential service in requirements")
             seen_services.add(service.id)

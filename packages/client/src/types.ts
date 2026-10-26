@@ -15,6 +15,49 @@ export interface TokenPair {
   refresh_token: string;
 }
 
+export interface PushCapabilities {
+  ios: boolean;
+  android: boolean;
+  live_activities: boolean;
+}
+
+export interface MobileDeviceRegistration {
+  platform: "ios" | "android";
+  app_id: string;
+  apns_environment: "sandbox" | "production";
+  push_token: string;
+  notifications_enabled: boolean;
+  live_activities_enabled: boolean;
+}
+
+export interface MobileDevice {
+  id: string;
+  notifications_enabled: boolean;
+  live_activities_enabled: boolean;
+}
+
+export interface AgentActivityRow {
+  sessionId: string;
+  workspaceId: string;
+  title: string;
+  workspaceName: string;
+  phase:
+    | "running"
+    | "waiting_for_approval"
+    | "waiting_for_input"
+    | "completed"
+    | "error"
+    | "interrupted";
+}
+
+export interface AgentActivitySnapshot {
+  organizationId: string;
+  deviceId: string;
+  activeCount: number;
+  activities: AgentActivityRow[];
+  updatedAt: string;
+}
+
 export interface Organization {
   id: string;
   name: string;

@@ -6,7 +6,8 @@ Native iOS and Android chat client built with Expo SDK 57 and React Native 0.86.
 
 - Browse existing workspaces and conversations, read history, and start or continue harness chats; follow live output, tasks/subtasks, permission and question gates, Markdown, mentions, model choices and skills.
 - Attach photos, camera images and documents; preview supported workspace files. Chat and workspace data remain on the server.
-- Sign in to an existing server. The app does **not** create/delete workspaces or provide workspace CRUD, push notifications, offline chat/queue/replay. It refreshes chat from REST when brought back to the foreground; this is not background delivery or guaranteed event replay.
+- Receive optional native push notifications for finished/failed runs and pending approvals/questions. On iOS, follow running agents on the Lock Screen and Dynamic Island with Live Activities. See [Mobile notification setup](../docs/mobile-notifications.md) for Apple/Firebase credentials and native build requirements.
+- Sign in to an existing server. The app does **not** create/delete workspaces or provide workspace CRUD or offline chat/queue/replay. Chat refreshes from REST when brought back to the foreground; push delivery does not replay missed chat events.
 
 ## Native interface
 
@@ -52,6 +53,7 @@ For an iOS simulator on a Mac, from `mobile/` run `APP_VARIANT=development EXPO_
 - `src/state/chatController.ts` — REST hydration, live subscriptions, chat state and immutable snapshots for React.
 - `src/components/`, `src/ui/` — native chat presentation and controls.
 - `src/platform/` — secure token storage, camera/document pickers, authenticated uploads and bounded temporary media cache.
+- `src/notifications/`, `src/widgets/` — device consent, native push tokens, notification navigation and the iOS Live Activity layout.
 - `packages/chat-core/`, `packages/client/` — framework-neutral shared chat helpers/protocol and the real REST/Socket.IO client used by the web and native clients.
 
 ## Checks

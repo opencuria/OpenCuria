@@ -902,6 +902,60 @@ describe("provider model defaults", () => {
   });
 });
 
+describe("mobile notification API", () => {
+  it("uses the current auth, organization and proxy prefix for registration and revocation", async () => {
+    const fetch = vi
+      .fn()
+      .mockImplementation(async (_input, init) =>
+        init?.method === "DELETE"
+          ? new Response(null, { status: 204 })
+          : jsonResponse({}),
+      );
+    const client = clientOptions({
+      apiBaseUrl: "https://api.example/curia/api/v1",
+    }).create(fetch);
+    const registration = {
+      platform: "ios" as const,
+      app_id: "com.opencuria.mobile",
+      apns_environment: "production" as const,
+      push_token: "native-token",
+      notifications_enabled: true,
+      live_activities_enabled: true,
+    };
+    await client.notifications.capabilities();
+    await client.notifications.registerDevice("device/id", registration);
+    await client.notifications.registerActivity(
+      "device/id",
+      "activity-id",
+      "activity-token",
+    );
+    await client.notifications.activity("device/id");
+    await client.notifications.unregisterDevice("device/id");
+    expect(fetch.mock.calls[1]).toMatchObject([
+      "https://api.example/curia/api/v1/notifications/devices/device%2Fid/",
+      { method: "PUT", body: JSON.stringify(registration) },
+    ]);
+    expect(fetch.mock.calls[2]).toMatchObject([
+      "https://api.example/curia/api/v1/notifications/devices/device%2Fid/activity/",
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          activity_id: "activity-id",
+          push_token: "activity-token",
+        }),
+      },
+    ]);
+    expect(fetch.mock.calls[4]?.[1]?.method).toBe("DELETE");
+    expect(
+      new Headers(fetch.mock.calls[1]?.[1]?.headers).get("X-Organization-Id"),
+    ).toBe("org-a");
+    expect(
+      new Headers(fetch.mock.calls[1]?.[1]?.headers).get("Authorization"),
+    ).toBe("Bearer old-access");
+    client.realtime.dispose();
+  });
+});
+
 describe("engine catalog API", () => {
   it("loads every engine catalog with the current authorization context", async () => {
     const fetch = vi.fn().mockResolvedValue(jsonResponse([]));

@@ -287,6 +287,48 @@ describe("SessionProvider", () => {
     );
   });
 
+  it("waits for device revocation before clearing auth and keeps failure retryable", async () => {
+    const client = makeClient();
+    clients.push(client);
+    const current = jest.fn();
+    render(
+      <SessionProvider>
+        <Harness onValue={current} />
+      </SessionProvider>,
+    );
+    await waitFor(() => expect(current.mock.lastCall?.[0].booting).toBe(false));
+    await act(async () => {
+      await current.mock.lastCall![0].login(
+        "https://curia.example",
+        "user@example.test",
+        "secret",
+      );
+    });
+    const pending = deferred<void>();
+    const revoke = jest
+      .fn()
+      .mockImplementationOnce(() => pending.promise)
+      .mockResolvedValueOnce(undefined);
+    current.mock.lastCall![0].registerSignOutCleanup(revoke);
+    let signingOut: Promise<void>;
+    await act(async () => {
+      signingOut = current.mock.lastCall![0].signOut();
+    });
+    expect(current.mock.lastCall?.[0].session).not.toBeNull();
+    expect(SecureStore.deleteItemAsync).not.toHaveBeenCalled();
+    await act(async () => {
+      pending.reject(new Error("Reconnect to revoke notifications"));
+      await signingOut!;
+    });
+    expect(current.mock.lastCall?.[0].session).not.toBeNull();
+    expect(current.mock.lastCall?.[0].error).toMatch(/Reconnect/);
+    await act(async () => {
+      await current.mock.lastCall![0].signOut();
+    });
+    expect(current.mock.lastCall?.[0].session).toBeNull();
+    expect(revoke).toHaveBeenCalledTimes(2);
+  });
+
   it("reactivates realtime and refreshes registered foreground work on resume", async () => {
     const client = makeClient();
     clients.push(client);

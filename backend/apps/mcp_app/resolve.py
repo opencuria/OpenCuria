@@ -197,13 +197,14 @@ def plugin_ids(ctx: ToolContext, refs: list[str]) -> list[uuid.UUID]:
 
 
 def list_credentials(ctx: ToolContext) -> list[Any]:
-    """Return credentials the caller may attach (provider secrets excluded)."""
+    """Return attachable credentials, excluding control-plane secrets."""
     return [
         credential
         for credential in CredentialSvc().list_credentials(
             ctx.user, ctx.organization_id
         )
-        if credential.service.credential_type != "provider_secret"
+        if credential.service.credential_type
+        not in {"provider_secret", "server_secret"}
     ]
 
 

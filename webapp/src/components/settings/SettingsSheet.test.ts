@@ -245,6 +245,7 @@ describe('SettingsSheet', () => {
     authMock.isAdmin = false
     const wrapper = mountSheet()
     expect(wrapper.find('[data-testid="settings-nav-runners"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="settings-nav-notifications"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="settings-nav-credential-services"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="settings-nav-general"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="settings-nav-plugins"]').exists()).toBe(true)

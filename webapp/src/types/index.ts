@@ -51,7 +51,6 @@ export enum TaskType {
   BUILD_IMAGE = 'build_image',
 }
 
-
 // --- Auth ---
 
 export interface LoginRequest {
@@ -356,7 +355,7 @@ export interface Credential {
   service_id: string
   service_name: string
   service_slug: string
-  credential_type: 'env' | 'file' | 'ssh_key' | 'mcp_oauth'
+  credential_type: 'env' | 'file' | 'ssh_key' | 'mcp_oauth' | 'server_secret'
   env_var_name: string
   target_path: string
   has_public_key: boolean

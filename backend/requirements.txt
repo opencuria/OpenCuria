@@ -19,7 +19,7 @@ python-socketio>=5.0,<6.0
 aiohttp>=3.9,<4.0
 
 # HTTP client (LLM provider streaming)
-httpx>=0.27,<1.0
+httpx[http2]>=0.27,<1.0
 
 # MCP tool arg/schema validation (explicit; never rely on transitivity)
 jsonschema>=4,<5

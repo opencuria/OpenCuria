@@ -32,6 +32,7 @@ interface SessionContextValue {
   signOut: () => Promise<void>;
   selectOrganization: (id: string) => Promise<void>;
   registerResource: RegisterResource;
+  registerSignOutCleanup: (cleanup: () => Promise<void>) => () => void;
   registerForegroundRefresh: (
     refresh: () => void | Promise<void>,
   ) => () => void;
@@ -55,6 +56,7 @@ export function SessionProvider({
   const generationRef = useRef(0);
   const lifecycleRef = useRef(0);
   const resourcesRef = useRef(new Set<() => void>());
+  const signOutCleanupsRef = useRef(new Set<() => Promise<void>>());
   const foregroundRefreshersRef = useRef(new Set<() => void | Promise<void>>());
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
 
@@ -68,6 +70,7 @@ export function SessionProvider({
       }
     }
     resourcesRef.current.clear();
+    signOutCleanupsRef.current.clear();
     clientRef.current?.realtime.dispose();
     clientRef.current = null;
     if (updateClientState) setClient(null);
@@ -80,6 +83,25 @@ export function SessionProvider({
     }
     resourcesRef.current.add(dispose);
     return () => resourcesRef.current.delete(dispose);
+  }, []);
+
+  const registerSignOutCleanup = useCallback((cleanup: () => Promise<void>) => {
+    signOutCleanupsRef.current.add(cleanup);
+    return () => {
+      signOutCleanupsRef.current.delete(cleanup);
+    };
+  }, []);
+
+  const revokeDevices = useCallback(async (): Promise<boolean> => {
+    try {
+      for (const cleanup of [...signOutCleanupsRef.current]) await cleanup();
+      return true;
+    } catch (cause) {
+      setError(
+        messageOf(cause, "Could not revoke this device's notifications."),
+      );
+      return false;
+    }
   }, []);
 
   const registerForegroundRefresh = useCallback(
@@ -419,6 +441,7 @@ export function SessionProvider({
   }, [authenticateExisting, expireAuthentication, readProfile]);
 
   const signOut = useCallback(async () => {
+    if (!(await revokeDevices())) return;
     ++generationRef.current;
     disposeScope();
     setSessionExpired(false);
@@ -432,7 +455,7 @@ export function SessionProvider({
     } catch (cause) {
       setError(messageOf(cause, "Could not clear the saved session."));
     }
-  }, [disposeScope, setCurrentSession]);
+  }, [disposeScope, revokeDevices, setCurrentSession]);
 
   const selectOrganization = useCallback(
     async (id: string) => {
@@ -443,6 +466,7 @@ export function SessionProvider({
         current.organizationId === id
       )
         return;
+      if (!(await revokeDevices())) return;
       const generation = ++generationRef.current;
       disposeScope();
       const next = { ...current, organizationId: id };
@@ -470,7 +494,14 @@ export function SessionProvider({
         if (generation === generationRef.current) setBooting(false);
       }
     },
-    [disposeScope, makeClient, organizations, readProfile, setCurrentSession],
+    [
+      disposeScope,
+      makeClient,
+      organizations,
+      readProfile,
+      revokeDevices,
+      setCurrentSession,
+    ],
   );
 
   const clearError = useCallback(() => setError(null), []);
@@ -488,6 +519,7 @@ export function SessionProvider({
       signOut,
       selectOrganization,
       registerResource,
+      registerSignOutCleanup,
       registerForegroundRefresh,
       clearError,
     }),
@@ -504,6 +536,7 @@ export function SessionProvider({
       signOut,
       selectOrganization,
       registerResource,
+      registerSignOutCleanup,
       registerForegroundRefresh,
       clearError,
     ],

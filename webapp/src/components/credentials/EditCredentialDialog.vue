@@ -33,6 +33,7 @@ const error = ref<string | null>(null)
 
 function credentialDescriptor(credential: Credential): string {
   if (credential.credential_type === 'mcp_oauth') return 'OAuth'
+  if (credential.credential_type === 'server_secret') return 'Server only'
   if (credential.credential_type === 'file') return credential.target_path
   if (credential.credential_type === 'ssh_key') return 'SSH key pair'
   return credential.env_var_name
@@ -114,7 +115,10 @@ function handleClose(): void {
           <div v-if="credential?.credential_type !== 'mcp_oauth'">
             <label class="text-sm font-medium text-foreground mb-1.5 block">New Value</label>
             <Textarea
-              v-if="credential?.credential_type === 'file'"
+              v-if="
+                credential?.credential_type === 'file' ||
+                credential?.credential_type === 'server_secret'
+              "
               v-model="value"
               :disabled="submitting"
               :rows="6"
@@ -135,7 +139,9 @@ function handleClose(): void {
       </DialogBody>
 
       <DialogFooter>
-        <Button variant="outline" type="button" :disabled="submitting" @click="handleClose">Cancel</Button>
+        <Button variant="outline" type="button" :disabled="submitting" @click="handleClose"
+          >Cancel</Button
+        >
         <Button type="submit" form="edit-credential-form" :disabled="submitting || !name.trim()">
           {{ submitting ? 'Saving…' : 'Save Changes' }}
         </Button>
