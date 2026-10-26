@@ -55,6 +55,8 @@ even through their dependencies.
 Inventory persistence never imports storage inspection, activity, retention or
 deletion workflows. InventoryInspectionService composes their read models and
 queries only through repositories, including fully loaded inventory records.
+Runner service domains and infrastructure never import their composition facade;
+shared RPC correlation records belong to the infrastructure that consumes them.
 """
 
 from __future__ import annotations
@@ -145,6 +147,39 @@ def _imported_modules(path: Path, tree: ast.Module) -> set[str]:
             # ``from apps.harness import api`` imports the submodule itself.
             imported.update(f"{module}.{alias.name}" for alias in node.names)
     return imported
+
+
+def test_runner_domains_and_infrastructure_never_import_composition_facade() -> None:
+    """Domain and infrastructure dependencies must point away from the facade."""
+    services = APPS_ROOT / "runners" / "services"
+    facade = "apps.runners.services"
+    violations = sorted(
+        f"{_module_name(path)} -> {facade}"
+        for package in (services / "domains", services / "infra")
+        for path in package.rglob("*.py")
+        if facade in _imported_modules(path, ast.parse(path.read_text()))
+    )
+    assert violations == [], (
+        "RunnerService composes domains and infrastructure; they must not "
+        "import it, including through function-local imports. Put shared "
+        "contracts in the module that owns them:\n" + "\n".join(violations)
+    )
+
+
+def test_facade_guard_resolves_absolute_and_local_relative_imports() -> None:
+    """Lazy imports and aliases must not conceal the reverse dependency."""
+    path = APPS_ROOT / "runners" / "services" / "domains" / "git_operations.py"
+    facade = "apps.runners.services"
+    for source in (
+        "import apps.runners.services as facade",
+        "from apps.runners import services as facade",
+        "from apps.runners.services import RunnerService",
+        "def dispatch():\n    from .. import RunnerService",
+    ):
+        assert facade in _imported_modules(path, ast.parse(source))
+    assert facade not in _imported_modules(
+        path, ast.parse("from ..infra.rpc_registry import PendingGitRequest")
+    )
 
 
 def test_no_application_module_imports_a_rest_router_module():

@@ -10,10 +10,10 @@ server instance for sending events to runners.
 Phase 3: this module is the thin ``RunnerService`` facade. All domain
 logic lives in the :class:`Mixin <apps.runners.services.domains>` modules
 (``services/domains/*.py``); infrastructure helpers live in
-``services/infra/*.py``. This module keeps the service constructor, the
-shared ``_PendingGitRequest`` record and the public re-exports so that
-``from apps.runners.services import RunnerService, _PendingGitRequest``
-keeps working unchanged. ``get_runner_service()`` is the process-wide
+``services/infra/*.py``. This module keeps the service constructor and
+public service exports. Shared RPC correlation records live with reply
+resolution in ``infra/rpc_registry.py``; domains and infrastructure never
+import this composition facade. ``get_runner_service()`` is the process-wide
 singleton every adapter (REST, Socket.IO) and other app resolves.
 
 Phase 4: the constructor additionally accepts optional injected ports
@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
 
 from ..repositories import (
     ImageBuildJobRepository,
@@ -59,28 +58,13 @@ from .infra.frontend_bus import FrontendBusMixin
 from .infra.harness_gateway import get_harness_gateway
 from .infra.ownership import OwnershipMixin
 from .infra.realtime import get_sio_server
-from .infra.rpc_registry import RpcRegistryMixin
+from .infra.rpc_registry import PendingGitRequest, RpcRegistryMixin
 from .infra.runner_transport import RunnerTransportMixin
 from .infra.session_store import SessionStoreMixin
 from .infra.task_dispatch import TaskDispatchMixin
 from .ports import HarnessGateway
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class _PendingGitRequest:
-    """In-flight git:operation RPC with its expected trust-boundary fields.
-
-    ``request_id`` correlation alone is not fail-closed: a reply on the
-    same runner connection with a wrong ``workspace_id``/``operation``
-    must never resolve another request's waiter. The pending entry
-    therefore pins the expected workspace UUID string and operation name.
-    """
-
-    future: asyncio.Future
-    workspace_id: str
-    operation: str
 
 
 class RunnerService(
@@ -156,11 +140,11 @@ class RunnerService(
         # Runner harness:process_* handlers only emit *_result events (no
         # Socket.IO ACK), so correlation uses request_id futures.
         self._process_pending: dict[str, asyncio.Future] = {}
-        # In-flight git RPCs: request_id -> _PendingGitRequest. Runner
+        # In-flight git RPCs: request_id -> PendingGitRequest. Runner
         # git:operation handlers only emit git:operation_result events
         # (no Socket.IO ACK), so correlation uses request_id futures plus
         # fail-closed workspace_id/operation matching (trust boundary).
-        self._git_pending: dict[str, _PendingGitRequest] = {}
+        self._git_pending: dict[str, PendingGitRequest] = {}
         # Heartbeat-vanished process rows awaiting async verify against
         # the runner (workspace_id -> rows). Stashed by the sync
         # ``handle_heartbeat`` (which cannot do RPCs) and drained by
@@ -199,7 +183,6 @@ def get_runner_service() -> RunnerService:
 
 __all__ = [
     "RunnerService",
-    "_PendingGitRequest",
     "_CREDENTIAL_INJECT_TIMEOUT_SECONDS",
     "get_runner_service",
 ]

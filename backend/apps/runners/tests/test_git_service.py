@@ -15,6 +15,7 @@ from apps.runners.exceptions import (
     WorkspaceStateError,
 )
 from apps.runners.services import RunnerService
+from apps.runners.services.infra.rpc_registry import PendingGitRequest
 from common.exceptions import NotFoundError
 
 
@@ -510,11 +511,9 @@ class TestHandleGitReply:
     def _register_pending(
         self, service, workspace_id, operation: str, request_id: str
     ):
-        from apps.runners.services import _PendingGitRequest
-
         loop = asyncio.new_event_loop()
         fut = loop.create_future()
-        service._git_pending[request_id] = _PendingGitRequest(
+        service._git_pending[request_id] = PendingGitRequest(
             future=fut,
             workspace_id=str(workspace_id),
             operation=operation,
@@ -835,14 +834,12 @@ class TestHandleGitReply:
         self, service, runner, workspace, monkeypatch
     ):
         """_await_git_result pins expected workspace/operation before emit."""
-        from apps.runners.services import _PendingGitRequest
-
         seen: dict = {}
 
         async def _capture(runner_arg, event, payload):
             pending = service._git_pending.get(payload["request_id"])
             seen["pending"] = pending
-            assert isinstance(pending, _PendingGitRequest)
+            assert isinstance(pending, PendingGitRequest)
             assert pending.workspace_id == str(workspace.id)
             assert pending.operation == "list_repos"
             assert event == "git:operation"

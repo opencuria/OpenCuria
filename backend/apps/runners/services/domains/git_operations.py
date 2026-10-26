@@ -8,8 +8,8 @@ plus sibling helpers (``_emit_to_runner`` via ``RunnerTransportMixin``,
 ``_ensure_git_dispatchable`` / ``_validate_task_runner`` /
 ``_validate_harness_workspace_runner`` via ``OwnershipMixin``,
 ``touch_workspace_activity`` via :class:`WorkspaceLifecycleMixin`).
-``_PendingGitRequest`` stays defined in the facade module and is imported
-lazily inside ``_await_git_result`` (no circular import).
+Pending request correlation uses the contract owned by ``infra.rpc_registry``;
+this domain never imports the composing ``RunnerService`` facade.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from ...exceptions import (
     RunnerTimeoutError,
     WorkspaceNotFoundError,
 )
+from ..infra.rpc_registry import PendingGitRequest
 
 logger = logging.getLogger(__name__)
 
@@ -226,11 +227,9 @@ class GitOperationsMixin:
         timeout: float,
     ) -> dict:
         """Emit a git:operation RPC and wait for its correlated result."""
-        from .. import _PendingGitRequest
-
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
-        self._git_pending[request_id] = _PendingGitRequest(
+        self._git_pending[request_id] = PendingGitRequest(
             future=future,
             workspace_id=str(workspace_id),
             operation=operation,

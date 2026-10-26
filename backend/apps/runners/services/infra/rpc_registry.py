@@ -1,15 +1,32 @@
 """Reply-event correlation for process and git RPCs.
 
-RunnerService owns the pending registries. Socket.IO ACK-based control calls
-use the transport directly and need no additional reply registry.
+The pending git request contract lives here with reply resolution. RunnerService
+allocates the per-instance registries; domains use this infrastructure directly.
+Socket.IO ACK-based control calls need no additional reply registry.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PendingGitRequest:
+    """In-flight git:operation RPC with its expected trust-boundary fields.
+
+    ``request_id`` correlation alone is not fail-closed: a reply on the
+    same runner connection with a wrong ``workspace_id``/``operation``
+    must never resolve another request's waiter. The pending entry
+    therefore pins the expected workspace UUID string and operation name.
+    """
+
+    future: asyncio.Future
+    workspace_id: str
+    operation: str
 
 
 class RpcRegistryMixin:
