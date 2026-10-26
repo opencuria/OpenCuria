@@ -4,33 +4,18 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
 from asgiref.sync import sync_to_async
 
-from apps.accounts.models import APIKeyPermission, User
+from apps.accounts.models import User
 from apps.mcp_app.context import ToolContext
 from apps.mcp_app.server import call_tool
 from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
-
-ALL_PERMISSIONS = [permission.value for permission in APIKeyPermission]
-
-
-@dataclass
-class FakeKey:
-    """Minimal API key: a user and an explicit permission allowlist."""
-
-    user: Any
-    permissions: list[str] = field(default_factory=lambda: list(ALL_PERMISSIONS))
-
-    def has_permission(self, permission: APIKeyPermission | str) -> bool:
-        value = getattr(permission, "value", permission)
-        return value in self.permissions
 
 
 @dataclass
@@ -47,17 +32,13 @@ class World:
         *,
         user: User | None = None,
         role: str = "member",
-        permissions: Iterable[str] | None = None,
     ) -> ToolContext:
-        key = FakeKey(
-            user=user or self.user,
-            permissions=list(ALL_PERMISSIONS if permissions is None else permissions),
-        )
         return ToolContext(
-            principal=key,
+            user=user or self.user,
             organization_id=self.org.id,
             organization_name=self.org.name,
             role=role,
+            workspace_id=self.workspace.id,
         )
 
 

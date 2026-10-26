@@ -9,8 +9,6 @@ from typing import Any
 
 from mcp.types import Tool, ToolAnnotations
 
-from apps.accounts.models import APIKeyPermission
-
 from .context import ToolContext
 
 #: Handlers receive the caller context and validated arguments and return a
@@ -20,13 +18,12 @@ ToolHandler = Callable[[ToolContext, dict[str, Any]], Awaitable[dict[str, Any]]]
 
 @dataclass(frozen=True)
 class ToolSpec:
-    """One MCP tool: model-facing contract, required permission, handler."""
+    """One MCP tool: model-facing contract and handler."""
 
     name: str
     title: str
     description: str
     input_schema: dict[str, Any]
-    permission: APIKeyPermission
     handler: ToolHandler
     read_only: bool = False
     destructive: bool = False
@@ -60,7 +57,6 @@ def registrar(
         title: str,
         description: str,
         schema: dict[str, Any],
-        permission: APIKeyPermission,
         read_only: bool = False,
         destructive: bool = False,
         idempotent: bool = False,
@@ -72,7 +68,6 @@ def registrar(
                     title=title,
                     description=inspect.cleandoc(description),
                     input_schema=schema,
-                    permission=permission,
                     handler=handler,
                     read_only=read_only,
                     destructive=destructive,

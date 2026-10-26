@@ -1,10 +1,8 @@
 """In-process access to the management MCP server for workspace agents.
 
 The built-in OpenCuria plugin (MCP transport ``builtin``) connects a harness
-run to the same server ``/mcp`` serves, over in-memory streams: no HTTP, no
-API key and no secret inside the workspace. The agent acts as the workspace
-owner with every MCP permission, bounded by the owner's role in the
-workspace's organization.
+run to the server over in-memory streams. The agent acts as the workspace
+owner, bounded by the owner's role in the workspace's organization.
 """
 
 from __future__ import annotations
@@ -12,34 +10,16 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from typing import Any
 
 import anyio
 from asgiref.sync import sync_to_async
 from mcp.shared.memory import MessageStream, create_client_server_memory_streams
 
-from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
 from apps.runners.services import get_runner_service
 
 from .context import ContextError, ToolContext
 from .server import create_mcp_server
-
-#: Every MCP permission; the owner's organization role still gates admin tools.
-AGENT_PERMISSIONS = frozenset(permission.value for permission in APIKeyPermission)
-
-
-@dataclass(frozen=True)
-class WorkspaceAgent:
-    """Principal of an agent running inside a workspace, acting as its owner."""
-
-    user: Any
-    permissions: frozenset[str] = AGENT_PERMISSIONS
-
-    def has_permission(self, permission: APIKeyPermission | str) -> bool:
-        """Return whether *permission* is granted (all MCP permissions are)."""
-        return getattr(permission, "value", permission) in self.permissions
 
 
 def agent_context(workspace_id: uuid.UUID, organization_id: uuid.UUID) -> ToolContext:
@@ -60,7 +40,7 @@ def agent_context(workspace_id: uuid.UUID, organization_id: uuid.UUID) -> ToolCo
     if membership is None:
         raise ContextError("The workspace owner is not a member of its organization.")
     return ToolContext(
-        principal=WorkspaceAgent(user=owner),
+        user=owner,
         organization_id=org_id,
         organization_name=membership["name"],
         role=str(membership["role"]),

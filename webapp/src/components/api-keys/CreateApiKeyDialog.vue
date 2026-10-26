@@ -222,8 +222,6 @@ function handleClose(): void {
           <p><span class="rounded bg-muted px-1 py-0.5 font-mono">Authorization: Bearer {{ createdKey.key_prefix }}…</span></p>
           <p>or</p>
           <p><span class="rounded bg-muted px-1 py-0.5 font-mono">X-API-Key: {{ createdKey.key_prefix }}…</span></p>
-          <p class="mt-2 text-xs font-medium text-foreground">MCP server</p>
-          <p><span class="rounded bg-muted px-1 py-0.5 font-mono">/mcp</span> with the same header; requires <span class="font-mono">mcp:access</span></p>
         </div>
 
       </div>

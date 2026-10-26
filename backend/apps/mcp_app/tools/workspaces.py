@@ -9,7 +9,6 @@ from typing import Any
 
 from asgiref.sync import sync_to_async
 
-from apps.accounts.models import APIKeyPermission
 from apps.credentials.services import CredentialSvc
 from apps.harness.conversation_service import ConversationService
 from apps.plugins.services import PluginService
@@ -150,59 +149,57 @@ def _details(ctx: ToolContext, workspace: Any) -> dict[str, Any]:
             }
         )
     )
-    if ctx.can(APIKeyPermission.PLUGINS_READ):
-        data["plugins"] = [
-            compact(
-                {
-                    "plugin_id": plugin["id"],
-                    "name": plugin["name"],
-                    "enabled": plugin["workspace_enabled"],
-                    "ready": plugin["ready"],
-                    "missing_credentials": [
-                        gap.get("service_name") or gap.get("key")
-                        for gap in plugin["missing_required_credentials"]
-                    ],
-                }
-            )
-            for plugin in PluginService().list_workspace_plugins(
-                workspace=workspace, org_id=ctx.organization_id
-            )
-        ]
-    if ctx.can(APIKeyPermission.HARNESS_READ):
-        chats = ConversationService().list_conversations(
-            organization_id=ctx.organization_id, workspace_ids=[workspace.id]
+    data["plugins"] = [
+        compact(
+            {
+                "plugin_id": plugin["id"],
+                "name": plugin["name"],
+                "enabled": plugin["workspace_enabled"],
+                "ready": plugin["ready"],
+                "missing_credentials": [
+                    gap.get("service_name") or gap.get("key")
+                    for gap in plugin["missing_required_credentials"]
+                ],
+            }
         )
-        data["recent_chats"] = [
-            compact(
-                {
-                    "chat_id": chat["session_id"],
-                    "title": chat["title"],
-                    "status": "running" if chat["status"] == "busy" else "idle",
-                    "waiting_for_input": chat["needs_attention"] or None,
-                    "last_message_at": timestamp(chat["last_message_at"]),
-                }
-            )
-            for chat in chats[:5]
-        ]
-        data["total_chats"] = len(chats)
-        data["scheduled_tasks"] = [
-            compact(
-                {
-                    "scheduled_task_id": task.id,
-                    "name": task.name,
-                    "status": "active"
-                    if task.enabled
-                    else "ended"
-                    if task.recurrence == "once"
-                    else "paused",
-                    "next_run_at": task.next_run_at if task.enabled else None,
-                }
-            )
-            for task in ScheduledTaskService().list(
-                organization_id=ctx.organization_id, owner_id=ctx.user.id
-            )
-            if task.workspace_id == workspace.id
-        ]
+        for plugin in PluginService().list_workspace_plugins(
+            workspace=workspace, org_id=ctx.organization_id
+        )
+    ]
+    chats = ConversationService().list_conversations(
+        organization_id=ctx.organization_id, workspace_ids=[workspace.id]
+    )
+    data["recent_chats"] = [
+        compact(
+            {
+                "chat_id": chat["session_id"],
+                "title": chat["title"],
+                "status": "running" if chat["status"] == "busy" else "idle",
+                "waiting_for_input": chat["needs_attention"] or None,
+                "last_message_at": timestamp(chat["last_message_at"]),
+            }
+        )
+        for chat in chats[:5]
+    ]
+    data["total_chats"] = len(chats)
+    data["scheduled_tasks"] = [
+        compact(
+            {
+                "scheduled_task_id": task.id,
+                "name": task.name,
+                "status": "active"
+                if task.enabled
+                else "ended"
+                if task.recurrence == "once"
+                else "paused",
+                "next_run_at": task.next_run_at if task.enabled else None,
+            }
+        )
+        for task in ScheduledTaskService().list(
+            organization_id=ctx.organization_id, owner_id=ctx.user.id
+        )
+        if task.workspace_id == workspace.id
+    ]
     return data
 
 
@@ -349,7 +346,6 @@ def _list(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "workspace_list",
     title="List workspaces",
-    permission=APIKeyPermission.WORKSPACES_READ,
     read_only=True,
     schema=obj(
         {
@@ -376,7 +372,6 @@ async def workspace_list(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
 @tool(
     "workspace_get",
     title="Get workspace details",
-    permission=APIKeyPermission.WORKSPACES_READ,
     read_only=True,
     schema=obj({"workspace": WORKSPACE_REF}, ("workspace",)),
     description="""
@@ -395,66 +390,62 @@ async def workspace_get(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
 
 def _options(ctx: ToolContext) -> dict[str, Any]:
     data: dict[str, Any] = {}
-    if ctx.can(APIKeyPermission.WORKSPACES_CREATE):
-        data["images"] = [_image_option(image) for image in _selectable_images(ctx)]
-        data["runners"] = [
+    data["images"] = [_image_option(image) for image in _selectable_images(ctx)]
+    data["runners"] = [
+        {
+            "runner_id": runner.id,
+            "name": runner.name or str(runner.id)[:8],
+            "online": runner.status == RunnerStatus.ONLINE,
+            "defaults": {
+                "vcpus": runner.qemu_default_vcpus,
+                "memory_mb": runner.qemu_default_memory_mb,
+                "disk_gb": runner.qemu_default_disk_size_gb,
+            },
+            "limits": {
+                "vcpus": [runner.qemu_min_vcpus, runner.qemu_max_vcpus],
+                "memory_mb": [runner.qemu_min_memory_mb, runner.qemu_max_memory_mb],
+                "disk_gb": [
+                    runner.qemu_min_disk_size_gb,
+                    runner.qemu_max_disk_size_gb,
+                ],
+            },
+        }
+        for runner in get_runner_service().list_runners(
+            organization_id=ctx.organization_id
+        )
+    ]
+    data["credentials"] = [
+        {
+            "credential_id": credential.id,
+            "name": credential.name,
+            "service": credential.service.name,
+            "type": credential.service.credential_type,
+            "scope": "personal" if credential.user_id else "organization",
+        }
+        for credential in resolve.list_credentials(ctx)
+    ]
+    data["plugins"] = [
+        compact(
             {
-                "runner_id": runner.id,
-                "name": runner.name or str(runner.id)[:8],
-                "online": runner.status == RunnerStatus.ONLINE,
-                "defaults": {
-                    "vcpus": runner.qemu_default_vcpus,
-                    "memory_mb": runner.qemu_default_memory_mb,
-                    "disk_gb": runner.qemu_default_disk_size_gb,
-                },
-                "limits": {
-                    "vcpus": [runner.qemu_min_vcpus, runner.qemu_max_vcpus],
-                    "memory_mb": [runner.qemu_min_memory_mb, runner.qemu_max_memory_mb],
-                    "disk_gb": [
-                        runner.qemu_min_disk_size_gb,
-                        runner.qemu_max_disk_size_gb,
-                    ],
-                },
+                "plugin_id": plugin["id"],
+                "name": plugin["name"],
+                "description": plugin["description"],
+                "required_credentials": [
+                    requirement["service_name"]
+                    for requirement in plugin["credential_requirements"]
+                    if requirement["required"]
+                ],
             }
-            for runner in get_runner_service().list_runners(
-                organization_id=ctx.organization_id
-            )
-        ]
-    if ctx.can(APIKeyPermission.CREDENTIALS_READ):
-        data["credentials"] = [
-            {
-                "credential_id": credential.id,
-                "name": credential.name,
-                "service": credential.service.name,
-                "type": credential.service.credential_type,
-                "scope": "personal" if credential.user_id else "organization",
-            }
-            for credential in resolve.list_credentials(ctx)
-        ]
-    if ctx.can(APIKeyPermission.PLUGINS_READ):
-        data["plugins"] = [
-            compact(
-                {
-                    "plugin_id": plugin["id"],
-                    "name": plugin["name"],
-                    "description": plugin["description"],
-                    "required_credentials": [
-                        requirement["service_name"]
-                        for requirement in plugin["credential_requirements"]
-                        if requirement["required"]
-                    ],
-                }
-            )
-            for plugin in PluginService().list_visible(org_id=ctx.organization_id)
-            if plugin["org_enabled"] and plugin["enabled"] and plugin["published"]
-        ]
+        )
+        for plugin in PluginService().list_visible(org_id=ctx.organization_id)
+        if plugin["org_enabled"] and plugin["enabled"] and plugin["published"]
+    ]
     return data
 
 
 @tool(
     "workspace_options",
     title="List workspace options",
-    permission=APIKeyPermission.WORKSPACES_READ,
     read_only=True,
     schema=obj({}),
     description="""
@@ -514,7 +505,6 @@ async def _status_result(
 @tool(
     "workspace_create",
     title="Create workspace",
-    permission=APIKeyPermission.WORKSPACES_CREATE,
     schema=obj(
         {
             "name": string("Workspace name, e.g. 'billing-service'.", minLength=1),
@@ -548,11 +538,6 @@ async def _status_result(
     """,
 )
 async def workspace_create(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    if args.get("credentials"):
-        ctx.require(APIKeyPermission.CREDENTIALS_READ)
-    if args.get("plugins"):
-        ctx.require(APIKeyPermission.PLUGINS_WRITE)
-
     def plan() -> dict[str, Any]:
         image, target = _pick_image(ctx, args.get("image"), args.get("runner"))
         credential_ids = resolve.credential_ids(ctx, args.get("credentials") or [])
@@ -592,7 +577,6 @@ async def workspace_create(ctx: ToolContext, args: dict[str, Any]) -> dict[str, 
 @tool(
     "workspace_update",
     title="Update workspace",
-    permission=APIKeyPermission.WORKSPACES_UPDATE,
     idempotent=True,
     schema=obj(
         {
@@ -621,10 +605,6 @@ async def workspace_create(ctx: ToolContext, args: dict[str, Any]) -> dict[str, 
     """,
 )
 async def workspace_update(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    if "credentials" in args:
-        ctx.require(APIKeyPermission.CREDENTIALS_READ)
-    if "plugins" in args:
-        ctx.require(APIKeyPermission.PLUGINS_WRITE)
     changes = set(args) - {"workspace"}
     if not changes:
         raise ToolError("Pass at least one field to change besides workspace.")
@@ -679,7 +659,6 @@ async def workspace_update(ctx: ToolContext, args: dict[str, Any]) -> dict[str, 
 @tool(
     "workspace_start",
     title="Start workspace",
-    permission=APIKeyPermission.WORKSPACES_RESUME,
     idempotent=True,
     schema=obj(
         {"workspace": WORKSPACE_REF, "wait_seconds": WAIT_FOR_RUNNING}, ("workspace",)
@@ -712,7 +691,6 @@ async def workspace_start(ctx: ToolContext, args: dict[str, Any]) -> dict[str, A
 @tool(
     "workspace_stop",
     title="Stop workspace",
-    permission=APIKeyPermission.WORKSPACES_STOP,
     idempotent=True,
     schema=obj({"workspace": WORKSPACE_REF}, ("workspace",)),
     description="""
@@ -732,7 +710,6 @@ async def workspace_stop(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
 @tool(
     "workspace_delete",
     title="Delete workspace",
-    permission=APIKeyPermission.WORKSPACES_DELETE,
     destructive=True,
     schema=obj({"workspace": WORKSPACE_REF}, ("workspace",)),
     description="""

@@ -1,35 +1,16 @@
 # MCP
 
-OpenCuria speaks the **Model Context Protocol (MCP)** in two directions:
+OpenCuria agents use tools through the **Model Context Protocol (MCP)**:
 
-- **OpenCuria MCP server**: AI assistants such as Claude Code, Claude Desktop, Cursor or ChatGPT manage OpenCuria: workspaces, chats, skills, plugins and scheduled tasks.
-- **MCP plugins**: agents inside workspaces get extra tools from the plugins you enable.
+- **OpenCuria plugin**: manage workspaces, chats, skills, plugins and scheduled tasks.
+- **Integration plugins**: get extra tools from the MCP servers you enable.
 
 ## OpenCuria MCP server
 
-**Endpoint:** `https://your-backend.example.com/mcp` (local: `http://localhost:8000/mcp`), Streamable HTTP.
-
-1. Create an API key under **Settings → API keys** with **`mcp:access`** plus the permissions for the tools you want, for example `workspaces:read`, `harness:read`, `harness:run`, `harness:permissions`, `skills:read`, `skills:write`, `plugins:read`, `plugins:write`. The server only offers tools the key may use.
-2. Add the server to your client:
-
-```bash
-claude mcp add --transport http opencuria https://your-backend.example.com/mcp \
-  --header "Authorization: Bearer kai_your_api_key"
-```
-
-```json
-{
-  "mcpServers": {
-    "opencuria": {
-      "type": "http",
-      "url": "https://your-backend.example.com/mcp",
-      "headers": { "Authorization": "Bearer kai_your_api_key" }
-    }
-  }
-}
-```
-
-The key acts as its owner in the owner's first organization. To use another organization, also send `X-Organization-Id: <organization id>`.
+The built-in **OpenCuria** plugin connects agents to this server in-process.
+Enable it per organization and workspace. Agents act as the workspace owner
+within the workspace's organization and the owner's role. No API key or
+credentials are required. The built-in plugin cannot be edited or deleted.
 
 ### Tools
 
@@ -61,8 +42,3 @@ OpenCuria agents use MCP tools from the plugins selected for a workspace.
 The backend connects the selected MCP servers when an agent needs them.
 Plugin definitions support stdio processes in the workspace and HTTP services.
 Browser automation is available through the Playwright plugin.
-
-The built-in **OpenCuria** plugin gives agents this MCP server without any setup: no API
-key, no credentials. Turn it on per organization and per workspace; the agent then acts
-as the workspace owner with every tool, within the owner's organization role. It cannot
-be edited or deleted.

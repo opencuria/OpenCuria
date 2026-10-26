@@ -294,17 +294,12 @@ membership. Run backend migrations before using this setting.
 
 ## OpenCuria MCP server
 
-AI assistants (Claude Code, Claude Desktop, Cursor, ChatGPT, …) manage OpenCuria through
-the stateless Streamable HTTP endpoint `/mcp` on the backend. Authenticate with an API key
-(`Authorization: Bearer kai_…` or `X-API-Key`) that holds `mcp:access`; each tool also
-requires its own permission and is hidden otherwise. `X-Organization-Id` selects the
-organization (default: the owner's first). About 30 task-oriented tools cover workspaces,
-chats (start, read with bounded waiting, send/steer, answer questions and permissions),
-skills, plugins and scheduled tasks. Client setup and the tool list are in
-[webapp/src/docs/mcp.md](./webapp/src/docs/mcp.md); the implementation lives in
-`backend/apps/mcp_app/`. Agents inside OpenCuria get the same server through the
-built-in, non-deletable **OpenCuria** plugin (enable it per organization and workspace):
-it runs in-process as the workspace owner, without API key or credentials.
+Agents manage OpenCuria through the built-in **OpenCuria** plugin, enabled per
+organization and workspace. Its MCP server runs in-process as the workspace owner,
+within that owner's organization role, without API keys or credentials. About 30
+task-oriented tools cover workspaces, chats, skills, plugins and scheduled tasks.
+The tool list is in [webapp/src/docs/mcp.md](./webapp/src/docs/mcp.md); the
+implementation lives in `backend/apps/mcp_app/`.
 
 ## MCP OAuth integrations
 

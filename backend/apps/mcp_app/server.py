@@ -1,6 +1,5 @@
-"""Per-request MCP server bound to one authenticated caller.
+"""In-process MCP server bound to one workspace owner and organization.
 
-``tools/list`` exposes only the tools whose permission the API key holds.
 ``tools/call`` validates arguments against the tool's JSON Schema, runs the
 handler and turns every expected failure into an ``isError`` result whose
 text tells the model how to recover.
@@ -98,15 +97,10 @@ async def call_tool(
     *,
     tools: Sequence[ToolSpec] = TOOLS,
 ) -> CallToolResult:
-    """Authorize, validate and run one tool call for *ctx*."""
+    """Validate and run one tool call within the owner's scope."""
     spec = next((tool for tool in tools if tool.name == name), None)
     if spec is None:
         return _error(f"Unknown tool '{name}'.")
-    if not ctx.can(spec.permission):
-        return _error(
-            f"This API key lacks the permission {spec.permission.value} required "
-            f"by {name}. Ask the user to add it under Settings → API keys."
-        )
     args = dict(arguments or {})
     try:
         jsonschema.validate(args, spec.input_schema)
@@ -139,18 +133,13 @@ async def call_tool(
     return _success(result)
 
 
-def visible_tools(ctx: ToolContext, tools: Sequence[ToolSpec] = TOOLS) -> list[Tool]:
-    """Return the ``tools/list`` entries the caller's API key may use."""
-    return [spec.to_mcp() for spec in tools if ctx.can(spec.permission)]
-
-
 def create_mcp_server(ctx: ToolContext) -> Server:
     """Create an MCP server instance bound to *ctx*."""
     server: Server = Server(SERVER_NAME, instructions=INSTRUCTIONS)
 
     @server.list_tools()
     async def _list_tools() -> list[Tool]:
-        return visible_tools(ctx)
+        return [spec.to_mcp() for spec in TOOLS]
 
     @server.call_tool(validate_input=False)
     async def _call_tool(name: str, arguments: dict[str, Any] | None) -> CallToolResult:

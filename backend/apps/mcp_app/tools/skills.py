@@ -6,7 +6,6 @@ from typing import Any
 
 from asgiref.sync import sync_to_async
 
-from apps.accounts.models import APIKeyPermission
 from apps.skills.services import SkillService
 
 from .. import resolve
@@ -59,7 +58,6 @@ def _full(skill: Any) -> dict[str, Any]:
 @tool(
     "skill_list",
     title="List skills",
-    permission=APIKeyPermission.SKILLS_READ,
     read_only=True,
     schema=obj(
         {
@@ -107,7 +105,6 @@ async def skill_list(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "skill_get",
     title="Get skill",
-    permission=APIKeyPermission.SKILLS_READ,
     read_only=True,
     schema=obj({"skill": SKILL_REF}, ("skill",)),
     description="Get the full Markdown body and metadata of one skill.",
@@ -119,7 +116,6 @@ async def skill_get(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "skill_create",
     title="Create skill",
-    permission=APIKeyPermission.SKILLS_WRITE,
     schema=obj(
         {
             "name": string(
@@ -164,7 +160,6 @@ async def skill_create(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
 @tool(
     "skill_update",
     title="Update skill",
-    permission=APIKeyPermission.SKILLS_WRITE,
     idempotent=True,
     schema=obj(
         {
@@ -203,7 +198,6 @@ async def skill_update(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
 @tool(
     "skill_delete",
     title="Delete skill",
-    permission=APIKeyPermission.SKILLS_WRITE,
     destructive=True,
     schema=obj({"skill": SKILL_REF}, ("skill",)),
     description="""

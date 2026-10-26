@@ -17,7 +17,6 @@ from typing import Any
 import structlog
 from asgiref.sync import sync_to_async
 
-from apps.accounts.models import APIKeyPermission
 from apps.harness.conversation_service import ConversationService
 from apps.harness.harness_service import get_harness_service
 from apps.harness.schemas import part_to_out, timeline_to_out
@@ -477,7 +476,6 @@ def _list(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "chat_list",
     title="List chats",
-    permission=APIKeyPermission.HARNESS_READ,
     read_only=True,
     schema=obj(
         {
@@ -538,7 +536,6 @@ def _part_detail(session: Any, part_id: str) -> dict[str, Any]:
 @tool(
     "chat_read",
     title="Read chat",
-    permission=APIKeyPermission.HARNESS_READ,
     read_only=True,
     schema=obj(
         {
@@ -601,7 +598,6 @@ async def chat_read(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "chat_start",
     title="Start chat",
-    permission=APIKeyPermission.HARNESS_RUN,
     schema=obj(
         {
             "workspace": string("Workspace ID or exact name the agent works in."),
@@ -700,7 +696,6 @@ async def chat_start(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "chat_send",
     title="Send message",
-    permission=APIKeyPermission.HARNESS_RUN,
     schema=obj(
         {
             "chat_id": CHAT_ID,
@@ -797,7 +792,6 @@ async def chat_send(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "chat_respond",
     title="Answer agent request",
-    permission=APIKeyPermission.HARNESS_PERMISSIONS,
     schema=obj(
         {
             "chat_id": CHAT_ID,
@@ -896,7 +890,6 @@ async def chat_respond(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
 @tool(
     "chat_stop",
     title="Stop agent",
-    permission=APIKeyPermission.HARNESS_RUN,
     idempotent=True,
     schema=obj({"chat_id": CHAT_ID}, ("chat_id",)),
     description="""
@@ -925,7 +918,6 @@ async def chat_stop(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "chat_delete",
     title="Delete chat",
-    permission=APIKeyPermission.HARNESS_RUN,
     destructive=True,
     schema=obj({"chat_id": CHAT_ID}, ("chat_id",)),
     description="""

@@ -184,16 +184,6 @@ async def test_power_tools_are_idempotent_and_delete_dispatches(world, monkeypat
     assert calls == [("stop", world.workspace.id), ("remove", world.workspace.id)]
 
 
-async def test_workspace_tools_respect_key_permissions(world):
-    read_only = world.ctx(permissions=["mcp:access", "workspaces:read"])
-
-    options = await ok(read_only, "workspace_options")
-    denied = await fails(read_only, "workspace_delete", workspace="billing-api")
-
-    assert options == {}  # images, credentials and plugins need more permissions
-    assert "workspaces:delete" in denied
-
-
 async def test_workspace_create_without_ready_image_explains_next_step(world):
     error = await fails(world.ctx(), "workspace_create", name="new-one")
 

@@ -6,7 +6,6 @@ from typing import Any
 
 from asgiref.sync import sync_to_async
 
-from apps.accounts.models import APIKeyPermission
 from apps.credentials.services import CredentialServiceSvc
 from apps.plugins.services import PluginService
 from apps.runners.services import get_runner_service
@@ -240,7 +239,6 @@ def _editable(ctx: ToolContext, ref: str, action: str) -> dict[str, Any]:
 @tool(
     "plugin_list",
     title="List plugins",
-    permission=APIKeyPermission.PLUGINS_READ,
     read_only=True,
     schema=obj(
         {
@@ -309,7 +307,6 @@ async def plugin_list(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "plugin_get",
     title="Get plugin",
-    permission=APIKeyPermission.PLUGINS_READ,
     read_only=True,
     schema=obj({"plugin": PLUGIN_REF}, ("plugin",)),
     description="""
@@ -325,7 +322,6 @@ async def plugin_get(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "plugin_create",
     title="Create plugin",
-    permission=APIKeyPermission.PLUGINS_WRITE,
     schema=obj(
         {
             "name": string("Plugin name, e.g. 'GitHub tools'.", minLength=1),
@@ -375,7 +371,6 @@ async def plugin_create(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
 @tool(
     "plugin_update",
     title="Update plugin",
-    permission=APIKeyPermission.PLUGINS_WRITE,
     idempotent=True,
     schema=obj(
         {
@@ -422,7 +417,6 @@ async def plugin_update(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
 @tool(
     "plugin_delete",
     title="Delete plugin",
-    permission=APIKeyPermission.PLUGINS_WRITE,
     destructive=True,
     schema=obj({"plugin": PLUGIN_REF}, ("plugin",)),
     description="""
@@ -442,7 +436,6 @@ async def plugin_delete(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
 @tool(
     "plugin_set_active",
     title="Enable or disable plugin",
-    permission=APIKeyPermission.PLUGINS_WRITE,
     idempotent=True,
     schema=obj(
         {
@@ -477,8 +470,6 @@ async def plugin_set_active(ctx: ToolContext, args: dict[str, Any]) -> dict[str,
             return {"scope": "organization", **_summary(updated)}
 
         return await sync_to_async(set_org)()
-
-    ctx.require(APIKeyPermission.WORKSPACES_UPDATE)
 
     def plan() -> tuple[Any, dict[str, Any], list[Any]]:
         workspace = resolve.workspace(ctx, args["workspace"])

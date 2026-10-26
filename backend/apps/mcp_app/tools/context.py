@@ -6,11 +6,9 @@ from typing import Any
 
 from asgiref.sync import sync_to_async
 
-from apps.accounts.models import APIKeyPermission
 from apps.harness.conversation_service import ConversationService
 from apps.harness.engines.service import EngineCatalogService
 from apps.harness.providers.base import ProviderError
-from apps.organizations.services import OrganizationService
 from apps.scheduled_tasks.services import ScheduledTaskService
 from apps.skills.services import SkillService
 from common.exceptions import AuthenticationError, NotFoundError
@@ -54,54 +52,35 @@ def _context(ctx: ToolContext) -> dict[str, Any]:
             "name": ctx.organization_name,
             "role": ctx.role,
         },
+        "current_workspace_id": ctx.workspace_id,
     }
-    if ctx.workspace_id is not None:
-        # Agents are bound to their workspace's organization.
-        data["current_workspace_id"] = ctx.workspace_id
-    others = [
-        {"organization_id": m["id"], "name": m["name"], "role": m["role"]}
-        for m in OrganizationService().list_user_organizations(user)
-        if m["id"] != ctx.organization_id
-    ]
-    if others and ctx.workspace_id is None:
-        data["other_organizations"] = others
-        data["switch_organization"] = (
-            "Send the X-Organization-Id header with another organization_id."
-        )
     counts: dict[str, Any] = {}
-    if ctx.can(APIKeyPermission.WORKSPACES_READ):
-        workspaces = resolve.list_workspaces(ctx)
-        counts["workspaces"] = len(workspaces)
-        counts["workspaces_running"] = sum(
-            1 for w in workspaces if str(w.status) == "running"
+    workspaces = resolve.list_workspaces(ctx)
+    counts["workspaces"] = len(workspaces)
+    counts["workspaces_running"] = sum(
+        1 for w in workspaces if str(w.status) == "running"
+    )
+    chats = ConversationService().list_conversations(
+        organization_id=ctx.organization_id,
+        workspace_ids=[w.id for w in resolve.list_workspaces(ctx)],
+    )
+    counts["chats"] = len(chats)
+    counts["chats_running"] = sum(1 for c in chats if c["status"] == "busy")
+    counts["chats_waiting_for_input"] = sum(1 for c in chats if c["needs_attention"])
+    counts["scheduled_tasks"] = len(
+        ScheduledTaskService().list(
+            organization_id=ctx.organization_id, owner_id=user.id
         )
-    if ctx.can(APIKeyPermission.HARNESS_READ):
-        chats = ConversationService().list_conversations(
-            organization_id=ctx.organization_id,
-            workspace_ids=[w.id for w in resolve.list_workspaces(ctx)],
-        )
-        counts["chats"] = len(chats)
-        counts["chats_running"] = sum(1 for c in chats if c["status"] == "busy")
-        counts["chats_waiting_for_input"] = sum(
-            1 for c in chats if c["needs_attention"]
-        )
-        counts["scheduled_tasks"] = len(
-            ScheduledTaskService().list(
-                organization_id=ctx.organization_id, owner_id=user.id
-            )
-        )
-        data["engines"] = _engines(ctx)
-    if ctx.can(APIKeyPermission.SKILLS_READ):
-        counts["skills"] = len(SkillService().list_skills(user, ctx.organization_id))
+    )
+    data["engines"] = _engines(ctx)
+    counts["skills"] = len(SkillService().list_skills(user, ctx.organization_id))
     data["counts"] = counts
-    data["api_key_permissions"] = sorted(ctx.principal.permissions or [])
     return data
 
 
 @tool(
     "opencuria_context",
     title="Show OpenCuria context",
-    permission=APIKeyPermission.MCP_ACCESS,
     read_only=True,
     schema=obj({}),
     description="""
@@ -109,9 +88,7 @@ def _context(ctx: ToolContext) -> dict[str, Any]:
         user's role in it (organization skills and plugins need the 'admin'
         role), counts of workspaces, chats (running / waiting for input),
         scheduled tasks and skills, the chat engines with their connection
-        status, and the permissions of this API key (a tool you cannot see
-        needs a permission the key lacks). Agents running inside an OpenCuria
-        workspace also get current_workspace_id, the workspace they run in.
+        status, and current_workspace_id, the workspace the agent runs in.
     """,
 )
 async def opencuria_context(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
@@ -161,7 +138,6 @@ def _models(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "model_list",
     title="List models",
-    permission=APIKeyPermission.HARNESS_READ,
     read_only=True,
     schema=obj(
         {

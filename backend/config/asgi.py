@@ -2,7 +2,7 @@
 ASGI config for opencuria backend.
 
 Combines Django HTTP, Socket.IO for runners and frontend clients,
-desktop WebSocket streams and the management MCP endpoint.
+and desktop WebSocket streams.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ django.setup()
 
 from django.core.asgi import get_asgi_application  # noqa: E402
 
-from apps.mcp_app.transport import MCP_PATH, mcp_asgi_app  # noqa: E402
 from apps.runners.desktop_proxy import desktop_proxy_app  # noqa: E402
 from apps.runners.sio_server import create_sio_app  # noqa: E402
 
@@ -54,7 +53,5 @@ async def application(scope, receive, send):
         or path.startswith("/socket.io")
     ):
         await sio_asgi(scope, receive, send)
-    elif path == MCP_PATH or path.startswith(f"{MCP_PATH}/"):
-        await mcp_asgi_app(scope, receive, send)
     else:
         await django_asgi(scope, receive, send)

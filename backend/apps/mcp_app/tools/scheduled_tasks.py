@@ -6,7 +6,6 @@ from typing import Any
 
 from asgiref.sync import sync_to_async
 
-from apps.accounts.models import APIKeyPermission
 from apps.scheduled_tasks.services import ScheduledTaskService
 
 from .. import resolve
@@ -199,7 +198,6 @@ def _values(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "scheduled_task_list",
     title="List scheduled tasks",
-    permission=APIKeyPermission.HARNESS_READ,
     read_only=True,
     schema=obj(
         {
@@ -244,7 +242,6 @@ async def scheduled_task_list(ctx: ToolContext, args: dict[str, Any]) -> dict[st
 @tool(
     "scheduled_task_get",
     title="Get scheduled task",
-    permission=APIKeyPermission.HARNESS_READ,
     read_only=True,
     schema=obj(
         {
@@ -275,7 +272,6 @@ async def scheduled_task_get(ctx: ToolContext, args: dict[str, Any]) -> dict[str
 @tool(
     "scheduled_task_create",
     title="Create scheduled task",
-    permission=APIKeyPermission.HARNESS_RUN,
     schema=obj(
         {
             "name": string("Short name, e.g. 'Nightly dependency check'.", minLength=1),
@@ -318,7 +314,6 @@ async def scheduled_task_create(
 @tool(
     "scheduled_task_update",
     title="Update scheduled task",
-    permission=APIKeyPermission.HARNESS_RUN,
     idempotent=True,
     schema=obj(
         {
@@ -359,7 +354,6 @@ async def scheduled_task_update(
 @tool(
     "scheduled_task_delete",
     title="Delete scheduled task",
-    permission=APIKeyPermission.HARNESS_RUN,
     destructive=True,
     schema=obj({"scheduled_task": TASK_REF}, ("scheduled_task",)),
     description="""
@@ -382,7 +376,6 @@ async def scheduled_task_delete(
 @tool(
     "scheduled_task_run_now",
     title="Run scheduled task now",
-    permission=APIKeyPermission.HARNESS_RUN,
     schema=obj(
         {"scheduled_task": TASK_REF, "wait_seconds": WAIT_SECONDS},
         ("scheduled_task",),

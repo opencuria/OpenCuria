@@ -96,17 +96,23 @@ async def test_other_users_skills_are_invisible(world):
     assert "No skill" in error
 
 
-async def test_context_reports_scope_counts_and_permissions(world):
-    ctx = world.ctx(permissions=["mcp:access", "workspaces:read", "skills:read"])
-
-    data = await ok(ctx, "opencuria_context")
+async def test_context_reports_workspace_scope_and_counts(world):
+    data = await ok(world.ctx(), "opencuria_context")
 
     assert data["organization"]["name"] == world.org.name
     assert data["organization"]["role"] == "member"
-    assert data["counts"] == {"workspaces": 1, "workspaces_running": 1, "skills": 0}
-    assert "engines" not in data  # needs harness:read
-    assert data["api_key_permissions"] == [
-        "mcp:access",
-        "skills:read",
-        "workspaces:read",
-    ]
+    assert data["current_workspace_id"] == str(world.workspace.id)
+    assert data["counts"] == {
+        "workspaces": 1,
+        "workspaces_running": 1,
+        "chats": 0,
+        "chats_running": 0,
+        "chats_waiting_for_input": 0,
+        "scheduled_tasks": 0,
+        "skills": 0,
+    }
+    assert {engine["engine"] for engine in data["engines"]} == {
+        "native",
+        "claude",
+        "codex",
+    }

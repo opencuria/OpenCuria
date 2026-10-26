@@ -12,7 +12,6 @@ import pytest
 from asgiref.sync import sync_to_async
 from django.apps import apps as django_apps
 
-from apps.accounts.models import APIKeyPermission
 from apps.harness.harness_service import HarnessService
 from apps.harness.mcp_client.runtime import McpRuntime
 from apps.harness.tools.base import ToolRegistry
@@ -46,14 +45,13 @@ def _prepare_run(world: World) -> PreparedPluginRuntime:
     return HarnessService._prepare_mcp_snapshot_for_run(session, world.org.id)
 
 
-async def test_agent_acts_as_workspace_owner_with_every_permission(world):
+async def test_agent_acts_as_workspace_owner(world):
     ctx = await sync_to_async(agent_context)(world.workspace.id, world.org.id)
 
     assert ctx.user.id == world.user.id
     assert ctx.role == "member"
     assert ctx.organization_id == world.org.id
     assert ctx.workspace_id == world.workspace.id
-    assert all(ctx.can(permission) for permission in APIKeyPermission)
 
 
 async def test_agent_context_fails_closed(world):
