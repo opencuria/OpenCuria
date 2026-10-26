@@ -1,0 +1,442 @@
+{
+  "baseline_commit": "f9eb24b098f89774d623046a63a3bef823449f56",
+  "date": "2026-10-26",
+  "selection": {
+    "method": "secrets.randbelow(3)",
+    "ranked_shortlist": [
+      "workspace-list-relations",
+      "provider-account-resolution",
+      "runner-upload-archive-processing"
+    ],
+    "selected": "provider-account-resolution",
+    "redraws": 0
+  },
+  "candidate_probes": [
+    {
+      "candidate": "workspace list, no image/credentials/plugins",
+      "count": 1,
+      "p50_ms": 10.452,
+      "p95_ms": 11.417,
+      "queries": 9
+    },
+    {
+      "candidate": "workspace list, no image/credentials/plugins",
+      "count": 10,
+      "p50_ms": 22.721,
+      "p95_ms": 24.124,
+      "queries": 27
+    },
+    {
+      "candidate": "workspace list, no image/credentials/plugins",
+      "count": 30,
+      "p50_ms": 49.613,
+      "p95_ms": 53.016,
+      "queries": 67
+    },
+    {
+      "candidate": "provider account list, shared",
+      "count": 1,
+      "p50_ms": 12.687,
+      "p95_ms": 15.318,
+      "queries": 15
+    },
+    {
+      "candidate": "provider account list, shared",
+      "count": 10,
+      "p50_ms": 33.532,
+      "p95_ms": 41.759,
+      "queries": 33
+    },
+    {
+      "candidate": "provider account list, shared",
+      "count": 30,
+      "p50_ms": 82.256,
+      "p95_ms": 88.447,
+      "queries": 73
+    }
+  ],
+  "archive_probe": {
+    "files": 200,
+    "compressed_bytes": 42251,
+    "tar_bytes": 11376640,
+    "p50_ms": 50.42,
+    "p95_ms": 60.454,
+    "event_loop_stall_p50_ms": 50.447,
+    "samples": 15,
+    "warmups": 2
+  },
+  "rounds": [
+    {
+      "execution_order": [
+        "baseline",
+        "optimized"
+      ],
+      "baseline": {
+        "benchmark": "authenticated REST and selected-account service, file SQLite",
+        "samples": 31,
+        "warmups": 3,
+        "results": [
+          {
+            "accounts": 0,
+            "rest": {
+              "queries": 17,
+              "p50_ms": 19.758,
+              "p95_ms": 22.808,
+              "peak_python_allocated_bytes": 98837,
+              "response_bytes": 2,
+              "response_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+            },
+            "selected": {
+              "queries": 12,
+              "p50_ms": 11.332,
+              "p95_ms": 14.076,
+              "peak_python_allocated_bytes": 64805,
+              "response_bytes": 2,
+              "response_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+            }
+          },
+          {
+            "accounts": 1,
+            "rest": {
+              "queries": 19,
+              "p50_ms": 24.321,
+              "p95_ms": 33.138,
+              "peak_python_allocated_bytes": 110767,
+              "response_bytes": 358,
+              "response_sha256": "fd4f7ba80f81cb800b1d3a4629494dd938b74f2117c80932f676d261fba46074"
+            },
+            "selected": {
+              "queries": 12,
+              "p50_ms": 11.279,
+              "p95_ms": 13.91,
+              "peak_python_allocated_bytes": 66528,
+              "response_bytes": 54,
+              "response_sha256": "f0f4e91578b5a8a9be6d0a629840928eefae7dc06743357d69bfdb8673f1abf0"
+            }
+          },
+          {
+            "accounts": 10,
+            "rest": {
+              "queries": 32,
+              "p50_ms": 44.706,
+              "p95_ms": 69.693,
+              "peak_python_allocated_bytes": 187943,
+              "response_bytes": 3580,
+              "response_sha256": "ccf50669d6bca5d2d2907059eaf44cb3b1c1fb203c6d2aef5a3bb2ec9c81896f"
+            },
+            "selected": {
+              "queries": 12,
+              "p50_ms": 11.798,
+              "p95_ms": 16.011,
+              "peak_python_allocated_bytes": 104639,
+              "response_bytes": 280,
+              "response_sha256": "298fdba16841134bbec30ad60fc2fc073591db06f326813ecead162c38cdcdec"
+            }
+          },
+          {
+            "accounts": 30,
+            "rest": {
+              "queries": 62,
+              "p50_ms": 100.033,
+              "p95_ms": 124.318,
+              "peak_python_allocated_bytes": 328350,
+              "response_bytes": 10750,
+              "response_sha256": "51658db764e38b8f5ce09dc3d648fafffb8129032f9fcb5f485b16e256f9281b"
+            },
+            "selected": {
+              "queries": 12,
+              "p50_ms": 12.988,
+              "p95_ms": 15.658,
+              "peak_python_allocated_bytes": 197955,
+              "response_bytes": 280,
+              "response_sha256": "298fdba16841134bbec30ad60fc2fc073591db06f326813ecead162c38cdcdec"
+            }
+          }
+        ],
+        "notes": [
+          "Five providers; alternating shared and personal accounts; member caller.",
+          "Steady state after first-selection initialization, no network latency.",
+          "REST includes middleware, authentication, decryption and serialization.",
+          "Query tracing and Python allocation peaks are separate from latency.",
+          "Allocation peaks are not RSS. No production data or services are used."
+        ]
+      },
+      "optimized": {
+        "benchmark": "authenticated REST and selected-account service, file SQLite",
+        "samples": 31,
+        "warmups": 3,
+        "results": [
+          {
+            "accounts": 0,
+            "rest": {
+              "queries": 12,
+              "p50_ms": 14.11,
+              "p95_ms": 17.913,
+              "peak_python_allocated_bytes": 98629,
+              "response_bytes": 2,
+              "response_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+            },
+            "selected": {
+              "queries": 8,
+              "p50_ms": 6.818,
+              "p95_ms": 8.419,
+              "peak_python_allocated_bytes": 65783,
+              "response_bytes": 2,
+              "response_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+            }
+          },
+          {
+            "accounts": 1,
+            "rest": {
+              "queries": 13,
+              "p50_ms": 13.574,
+              "p95_ms": 17.238,
+              "peak_python_allocated_bytes": 104327,
+              "response_bytes": 358,
+              "response_sha256": "fd4f7ba80f81cb800b1d3a4629494dd938b74f2117c80932f676d261fba46074"
+            },
+            "selected": {
+              "queries": 8,
+              "p50_ms": 7.053,
+              "p95_ms": 8.842,
+              "peak_python_allocated_bytes": 65903,
+              "response_bytes": 54,
+              "response_sha256": "f0f4e91578b5a8a9be6d0a629840928eefae7dc06743357d69bfdb8673f1abf0"
+            }
+          },
+          {
+            "accounts": 10,
+            "rest": {
+              "queries": 13,
+              "p50_ms": 21.477,
+              "p95_ms": 28.433,
+              "peak_python_allocated_bytes": 140772,
+              "response_bytes": 3580,
+              "response_sha256": "ccf50669d6bca5d2d2907059eaf44cb3b1c1fb203c6d2aef5a3bb2ec9c81896f"
+            },
+            "selected": {
+              "queries": 8,
+              "p50_ms": 9.677,
+              "p95_ms": 12.449,
+              "peak_python_allocated_bytes": 104081,
+              "response_bytes": 280,
+              "response_sha256": "298fdba16841134bbec30ad60fc2fc073591db06f326813ecead162c38cdcdec"
+            }
+          },
+          {
+            "accounts": 30,
+            "rest": {
+              "queries": 13,
+              "p50_ms": 24.701,
+              "p95_ms": 29.537,
+              "peak_python_allocated_bytes": 229172,
+              "response_bytes": 10750,
+              "response_sha256": "51658db764e38b8f5ce09dc3d648fafffb8129032f9fcb5f485b16e256f9281b"
+            },
+            "selected": {
+              "queries": 8,
+              "p50_ms": 12.23,
+              "p95_ms": 15.67,
+              "peak_python_allocated_bytes": 197825,
+              "response_bytes": 280,
+              "response_sha256": "298fdba16841134bbec30ad60fc2fc073591db06f326813ecead162c38cdcdec"
+            }
+          }
+        ],
+        "notes": [
+          "Five providers; alternating shared and personal accounts; member caller.",
+          "Steady state after first-selection initialization, no network latency.",
+          "REST includes middleware, authentication, decryption and serialization.",
+          "Query tracing and Python allocation peaks are separate from latency.",
+          "Allocation peaks are not RSS. No production data or services are used."
+        ]
+      }
+    },
+    {
+      "execution_order": [
+        "optimized",
+        "baseline"
+      ],
+      "baseline": {
+        "benchmark": "authenticated REST and selected-account service, file SQLite",
+        "samples": 31,
+        "warmups": 3,
+        "results": [
+          {
+            "accounts": 0,
+            "rest": {
+              "queries": 17,
+              "p50_ms": 16.334,
+              "p95_ms": 20.962,
+              "peak_python_allocated_bytes": 96787,
+              "response_bytes": 2,
+              "response_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+            },
+            "selected": {
+              "queries": 12,
+              "p50_ms": 8.792,
+              "p95_ms": 9.98,
+              "peak_python_allocated_bytes": 65055,
+              "response_bytes": 2,
+              "response_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+            }
+          },
+          {
+            "accounts": 1,
+            "rest": {
+              "queries": 19,
+              "p50_ms": 17.874,
+              "p95_ms": 20.286,
+              "peak_python_allocated_bytes": 111812,
+              "response_bytes": 358,
+              "response_sha256": "fd4f7ba80f81cb800b1d3a4629494dd938b74f2117c80932f676d261fba46074"
+            },
+            "selected": {
+              "queries": 12,
+              "p50_ms": 8.179,
+              "p95_ms": 12.641,
+              "peak_python_allocated_bytes": 66128,
+              "response_bytes": 54,
+              "response_sha256": "f0f4e91578b5a8a9be6d0a629840928eefae7dc06743357d69bfdb8673f1abf0"
+            }
+          },
+          {
+            "accounts": 10,
+            "rest": {
+              "queries": 32,
+              "p50_ms": 36.106,
+              "p95_ms": 39.555,
+              "peak_python_allocated_bytes": 188098,
+              "response_bytes": 3580,
+              "response_sha256": "ccf50669d6bca5d2d2907059eaf44cb3b1c1fb203c6d2aef5a3bb2ec9c81896f"
+            },
+            "selected": {
+              "queries": 12,
+              "p50_ms": 9.569,
+              "p95_ms": 14.119,
+              "peak_python_allocated_bytes": 104589,
+              "response_bytes": 280,
+              "response_sha256": "298fdba16841134bbec30ad60fc2fc073591db06f326813ecead162c38cdcdec"
+            }
+          },
+          {
+            "accounts": 30,
+            "rest": {
+              "queries": 62,
+              "p50_ms": 80.774,
+              "p95_ms": 92.766,
+              "peak_python_allocated_bytes": 330243,
+              "response_bytes": 10750,
+              "response_sha256": "51658db764e38b8f5ce09dc3d648fafffb8129032f9fcb5f485b16e256f9281b"
+            },
+            "selected": {
+              "queries": 12,
+              "p50_ms": 11.035,
+              "p95_ms": 12.392,
+              "peak_python_allocated_bytes": 197905,
+              "response_bytes": 280,
+              "response_sha256": "298fdba16841134bbec30ad60fc2fc073591db06f326813ecead162c38cdcdec"
+            }
+          }
+        ],
+        "notes": [
+          "Five providers; alternating shared and personal accounts; member caller.",
+          "Steady state after first-selection initialization, no network latency.",
+          "REST includes middleware, authentication, decryption and serialization.",
+          "Query tracing and Python allocation peaks are separate from latency.",
+          "Allocation peaks are not RSS. No production data or services are used."
+        ]
+      },
+      "optimized": {
+        "benchmark": "authenticated REST and selected-account service, file SQLite",
+        "samples": 31,
+        "warmups": 3,
+        "results": [
+          {
+            "accounts": 0,
+            "rest": {
+              "queries": 12,
+              "p50_ms": 12.157,
+              "p95_ms": 16.51,
+              "peak_python_allocated_bytes": 98429,
+              "response_bytes": 2,
+              "response_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+            },
+            "selected": {
+              "queries": 8,
+              "p50_ms": 6.147,
+              "p95_ms": 9.997,
+              "peak_python_allocated_bytes": 65183,
+              "response_bytes": 2,
+              "response_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+            }
+          },
+          {
+            "accounts": 1,
+            "rest": {
+              "queries": 13,
+              "p50_ms": 13.588,
+              "p95_ms": 19.455,
+              "peak_python_allocated_bytes": 105776,
+              "response_bytes": 358,
+              "response_sha256": "fd4f7ba80f81cb800b1d3a4629494dd938b74f2117c80932f676d261fba46074"
+            },
+            "selected": {
+              "queries": 8,
+              "p50_ms": 6.91,
+              "p95_ms": 10.997,
+              "peak_python_allocated_bytes": 65353,
+              "response_bytes": 54,
+              "response_sha256": "f0f4e91578b5a8a9be6d0a629840928eefae7dc06743357d69bfdb8673f1abf0"
+            }
+          },
+          {
+            "accounts": 10,
+            "rest": {
+              "queries": 13,
+              "p50_ms": 15.848,
+              "p95_ms": 17.405,
+              "peak_python_allocated_bytes": 141422,
+              "response_bytes": 3580,
+              "response_sha256": "ccf50669d6bca5d2d2907059eaf44cb3b1c1fb203c6d2aef5a3bb2ec9c81896f"
+            },
+            "selected": {
+              "queries": 8,
+              "p50_ms": 7.163,
+              "p95_ms": 9.042,
+              "peak_python_allocated_bytes": 104181,
+              "response_bytes": 280,
+              "response_sha256": "298fdba16841134bbec30ad60fc2fc073591db06f326813ecead162c38cdcdec"
+            }
+          },
+          {
+            "accounts": 30,
+            "rest": {
+              "queries": 13,
+              "p50_ms": 18.961,
+              "p95_ms": 21.355,
+              "peak_python_allocated_bytes": 229017,
+              "response_bytes": 10750,
+              "response_sha256": "51658db764e38b8f5ce09dc3d648fafffb8129032f9fcb5f485b16e256f9281b"
+            },
+            "selected": {
+              "queries": 8,
+              "p50_ms": 8.262,
+              "p95_ms": 9.076,
+              "peak_python_allocated_bytes": 197475,
+              "response_bytes": 280,
+              "response_sha256": "298fdba16841134bbec30ad60fc2fc073591db06f326813ecead162c38cdcdec"
+            }
+          }
+        ],
+        "notes": [
+          "Five providers; alternating shared and personal accounts; member caller.",
+          "Steady state after first-selection initialization, no network latency.",
+          "REST includes middleware, authentication, decryption and serialization.",
+          "Query tracing and Python allocation peaks are separate from latency.",
+          "Allocation peaks are not RSS. No production data or services are used."
+        ]
+      }
+    }
+  ]
+}

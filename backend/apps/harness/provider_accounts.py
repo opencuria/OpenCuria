@@ -161,14 +161,25 @@ class ProviderAccountService:
         provider_filter = self._provider(provider) if provider is not None else None
         with transaction.atomic():
             self._lock_fence()
-            self._membership(organization_id, user_id, lock=True)
-            accounts = self.repository.list_visible(
-                organization_id, user_id, provider_filter
+            membership = self._membership(organization_id, user_id, lock=True)
+            accounts = self.repository.list_visible(organization_id, user_id)
+            selected = self._selected_accounts_locked(
+                organization_id, user_id, accounts
             )
-            selected = self._selected_accounts_locked(organization_id, user_id)
+            if provider_filter is not None:
+                accounts = [row for row in accounts if row.provider == provider_filter]
+            for account in accounts:
+                self._assert_secret_binding(account)
+            secrets = self.secret_service.get_provider_secrets(
+                organization_id=organization_id,
+                user_id=user_id,
+                account_ids=[row.id for row in accounts if row.credential_id],
+            )
             result: list[dict[str, Any]] = []
             for account in accounts:
-                secret = self.get_credentials(account) if account.credential_id else {}
+                if account.credential_id and account.id not in secrets:
+                    raise NotFoundError("Credential", str(account.credential_id))
+                secret = secrets.get(account.id, {})
                 config = dict(account.config or {})
                 selected_account = selected.get(account.provider)
                 result.append(
@@ -183,7 +194,7 @@ class ProviderAccountService:
                             and selected_account.id == account.id
                         ),
                         "can_manage": account.user_id == user_id
-                        or self._is_admin(organization_id, user_id),
+                        or membership.role == "admin",
                         "base_url": config.get("base_url", ""),
                         "api_key_hint": self._hint_secret(account.provider, secret),
                         "account_id": secret.get("account_id", ""),
@@ -311,7 +322,11 @@ class ProviderAccountService:
                     credential_id=credential.id,
                     config=config,
                 )
-                self._selected_accounts_locked(organization_id, user_id)
+                self._selected_accounts_locked(
+                    organization_id,
+                    user_id,
+                    self.repository.list_visible(organization_id, user_id),
+                )
                 return account
 
             scope_changed = old_user_id != user_owner_id
@@ -522,21 +537,31 @@ class ProviderAccountService:
         with transaction.atomic():
             self._lock_fence()
             self._membership(organization_id, user_id, lock=True)
-            return self._selected_accounts_locked(organization_id, user_id)
+            return self._selected_accounts_locked(
+                organization_id,
+                user_id,
+                self.repository.list_visible(organization_id, user_id),
+            )
 
     def _selected_accounts_locked(
-        self, organization_id: uuid.UUID, user_id: int
+        self,
+        organization_id: uuid.UUID,
+        user_id: int,
+        accounts: list[ProviderConnection],
     ) -> dict[str, ProviderConnection]:
         """Resolve selections while the account/turn mutex is held."""
-        accounts = self.repository.list_visible(organization_id, user_id)
         by_provider: dict[str, list[ProviderConnection]] = {
             provider: [] for provider in SUPPORTED_PROVIDERS
         }
         for account in accounts:
             by_provider.setdefault(account.provider, []).append(account)
+        selections = {
+            row.provider: row
+            for row in self.repository.list_selections(organization_id, user_id)
+        }
         selected: dict[str, ProviderConnection] = {}
         for provider in SUPPORTED_PROVIDERS:
-            selection = self.repository.selection(organization_id, user_id, provider)
+            selection = selections.get(provider)
             if selection is None:
                 rows = by_provider.get(provider, [])
                 initial = rows[0] if rows else None
@@ -602,13 +627,6 @@ class ProviderAccountService:
                 account_id=account.id,
             ):
                 raise NotFoundError("ProviderAccount", str(account_id))
-
-    @staticmethod
-    def _is_admin(organization_id: uuid.UUID, user_id: int) -> bool:
-        membership = MembershipRepository.get_for_user_and_org(user_id, organization_id)
-        return bool(
-            membership and membership.user.is_active and membership.role == "admin"
-        )
 
     @staticmethod
     def _hint_secret(provider: str, credentials: dict[str, Any]) -> str:

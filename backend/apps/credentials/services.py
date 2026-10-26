@@ -659,8 +659,6 @@ class CredentialSvc:
         account_id: uuid.UUID,
     ) -> dict:
         """Decrypt a secret only after validating its account/scope binding."""
-        import json
-
         credential = self.credentials.get_internal_provider_secret(
             credential_id,
             organization_id=organization_id,
@@ -670,8 +668,36 @@ class CredentialSvc:
         )
         if credential is None:
             raise NotFoundError("Credential", str(credential_id))
+        return self._decode_provider_secret(credential.encrypted_value)
+
+    def get_provider_secrets(
+        self,
+        *,
+        organization_id: uuid.UUID,
+        user_id: int,
+        account_ids: list[uuid.UUID],
+    ) -> dict[uuid.UUID, dict]:
+        """Decrypt visible, live-bound account secrets in one repository read.
+
+        Missing or invalid bindings are omitted; callers must reject any missing
+        account they expected to have a secret.
+        """
+        return {
+            account_id: self._decode_provider_secret(value)
+            for account_id, value in self.credentials.get_bound_provider_secrets(
+                organization_id=organization_id,
+                user_id=user_id,
+                account_ids=account_ids,
+            ).items()
+        }
+
+    @staticmethod
+    def _decode_provider_secret(encrypted_value: str) -> dict:
+        """Decode provider JSON with the same fallback for single and batch reads."""
+        import json
+
         try:
-            value = json.loads(decrypt_value(credential.encrypted_value))
+            value = json.loads(decrypt_value(encrypted_value))
         except (TypeError, ValueError):
             return {}
         return value if isinstance(value, dict) else {}

@@ -121,22 +121,16 @@ class ProviderAccountRepository:
         ).update(account=None, is_revoked=True, updated_at=timezone.now())
 
     @staticmethod
-    def selection(
+    def list_selections(
         organization_id: uuid.UUID,
         user_id: int,
-        provider: str,
-        *,
-        lock: bool = False,
-    ) -> ProviderSelection | None:
-        """Get a selection row; absent is distinct from explicit None."""
-        query = ProviderSelection.objects.filter(
-            organization_id=organization_id,
-            user_id=user_id,
-            provider=provider,
+    ) -> list[ProviderSelection]:
+        """Read current selections together; absent differs from explicit None."""
+        return list(
+            ProviderSelection.objects.filter(
+                organization_id=organization_id, user_id=user_id
+            )
         )
-        if lock:
-            query = query.select_for_update(of=("self",))
-        return query.first()
 
     @staticmethod
     def set_selection(

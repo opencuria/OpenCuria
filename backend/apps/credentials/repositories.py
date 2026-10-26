@@ -6,7 +6,8 @@ import hmac
 import uuid
 
 from django.db import IntegrityError, connection, transaction
-from django.db.models import Q, QuerySet
+from django.db.models import F, Q, QuerySet, Value
+from django.db.models.functions import Concat
 from django.utils import timezone
 
 from common.exceptions import ConflictError
@@ -216,6 +217,41 @@ class CredentialRepository:
         )
 
     @staticmethod
+    def _bound_provider_secrets() -> QuerySet[Credential]:
+        """Match each secret to its live account, provider and ownership scope.
+
+        Aliases keep all account predicates on the same reverse-relation join,
+        including when callers add further filters to the queryset.
+        """
+        return (
+            Credential.objects.alias(
+                bound_account_id=F("provider_accounts__id"),
+                bound_org_id=F("provider_accounts__organization_id"),
+                bound_user_id=F("provider_accounts__user_id"),
+                bound_provider=F("provider_accounts__provider"),
+                bound_deleted_at=F("provider_accounts__deleted_at"),
+            )
+            .filter(
+                service__credential_type="provider_secret",
+                service__slug=Concat(Value("provider-account-"), F("bound_provider")),
+                service__organization_id=F("bound_org_id"),
+                bound_deleted_at__isnull=True,
+            )
+            .filter(
+                Q(
+                    bound_user_id__isnull=True,
+                    user_id__isnull=True,
+                    organization_id=F("bound_org_id"),
+                )
+                | Q(
+                    bound_user_id__isnull=False,
+                    user_id=F("bound_user_id"),
+                    organization_id__isnull=True,
+                )
+            )
+        )
+
+    @staticmethod
     def get_internal_provider_secret(
         credential_id: uuid.UUID,
         *,
@@ -226,22 +262,32 @@ class CredentialRepository:
     ) -> Credential | None:
         """Fetch only a secret bound to the exact provider account and scope."""
         return (
-            Credential.objects.filter(
+            CredentialRepository._bound_provider_secrets()
+            .filter(
                 id=credential_id,
-                service__credential_type="provider_secret",
-                service__slug=f"provider-account-{provider}",
-                service__organization_id=organization_id,
-                organization_id=organization_id if user_id is None else None,
-                user_id=user_id,
-                provider_accounts__id=account_id,
-                provider_accounts__organization_id=organization_id,
-                provider_accounts__user_id=user_id,
-                provider_accounts__provider=provider,
-                provider_accounts__deleted_at__isnull=True,
+                bound_account_id=account_id,
+                bound_org_id=organization_id,
+                bound_user_id=user_id,
+                bound_provider=provider,
             )
             .select_related("service")
             .first()
         )
+
+    @staticmethod
+    def get_bound_provider_secrets(
+        *, organization_id: uuid.UUID, user_id: int, account_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, str]:
+        """Read encrypted values for visible, correctly bound accounts in one query."""
+        if not account_ids:
+            return {}
+        query = (
+            CredentialRepository._bound_provider_secrets()
+            .filter(bound_account_id__in=account_ids, bound_org_id=organization_id)
+            .filter(Q(bound_user_id__isnull=True) | Q(bound_user_id=user_id))
+            .annotate(account_id=F("bound_account_id"))
+        )
+        return dict(query.values_list("account_id", "encrypted_value"))
 
     @staticmethod
     def reassign_internal_provider_secret(
