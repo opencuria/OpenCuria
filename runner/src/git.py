@@ -1064,6 +1064,27 @@ def parse_raw_z(output: str) -> dict[str, dict[str, Any]]:
     return infos
 
 
+def parse_diff_z(output: str) -> list[dict[str, Any]]:
+    """Read ``--raw --numstat --patch -z`` from a single Git traversal.
+
+    Git emits raw records, numstat records, then an extra NUL before the
+    patch. Consume whole raw records to find the numstat boundary: paths
+    can themselves look like raw headers or tab-separated statistics.
+    Existing parsers retain ownership of paths, hunks and response limits.
+    """
+    metadata, _, patch = output.partition("\x00\x00")
+    fields = _iter_nul_fields(metadata)
+    end = 0
+    while end < len(fields) and fields[end].startswith(":"):
+        status = fields[end].rsplit(" ", 1)[-1]
+        end += 3 if status.startswith(("R", "C")) else 2
+    return build_file_changes(
+        raw=parse_raw_z("\x00".join(fields[:end])),
+        numstat=parse_numstat_z("\x00".join(fields[end:])),
+        patches=split_patch_per_file(patch),
+    )
+
+
 # --- unified patch parsing ----------------------------------------------------
 
 
@@ -1553,6 +1574,7 @@ __all__ = [
     "normalize_repo_arg",
     "parse_single_path_output",
     "parse_ahead_behind",
+    "parse_diff_z",
     "parse_for_each_ref",
     "parse_log_us_rs",
     "parse_numstat_z",

@@ -827,21 +827,10 @@ class GitService:
         )
 
         if staged_paths:
-            staged_patches = await self._git_diff_paths(
+            staged_entries = await self._git_diff_file_changes(
                 runtime, instance_id, repo_root, env,
-                ["git", "diff", "--cached", "--no-color", "--no-ext-diff",
-                 "--src-prefix=a/", "--dst-prefix=b/",
-                 f"--unified={git_ops.GIT_DIFF_CONTEXT_LINES}",
-                 "--patch", "--no-commit-id", "--", *staged_paths],
+                ["git", "diff", "--cached", "--", *staged_paths],
             )
-            staged_numstat = await self._git_diff_numstat_raw(
-                runtime, instance_id, repo_root, env,
-                ["git", "diff", "--cached", "--no-color", "--no-ext-diff",
-                 "--numstat", "-z", "--", *staged_paths],
-                ["git", "diff", "--cached", "--no-color", "--no-ext-diff",
-                 "--raw", "-z", "--", *staged_paths],
-            )
-            staged_entries = self._git_join_diff_parts(staged_patches, staged_numstat)
 
         if unstaged_paths:
             tracked_unstaged = sorted(
@@ -856,21 +845,13 @@ class GitService:
             )
             combined: list[dict[str, Any]] = []
             if tracked_unstaged:
-                entries = await self._git_diff_paths(
-                    runtime, instance_id, repo_root, env,
-                    ["git", "diff", "--no-color", "--no-ext-diff",
-                     "--src-prefix=a/", "--dst-prefix=b/",
-                     f"--unified={git_ops.GIT_DIFF_CONTEXT_LINES}",
-                     "--patch", "--no-commit-id", "--", *tracked_unstaged],
+                combined.extend(
+                    await self._git_diff_file_changes(
+                        runtime, instance_id, repo_root, env,
+                        ["git", "diff", "--", *tracked_unstaged],
+                        separate_patch=any(item.get("conflict") for item in changes),
+                    )
                 )
-                numstat = await self._git_diff_numstat_raw(
-                    runtime, instance_id, repo_root, env,
-                    ["git", "diff", "--no-color", "--no-ext-diff",
-                     "--numstat", "-z", "--", *tracked_unstaged],
-                    ["git", "diff", "--no-color", "--no-ext-diff",
-                     "--raw", "-z", "--", *tracked_unstaged],
-                )
-                combined.extend(self._git_join_diff_parts(entries, numstat))
             for rel in untracked:
                 combined.append(
                     await self._git_untracked_entry(
@@ -883,60 +864,56 @@ class GitService:
         staged_entries.sort(key=lambda item: item["new_path"])
         return {"staged": staged_entries, "unstaged": unstaged_entries}
 
-    async def _git_diff_paths(
+    async def _git_diff_file_changes(
         self,
         runtime: RuntimeBackend,
         instance_id: str,
         repo_root: str,
         env: dict[str, str],
         argv: list[str],
-    ) -> dict[str, str]:
-        """Run a patch diff argv and split per-file patches."""
+        *,
+        check: bool = True,
+        separate_patch: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Read a diff once, retaining best-effort commit reads.
+
+        Unmerged working trees need a separate patch read: adding --patch
+        makes Git emit combined raw records and suppress numstat for conflicts.
+        Keep ordinary raw/numstat records there to preserve the response.
+        """
+        options = [
+            "--no-color", "--no-ext-diff",
+            "--src-prefix=a/", "--dst-prefix=b/",
+        ]
+        patch_format = ["--patch", f"--unified={git_ops.GIT_DIFF_CONTEXT_LINES}"]
+        formats = ["--raw", "--numstat", "-z"]
+        if not separate_patch:
+            formats.extend(patch_format)
+        command = [*argv[:2], *options, *formats, *argv[2:]]
         exit_code, output = await self._git_exec(
-            runtime, instance_id, argv,
+            runtime, instance_id, command,
             workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
         )
         if exit_code != 0:
-            raise git_ops.GitError(
-                "git_failed", "git diff failed",
-                exit_code=exit_code, stderr=output,
+            if check:
+                raise git_ops.GitError(
+                    "git_failed", "git diff failed",
+                    exit_code=exit_code, stderr=output,
+                )
+            return []
+        if separate_patch:
+            exit_code, patch = await self._git_exec(
+                runtime, instance_id,
+                [*argv[:2], *options, *patch_format, *argv[2:]],
+                workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
             )
-        return git_ops.split_patch_per_file(output)
-
-    async def _git_diff_numstat_raw(
-        self,
-        runtime: RuntimeBackend,
-        instance_id: str,
-        repo_root: str,
-        env: dict[str, str],
-        numstat_argv: list[str],
-        raw_argv: list[str],
-    ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-        """Run numstat + raw diff argvs and parse them."""
-        exit_code_n, numstat_out = await self._git_exec(
-            runtime, instance_id, numstat_argv,
-            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        numstat: dict[str, dict[str, Any]] = {}
-        if exit_code_n == 0:
-            numstat = git_ops.parse_numstat_z(numstat_out)
-        exit_code_r, raw_out = await self._git_exec(
-            runtime, instance_id, raw_argv,
-            workdir=repo_root, env=env, timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        raw: dict[str, dict[str, Any]] = {}
-        if exit_code_r == 0:
-            raw = git_ops.parse_raw_z(raw_out)
-        return numstat, raw
-
-    def _git_join_diff_parts(
-        self,
-        patches: dict[str, str],
-        numstat_raw: tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]],
-    ) -> list[dict[str, Any]]:
-        """Join patch/numstat/raw parts into file change dicts."""
-        numstat, raw = numstat_raw
-        return git_ops.build_file_changes(raw=raw, numstat=numstat, patches=patches)
+            if exit_code != 0:
+                raise git_ops.GitError(
+                    "git_failed", "git diff failed",
+                    exit_code=exit_code, stderr=patch,
+                )
+            output = output + "\x00" + patch
+        return git_ops.parse_diff_z(output)
 
     async def _git_untracked_entry(
         self,
@@ -1052,34 +1029,13 @@ class GitService:
 
         is_root = len(parents) == 0
         if is_root:
-            numstat_argv = ["git", "diff-tree", "--root", "--no-commit-id",
-                            "--numstat", "-z", "-r", "-M", full, "--"]
-            raw_argv = ["git", "diff-tree", "--root", "--no-commit-id",
-                        "--raw", "-z", "-r", "-M", full, "--"]
-            patch_argv = ["git", "show", "--no-color", "--no-ext-diff",
-                          "--pretty=format:", "--patch",
-                          f"--unified={git_ops.GIT_DIFF_CONTEXT_LINES}",
-                          "--src-prefix=a/", "--dst-prefix=b/", "-M", full, "--"]
+            # show retains textconv for root patches, unlike diff-tree's default.
+            diff_argv = ["git", "show", "--pretty=format:", "-M", full, "--"]
         else:
-            numstat_argv = ["git", "diff-tree", "--no-commit-id",
-                            "--numstat", "-z", "-r", "-M",
-                            f"{parents[0]}", full, "--"]
-            raw_argv = ["git", "diff-tree", "--no-commit-id",
-                        "--raw", "-z", "-r", "-M",
-                        f"{parents[0]}", full, "--"]
-            patch_argv = ["git", "diff", "--no-color", "--no-ext-diff",
-                          f"{parents[0]}", full, "--patch",
-                          f"--unified={git_ops.GIT_DIFF_CONTEXT_LINES}",
-                          "--src-prefix=a/", "--dst-prefix=b/", "-M", "--"]
-        numstat, raw = await self._git_diff_numstat_raw(
-            runtime, instance_id, repo_root, env, numstat_argv, raw_argv
+            diff_argv = ["git", "diff", "-M", parents[0], full, "--"]
+        file_changes = await self._git_diff_file_changes(
+            runtime, instance_id, repo_root, env, diff_argv, check=False,
         )
-        exit_code_p, patch_out = await self._git_exec(
-            runtime, instance_id, patch_argv,
-            workdir=repo_root, env=env, timeout=timeout,
-        )
-        patches = git_ops.split_patch_per_file(patch_out) if exit_code_p == 0 else {}
-        file_changes = git_ops.build_file_changes(raw=raw, numstat=numstat, patches=patches)
         return {
             "hash": full,
             "message": subject,

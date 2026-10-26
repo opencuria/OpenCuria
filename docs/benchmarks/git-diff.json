@@ -1,0 +1,82 @@
+{
+  "baseline_ref": "b60d90f9e5a21b22cc37d534c19ad9e94a07c4a0",
+  "python": "3.12.3",
+  "git": "2.43.0",
+  "platform": "Linux x86_64",
+  "warmups": 5,
+  "method": "40 shuffled baseline/current pairs per case, real local Git with test-runtime workspace/probe mapping, nearest-rank p95, no simulated latency",
+  "results": [
+    {
+      "operation": "working_diff",
+      "files": 1,
+      "lines_per_file": 50,
+      "samples": 40,
+      "baseline": {
+        "p50_ms": 17.217,
+        "p95_ms": 25.542,
+        "guest_commands": 11,
+        "peak_python_kib": 109.6
+      },
+      "optimized": {
+        "p50_ms": 9.001,
+        "p95_ms": 13.039,
+        "guest_commands": 7,
+        "peak_python_kib": 103.3
+      }
+    },
+    {
+      "operation": "working_diff",
+      "files": 100,
+      "lines_per_file": 50,
+      "samples": 40,
+      "baseline": {
+        "p50_ms": 122.208,
+        "p95_ms": 256.463,
+        "guest_commands": 11,
+        "peak_python_kib": 5225.5
+      },
+      "optimized": {
+        "p50_ms": 92.34,
+        "p95_ms": 190.55,
+        "guest_commands": 7,
+        "peak_python_kib": 5300.2
+      }
+    },
+    {
+      "operation": "working_diff",
+      "files": 10,
+      "lines_per_file": 5000,
+      "samples": 40,
+      "baseline": {
+        "p50_ms": 211.882,
+        "p95_ms": 368.008,
+        "guest_commands": 11,
+        "peak_python_kib": 49149.5
+      },
+      "optimized": {
+        "p50_ms": 207.072,
+        "p95_ms": 271.583,
+        "guest_commands": 7,
+        "peak_python_kib": 50122.6
+      }
+    },
+    {
+      "operation": "commit_details",
+      "files": 100,
+      "lines_per_file": 50,
+      "samples": 40,
+      "baseline": {
+        "p50_ms": 60.38,
+        "p95_ms": 95.944,
+        "guest_commands": 9,
+        "peak_python_kib": 1426.7
+      },
+      "optimized": {
+        "p50_ms": 45.237,
+        "p95_ms": 68.91,
+        "guest_commands": 7,
+        "peak_python_kib": 1511.8
+      }
+    }
+  ]
+}
