@@ -26,7 +26,6 @@ from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
-from apps.credentials.services import CredentialSvc
 from apps.organizations.services import OrganizationService
 from apps.plugins.schemas import WorkspacePluginOut
 from apps.plugins.services import PluginService
@@ -493,14 +492,6 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
                 detail="An image artifact must be selected to create a workspace",
                 code="image_artifact_required",
             )
-        # Resolve credential IDs to env_vars, files and ssh_keys
-        credential_svc = CredentialSvc()
-        resolved = await sync_to_async(credential_svc.resolve_credentials)(
-            payload.credential_ids,
-            org_id=org_id,
-            user=request.user,
-        )
-
         workspace, task = await service.create_workspace(
             name=payload.name,
             repos=payload.repos,
@@ -509,11 +500,7 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
             qemu_disk_size_gb=payload.qemu_disk_size_gb,
             desktop_width=payload.desktop_width,
             desktop_height=payload.desktop_height,
-            env_vars=resolved.env_vars,
-            files=resolved.files,
-            ssh_keys=resolved.ssh_keys,
-            credentials=resolved.credentials,
-            resolved_credentials=resolved,
+            credential_ids=payload.credential_ids,
             runner_id=payload.runner_id,
             image_artifact_id=payload.image_artifact_id,
             user=request.user,
@@ -849,26 +836,10 @@ async def update_workspace(
     try:
         await _get_owned_workspace_async(request, org_id, workspace_id)
 
-        resolved_credentials = None
-        if payload.credential_ids is not None:
-            credential_svc = CredentialSvc()
-            resolved_credentials = await sync_to_async(
-                credential_svc.resolve_credentials
-            )(
-                payload.credential_ids,
-                org_id=org_id,
-                user=request.user,
-            )
-
         workspace = await service.update_workspace(
             workspace_id,
             name=payload.name,
-            credentials=(
-                resolved_credentials.credentials
-                if resolved_credentials is not None
-                else None
-            ),
-            resolved_credentials=resolved_credentials,
+            credential_ids=payload.credential_ids,
             qemu_vcpus=payload.qemu_vcpus,
             qemu_memory_mb=payload.qemu_memory_mb,
             qemu_disk_size_gb=payload.qemu_disk_size_gb,
@@ -1770,17 +1741,10 @@ async def create_workspace_from_captured_image(
         latest = await sync_to_async(ImageVersionService().latest_captured_version)(
             request.user, org_id, captured_image_id
         )
-        resolved = await sync_to_async(CredentialSvc().resolve_credentials)(
-            payload.credential_ids, org_id=org_id, user=request.user
-        )
         workspace, task = await service.create_workspace_from_image_artifact(
             image_artifact_id=latest.id,
             name=payload.name,
-            env_vars=resolved.env_vars,
-            files=resolved.files,
-            ssh_keys=resolved.ssh_keys,
-            credentials=resolved.credentials,
-            resolved_credentials=resolved,
+            credential_ids=payload.credential_ids,
             user=request.user,
             organization_id=org_id,
             plugin_ids=payload.plugin_ids,

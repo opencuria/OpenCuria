@@ -1,16 +1,20 @@
-"""Credential sync onto running workspaces (Phase 3 domain mixin).
+"""Workspace credential resolution and sync onto running workspaces.
 
-Byte-identical method bodies extracted from the former monolithic
-``apps/runners/services/__init__.py``. No logic changes; the mixin relies
-on the facade (``RunnerService``) providing ``self.workspaces``,
-``self.tasks``, ``self._pending_credential_inject`` plus sibling helpers
-(``_call_runner`` / ``_emit_to_runner`` via ``RunnerTransportMixin``,
-``_forward_workspace_status`` via ``FrontendBusMixin``,
-``_validate_task_runner`` via ``OwnershipMixin``). Phase 4: the credential
-resolution goes through ``self._credential_resolver`` when the facade was
-constructed with one (injected port, see ``services/ports.py``); otherwise
-the previous ``CredentialSvc()`` path is kept as fallback, so the
-top-level ``apps.credentials`` import stays (fallback coupling only).
+This mixin is the runner service's only path into the credentials context:
+lifecycle flows resolve a requested credential selection through
+:meth:`CredentialSyncMixin._resolve_credential_selection` and the
+credentials attached to a workspace through
+:meth:`CredentialSyncMixin._credential_resolve_call`. Adapters (REST, MCP)
+pass credential IDs only and never handle resolved secrets.
+
+The mixin relies on the facade (``RunnerService``) providing
+``self.workspaces``, ``self.tasks``, ``self._pending_credential_inject``
+plus sibling helpers (``_call_runner`` / ``_emit_to_runner`` via
+``RunnerTransportMixin``, ``_forward_workspace_status`` via
+``FrontendBusMixin``, ``_validate_task_runner`` via ``OwnershipMixin``).
+Attached-credential resolution goes through ``self._credential_resolver``
+when the facade was constructed with one (injected port, see
+``services/ports.py``); otherwise ``CredentialSvc`` is used.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ from typing import TYPE_CHECKING
 
 from asgiref.sync import sync_to_async
 
-from apps.credentials.services import ResolvedCredentials
+from apps.credentials.services import CredentialSvc, ResolvedCredentials
 from common.exceptions import ConflictError
 from common.utils import generate_uuid
 
@@ -40,21 +44,50 @@ _CREDENTIAL_INJECT_TIMEOUT_SECONDS = 30
 class CredentialSyncMixin:
     """Credential inject/reconcile flows shared by RunnerService."""
 
+    async def _resolve_credential_selection(
+        self,
+        credential_ids: list[uuid.UUID],
+        *,
+        user,
+        organization_id: uuid.UUID | None,
+    ) -> ResolvedCredentials:
+        """Resolve credentials requested for a workspace on behalf of *user*.
+
+        Validates visibility, ownership, OAuth bindings and per-service
+        uniqueness before any workspace state changes.
+
+        Raises:
+            ConflictError: When the user or organization is missing, or the
+                selection violates a credential rule.
+            NotFoundError: When a credential is missing or not visible.
+        """
+        if user is None or organization_id is None:
+            raise ConflictError(
+                "User and organization are required to resolve workspace credentials"
+            )
+        return await sync_to_async(CredentialSvc().resolve_credentials)(
+            list(credential_ids), org_id=organization_id, user=user
+        )
+
     def _credential_resolve_call(self, workspace):
         """Return the sync ``resolve_workspace_credentials`` callable to use.
 
-        Phase-4 port: when the facade was constructed with
-        ``credential_resolver=...``, its bound
-        ``resolve_workspace_credentials`` method is used; otherwise the
-        legacy ``CredentialSvc()`` fallback applies. Callers wrap the
-        result with ``sync_to_async`` exactly as before.
+        When the facade was constructed with ``credential_resolver=...``,
+        its bound ``resolve_workspace_credentials`` method is used;
+        otherwise ``CredentialSvc``'s. Callers wrap the result with
+        ``sync_to_async``.
         """
         resolver = getattr(self, "_credential_resolver", None)
         if resolver is not None:
             return resolver.resolve_workspace_credentials
-        from apps.credentials.services import CredentialSvc
-
         return CredentialSvc().resolve_workspace_credentials
+
+    @staticmethod
+    def _has_credential_material(resolved: ResolvedCredentials | None) -> bool:
+        """Return whether resolved credentials write anything into a workspace."""
+        return resolved is not None and bool(
+            resolved.env_vars or resolved.files or resolved.ssh_keys
+        )
 
     @staticmethod
     def _resolved_credentials_payload(resolved) -> dict:

@@ -1000,10 +1000,7 @@ def test_disconnect_preserves_attachment_and_allows_workspace_detach(context):
     asyncio.run(
         RunnerService().update_workspace(
             workspace.id,
-            credentials=[],
-            resolved_credentials=CredentialSvc().resolve_credentials(
-                [], org_id=org.id, user=user
-            ),
+            credential_ids=[],
             plugin_ids=[],
             user=user,
             organization_id=org.id,
@@ -1057,16 +1054,12 @@ def test_clone_from_image_can_attach_selected_oauth_plugin(context):
         status=ImageInstance.Status.READY,
     )
     runner_service = RunnerService(sio_server=AsyncMock())
-    resolved = CredentialSvc().resolve_credentials(
-        [credential.id], org_id=org.id, user=user
-    )
 
     cloned, task = asyncio.run(
         runner_service.create_workspace_from_image_artifact(
             image_artifact_id=artifact.id,
             name="OAuth plugin clone",
-            credentials=resolved.credentials,
-            resolved_credentials=resolved,
+            credential_ids=[credential.id],
             user=user,
             organization_id=org.id,
             plugin_ids=[plugin.id],

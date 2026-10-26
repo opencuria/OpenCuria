@@ -560,24 +560,17 @@ async def workspace_create(ctx: ToolContext, args: dict[str, Any]) -> dict[str, 
             "image": image,
             "target": target,
             "plugin_ids": resolve.plugin_ids(ctx, args.get("plugins") or []),
-            "credentials": CredentialSvc().resolve_credentials(
-                credential_ids, org_id=ctx.organization_id, user=ctx.user
-            ),
+            "credential_ids": credential_ids,
         }
 
     prepared = await sync_to_async(plan)()
-    resolved = prepared["credentials"]
     workspace, _task = await get_runner_service().create_workspace(
         name=args["name"].strip(),
         repos=args.get("repos") or [],
         qemu_vcpus=args.get("vcpus"),
         qemu_memory_mb=args.get("memory_mb"),
         qemu_disk_size_gb=args.get("disk_gb"),
-        env_vars=resolved.env_vars,
-        files=resolved.files,
-        ssh_keys=resolved.ssh_keys,
-        credentials=resolved.credentials,
-        resolved_credentials=resolved,
+        credential_ids=prepared["credential_ids"],
         runner_id=prepared["target"]["runner_id"],
         image_artifact_id=prepared["target"]["artifact_id"],
         user=ctx.user,
@@ -638,25 +631,25 @@ async def workspace_update(ctx: ToolContext, args: dict[str, Any]) -> dict[str, 
 
     def plan() -> dict[str, Any]:
         workspace = resolve.workspace(ctx, args["workspace"])
-        resolved = None
-        if "credentials" in args:
-            resolved = CredentialSvc().resolve_credentials(
-                resolve.credential_ids(ctx, args["credentials"]),
-                org_id=ctx.organization_id,
-                user=ctx.user,
-            )
+        credential_ids = (
+            resolve.credential_ids(ctx, args["credentials"])
+            if "credentials" in args
+            else None
+        )
         plugin_ids = (
             resolve.plugin_ids(ctx, args["plugins"]) if "plugins" in args else None
         )
-        return {"workspace": workspace, "resolved": resolved, "plugin_ids": plugin_ids}
+        return {
+            "workspace": workspace,
+            "credential_ids": credential_ids,
+            "plugin_ids": plugin_ids,
+        }
 
     prepared = await sync_to_async(plan)()
-    resolved = prepared["resolved"]
     updated = await get_runner_service().update_workspace(
         prepared["workspace"].id,
         name=args.get("name"),
-        credentials=resolved.credentials if resolved is not None else None,
-        resolved_credentials=resolved,
+        credential_ids=prepared["credential_ids"],
         qemu_vcpus=args.get("vcpus"),
         qemu_memory_mb=args.get("memory_mb"),
         qemu_disk_size_gb=args.get("disk_gb"),

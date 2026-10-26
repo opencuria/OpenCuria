@@ -67,7 +67,7 @@ async def _create_from_image(service, method, image, runner, user, name):
         "name": name,
         "user": user,
         "organization_id": runner.organization_id,
-        "credentials": [],
+        "credential_ids": [],
     }
     if method == "create_workspace":
         return await service.create_workspace(repos=[], **options)

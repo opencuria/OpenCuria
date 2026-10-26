@@ -6,14 +6,12 @@ on the facade (``RunnerService``) providing ``self.workspaces``,
 ``self.tasks``, ``self.image_instances``, ``self.processes`` plus sibling
 helpers (``_dispatch_workspace_task`` / ``_set_workspace_operation`` via
 ``TaskDispatchMixin``, ``_ensure_*`` guards via ``OwnershipMixin``,
-``_forward_*`` via ``FrontendBusMixin``, ``_resolved_credentials_payload``
-via :class:`CredentialSyncMixin`, ``mark_processes_killed`` via
-:class:`ProcessManagerMixin`). ``CredentialSvc`` is only ever imported
-lazily inside method bodies (no new top-level credentials coupling);
-the ``update`` / ``resume`` resolve paths prefer the injected
-``credential_resolver`` port via ``CredentialSyncMixin``
-(see :meth:`_credential_resolve_call`) and keep ``CredentialSvc()`` as
-fallback.
+``_forward_*`` via ``FrontendBusMixin``, ``_resolve_credential_selection`` /
+``_credential_resolve_call`` / ``_resolved_credentials_payload`` via
+:class:`CredentialSyncMixin`, ``mark_processes_killed`` via
+:class:`ProcessManagerMixin`). Callers select credentials by ID; this module
+never imports the credentials context and reaches it only through
+``CredentialSyncMixin``.
 """
 
 from __future__ import annotations
@@ -50,8 +48,6 @@ from ...provisioning import disk_size_for, provisioning_command, uses_artifact_c
 from ...workspace_operation_repository import WorkspaceOperationRepository
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
-    from apps.credentials.services import ResolvedCredentials
-
     from ...models import ImageInstance, Runner, Task, Workspace
 
 logger = logging.getLogger(__name__)
@@ -212,11 +208,7 @@ class WorkspaceLifecycleMixin:
         qemu_disk_size_gb: int | None = None,
         desktop_width: int | None = None,
         desktop_height: int | None = None,
-        env_vars: dict[str, str] | None = None,
-        files: list | None = None,
-        ssh_keys: list[str] | None = None,
-        credentials: list | None = None,
-        resolved_credentials: ResolvedCredentials | None = None,
+        credential_ids: list[uuid.UUID] | None = None,
         runner_id: uuid.UUID | None = None,
         image_artifact_id: uuid.UUID | None = None,
         user=None,
@@ -227,12 +219,21 @@ class WorkspaceLifecycleMixin:
         Create a new workspace on a runner.
 
         If runner_id is not specified, any online runner in the
-        organization is selected.
+        organization is selected. ``credential_ids`` are resolved for
+        ``user`` before anything is persisted or dispatched.
 
         Returns the created Workspace and Task records.
         """
         if image_artifact_id is None:
             raise ConflictError("An image artifact is required")
+
+        resolved = (
+            await self._resolve_credential_selection(
+                credential_ids, user=user, organization_id=organization_id
+            )
+            if credential_ids is not None
+            else None
+        )
 
         selected_image = await sync_to_async(self.image_instances.get_by_id)(
             image_artifact_id
@@ -277,32 +278,6 @@ class WorkspaceLifecycleMixin:
             DEFAULT_DESKTOP_HEIGHT if desktop_height is None else desktop_height,
         )
 
-        if credentials is None and (env_vars or files or ssh_keys):
-            raise ConflictError(
-                "Workspace lifecycle credentials require secure catalog associations"
-            )
-        resolved_credential_records = resolved_credentials
-        if credentials is not None:
-            if user is None or organization_id is None:
-                raise ConflictError(
-                    "User and organization are required to resolve "
-                    "workspace credentials"
-                )
-            if resolved_credential_records is None:
-                from apps.credentials.services import CredentialSvc
-
-                resolved_credential_records = await sync_to_async(
-                    CredentialSvc().resolve_credentials
-                )(
-                    [credential.id for credential in credentials],
-                    org_id=organization_id,
-                    user=user,
-                )
-        if credentials is not None:
-            env_vars = resolved_credential_records.env_vars
-            files = resolved_credential_records.files
-            ssh_keys = resolved_credential_records.ssh_keys
-
         # Persist workspace, associations, plugin activations and task atomically.
         workspace_id = generate_uuid()
         workspace_name = self._derive_workspace_name(name, repos, workspace_id)
@@ -341,11 +316,11 @@ class WorkspaceLifecycleMixin:
             runner=runner,
             user=user,
             organization_id=organization_id,
-            credentials=list(credentials or []),
+            credentials=list(resolved.credentials) if resolved is not None else [],
             plugin_ids=list(plugin_ids or []),
             task_id=task_id,
             operation_payload=command.payload,
-            credentials_present=bool(env_vars or files or ssh_keys),
+            credentials_present=self._has_credential_material(resolved),
             task_type=command.task_type,
         )
         # Dispatch to runner — include workspace_id so the runner
@@ -359,16 +334,7 @@ class WorkspaceLifecycleMixin:
             payload={
                 "task_id": str(task_id),
                 **command.payload,
-                "env_vars": env_vars or {},
-                "files": [
-                    {
-                        "target_path": file.target_path,
-                        "content": file.content,
-                        "mode": file.mode,
-                    }
-                    for file in (files or [])
-                ],
-                "ssh_keys": ssh_keys or [],
+                **self._resolved_credentials_payload(resolved),
             },
         )
         logger.info(
@@ -384,8 +350,7 @@ class WorkspaceLifecycleMixin:
         workspace_id: uuid.UUID,
         *,
         name: str | None = None,
-        credentials: list | None = None,
-        resolved_credentials: ResolvedCredentials | None = None,
+        credential_ids: list[uuid.UUID] | None = None,
         qemu_vcpus: int | None = None,
         qemu_memory_mb: int | None = None,
         qemu_disk_size_gb: int | None = None,
@@ -395,10 +360,26 @@ class WorkspaceLifecycleMixin:
         user=None,
         organization_id: uuid.UUID | None = None,
     ) -> Workspace:
-        """Validate and atomically persist final workspace configuration."""
+        """Validate and atomically persist final workspace configuration.
+
+        ``credential_ids`` replaces the attached credentials (``None`` keeps
+        them); they are resolved for ``user`` (default: the workspace owner)
+        before anything changes.
+        """
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None:
             raise WorkspaceNotFoundError(str(workspace_id))
+        if user is None:
+            user = workspace.created_by
+        if organization_id is None:
+            organization_id = workspace.runner.organization_id
+        resolved = (
+            await self._resolve_credential_selection(
+                credential_ids, user=user, organization_id=organization_id
+            )
+            if credential_ids is not None
+            else None
+        )
         self._ensure_workspace_available(workspace)
         acknowledged_credentials_present = bool(workspace.credentials_present)
 
@@ -408,13 +389,8 @@ class WorkspaceLifecycleMixin:
             if not trimmed_name:
                 raise ValueError("Workspace name must not be empty")
 
-        credential_records = (
-            resolved_credentials.credentials
-            if resolved_credentials is not None
-            else credentials
-        )
+        credential_records = resolved.credentials if resolved is not None else None
         has_ordinary_selection_change = False
-        resolved_payload = resolved_credentials
         needs_disk_sync = False
         if credential_records is not None:
             current_ordinary_ids = await sync_to_async(
@@ -426,23 +402,10 @@ class WorkspaceLifecycleMixin:
                 if credential.service.credential_type != "mcp_oauth"
             }
             has_ordinary_selection_change = current_ordinary_ids != new_ordinary_ids
-            if resolved_payload is None:
-                from apps.credentials.services import CredentialSvc
-
-                resolver = CredentialSvc()
-                resolved_payload = await sync_to_async(resolver.resolve_credentials)(
-                    [credential.id for credential in credential_records],
-                    org_id=workspace.runner.organization_id,
-                    user=workspace.created_by,
-                )
-            desired_present = bool(
-                resolved_payload.env_vars
-                or resolved_payload.files
-                or resolved_payload.ssh_keys
-            )
             needs_disk_sync = workspace.status == WorkspaceStatus.RUNNING and (
                 has_ordinary_selection_change
-                or bool(workspace.credentials_present) != desired_present
+                or bool(workspace.credentials_present)
+                != self._has_credential_material(resolved)
             )
 
         qemu_fields_requested = any(
@@ -493,10 +456,6 @@ class WorkspaceLifecycleMixin:
                 workspace.desktop_height if desktop_height is None else desktop_height,
             )
 
-        if user is None:
-            user = workspace.created_by
-        if organization_id is None:
-            organization_id = workspace.runner.organization_id
         from ..workspace_configuration import WorkspaceConfigurationService
 
         workspace = await sync_to_async(
@@ -546,7 +505,7 @@ class WorkspaceLifecycleMixin:
             else:
                 try:
                     acknowledged_presence = await self._dispatch_credential_inject(
-                        workspace, resolved=resolved_payload, wait=True
+                        workspace, resolved=resolved, wait=True
                     )
                     workspace = await sync_to_async(self.workspaces.get_by_id)(
                         workspace_id
@@ -767,12 +726,8 @@ class WorkspaceLifecycleMixin:
                 exclude_workspace_id=workspace.id,
             )
 
-        from apps.credentials.services import CredentialSvc
-
         try:
-            await sync_to_async(CredentialSvc().resolve_workspace_credentials)(
-                workspace
-            )
+            await sync_to_async(self._credential_resolve_call(workspace))(workspace)
         except Exception as exc:  # noqa: BLE001 - surfaced as a clear conflict
             raise ConflictError(
                 "Workspace credentials cannot be resolved. Fix or detach them "
@@ -1232,29 +1187,25 @@ class WorkspaceLifecycleMixin:
         self,
         image_artifact_id: uuid.UUID,
         name: str = "",
-        env_vars: dict[str, str] | None = None,
-        files: list | None = None,
-        ssh_keys: list[str] | None = None,
-        credentials: list | None = None,
-        resolved_credentials: ResolvedCredentials | None = None,
+        credential_ids: list[uuid.UUID] | None = None,
         user=None,
         organization_id: uuid.UUID | None = None,
         plugin_ids: list[uuid.UUID] | None = None,
     ) -> tuple[Workspace, Task]:
         """Create a workspace from an image artifact.
 
-        Credentials are explicitly supplied by the caller and persisted in
-        the new workspace until a controlled stop. Captured artifacts do
-        not retain credential associations.
+        Credentials are explicitly selected by the caller (``credential_ids``,
+        resolved for ``user``) and persisted in the new workspace until a
+        controlled stop. Captured artifacts do not retain credential
+        associations.
         """
-        from apps.credentials.services import CredentialSvc
-
-        # Phase-4 port: the uniqueness check needs the full CredentialSvc
-        # API; an injected credential_resolver only replaces
-        # resolve_workspace_credentials, so keep the concrete service here.
-        # (getattr fallback: a fake resolver without the uniqueness method
-        # would break this path — always use CredentialSvc for the check.)
-        credential_svc = CredentialSvc()
+        resolved = (
+            await self._resolve_credential_selection(
+                credential_ids, user=user, organization_id=organization_id
+            )
+            if credential_ids is not None
+            else None
+        )
         image = await sync_to_async(self.image_instances.get_by_id)(image_artifact_id)
         if image is None:
             raise ValueError(f"Image artifact '{image_artifact_id}' not found")
@@ -1304,33 +1255,11 @@ class WorkspaceLifecycleMixin:
             requested_disk_size_gb=qemu_disk_size_gb,
         )
 
-        resolved_env_vars = env_vars or {}
-        resolved_files = files or []
-        resolved_ssh_keys = ssh_keys or []
-
-        if credentials is not None:
-            resolved = resolved_credentials
-            if resolved is None:
-                resolved = await sync_to_async(credential_svc.resolve_credentials)(
-                    [credential.id for credential in credentials],
-                    org_id=organization_id,
-                    user=user,
-                )
-            resolved_env_vars = resolved.env_vars
-            resolved_files = resolved.files
-            resolved_ssh_keys = resolved.ssh_keys
-
         workspace_id = generate_uuid()
         workspace_name = self._derive_workspace_name(name, [], workspace_id)
         if not name:
             workspace_name = f"{workspace_name} (clone)"
 
-        if credentials is None and (
-            resolved_env_vars or resolved_files or resolved_ssh_keys
-        ):
-            raise ConflictError(
-                "Workspace lifecycle credentials require secure catalog associations"
-            )
         task_id = generate_uuid()
         from ..workspace_configuration import WorkspaceConfigurationService
 
@@ -1352,12 +1281,10 @@ class WorkspaceLifecycleMixin:
             runner=runner,
             user=user,
             organization_id=organization_id,
-            credentials=list(credentials or []),
+            credentials=list(resolved.credentials) if resolved is not None else [],
             plugin_ids=list(plugin_ids or []),
             task_id=task_id,
-            credentials_present=bool(
-                resolved_env_vars or resolved_files or resolved_ssh_keys
-            ),
+            credentials_present=self._has_credential_material(resolved),
             task_type=TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT,
             operation_payload={
                 "workspace_id": str(workspace_id),
@@ -1384,16 +1311,7 @@ class WorkspaceLifecycleMixin:
                 "qemu_vcpus": qemu_vcpus,
                 "qemu_memory_mb": qemu_memory_mb,
                 "qemu_disk_size_gb": qemu_disk_size_gb,
-                "env_vars": resolved_env_vars,
-                "files": [
-                    {
-                        "target_path": file.target_path,
-                        "content": file.content,
-                        "mode": file.mode,
-                    }
-                    for file in resolved_files
-                ],
-                "ssh_keys": resolved_ssh_keys,
+                **self._resolved_credentials_payload(resolved),
             },
         )
         logger.info(

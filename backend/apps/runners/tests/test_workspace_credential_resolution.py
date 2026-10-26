@@ -1,4 +1,4 @@
-"""Regression tests for credential-safe workspace creation fallbacks."""
+"""Workspace lifecycle resolves requested credential IDs in the service."""
 
 from __future__ import annotations
 
@@ -48,10 +48,10 @@ async def test_create_workspace_resolves_credentials_without_api_pre_resolution(
     )
 
     workspace, _ = await service.create_workspace(
-        name="Fallback credentials",
+        name="Service-resolved credentials",
         repos=[],
         image_artifact_id=artifact.id,
-        credentials=[credential],
+        credential_ids=[credential.id],
         user=user,
         organization_id=runner.organization_id,
     )
@@ -79,9 +79,7 @@ async def test_create_workspace_resolves_credentials_without_api_pre_resolution(
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_update_workspace_fallback_resolves_requested_credential_ids(
-    workspace, user
-):
+async def test_update_workspace_resolves_requested_credential_ids(workspace, user):
     service = RunnerService(sio_server=AsyncMock())
     credential_service = CredentialService.objects.create(
         name="Update API key",
@@ -105,7 +103,7 @@ async def test_update_workspace_fallback_resolves_requested_credential_ids(
 
     await service.update_workspace(
         workspace.id,
-        credentials=[credential],
+        credential_ids=[credential.id],
         user=user,
         organization_id=workspace.runner.organization_id,
     )
@@ -122,7 +120,7 @@ async def test_update_workspace_fallback_resolves_requested_credential_ids(
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_create_workspace_fallback_requires_user_and_organization(runner, user):
+async def test_create_workspace_credentials_require_user_and_organization(runner, user):
     socket_server = AsyncMock()
     service = RunnerService(sio_server=socket_server)
     artifact = ImageInstance.objects.create(
@@ -156,13 +154,13 @@ async def test_create_workspace_fallback_requires_user_and_organization(runner, 
             name="Missing context",
             repos=[],
             image_artifact_id=artifact.id,
-            credentials=[credential],
+            credential_ids=[credential.id],
         )
 
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_create_workspace_fallback_validates_credential_ownership(runner, user):
+async def test_create_workspace_validates_credential_ownership(runner, user):
     socket_server = AsyncMock()
     service = RunnerService(sio_server=socket_server)
     artifact = ImageInstance.objects.create(
@@ -199,7 +197,7 @@ async def test_create_workspace_fallback_validates_credential_ownership(runner, 
             name="Foreign credential",
             repos=[],
             image_artifact_id=artifact.id,
-            credentials=[credential],
+            credential_ids=[credential.id],
             user=user,
             organization_id=runner.organization_id,
         )

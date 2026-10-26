@@ -19,8 +19,9 @@ singleton every adapter (REST, Socket.IO) and other app resolves.
 Phase 4: the constructor additionally accepts optional injected ports
 (``credential_resolver``, ``harness_gateway``, ``frontend_bus`` — all
 keyword-only, default ``None``). An unset ``harness_gateway`` resolves to
-the gateway the harness app registered at startup; the other ports keep
-their previous lazy-import behaviour when unset. The
+the gateway the harness app registered at startup, an unset
+``credential_resolver`` to ``CredentialSvc``; ``frontend_bus`` keeps its
+lazy-import behaviour when unset. The
 pending RPC registries are plain per-instance dictionaries; terminal/desktop
 maps remain shared class attributes.
 """
@@ -110,9 +111,8 @@ class RunnerService(
                         service testable.
             credential_resolver: Optional object with
                         ``resolve_workspace_credentials(workspace)`` (sync).
-                        When set, credential call sites use it instead of
-                        constructing ``CredentialSvc()``. Default ``None``
-                        keeps the previous lazy behaviour.
+                        When set, attached-credential resolution uses it
+                        instead of ``CredentialSvc``. Default ``None``.
             harness_gateway: Optional ``HarnessGateway``. When unset,
                         the gateway registered by the harness app is
                         used (see :meth:`_harness`).

@@ -298,7 +298,7 @@ def test_full_success_holds_parent_until_recovery(
             (service.resume_workspace, {}),
             (service.rename_workspace, {"name": "denied"}),
             (service.update_workspace, {"qemu_vcpus": 2}),
-            (service.update_workspace, {"credentials": []}),
+            (service.update_workspace, {"credential_ids": []}),
             (service.create_image_artifact, {"name": "overlap"}),
         ]:
             with pytest.raises(ConflictError):

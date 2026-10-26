@@ -7,9 +7,11 @@ via structural typing so tests can inject fakes.
 
 Wiring status (what ``RunnerService`` consumes):
 
-- ``CredentialResolver``: used by ``credential_sync._dispatch_credential_inject``
-  and the three ``workspace_lifecycle`` credential paths (``update`` /
-  ``resume`` / ``create_from_image_artifact`` uniqueness check).
+- ``CredentialResolver``: resolves the credentials attached to a workspace
+  (``credential_sync._dispatch_credential_inject`` and the ``resume`` /
+  ``recreate`` lifecycle paths). Credential selections requested by callers
+  (create / update / clone by ``credential_ids``) always resolve through
+  ``CredentialSyncMixin._resolve_credential_selection``.
 - ``HarnessGateway``: the only way the runners app reaches the agent
   harness (reply/stream routing, stream failure, viewer desktop actions,
   busy agent checks, workspace activity reads, desktop take-over).
@@ -79,15 +81,12 @@ class FrontendBus(Protocol):
 
 
 class CredentialResolver(Protocol):
-    """Resolve workspace credentials for injection/reconcile flows.
+    """Resolve the credentials attached to a workspace.
 
     Phase-4 wiring: ``RunnerService(credential_resolver=...)`` stores the
-    object on ``self._credential_resolver``; the credential call sites use
-    ``resolver.resolve_workspace_credentials(workspace)`` (sync method,
-    called via ``sync_to_async``) instead of constructing
-    ``CredentialSvc()``. ``assert_unique_workspace_credentials`` (used by
-    ``create_workspace_from_image_artifact``) is optional: objects that do
-    not provide it fall back to ``CredentialSvc()`` for that check only.
+    object on ``self._credential_resolver``; attached-credential call sites
+    use ``resolver.resolve_workspace_credentials(workspace)`` (sync method,
+    called via ``sync_to_async``) instead of constructing ``CredentialSvc()``.
     """
 
     def resolve_workspace_credentials(self, workspace: Any) -> Any:

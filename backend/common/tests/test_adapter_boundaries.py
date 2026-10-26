@@ -31,6 +31,8 @@ SSO provisioning share the accounts user repository; profile writes and
 password checks (which can save upgraded hashes) stay there as well.
 Credential repositories are private to their context; consumers resolve
 catalog entries and workspace attachments through credential services.
+Adapters select credentials by ID and never resolve (decrypt) them; the
+service that applies a selection resolves it.
 Harness persistence never imports tool adapters; todo records and their storage
 port live in ``apps.harness.todos.domain`` and tools call its todo service.
 Provider wire adapters share context-error classification within ``providers``;
@@ -101,6 +103,9 @@ REPOSITORY_ONLY_APPS = {
 
 #: Model manager and instance-reload attributes that issue queries.
 ORM_QUERY_ATTRIBUTES = {"objects", "_default_manager", "refresh_from_db"}
+
+#: ``CredentialSvc`` methods that decrypt credential secrets.
+CREDENTIAL_RESOLUTION_CALLS = {"resolve_credentials", "resolve_workspace_credentials"}
 
 
 def _module_name(path: Path) -> str:
@@ -727,6 +732,26 @@ def test_adapters_never_query_the_orm():
     assert violations == [], (
         "Move ORM access into the app's repositories and call it through its "
         "service from adapters:\n" + "\n".join(violations)
+    )
+
+
+def test_adapters_never_resolve_credential_secrets():
+    """REST and MCP select credentials by ID; services resolve the secrets."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    adapters = _adapter_modules(trees)
+    assert APPS_ROOT / "runners" / "api.py" in adapters  # discovery sanity check
+    assert APPS_ROOT / "mcp_app" / "tools" / "workspaces.py" in adapters
+
+    violations = sorted(
+        f"{_module_name(path)}:{node.lineno} -> {node.attr}"
+        for path in adapters
+        for node in ast.walk(trees[path])
+        if isinstance(node, ast.Attribute) and node.attr in CREDENTIAL_RESOLUTION_CALLS
+    )
+    assert violations == [], (
+        "Adapters must pass credential IDs to the service that uses them "
+        "(e.g. RunnerService.create_workspace(credential_ids=...)) instead of "
+        "resolving decrypted credentials themselves:\n" + "\n".join(violations)
     )
 
 

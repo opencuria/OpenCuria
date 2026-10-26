@@ -15,10 +15,7 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 
 from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
-from apps.credentials.services import (
-    CredentialSvc,
-    ResolvedCredentials,
-)
+from apps.credentials.services import CredentialSvc
 from apps.organizations.models import Organization
 from apps.runners.enums import (
     ProcessStatus,
@@ -1047,7 +1044,7 @@ class TestCreateWorkspace:
             name="Test Workspace",
             repos=["https://github.com/test/repo"],
             image_artifact_id=artifact.id,
-            credentials=[],
+            credential_ids=[],
             user=user,
             organization_id=runner.organization_id,
         )
@@ -1593,8 +1590,7 @@ class TestCreateWorkspaceFromImageArtifact:
         workspace, task = await service.create_workspace_from_image_artifact(
             image_artifact_id=artifact.id,
             name="Clone Workspace",
-            env_vars={"GITHUB_TOKEN": "secret-token"},
-            credentials=[credential],
+            credential_ids=[credential.id],
             user=user,
             organization_id=runner.organization_id,
         )
@@ -1665,7 +1661,7 @@ class TestCreateWorkspaceFromImageArtifact:
             await service.create_workspace_from_image_artifact(
                 image_artifact_id=artifact.id,
                 name="Atomic clone",
-                credentials=[],
+                credential_ids=[],
                 user=user,
                 organization_id=runner.organization_id,
                 plugin_ids=[plugin.id],
@@ -2904,13 +2900,9 @@ class TestPersistentWorkspaceCredentials:
             value=None,
             user=user,
         )
-        resolved = CredentialSvc()._build_resolved_credentials(
-            [env_cred, file_cred, ssh_cred]
-        )
-
         updated = await service.update_workspace(
             workspace.id,
-            resolved_credentials=resolved,
+            credential_ids=[env_cred.id, file_cred.id, ssh_cred.id],
         )
 
         assert updated is not None
@@ -2947,7 +2939,7 @@ class TestPersistentWorkspaceCredentials:
 
         updated = await service.update_workspace(
             workspace.id,
-            credentials=[credential],
+            credential_ids=[credential.id],
             user=user,
             organization_id=workspace.runner.organization_id,
         )
@@ -2983,7 +2975,7 @@ class TestPersistentWorkspaceCredentials:
 
         updated = await service.update_workspace(
             workspace.id,
-            credentials=[replacement],
+            credential_ids=[replacement.id],
             user=user,
             organization_id=workspace.runner.organization_id,
         )
@@ -3070,9 +3062,7 @@ class TestPersistentWorkspaceCredentials:
 
         updated = await service.update_workspace(
             workspace.id,
-            resolved_credentials=CredentialSvc().resolve_workspace_credentials(
-                workspace
-            ),
+            credential_ids=[oauth_credential.id],
         )
         assert updated.credentials_present is False
         workspace.refresh_from_db()
@@ -3100,7 +3090,7 @@ class TestPersistentWorkspaceCredentials:
 
         updated = await service.update_workspace(
             workspace.id,
-            resolved_credentials=ResolvedCredentials(),
+            credential_ids=[],
         )
 
         assert list(updated.credentials.values_list("id", flat=True)) == []
@@ -3137,11 +3127,9 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials.add(old_cred)
         workspace.credentials_present = True
         workspace.save(update_fields=["credentials_present", "updated_at"])
-        resolved = CredentialSvc()._build_resolved_credentials([new_cred])
-
         await service.update_workspace(
             workspace.id,
-            resolved_credentials=resolved,
+            credential_ids=[new_cred.id],
         )
 
         event, payload = sio_mock.call.await_args.args[:2]
@@ -3160,11 +3148,9 @@ class TestPersistentWorkspaceCredentials:
             env_var="GITHUB_TOKEN",
             value="stopped-token",
         )
-        resolved = CredentialSvc()._build_resolved_credentials([credential])
-
         updated = await service.update_workspace(
             stopped_workspace.id,
-            resolved_credentials=resolved,
+            credential_ids=[credential.id],
         )
 
         assert list(updated.credentials.values_list("id", flat=True)) == [credential.id]
@@ -3208,12 +3194,9 @@ class TestPersistentWorkspaceCredentials:
             env_var="GITHUB_TOKEN",
             value="offline-token",
         )
-        resolved = CredentialSvc()._build_resolved_credentials([credential])
-
         updated = await service.update_workspace(
             workspace.id,
-            credentials=[credential],
-            resolved_credentials=resolved,
+            credential_ids=[credential.id],
             user=workspace.created_by,
             organization_id=offline_runner.organization_id,
         )
@@ -3246,7 +3229,7 @@ class TestPersistentWorkspaceCredentials:
 
         updated = await service.update_workspace(
             workspace.id,
-            credentials=[],
+            credential_ids=[],
             user=user,
             organization_id=offline_runner.organization_id,
         )
@@ -3273,7 +3256,7 @@ class TestPersistentWorkspaceCredentials:
 
         updated = await service.update_workspace(
             workspace.id,
-            credentials=[credential],
+            credential_ids=[credential.id],
             user=user,
             organization_id=workspace.runner.organization_id,
         )
@@ -3303,7 +3286,7 @@ class TestPersistentWorkspaceCredentials:
         updated = asyncio.run(
             service.update_workspace(
                 workspace.id,
-                credentials=[],
+                credential_ids=[],
                 user=user,
                 organization_id=workspace.runner.organization_id,
             )
@@ -3362,7 +3345,7 @@ class TestPersistentWorkspaceCredentials:
 
         updated = await service.update_workspace(
             workspace.id,
-            credentials=[credential],
+            credential_ids=[credential.id],
             user=user,
             organization_id=workspace.runner.organization_id,
         )
@@ -3390,12 +3373,9 @@ class TestPersistentWorkspaceCredentials:
         sio_mock.call = AsyncMock(
             return_value={"ok": True, "credentials_present": True}
         )
-        resolved = CredentialSvc()._build_resolved_credentials([credential])
-
         updated = await service.update_workspace(
             workspace.id,
-            credentials=[credential],
-            resolved_credentials=resolved,
+            credential_ids=[credential.id],
             user=user,
             organization_id=workspace.runner.organization_id,
         )
@@ -3418,12 +3398,10 @@ class TestPersistentWorkspaceCredentials:
         workspace.credentials.add(credential)
         workspace.credentials_present = True
         workspace.save(update_fields=["credentials_present", "updated_at"])
-        resolved = CredentialSvc()._build_resolved_credentials([credential])
-
         await service.update_workspace(
             workspace.id,
             name="Renamed Workspace",
-            resolved_credentials=resolved,
+            credential_ids=[credential.id],
         )
 
         sio_mock.call.assert_not_awaited()

@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 from asgiref.sync import sync_to_async
 
-from apps.credentials.models import CredentialService
+from apps.credentials.models import CredentialService, OrgCredentialServiceActivation
+from apps.credentials.services import CredentialSvc
 from apps.plugins.models import Plugin
 from apps.runners.enums import WorkspaceStatus
+from apps.runners.models import Workspace
+from apps.runners.services import get_runner_service
 from apps.runners.services.domains.workspace_lifecycle import (
     WorkspaceLifecycleMixin,
 )
+from apps.runners.tests.test_image_versions import make_line
 
 from .conftest import fails, ok
 
@@ -192,3 +198,62 @@ async def test_workspace_create_without_ready_image_explains_next_step(world):
     error = await fails(world.ctx(), "workspace_create", name="new-one")
 
     assert "No image is ready" in error
+
+
+def _selected_token(world, value: str):
+    service = _token_service(world)
+    OrgCredentialServiceActivation.objects.create(
+        organization=world.org, credential_service=service
+    )
+    return CredentialSvc().create_personal_credential(
+        service_id=service.id,
+        name="Acme credential",
+        value=value,
+        user=world.user,
+        org_id=world.org.id,
+    )
+
+
+async def test_workspace_create_attaches_credentials_by_name(world, monkeypatch):
+    emit = AsyncMock()
+    monkeypatch.setattr(get_runner_service(), "_emit_to_runner", emit)
+    credential = await sync_to_async(_selected_token)(world, "create-secret")
+    await sync_to_async(make_line)(world.runner, world.user, name="Captured base")
+
+    created = await ok(
+        world.ctx(),
+        "workspace_create",
+        name="with-credentials",
+        credentials=["Acme credential"],
+    )
+
+    workspace = await sync_to_async(Workspace.objects.get)(pk=created["workspace_id"])
+    attached = await sync_to_async(list)(
+        workspace.credentials.values_list("id", flat=True)
+    )
+    assert attached == [credential.id]
+    assert "create-secret" not in json.dumps(created, default=str)
+    payload = next(arg for arg in emit.await_args.args if isinstance(arg, dict))
+    assert payload["env_vars"] == {"ACME_TOKEN": "create-secret"}
+
+
+async def test_workspace_update_replaces_credentials_by_name(world, monkeypatch):
+    call_runner = AsyncMock(return_value={"ok": True, "credentials_present": True})
+    monkeypatch.setattr(get_runner_service(), "_call_runner", call_runner)
+    credential = await sync_to_async(_selected_token)(world, "update-secret")
+    ctx = world.ctx()
+
+    attached = await ok(
+        ctx, "workspace_update", workspace="billing-api", credentials=[credential.name]
+    )
+    detached = await ok(
+        ctx, "workspace_update", workspace="billing-api", credentials=[]
+    )
+
+    assert [c["name"] for c in attached["credentials"]] == ["Acme credential"]
+    assert "credentials" not in detached
+    injected = [
+        next(arg for arg in call.args if isinstance(arg, dict))["env_vars"]
+        for call in call_runner.await_args_list
+    ]
+    assert injected == [{"ACME_TOKEN": "update-secret"}, {}]
