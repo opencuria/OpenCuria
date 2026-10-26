@@ -6,6 +6,7 @@ SQLite cannot establish row-lock semantics and intentionally skips this suite.
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from queue import Queue
 from unittest.mock import AsyncMock
 
@@ -13,6 +14,7 @@ import pytest
 from django.db import connection, connections, transaction
 from django.utils import timezone
 
+from apps.runners.deletion_repository import DeletionRepository
 from apps.runners.locking import lock_runner
 from apps.runners.models import (
     ImageBuildJob,
@@ -129,9 +131,11 @@ def test_duplicate_operation_claim(runner, workspace):
         "task:stop_workspace",
         {"task_id": str(task.id), "workspace_id": str(workspace.id)},
     )
-    results = race(
-        runner, OperationRepository.candidates, OperationRepository.candidates
+    claim = partial(
+        OperationRepository.candidates,
+        delivery_allowed=DeletionRepository.delivery_allowed,
     )
+    results = race(runner, claim, claim)
     assert sorted(len(r) for r in results) == [0, 1]
     assert LifecycleCommand.objects.get(task=task).deliveries == 1
 

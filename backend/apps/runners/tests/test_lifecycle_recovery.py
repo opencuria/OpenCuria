@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from django.utils import timezone
 
+from apps.runners.deletion_repository import DeletionRepository
 from apps.runners.enums import TaskType
 from apps.runners.models import ImageDefinition, LifecycleCommand, Task
 from apps.runners.operations import OperationRepository
@@ -73,7 +74,7 @@ def test_unprepared_intent_and_lost_lease_bounded(runner, workspace):
     LifecycleCommand.objects.filter(task=task).update(
         created_at=timezone.now() - timedelta(minutes=2)
     )
-    OperationRepository.candidates()
+    OperationRepository.candidates(delivery_allowed=DeletionRepository.delivery_allowed)
     task.refresh_from_db()
     workspace.refresh_from_db()
     assert task.status == "failed"
@@ -98,7 +99,12 @@ def test_sanitized_outbox_and_offline_expiry(runner, workspace):
     runner.sid = "still-connected"
     runner.last_heartbeat_at = timezone.now() - timedelta(minutes=5)
     runner.save()
-    assert OperationRepository.candidates() == []
+    assert (
+        OperationRepository.candidates(
+            delivery_allowed=DeletionRepository.delivery_allowed
+        )
+        == []
+    )
     runner.refresh_from_db()
     workspace.refresh_from_db()
     assert runner.status == "offline"
@@ -107,7 +113,7 @@ def test_sanitized_outbox_and_offline_expiry(runner, workspace):
     LifecycleCommand.objects.filter(task=task).update(
         deadline_at=timezone.now() - timedelta(seconds=1)
     )
-    OperationRepository.candidates()
+    OperationRepository.candidates(delivery_allowed=DeletionRepository.delivery_allowed)
     task.refresh_from_db()
     assert task.status == "failed"
 
@@ -138,13 +144,18 @@ def test_fresh_execution_heartbeat_suppresses_duplicate_delivery(runner, workspa
     LifecycleCommand.objects.filter(task=task).update(
         heartbeat_at=timezone.now(), deliveries=12
     )
-    assert OperationRepository.candidates() == []
+    assert (
+        OperationRepository.candidates(
+            delivery_allowed=DeletionRepository.delivery_allowed
+        )
+        == []
+    )
     task.refresh_from_db()
     assert task.status == "pending"
     LifecycleCommand.objects.filter(task=task).update(
         deadline_at=timezone.now() - timedelta(seconds=1)
     )
-    OperationRepository.candidates()
+    OperationRepository.candidates(delivery_allowed=DeletionRepository.delivery_allowed)
     task.refresh_from_db()
     assert task.status == "failed"
 

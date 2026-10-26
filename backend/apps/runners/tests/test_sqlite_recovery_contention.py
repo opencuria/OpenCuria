@@ -3,6 +3,7 @@
 import sqlite3
 from copy import deepcopy
 from threading import Event, Thread
+from unittest.mock import Mock
 
 import pytest
 from django.db import connection
@@ -14,8 +15,10 @@ from apps.runners.operations import OperationRepository
 
 @pytest.mark.django_db
 def test_idle_delivery_poll_does_not_take_writer_lock(runner):
+    approval = Mock(side_effect=AssertionError("Idle polling must not check approval"))
     with CaptureQueriesContext(connection) as queries:
-        assert OperationRepository.candidates() == []
+        assert OperationRepository.candidates(delivery_allowed=approval) == []
+    approval.assert_not_called()
     assert all(
         query["sql"].lstrip().upper().startswith("SELECT")
         for query in queries.captured_queries

@@ -1,6 +1,7 @@
 """Durable lifecycle repository. Task.status remains the execution truth."""
 
 import uuid
+from collections.abc import Callable
 from datetime import timedelta
 
 from django.db import transaction
@@ -167,8 +168,14 @@ class OperationRepository:
         )
 
     @staticmethod
-    def candidates() -> list:
-        """Claim due commands with bounded delivery; expired leases may be reclaimed."""
+    def candidates(
+        *, delivery_allowed: Callable[[uuid.UUID], bool]
+    ) -> list[LifecycleCommand]:
+        """Claim due commands with bounded delivery; reclaim expired leases.
+
+        The recovery service supplies domain approval. Evaluate it under the
+        runner locks before expiring unissued commands and allocating leases.
+        """
         now = timezone.now()
         stale_runners = Runner.objects.filter(status="online").filter(
             Q(last_heartbeat_at__lt=now - timedelta(seconds=90))
@@ -209,11 +216,7 @@ class OperationRepository:
             )
             claimed = []
             for row in rows:
-                from .deletion_repository import DeletionRepository
-
-                if not row.deliveries and not DeletionRepository.delivery_allowed(
-                    row.task_id
-                ):
+                if not row.deliveries and not delivery_allowed(row.task_id):
                     # An explicitly withheld, never-executed approval is idle,
                     # not an ambiguous runtime deadline failure.
                     row.deadline_at = now + timedelta(hours=2)
@@ -234,9 +237,7 @@ class OperationRepository:
                     continue
                 if not row.event or not row.task.runner.is_online or alive:
                     continue
-                from .deletion_repository import DeletionRepository
-
-                if not DeletionRepository.delivery_allowed(row.task_id):
+                if not delivery_allowed(row.task_id):
                     continue
                 row.lease_until = now + timedelta(seconds=30)
                 row.deliveries += 1

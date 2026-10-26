@@ -1,8 +1,9 @@
 """Independent durable delivery loop shared by deployment and tests."""
 
-from asgiref.sync import sync_to_async
 import structlog
+from asgiref.sync import sync_to_async
 
+from ..deletion_repository import DeletionRepository
 from ..operations import OperationRepository
 
 logger = structlog.get_logger(__name__)
@@ -13,8 +14,6 @@ class RecoveryService:
 
     async def tick(self, transport) -> None:
         """Advance durable coordinators and deliver due commands independently."""
-        from ..deletion_repository import DeletionRepository
-
         await sync_to_async(DeletionRepository.tick)()
         from ..capture_repository import CaptureRepository
         from ..recreate_repository import RecreateRepository
@@ -67,7 +66,9 @@ class RecoveryService:
                 logger.exception(
                     "operation_inspection_deferred", task_id=str(row.task_id)
                 )
-        commands = await sync_to_async(OperationRepository.candidates)()
+        commands = await sync_to_async(OperationRepository.candidates)(
+            delivery_allowed=DeletionRepository.delivery_allowed
+        )
         for command in commands:
             try:
                 if not await sync_to_async(DeletionRepository.delivery_allowed)(
@@ -83,6 +84,7 @@ class RecoveryService:
                     "task:resume_workspace",
                 }:
                     from apps.credentials.services import CredentialSvc
+
                     from . import RunnerService
 
                     resolved = await sync_to_async(

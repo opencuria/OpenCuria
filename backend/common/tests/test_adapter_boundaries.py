@@ -61,6 +61,9 @@ Runner service domains and infrastructure never import their composition facade;
 shared RPC correlation records belong to the infrastructure that consumes them.
 Workspace reservation reads and task admission never import capture/recreate
 coordinators. Their shared read boundary is WorkspaceOperationRepository.
+Lifecycle outbox persistence never imports task allocation or workflow coordinators.
+RecoveryService supplies domain delivery approval, checked under the existing
+runner locks before command expiry and lease allocation.
 """
 
 from __future__ import annotations
@@ -186,6 +189,40 @@ def test_facade_guard_resolves_absolute_and_local_relative_imports() -> None:
         assert facade in _imported_modules(path, ast.parse(source))
     assert facade not in _imported_modules(
         path, ast.parse("from ..infra.rpc_registry import PendingGitRequest")
+    )
+
+
+def test_lifecycle_outbox_never_imports_its_consumers() -> None:
+    """Command claiming must not import the workflows that allocate commands."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    modules = {_module_name(path): path for path in trees}
+    consumers = {
+        "apps.runners.repositories",
+        "apps.runners.deletion_repository",
+        "apps.runners.capture_repository",
+        "apps.runners.recreate_repository",
+        "apps.runners.services",
+    }
+    pending = {"apps.runners.operations"}
+    checked: set[str] = set()
+    violations = set()
+    while pending:
+        module = pending.pop()
+        checked.add(module)
+        path = modules[module]
+        for imported in _imported_modules(path, trees[path]):
+            if any(
+                imported == owner or imported.startswith(f"{owner}.")
+                for owner in consumers
+            ):
+                violations.add(f"{module} -> {imported}")
+            elif imported in modules and imported not in checked:
+                pending.add(imported)
+    assert violations == set(), (
+        "RecoveryService must supply domain delivery approval to the lifecycle "
+        "outbox; persistence and its dependencies must not import task allocation "
+        "or workflow coordination, even through local imports:\n"
+        + "\n".join(sorted(violations))
     )
 
 
