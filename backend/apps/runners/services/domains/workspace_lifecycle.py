@@ -47,6 +47,7 @@ from ...exceptions import (
     WorkspaceStateError,
 )
 from ...provisioning import disk_size_for, provisioning_command, uses_artifact_clone
+from ...workspace_operation_repository import WorkspaceOperationRepository
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
     from apps.credentials.services import ResolvedCredentials
@@ -1095,9 +1096,7 @@ class WorkspaceLifecycleMixin:
             self._pending_credential_inject.discard(
                 (str(workspace.runner_id), str(workspace.id))
             )
-        from ...recreate_repository import RecreateRepository
-
-        recreating = RecreateRepository.owns(task)
+        recreating = WorkspaceOperationRepository.owns_recreate_child(task.id)
         if workspace and task.type in {
             TaskType.CREATE_WORKSPACE,
             TaskType.CREATE_WORKSPACE_FROM_IMAGE_ARTIFACT,
@@ -1173,7 +1172,7 @@ class WorkspaceLifecycleMixin:
 
         from ...recreate_repository import RecreateRepository
 
-        recreating = RecreateRepository.owns(task)
+        recreating = WorkspaceOperationRepository.owns_recreate_child(task.id)
         delete_result = result or ("already_absent" if already_absent else "deleted")
         if delete_result not in {"deleted", "already_absent"}:
             error = f"Workspace delete was not confirmed: {delete_result}"

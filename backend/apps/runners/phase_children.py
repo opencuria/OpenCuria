@@ -12,7 +12,6 @@ from .operations import OperationRepository
 UNKNOWN_CHILD_DIAGNOSTIC = (
     "Unknown child outcome; exact journal reconciliation required"
 )
-TERMINAL_PHASES = ["completed", "failed"]
 
 
 def fence_unknown_child(

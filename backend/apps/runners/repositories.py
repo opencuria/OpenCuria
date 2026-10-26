@@ -40,6 +40,7 @@ from .models import (
     Workspace,
     WorkspaceProcess,
 )
+from .workspace_operation_repository import WorkspaceOperationRepository
 
 # ---------------------------------------------------------------------------
 # Runner Repository
@@ -511,9 +512,7 @@ class WorkspaceRepository:
         active_operation: WorkspaceOperation | None,
     ) -> Workspace:
         """Update the currently active blocking operation for a workspace."""
-        from .operation_projection import project_workspace_operation
-
-        workspace.active_operation = project_workspace_operation(
+        workspace.active_operation = WorkspaceOperationRepository.project(
             workspace.id, active_operation
         )
         workspace.save(update_fields=["active_operation", "updated_at"])
@@ -1154,15 +1153,14 @@ class TaskRepository:
                 workspace = Workspace.objects.select_for_update().get(pk=workspace.id)
                 from common.exceptions import ConflictError
 
-                from .capture_repository import CaptureRepository
-                from .recreate_repository import RecreateRepository
-
-                if capture_request_id is None and CaptureRepository.active(
-                    workspace.id
+                if (
+                    capture_request_id is None
+                    and WorkspaceOperationRepository.capture_active(workspace.id)
                 ):
                     raise ConflictError("Workspace is capturing image")
-                if recreate_request_id is None and RecreateRepository.active(
-                    workspace.id
+                if (
+                    recreate_request_id is None
+                    and WorkspaceOperationRepository.recreate_active(workspace.id)
                 ):
                     raise ConflictError("Workspace is being reset")
             task = Task.objects.create(
@@ -1211,10 +1209,8 @@ class TaskRepository:
     @staticmethod
     def release_workspace(task: Task) -> None:
         """Release a child identity, never its enclosing capture/recreate request."""
-        from .operation_projection import project_workspace_operation
-
         operation = (
-            project_workspace_operation(task.workspace_id, None)
+            WorkspaceOperationRepository.project(task.workspace_id, None)
             if task.workspace_id
             else None
         )

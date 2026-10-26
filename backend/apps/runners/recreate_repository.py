@@ -26,63 +26,23 @@ from .models import (
     Workspace,
     WorkspaceRecreateRequest,
 )
-from .phase_children import TERMINAL_PHASES, fence_unknown_child
+from .phase_children import fence_unknown_child
 from .provisioning import provisioning_command
 from .repositories import TaskRepository
+from .workspace_operation_repository import (
+    REQUEST_TERMINAL_PHASES,
+    WorkspaceOperationRepository,
+)
 
 RECREATABLE_STATUSES = {
     WorkspaceStatus.RUNNING,
     WorkspaceStatus.STOPPED,
     WorkspaceStatus.FAILED,
 }
-OPERATION_BY_REASON = {
-    WorkspaceRecreateRequest.Reason.CAPTURE: "capturing_image",
-    WorkspaceRecreateRequest.Reason.RESET: "resetting",
-    WorkspaceRecreateRequest.Reason.UPDATE: "updating",
-}
 
 
 class RecreateRepository:
     """Own recreate reservations, child allocation and phase progression."""
-
-    @staticmethod
-    def live(workspace_id: uuid.UUID | str) -> WorkspaceRecreateRequest | None:
-        """The unfinished recreate request of a workspace, if any."""
-        return (
-            WorkspaceRecreateRequest.objects.filter(workspace_id=workspace_id)
-            .exclude(phase__in=TERMINAL_PHASES)
-            .first()
-        )
-
-    @staticmethod
-    def active(workspace_id: uuid.UUID | str) -> bool:
-        """Whether a recreate still owns the workspace between children."""
-        return RecreateRepository.live(workspace_id) is not None
-
-    @staticmethod
-    def operation(workspace_id: uuid.UUID | str, fallback: str | None) -> str | None:
-        """Project the whole recreate as one operation, keeping interventions."""
-        request = RecreateRepository.live(workspace_id)
-        if request is None:
-            return fallback
-        if LifecycleCommand.objects.filter(
-            task__workspace_id=workspace_id,
-            task_id=Workspace.objects.filter(pk=workspace_id).values("current_task_id")[
-                :1
-            ],
-            phase="intervention",
-        ).exists():
-            return None
-        return OPERATION_BY_REASON[request.reason]
-
-    @staticmethod
-    def owns(task: Task) -> bool:
-        """Whether a task is the current child of an unfinished recreate."""
-        return (
-            WorkspaceRecreateRequest.objects.filter(child=task)
-            .exclude(phase__in=TERMINAL_PHASES)
-            .exists()
-        )
 
     @staticmethod
     def allocate(
@@ -142,13 +102,11 @@ class RecreateRepository:
             raise ConflictError(
                 "Only running, stopped or failed workspaces can be reset"
             )
-        from .capture_repository import CaptureRepository
-
         if (
             ws.active_operation
             or ws.current_task_id
-            or CaptureRepository.active(ws.id)
-            or RecreateRepository.active(ws.id)
+            or WorkspaceOperationRepository.capture_active(ws.id)
+            or WorkspaceOperationRepository.recreate_active(ws.id)
         ):
             raise ConflictError("Workspace has an unresolved lifecycle operation")
         if Task.objects.filter(
@@ -270,7 +228,7 @@ class RecreateRepository:
         """Allocate the next child after terminal evidence of the previous one."""
         ids = list(
             WorkspaceRecreateRequest.objects.exclude(
-                phase__in=TERMINAL_PHASES
+                phase__in=REQUEST_TERMINAL_PHASES
             ).values_list("id", flat=True)
         )
         finished = []
@@ -298,7 +256,7 @@ class RecreateRepository:
             request = WorkspaceRecreateRequest.objects.select_for_update(
                 of=("self",)
             ).get(pk=request_id)
-            if request.phase in TERMINAL_PHASES:
+            if request.phase in REQUEST_TERMINAL_PHASES:
                 return None
             ws = (
                 Workspace.objects.select_for_update(of=("self",))

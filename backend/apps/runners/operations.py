@@ -11,6 +11,10 @@ from common.exceptions import ConflictError
 
 from .locking import lock_runner
 from .models import LifecycleCommand, Runner, Task, Workspace
+from .workspace_operation_repository import (
+    OPERATION_BY_REASON,
+    WorkspaceOperationRepository,
+)
 
 LIFECYCLE_TYPES = {
     "create_workspace",
@@ -51,17 +55,10 @@ class OperationRepository:
             ws = Workspace.objects.select_for_update().get(pk=task.workspace_id)
             if ws.current_task_id and ws.current_task_id != task.id:
                 raise ConflictError("Workspace has an unresolved lifecycle operation")
-            from .models import CaptureRequest
-            from .recreate_repository import OPERATION_BY_REASON, RecreateRepository
-
-            capture = (
-                CaptureRequest.objects.filter(workspace=ws)
-                .exclude(phase__in=["completed", "failed"])
-                .first()
-            )
+            capture = WorkspaceOperationRepository.live_capture(ws.id)
             if capture and capture.id != capture_request_id:
                 raise ConflictError("Workspace is capturing image")
-            recreate = RecreateRepository.live(ws.id)
+            recreate = WorkspaceOperationRepository.live_recreate(ws.id)
             if recreate and recreate.id != recreate_request_id:
                 raise ConflictError("Workspace is being reset")
             ws.current_task_id = task.id

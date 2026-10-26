@@ -21,6 +21,7 @@ from .models import (
 from .operations import OperationRepository
 from .phase_children import fence_unknown_child
 from .repositories import TaskRepository, WorkspaceProcessRepository
+from .workspace_operation_repository import WorkspaceOperationRepository
 
 MAX_MESSAGE_LENGTH = 500
 
@@ -64,9 +65,7 @@ class CaptureRepository:
             if (
                 ws.active_operation
                 or ws.current_task_id
-                or CaptureRequest.objects.filter(workspace=ws)
-                .exclude(phase__in=["completed", "failed"])
-                .exists()
+                or WorkspaceOperationRepository.capture_active(ws.id)
             ):
                 raise ConflictError(
                     "Workspace has an unresolved capture/lifecycle operation"
@@ -210,30 +209,6 @@ class CaptureRepository:
                 )
 
         return finished
-
-    @staticmethod
-    def active(workspace_id: uuid.UUID | str) -> bool:
-        """Whether a durable capture still owns the workspace between children."""
-        return (
-            CaptureRequest.objects.filter(workspace_id=workspace_id)
-            .exclude(phase__in=["completed", "failed"])
-            .exists()
-        )
-
-    @staticmethod
-    def operation(workspace_id: uuid.UUID | str, fallback: str | None) -> str | None:
-        """Project the whole operation, retaining explicit intervention semantics."""
-        if not CaptureRepository.active(workspace_id):
-            return fallback
-        if LifecycleCommand.objects.filter(
-            task__workspace_id=workspace_id,
-            task_id=Workspace.objects.filter(pk=workspace_id).values("current_task_id")[
-                :1
-            ],
-            phase="intervention",
-        ).exists():
-            return None
-        return "capturing_image"
 
     @staticmethod
     def advance(request_id: uuid.UUID) -> dict | None:

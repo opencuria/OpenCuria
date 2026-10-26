@@ -57,6 +57,8 @@ deletion workflows. InventoryInspectionService composes their read models and
 queries only through repositories, including fully loaded inventory records.
 Runner service domains and infrastructure never import their composition facade;
 shared RPC correlation records belong to the infrastructure that consumes them.
+Workspace reservation reads and task admission never import capture/recreate
+coordinators. Their shared read boundary is WorkspaceOperationRepository.
 """
 
 from __future__ import annotations
@@ -813,6 +815,44 @@ def test_storage_inspection_queries_only_through_repositories() -> None:
     assert violations == [], (
         "Materialize storage inspection inputs in repositories, then compose "
         "their user-visible state in services:\n" + "\n".join(violations)
+    )
+
+
+def test_workspace_operation_reads_never_import_phase_coordinators() -> None:
+    """Reading reservations and admitting tasks must not load phase progression."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    modules = {_module_name(path): path for path in trees}
+    roots = {
+        "apps.runners.workspace_operation_repository",
+        "apps.runners.repositories",
+        "apps.runners.operations",
+    }
+    coordinators = {
+        "apps.runners.capture_repository",
+        "apps.runners.recreate_repository",
+        "apps.runners.phase_children",
+    }
+    assert roots <= modules.keys()
+    pending = set(roots)
+    checked: set[str] = set()
+    violations = set()
+    while pending:
+        module = pending.pop()
+        checked.add(module)
+        path = modules[module]
+        for imported in _imported_modules(path, trees[path]):
+            if any(
+                imported == owner or imported.startswith(f"{owner}.")
+                for owner in coordinators
+            ):
+                violations.add(f"{module} -> {imported}")
+            elif imported in modules and imported not in checked:
+                pending.add(imported)
+    assert violations == set(), (
+        "Read durable reservations through WorkspaceOperationRepository; "
+        "task admission and status projection must not import capture/recreate "
+        "phase progression, even transitively or inside functions:\n"
+        + "\n".join(sorted(violations))
     )
 
 

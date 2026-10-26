@@ -17,6 +17,7 @@ from asgiref.sync import async_to_sync, sync_to_async
 from django.db import transaction
 
 from ...enums import WorkspaceStatus
+from ...workspace_operation_repository import WorkspaceOperationRepository
 from . import realtime
 
 logger = logging.getLogger(__name__)
@@ -173,10 +174,8 @@ class FrontendBusMixin:
         self, workspace_id: str, active_operation: str | None
     ) -> dict:
         """Read the committed operation and lifecycle projection synchronously."""
-        from ...operation_projection import project_workspace_operation
-
         workspace = self.workspaces.get_by_id(workspace_id)
-        operation = project_workspace_operation(workspace_id, active_operation)
+        operation = WorkspaceOperationRepository.project(workspace_id, active_operation)
         payload = {"workspace_id": workspace_id, "active_operation": operation}
         if workspace is not None:
             payload.update(
