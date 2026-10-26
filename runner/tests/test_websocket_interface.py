@@ -140,41 +140,6 @@ class WebSocketHandlerRegistrationTests(unittest.IsolatedAsyncioTestCase):
         }.isdisjoint(interface._sio.handlers["/"])
 
 
-class WebSocketVmMetricsPayloadTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.interface = WebSocketInterface(
-            DummyService(), RunnerSettings(state_dir=tempfile.mkdtemp())
-        )
-
-    def test_forwards_guest_disk_counters_when_reported(self) -> None:
-        payload = self.interface._build_vm_metrics_payload(
-            {
-                "ws-1": {
-                    "cpu_time_ns": 0,
-                    "vcpu_count": 2,
-                    "disk_used_bytes": 3,
-                    "disk_total_bytes": 4,
-                    "guest_disk_used_bytes": 10,
-                    "guest_disk_free_bytes": 20,
-                    "guest_disk_total_bytes": 31,
-                }
-            }
-        )
-
-        assert payload["ws-1"]["guest_disk_used_bytes"] == 10
-        assert payload["ws-1"]["guest_disk_free_bytes"] == 20
-        assert payload["ws-1"]["guest_disk_total_bytes"] == 31
-        assert payload["ws-1"]["disk_used_bytes"] == 3
-
-    def test_omits_guest_disk_counters_when_guest_did_not_answer(self) -> None:
-        payload = self.interface._build_vm_metrics_payload(
-            {"ws-1": {"disk_used_bytes": 3, "disk_total_bytes": 0}}
-        )
-
-        assert "guest_disk_used_bytes" not in payload["ws-1"]
-        assert payload["ws-1"]["disk_used_bytes"] == 3
-
-
 class WebSocketReconnectTests(unittest.IsolatedAsyncioTestCase):
     async def test_reconnect_loop_survives_handshake_timeouts(self) -> None:
         """A hanging backend must not kill the reconnect loop (and the runner)."""
@@ -202,7 +167,7 @@ class WebSocketReconnectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempts, 3)
 
 
-class WebSocketMetricsPathTests(unittest.TestCase):
+class WebSocketTransportSettingsTests(unittest.TestCase):
     def test_socketio_client_raises_http_buffer_size(self) -> None:
         """aiohttp inbound WS messages must accept 200 MiB like the backend."""
         interface = WebSocketInterface(
@@ -213,38 +178,6 @@ class WebSocketMetricsPathTests(unittest.TestCase):
             interface._sio.eio.websocket_extra_options["max_msg_size"],
             SOCKETIO_MAX_HTTP_BUFFER_SIZE,
         )
-
-    def test_storage_root_defaults_to_var_lib_opencuria(self) -> None:
-        settings = RunnerSettings(
-            state_dir=tempfile.mkdtemp(),
-            qemu_image_cache_dir="/var/lib/opencuria/images",
-            qemu_disk_dir="/var/lib/opencuria/disks",
-            qemu_snapshot_dir="/var/lib/opencuria/snapshots",
-        )
-        interface = WebSocketInterface(DummyService(), settings)
-        self.assertEqual(
-            interface._storage_root_path().as_posix(), "/var/lib/opencuria"
-        )
-
-    def test_storage_root_respects_custom_common_base(self) -> None:
-        settings = RunnerSettings(
-            state_dir=tempfile.mkdtemp(),
-            qemu_image_cache_dir="/mnt/kern-store/images",
-            qemu_disk_dir="/mnt/kern-store/disks",
-            qemu_snapshot_dir="/mnt/kern-store/snapshots",
-        )
-        interface = WebSocketInterface(DummyService(), settings)
-        self.assertEqual(interface._storage_root_path().as_posix(), "/mnt/kern-store")
-
-    def test_resolve_disk_usage_path_falls_back_to_existing_parent(self) -> None:
-        settings = RunnerSettings(
-            state_dir=tempfile.mkdtemp(),
-            qemu_image_cache_dir="/tmp/runner-metrics-test/images",
-            qemu_disk_dir="/tmp/runner-metrics-test/disks",
-            qemu_snapshot_dir="/tmp/runner-metrics-test/snapshots",
-        )
-        interface = WebSocketInterface(DummyService(), settings)
-        self.assertEqual(interface._resolve_disk_usage_path(), "/tmp")
 
 
 @pytest.mark.asyncio

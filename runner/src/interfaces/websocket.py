@@ -15,15 +15,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import os
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime
 
 import aiohttp
-import psutil
 import socketio
 import structlog
 
@@ -32,6 +29,7 @@ from ..git import GIT_OPERATIONS, git_timeout_for
 from ..runtime.artifacts import ArtifactRequestError
 from ..service import WorkspaceService
 from ..services.capture_fence import CaptureFence, live_interaction
+from ..services.system_metrics import SystemMetricsCollector
 from .base import Interface
 
 logger = structlog.get_logger(__name__)
@@ -41,13 +39,6 @@ logger = structlog.get_logger(__name__)
 # max_http_buffer_size). aiohttp's 4 MiB default would drop inbound
 # workspace file payloads.
 SOCKETIO_MAX_HTTP_BUFFER_SIZE = 200 * 1024 * 1024
-
-# Optional per-VM guest filesystem counters forwarded with system metrics.
-_GUEST_DISK_METRIC_KEYS = (
-    "guest_disk_used_bytes",
-    "guest_disk_free_bytes",
-    "guest_disk_total_bytes",
-)
 
 
 class _ReconnectingAsyncClient(socketio.AsyncClient):
@@ -114,8 +105,7 @@ class WebSocketInterface(Interface):
         self._heartbeat_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._metrics_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._health_check_task: asyncio.Task | None = None  # type: ignore[type-arg]
-        self._vm_cpu_samples: dict[str, tuple[int, float, int]] = {}
-        self._disk_usage_path = self._resolve_disk_usage_path()
+        self._system_metrics = SystemMetricsCollector(settings)
         self._desktop_proxy_tunnels: dict[str, DesktopProxyTunnel] = {}
         # Bounded reassembly for chunked frontend→runner uploads.
         # Keyed by request_id; entries expire and are dropped on disconnect
@@ -731,85 +721,9 @@ class WebSocketInterface(Interface):
 
     # -- system metrics loop ---------------------------------------------------
 
-    def _compute_vm_cpu_percent(
-        self, workspace_id: str, cpu_time_ns: int, vcpu_count: int
-    ) -> float:
-        """Compute VM CPU utilisation percentage from cumulative CPU time."""
-        now = time.monotonic()
-        prev = self._vm_cpu_samples.get(workspace_id)
-        self._vm_cpu_samples[workspace_id] = (cpu_time_ns, now, max(vcpu_count, 1))
-        if prev is None:
-            return 0.0
-
-        prev_cpu_time_ns, prev_sample_ts, prev_vcpu_count = prev
-        elapsed_s = now - prev_sample_ts
-        if elapsed_s <= 0:
-            return 0.0
-
-        cpu_delta_ns = max(cpu_time_ns - prev_cpu_time_ns, 0)
-        capacity_ns = elapsed_s * max(prev_vcpu_count, 1) * 1_000_000_000
-        if capacity_ns <= 0:
-            return 0.0
-
-        cpu_percent = (cpu_delta_ns / capacity_ns) * 100
-        return round(max(0.0, min(cpu_percent, 100.0)), 1)
-
-    def _build_vm_metrics_payload(
-        self, raw_vm_metrics: dict[str, dict]
-    ) -> dict[str, dict[str, float | int]]:
-        """Normalise raw VM metrics for transport to backend/webapp."""
-        vm_metrics: dict[str, dict[str, float | int]] = {}
-        observed_workspace_ids = set(raw_vm_metrics.keys())
-
-        for workspace_id, metric in raw_vm_metrics.items():
-            cpu_time_ns = int(metric.get("cpu_time_ns", 0))
-            vcpu_count = int(metric.get("vcpu_count", 1))
-            vm_metrics[workspace_id] = {
-                "cpu_usage_percent": self._compute_vm_cpu_percent(
-                    workspace_id, cpu_time_ns, vcpu_count
-                ),
-                "ram_used_bytes": int(metric.get("ram_used_bytes", 0)),
-                "ram_total_bytes": int(metric.get("ram_total_bytes", 0)),
-                "disk_used_bytes": int(metric.get("disk_used_bytes", 0)),
-                "disk_total_bytes": int(metric.get("disk_total_bytes", 0)),
-            }
-            # Guest filesystem usage is only known while the guest answers.
-            for key in _GUEST_DISK_METRIC_KEYS:
-                if key in metric:
-                    vm_metrics[workspace_id][key] = int(metric[key])
-
-        # Remove stale CPU samples for VMs that no longer exist.
-        for workspace_id in list(self._vm_cpu_samples.keys()):
-            if workspace_id not in observed_workspace_ids:
-                self._vm_cpu_samples.pop(workspace_id, None)
-
-        return vm_metrics
-
-    def _storage_root_path(self) -> Path:
-        """Return the shared storage root for runner-managed QEMU artifacts."""
-        storage_dirs = [
-            self._settings.qemu_image_cache_dir,
-            self._settings.qemu_disk_dir,
-            self._settings.qemu_snapshot_dir,
-        ]
-        expanded = [str(Path(path).expanduser()) for path in storage_dirs if path]
-        if not expanded:
-            return Path("/")
-        return Path(os.path.commonpath(expanded))
-
-    def _resolve_disk_usage_path(self) -> str:
-        """Resolve an existing path on the filesystem used for runner storage."""
-        probe = self._storage_root_path()
-        while not probe.exists():
-            if probe.parent == probe:
-                return "/"
-            probe = probe.parent
-        return str(probe)
-
     async def _metrics_loop(self) -> None:
         """Collect host system metrics every 60 s and emit to backend."""
-        # Trigger the first psutil CPU sample so the 60-s average is meaningful
-        psutil.cpu_percent(interval=None)
+        self._system_metrics.prime_cpu_sample()
 
         while True:
             try:
@@ -817,29 +731,17 @@ class WebSocketInterface(Interface):
                 if not self._sio.connected:
                     continue
 
-                cpu = await asyncio.to_thread(psutil.cpu_percent, 1)
-                ram = psutil.virtual_memory()
-                disk = psutil.disk_usage(self._disk_usage_path)
-                raw_vm_metrics = await self._service.get_vm_metrics()
-                vm_metrics = self._build_vm_metrics_payload(raw_vm_metrics)
-
-                payload = {
-                    "timestamp": datetime.now(tz=timezone.utc).isoformat(),
-                    "cpu_usage_percent": cpu,
-                    "ram_used_bytes": ram.used,
-                    "ram_total_bytes": ram.total,
-                    "disk_used_bytes": disk.used,
-                    "disk_total_bytes": disk.total,
-                    "vm_metrics": vm_metrics,
-                }
+                payload = await self._system_metrics.collect(
+                    self._service.get_vm_metrics
+                )
                 await self._sio.emit("runner:system_metrics", payload)
                 logger.debug(
                     "system_metrics_sent",
-                    cpu=cpu,
-                    ram_used=ram.used,
-                    disk_used=disk.used,
-                    disk_path=self._disk_usage_path,
-                    vm_count=len(vm_metrics),
+                    cpu=payload["cpu_usage_percent"],
+                    ram_used=payload["ram_used_bytes"],
+                    disk_used=payload["disk_used_bytes"],
+                    disk_path=self._system_metrics.disk_usage_path,
+                    vm_count=len(payload["vm_metrics"]),
                 )
             except asyncio.CancelledError:
                 break
