@@ -151,7 +151,8 @@ QEMU publication converts into a unique same-directory temp, verifies standalone
 QCOW2 and integrity, fsyncs, publishes exclusively, and writes an exclusive fsynced
 manifest with digest/identity. Interrupted files remain unknown, not auto-removed.
 Publication/checkpoint evidence can recover exact terminal success; otherwise
-intervention preserves resources. Legacy metadata is read without rewriting.
+intervention preserves resources. Image artifacts use only JSON publication
+manifests; files without a manifest remain unknown.
 Cold cloud-image downloads validate/fsync before publishing the cache entry.
 
 External writers do not obey the process-local storage lock; this is not a

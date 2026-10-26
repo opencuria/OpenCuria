@@ -7,7 +7,7 @@ import pytest
 from django.utils import timezone
 
 from apps.runners.inventory_repository import InventoryRepository
-from apps.runners.models import InventoryEdge, InventorySnapshot, Runner, Workspace
+from apps.runners.models import InventoryEdge, InventorySnapshot
 from apps.runners.services.inventory_inspection import InventoryInspectionService
 from apps.runners.tests.conftest import capture_version_fields
 
@@ -474,62 +474,6 @@ def test_legacy_shared_physical_alias_is_unverified_not_missing(runner):
         InventoryInspectionService.inspect(runner)["generations"][0]["observed_state"]
         == "unknown"
     )
-
-
-@pytest.mark.parametrize("same_runner", [True, False])
-def test_legacy_capture_snapshot_alias_joins_only_its_runner(
-    runner: Runner,
-    offline_runner: Runner,
-    workspace: Workspace,
-    same_runner: bool,
-) -> None:
-    from apps.runners.models import ImageInstance, InventoryResource
-
-    snapshot_id = str(uuid.uuid4())
-    physical = f"/var/lib/opencuria/snapshots/{snapshot_id}.qcow2"
-    image = ImageInstance.objects.create(
-        runner=runner if same_runner else offline_runner,
-        name="Legacy capture",
-        origin_type="workspace_capture",
-        origin_workspace=workspace,
-        is_legacy=True,
-        runner_ref=snapshot_id,
-        status="ready",
-    )
-    assert str(image.id) != snapshot_id
-    payload = scan(
-        resources=[
-            {
-                "resource_id": physical,
-                "aliases": [physical, snapshot_id],
-                "kind": "image",
-                "managed": True,
-                "state": "legacy",
-            },
-            {
-                "resource_id": "domain",
-                "kind": "workspace",
-                "managed": True,
-                "metadata": {"workspace_id": str(workspace.id)},
-                "dependencies": [physical],
-            },
-        ]
-    )
-    assert not InventoryRepository.record(str(runner.id), "old-session", payload)
-    assert InventoryRepository.record(str(runner.id), runner.sid, payload)
-    observed = InventoryResource.objects.get(
-        physical_id=physical
-    )
-    workspace.refresh_from_db()
-    if same_runner:
-        assert observed.image_id == image.id
-        assert workspace.base_image_instance_id == image.id
-        generation = InventoryInspectionService.inspect(runner)["generations"][0]
-        assert generation["observed_state"] == "legacy"
-        assert generation["dependencies"][0]["id"] == str(workspace.id)
-    else:
-        assert observed.image_id is None
-        assert workspace.base_image_instance_id is None
 
 
 @pytest.mark.parametrize("operation_matches", [False, True])

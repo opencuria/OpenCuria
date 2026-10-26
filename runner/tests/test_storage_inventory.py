@@ -56,9 +56,8 @@ def qcow(path, backing=None):
 @pytest.mark.asyncio
 async def test_capture_self_contained_stopped_scrubbed_and_exclusive(tmp_path):
     r = runtime(tmp_path)
-    source = r._snapshot_dir / "legacy.qcow2"
+    source = r._snapshot_dir / "source.qcow2"
     qcow(source)
-    source.with_suffix(".meta").write_text("snapshot_id=legacy\n")
     disk = r._disk_dir / "workspace.qcow2"
     qcow(disk, source)
     domain = MagicMock()
@@ -101,6 +100,10 @@ async def test_capture_self_contained_stopped_scrubbed_and_exclusive(tmp_path):
     published = next(item for item in scan.resources if item.resource_id == str(target))
     assert published.state == "ready"
     assert published.metadata["name"] == artifact.name
+    await r.delete_image_artifact(image_id)
+    assert not target.exists()
+    assert not target.with_suffix(".manifest.json").exists()
+    await r.delete_image_artifact(image_id)
 
 
 @pytest.mark.asyncio
@@ -108,10 +111,8 @@ async def test_capture_descendant_and_unreadable_scan_block_delete(tmp_path):
     r = runtime(tmp_path)
     source = r._snapshot_dir / "parent.qcow2"
     qcow(source)
-    source.with_suffix(".meta").write_text("snapshot_id=parent")
     child = r._snapshot_dir / "child.qcow2"
     qcow(child, source)
-    child.with_suffix(".meta").write_text("snapshot_id=child")
     with pytest.raises(RuntimeError, match="dependents"):
         await r.delete_image_artifact("parent")
     child.unlink()
@@ -700,61 +701,27 @@ async def test_cached_publication_foreign_overwrite_cannot_be_deleted(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_legacy_base_and_old_meta_keep_physical_backing_identity(tmp_path):
+async def test_unpublished_images_keep_physical_dependencies_but_cannot_be_used(tmp_path):
     r = runtime(tmp_path)
-    base = tmp_path / "images" / "legacy.qcow2"
+    base = tmp_path / "images" / "base.qcow2"
     qcow(base)
-    child = r._snapshot_dir / "old-capture.qcow2"
+    child = r._snapshot_dir / "unpublished.qcow2"
     qcow(child, base)
-    child.with_suffix(".meta").write_text("snapshot_id=old-capture\n")
+    child.with_suffix(".meta").write_text("snapshot_id=unpublished\n")
     scan = await r.inventory()
     assert scan.complete
     resources = {item.resource_id: item for item in scan.resources}
-    assert resources[str(base)].kind == "disk"
-    assert resources[str(base)].state == "unknown"
-    assert str(base) in resources[str(base)].aliases
-    assert resources[str(child)].kind == "image"
-    assert resources[str(child)].state == "legacy"
-    assert resources[str(child)].aliases == [str(child), "old-capture"]
+    for path in (base, child):
+        assert resources[str(path)].kind == "disk"
+        assert resources[str(path)].state == "unknown"
+        assert resources[str(path)].aliases == [str(path)]
     assert resources[str(child)].dependencies == [str(base)]
-    assert not resources[str(base)].metadata.get("artifact_id")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("marker", ["matching", "mismatched", "missing", "symlink"])
-async def test_legacy_snapshot_alias_requires_exact_managed_marker(
-    tmp_path: Path, marker: str
-) -> None:
-    r = runtime(tmp_path)
-    snapshot_id = str(uuid.uuid4())
-    image = r._snapshot_dir / f"{snapshot_id}.qcow2"
-    qcow(image)
-    meta_path = image.with_suffix(".meta")
-    if marker == "symlink":
-        foreign_marker = tmp_path / "foreign.meta"
-        foreign_marker.write_text(f"snapshot_id={snapshot_id}\n")
-        meta_path.symlink_to(foreign_marker)
-    elif marker != "missing":
-        recorded_id = snapshot_id if marker == "matching" else str(uuid.uuid4())
-        meta_path.write_text(f"snapshot_id={recorded_id}\nname=Legacy capture\n")
-
-    # A copied marker in another storage directory cannot claim the snapshot ID.
-    copy = tmp_path / "images" / image.name
-    qcow(copy)
-    copy.with_suffix(".meta").write_text(f"snapshot_id={snapshot_id}\n")
-    disk = r._disk_dir / "workspace.qcow2"
-    qcow(disk, image)
-
-    scan = await r.inventory()
-    resources = {item.resource_id: item for item in scan.resources}
-    assert scan.complete is (marker != "symlink")
-    assert (snapshot_id in resources[str(image)].aliases) is (marker == "matching")
-    assert snapshot_id not in resources[str(copy)].aliases
-    assert "artifact_id" not in resources[str(image)].metadata
-    assert resources[str(disk)].dependencies == [str(image)]
-    with pytest.raises(RuntimeError, match="Incomplete|dependents"):
-        await r.delete_image_artifact(snapshot_id)
-    assert image.exists()
+    with pytest.raises(RuntimeError, match="Unknown image"):
+        await r.delete_image_artifact("unpublished")
+    with pytest.raises(RuntimeError, match="published image manifest"):
+        await r.create_workspace_from_image_artifact("unpublished", "clone")
+    assert not r._disk_path("clone").exists()
+    assert child.exists()
 
 
 def cloud_init_domain(r, workspace_id, disk):

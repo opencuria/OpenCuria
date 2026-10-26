@@ -2353,21 +2353,6 @@ class QemuRuntime(RuntimeBackend):
                     resource.metadata = {**manifest, **resource.metadata}
                     resource.state = "ready"
                     resource.kind = "image"
-                elif path.with_suffix(".meta").exists():
-                    resource.state = "legacy"
-                    resource.kind = "image"
-                    legacy = await asyncio.to_thread(
-                        self._read_legacy_image_metadata, path.with_suffix(".meta")
-                    )
-                    snapshot_id = legacy.get("snapshot_id", "")
-                    # Legacy captures use a snapshot ID distinct from the DB image ID.
-                    # Only its exact managed filename proves that reference alias.
-                    if (
-                        path.parent == self._snapshot_dir.absolute()
-                        and snapshot_id == path.stem
-                        and re.fullmatch(r"[A-Za-z0-9_-]+", snapshot_id)
-                    ):
-                        resource.aliases.append(snapshot_id)
                 elif path.suffix == ".iso":
                     # Directory placement or an arbitrary managed-domain reference
                     # is not ownership. Only the exact workspace's seed path is.
@@ -2545,28 +2530,14 @@ class QemuRuntime(RuntimeBackend):
                 )
             )
         resource = next((r for r in scan.resources if r.resource_id == key), None)
-        if resource and resource.state not in {"ready", "legacy"}:
+        if resource and resource.state != "ready":
             raise RuntimeError("Unknown image cannot be deleted")
         if target.exists():
             target.unlink()
-        for suffix in (".manifest.json", ".meta"):
-            target.with_suffix(suffix).unlink(missing_ok=True)
-        if target.exists() or any(
-            target.with_suffix(s).exists() for s in (".manifest.json", ".meta")
-        ):
+        marker = target.with_suffix(".manifest.json")
+        marker.unlink(missing_ok=True)
+        if target.exists() or marker.exists():
             raise RuntimeError("Image deletion incomplete")
-
-    @staticmethod
-    def _read_legacy_image_metadata(path: Path) -> dict[str, str]:
-        """Read a legacy capture marker without following a marker symlink."""
-        if path.is_symlink():
-            raise ValueError("Symlink image marker refused")
-        metadata: dict[str, str] = {}
-        for line in path.read_text().splitlines():
-            key, separator, value = line.partition("=")
-            if separator and key.strip():
-                metadata[key.strip()] = value.strip()
-        return metadata
 
     @storage_mutation
     async def create_workspace_from_image_artifact(
@@ -2583,15 +2554,12 @@ class QemuRuntime(RuntimeBackend):
         Creates a new QCOW2 overlay backed by the artifact image
         and starts a new VM.
         """
-        snapshot_path = self._resolve_image_artifact_path(artifact_id)
+        snapshot_path = self._managed_image_path(artifact_id)
         if not snapshot_path.exists():
             raise RuntimeError(f"Image artifact {artifact_id} not found")
 
-        if not (
-            snapshot_path.with_suffix(".manifest.json").exists()
-            or snapshot_path.with_suffix(".meta").exists()
-        ):
-            raise RuntimeError("Clone requires published or legacy image metadata")
+        if not snapshot_path.with_suffix(".manifest.json").exists():
+            raise RuntimeError("Clone requires a published image manifest")
         # Failed clones remain as observed owned disks for intervention, not deleted
         # while a partially defined domain might still reference them.
         # Create overlay backed by the snapshot
@@ -2666,7 +2634,3 @@ class QemuRuntime(RuntimeBackend):
             new_instance_id=new_instance_id,
         )
         return new_instance_id
-
-    def _resolve_image_artifact_path(self, artifact_id: str) -> Path:
-        """Resolve a clone source from either a snapshot id or a built image path."""
-        return self._managed_image_path(artifact_id)

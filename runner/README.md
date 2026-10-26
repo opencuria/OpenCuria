@@ -36,6 +36,11 @@ QEMU images are built from image definitions and build jobs in the app. The
 backend generates the init script; the runner builds the QCOW2 image from an
 Ubuntu cloud image.
 
+Built and captured images use `.manifest.json` publication markers. Inventory
+only classifies images with verified manifests as ready; cloning requires a
+manifest. Unpublished disks remain visible with their physical dependencies
+and cannot be deleted as image artifacts.
+
 Each newly provisioned VM gets a fresh
 [cloud-init instance ID](https://docs.cloud-init.io/en/26.1/reference/datasources/nocloud.html#example-creating-a-disk)
 in its seed ISO, independent of the stable workspace ID. This makes reset, update, and cloning
