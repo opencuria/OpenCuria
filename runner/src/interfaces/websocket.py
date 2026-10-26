@@ -1056,7 +1056,7 @@ class WebSocketInterface(Interface):
             *, request_id: str, workspace_id: str, path: str
         ) -> tuple[str, str]:
             """Validate request/workspace/path for an upload start chunk."""
-            from ..services.exec_kernel import sanitize_path as _sanitize_path
+            from ..services.workspace_helpers import sanitize_path as _sanitize_path
 
             if not request_id or not isinstance(request_id, str):
                 raise ValueError("request_id must not be empty")
@@ -3134,7 +3134,7 @@ class WebSocketInterface(Interface):
                     is_directory = bool(data.get("is_directory", False))
                 except (TypeError, ValueError) as exc:
                     raise ValueError("invalid upload fields") from exc
-                from ..services.exec_kernel import (
+                from ..services.workspace_helpers import (
                     sanitize_filename as _sanitize_filename,
                 )
 

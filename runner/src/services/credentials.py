@@ -1,8 +1,7 @@
 """Manage persistent workspace credentials and their guest path constants.
 
-The execution kernel and file manager provide the shared shell-path and
-archive helpers. This module depends on them without importing
-``src.service``.
+Workspace helpers and the file manager provide shell-path and archive helpers
+without importing ``src.service``.
 """
 
 from __future__ import annotations
@@ -13,8 +12,8 @@ from typing import Any
 import structlog
 
 from ..runtime.base import RuntimeBackend
-from .exec_kernel import credential_path_helpers as _credential_path_helpers
 from .files import build_tar_entries as _build_tar_entries_impl
+from .workspace_helpers import credential_path_helpers as _credential_path_helpers
 
 logger = structlog.get_logger(__name__)
 

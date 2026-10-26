@@ -1,8 +1,8 @@
 """Workspace lifecycle orchestration across runtime and session managers.
 
 The lifecycle owns workspace transitions and coordinates the injected
-runtime, credential, exec, background, stream, and desktop managers.
-Checkpoint and scrub-proof hooks connect lifecycle transitions to the
+runtime, credential, background, stream, and desktop managers, plus harness
+execution. Checkpoint and scrub-proof hooks connect lifecycle transitions to the
 websocket's durable workspace state.
 """
 
@@ -12,6 +12,7 @@ import asyncio
 import inspect
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any
 
@@ -62,7 +63,9 @@ class WorkspaceLifecycle:
         settings: Any | None = None,
         runtime: RuntimeBackend | None = None,
         credentials: Any | None = None,
-        exec_kernel: Any | None = None,
+        exec_harness_command: (
+            Callable[[uuid.UUID, list[str]], Awaitable[tuple[int, str, str]]] | None
+        ) = None,
         background: Any | None = None,
         streams: Any | None = None,
         desktop: Any | None = None,
@@ -74,7 +77,7 @@ class WorkspaceLifecycle:
         self._settings = settings
         self._runtime = runtime
         self._credentials = credentials
-        self._exec_kernel = exec_kernel
+        self._exec_harness_command = exec_harness_command
         self._background = background
         self._streams = streams
         self._desktop = desktop
@@ -227,18 +230,11 @@ class WorkspaceLifecycle:
 
         for repo_url in repos:
             log.info("cloning_repo", repo=repo_url)
-            exit_code, output = await self._exec_kernel.exec_command(
-                runtime,
-                instance_id,
-                {
-                    "args": ["git", "clone", repo_url],
-                    "workdir": "/workspace",
-                    "env": {},
-                    "description": f"Clone repository: {repo_url}",
-                },
+            exit_code, stdout, stderr = await self._exec_harness_command(
+                workspace_id, ["git", "clone", repo_url]
             )
             if exit_code != 0:
-                log.warning("repo_clone_failed", repo=repo_url, output=output)
+                log.warning("repo_clone_failed", repo=repo_url, output=stdout + stderr)
             else:
                 log.info("repo_cloned", repo=repo_url)
 

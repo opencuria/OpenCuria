@@ -1,9 +1,14 @@
+import asyncio
 import io
+import os
+import shlex
 import tarfile
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from src.config import RunnerSettings
+from src.runtime.base import WorkspaceConfig
 from src.service import WorkspaceService
 from src.services.credentials import (
     WORKSPACE_CREDENTIAL_DIR,
@@ -27,22 +32,65 @@ def test_convert_archive_to_tar_rejects_links(link_type: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_workspace_injects_credentials_and_leaves_them() -> None:
-    class DummyRuntime:
-        def __init__(self):
-            self.exec_command_wait = AsyncMock(return_value=(0, ""))
-            self.put_archive = AsyncMock()
+@pytest.mark.parametrize("clone_exit_code", [0, 7])
+async def test_create_workspace_clones_with_persistent_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clone_exit_code: int
+) -> None:
+    env_path = tmp_path / "env.sh"
+    clone_args = tmp_path / "clone-args"
+    git = tmp_path / "git"
+    git.write_text(
+        "#!/bin/sh\n"
+        'test "$GITHUB_TOKEN" = secret || exit 99\n'
+        f'printf "%s\\n" "$@" >> {shlex.quote(str(clone_args))}\n'
+        "echo clone-output\n"
+        "echo clone-error >&2\n"
+        f"exit {clone_exit_code}\n"
+    )
+    git.chmod(0o700)
 
-        async def create_workspace(self, config):
+    async def execute(
+        instance_id: str,
+        command: list[str],
+        workdir: str,
+        env: dict[str, str] | None = None,
+    ) -> tuple[int, str]:
+        if "OPENCURIA_STDOUT" not in command[-1]:
+            return 0, ""
+        assert (instance_id, workdir) == ("instance-1", "/workspace")
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=tmp_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        output, _ = await process.communicate()
+        assert process.returncode is not None
+        return process.returncode, output.decode()
+
+    async def put_archive(instance_id: str, path: str, content: bytes) -> None:
+        with tarfile.open(fileobj=io.BytesIO(content)) as archive:
+            env_path.write_bytes(archive.extractfile("env.sh").read())
+
+    class DummyRuntime:
+        def __init__(self) -> None:
+            self.exec_command_wait = AsyncMock(side_effect=execute)
+            self.put_archive = AsyncMock(side_effect=put_archive)
+
+        async def create_workspace(self, config: WorkspaceConfig) -> str:
             return "instance-1"
 
     runtime = DummyRuntime()
     service = WorkspaceService(runtime, RunnerSettings())
-    service.exec_kernel.exec_command = AsyncMock(side_effect=[(0, "")])
+    service.harness._credential_env_file = str(env_path)
+    log = Mock()
+    log.bind.return_value = log
+    monkeypatch.setattr("src.services.workspace_lifecycle.logger", log)
+    repos = ["repo 'name'; touch injected", "another-repo"]
 
     workspace_id, credentials_present = await service.create_workspace(
-        repos=["git@github.com:example/private-repo.git"],
-        env_vars={"GITHUB_TOKEN": "secret"},
+        repos=repos,
+        env_vars={"GITHUB_TOKEN": "secret", "PATH": f"{tmp_path}:{os.defpath}"},
         ssh_keys=[
             "-----BEGIN OPENSSH PRIVATE KEY-----\nmock\n-----END OPENSSH PRIVATE KEY-----"
         ],
@@ -58,15 +106,12 @@ async def test_create_workspace_injects_credentials_and_leaves_them() -> None:
         ssh_key = archive.extractfile("ssh/id_ed25519").read().decode("utf-8")
     assert "GITHUB_TOKEN=secret" in env_file
     assert "mock" in ssh_key
-    assert service.exec_kernel.exec_command.await_count == 1
-    clone_call = service.exec_kernel.exec_command.await_args_list[0]
-    assert "credential_context" not in clone_call.kwargs
-    assert clone_call.args[2]["args"] == [
-        "git",
-        "clone",
-        "git@github.com:example/private-repo.git",
-    ]
-    assert str(workspace_id)
+    assert clone_args.read_text().splitlines() == ["clone", repos[0], "clone", repos[1]]
+    assert not (tmp_path / "injected").exists()
+    assert service.registry.get_cached(workspace_id).status == "running"
+    assert log.warning.call_count == (len(repos) if clone_exit_code else 0)
+    if clone_exit_code:
+        assert log.warning.call_args.kwargs["output"] == "clone-output\nclone-error\n"
 
 
 @pytest.mark.asyncio
@@ -190,14 +235,3 @@ async def test_start_terminal_sources_persistent_env() -> None:
     assert command[0] == "/bin/bash"
     assert WORKSPACE_CREDENTIAL_ENV_FILE in command[2]
     assert "TERM" in call.kwargs["env"]
-
-
-def test_wrap_command_sources_persistent_env() -> None:
-    service = WorkspaceService({}, RunnerSettings())
-    wrapped = service.exec_kernel.wrap_command_with_persistent_env(
-        {"args": ["git", "clone", "repo"], "env": {"EXTRA": "1"}}
-    )
-    assert wrapped["args"][0] == "bash"
-    snippet = wrapped["args"][2]
-    assert WORKSPACE_CREDENTIAL_ENV_FILE in snippet
-    assert "EXTRA" in snippet

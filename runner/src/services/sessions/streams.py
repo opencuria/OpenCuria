@@ -21,7 +21,7 @@ import structlog
 from ...models import WorkspaceInfo
 from ...runtime.base import ProcessHandle, RuntimeBackend
 from ..capture_fence import CaptureFence, live_interaction
-from ..exec_kernel import sanitize_exec_workdir
+from ..workspace_helpers import sanitize_exec_workdir
 from .stream_intents import StreamIntentStore
 
 logger = structlog.get_logger(__name__)

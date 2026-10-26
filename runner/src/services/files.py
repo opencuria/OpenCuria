@@ -22,8 +22,8 @@ from ..models import WorkspaceInfo
 from ..runtime.base import RuntimeBackend
 from .capture_fence import CaptureFence, live_interaction
 from .directory_archive import DIRECTORY_ARCHIVE_TOO_LARGE, directory_archive_command
-from .exec_kernel import sanitize_filename as _sanitize_filename
-from .exec_kernel import sanitize_path as _sanitize_path
+from .workspace_helpers import sanitize_filename as _sanitize_filename
+from .workspace_helpers import sanitize_path as _sanitize_path
 
 logger = structlog.get_logger(__name__)
 

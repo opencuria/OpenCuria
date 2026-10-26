@@ -19,7 +19,7 @@ from .. import git as git_ops
 from ..models import WorkspaceInfo
 from ..runtime.base import RuntimeBackend
 from .capture_fence import CaptureFence, live_interaction
-from .exec_kernel import KeyedLockMap
+from .workspace_helpers import KeyedLockMap
 
 logger = structlog.get_logger(__name__)
 

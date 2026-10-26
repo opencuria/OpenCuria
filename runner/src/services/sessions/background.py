@@ -21,8 +21,10 @@ from ...models import WorkspaceInfo
 from ...runtime.base import RuntimeBackend
 from ..capture_fence import CaptureFence, live_interaction
 from ..credentials import WORKSPACE_CREDENTIAL_ENV_FILE as _CREDENTIAL_ENV_FILE
-from ..exec_kernel import KeyedLockMap
-from ..exec_kernel import sanitize_exec_workdir as _canonical_sanitize_exec_workdir
+from ..workspace_helpers import KeyedLockMap
+from ..workspace_helpers import (
+    sanitize_exec_workdir as _canonical_sanitize_exec_workdir,
+)
 
 logger = structlog.get_logger(__name__)
 

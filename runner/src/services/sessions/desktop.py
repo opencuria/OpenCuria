@@ -24,8 +24,8 @@ from ...models import DesktopSession, WorkspaceInfo
 from ...runtime.base import RuntimeBackend
 from ...runtime.managed_process import validate_guest_token
 from ..capture_fence import CaptureFence, live_interaction
-from ..exec_kernel import KeyedLockMap
-from ..exec_kernel import sanitize_path as _sanitize_path
+from ..workspace_helpers import KeyedLockMap
+from ..workspace_helpers import sanitize_path as _sanitize_path
 from .clipboard_selection import build_guest_command
 from .desktop_leases import DesktopLeaseStore
 

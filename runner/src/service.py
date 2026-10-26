@@ -19,7 +19,6 @@ from .runtime.artifacts import RuntimeArtifactManager
 from .runtime.base import RuntimeBackend
 from .services.capture_fence import CaptureFence
 from .services.credentials import WORKSPACE_CREDENTIAL_ENV_FILE, CredentialManager
-from .services.exec_kernel import ExecKernel, sanitize_exec_workdir
 from .services.files import FileManager
 from .services.git_service import GitService
 from .services.harness_exec import HarnessExecService
@@ -28,6 +27,7 @@ from .services.sessions.background import BackgroundProcessManager
 from .services.sessions.desktop import DesktopManager
 from .services.sessions.streams import StreamManager
 from .services.sessions.terminals import TerminalManager
+from .services.workspace_helpers import sanitize_exec_workdir
 from .services.workspace_lifecycle import WorkspaceLifecycle
 from .services.workspace_registry import WorkspaceRegistry
 
@@ -47,9 +47,6 @@ class WorkspaceService:
         self._registry = WorkspaceRegistry(runtime, settings)
         get_cached = self._registry.get_cached
         get_runtime = self._registry.get_runtime
-        self._exec_kernel = ExecKernel(
-            credential_env_file=WORKSPACE_CREDENTIAL_ENV_FILE,
-        )
         self._credentials_manager = CredentialManager()
         self._terminals_manager = TerminalManager(
             runtime,
@@ -95,7 +92,7 @@ class WorkspaceService:
             settings,
             runtime,
             self._credentials_manager,
-            self._exec_kernel,
+            self._harness.exec_harness_command,
             self._background,
             self._streams_manager,
             self._desktop,
@@ -185,11 +182,6 @@ class WorkspaceService:
     def credentials(self) -> CredentialManager:
         """Return the credential inject/remove manager."""
         return self._credentials_manager
-
-    @property
-    def exec_kernel(self) -> ExecKernel:
-        """Return the exec kernel (wrap + normalise + runtime dispatch)."""
-        return self._exec_kernel
 
     @property
     def desktop(self) -> DesktopManager:

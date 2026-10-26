@@ -11,7 +11,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-
 from src.config import RunnerSettings
 from src.models import WorkspaceInfo
 from src.runtime.base import PtyHandle
@@ -41,35 +40,12 @@ def _cache_workspace(
     return info
 
 
-async def test_workspace_context_resolution_errors() -> None:
-    from src.services.exec_kernel import WorkspaceContext
-
+async def test_stop_workspace_rejects_missing_instance() -> None:
     service = _make_service(runtime=object())
     workspace_id = uuid.uuid4()
-
-    with pytest.raises(ValueError, match="not found"):
-        await WorkspaceContext.resolve(
-            service.registry.get_cached, service.registry.get_runtime, workspace_id
-        )
-
-    _cache_workspace(service, workspace_id)
-    service.registry._runtime = None
-    with pytest.raises(RuntimeError, match="unavailable"):
-        await WorkspaceContext.resolve(
-            service.registry.get_cached, service.registry.get_runtime, workspace_id
-        )
-
-    service.registry._runtime = object()
-    missing_instance = uuid.uuid4()
-    _cache_workspace(service, missing_instance, instance_id="")
+    _cache_workspace(service, workspace_id, instance_id="")
     with pytest.raises(RuntimeError, match="no instance assigned"):
-        await WorkspaceContext.resolve(
-            service.registry.get_cached,
-            service.registry.get_runtime,
-            missing_instance,
-        )
-    with pytest.raises(RuntimeError, match="no instance assigned"):
-        await service.lifecycle.stop_workspace(missing_instance)
+        await service.lifecycle.stop_workspace(workspace_id)
 
 
 async def test_keyed_lock_maps_retain_manager_locks() -> None:
