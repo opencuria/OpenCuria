@@ -1257,112 +1257,6 @@ class ImageInstanceRepository:
     """Data access for ImageInstance records."""
 
     @staticmethod
-    def create(
-        *,
-        runner: Runner,
-        origin_type: str,
-        runner_ref: str,
-        name: str,
-        size_bytes: int = 0,
-        origin_definition: ImageDefinition | None = None,
-        origin_workspace: Workspace | None = None,
-        build_job: ImageBuildJob | None = None,
-        created_by=None,
-        credentials: list | None = None,
-    ) -> ImageInstance:
-        """Create a new image instance record (immediately ready)."""
-        image = ImageInstance.objects.create(
-            runner=runner,
-            origin_type=origin_type,
-            origin_definition=origin_definition,
-            origin_workspace=origin_workspace,
-            runner_ref=runner_ref,
-            name=name,
-            size_bytes=size_bytes,
-            status=ImageInstance.Status.READY,
-            build_job=build_job,
-            created_by=created_by,
-        )
-        if credentials:
-            image.credentials.set(credentials)
-        return image
-
-    @staticmethod
-    def create_pending(
-        *,
-        runner: Runner,
-        origin_type: str,
-        name: str,
-        creating_task_id: str,
-        origin_definition: ImageDefinition | None = None,
-        origin_workspace: Workspace | None = None,
-        build_job: ImageBuildJob | None = None,
-        created_by=None,
-        credentials: list | None = None,
-    ) -> ImageInstance:
-        """Create an image instance before capture/build finishes."""
-        status = (
-            ImageInstance.Status.BUILDING
-            if origin_type == ImageInstance.OriginType.DEFINITION_BUILD
-            else ImageInstance.Status.CAPTURING
-        )
-        image = ImageInstance.objects.create(
-            runner=runner,
-            origin_type=origin_type,
-            origin_definition=origin_definition,
-            origin_workspace=origin_workspace,
-            runner_ref="",
-            name=name,
-            size_bytes=None,
-            build_job=build_job,
-            created_by=created_by,
-            status=status,
-            creating_task_id=creating_task_id,
-        )
-        if credentials:
-            image.credentials.set(credentials)
-        return image
-
-    @staticmethod
-    def get_by_task_id(task_id: str) -> ImageInstance | None:
-        """Find the image instance associated with a create or delete task."""
-        return (
-            ImageInstance.objects.filter(
-                Q(creating_task_id=task_id) | Q(deleting_task_id=task_id)
-            )
-            .select_related(
-                "runner",
-                "origin_workspace",
-                "origin_workspace__runner",
-                "created_by",
-                "origin_definition",
-                "build_job",
-                "build_job__runner",
-                "build_job__image_definition",
-            )
-            .first()
-        )
-
-    @staticmethod
-    def mark_ready(image_id, *, runner_ref: str, size_bytes: int) -> None:
-        """Update a creating image instance to ready once the runner reports success."""
-        ImageInstance.objects.filter(
-            id=image_id, status__in=["building", "capturing"]
-        ).update(
-            status=ImageInstance.Status.READY,
-            runner_ref=runner_ref,
-            size_bytes=size_bytes,
-        )
-
-    @staticmethod
-    def mark_failed_by_task_id(task_id: str) -> None:
-        """Mark any creating image instance associated with task_id as failed."""
-        ImageInstance.objects.filter(
-            creating_task_id=task_id,
-            status__in=[ImageInstance.Status.BUILDING, ImageInstance.Status.CAPTURING],
-        ).update(status=ImageInstance.Status.FAILED)
-
-    @staticmethod
     def get_by_id(image_id: uuid.UUID) -> ImageInstance | None:
         """Fetch an image instance by ID, including source and runner info."""
         return (
@@ -1401,60 +1295,12 @@ class ImageInstanceRepository:
         )
 
     @staticmethod
-    def mark_retired(image_id: uuid.UUID) -> None:
-        """Mark an image instance retired so it cannot be used for new workspaces."""
-        ImageInstance.objects.filter(id=image_id).exclude(
-            status=ImageInstance.Status.DELETED
-        ).update(status=ImageInstance.Status.RETIRED)
-
-    @staticmethod
     def mark_ready_from_retired(image_id: uuid.UUID) -> None:
         """Mark a retired image instance ready again without changing its ref."""
         ImageInstance.objects.filter(
             id=image_id,
             status=ImageInstance.Status.RETIRED,
         ).update(status=ImageInstance.Status.READY)
-
-    @staticmethod
-    def mark_deleting(image_id: uuid.UUID, *, deleting_task_id: str | None) -> None:
-        """Mark an image instance as pending deletion."""
-        now = timezone.now()
-        from common.exceptions import ConflictError
-
-        with transaction.atomic():
-            ImageInstance.objects.select_for_update().get(id=image_id)
-            from .image_lines import ImageLineRepository
-
-            if ImageLineRepository.pinning_workspaces([image_id]).exists():
-                raise ConflictError("Image is still used by a workspace")
-            ImageInstance.objects.filter(id=image_id).update(
-                status=ImageInstance.Status.DELETING,
-                deleting_task_id=deleting_task_id,
-                delete_requested_at=Coalesce("delete_requested_at", Value(now)),
-                delete_started_at=now,
-                delete_last_error="",
-                delete_attempt_count=F("delete_attempt_count") + 1,
-            )
-
-    @staticmethod
-    def mark_pending_deletion(image_id: uuid.UUID) -> None:
-        """Mark an image instance as pending deletion (runner offline)."""
-        requested_at = timezone.now()
-        from common.exceptions import ConflictError
-
-        with transaction.atomic():
-            ImageInstance.objects.select_for_update().get(id=image_id)
-            from .image_lines import ImageLineRepository
-
-            if ImageLineRepository.pinning_workspaces([image_id]).exists():
-                raise ConflictError("Image is still used by a workspace")
-            ImageInstance.objects.filter(id=image_id).update(
-                status=ImageInstance.Status.PENDING_DELETION,
-                delete_requested_at=Coalesce(
-                    "delete_requested_at", Value(requested_at)
-                ),
-                delete_last_error="",
-            )
 
     @staticmethod
     def mark_deleted(image_id: uuid.UUID) -> None:
@@ -1511,12 +1357,6 @@ class ImageDefinitionRepository:
             candidate = base[: 255 - len(suffix)] + suffix
             index += 1
         return candidate
-
-    @staticmethod
-    def list_deleting():
-        return ImageDefinition.objects.filter(
-            status__in=["pending_deletion", "deleting"]
-        )
 
     @staticmethod
     def list_by_org(organization_id: uuid.UUID) -> QuerySet[ImageDefinition]:
@@ -1662,37 +1502,6 @@ class ImageDefinitionRepository:
         )
 
     @staticmethod
-    def mark_pending_deletion(definition_id: uuid.UUID) -> None:
-        """Mark definition pending deletion (waiting for build deletes)."""
-        requested_at = timezone.now()
-        ImageDefinition.objects.filter(id=definition_id).update(
-            status=ImageDefinition.Status.PENDING_DELETION,
-            delete_requested_at=Coalesce("delete_requested_at", Value(requested_at)),
-            delete_last_error="",
-        )
-
-    @staticmethod
-    def mark_deleting(definition_id: uuid.UUID) -> None:
-        """Mark definition as actively deleting its builds."""
-        now = timezone.now()
-        ImageDefinition.objects.filter(id=definition_id).update(
-            status=ImageDefinition.Status.DELETING,
-            delete_requested_at=Coalesce("delete_requested_at", Value(now)),
-            delete_started_at=now,
-            delete_last_error="",
-            delete_attempt_count=F("delete_attempt_count") + 1,
-        )
-
-    @staticmethod
-    def mark_deleted(definition_id: uuid.UUID) -> None:
-        """Mark definition as fully deleted after all builds are confirmed deleted."""
-        ImageDefinition.objects.filter(id=definition_id).update(
-            status=ImageDefinition.Status.DELETED,
-            delete_confirmed_at=timezone.now(),
-            deleted_at=timezone.now(),
-        )
-
-    @staticmethod
     def mark_delete_failed(definition_id: uuid.UUID, *, error: str = "") -> None:
         """Mark definition deletion as failed."""
         ImageDefinition.objects.filter(id=definition_id).update(
@@ -1737,16 +1546,6 @@ class ImageBuildJobRepository:
             job.status = "deactivated"
             job.save(update_fields=["status", "updated_at"])
             return job
-
-    @staticmethod
-    def has_multiple_generations(job_id) -> bool:
-        return ImageInstance.objects.filter(build_job_id=job_id).count() > 1
-
-    @staticmethod
-    def has_inflight_generations(job_id) -> bool:
-        return ImageInstance.objects.filter(
-            build_job_id=job_id, status__in=["building", "capturing"]
-        ).exists()
 
     @staticmethod
     def list_for_definition(
@@ -1830,58 +1629,6 @@ class ImageBuildJobRepository:
             image_definition_id,
             runner_id,
             organization_id=organization_id,
-        )
-
-    @staticmethod
-    def delete_for_org(
-        image_definition_id: uuid.UUID,
-        runner_id: uuid.UUID,
-        organization_id: uuid.UUID,
-    ) -> int:
-        """Delete a runner image build scoped to an organization."""
-        deleted, _ = (
-            ImageBuildJob.objects.filter(
-                image_definition_id=image_definition_id,
-                runner_id=runner_id,
-            )
-            .filter(
-                Q(image_definition__organization_id=organization_id)
-                | Q(image_definition__organization__isnull=True)
-            )
-            .delete()
-        )
-        return deleted
-
-    @staticmethod
-    def mark_pending_deletion(build_job_id: uuid.UUID) -> None:
-        """Mark build job as pending deletion (runner offline)."""
-        requested_at = timezone.now()
-        ImageBuildJob.objects.filter(id=build_job_id).update(
-            status=ImageBuildJob.Status.PENDING_DELETION,
-            delete_requested_at=Coalesce("delete_requested_at", Value(requested_at)),
-            delete_last_error="",
-        )
-
-    @staticmethod
-    def mark_deleting(build_job_id: uuid.UUID, *, deleting_task_id: str) -> None:
-        """Mark build job as actively deleting on runner."""
-        now = timezone.now()
-        ImageBuildJob.objects.filter(id=build_job_id).update(
-            status=ImageBuildJob.Status.DELETING,
-            deleting_task_id=deleting_task_id,
-            delete_requested_at=Coalesce("delete_requested_at", Value(now)),
-            delete_started_at=now,
-            delete_last_error="",
-            delete_attempt_count=F("delete_attempt_count") + 1,
-        )
-
-    @staticmethod
-    def mark_deleted(build_job_id: uuid.UUID) -> None:
-        """Mark build job as fully deleted after runner confirmation."""
-        ImageBuildJob.objects.filter(id=build_job_id).update(
-            status=ImageBuildJob.Status.DELETED,
-            deleting_task_id=None,
-            delete_confirmed_at=timezone.now(),
         )
 
     @staticmethod
