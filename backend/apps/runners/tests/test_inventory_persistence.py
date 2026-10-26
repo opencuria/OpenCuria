@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from apps.runners.inventory_repository import InventoryRepository
 from apps.runners.models import InventoryEdge, InventorySnapshot, Runner, Workspace
+from apps.runners.services.inventory_inspection import InventoryInspectionService
 from apps.runners.tests.conftest import capture_version_fields
 
 pytestmark = pytest.mark.django_db
@@ -49,14 +50,14 @@ def test_sequence_session_and_partial_retention(runner):
     assert InventoryEdge.objects.filter(target__kind="unknown").count() == 1
     partial = scan(2, False, payload["inventory_epoch"])
     assert InventoryRepository.record(str(runner.id), runner.sid, partial)
-    detail = InventoryRepository.detail(runner)
+    detail = InventoryInspectionService.inspect(runner)
     assert not detail["latest_complete"]
     assert not detail["runtimes"][0]["fresh"]
     assert len(detail["runtimes"][0]["resources"]) == 2
     assert detail["runtimes"][0]["resources"][0]["logical_bytes"] is None
     assert detail["runtimes"][0]["diagnostics"]["errors"] == ["inspection failed"]
     InventorySnapshot.objects.update(received_at=timezone.now() - timedelta(minutes=6))
-    assert not InventoryRepository.detail(runner)["runtimes"][0]["fresh"]
+    assert not InventoryInspectionService.inspect(runner)["runtimes"][0]["fresh"]
 
 
 def test_malformed_snapshot_transaction_rolls_back(runner):
@@ -86,7 +87,7 @@ def test_workspace_join_uses_actual_metadata(runner, workspace):
         ]
     )
     assert InventoryRepository.record(str(runner.id), runner.sid, payload)
-    observed = InventoryRepository.detail(runner)["runtimes"][0]["resources"][0]
+    observed = InventoryInspectionService.inspect(runner)["runtimes"][0]["resources"][0]
     assert observed["workspace"]["id"] == str(workspace.id)
     assert observed["workspace"]["status"] == "running"
 
@@ -224,7 +225,7 @@ def test_enriched_generation_db_pin_without_physical_observation(runner, workspa
     )
     workspace.base_image_instance = image
     workspace.save(update_fields=["base_image_instance"])
-    detail = InventoryRepository.detail(runner)
+    detail = InventoryInspectionService.inspect(runner)
     generation = detail["generations"][0]
     assert generation["name"] == "Historical base"
     assert generation["observed_state"] == "unknown"
@@ -236,12 +237,12 @@ def test_enriched_generation_db_pin_without_physical_observation(runner, workspa
     assert "@" not in generation["dependencies"][0]["owner_label"]
     assert InventoryRepository.record(str(runner.id), runner.sid, scan())
     assert (
-        InventoryRepository.detail(runner)["generations"][0]["observed_state"]
+        InventoryInspectionService.inspect(runner)["generations"][0]["observed_state"]
         == "missing"
     )
     runner.status = "offline"
     runner.save(update_fields=["status"])
-    detail = InventoryRepository.detail(runner)
+    detail = InventoryInspectionService.inspect(runner)
     assert not detail["runner_online"]
     assert detail["generations"][0]["observed_state"] == "unknown"
 
@@ -294,7 +295,7 @@ def test_recursive_physical_consumers_and_logical_pins_ignore_provenance(
         ]
     )
     assert InventoryRepository.record(str(runner.id), runner.sid, payload)
-    detail = InventoryRepository.detail(runner)
+    detail = InventoryInspectionService.inspect(runner)
     RunnerStorageOut.model_validate(detail)
     images = {i["id"]: i for i in detail["generations"]}
     assert images[str(root.id)]["dependencies"][0]["id"] == str(workspace.id)
@@ -337,11 +338,11 @@ def test_workspace_state_authority_not_disk_order(runner, workspace, reverse, st
         {"resource_id": "base", "kind": "image", "managed": True, "state": "ready"},
     ]
     observe(runner, list(reversed(resources)) if reverse else resources)
-    detail = InventoryRepository.detail(runner)
+    detail = InventoryInspectionService.inspect(runner)
     assert detail["generations"][0]["dependencies"][0]["observed_state"] == state
     # Partial scans retain last confirmed state without claiming freshness.
     observe(runner, [], complete=False)
-    detail = InventoryRepository.detail(runner)
+    detail = InventoryInspectionService.inspect(runner)
     assert detail["generations"][0]["dependencies"][0]["observed_state"] == state
     assert not detail["runtimes"][0][
         "fresh"
@@ -349,7 +350,7 @@ def test_workspace_state_authority_not_disk_order(runner, workspace, reverse, st
     # Disk-only ownership still links dependents but never supplies runtime state.
     observe(runner, [r for r in resources if r["kind"] != "workspace"])
     assert (
-        InventoryRepository.detail(runner)["generations"][0]["dependencies"][0][
+        InventoryInspectionService.inspect(runner)["generations"][0]["dependencies"][0][
             "observed_state"
         ]
         == "unknown"
@@ -386,9 +387,8 @@ def test_current_pointer_is_not_default_after_retirement(
     )
     job.current_generation = image
     job.save()
-    assert (
-        InventoryRepository.detail(runner)["generations"][0]["is_current"] is expected
-    )
+    generation = InventoryInspectionService.inspect(runner)["generations"][0]
+    assert generation["is_current"] is expected
 
 
 @pytest.mark.parametrize("physical", ["/cache/base.qcow2", "/other/base.qcow2"])
@@ -434,7 +434,7 @@ def test_exact_legacy_disk_reference_is_association_not_publication(
         ).image_id
         == image.id
     )
-    generation = InventoryRepository.detail(runner)["generations"][0]
+    generation = InventoryInspectionService.inspect(runner)["generations"][0]
     assert generation["observed_state"] == "unknown"
     assert generation["dependencies"][0]["id"] == str(workspace.id)
     image.refresh_from_db()
@@ -471,7 +471,7 @@ def test_legacy_shared_physical_alias_is_unverified_not_missing(runner):
     assert InventoryRepository.record(str(runner.id), runner.sid, payload)
     assert not InventoryResource.objects.filter(image=image).exists()
     assert (
-        InventoryRepository.detail(runner)["generations"][0]["observed_state"]
+        InventoryInspectionService.inspect(runner)["generations"][0]["observed_state"]
         == "unknown"
     )
 
@@ -524,7 +524,7 @@ def test_legacy_capture_snapshot_alias_joins_only_its_runner(
     if same_runner:
         assert observed.image_id == image.id
         assert workspace.base_image_instance_id == image.id
-        generation = InventoryRepository.detail(runner)["generations"][0]
+        generation = InventoryInspectionService.inspect(runner)["generations"][0]
         assert generation["observed_state"] == "legacy"
         assert generation["dependencies"][0]["id"] == str(workspace.id)
     else:
@@ -561,9 +561,8 @@ def test_qemu_uuid_manifest_requires_artifact_and_operation(runner, operation_ma
         ]
     )
     assert InventoryRepository.record(str(runner.id), runner.sid, payload)
-    assert InventoryRepository.detail(runner)["generations"][0]["observed_state"] == (
-        "ready" if operation_matches else "unknown"
-    )
+    generation = InventoryInspectionService.inspect(runner)["generations"][0]
+    assert generation["observed_state"] == ("ready" if operation_matches else "unknown")
 
 
 def test_shared_legacy_database_reference_cannot_guess_identity(runner):
@@ -593,7 +592,7 @@ def test_shared_legacy_database_reference_cannot_guess_identity(runner):
     assert not InventoryResource.objects.filter(image__isnull=False).exists()
     assert all(
         g["observed_state"] == "unknown"
-        for g in InventoryRepository.detail(runner)["generations"]
+        for g in InventoryInspectionService.inspect(runner)["generations"]
     )
 
 
@@ -609,7 +608,7 @@ def test_unpublished_capture_without_reference_is_not_missing(runner):
     )
     assert InventoryRepository.record(str(runner.id), runner.sid, scan())
     assert (
-        InventoryRepository.detail(runner)["generations"][0]["observed_state"]
+        InventoryInspectionService.inspect(runner)["generations"][0]["observed_state"]
         == "not_published"
     )
 
@@ -644,7 +643,7 @@ def test_sanitized_storage_identity_serialization(runner, workspace, identity):
             ]
         ),
     )
-    detail = InventoryRepository.detail(runner)
+    detail = InventoryInspectionService.inspect(runner)
     serialized = RunnerStorageOut.model_validate(detail).model_dump(mode="json")
     for runtime in serialized["runtimes"]:
         observed = runtime["resources"][0]
@@ -700,7 +699,7 @@ def test_exact_base_pin_serialized_without_physical_base(runner, workspace):
         ),
     )
     serialized = RunnerStorageOut.model_validate(
-        InventoryRepository.detail(runner)
+        InventoryInspectionService.inspect(runner)
     ).model_dump(mode="json")
     assert serialized["generations"][0]["dependencies"][0][
         "base_image_instance_id"

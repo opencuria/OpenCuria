@@ -52,6 +52,9 @@ import their service consumers, even through function-local imports.
 Engine execution contracts live in ``apps.harness.engines.base``; external
 engines and shared tool dispatch never import the native inference loop,
 even through their dependencies.
+Inventory persistence never imports storage inspection, activity, retention or
+deletion workflows. InventoryInspectionService composes their read models and
+queries only through repositories, including fully loaded inventory records.
 """
 
 from __future__ import annotations
@@ -720,6 +723,61 @@ def test_services_query_the_orm_only_through_repositories():
         "Query the ORM in the owning app's repositories module and call it "
         "from the service (e.g. HarnessPartRepository, not "
         "self.parts.model.objects):\n" + "\n".join(violations)
+    )
+
+
+def test_inventory_persistence_never_imports_inspection_workflows() -> None:
+    """Storage read composition must not pull workflows into scan persistence."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    modules = {_module_name(path): path for path in trees}
+    forbidden = {
+        "apps.runners.services",
+        "apps.runners.activity_repository",
+        "apps.runners.retention_repository",
+        "apps.runners.deletion_repository",
+    }
+    pending = {"apps.runners.inventory_repository"}
+    checked: set[str] = set()
+    violations = set()
+    while pending:
+        module = pending.pop()
+        checked.add(module)
+        path = modules[module]
+        for imported in _imported_modules(path, trees[path]):
+            if any(
+                imported == owner or imported.startswith(f"{owner}.")
+                for owner in forbidden
+            ):
+                violations.add(f"{module} -> {imported}")
+            elif imported in modules and imported not in checked:
+                pending.add(imported)
+    assert violations == set(), (
+        "Keep storage inspection composition in InventoryInspectionService; "
+        "inventory persistence must not import its consumers, even transitively "
+        "or inside functions:\n" + "\n".join(sorted(violations))
+    )
+
+
+def test_storage_inspection_queries_only_through_repositories() -> None:
+    """Storage services may read loaded records but never issue ORM queries."""
+    services = ("storage", "inventory_inspection")
+    query_attributes = ORM_QUERY_ATTRIBUTES | {
+        "select_related",
+        "prefetch_related",
+        "values_list",
+        "save",
+    }
+    violations = sorted(
+        f"{name}:{node.lineno}: {node.attr}"
+        for name in services
+        for node in ast.walk(
+            ast.parse((APPS_ROOT / "runners" / "services" / f"{name}.py").read_text())
+        )
+        if isinstance(node, ast.Attribute) and node.attr in query_attributes
+    )
+    assert violations == [], (
+        "Materialize storage inspection inputs in repositories, then compose "
+        "their user-visible state in services:\n" + "\n".join(violations)
     )
 
 

@@ -11,6 +11,7 @@ from common.exceptions import NotFoundError
 from ..inventory_repository import InventoryRepository
 from ..repositories import RunnerRepository
 from .activity import ActivityService
+from .inventory_inspection import InventoryInspectionService
 
 
 class StorageService:
@@ -31,7 +32,7 @@ class StorageService:
 
     def detail(self, user, organization_id, runner_id) -> dict:
         runner = self.authorized_runner(user, organization_id, runner_id)
-        detail = InventoryRepository.detail(runner)
+        detail = InventoryInspectionService.inspect(runner)
         detail["activities"] = [
             activity.model_dump(mode="json")
             for activity in ActivityService.project(detail)

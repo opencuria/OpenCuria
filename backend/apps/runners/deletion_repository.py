@@ -14,9 +14,9 @@ from django.db import transaction
 from django.utils import timezone
 
 from common.exceptions import ConflictError, NotFoundError
+from common.user_labels import owner_label
 
 from .image_lines import ImageLineRepository
-from .inventory_repository import InventoryRepository
 from .models import (
     CapturedImage,
     ImageBuildJob,
@@ -272,7 +272,7 @@ class DeletionRepository:
                     "id": k,
                     "runner_id": str(i.runner_id),
                     "owner_id": str(i.created_by_id) if i.created_by_id else None,
-                    "owner_label": InventoryRepository.owner_label(i.created_by),
+                    "owner_label": owner_label(i.created_by),
                     "name": i.name,
                 }
                 for k, i in selected_images.items()
@@ -285,7 +285,7 @@ class DeletionRepository:
                     "id": k,
                     "runner_id": str(w.runner_id),
                     "owner_id": str(w.created_by_id) if w.created_by_id else None,
-                    "owner_label": InventoryRepository.owner_label(w.created_by),
+                    "owner_label": owner_label(w.created_by),
                     "name": w.name,
                 }
                 for k, w in selected_ws.items()
