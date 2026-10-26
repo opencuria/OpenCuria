@@ -100,6 +100,11 @@ instance-id: {bootstrap_id}
 local-hostname: opencuria-workspace
 """
 
+# Every exec, upload, terminal and agent stream shares one SSH connection per
+# VM (see ``_get_ssh``), so sshd's default of 10 sessions per connection is
+# raised. write_files runs before sshd starts: the runner's first connection
+# predates runcmd's ssh restart and keeps its boot-time limits. sshd uses the
+# first value it reads, so the drop-in sorts before the image's own files.
 _CLOUD_INIT_USER = """\
 #cloud-config
 users:
@@ -115,6 +120,10 @@ write_files:
     permissions: '0600'
     content: |
       {ssh_public_key}
+  - path: /etc/ssh/sshd_config.d/10-opencuria-sessions.conf
+    permissions: '0644'
+    content: |
+      MaxSessions 64
 runcmd:
   - mkdir -p /workspace
   - mkdir -p /root/.ssh

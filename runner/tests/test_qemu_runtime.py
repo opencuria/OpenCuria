@@ -67,6 +67,45 @@ class QemuRuntimeCloudInitTests(unittest.IsolatedAsyncioTestCase):
         for identity in identities:
             self.assertEqual(uuid.UUID(identity).version, 4)
 
+    async def test_seed_raises_the_ssh_session_cap_before_sshd_starts(
+        self,
+    ) -> None:
+        """All runner channels share one SSH connection; 10 sessions is too few.
+
+        runcmd restarts sshd only after the runner's connection is open, and
+        that connection keeps its boot-time limits, so the cap must be written
+        by write_files, which runs before sshd starts.
+        """
+        seeds: list[str] = []
+
+        async def create_iso(*args: str, **kwargs: object) -> SimpleNamespace:
+            files = {Path(arg).name: Path(arg) for arg in args[-3:]}
+            seeds.append(files["user-data"].read_text())
+            Path(args[2]).touch()
+            return SimpleNamespace(
+                returncode=0, communicate=AsyncMock(return_value=(b"", b""))
+            )
+
+        with patch("src.runtime.qemu_runtime.shutil.which", return_value="tool"), patch(
+            "src.runtime.qemu_runtime.asyncio.create_subprocess_exec",
+            side_effect=create_iso,
+        ):
+            await self.runtime._create_cloud_init_iso(
+                self.workspace_id, vm_ip="10.100.0.2", gateway="10.100.0.1"
+            )
+
+        write_files, runcmd = seeds[0].split("write_files:", 1)[1].split("runcmd:", 1)
+        caps = [
+            int(line.split()[1])
+            for entry in write_files.split("\n  - path: ")[1:]
+            if entry.startswith("/etc/ssh/sshd_config.d/")
+            for line in entry.splitlines()
+            if line.strip().startswith("MaxSessions ")
+        ]
+        self.assertEqual(len(caps), 1)
+        self.assertGreaterEqual(caps[0], 64)
+        self.assertNotIn("MaxSessions", runcmd)
+
     async def test_start_reuses_the_existing_seed(self) -> None:
         """A normal start must not rerun first-boot provisioning."""
         iso = self.runtime._cloud_init_iso_path(self.workspace_id)
