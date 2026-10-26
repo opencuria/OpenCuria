@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * Dialog for capturing an image directly from a workspace card.
- * Used when the camera icon is clicked in WorkspaceActions.
+ * Opened from the capture action in WorkspaceActions.
  */
 import { ref, computed } from 'vue'
 import { Button } from '@/components/ui/button'

@@ -1,9 +1,27 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { WorkspaceStatus } from '@/types'
 import type { Workspace } from '@/types'
 import { Button } from '@/components/ui/button'
-import { Square, Play, Trash2, Camera, Loader2, RotateCcw } from '@lucide/vue'
+import {
+  Square,
+  Play,
+  Trash2,
+  Camera,
+  Loader2,
+  RotateCcw,
+  MoreHorizontal,
+  Pencil,
+  AlertTriangle,
+} from '@lucide/vue'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useAuthStore } from '@/stores/auth'
 import EditWorkspaceDialog from './EditWorkspaceDialog.vue'
@@ -18,6 +36,8 @@ const emit = defineEmits<{
   captureImage: []
   recreate: []
 }>()
+
+const editDialog = ref<InstanceType<typeof EditWorkspaceDialog>>()
 
 function inspectRunner() {
   window.dispatchEvent(
@@ -83,7 +103,10 @@ const areActionsDisabled = computed(
     isTransitioning.value || isRunnerOfflineState.value || props.workspace.intervention_required,
 )
 
-const btnSize = computed(() => (props.size === 'sm' ? ('icon-sm' as const) : ('icon' as const)))
+function handleEdit(e: Event): void {
+  e.stopPropagation()
+  editDialog.value?.show()
+}
 
 function handleStop(e: Event): void {
   e.stopPropagation()
@@ -114,82 +137,109 @@ function handleRecreate(e: Event): void {
 </script>
 
 <template>
-  <div class="flex flex-wrap items-center gap-1">
-    <p v-if="workspace.intervention_required" role="alert" class="text-xs text-destructive">
-      {{
-        auth.isAdmin
-          ? 'A previous operation could not be confirmed. Review its status to continue.'
-          : 'A previous operation could not be confirmed. Ask an organization admin to review it.'
-      }}
-    </p>
-    <Button
-      v-if="workspace.intervention_required && auth.isAdmin"
-      variant="outline"
-      size="sm"
-      @click="inspectRunner"
-      >Review workspace issue</Button
-    >
-    <EditWorkspaceDialog :workspace="workspace" :size="size" :disabled="areActionsDisabled" />
+  <div class="flex shrink-0 items-center gap-1" @click.stop>
     <Button
       v-if="isTransitioning && !workspace.intervention_required"
       variant="ghost"
-      :size="btnSize"
+      :size="size || 'default'"
       :title="transitionLabel || 'Workspace action in progress'"
       disabled
     >
       <Loader2 :size="14" class="animate-spin" />
+      <span class="max-w-24 truncate">{{ transitionLabel || 'Working' }}</span>
     </Button>
     <Button
-      v-if="canCaptureImage"
+      v-else-if="canStop && !hideDestructive"
       variant="ghost"
-      :size="btnSize"
-      :title="captureTitle"
-      :disabled="areActionsDisabled || captureBlockedByCredentials"
-      @click="handleCaptureImage"
-    >
-      <Camera :size="14" />
-    </Button>
-    <Button
-      v-if="canRecreate && !hideDestructive"
-      variant="ghost"
-      :size="btnSize"
-      title="Reset workspace"
-      data-testid="workspace-actions-recreate"
-      :disabled="areActionsDisabled"
-      @click="handleRecreate"
-    >
-      <RotateCcw :size="14" />
-    </Button>
-    <Button
-      v-if="canStop && !hideDestructive"
-      variant="ghost"
-      :size="btnSize"
+      :size="size || 'default'"
       title="Stop workspace"
       :disabled="areActionsDisabled"
       @click="handleStop"
     >
       <Square :size="14" />
+      Stop
     </Button>
     <Button
-      v-if="canResume"
-      variant="ghost"
-      :size="btnSize"
+      v-else-if="canResume"
+      variant="secondary"
+      :size="size || 'default'"
       :title="isRunnerOfflineState ? 'Runner offline' : 'Resume workspace'"
       :disabled="areActionsDisabled"
       @click="handleResume"
     >
       <Play :size="14" />
+      Start
     </Button>
-    <Button
-      v-if="canRemove && !hideDestructive"
-      variant="ghost"
-      :size="btnSize"
-      title="Remove workspace"
-      class="text-destructive hover:text-destructive"
+    <DropdownMenu>
+      <DropdownMenuTrigger as-child>
+        <Button
+          variant="ghost"
+          :size="size === 'sm' ? 'icon-sm' : 'icon'"
+          title="More workspace actions"
+          :aria-label="`More actions for ${workspace.name}`"
+          class="text-muted-foreground"
+        >
+          <MoreHorizontal :size="16" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" class="w-56" @click.stop>
+        <template v-if="workspace.intervention_required">
+          <DropdownMenuLabel
+            role="alert"
+            class="whitespace-normal text-xs font-normal text-destructive"
+          >
+            {{
+              auth.isAdmin
+                ? 'A previous operation could not be confirmed. Review its status to continue.'
+                : 'A previous operation could not be confirmed. Ask an organization admin to review it.'
+            }}
+          </DropdownMenuLabel>
+          <DropdownMenuItem v-if="auth.isAdmin" @select="inspectRunner">
+            <AlertTriangle />
+            Review workspace issue
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+        </template>
+        <DropdownMenuItem :disabled="areActionsDisabled" @select="handleEdit">
+          <Pencil />
+          Edit workspace
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          v-if="canCaptureImage"
+          :title="captureTitle"
+          :disabled="areActionsDisabled || captureBlockedByCredentials"
+          @select="handleCaptureImage"
+        >
+          <Camera />
+          Capture image
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          v-if="canRecreate && !hideDestructive"
+          data-testid="workspace-actions-recreate"
+          :disabled="areActionsDisabled"
+          @select="handleRecreate"
+        >
+          <RotateCcw />
+          Reset workspace
+        </DropdownMenuItem>
+        <template v-if="canRemove && !hideDestructive">
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            variant="destructive"
+            :disabled="areActionsDisabled"
+            @select="handleRemove"
+          >
+            <Trash2 />
+            Remove workspace
+          </DropdownMenuItem>
+        </template>
+      </DropdownMenuContent>
+    </DropdownMenu>
+    <EditWorkspaceDialog
+      ref="editDialog"
+      :workspace="workspace"
       :disabled="areActionsDisabled"
-      @click="handleRemove"
-    >
-      <Trash2 :size="14" />
-    </Button>
+      hide-trigger
+    />
   </div>
 </template>

@@ -306,6 +306,8 @@ const canSave = computed(
     pluginSelectionValid.value &&
     resourceSelectionValid.value,
 )
+
+defineExpose({ show: handleOpen })
 </script>
 
 <template>

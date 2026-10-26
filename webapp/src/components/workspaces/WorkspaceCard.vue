@@ -42,8 +42,8 @@ function handleCaptureImage(): void {
   imageArtifactDialogOpen.value = true
 }
 
-const transitionLabel = computed(
-  () => workspaceStore.getWorkspaceTransitionLabel(props.workspace.id),
+const transitionLabel = computed(() =>
+  workspaceStore.getWorkspaceTransitionLabel(props.workspace.id),
 )
 const isRunnerOfflineState = computed(
   () =>
@@ -53,6 +53,7 @@ const isRunnerOfflineState = computed(
 )
 
 const statusVariant = computed(() => {
+  if (props.workspace.intervention_required) return 'destructive'
   if (transitionLabel.value) {
     return 'default'
   }
@@ -78,14 +79,22 @@ const statusVariant = computed(() => {
 })
 
 const statusLabel = computed(() => {
+  if (props.workspace.intervention_required) return 'Needs review'
   if (transitionLabel.value) return transitionLabel.value
   if (isRunnerOfflineState.value) {
     return 'Runner offline'
   }
-  return transitionLabel.value ?? props.workspace.status
+  if (props.workspace.status === WorkspaceStatus.RUNNING && props.workspace.has_active_session) {
+    return 'Busy'
+  }
+  return props.workspace.status.replace(/_/g, ' ')
 })
 const showStatusSpinner = computed(
-  () => Boolean(transitionLabel.value) && !isRunnerOfflineState.value,
+  () =>
+    !isRunnerOfflineState.value &&
+    !props.workspace.intervention_required &&
+    (Boolean(transitionLabel.value) ||
+      (props.workspace.status === WorkspaceStatus.RUNNING && props.workspace.has_active_session)),
 )
 const imminentAutoStopLabel = computed(() => {
   if (!props.workspace.auto_stop_at || props.workspace.status !== WorkspaceStatus.RUNNING) {
@@ -122,81 +131,107 @@ const disk = computed(() => {
 
 <template>
   <Card
-    :class="'transition-colors duration-150' + (props.clickable ? ' cursor-pointer hover:border-border' : '')"
+    :class="[
+      'h-full min-w-0 gap-0 py-5 transition-[background-color,box-shadow] duration-150',
+      props.clickable && 'cursor-pointer hover:bg-accent/20 hover:ring-foreground/20',
+    ]"
     @click="props.clickable ? $emit('click') : undefined"
   >
-    <CardContent>
-      <div class="flex items-start justify-between gap-3 mb-3">
-        <div class="flex items-center gap-3 min-w-0 flex-1">
+    <CardContent class="grid grid-rows-[4rem_2.5rem_2.75rem] gap-2 px-5">
+      <div class="flex min-w-0 items-start gap-3">
+        <div class="flex min-w-0 flex-1 items-start gap-3">
           <div
             :class="[
-              'flex items-center justify-center w-10 h-10 rounded-[var(--radius-md)]',
-               isRunnerOfflineState
-                 ? 'bg-muted text-muted-foreground'
-                 : workspace.status === WorkspaceStatus.RUNNING
+              'flex size-10 shrink-0 items-center justify-center rounded-xl',
+              isRunnerOfflineState
+                ? 'bg-muted text-muted-foreground'
+                : workspace.status === WorkspaceStatus.RUNNING
                   ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-                      : workspace.status === WorkspaceStatus.CREATING
+                  : workspace.status === WorkspaceStatus.CREATING
                     ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
-                    : workspace.status === WorkspaceStatus.FAILED || workspace.status === WorkspaceStatus.DELETE_FAILED
+                    : workspace.status === WorkspaceStatus.FAILED ||
+                        workspace.status === WorkspaceStatus.DELETE_FAILED
                       ? 'bg-destructive/10 text-destructive'
-                      : workspace.status === WorkspaceStatus.REMOVED || workspace.status === WorkspaceStatus.DELETED
-                         ? 'bg-muted/50 text-muted-foreground/50'
-                         : 'bg-muted text-muted-foreground',
+                      : workspace.status === WorkspaceStatus.REMOVED ||
+                          workspace.status === WorkspaceStatus.DELETED
+                        ? 'bg-muted/50 text-muted-foreground/50'
+                        : 'bg-muted text-muted-foreground',
             ]"
           >
             <Container :size="18" />
           </div>
-          <div class="min-w-0">
-            <h3 class="font-medium text-foreground text-sm truncate">
+          <div class="min-w-0 flex-1">
+            <h3
+              class="truncate text-sm font-semibold leading-5 text-foreground"
+              :title="workspace.name"
+            >
               {{ workspace.name }}
             </h3>
             <ImageVersionBadge :workspace="workspace" @update="openRecreate(true)" />
           </div>
         </div>
 
-        <div class="flex items-center gap-1.5 shrink-0">
-          <Badge
-            v-if="!isRunnerOfflineState && workspace.status === WorkspaceStatus.RUNNING && workspace.has_active_session"
-            variant="outline"
-            class="flex items-center gap-1"
-          >
-            <Loader2 :size="10" class="animate-spin" />
-            Busy
-          </Badge>
-          <Badge
-            v-if="showResourceWarning"
-            variant="outline"
-            class="flex items-center gap-1"
-          >
-            <AlertTriangle :size="10" />
-            High usage
-          </Badge>
-          <Badge :variant="statusVariant" class="flex items-center gap-1">
-            <WifiOff v-if="isRunnerOfflineState" :size="10" />
-            <Loader2 v-else-if="showStatusSpinner" :size="10" class="animate-spin" />
-            {{ statusLabel }}
-          </Badge>
-        </div>
+        <span
+          v-if="showResourceWarning"
+          class="shrink-0 text-amber-600 dark:text-amber-400"
+          title="High usage"
+        >
+          <AlertTriangle :size="16" />
+          <span class="sr-only">High usage</span>
+        </span>
       </div>
 
       <!-- Storage: last observed free space inside the workspace -->
-      <div
-        v-if="disk"
-        class="mb-3 flex items-center gap-2.5 text-xs"
-        :title="disk.title"
-        data-testid="workspace-card-disk"
-      >
-        <UsageMeter :percent="disk.percent" :level="disk.level" label="Storage used" class="h-1 flex-1" />
-        <span class="shrink-0 tabular-nums" :class="USAGE_LEVEL_CLASSES[disk.level].text">{{ disk.free }} free</span>
+      <div class="flex min-w-0 flex-col justify-center gap-1.5">
+        <div
+          v-if="disk"
+          class="flex items-center gap-3 text-xs"
+          :title="disk.title"
+          data-testid="workspace-card-disk"
+        >
+          <UsageMeter
+            :percent="disk.percent"
+            :level="disk.level"
+            label="Storage used"
+            class="h-1 flex-1"
+          />
+          <span class="shrink-0 tabular-nums" :class="USAGE_LEVEL_CLASSES[disk.level].text"
+            >{{ disk.free }} free</span
+          >
+        </div>
+        <span v-else class="text-xs text-muted-foreground/60">Storage not measured</span>
+        <span
+          v-if="imminentAutoStopLabel"
+          class="truncate text-xs text-amber-600 dark:text-amber-400"
+          :title="imminentAutoStopLabel"
+        >
+          {{ imminentAutoStopLabel }}
+        </span>
       </div>
 
-      <!-- Footer: Auto-stop + Actions -->
-      <div class="flex items-center justify-between gap-3">
-        <div class="min-w-0 text-xs">
-          <div v-if="imminentAutoStopLabel" class="text-amber-600 dark:text-amber-400">
-            {{ imminentAutoStopLabel }}
-          </div>
-        </div>
+      <div class="flex min-w-0 items-center justify-between gap-2 border-t border-border/60 pt-3">
+        <Badge
+          :variant="statusVariant"
+          class="min-w-0 shrink gap-1.5 capitalize"
+          :class="
+            !isRunnerOfflineState &&
+            !workspace.intervention_required &&
+            workspace.status === WorkspaceStatus.RUNNING &&
+            !transitionLabel
+              ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400'
+              : ''
+          "
+          :title="statusLabel"
+        >
+          <AlertTriangle v-if="workspace.intervention_required" :size="10" />
+          <WifiOff v-else-if="isRunnerOfflineState" :size="10" />
+          <Loader2 v-else-if="showStatusSpinner" :size="10" class="animate-spin" />
+          <span
+            v-else-if="workspace.status === WorkspaceStatus.RUNNING"
+            class="size-1.5 shrink-0 rounded-full bg-current"
+          />
+          <span class="truncate">{{ statusLabel }}</span>
+        </Badge>
         <WorkspaceActions
           :workspace="workspace"
           size="sm"

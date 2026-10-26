@@ -102,7 +102,7 @@ onMounted(async () => {
 <template>
   <div class="space-y-6">
     <!-- Page header -->
-    <div class="flex items-center justify-between">
+    <div class="flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:justify-between">
       <div>
         <h2 class="text-xl font-semibold text-foreground">Workspaces</h2>
         <p class="text-sm text-muted-foreground mt-1">

@@ -14,8 +14,11 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div v-if="workspaces.length" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-    <div v-for="workspace in workspaces" :key="workspace.id" class="flex flex-col gap-2">
+  <div
+    v-if="workspaces.length"
+    class="grid auto-rows-fr grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3"
+  >
+    <div v-for="workspace in workspaces" :key="workspace.id" class="flex min-w-0 flex-col gap-2">
       <WorkspaceCard
         :workspace="workspace"
         :show-resource-warning="warningWorkspaceIds?.[workspace.id]"
@@ -27,10 +30,7 @@ const emit = defineEmits<{
     </div>
   </div>
 
-  <div
-    v-else
-    class="flex flex-col items-center justify-center py-12 px-6 text-center"
-  >
+  <div v-else class="flex flex-col items-center justify-center py-12 px-6 text-center">
     <div class="mb-4 text-muted-foreground">
       <Container :size="40" />
     </div>

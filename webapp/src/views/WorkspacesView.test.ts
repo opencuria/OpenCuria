@@ -163,4 +163,31 @@ describe('WorkspacesView workspace storage', () => {
     await wrapper.findAllComponents(WorkspaceCard)[1]!.get('[data-slot="card"]').trigger('click')
     expect(push).toHaveBeenCalledWith({ name: 'workspace-detail', params: { id: 'stopped' } })
   })
+
+  it('combines active session activity into the running status', async () => {
+    workspaceStore.workspaces = [makeWorkspace('busy', { has_active_session: true })]
+    const wrapper = mountView()
+    await flushPromises()
+    const card = wrapper.getComponent(WorkspaceCard)
+    expect(card.get('[title="Busy"]').text()).toBe('Busy')
+    expect(card.find('[title="running"]').exists()).toBe(false)
+  })
+
+  it('keeps a blocked operation visible without opening its actions menu', async () => {
+    workspaceStore.workspaces = [makeWorkspace('blocked', { intervention_required: true })]
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.getComponent(WorkspaceCard).get('[title="Needs review"]').text()).toBe(
+      'Needs review',
+    )
+  })
+
+  it('uses readable labels for compound workspace statuses', async () => {
+    workspaceStore.workspaces = [makeWorkspace('failed', { status: WorkspaceStatus.DELETE_FAILED })]
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.getComponent(WorkspaceCard).get('[title="delete failed"]').text()).toBe(
+      'delete failed',
+    )
+  })
 })
