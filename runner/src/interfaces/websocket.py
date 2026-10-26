@@ -471,38 +471,13 @@ class WebSocketInterface(Interface):
     async def _desktop_lease_tick(self) -> None:
         """Maintain workspaces concurrently without an unbounded task backlog."""
         desktop = self._service.desktop
-        store = desktop.lease_store
         workspace_ids = await desktop.maintenance_workspace_ids()
 
         async def maintain(workspace_id: uuid.UUID) -> None:
             before = desktop.get_desktop_session(workspace_id)
             previous = self._desktop_lifecycle_payload(workspace_id)
             try:
-                helper = getattr(desktop, "maintain_workspace", None)
-                if helper is not None:
-                    await helper(workspace_id)
-                else:
-                    await desktop.recover_workspace(workspace_id)
-                    for row in await store.list_expired():
-                        if row["workspace_id"] == str(workspace_id):
-                            await desktop._release_lease(
-                                workspace_id, row, terminal_state="expired"
-                            )
-                    # Until the manager exposes workspace maintenance, keep
-                    # recording cleanup scoped too; never invoke a global reap
-                    # that can let the first hung guest starve all others.
-                    for recording in await store.recordings():
-                        if recording["workspace_id"] != str(workspace_id):
-                            continue
-                        waiter = desktop._recording_waiters.get(
-                            recording["recording_id"]
-                        )
-                        if recording["state"] == "closing" or (
-                            waiter is not None and waiter.done()
-                        ):
-                            await desktop._cleanup_lease_recordings(
-                                recording["lease_id"]
-                            )
+                await desktop.maintain_workspace(workspace_id)
             finally:
                 current = self._desktop_lifecycle_payload(workspace_id)
                 if previous != current or before is not desktop.get_desktop_session(

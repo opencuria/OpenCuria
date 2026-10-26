@@ -259,41 +259,6 @@ class WorkspaceRegistry:
 
         return payload
 
-    async def recover_desktop_sessions_from_runtime(self) -> None:
-        """Rebuild in-memory desktop sessions from live runtime state."""
-        sessions = self.desktop_sessions if self.desktop_sessions is not None else {}
-        for workspace_id, info in list(self._cache.items()):
-            if self.desktop_manager is not None:
-                await self.desktop_manager.recover_workspace(workspace_id)
-                # Only DesktopManager may reconcile its process cache.
-                continue
-            if info.status != "running" or workspace_id in sessions:
-                continue
-
-            try:
-                live = (
-                    await self.desktop_live(workspace_id)
-                    if self.desktop_live is not None
-                    else False
-                )
-                if not live:
-                    continue
-            except Exception:
-                logger.exception(
-                    "desktop_session_recovery_failed",
-                    workspace_id=str(workspace_id),
-                )
-                continue
-
-            sessions[workspace_id] = DesktopSession(
-                workspace_id=workspace_id,
-                instance_id=info.instance_id,
-            )
-            logger.info(
-                "desktop_session_recovered",
-                workspace_id=str(workspace_id),
-            )
-
     async def get_vm_metrics(self) -> dict[str, dict[str, Any]]:
         """Collect host-observed metrics for QEMU workspaces."""
         qemu_runtime = self._runtime

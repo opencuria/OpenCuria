@@ -422,7 +422,7 @@ class WorkspaceService:
     async def recover_desktop_sessions_from_runtime(self) -> None:
         """Reconcile desktops from live runtime state with bounded workers."""
         await self.run_desktop_workers(
-            list(self._registry._cache), self._desktop.recover_workspace
+            list(self._registry._cache), self._desktop.maintain_workspace
         )
 
     async def run_desktop_workers(

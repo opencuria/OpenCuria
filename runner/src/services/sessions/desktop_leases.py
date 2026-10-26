@@ -103,31 +103,20 @@ class DesktopLeaseStore:
             ],
         )
 
-    async def list_all(self) -> list[dict]:
-        """Enumerate metadata for startup epoch reconciliation."""
+    async def list_expired(self, workspace_id: str) -> list[dict]:
+        """Return overdue/closing owners for one workspace."""
         return await asyncio.to_thread(
             self._run,
             lambda db: [
                 self._row(r)
-                for r in db.execute("SELECT * FROM desktop_leases").fetchall()
+                for r in db.execute(
+                    "SELECT * FROM desktop_leases WHERE workspace_id=? AND "
+                    "(state='closing' OR "
+                    "(state IN ('reserved','held') AND expires_at<=?))",
+                    (str(workspace_id), time.time()),
+                )
             ],
         )
-
-    async def list_expired(self, workspace_id: str | None = None) -> list[dict]:
-        """Return overdue/closing owners, optionally scoped to one workspace."""
-
-        def operation(db: sqlite3.Connection) -> list[dict]:
-            query = (
-                "SELECT * FROM desktop_leases WHERE (state='closing' OR "
-                "(state IN ('reserved','held') AND expires_at<=?))"
-            )
-            args = [time.time()]
-            if workspace_id is not None:
-                query += " AND workspace_id=?"
-                args.append(str(workspace_id))
-            return [self._row(r) for r in db.execute(query, args)]
-
-        return await asyncio.to_thread(self._run, operation)
 
     async def unfinished_workspace_ids(self) -> list[str]:
         """Enumerate maintenance targets without reading terminal history."""
@@ -365,18 +354,17 @@ class DesktopLeaseStore:
 
         return await asyncio.to_thread(self._run, operation)
 
-    async def recordings(self, lease_id: str | None = None) -> list[dict]:
-        """Return durable recording metadata, including closed tombstones."""
-
-        def operation(db: sqlite3.Connection) -> list[dict]:
-            query = "SELECT * FROM desktop_recordings"
-            args = ()
-            if lease_id is not None:
-                query += " WHERE lease_id=?"
-                args = (lease_id,)
-            return [dict(r) for r in db.execute(query, args)]
-
-        return await asyncio.to_thread(self._run, operation)
+    async def recordings(self, lease_id: str) -> list[dict]:
+        """Return one lease's recording metadata, including closed tombstones."""
+        return await asyncio.to_thread(
+            self._run,
+            lambda db: [
+                dict(r)
+                for r in db.execute(
+                    "SELECT * FROM desktop_recordings WHERE lease_id=?", (lease_id,)
+                )
+            ],
+        )
 
     async def recording_state(self, recording_id: str, state: str) -> None:
         """Move an attempt towards verified closure, never resurrect it."""
@@ -391,68 +379,30 @@ class DesktopLeaseStore:
             ),
         )
 
-    async def clear_workspace(self, workspace_id: str) -> None:
-        """Forget tombstones only after caller proves guest stop/removal.
-
-        Administrative use only: requires a permanent logical identity/replay
-        boundary, not ordinary stop/removal. Production retains terminal records
-        indefinitely because workspace/viewer UUIDs can be reused. Live or
-        unverified owners refuse deletion; caller must prove the replay boundary.
-        """
-
-        def operation(db: sqlite3.Connection) -> None:
-            if (
-                db.execute(
-                    "SELECT 1 FROM desktop_leases WHERE workspace_id=? "
-                    "AND state NOT IN ('released','expired')",
-                    (str(workspace_id),),
-                ).fetchone()
-                or db.execute(
-                    "SELECT 1 FROM desktop_recordings WHERE workspace_id=? "
-                    "AND state!='closed'",
-                    (str(workspace_id),),
-                ).fetchone()
-            ):
-                raise ValueError("Workspace still has unverified desktop owners")
-            db.execute(
-                "DELETE FROM desktop_recordings WHERE workspace_id=?",
-                (str(workspace_id),),
-            )
-            db.execute(
-                "DELETE FROM desktop_leases WHERE workspace_id=?", (str(workspace_id),)
-            )
-
-        await asyncio.to_thread(self._run, operation)
-
-    async def list_unfinished(self, workspace_id: str | None = None) -> list[dict]:
+    async def list_unfinished(self, workspace_id: str) -> list[dict]:
         """Read only owners requiring maintenance; terminal replay fences remain."""
+        return await asyncio.to_thread(
+            self._run,
+            lambda db: [
+                self._row(r)
+                for r in db.execute(
+                    "SELECT * FROM desktop_leases WHERE workspace_id=? "
+                    "AND state IN ('reserved','held','closing')",
+                    (str(workspace_id),),
+                )
+            ],
+        )
 
-        def operation(db: sqlite3.Connection) -> list[dict]:
-            query = (
-                "SELECT * FROM desktop_leases "
-                "WHERE state IN ('reserved','held','closing')"
-            )
-            args = ()
-            if workspace_id is not None:
-                query += " AND workspace_id=?"
-                args = (str(workspace_id),)
-            return [self._row(r) for r in db.execute(query, args)]
-
-        return await asyncio.to_thread(self._run, operation)
-
-    async def unfinished_recordings(
-        self, workspace_id: str | None = None
-    ) -> list[dict]:
+    async def unfinished_recordings(self, workspace_id: str) -> list[dict]:
         """Read recovery attempts without scanning closed recording history."""
-
-        def operation(db: sqlite3.Connection) -> list[dict]:
-            query = (
-                "SELECT * FROM desktop_recordings WHERE state IN ('starting','closing')"
-            )
-            args = ()
-            if workspace_id is not None:
-                query += " AND workspace_id=?"
-                args = (str(workspace_id),)
-            return [dict(r) for r in db.execute(query, args)]
-
-        return await asyncio.to_thread(self._run, operation)
+        return await asyncio.to_thread(
+            self._run,
+            lambda db: [
+                dict(r)
+                for r in db.execute(
+                    "SELECT * FROM desktop_recordings WHERE workspace_id=? "
+                    "AND state IN ('starting','closing')",
+                    (str(workspace_id),),
+                )
+            ],
+        )

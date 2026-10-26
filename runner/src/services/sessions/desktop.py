@@ -772,29 +772,6 @@ class DesktopManager:
                 await asyncio.gather(*(cleanup(*job) for job in jobs))
             await self._lease_projection(workspace_id)
 
-    async def reap_expired(self) -> None:
-        """Compatibility maintenance entry point, concurrent across workspaces."""
-        await self.recover()
-
-    async def recover(self) -> None:
-        """Reconcile unfinished ownership concurrently; never resume desktops."""
-
-        async def maintain(workspace_id: uuid.UUID) -> None:
-            try:
-                await self.maintain_workspace(workspace_id)
-            except Exception:
-                logger.exception(
-                    "desktop_lease_recovery_failed", workspace_id=str(workspace_id)
-                )
-
-        await asyncio.gather(
-            *(maintain(ws) for ws in await self.maintenance_workspace_ids())
-        )
-
-    async def recover_workspace(self, workspace_id: uuid.UUID) -> None:
-        """Compatibility alias for scoped maintenance."""
-        await self.maintain_workspace(workspace_id)
-
     @property
     def _desktop_locks(self) -> dict[uuid.UUID, asyncio.Lock]:
         """Alias onto the desktop lock map's underlying dict (live)."""

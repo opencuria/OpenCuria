@@ -318,7 +318,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         self.service.desktop._desktop_generations[self.workspace_id] = 5
         self.runtime.exec_command_wait.reset_mock()
 
-        await self.service.registry.recover_desktop_sessions_from_runtime()
+        await self.service.recover_desktop_sessions_from_runtime()
 
         self.assertIs(
             self.service.desktop._desktop_sessions[self.workspace_id], session

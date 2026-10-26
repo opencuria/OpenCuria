@@ -163,7 +163,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await self.store.get("one"))["activated"])
         self.assertEqual(result["holder_count"], 1)
         manager._stop_desktop_process.assert_not_awaited()
-        await manager.reap_expired()
+        await manager.maintain_workspace(self.ws)
         self.assertEqual((await self.store.get("one"))["state"], "expired")
         self.assertFalse((await self.store.get("one"))["activated"])
 
@@ -184,7 +184,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_recovery_old_epoch_never_resumes(self):
         await self.reserve(epoch="old")
         manager = self.manager()
-        await manager.recover_workspace(self.ws)
+        await manager.maintain_workspace(self.ws)
         self.assertEqual((await self.store.get("one"))["state"], "expired")
         manager._ensure_desktop_process_locked.assert_not_awaited()
 
@@ -232,7 +232,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         restarted._get_runtime = lambda _: runtime
         restarted._is_desktop_session_live = AsyncMock(return_value=True)
         self.assertFalse(restarted._recording_handles)
-        await restarted.recover_workspace(self.ws)
+        await restarted.maintain_workspace(self.ws)
         runtime.close_managed_process.assert_awaited_with("guest", row["control_path"])
         self.assertEqual((await self.store.recordings("one"))[0]["state"], "closed")
         self.assertEqual((await self.store.get("one"))["state"], "expired")
@@ -255,7 +255,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.store.get("one"))["state"], "closing")
         manager._stop_desktop_process.assert_not_awaited()
         runtime.close_managed_process.return_value = True
-        await manager.reap_expired()
+        await manager.maintain_workspace(self.ws)
         self.assertEqual((await self.store.recordings("one"))[0]["state"], "closed")
         self.assertEqual((await self.store.get("one"))["state"], "expired")
 
@@ -269,7 +269,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
                 "UPDATE desktop_leases SET expires_at=0 WHERE lease_id='one'"
             ),
         )
-        await manager.reap_expired()
+        await manager.maintain_workspace(self.ws)
         runtime.close_managed_process.assert_awaited_once()
         self.assertEqual((await self.store.get("one"))["state"], "expired")
 
@@ -287,13 +287,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await manager.desktop_action(self.ws, "record_start", {"run_id": "run-1"})
         await manager.desktop_action(self.ws, "release", intent)
-        await self.store.clear_workspace(str(self.ws))
-        self.assertEqual(await self.store.recordings(), [])
-
-    async def test_clear_workspace_refuses_live_owners(self):
-        await self.reserve()
-        with self.assertRaises(ValueError):
-            await self.store.clear_workspace(str(self.ws))
+        self.assertEqual((await self.store.recordings("one"))[0]["state"], "closed")
 
     async def test_record_stop_before_delayed_start_is_durable_fence(self):
         manager, runtime, intent = await self.recording_manager()
@@ -308,7 +302,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         runtime.process_wait = AsyncMock(return_value=0)
         await manager.desktop_action(self.ws, "record_start", {"run_id": "run-1"})
         await asyncio.sleep(0)
-        await manager.reap_expired()
+        await manager.maintain_workspace(self.ws)
         self.assertEqual((await self.store.recordings("one"))[0]["state"], "closed")
         self.assertEqual((await self.store.get("one"))["state"], "held")
         await manager.desktop_action(self.ws, "release", intent)
@@ -340,7 +334,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         manager._get_runtime = lambda _: runtime
         replacement = DesktopSession(self.ws, "guest")
         manager._desktop_sessions[self.ws] = replacement
-        await manager.recover_workspace(self.ws)
+        await manager.maintain_workspace(self.ws)
         self.assertEqual((await self.store.get("one"))["state"], "expired")
         self.assertIs(manager._desktop_sessions[self.ws], replacement)
         manager._stop_desktop_process.assert_not_awaited()
@@ -354,7 +348,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         )
         manager._get_runtime = lambda _: runtime
         manager._desktop_sessions[self.ws] = DesktopSession(self.ws, "guest")
-        await manager.recover_workspace(self.ws)
+        await manager.maintain_workspace(self.ws)
         self.assertEqual((await self.store.get("one"))["state"], "closing")
         self.assertTrue((await self.store.get("one"))["activated"])
         manager._stop_desktop_process.assert_not_awaited()
@@ -399,13 +393,13 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
                 return_value=SimpleNamespace(instance_id="old", status="removed")
             )
         )
-        await manager.recover_workspace(self.ws)
+        await manager.maintain_workspace(self.ws)
         self.assertEqual((await self.store.get("one"))["state"], "expired")
 
     async def test_recovery_without_ledger_does_not_touch_unknown_desktop(self):
         manager = self.manager()
         manager._get_runtime = lambda _: self.fail("Unknown desktop must not be killed")
-        await manager.recover_workspace(self.ws)
+        await manager.maintain_workspace(self.ws)
         manager._stop_desktop_process.assert_not_awaited()
 
     async def test_database_file_private(self):
@@ -575,7 +569,6 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         manager._get_cached = lambda _: self.fail("Terminal history accessed cache")
         manager._get_runtime = lambda _: self.fail("Terminal history probed guest")
         await manager.maintain_workspace(self.ws)
-        await manager.recover()
         manager._ensure_desktop_process_locked.assert_not_awaited()
 
     async def test_maintenance_other_owner_progresses_while_first_hangs(self):
@@ -670,7 +663,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
                 "('old','one',?,'guest','run','old','control','output','closing')",
                 (str(self.ws),),
             )
-        rows = await self.store.recordings()
+        rows = await self.store.recordings("one")
         self.assertIsNone(rows[0]["guest_token"])
 
     def guest_manager(self, *, stop_kills_xvnc: bool = True):
@@ -736,7 +729,7 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "cannot advance revision"):
             await manager.desktop_action(self.ws, "hold", self.viewer(2))
         guest["kills"] = True
-        await manager.reap_expired()
+        await manager.maintain_workspace(self.ws)
         self.assertEqual((await self.store.get("viewer-tab"))["state"], "expired")
         held = await manager.desktop_action(self.ws, "hold", self.viewer(2))
         self.assertEqual(held["lease_state"], "held")
