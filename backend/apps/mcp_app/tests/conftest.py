@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -67,6 +68,25 @@ def _build_world() -> World:
 async def world(transactional_db) -> World:
     """Organization member with one online runner and one running workspace."""
     return await sync_to_async(_build_world)()
+
+
+@pytest.fixture
+async def codex_account(world: World):
+    """Connect a synthetic ChatGPT account without contacting a provider."""
+    from apps.harness.provider_accounts import ProviderAccountService
+
+    return await sync_to_async(ProviderAccountService().save_account)(
+        organization_id=world.org.id,
+        user=world.user,
+        provider="chatgpt",
+        payload={
+            "label": "MCP Codex test",
+            "access": "test-access",
+            "refresh": "test-refresh",
+            "account_id": "test-account",
+            "expires": int(time.time() * 1000) + 3600_000,
+        },
+    )
 
 
 async def call(ctx: ToolContext, tool: str, /, **arguments: Any):

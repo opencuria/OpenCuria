@@ -142,7 +142,7 @@ export const HARNESS_ENGINES: ReadonlyArray<HarnessEngine & { id: HarnessId }> =
       modes: ["build", "plan"],
       connected: false,
       default_model: "chatgpt/gpt-6.1-sol",
-      default_effort: "low",
+      default_effort: "high",
     },
   ];
 

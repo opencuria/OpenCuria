@@ -616,8 +616,8 @@ async def chat_read(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
             ),
             "model": string("Model ID from model_list; omit for the engine default."),
             "reasoning_effort": string(
-                "Optional effort level supported by the model, e.g. 'low', "
-                "'medium', 'high'."
+                "Reasoning effort from model_list.reasoning_efforts, e.g. 'high' "
+                "or 'ultra' when supported. Omit for the engine/agent default."
             ),
             "mode": enum(
                 ["build", "plan"],
@@ -703,7 +703,11 @@ async def chat_start(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
             "model": string(
                 "Switch the model for this and later turns (idle chats only)."
             ),
-            "reasoning_effort": string("Switch the effort level (idle chats only)."),
+            "reasoning_effort": string(
+                "Switch reasoning effort (idle chats only). Use a value from "
+                "model_list.reasoning_efforts; omit to keep the current effort, "
+                "or pass an empty string to restore the engine/agent default."
+            ),
             "mode": enum(["build", "plan"], "Switch the mode (idle chats only)."),
             "skills": string_list(
                 "Replace the selected skills for this and later turns (idle chats "
@@ -757,7 +761,7 @@ async def chat_send(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
                 current = service.set_mode(current.id, args["mode"])
             if args.get("model"):
                 current = service.set_model(current.id, args["model"])
-            if args.get("reasoning_effort"):
+            if "reasoning_effort" in args:
                 current = service.set_reasoning_effort(
                     current.id, args["reasoning_effort"]
                 )

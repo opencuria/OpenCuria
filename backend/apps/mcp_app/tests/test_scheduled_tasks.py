@@ -5,10 +5,13 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.utils import timezone
 
 from apps.harness.harness_service import HarnessService
-from apps.scheduled_tasks.models import ScheduledTaskRun
+from apps.harness.models import HarnessMessage
+from apps.harness.provider_accounts import ProviderAccountService
+from apps.scheduled_tasks.models import ScheduledTask, ScheduledTaskRun
 from apps.scheduled_tasks.services import ScheduledTaskService
 
 from .conftest import fails, ok
@@ -106,6 +109,90 @@ async def test_one_time_task_and_validation_messages(world):
         recurrence="weekly",
     )
     assert "weekly recurrence requires weekdays" in no_days
+
+
+@pytest.mark.parametrize("effort", [None, "low", "high", "ultra"])
+async def test_codex_task_effort_is_saved_updated_and_used_on_run(
+    world, codex_account, monkeypatch, effort
+):
+    ctx = world.ctx()
+    settings = {"reasoning_effort": effort} if effort else {}
+    created = await ok(
+        ctx,
+        "scheduled_task_create",
+        name="Codex review",
+        workspace="billing-api",
+        prompt="Review this repo",
+        engine="codex",
+        recurrence="daily",
+        **settings,
+    )
+    assert created["model"] == "chatgpt/gpt-6.1-sol"
+    assert created["reasoning_effort"] == (effort or "high")
+    updated = await ok(
+        ctx,
+        "scheduled_task_update",
+        scheduled_task="Codex review",
+        reasoning_effort="medium",
+    )
+    assert updated["reasoning_effort"] == "medium"
+    kept = await ok(
+        ctx,
+        "scheduled_task_update",
+        scheduled_task="Codex review",
+        mode="plan",
+    )
+    assert kept["reasoning_effort"] == "medium"
+    detail = await ok(ctx, "scheduled_task_get", scheduled_task="Codex review")
+    assert detail["reasoning_effort"] == "medium"
+    runs = []
+
+    async def start_run(self, target, prompt, **kwargs):
+        runs.append((target.harness_id, target.model, target.reasoning_effort))
+        return await sync_to_async(HarnessMessage.objects.create)(
+            session=target,
+            role="assistant",
+            reasoning_effort=target.reasoning_effort,
+        )
+
+    monkeypatch.setattr(HarnessService, "start_run", start_run)
+    result = await ok(ctx, "scheduled_task_run_now", scheduled_task="Codex review")
+    assert result["run"]["status"] == "running"
+    assert runs == [("codex", "chatgpt/gpt-6.1-sol", "medium")]
+    reset = await ok(
+        ctx,
+        "scheduled_task_update",
+        scheduled_task="Codex review",
+        reasoning_effort="",
+    )
+    assert reset["reasoning_effort"] == "high"
+
+
+async def test_codex_task_rejects_unsupported_effort_and_unavailable_account(
+    world,
+    codex_account,
+):
+    settings = {
+        "name": "Invalid Codex review",
+        "workspace": "billing-api",
+        "prompt": "Review",
+        "engine": "codex",
+        "recurrence": "daily",
+        "model": "chatgpt/gpt-6-luna",
+        "reasoning_effort": "ultra",
+    }
+    error = await fails(world.ctx(), "scheduled_task_create", **settings)
+    assert "Invalid Codex reasoning effort" in error
+    await sync_to_async(ProviderAccountService().select_account)(
+        world.org.id, world.user.id, "chatgpt", None
+    )
+    denied = await fails(
+        world.ctx(),
+        "scheduled_task_create",
+        **{**settings, "reasoning_effort": "high"},
+    )
+    assert "Connect your selected ChatGPT or OpenRouter account" in denied
+    assert await sync_to_async(ScheduledTask.objects.count)() == 0
 
 
 async def test_run_now_and_history(world, monkeypatch):

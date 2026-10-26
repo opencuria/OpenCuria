@@ -72,7 +72,7 @@ def test_engine_availability_follows_provider_account_selection(
             "modes": ["build", "plan"],
             "connected": False,
             "default_model": "chatgpt/gpt-6.1-sol",
-            "default_effort": "low",
+            "default_effort": "high",
         },
     ]
     token = "safe-claude-api-token"

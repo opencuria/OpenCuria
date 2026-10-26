@@ -204,7 +204,7 @@ function engineUnavailable(id: HarnessId): boolean {
 }
 const { entries: recentEntries } = useRecentModels()
 const recentModels = computed(() =>
-  localHarnessId.value === 'native' ? recentCatalogModels(catalog.value) : [],
+  localHarnessId.value !== 'claude' ? recentCatalogModels(catalog.value) : [],
 )
 const modelLoading = ref(true)
 const providerMissing = ref(false)
@@ -472,6 +472,7 @@ async function loadProviderModels(): Promise<void> {
     const [models, availableEngines] = await Promise.all([
       loadEngineModelsCached(engineId),
       listHarnessEngines().catch(() => []),
+      engineId !== 'claude' ? loadRecentModels() : Promise.resolve([]),
     ])
     if (!isCurrent()) return
     engineCatalog.value = models
@@ -484,16 +485,18 @@ async function loadProviderModels(): Promise<void> {
       (applyEngineDefaultsAfterCatalog || !localModel.value)
     ) {
       const defaults = harnessEngineDefaults(engineId, engines.value)
-      const model = models.find((item) => item.id === defaults.model) ?? models[0]
+      const remembered = engineId === 'codex' ? recentCatalogModels(models)[0] : undefined
+      const model = remembered ?? models.find((item) => item.id === defaults.model) ?? models[0]
       localModel.value = model?.id ?? defaults.model
-      localEffort.value = model ? snapEffort(model, defaults.effort) : defaults.effort
+      const effort =
+        (engineId === 'codex' ? recentEffortFor(localModel.value) : '') || defaults.effort
+      localEffort.value = model ? snapEffort(model, effort) : effort
       emit('update:model', localModel.value)
       emit('update:effort', localEffort.value)
       applyEngineDefaultsAfterCatalog = false
     }
     if (localHarnessId.value === 'native') {
       if (!isScheduledTask.value) await harness.loadAgentConfigs()
-      await loadRecentModels()
     }
   } catch {
     if (!isCurrent()) return
@@ -614,7 +617,7 @@ watch(
       if (!props.engineLocked) {
         const defaults = harnessEngineDefaults(next, engines.value)
         localModel.value = defaults.model
-        localEffort.value = defaults.effort || recentEffortFor(localModel.value)
+        localEffort.value = defaults.effort
         emit('update:model', localModel.value)
         emit('update:effort', localEffort.value)
         applyEngineDefaultsAfterCatalog = true
@@ -1511,7 +1514,7 @@ function onComposerKeydown(e: KeyboardEvent): void {
                 :effort="localEffort"
                 :models="catalog"
                 :recent-models="recentModels"
-                :recent-efforts="localHarnessId === 'native' ? recentEntries : []"
+                :recent-efforts="localHarnessId !== 'claude' ? recentEntries : []"
                 :loading="modelLoading"
                 :disabled="pickersLocked"
                 :default-model-label="isScheduledTask ? 'Agent default' : 'Select model…'"

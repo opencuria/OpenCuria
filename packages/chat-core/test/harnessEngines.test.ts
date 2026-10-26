@@ -64,7 +64,7 @@ describe("shared engine policy", () => {
     });
     expect(harnessEngineDefaults("codex")).toEqual({
       model: "chatgpt/gpt-6.1-sol",
-      effort: "low",
+      effort: "high",
     });
     expect(
       harnessEngineChoices([]).find((e) => e.id === "codex")?.connected,

@@ -16,6 +16,7 @@ from apps.harness.models import (
     HarnessSession,
     QuestionRequest,
 )
+from apps.harness.provider_accounts import ProviderAccountService
 from apps.organizations.models import Membership, MembershipRole
 from apps.runners.enums import WorkspaceStatus
 
@@ -263,6 +264,111 @@ async def test_chat_start_creates_a_chat_with_skills(world, monkeypatch):
     assert result["chat"]["skills"] == ["Conventions"]
     assert result["chat"]["engine"] == "native"
     assert runs == [("Add a health check", [skill["skill_id"]])]
+
+
+async def test_codex_effort_is_discoverable_and_applied_to_start_and_followups(
+    world, codex_account, monkeypatch
+):
+    runs = []
+
+    async def start_run(self, target, prompt, **kwargs):
+        runs.append((target.model, target.reasoning_effort))
+
+    monkeypatch.setattr(HarnessService, "start_run", start_run)
+    ctx = world.ctx()
+    models = await ok(ctx, "model_list", engine="codex")
+    model = next(m for m in models["models"] if m["model"] == "chatgpt/gpt-6.1-sol")
+    assert "ultra" in model["reasoning_efforts"]
+    assert model["default_effort"] == "high"
+    created = await ok(
+        ctx,
+        "chat_start",
+        workspace="billing-api",
+        prompt="Review",
+        engine="codex",
+        reasoning_effort="ultra",
+    )
+    chat_id = created["chat"]["chat_id"]
+    assert created["chat"]["reasoning_effort"] == "ultra"
+    for settings in ({}, {"reasoning_effort": "medium"}, {"reasoning_effort": ""}):
+        await ok(ctx, "chat_send", chat_id=chat_id, prompt="Continue", **settings)
+    assert runs == [
+        (model["model"], "ultra"),
+        (model["model"], "ultra"),
+        (model["model"], "medium"),
+        (model["model"], "high"),
+    ]
+    session = await sync_to_async(HarnessSession.objects.get)(id=chat_id)
+    assert session.reasoning_effort == "high"
+
+    invalid = await fails(
+        ctx, "chat_send", chat_id=chat_id, prompt="Continue", reasoning_effort="turbo"
+    )
+    assert "Invalid Codex reasoning effort" in invalid
+    await sync_to_async(ProviderAccountService().select_account)(
+        world.org.id, world.user.id, "chatgpt", None
+    )
+    denied = await fails(
+        ctx,
+        "chat_send",
+        chat_id=chat_id,
+        prompt="Continue",
+        reasoning_effort="low",
+    )
+    assert "No chatgpt account selected for Codex" in denied
+    await sync_to_async(session.refresh_from_db)()
+    assert session.reasoning_effort == "high"
+    assert len(runs) == 4
+
+
+@pytest.mark.parametrize("effort", [None, "low", "high", "ultra"])
+async def test_codex_chat_creation_effort_defaults_and_explicit_values(
+    world, codex_account, monkeypatch, effort
+):
+    async def start_run(self, target, prompt, **kwargs):
+        assert target.reasoning_effort == (effort or "high")
+
+    monkeypatch.setattr(HarnessService, "start_run", start_run)
+    settings = {"reasoning_effort": effort} if effort else {}
+    created = await ok(
+        world.ctx(),
+        "chat_start",
+        workspace="billing-api",
+        prompt="Review",
+        engine="codex",
+        **settings,
+    )
+    assert created["chat"]["reasoning_effort"] == (effort or "high")
+
+
+@pytest.mark.parametrize("engine, expected", [("native", ""), ("claude", "high")])
+async def test_chat_send_can_restore_native_and_claude_effort_defaults(
+    world, monkeypatch, engine, expected
+):
+    def create():
+        session = _chat(world)
+        session.harness_id = engine
+        session.reasoning_effort = "medium"
+        session.save(update_fields=["harness_id", "reasoning_effort"])
+        return session
+
+    session = await sync_to_async(create)()
+    runs = []
+
+    async def start_run(self, target, prompt, **kwargs):
+        runs.append(target.reasoning_effort)
+
+    monkeypatch.setattr(HarnessService, "start_run", start_run)
+    await ok(
+        world.ctx(),
+        "chat_send",
+        chat_id=str(session.id),
+        prompt="Continue",
+        reasoning_effort="",
+    )
+    await sync_to_async(session.refresh_from_db)()
+    assert session.reasoning_effort == expected
+    assert runs == [expected]
 
 
 async def test_chats_of_other_users_are_not_found(world):

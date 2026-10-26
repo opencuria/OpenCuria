@@ -78,7 +78,9 @@ def test_pinned_default_and_per_model_ultra_allowlist():
     specs = {m.id: m for m in chatgpt_models()}
     assert DEFAULT_CODEX_MODEL == "chatgpt/gpt-6.1-sol"
     assert normalize_codex_effort("ultra", specs[DEFAULT_CODEX_MODEL]) == "ultra"
-    assert normalize_codex_effort("", specs[DEFAULT_CODEX_MODEL]) == "low"
+    assert normalize_codex_effort("", specs[DEFAULT_CODEX_MODEL]) == "high"
+    assert normalize_codex_effort("low", specs[DEFAULT_CODEX_MODEL]) == "low"
+    assert all(model.default_effort == "high" for model in specs.values())
     for model in ("chatgpt/gpt-6-luna", "chatgpt/gpt-5.6-luna", "chatgpt/gpt-5.5"):
         with pytest.raises(ValueError, match="Invalid Codex reasoning effort"):
             normalize_codex_effort("ultra", specs[model])
@@ -127,7 +129,7 @@ def test_create_setters_and_direct_run_reject_provider_switch(codex_setup):
     assert session.engine_state == {"provider_id": "chatgpt"}
     assert session.created_by_id == data.owner.id
     assert session.model == DEFAULT_CODEX_MODEL
-    assert session.reasoning_effort == "low"
+    assert session.reasoning_effort == "high"
     data.service.set_reasoning_effort(session.id, "ultra")
     data.service.set_model(session.id, "chatgpt/gpt-6-astra")
     for invalid in (
@@ -145,7 +147,7 @@ def test_create_setters_and_direct_run_reject_provider_switch(codex_setup):
     assert session.model == "chatgpt/gpt-6-astra"
     assert session.reasoning_effort == "ultra"
     updated = data.service.set_model(session.id, "chatgpt/gpt-6-luna")
-    assert updated.reasoning_effort == "medium"
+    assert updated.reasoning_effort == "high"
     with pytest.raises(ValueError, match="selected provider account"):
         create_session(data, connection_id=data.account.id)
 

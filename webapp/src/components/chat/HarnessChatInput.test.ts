@@ -10,7 +10,7 @@ import { OPEN_SETTINGS_EVENT } from '@/components/settings/settingsTabs'
 import * as harnessApi from '@/services/harness.api'
 import type { ProviderModel } from '@/lib/harnessModels'
 import { resetProviderCatalogCache } from '@/lib/providerCatalog'
-import { resetRecentModelsCache } from '@/lib/recentModels'
+import { recordRecentModelUsage, resetRecentModelsCache } from '@/lib/recentModels'
 import { resetAgentConfigsCache } from '@/lib/agentConfigs'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useHarnessStore } from '@/stores/harness'
@@ -157,6 +157,7 @@ describe('HarnessChatInput', () => {
     resetProviderCatalogCache()
     resetAgentConfigsCache()
     resetRecentModelsCache()
+    vi.mocked(harnessApi.listRecentModels).mockResolvedValue([])
     listAgentConfigsMock.mockResolvedValue([
       {
         agent: 'build',
@@ -207,8 +208,8 @@ describe('HarnessChatInput', () => {
       id: 'chatgpt/gpt-6.1-sol',
       provider: 'chatgpt',
       name: 'Codex Sol',
-      reasoning_efforts: ['low', 'ultra'],
-      default_effort: 'low',
+      reasoning_efforts: ['low', 'medium', 'high', 'ultra'],
+      default_effort: 'high',
     },
     { ...catalog[0]!, id: 'openrouter/vendor/codex', name: 'Router Codex' },
   ]
@@ -222,7 +223,7 @@ describe('HarnessChatInput', () => {
         modes: ['build', 'plan'],
         connected: true,
         default_model: 'chatgpt/gpt-6.1-sol',
-        default_effort: 'low',
+        default_effort: 'high',
       },
     ])
     codexModelsMock.mockResolvedValue(codexModels)
@@ -247,7 +248,7 @@ describe('HarnessChatInput', () => {
       'plan',
       'chatgpt/gpt-6.1-sol',
       [],
-      'low',
+      'high',
       'codex',
     ])
     wrapper.unmount()
@@ -289,8 +290,55 @@ describe('HarnessChatInput', () => {
     await flushPromises()
     expect(wrapper.emitted('update:harnessId')?.slice(-1)[0]).toEqual(['codex'])
     expect(wrapper.emitted('update:model')?.slice(-1)[0]).toEqual(['chatgpt/gpt-6.1-sol'])
-    expect(wrapper.emitted('update:effort')?.slice(-1)[0]).toEqual(['low'])
+    expect(wrapper.emitted('update:effort')?.slice(-1)[0]).toEqual(['high'])
     expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it.each(['chat', 'scheduled-task'] as const)(
+    'restores the last available Codex model and effort from the server in a %s composer',
+    async (variant) => {
+      enableCodex()
+      vi.mocked(harnessApi.listRecentModels).mockResolvedValue([
+        { model: 'removed/model', effort: 'ultra', last_used_at: '' },
+        { model: 'openrouter/vendor/codex', effort: 'low', last_used_at: '' },
+        { model: 'chatgpt/gpt-6.1-sol', effort: 'ultra', last_used_at: '' },
+      ])
+      const wrapper = mountInput({ harnessId: 'codex', variant })
+      await flushPromises()
+      expect(wrapper.emitted('update:model')?.slice(-1)[0]).toEqual(['openrouter/vendor/codex'])
+      expect(wrapper.emitted('update:effort')?.slice(-1)[0]).toEqual(['low'])
+
+      await wrapper.get('[data-testid="composer-model-chatgpt/gpt-6.1-sol"]').trigger('click')
+      expect(wrapper.emitted('update:effort')?.slice(-1)[0]).toEqual(['ultra'])
+      wrapper.unmount()
+    },
+  )
+
+  it('restores the last-used effort when switching back to Codex Build', async () => {
+    enableCodex()
+    const wrapper = mountInput()
+    await flushPromises()
+    recordRecentModelUsage('chatgpt/gpt-6.1-sol', 'ultra')
+    await wrapper.get('[data-testid="composer-mode-codex-build"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('update:effort')?.slice(-1)[0]).toEqual(['ultra'])
+    await wrapper.get('[data-testid="composer-mode-native-plan"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="composer-mode-codex-build"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('update:effort')?.slice(-1)[0]).toEqual(['ultra'])
+    wrapper.unmount()
+  })
+
+  it('falls back to a supported effort if a remembered Codex effort is unavailable', async () => {
+    enableCodex()
+    vi.mocked(harnessApi.listRecentModels).mockResolvedValue([
+      { model: 'openrouter/vendor/codex', effort: 'ultra', last_used_at: '' },
+    ])
+    const wrapper = mountInput({ harnessId: 'codex' })
+    await flushPromises()
+    expect(wrapper.emitted('update:effort')?.slice(-1)[0]).toEqual(['high'])
     wrapper.unmount()
   })
 

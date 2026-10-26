@@ -51,7 +51,7 @@ const models = computed(() =>
 )
 const { entries: recentEntries } = useRecentModels()
 const recentModels = computed(() =>
-  harnessId.value === 'native' ? recentCatalogModels(models.value) : [],
+  harnessId.value !== 'claude' ? recentCatalogModels(models.value) : [],
 )
 
 const confirmOpen = ref(false)
@@ -68,7 +68,7 @@ onMounted(async () => {
   try {
     const [loaded] = await Promise.all([
       loadEngineModelsCached(engineId),
-      engineId === 'native' ? loadRecentModels() : Promise.resolve([]),
+      engineId !== 'claude' ? loadRecentModels() : Promise.resolve([]),
     ])
     engineCatalog.value = loaded
   } catch {
@@ -125,7 +125,7 @@ function submit(): void {
           :effort="effort"
           :models="models"
           :recent-models="recentModels"
-          :recent-efforts="harnessId === 'native' ? recentEntries : []"
+          :recent-efforts="harnessId !== 'claude' ? recentEntries : []"
           :loading="modelLoading"
           @update:model="model = $event"
           @update:effort="effort = $event"

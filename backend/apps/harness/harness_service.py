@@ -693,7 +693,7 @@ class HarnessService:
         if getattr(session, "harness_id", "native") == "claude":
             from .engines.catalog import normalize_claude_effort
 
-            effort = normalize_claude_effort(reasoning_effort)
+            effort = normalize_claude_effort(reasoning_effort or None)
         elif getattr(session, "harness_id", "native") == "codex":
             _, effort = self._validate_codex_session_config(
                 session, session.model, reasoning_effort

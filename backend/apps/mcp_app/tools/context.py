@@ -158,8 +158,9 @@ def _models(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     description="""
         List the models a chat engine can use, with their reasoning effort
         levels. Use the returned 'model' value as the model argument of
-        chat_start, chat_send or scheduled_task_create. Omitting the model
-        there uses the engine's default, which is usually what you want.
+        chat_start, chat_send or scheduled_task_create. Set reasoning_effort
+        on those tools to one of the returned reasoning_efforts. Omitting the
+        model on creation uses the engine's default.
         Native catalogs can be long: filter with query.
     """,
 )

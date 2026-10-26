@@ -79,6 +79,20 @@ interface SendOptions {
   reasoningEffort?: string
 }
 
+/** Codex defaults are resolved server-side; remember the admitted selection. */
+function recordComposerModelUsage(
+  session: HarnessSession,
+  model: string,
+  effort: string,
+  harnessId = session.harness_id ?? 'native',
+): void {
+  if (harnessId === 'claude') return
+  recordRecentModelUsage(
+    harnessId === 'codex' ? session.model : model,
+    harnessId === 'codex' ? (session.reasoning_effort ?? effort) : effort,
+  )
+}
+
 export const useHarnessStore = defineStore('harness', () => {
   // --- State ---
   const sessions = ref<HarnessSession[]>([])
@@ -888,7 +902,7 @@ export const useHarnessStore = defineStore('harness', () => {
         },
       ]
       await fetchParts(session.id)
-      if (harnessId === 'native') recordRecentModelUsage(model, reasoningEffort)
+      recordComposerModelUsage(session, model, reasoningEffort, harnessId)
       return session
     } catch (e: unknown) {
       notifications.error('Prompt failed', e instanceof Error ? e.message : 'Unknown error')
@@ -951,8 +965,12 @@ export const useHarnessStore = defineStore('harness', () => {
       // before returning. Fetch their authoritative ids/positions instead
       // of inventing a local user that can collide with an identical prompt.
       await fetchParts(sessionId)
-      if ((session.harness_id ?? previousSession?.harness_id) !== 'claude')
-        recordRecentModelUsage(options.model ?? '', options.reasoningEffort ?? '')
+      recordComposerModelUsage(
+        session,
+        options.model ?? '',
+        options.reasoningEffort ?? '',
+        session.harness_id ?? previousSession?.harness_id,
+      )
       return true
     } catch (e: unknown) {
       notifications.error('Prompt failed', e instanceof Error ? e.message : 'Unknown error')
@@ -1188,8 +1206,7 @@ export const useHarnessStore = defineStore('harness', () => {
         // A refresh started during admission may still contain the old suffix.
         invalidatePartFetches(sessionId)
         await fetchParts(sessionId)
-        if (session.harness_id !== 'claude')
-          recordRecentModelUsage(options.model ?? '', options.reasoningEffort ?? '')
+        recordComposerModelUsage(session, options.model ?? '', options.reasoningEffort ?? '')
       } catch (e: unknown) {
         invalidatePartFetches(sessionId)
         if (previous && cutoff !== -1) messagesBySession.value[sessionId] = previous

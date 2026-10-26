@@ -68,7 +68,11 @@ RUN_FIELDS = {
         "Agent engine (default native); external engines must be connected.",
     ),
     "model": string("Model ID from model_list; omit for the engine default."),
-    "reasoning_effort": string("Optional effort level, e.g. 'low' or 'high'."),
+    "reasoning_effort": string(
+        "Reasoning effort from model_list.reasoning_efforts, e.g. 'high' or "
+        "'ultra' when supported. An empty string uses the engine/agent default; "
+        "omitting it on update keeps the saved effort."
+    ),
     "mode": enum(["build", "plan"], "'build' (default) or 'plan' (read-only)."),
     "skills": string_list("Skill IDs or names the agent should follow."),
 }

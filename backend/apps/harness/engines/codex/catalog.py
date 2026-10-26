@@ -3,6 +3,7 @@
 models.json records unauthenticated model/list capabilities from the official
 0.163.0 bundled runtime, not the account's live subscription entitlements. No
 native-provider defaults are used: Codex's default and effort support differ.
+OpenCuria starts ChatGPT Codex models at high effort when supported.
 Upstream OpenAI Codex (Apache-2.0); see THIRD_PARTY_NOTICES.md.
 """
 
@@ -20,7 +21,7 @@ CODEX_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ul
 _SPECS = json.loads(Path(__file__).with_name("models.json").read_text())["models"]
 _DEFAULT = next(spec for spec in _SPECS if spec["is_default"])
 DEFAULT_CODEX_MODEL = "chatgpt/" + _DEFAULT["id"]
-DEFAULT_CODEX_EFFORT = _DEFAULT["default_effort"]
+DEFAULT_CODEX_EFFORT = "high"
 _MODEL_REF = re.compile(r"^(chatgpt|openrouter)/[A-Za-z0-9][A-Za-z0-9._:/+@-]*$")
 
 
@@ -32,7 +33,11 @@ def chatgpt_models() -> list[ProviderModel]:
             name=spec["name"],
             provider="chatgpt",
             reasoning_efforts=tuple(spec["reasoning_efforts"]),
-            default_effort=spec["default_effort"],
+            default_effort=(
+                DEFAULT_CODEX_EFFORT
+                if DEFAULT_CODEX_EFFORT in spec["reasoning_efforts"]
+                else spec["default_effort"]
+            ),
             supports_tools=True,
         )
         for spec in _SPECS
