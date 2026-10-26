@@ -1,45 +1,5 @@
-"""Permissions package for the agent harness."""
+"""Harness permission policy, request lifecycle and persistence.
 
-from __future__ import annotations
-
-from .evaluator import (
-    ALLOW,
-    ASK,
-    DEFAULT_GLOBAL_RULES,
-    DENY,
-    Evaluation,
-    PermissionContext,
-    PermissionEvaluator,
-    compile_rules,
-)
-from .repositories import AllowlistRepository, PermissionRequestRepository
-from .scopes import (
-    is_permission_scope,
-    permission_display_action,
-    permission_scope,
-    permission_scope_matches,
-)
-from .service import PermissionService, ResolveResult
-
-__all__ = [
-    "ALLOW",
-    "ASK",
-    "DEFAULT_GLOBAL_RULES",
-    "DENY",
-    "AllowlistRepository",
-    "Evaluation",
-    "PermissionContext",
-    "PermissionEvaluator",
-    "PermissionRequestRepository",
-    "PermissionService",
-    "ResolveResult",
-    "compile_rules",
-    "is_permission_scope",
-    "permission_display_action",
-    "permission_scope",
-    "permission_scope_matches",
-    "is_permission_scope",
-    "permission_display_action",
-    "permission_scope",
-    "permission_scope_matches",
-]
+Import from the owning submodule. Keep package initialization free of imports
+so rule evaluation and scope utilities never load request services or models.
+"""
