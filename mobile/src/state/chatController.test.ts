@@ -280,6 +280,68 @@ describe("ChatController", () => {
     controller.dispose();
   });
 
+  it("reuses 2,000 unchanged tool parts while publishing immutable streamed snapshots", async () => {
+    const root = session("root", { status: "busy" });
+    const { client, realtime } = makeClient([root]);
+    const assistant = message("assistant", "assistant", "");
+    assistant.parts = Array.from({ length: 2000 }, (_, index) => ({
+      id: `tool-${index}`,
+      position: index,
+      session_id: "root",
+      message_id: "assistant",
+      type: "tool",
+      state: "completed",
+      title: "Read source",
+      output: "Full detail",
+      input: { tool: "read", arguments: { path: "/workspace/a" } },
+      meta: { step: index },
+      display: { summary: "Read source" },
+      detail_loaded: true,
+    }));
+    vi.mocked(client.harness.timeline).mockResolvedValue(
+      timeline(root, [assistant]),
+    );
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    const before = controller.getSnapshot();
+    const notify = vi.fn();
+    const detach = controller.subscribe(notify);
+    const event = {
+      workspace_id: "workspace-a",
+      session_id: "root",
+      message_id: "assistant",
+      part_id: "text",
+      part_position: 2001,
+      delta: { text: "Hello" },
+    };
+    realtime.emit("harness.part_updated", event);
+    const first = controller.getSnapshot();
+    realtime.emit("harness.part_updated", {
+      ...event,
+      delta: { text: " world" },
+    });
+    const second = controller.getSnapshot();
+    expect(notify).toHaveBeenCalledTimes(2);
+    expect(before.messages[0]!.content).toBe("");
+    expect(first.messages[0]!.content).toBe("Hello");
+    expect(second.messages[0]!.content).toBe("Hello world");
+    for (let index = 0; index < 2000; index++) {
+      expect(second.messages[0]!.parts[index]).toBe(
+        before.messages[0]!.parts[index],
+      );
+    }
+    expect(second.messages[0]!.parts[2000]).not.toBe(
+      first.messages[0]!.parts[2000],
+    );
+    expect(Object.isFrozen(second.messages[0]!.parts)).toBe(true);
+    expect(Object.isFrozen(second.messages[0]!.parts[2000])).toBe(true);
+    realtime.emit("harness.part_updated", { ...event, workspace_id: "other" });
+    expect(controller.getSnapshot()).toBe(second);
+    expect(notify).toHaveBeenCalledTimes(2);
+    detach();
+    controller.dispose();
+  });
+
   it("renders patch previews without refetching and refreshes after compaction", async () => {
     const root = session("root");
     const { client, realtime } = makeClient([root]);

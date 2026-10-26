@@ -27,7 +27,7 @@ import type {
   HarnessQuestionResolvedEvent,
 } from "@opencuria/chat-core/harness";
 import {
-  applyPartDelta,
+  applyPartDeltaImmutable,
   applySubtaskFinished,
   applySubtaskStarted,
   applyTodoUpdate,
@@ -1932,23 +1932,24 @@ export class ChatController {
 
   private onPartUpdated(data: HarnessPartUpdatedEvent): void {
     if (!this.ownsEvent(data)) return;
-    const messages = this.prepareEventMessages(
-      data.session_id,
-      data.message_id,
-    );
-    const before = messages.length;
-    const matching = messages.find((message) => message.id === data.message_id);
+    const current = this.messagesBySession.get(data.session_id) ?? [];
+    const matching = current.find((message) => message.id === data.message_id);
     if (
       matching &&
       (matching.role !== "assistant" || matching.completed_at != null)
     )
       return;
-    applyPartDelta(messages, data.session_id, data.delta, {
-      step: data.step,
-      partId: data.part_id,
-      partPosition: data.part_position,
-      messageId: data.message_id,
-    });
+    const messages = applyPartDeltaImmutable(
+      current,
+      data.session_id,
+      data.delta,
+      {
+        step: data.step,
+        partId: data.part_id,
+        partPosition: data.part_position,
+        messageId: data.message_id,
+      },
+    );
     const session = this.sessions.find((item) => item.id === data.session_id);
     const assistant = messages.find(
       (message) => message.id === data.message_id,
@@ -1958,12 +1959,7 @@ export class ChatController {
       if (!assistant.reasoning_effort && session?.reasoning_effort)
         assistant.reasoning_effort = session.reasoning_effort;
     }
-    if (
-      messages.length !== before ||
-      messages !== this.messagesBySession.get(data.session_id)
-    ) {
-      this.commitEventMessages(data.session_id, messages);
-    }
+    this.commitEventMessages(data.session_id, messages);
     if (data.delta.compaction && this.isInActiveLineage(data.session_id)) {
       const context = this.captureSelection();
       if (context)

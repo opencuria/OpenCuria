@@ -1,0 +1,49 @@
+{
+  "method": "secrets.choice(top_three), operating-system randomness",
+  "selected": "mobile_stream_copy",
+  "ranking": [
+    {
+      "rank": 1,
+      "candidate": "scheduled_task_history",
+      "component": "backend",
+      "evidence": "100-run authenticated REST: p50 35.16 ms, p95 39.51 ms, peak Python allocations 14,978,510 bytes for 36,200 response bytes; full assistant content and unused session joined",
+      "risk": "low; restrict repository projection, preserve service and adapters"
+    },
+    {
+      "rank": 2,
+      "candidate": "runner_archive_upload",
+      "component": "runner",
+      "evidence": "2,000-file compressed archive: p50 conversion 221.62 ms and max event-loop stall 247.68 ms; synchronous conversion and getmembers before extraction",
+      "risk": "medium; cancellation and capture fencing must remain intact"
+    },
+    {
+      "rank": 3,
+      "candidate": "mobile_stream_copy",
+      "component": "mobile/shared",
+      "evidence": "actual bundled controller event handler: p50/p95 3.49/3.69 ms per event at 2,000 parts; clones/freezes every part for each streamed delta",
+      "risk": "medium; shared immutable update behavior and snapshot identity require careful testing"
+    },
+    {
+      "rank": 4,
+      "candidate": "shared_stream_scans",
+      "component": "packages/chat-core",
+      "evidence": "Vue-reactive reducer: p50/p95 0.83/0.95 ms per delta at 2,000 parts; repeated scans",
+      "risk": "higher semantic risk relative to smaller measured benefit"
+    },
+    {
+      "rank": 5,
+      "candidate": "conversation_state_overfetch",
+      "component": "backend",
+      "evidence": "root feed repository loads engine_state and summary although projection never uses them; current engine state usually small",
+      "risk": "low, but impact not yet demonstrated with realistic persisted state"
+    },
+    {
+      "rank": 6,
+      "candidate": "web_dashboard_sort",
+      "component": "webapp",
+      "evidence": "already ordered feed sorted again client-side with repeated Date parsing; current network dedup and markdown coalescing already present",
+      "risk": "low but likely low impact at normal feed sizes"
+    }
+  ],
+  "probe_timing_note": "Mobile/reducer scout quantiles describe per-batch mean event cost. The dedicated before/after benchmark reports individual-event percentiles."
+}

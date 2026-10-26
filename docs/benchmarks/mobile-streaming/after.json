@@ -1,0 +1,36 @@
+{
+  "benchmark": "Mobile ChatController REST hydration and ordered realtime stream",
+  "node": "v22.23.2",
+  "source": "working-tree",
+  "samples": 31,
+  "chunks_per_sample": 100,
+  "history_messages": 50,
+  "notes": [
+    "Three warmups per size; fresh frozen transcript per sample.",
+    "Timing includes reducer, snapshot publication and a synchronous subscriber.",
+    "Network, native rendering and provider latency excluded; desktop CPU."
+  ],
+  "results": [
+    {
+      "parts": 100,
+      "p50_ms_per_event": 0.029813999999987573,
+      "p95_ms_per_event": 0.08915400000000773,
+      "replaced_parts": 1,
+      "transcript_sha256": "1376e1d5225698cb69618f63502443b159b8c199e9a25f50f325e24af0af0e1d"
+    },
+    {
+      "parts": 500,
+      "p50_ms_per_event": 0.05669199999999819,
+      "p95_ms_per_event": 0.11933699999997316,
+      "replaced_parts": 1,
+      "transcript_sha256": "9037ffb4e78e993caa56d9a79ed529fff5ce75b177ba4cdac70b64d3e1dd5d90"
+    },
+    {
+      "parts": 2000,
+      "p50_ms_per_event": 0.1862900000000991,
+      "p95_ms_per_event": 0.28770600000007107,
+      "replaced_parts": 1,
+      "transcript_sha256": "70eec2c6d91a72c2b8172b510ccb3ee00468d210e8414991c498860b0c1bdb5a"
+    }
+  ]
+}

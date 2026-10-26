@@ -188,6 +188,47 @@ function sanitizeAgentMeta(value: unknown): Record<string, string> {
 /** Cost/tokens meta keys forwarded on step-finish parts. */
 const STEP_FINISH_META_KEYS = ["cost", "tokens", "step"] as const;
 
+export interface HarnessPartDeltaOptions {
+  step?: number;
+  partId?: string | null;
+  partPosition?: number;
+  messageId: string;
+}
+
+/**
+ * Apply the same reducer to an immutable snapshot, sharing untouched rows.
+ * Only the destination part and open text/reasoning streams can be mutated:
+ * a delta may close those streams as it starts another kind of work. Nested
+ * input/meta/display values are replaced by the reducer, never mutated.
+ */
+export function applyPartDeltaImmutable(
+  messages: readonly HarnessMessage[],
+  sessionId: string,
+  delta: HarnessPartDelta,
+  opts: HarnessPartDeltaOptions,
+): HarnessMessage[] {
+  const next = messages.map((message) => {
+    if (
+      message.id !== opts.messageId ||
+      message.role !== "assistant" ||
+      message.completed_at != null
+    )
+      return message;
+    return {
+      ...message,
+      parts: message.parts.map((part) =>
+        part.id === opts.partId ||
+        ((part.type === "text" || part.type === "reasoning") &&
+          (part.state === "running" || part.state === "pending"))
+          ? { ...part }
+          : part,
+      ),
+    };
+  });
+  applyPartDelta(next, sessionId, delta, opts);
+  return next;
+}
+
 /**
  * Apply a `harness.part_updated` delta to its per-turn assistant message.
  *
@@ -205,12 +246,7 @@ export function applyPartDelta(
   messages: HarnessMessage[],
   sessionId: string,
   delta: HarnessPartDelta,
-  opts: {
-    step?: number;
-    partId?: string | null;
-    partPosition?: number;
-    messageId: string;
-  },
+  opts: HarnessPartDeltaOptions,
 ): HarnessMessage {
   const message = routeAssistantMessage(messages, sessionId, opts.messageId);
   // Completed turns are frozen: late/stale duplicates for an older
