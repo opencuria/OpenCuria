@@ -1,0 +1,11 @@
+{
+  "baseline": "8e818b0",
+  "method": "secrets.randbelow(3)",
+  "ranked_top_three": [
+    "Backend pending permission/question scans without lookup indexes",
+    "Runner sequential untracked-file Git diff reads",
+    "Backend scheduled-run history message/session overfetch"
+  ],
+  "zero_based_draw": 2,
+  "selected": "Backend scheduled-run history message/session overfetch"
+}

@@ -137,12 +137,12 @@ class ScheduledTaskRepository:
 
     @staticmethod
     def list_runs(task: ScheduledTask, *, limit: int = 100) -> list[ScheduledTaskRun]:
+        """Return recent ledger outcomes without loading assistant answer bodies."""
         return list(
-            ScheduledTaskRun.objects.filter(
-                scheduled_task_id=task.id
-            ).select_related("session", "assistant_message").order_by(
-                "-scheduled_for"
-            )[:limit]
+            ScheduledTaskRun.objects.filter(scheduled_task_id=task.id)
+            .select_related("assistant_message")
+            .defer("assistant_message__content")
+            .order_by("-scheduled_for")[:limit]
         )
 
     @staticmethod
@@ -419,7 +419,11 @@ class ScheduledTaskRepository:
             rows = rows.filter(scheduled_task_id=task_id)
         if message_id is not None:
             rows = rows.filter(assistant_message_id=message_id)
-        return list(rows.select_related("assistant_message", "scheduled_task", "session"))
+        # Completion repair consumes only the assistant outcome, not its answer
+        # body or the linked task/session objects.
+        return list(
+            rows.select_related("assistant_message").defer("assistant_message__content")
+        )
 
     @staticmethod
     def finish_run(
