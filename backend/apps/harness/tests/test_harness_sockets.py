@@ -12,12 +12,8 @@ from asgiref.sync import sync_to_async
 from apps.harness.conversation_events import FRONTEND_EVENT_CONVERSATIONS_CHANGED
 from apps.harness.conversation_service import ConversationService
 from apps.harness.harness_service import (
-    FRONTEND_EVENT_PART,
     FRONTEND_EVENT_PERMISSION,
     FRONTEND_EVENT_STATUS,
-    FRONTEND_EVENT_SUBTASK_FINISHED,
-    FRONTEND_EVENT_SUBTASK_STARTED,
-    FRONTEND_EVENT_TODO,
     HarnessService,
 )
 from apps.harness.permissions.evaluator import PermissionEvaluator
@@ -30,6 +26,12 @@ from apps.harness.providers.base import (
 from apps.harness.repositories import (
     HarnessMessageRepository,
     HarnessSessionRepository,
+)
+from apps.harness.run_timeline import (
+    FRONTEND_EVENT_PART,
+    FRONTEND_EVENT_SUBTASK_FINISHED,
+    FRONTEND_EVENT_SUBTASK_STARTED,
+    FRONTEND_EVENT_TODO,
 )
 from apps.harness.tests.helpers import parts_for_session
 

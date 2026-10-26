@@ -13,10 +13,7 @@ from apps.harness.engines.claude.errors import ClaudeTranscriptError
 from apps.harness.engines.connections import AuthConfiguration
 from apps.harness.engines.run_repository import HarnessRunRepository
 from apps.harness.engines.runs import HarnessRunService
-from apps.harness.harness_service import (
-    FRONTEND_EVENT_PART,
-    HarnessService,
-)
+from apps.harness.harness_service import HarnessService
 from apps.harness.models import (
     HarnessMessage,
     HarnessPart,
@@ -27,6 +24,7 @@ from apps.harness.permissions.models import PermissionAllowlist, PermissionReque
 from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import Usage
 from apps.harness.repositories import HarnessMessageRepository
+from apps.harness.run_timeline import FRONTEND_EVENT_PART
 from apps.harness.tests.conftest import FakeAccessor
 from common.exceptions import AuthenticationError, ConflictError
 

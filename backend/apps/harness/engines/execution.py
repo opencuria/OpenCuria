@@ -15,6 +15,7 @@ from common.exceptions import ConflictError
 
 from ..models import HarnessRunStatus, HarnessSessionStatus
 from ..providers.base import LLMMessage
+from ..run_timeline import tail_remainder
 from .base import RunOptions
 
 if TYPE_CHECKING:
@@ -50,7 +51,6 @@ async def execute_external_run(
     max_depth: int,
 ) -> None:
     """Run an external engine under durable ownership and common persistence."""
-    from ..harness_service import _tail_remainder
     from ..providers.base import Usage
     from .external_runtime import prepare_external_runtime
 
@@ -261,7 +261,7 @@ async def execute_external_run(
         await sync_to_async(service.messages.refresh, thread_sensitive=True)(
             assistant
         )
-        remainder = _tail_remainder(assistant.content or "", result.output or "")
+        remainder = tail_remainder(assistant.content or "", result.output or "")
         usage = result.usage or Usage()
         metadata = dict(getattr(result, "metadata", {}) or {})
         # Persist only bounded, explicitly secret-free SDK result fields.

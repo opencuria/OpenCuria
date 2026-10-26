@@ -14,7 +14,6 @@ from asgiref.sync import sync_to_async
 from django.core.exceptions import SynchronousOnlyOperation
 
 from apps.harness.harness_service import (
-    FRONTEND_EVENT_PART,
     FRONTEND_EVENT_PERMISSION,
     FRONTEND_EVENT_QUESTION,
     FRONTEND_EVENT_STATUS,
@@ -41,6 +40,7 @@ from apps.harness.repositories import (
     QuestionRequestRepository,
 )
 from apps.harness.run_events import assistant_run_finished
+from apps.harness.run_timeline import FRONTEND_EVENT_PART, tail_remainder
 from apps.harness.tests.helpers import parts_for_session
 from apps.harness.tools.truncate import MAX_BYTES
 from common.exceptions import ConflictError
@@ -918,7 +918,7 @@ async def test_fail_open_parts_preserves_partial_tool_output(
         title="read",
     )
 
-    await service._fail_open_parts(assistant, state="error", output="aborted")
+    await service.timeline.fail_open_parts(assistant, state="error", output="aborted")
 
     reasoning.refresh_from_db()
     tool_partial.refresh_from_db()
@@ -3439,8 +3439,6 @@ async def test_execute_run_tail_remainder_creates_text_part_without_duplicates(
     harness_workspace,
 ) -> None:
     """A non-streamed tail is appended once to content and to a text part."""
-    import apps.harness.harness_service as svc_mod
-
     service, _, _events = _service()
     session = await _db_create_session(harness_workspace)
     assistant = await sync_to_async(HarnessMessageRepository.create)(
@@ -3450,19 +3448,19 @@ async def test_execute_run_tail_remainder_creates_text_part_without_duplicates(
         message_id=assistant.id, type="text", state="running", output="streamed "
     )
     service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
-    await service._append_tail_text_part(session, assistant, "tail words")
-    await sync_to_async(svc_mod.HarnessMessageRepository.append_content)(
+    await service.timeline.append_tail_text(session, assistant, "tail words")
+    await sync_to_async(HarnessMessageRepository.append_content)(
         assistant, "tail words"
     )
     assistant.refresh_from_db()
     assert assistant.content == "streamed tail words"
     parts = HarnessPartRepository.list_for_message(assistant.id)
     assert "".join(p.output for p in parts if p.type == "text") == "streamed tail words"
-    assert svc_mod._tail_remainder("abc", "abc") == ""
-    assert svc_mod._tail_remainder("abc", "abcdef") == "def"
-    assert svc_mod._tail_remainder("abcdef", "abc") == ""
-    assert svc_mod._tail_remainder("", "hello") == "hello"
-    assert svc_mod._tail_remainder("already streamed", "different final") == ""
+    assert tail_remainder("abc", "abc") == ""
+    assert tail_remainder("abc", "abcdef") == "def"
+    assert tail_remainder("abcdef", "abc") == ""
+    assert tail_remainder("", "hello") == "hello"
+    assert tail_remainder("already streamed", "different final") == ""
 
 
 @pytest.mark.django_db(transaction=True)

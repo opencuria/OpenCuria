@@ -13,13 +13,14 @@ from asgiref.sync import async_to_sync, sync_to_async
 from django.db import connection, connections
 from django.test.utils import CaptureQueriesContext
 
-from apps.harness.harness_service import FRONTEND_EVENT_PART, HarnessService
+from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessMessage, HarnessPart
 from apps.harness.repositories import (
     HarnessMessageRepository,
     HarnessPartRepository,
     HarnessSessionRepository,
 )
+from apps.harness.run_timeline import FRONTEND_EVENT_PART
 
 
 @pytest.fixture(autouse=True)

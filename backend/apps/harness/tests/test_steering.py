@@ -11,7 +11,6 @@ import pytest
 
 from apps.harness.engines.base import RunOptions
 from apps.harness.harness_service import (
-    FRONTEND_EVENT_PART,
     FRONTEND_EVENT_STEER_QUEUE,
     HarnessService,
 )
@@ -30,6 +29,7 @@ from apps.harness.repositories import (
     HarnessPartRepository,
     HarnessSessionRepository,
 )
+from apps.harness.run_timeline import FRONTEND_EVENT_PART
 from apps.harness.runner import HarnessRunner
 from apps.harness.steering import (
     MAX_PENDING_STEERS,

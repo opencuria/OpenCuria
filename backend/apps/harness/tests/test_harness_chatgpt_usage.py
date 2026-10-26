@@ -11,10 +11,11 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from apps.harness.harness_service import FRONTEND_EVENT_PART, HarnessService
+from apps.harness.harness_service import HarnessService
 from apps.harness.providers.chatgpt import ChatGPTAdapter
 from apps.harness.providers.chatgpt_oauth import CODEX_API_ENDPOINT
 from apps.harness.repositories import HarnessSessionRepository
+from apps.harness.run_timeline import FRONTEND_EVENT_PART
 from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.tests.helpers import parts_for_session
 from apps.runners.models import Workspace

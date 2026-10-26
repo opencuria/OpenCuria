@@ -776,7 +776,7 @@ def _observable_parts(
 ) -> list[dict[str, Any]]:
     """Expose plan/reflections as persisted runner events (never assistant).
 
-    ``HarnessService._persist_runner_event`` only persists ``part_updated``
+    ``RunTimeline.record`` only persists ``part_updated``
     (text/reasoning deltas) and ``agent`` events are persisted by the new
     ``agent`` branch as ``HarnessPartType.AGENT`` (frontend card type).
     The agent event carries safe ``agent_meta`` (see
