@@ -9,7 +9,6 @@ import pytest
 from asgiref.sync import sync_to_async
 
 from apps.harness.harness_service import HarnessService
-from apps.harness.models import HarnessMessage
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.models import PermissionAllowlist, PermissionRequest
 from apps.harness.permissions.repositories import PermissionRequestRepository
@@ -21,14 +20,10 @@ from apps.harness.repositories import (
 )
 
 
-def _service(**kwargs) -> PermissionService:
+def _service() -> PermissionService:
     return PermissionService(
-        evaluator=PermissionEvaluator(global_rules={"*": "ask"}), **kwargs
+        evaluator=PermissionEvaluator(global_rules={"*": "ask"})
     )
-
-
-def _ids() -> tuple[uuid.UUID, uuid.UUID]:
-    return uuid.uuid4(), uuid.uuid4()
 
 
 @pytest.mark.django_db(transaction=True)
@@ -168,7 +163,9 @@ async def test_redacted_actions_keep_secret_specific_always_scope(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_shared_on_permission_skips_persisted_allowlist(harness_workspace) -> None:
+async def test_shared_on_permission_skips_persisted_allowlist(
+    harness_workspace,
+) -> None:
     """The shared callback used by both engines honors existing grants."""
     permissions = PermissionService(
         evaluator=PermissionEvaluator(global_rules={"edit": "allow"})
@@ -257,261 +254,111 @@ async def test_always_resolves_only_matching_pending_sibling(harness_workspace) 
     assert nonmatching.status == "pending"
 
 
-@pytest.mark.django_db
-def test_allow_rule_needs_no_request() -> None:
-    """Allow decisions create no permission request."""
-    service = PermissionService(
-        evaluator=PermissionEvaluator(global_rules={"*": "allow"})
-    )
-    org_id, session_id = _ids()
-    decision, request = service.check_or_request(
-        organization_id=org_id,
-        session_id=session_id,
-        tool="read",
-        pattern="/workspace/a.txt",
-    )
-    assert decision == "allow"
-    assert request is None
-    assert PermissionRequest.objects.count() == 0
-
-
-@pytest.mark.django_db
-def test_deny_rule_needs_no_request() -> None:
-    """Deny decisions create no permission request."""
-    service = PermissionService(
-        evaluator=PermissionEvaluator(global_rules={"bash": "deny"})
-    )
-    org_id, session_id = _ids()
-    decision, request = service.check_or_request(
-        organization_id=org_id,
-        session_id=session_id,
-        tool="bash",
-        pattern="rm -rf /",
-    )
-    assert decision == "deny"
-    assert request is None
-
-
-@pytest.mark.django_db
-def test_ask_creates_pending_request() -> None:
-    """Ask decisions persist a pending request."""
-    service = _service()
-    org_id, session_id = _ids()
-    workspace_id = uuid.uuid4()
-    decision, request = service.check_or_request(
-        organization_id=org_id,
-        session_id=session_id,
-        workspace_id=workspace_id,
-        tool="bash",
-        pattern="rm -rf /tmp/x",
-        title="$ rm -rf /tmp/x",
-    )
-    assert decision == "ask"
-    assert request is not None
-    assert request.status == "pending"
-    assert request.tool == "bash"
-    assert request.pattern == "rm -rf /tmp/x"
-    assert request.session_id == session_id
-    assert request.workspace_id == workspace_id
-
-
-@pytest.mark.django_db
-def test_resolve_once_approves_without_allowlist() -> None:
-    """once approvals resolve allow without persisting a grant."""
-    service = _service()
-    org_id, session_id = _ids()
-    _, request = service.check_or_request(
-        organization_id=org_id,
-        session_id=session_id,
-        tool="bash",
-        pattern="ls",
-    )
-    assert request is not None
-    result = service.resolve(request.id, "once")
-    assert result.decision == "allow"
-    assert result.remember == "once"
-    stored = PermissionRequest.objects.get(id=request.id)
-    assert stored.status == "approved"
-    assert PermissionAllowlist.objects.count() == 0
-    # A second identical check still asks (no persisted grant).
-    decision, second = service.check_or_request(
-        organization_id=org_id,
-        session_id=session_id,
-        tool="bash",
-        pattern="ls",
-    )
-    assert decision == "ask"
-    assert second is not None
-
-
-@pytest.mark.django_db
-def test_resolve_always_writes_allowlist_and_applies() -> None:
-    """always approvals persist and future checks return allow."""
-    service = _service()
-    org_id, session_id = _ids()
-    _, request = service.check_or_request(
-        organization_id=org_id,
-        session_id=session_id,
+@pytest.fixture
+def pending_request(db) -> PermissionRequest:
+    """Create a pending request through the repository used by the harness."""
+    return PermissionRequestRepository.create(
+        organization_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        workspace_id=uuid.uuid4(),
         tool="edit",
         pattern="/workspace/src/**",
     )
-    assert request is not None
-    result = service.resolve(request.id, "always")
-    assert result.decision == "allow"
-    assert result.remember == "always"
-    assert PermissionAllowlist.objects.filter(
-        organization_id=org_id, tool="edit"
-    ).exists()
-    decision, second = service.check_or_request(
-        organization_id=org_id,
-        session_id=session_id,
-        tool="edit",
-        pattern="/workspace/src/**",
-    )
-    assert decision == "allow"
-    assert second is None
 
 
-@pytest.mark.django_db
-def test_allowlist_scope_and_action_matching() -> None:
-    """Grants are action-specific and workspace-safe."""
+@pytest.mark.parametrize(
+    ("response", "decision", "status", "remember"),
+    [
+        ("once", "allow", "approved", "once"),
+        ("always", "allow", "approved", "always"),
+        ("reject", "deny", "rejected", "once"),
+    ],
+)
+def test_resolve_permission(
+    pending_request: PermissionRequest,
+    response: str,
+    decision: str,
+    status: str,
+    remember: str,
+) -> None:
+    """Resolve once/always/reject and persist grants only for always."""
     service = _service()
-    org_id, session_id = _ids()
-    workspace_id = uuid.uuid4()
-    _, request = service.check_or_request(
-        organization_id=org_id,
-        session_id=session_id,
-        workspace_id=workspace_id,
-        tool="read",
-        pattern="/workspace/src/**",
+    result = service.resolve(pending_request.id, response)
+    pending_request.refresh_from_db()
+
+    assert result.request_id == pending_request.id
+    assert result.decision == decision
+    assert result.remember == remember
+    assert pending_request.status == status
+    assert pending_request.remember == remember
+    assert pending_request.resolved_at is not None
+    assert service.is_allowlisted(
+        pending_request.organization_id,
+        pending_request.tool,
+        "/workspace/src/main.py",
+        pending_request.workspace_id,
+    ) == (response == "always")
+    assert PermissionAllowlist.objects.count() == int(response == "always")
+
+
+def test_allowlist_scope_and_action_matching(
+    pending_request: PermissionRequest,
+) -> None:
+    """Grants are action-specific and bound to their organization/workspace."""
+    service = _service()
+    service.resolve(pending_request.id, "always")
+    org_id, workspace_id = (
+        pending_request.organization_id,
+        pending_request.workspace_id,
     )
-    assert request is not None
-    service.resolve(request.id, "always")
 
     assert service.is_allowlisted(
-        org_id, "read", "/workspace/src/main.py", workspace_id
-    )
-    assert not service.is_allowlisted(
-        org_id, "read", "/workspace/private.py", workspace_id
-    )
-    assert not service.is_allowlisted(
         org_id, "edit", "/workspace/src/main.py", workspace_id
     )
-    assert not service.is_allowlisted(
-        org_id, "read", "/workspace/src/main.py", uuid.uuid4()
-    )
-    assert not service.is_allowlisted(org_id, "read", "/workspace/src/main.py")
+    for org, tool, action, workspace in [
+        (org_id, "edit", "/workspace/private.py", workspace_id),
+        (org_id, "read", "/workspace/src/main.py", workspace_id),
+        (org_id, "edit", "/workspace/src/main.py", uuid.uuid4()),
+        (org_id, "edit", "/workspace/src/main.py", None),
+        (uuid.uuid4(), "edit", "/workspace/src/main.py", workspace_id),
+    ]:
+        assert not service.is_allowlisted(org, tool, action, workspace)
 
 
-@pytest.mark.django_db
-def test_persisted_allowlist_does_not_override_explicit_deny() -> None:
-    """An evaluator deny takes precedence over persisted always grants."""
+def test_resolve_invalid_missing_and_resolved_requests(
+    pending_request: PermissionRequest,
+) -> None:
+    """Invalid answers leave the request pending; unknown/settled IDs fail."""
     service = _service()
-    org_id, session_id = _ids()
-    _, request = service.check_or_request(
-        organization_id=org_id,
-        session_id=session_id,
-        tool="bash",
-        pattern="dangerous command",
-    )
-    assert request is not None
-    service.resolve(request.id, "always")
-    service.evaluator = PermissionEvaluator(
-        global_rules={"bash": {"dangerous*": "deny"}}
-    )
+    with pytest.raises(ValueError, match="once.*always.*reject"):
+        service.resolve(pending_request.id, "maybe")
+    pending_request.refresh_from_db()
+    assert pending_request.status == "pending"
+    assert pending_request.resolved_at is None
+    assert not PermissionAllowlist.objects.exists()
 
-    assert service.check("bash", "dangerous command", organization_id=org_id) == "deny"
-    decision, followup = service.check_or_request(
-        organization_id=org_id,
-        session_id=session_id,
-        tool="bash",
-        pattern="dangerous command",
-    )
-    assert decision == "deny"
-    assert followup is None
+    service.resolve(pending_request.id, "once")
+    for request_id in (pending_request.id, uuid.uuid4()):
+        with pytest.raises(LookupError, match="not found"):
+            service.resolve(request_id, "once")
 
 
-@pytest.mark.django_db
-def test_resolve_reject_denies() -> None:
-    """reject resolves deny without an allowlist entry."""
-    service = _service()
-    org_id, session_id = _ids()
-    _, request = service.check_or_request(
-        organization_id=org_id,
-        session_id=session_id,
-        tool="bash",
-        pattern="reboot",
-    )
-    assert request is not None
-    result = service.resolve(request.id, "reject")
-    assert result.decision == "deny"
-    stored = PermissionRequest.objects.get(id=request.id)
-    assert stored.status == "rejected"
-    assert PermissionAllowlist.objects.count() == 0
-
-
-@pytest.mark.django_db
-def test_resolve_invalid_response_rejected() -> None:
-    """Unknown resolve responses raise ValueError."""
-    service = _service()
-    org_id, session_id = _ids()
-    _, request = service.check_or_request(
-        organization_id=org_id,
-        session_id=session_id,
-        tool="bash",
-        pattern="ls",
-    )
-    assert request is not None
-    with pytest.raises(ValueError, match="once\\|always\\|reject"):
-        service.resolve(request.id, "maybe")
-
-
-@pytest.mark.django_db
-def test_resolve_missing_or_resolved_raises() -> None:
-    """Resolving twice (or unknown ids) raises LookupError."""
-    service = _service()
-    with pytest.raises(LookupError, match="not found"):
-        service.resolve(uuid.uuid4(), "once")
-    org_id, session_id = _ids()
-    _, request = service.check_or_request(
-        organization_id=org_id,
-        session_id=session_id,
-        tool="bash",
-        pattern="ls",
-    )
-    assert request is not None
-    service.resolve(request.id, "once")
-    with pytest.raises(LookupError, match="not found"):
-        service.resolve(request.id, "once")
-
-
-@pytest.mark.django_db
-def test_list_pending_for_session_filters_by_tool() -> None:
-    """Pending asks for one session can be listed and filtered by tool."""
-    service = _service()
-    org_id, session_id = _ids()
-    service.check_or_request(
-        organization_id=org_id,
-        session_id=session_id,
-        tool="bash",
-        pattern="git status",
-    )
-    service.check_or_request(
-        organization_id=org_id,
-        session_id=session_id,
-        tool="bash",
-        pattern="git diff",
-    )
-    service.check_or_request(
-        organization_id=org_id,
-        session_id=session_id,
-        tool="edit",
-        pattern="/workspace/a.py",
-    )
+def test_list_pending_for_session_filters_by_tool(
+    pending_request: PermissionRequest,
+) -> None:
+    """Pending asks are scoped to a session and optionally a tool."""
+    for action in ("git status", "git diff"):
+        PermissionRequestRepository.create(
+            organization_id=pending_request.organization_id,
+            session_id=pending_request.session_id,
+            tool="bash",
+            pattern=action,
+        )
     bash_pending = PermissionRequestRepository.list_pending_for_session(
-        session_id, tool="bash"
+        pending_request.session_id, tool="bash"
     )
-    all_pending = PermissionRequestRepository.list_pending_for_session(session_id)
-    assert len(bash_pending) == 2
+    all_pending = PermissionRequestRepository.list_pending_for_session(
+        pending_request.session_id
+    )
     assert {item.pattern for item in bash_pending} == {"git status", "git diff"}
     assert len(all_pending) == 3

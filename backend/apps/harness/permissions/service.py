@@ -10,7 +10,6 @@ import structlog
 from . import models as perm_models
 from .evaluator import (
     ALLOW,
-    ASK,
     DEFAULT_GLOBAL_RULES,
     DENY,
     Decision,
@@ -32,10 +31,10 @@ class ResolveResult:
 
 
 class PermissionService:
-    """Permission gate: evaluator + request lifecycle + allowlist.
+    """Shared evaluator, persisted approvals and request resolution.
 
-    No ORM outside the repositories. Tools/services call
-    :meth:`check_or_request` before executing a gated tool.
+    Engines evaluate policy before the harness's permission callback creates
+    pending requests. This service resolves them and stores reusable grants.
     """
 
     def __init__(
@@ -49,65 +48,6 @@ class PermissionService:
         )
         self.requests = requests or PermissionRequestRepository
         self.allowlist = allowlist or AllowlistRepository
-
-    def check(
-        self,
-        tool: str,
-        action: str = "",
-        *,
-        mode: str = "",
-        organization_id: uuid.UUID | None = None,
-        workspace_id: uuid.UUID | None = None,
-    ) -> Decision:
-        """Evaluate without side effects; explicit evaluator denies win."""
-        decision = self.evaluator.evaluate(tool, action, mode=mode)
-        if decision == DENY:
-            return DENY
-        if organization_id is not None and self.is_allowlisted(
-            organization_id, tool, action, workspace_id
-        ):
-            return ALLOW
-        return decision
-
-    def check_or_request(
-        self,
-        *,
-        organization_id: uuid.UUID,
-        session_id: uuid.UUID,
-        tool: str,
-        pattern: str,
-        title: str = "",
-        mode: str = "",
-        workspace_id: uuid.UUID | None = None,
-    ) -> tuple[Decision, perm_models.PermissionRequest | None]:
-        """Evaluate; on ``ask`` persist a pending request.
-
-        Returns ``(decision, request)`` where request is None unless the
-        decision is ``ask`` (a pending request was created).
-        """
-        decision = self.evaluator.evaluate(tool, pattern, mode=mode)
-        if decision == DENY:
-            return DENY, None
-        if self.is_allowlisted(organization_id, tool, pattern, workspace_id):
-            log.debug("permission_allowlisted", tool=tool, pattern=pattern)
-            return ALLOW, None
-        if decision != ASK:
-            return decision, None
-        request = self.requests.create(
-            organization_id=organization_id,
-            session_id=session_id,
-            workspace_id=workspace_id,
-            tool=tool,
-            pattern=pattern,
-            title=title,
-        )
-        log.info(
-            "permission_requested",
-            request_id=str(request.id),
-            tool=tool,
-            pattern=pattern,
-        )
-        return ASK, request
 
     def resolve(self, request_id: uuid.UUID, response: str) -> ResolveResult:
         """Resolve a pending request: once | always | reject.
@@ -155,16 +95,6 @@ class PermissionService:
         workspace_id: uuid.UUID | None = None,
     ) -> bool:
         """Return whether a persisted grant covers this scoped tool action."""
-        return self._allowlisted(organization_id, tool, action, workspace_id)
-
-    def _allowlisted(
-        self,
-        organization_id: uuid.UUID,
-        tool: str,
-        action: str,
-        workspace_id: uuid.UUID | None,
-    ) -> bool:
-        """Return True when an allowlist entry covers (tool, action)."""
         import fnmatch
 
         patterns = self.allowlist.patterns_for(
