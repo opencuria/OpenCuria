@@ -317,21 +317,33 @@ async def test_files_upload_missing_chunk_finish_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_harness_write_chunked_out_of_order_happy() -> None:
+@pytest.mark.parametrize("content", ["", "aGk=", "QUJDREVG"])
+async def test_harness_write_out_of_order_happy(content: str) -> None:
     service = FakeChunkService()
     interface = _interface(service)
     workspace_id = uuid.uuid4()
     request_id, path = "w-happy", "/workspace/a.txt"
     handlers = interface._sio.handlers["/"]
-    await handlers["harness:write_file_start"](_payload(workspace_id, request_id, path=path, total_chunks=2))
-    for index, piece in ((1, "REVG"), (0, "QUJD")):
-        await handlers["harness:write_file_chunk"](_payload(workspace_id, request_id, path=path,
-            index=index, total_chunks=2, content=piece))
-    await handlers["harness:write_file_finish"](_payload(workspace_id, request_id, path=path, total_chunks=2))
+    chunks = [content[i : i + 4] for i in range(0, len(content), 4)]
+    total = len(chunks)
+    await handlers["harness:write_file_start"](
+        _payload(workspace_id, request_id, path=path, total_chunks=total)
+    )
+    for index in reversed(range(total)):
+        await handlers["harness:write_file_chunk"](
+            _payload(
+                workspace_id, request_id, path=path,
+                index=index, total_chunks=total, content=chunks[index],
+            )
+        )
+    await handlers["harness:write_file_finish"](
+        _payload(workspace_id, request_id, path=path)
+    )
     assert len(service.write_calls) == 1
-    assert service.write_calls[0]["content_b64"] == "QUJDREVG"
+    assert service.write_calls[0]["content_b64"] == content
     results = _emits_of(interface, "harness:write_file_result")
     assert results and results[-1].get("ok") is True
+    assert interface._upload_transfers == {}
 
 
 @pytest.mark.asyncio
@@ -344,6 +356,25 @@ async def test_harness_write_unknown_chunk_errors_small() -> None:
     results = _emits_of(interface, "harness:write_file_result")
     assert len(results) == 1 and results[0].get("error")
     assert len(json.dumps(results[0])) < _SMALL_JSON
+    assert service.write_calls == []
+
+
+@pytest.mark.asyncio
+async def test_harness_write_cancel_is_scoped_to_workspace_and_transfer_kind() -> None:
+    service = FakeChunkService()
+    interface = _interface(service)
+    workspace_id = uuid.uuid4()
+    handlers = interface._sio.handlers["/"]
+    payload = _payload(workspace_id, "cancel", path="/workspace/a.txt")
+    await handlers["harness:write_file_start"]({**payload, "total_chunks": 1})
+    key = "harness-write:cancel"
+    interface._upload_transfers["browser-upload:cancel"] = dict(
+        interface._upload_transfers[key]
+    )
+    await handlers["harness:cancel"]({**payload, "workspace_id": str(uuid.uuid4())})
+    assert key in interface._upload_transfers
+    await handlers["harness:cancel"](payload)
+    assert set(interface._upload_transfers) == {"browser-upload:cancel"}
     assert service.write_calls == []
 
 
@@ -471,24 +502,11 @@ async def test_harness_read_malformed_workspace_answers_small_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_harness_write_malformed_workspace_answers_small_error() -> None:
+@pytest.mark.parametrize("stage", ["start", "chunk", "finish"])
+async def test_harness_write_malformed_workspace_answers_small_error(stage: str) -> None:
     service = FakeChunkService()
     interface = _interface(service)
-    await interface._sio.handlers["/"]["harness:write_file"](
-        {"workspace_id": "bad", "request_id": "w-bad",
-         "path": "/workspace/a.txt", "content": "QUJD"})
-    results = _emits_of(interface, "harness:write_file_result")
-    assert len(results) == 1
-    assert results[0]["workspace_id"] == "bad" and results[0].get("error")
-    assert len(json.dumps(results[0])) < _SMALL_JSON
-    assert service.write_calls == []
-
-
-@pytest.mark.asyncio
-async def test_harness_write_chunk_malformed_workspace_answers_small_error() -> None:
-    service = FakeChunkService()
-    interface = _interface(service)
-    await interface._sio.handlers["/"]["harness:write_file_chunk"](
+    await interface._sio.handlers["/"][f"harness:write_file_{stage}"](
         {"workspace_id": "bad", "request_id": "w-bad",
          "path": "/workspace/a.txt", "index": 0, "total_chunks": 1,
          "content": "QUJD"})
@@ -496,6 +514,7 @@ async def test_harness_write_chunk_malformed_workspace_answers_small_error() -> 
     assert len(results) == 1
     assert results[0]["workspace_id"] == "bad" and results[0].get("error")
     assert len(json.dumps(results[0])) < _SMALL_JSON
+    assert service.write_calls == []
 
 
 @pytest.mark.asyncio
@@ -524,18 +543,6 @@ async def test_files_upload_chunk_missing_request_id_stays_silent() -> None:
          "index": 0, "total_chunks": 1, "content": "QUJD"})
     assert _emits_of(interface, "files:upload_result") == []
     assert service.upload_calls == []
-
-
-@pytest.mark.asyncio
-async def test_harness_write_finish_malformed_workspace_answers_small_error() -> None:
-    service = FakeChunkService()
-    interface = _interface(service)
-    await interface._sio.handlers["/"]["harness:write_file_finish"](
-        {"workspace_id": "bad", "request_id": "w-fin",
-         "path": "/workspace/a.txt", "total_chunks": 1})
-    results = _emits_of(interface, "harness:write_file_result")
-    assert len(results) == 1 and results[0].get("error")
-    assert len(json.dumps(results[0])) < _SMALL_JSON
 
 
 # ---------------------------------------------------------------------------

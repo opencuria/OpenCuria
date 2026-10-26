@@ -2,7 +2,7 @@
 
 Read/download replies above ``CHUNK_B64_SIZE`` use ordered chunk events and
 a metadata-only result; smaller replies carry content inline. File uploads
-always use start/chunk/finish, with zero chunks for empty files.
+and harness writes always use start/chunk/finish, with zero chunks for empty files.
 """
 
 from __future__ import annotations

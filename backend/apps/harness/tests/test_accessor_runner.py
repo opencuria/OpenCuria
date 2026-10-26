@@ -143,7 +143,7 @@ async def test_read_write_list_stat_roundtrip() -> None:
                     "mime": "text/plain",
                 }
             )
-        elif event == "harness:write_file":
+        elif event == "harness:write_file_finish":
             route_harness_result(
                 {"request_id": rid, "workspace_id": "ws-1", "ok": True}
             )
@@ -660,10 +660,15 @@ async def test_read_file_small_inline_payload_needs_no_chunks() -> None:
     assert content.mime == "text/plain"
 
 
-async def test_chunked_write_event_sequence() -> None:
-    """A ~300 KiB write rides start + ordered chunks + finish, then ok."""
+@pytest.mark.parametrize(
+    ("size", "total"),
+    [(0, 0), (2, 1), (HARNESS_CHUNK_B64_SIZE * 3 // 4, 1),
+     (HARNESS_CHUNK_B64_SIZE * 3 // 4 + 1, 2)],
+)
+async def test_write_event_sequence(size: int, total: int) -> None:
+    """Empty, small and multi-chunk writes use the same bounded protocol."""
     transport = FakeTransport()
-    content = bytes((i % 251 for i in range(300 * 1024)))
+    content = bytes(i % 251 for i in range(size))
 
     async def auto_reply(event: str, payload: dict) -> None:
         if event == "harness:write_file_finish":
@@ -682,13 +687,17 @@ async def test_chunked_write_event_sequence() -> None:
     assert events[0] == "harness:write_file_start"
     assert events[-1] == "harness:write_file_finish"
     chunk_events = [event for event in events if event == "harness:write_file_chunk"]
-    assert len(chunk_events) >= 2
 
     start_payload = _request_id(transport, "harness:write_file_start")
     assert start_payload["path"] == "/workspace/big.bin"
-    total = int(start_payload["total_chunks"])
-    assert total >= 2
+    assert start_payload["mode"] == 0o644
+    assert start_payload["total_chunks"] == total
     assert len(chunk_events) == total
+    assert len(events) == total + 2
+    assert all(
+        payload["request_id"] == start_payload["request_id"]
+        for _, payload in transport.emitted
+    )
 
     chunk_payloads = [
         payload
@@ -705,28 +714,20 @@ async def test_chunked_write_event_sequence() -> None:
     assert base64.b64decode(joined) == content
 
 
-async def test_write_file_rejects_above_absolute_cap_without_emitting() -> None:
-    """Content past the 10 MiB cap raises before any socket emit."""
-    transport = FakeTransport()
-    accessor = _accessor(transport)
-    with pytest.raises(ValueError, match="maximum size"):
-        await accessor.write_file("/workspace/big.bin", b"x" * (10 * 1024 * 1024 + 4))
-    assert transport.emitted == []
-
-
 async def test_write_file_exact_cap_allowed_plus_one_rejected() -> None:
     """Exactly 10 MiB passes the cap check; 10 MiB + 1 raises, no emit."""
     transport = FakeTransport()
     accessor = _accessor(transport)
 
     async def auto_reply_ok(event: str, payload: dict) -> None:
-        route_harness_result(
-            {
-                "request_id": payload["request_id"],
-                "workspace_id": "ws-1",
-                "ok": True,
-            }
-        )
+        if event == "harness:write_file_finish":
+            route_harness_result(
+                {
+                    "request_id": payload["request_id"],
+                    "workspace_id": "ws-1",
+                    "ok": True,
+                }
+            )
 
     transport.auto_reply = auto_reply_ok
     await accessor.write_file("/workspace/exact.bin", b"x" * (10 * 1024 * 1024))
@@ -738,22 +739,6 @@ async def test_write_file_exact_cap_allowed_plus_one_rejected() -> None:
             "/workspace/over.bin", b"x" * (10 * 1024 * 1024 + 1)
         )
     assert transport2.emitted == []
-
-
-async def test_write_file_rejects_too_many_chunks(monkeypatch) -> None:
-    """More than HARNESS_WRITE_MAX_CHUNKS slices raise before emitting."""
-    from apps.harness.access import runner_accessor as accessor_module
-
-    transport = FakeTransport()
-    accessor = _accessor(transport)
-    monkeypatch.setattr(
-        accessor_module.RunnerWorkspaceAccessor,
-        "_chunk_b64_slices",
-        staticmethod(lambda payload_b64: ["QQ=="] * 65),
-    )
-    with pytest.raises(ValueError, match="maximum size"):
-        await accessor.write_file("/workspace/big.bin", bytes(300 * 1024))
-    assert transport.emitted == []
 
 
 async def test_read_file_timeout_cancels_and_cleans_state() -> None:

@@ -10,9 +10,11 @@ Protocol (backend -> runner)::
     harness:exec_wait   {request_id, workspace_id, command, workdir,
                          env, timeout}
     harness:read_file   {request_id, workspace_id, path, max_size}
-    harness:write_file  {request_id, workspace_id, path, content, mode}
-                        (small payloads only; large writes use
-                        harness:write_file_start/chunk/finish below)
+    harness:write_file_start  {request_id, workspace_id, path, mode,
+                               total_chunks} (zero for empty files)
+    harness:write_file_chunk  {request_id, workspace_id, path, index,
+                               total_chunks, content}
+    harness:write_file_finish {request_id, workspace_id, path}
     harness:list        {request_id, workspace_id, path}
     harness:stat           {request_id, workspace_id, path}
     harness:desktop_action {request_id, workspace_id, action, args}
@@ -29,11 +31,6 @@ Protocol (runner -> backend)::
                               followed by a metadata-only
                               harness:read_file_result with
                               ``chunked=True`` and empty content)
-    harness:write_file_start  {request_id, workspace_id, path, mode,
-                               total_chunks}
-    harness:write_file_chunk  {request_id, workspace_id, path, index,
-                               total_chunks, content}
-    harness:write_file_finish {request_id, workspace_id, path}
     harness:write_file_result {request_id, workspace_id, ok}
                               or {..., error}
     harness:list_result      {request_id, workspace_id, entries}
@@ -103,10 +100,6 @@ HARNESS_READ_MAX_CHARS = 141 * 1024 * 1024
 #: to ~534 chunks at 256 KiB base64; the cap leaves headroom for padding
 #: while rejecting unbounded ``total_chunks`` announcements.
 HARNESS_READ_MAX_CHUNKS = 560
-
-#: Max chunks for one chunked harness write. 10 MiB of raw bytes encode
-#: to ~52 chunks; 64 leaves headroom and matches the runner upload cap.
-HARNESS_WRITE_MAX_CHUNKS = 64
 
 #: Max decoded bytes for a chunked harness write. Matches the runner's
 #: ``FILE_UPLOAD_MAX_SIZE`` (10 MiB) so the backend never buffers more.
@@ -845,11 +838,8 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
     ) -> None:
         """Write a file atomically into the workspace VM.
 
-        Small payloads use the legacy single ``harness:write_file`` event;
-        payloads above 256 KiB base64 ride as
-        ``harness:write_file_start`` + ordered ``harness:write_file_chunk``
-        slices + ``harness:write_file_finish`` (all small events), so large
-        writes stay far below Daphne's default 1 MiB inbound cap.
+        All writes use start/chunk/finish with bounded base64 slices.
+        Empty files announce zero chunks and finish without a chunk event.
         """
         safe_path = sanitize_harness_path(path)
         if not isinstance(content, (bytes, bytearray)):
@@ -863,28 +853,8 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             )
         payload_b64 = base64.b64encode(bytes(content)).decode("ascii")
         request_id = uuid.uuid4().hex
-        if len(payload_b64) <= HARNESS_CHUNK_B64_SIZE:
-            result = await self._await_result(
-                request_id,
-                "harness:write_file",
-                {
-                    "request_id": request_id,
-                    "workspace_id": self.workspace_id,
-                    "path": safe_path,
-                    "content": payload_b64,
-                    "mode": mode,
-                },
-                None,
-            )
-            self._raise_for_error(result, "harness:write_file")
-            return
         slices = self._chunk_b64_slices(payload_b64)
         total = len(slices)
-        if total > HARNESS_WRITE_MAX_CHUNKS:
-            raise ValueError(
-                "content exceeds maximum size of "
-                f"{HARNESS_WRITE_MAX_BYTES} bytes"
-            )
         completion: asyncio.Future[dict[str, Any]] = (
             asyncio.get_running_loop().create_future()
         )
@@ -924,10 +894,10 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
             timeout_s = self._resolve_timeout(None)
             result = await asyncio.wait_for(completion, timeout_s)
             completed = True
-            self._raise_for_error(result, "harness:write_file")
+            self._raise_for_error(result, "harness file write")
         except TimeoutError as exc:
             raise TimeoutError(
-                "Harness request 'harness:write_file' timed out "
+                "Harness file write timed out "
                 f"after {self._resolve_timeout(None):.1f}s"
             ) from exc
         finally:

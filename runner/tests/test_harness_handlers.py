@@ -329,22 +329,13 @@ class HarnessExecWaitTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_read_write_list_stat_ok(self) -> None:
+    async def test_read_list_stat_ok(self) -> None:
         service = _FakeService()
         interface = _interface(service)
         workspace_id = uuid.uuid4()
 
         await interface._sio.handlers["/"]["harness:read_file"](
             _payload(workspace_id, "r1", path="/workspace/a.txt")
-        )
-        await interface._sio.handlers["/"]["harness:write_file"](
-            _payload(
-                workspace_id,
-                "w1",
-                path="/workspace/a.txt",
-                content=base64.b64encode(b"hi").decode(),
-                mode=0o644,
-            )
         )
         await interface._sio.handlers["/"]["harness:list"](
             _payload(workspace_id, "l1", path="/workspace")
@@ -360,7 +351,6 @@ class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             emitted["harness:read_file_result"]["mime_type"], "text/plain"
         )
-        self.assertTrue(emitted["harness:write_file_result"]["ok"])
         self.assertEqual(
             emitted["harness:list_result"]["entries"][0]["name"], "a.txt"
         )
@@ -375,15 +365,6 @@ class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         await handlers["harness:read_file"](
             _payload(workspace_id, "r-external", path=path)
-        )
-        await handlers["harness:write_file"](
-            _payload(
-                workspace_id,
-                "w-external",
-                path=path,
-                content=base64.b64encode(b"write me").decode(),
-                mode=0o600,
-            )
         )
         await handlers["harness:list"](
             _payload(workspace_id, "l-external", path="/etc")
@@ -400,7 +381,6 @@ class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):
             emitted["harness:read_file_result"]["content"],
             base64.b64encode(b"hi").decode(),
         )
-        self.assertTrue(emitted["harness:write_file_result"]["ok"])
         self.assertEqual(
             emitted["harness:list_result"]["entries"][0]["name"], "a.txt"
         )
@@ -409,7 +389,6 @@ class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):
             service.file_access_calls,
             [
                 ("read", path, True),
-                ("write", path, True),
                 ("list", "/etc", True),
                 ("stat", path, True),
             ],

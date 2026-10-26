@@ -1042,13 +1042,13 @@ class WebSocketInterface(Interface):
             )
             logger.error(log_msg, error=error, request_id=request_id)
 
-        def _parse_total_chunks(raw: object, *, cap: int, minimum: int) -> int:
+        def _parse_total_chunks(raw: object, *, cap: int) -> int:
             """Parse and bound a ``total_chunks`` announcement."""
             try:
                 total = int(raw)  # type: ignore[arg-type]
             except (TypeError, ValueError) as exc:
                 raise ValueError("invalid total_chunks for transfer") from exc
-            if total < minimum or total > cap:
+            if total < 0 or total > cap:
                 raise ValueError("invalid total_chunks for transfer")
             return total
 
@@ -2264,52 +2264,6 @@ class WebSocketInterface(Interface):
                 )
                 logger.exception("harness_read_file_failed")
 
-        @sio.on("harness:write_file")
-        async def on_harness_write_file(data: dict) -> None:
-            ws_echo, request_id, path = _file_request_echo(data)
-            try:
-                workspace_id = uuid.UUID(ws_echo)
-                from ..chunking import (
-                    normalize_base64,
-                    should_chunk,
-                )
-
-                content = str(data.get("content", ""))
-                if should_chunk(content):
-                    raise ValueError(
-                        "harness:write_file payload too large for a single "
-                        "event; use harness:write_file_start/"
-                        "harness:write_file_chunk/"
-                        "harness:write_file_finish"
-                    )
-                await self._service.files.write_file_content(
-                    workspace_id,
-                    path,
-                    normalize_base64(content),
-                    mode=int(data.get("mode", 0o644)),
-                    allow_external=True,
-                )
-                await _harness_result(
-                    "harness:write_file_result",
-                    {
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        "path": path,
-                        "ok": True,
-                    },
-                )
-            except Exception as exc:
-                await _harness_result(
-                    "harness:write_file_result",
-                    {
-                        "workspace_id": ws_echo,
-                        "request_id": request_id,
-                        "path": path,
-                        "error": str(exc),
-                    },
-                )
-                logger.exception("harness_write_file_failed")
-
         @sio.on("harness:write_file_start")
         async def on_harness_write_file_start(data: dict) -> None:
             ws_echo, request_id, path = _file_request_echo(data)
@@ -2322,9 +2276,8 @@ class WebSocketInterface(Interface):
                 from ..services.files import FILE_UPLOAD_MAX_SIZE, FileManager
 
                 total = _parse_total_chunks(
-                    data.get("total_chunks", 0),
+                    data.get("total_chunks", -1),
                     cap=MAX_UPLOAD_CHUNKS_PER_TRANSFER,
-                    minimum=1,
                 )
                 if not request_id:
                     raise ValueError("request_id must not be empty")
@@ -2775,6 +2728,10 @@ class WebSocketInterface(Interface):
             if not isinstance(request_id, str) or not request_id.strip():
                 logger.warning("harness_cancel_missing_request_id")
                 return
+            key = _upload_key("harness-write", request_id)
+            transfer = self._upload_transfers.get(key)
+            if transfer and transfer["workspace_id"] == data.get("workspace_id"):
+                self._upload_transfers.pop(key, None)
             task = self._running_tasks.pop(f"harness:{request_id}", None)
             if task is not None and not task.done():
                 task.cancel()
@@ -3166,7 +3123,6 @@ class WebSocketInterface(Interface):
                 total = _parse_total_chunks(
                     data.get("total_chunks", -1),
                     cap=MAX_UPLOAD_CHUNKS_PER_TRANSFER,
-                    minimum=0,
                 )
                 _validate_upload_start_fields(
                     request_id=request_id,
