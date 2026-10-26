@@ -1042,13 +1042,13 @@ class WebSocketInterface(Interface):
             )
             logger.error(log_msg, error=error, request_id=request_id)
 
-        def _parse_total_chunks(raw: object, *, cap: int) -> int:
+        def _parse_total_chunks(raw: object, *, cap: int, minimum: int) -> int:
             """Parse and bound a ``total_chunks`` announcement."""
             try:
                 total = int(raw)  # type: ignore[arg-type]
             except (TypeError, ValueError) as exc:
                 raise ValueError("invalid total_chunks for transfer") from exc
-            if total <= 0 or total > cap:
+            if total < minimum or total > cap:
                 raise ValueError("invalid total_chunks for transfer")
             return total
 
@@ -2316,14 +2316,15 @@ class WebSocketInterface(Interface):
             try:
                 workspace_id = uuid.UUID(ws_echo)
                 from ..chunking import (
-                    MAX_CHUNKS_PER_TRANSFER,
+                    MAX_UPLOAD_CHUNKS_PER_TRANSFER,
                     max_b64_chars_for_raw_bytes,
                 )
                 from ..services.files import FILE_UPLOAD_MAX_SIZE, FileManager
 
                 total = _parse_total_chunks(
                     data.get("total_chunks", 0),
-                    cap=MAX_CHUNKS_PER_TRANSFER,
+                    cap=MAX_UPLOAD_CHUNKS_PER_TRANSFER,
+                    minimum=1,
                 )
                 if not request_id:
                     raise ValueError("request_id must not be empty")
@@ -3150,87 +3151,57 @@ class WebSocketInterface(Interface):
                 )
                 logger.exception("files_read_failed")
 
-        @sio.on("files:upload")
-        async def on_files_upload(data: dict) -> None:
-            raw = data if isinstance(data, dict) else {}
-            ws_echo = raw.get("workspace_id", "")
-            ws_echo = ws_echo if isinstance(ws_echo, str) else ""
-            request_id = raw.get("request_id", "")
-            request_id = request_id if isinstance(request_id, str) else ""
-            path = raw.get("path", "/workspace")
-            path = path if isinstance(path, str) else "/workspace"
+        @sio.on("files:upload_start")
+        async def on_files_upload_start(data: dict) -> None:
+            ws_echo, request_id, path = _file_request_echo(data)
             try:
                 workspace_id = uuid.UUID(ws_echo)
-                # Chunked uploads start via files:upload_start; a plain
-                # files:upload still carries the full payload (backward
-                # compatible small-upload path).
-                if raw.get("chunked"):
-                    from ..chunking import (
-                        MAX_CHUNKS_PER_TRANSFER,
-                        max_b64_chars_for_raw_bytes,
-                    )
-                    from ..services.files import FILE_UPLOAD_MAX_SIZE
+                from ..chunking import (
+                    MAX_UPLOAD_CHUNKS_PER_TRANSFER,
+                    max_b64_chars_for_raw_bytes,
+                )
+                from ..services.files import FILE_UPLOAD_MAX_SIZE
 
-                    _prune_upload_transfers()
-                    total = _parse_total_chunks(
-                        raw.get("total_chunks", 0),
-                        cap=MAX_CHUNKS_PER_TRANSFER,
-                    )
-                    _validate_upload_start_fields(
-                        request_id=request_id,
-                        workspace_id=str(workspace_id),
-                        path=path,
-                    )
-                    try:
-                        filename = str(raw.get("filename", ""))
-                        is_directory = bool(raw.get("is_directory", False))
-                    except (TypeError, ValueError) as exc:
-                        raise ValueError("invalid upload fields") from exc
-                    from ..services.exec_kernel import (
-                        sanitize_filename as _sanitize_filename,
-                    )
-
-                    _sanitize_filename(filename)
-                    key = _upload_key("browser-upload", request_id)
-                    if key in self._upload_transfers:
-                        raise ValueError("upload already in progress")
-                    if len(self._upload_transfers) >= 16:
-                        raise ValueError("too many concurrent uploads")
-                    import time as _time
-
-                    self._upload_transfers[key] = {
-                        "workspace_id": str(workspace_id),
-                        "path": path,
-                        "filename": filename,
-                        "is_directory": is_directory,
-                        "kind": "browser-upload",
-                        "total_chunks": total,
-                        "chunks": {},
-                        "buffered_chars": 0,
-                        "max_chars": max_b64_chars_for_raw_bytes(FILE_UPLOAD_MAX_SIZE),
-                        "created_at": _time.monotonic(),
-                    }
-                    return
-                if not isinstance(raw.get("filename"), str) or not isinstance(
-                    raw.get("content"), str
-                ):
-                    raise ValueError("filename and content must be strings")
-                await self._service.files.upload_file(
-                    workspace_id,
+                _prune_upload_transfers()
+                total = _parse_total_chunks(
+                    data.get("total_chunks", -1),
+                    cap=MAX_UPLOAD_CHUNKS_PER_TRANSFER,
+                    minimum=0,
+                )
+                _validate_upload_start_fields(
+                    request_id=request_id,
+                    workspace_id=str(workspace_id),
                     path=path,
-                    filename=raw["filename"],
-                    content_b64=raw["content"],
-                    is_directory=raw.get("is_directory", False),
                 )
-                await sio.emit(
-                    "files:upload_result",
-                    {
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        "path": path,
-                        "status": "success",
-                    },
+                try:
+                    filename = str(data.get("filename", ""))
+                    is_directory = bool(data.get("is_directory", False))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("invalid upload fields") from exc
+                from ..services.exec_kernel import (
+                    sanitize_filename as _sanitize_filename,
                 )
+
+                _sanitize_filename(filename)
+                key = _upload_key("browser-upload", request_id)
+                if key in self._upload_transfers:
+                    raise ValueError("upload already in progress")
+                if len(self._upload_transfers) >= 16:
+                    raise ValueError("too many concurrent uploads")
+                import time as _time
+
+                self._upload_transfers[key] = {
+                    "workspace_id": str(workspace_id),
+                    "path": path,
+                    "filename": filename,
+                    "is_directory": is_directory,
+                    "kind": "browser-upload",
+                    "total_chunks": total,
+                    "chunks": {},
+                    "buffered_chars": 0,
+                    "max_chars": max_b64_chars_for_raw_bytes(FILE_UPLOAD_MAX_SIZE),
+                    "created_at": _time.monotonic(),
+                }
             except Exception as exc:
                 await sio.emit(
                     "files:upload_result",

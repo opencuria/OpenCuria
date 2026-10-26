@@ -3635,26 +3635,26 @@ class TestChunkedFileTransferOwnership:
         sio_mock.emit.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("total", [0, 2])
     async def test_chunked_upload_start_relays_to_runner(
-        self, service, sio_mock, workspace
+        self, service, sio_mock, workspace, total
     ):
         sio_mock.emit.reset_mock()
         data = {
             "workspace_id": str(workspace.id),
             "request_id": "upload-start",
             "path": "/workspace/a.bin",
-            "total_chunks": 2,
-            "chunked": True,
+            "total_chunks": total,
         }
         await service.forward_files_event(
             workspace_id=str(workspace.id),
-            event="files:upload",
+            event="files:upload_start",
             data=data,
         )
         sio_mock.emit.assert_awaited_once()
         event, payload = sio_mock.emit.await_args.args[:2]
-        assert event == "files:upload"
-        assert payload["total_chunks"] == 2
+        assert event == "files:upload_start"
+        assert payload["total_chunks"] == total
 
     @pytest.mark.asyncio
     async def test_offline_chunked_start_emits_one_error_then_chunks_are_silent(
@@ -3676,10 +3676,9 @@ class TestChunkedFileTransferOwnership:
             "request_id": "upload-off",
             "path": "/workspace/a.bin",
             "total_chunks": 2,
-            "chunked": True,
         }
         await service.forward_files_event(
-            workspace_id=str(workspace.id), event="files:upload", data=start
+            workspace_id=str(workspace.id), event="files:upload_start", data=start
         )
         emit.assert_awaited_once()
         event, payload, _workspace_id = emit.await_args.args

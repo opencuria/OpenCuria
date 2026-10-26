@@ -1,13 +1,9 @@
 /**
- * Chunked base64 file transport helpers.
+ * Bounded base64 file transport helpers.
  *
- * Daphne's default inbound message/frame cap is 1 MiB (oversize frames were
- * dropped as disconnects), so no single file event may carry a large base64
- * payload. Payloads above FILE_CHUNK_B64_SIZE ride as ordered 256 KiB base64
- * chunk events plus a small metadata-only final result (`chunked: true`,
- * `total_chunks: N`, empty content). Small payloads stay inline for backward
- * compatibility. Engine.IO keeps its separate 200 MiB HTTP buffer for
- * pre-existing monolithic non-chunk events.
+ * Read/download replies above FILE_CHUNK_B64_SIZE use ordered chunk events
+ * and a metadata-only result; smaller replies carry content inline. Uploads
+ * always use start/chunk/finish, with zero chunks for empty files.
  *
  * Must stay in sync with the runner (`runner/src/chunking.py`
  * `CHUNK_B64_SIZE`) and backend
@@ -29,9 +25,6 @@ export const MAX_UPLOAD_CHUNKS_PER_TRANSFER = 64;
 
 /** Max raw bytes for one upload/write payload (matches runner cap). */
 export const UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
-
-/** Backward-compatible alias for the upload/write chunk cap. */
-export const MAX_CHUNKS_PER_TRANSFER = MAX_UPLOAD_CHUNKS_PER_TRANSFER;
 
 /** How long a partial chunked transfer waits for completion before failing. */
 export const CHUNK_TRANSFER_TIMEOUT_MS = 30_000;
@@ -122,11 +115,57 @@ export function splitBase64Chunks(
   return out;
 }
 
-export function shouldChunkPayload(
-  payload: string,
-  limit: number = FILE_CHUNK_B64_SIZE,
-): boolean {
-  return stripBase64Whitespace(payload).length > limit;
+export interface FilesUploadPlannedEvent {
+  event:
+    | "frontend:files_upload_start"
+    | "frontend:files_upload_chunk"
+    | "frontend:files_upload_finish";
+  payload: Record<string, unknown>;
+}
+
+/** Plan one bounded upload; empty files use start/finish without chunks. */
+export function planFilesUpload(
+  workspaceId: string,
+  requestId: string,
+  path: string,
+  filename: string,
+  content: string,
+  isDirectory = false,
+): FilesUploadPlannedEvent[] {
+  const clean = stripBase64Whitespace(content);
+  if (decodedBase64Size(clean) > UPLOAD_MAX_BYTES) {
+    throw new RangeError(
+      `Upload exceeds the ${UPLOAD_MAX_BYTES / (1024 * 1024)} MB limit.`,
+    );
+  }
+  const chunks = splitBase64Chunks(clean);
+  if (chunks.length > MAX_UPLOAD_CHUNKS_PER_TRANSFER) {
+    throw new RangeError("Upload exceeds the chunk limit.");
+  }
+  const base = { workspace_id: workspaceId, request_id: requestId, path };
+  return [
+    {
+      event: "frontend:files_upload_start",
+      payload: {
+        ...base,
+        filename,
+        is_directory: isDirectory,
+        total_chunks: chunks.length,
+      },
+    },
+    ...chunks.map(
+      (piece, index): FilesUploadPlannedEvent => ({
+        event: "frontend:files_upload_chunk",
+        payload: {
+          ...base,
+          index,
+          total_chunks: chunks.length,
+          content: piece,
+        },
+      }),
+    ),
+    { event: "frontend:files_upload_finish", payload: base },
+  ];
 }
 
 /**

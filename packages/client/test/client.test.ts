@@ -791,47 +791,53 @@ describe("realtime and file transfers", () => {
     client.realtime.dispose();
   });
 
-  it("emits chunked uploads only while connected and settles matching upload result", async () => {
-    const sockets: MockSocket[] = [];
-    const client = clientOptions().create(
-      vi.fn(async () => jsonResponse({})) as any,
-      {
-        socketFactory: mockSocketFactory(sockets),
-        createFileRequestId: () => "upload-1",
-      },
-    );
-    client.realtime.connect();
-    const socket = sockets[0];
-    socket.connect();
-    const content = "A".repeat(256 * 1024 + 4);
-    const upload = client.files.uploadFile("ws-1", {
-      directory: "/workspace",
-      filename: "a.bin",
-      base64: content,
-    });
-    const events = socket.emitted.filter(({ event }) =>
-      event.startsWith("frontend:files_upload"),
-    );
-    expect(events.map(({ event }) => event)).toEqual([
-      "frontend:files_upload_start",
-      "frontend:files_upload_chunk",
-      "frontend:files_upload_chunk",
-      "frontend:files_upload_finish",
-    ]);
-    expect(events[0].data.total_chunks).toBe(2);
-    socket.trigger("files:upload_result", {
-      workspace_id: "ws-1",
-      request_id: "upload-1",
-      path: "/workspace",
-      filename: "a.bin",
-      status: "success",
-    });
-    await expect(upload).resolves.toMatchObject({
-      status: "success",
-      path: "/workspace/a.bin",
-    });
-    client.realtime.dispose();
-  });
+  it.each([0, 4, 256 * 1024 + 4])(
+    "uploads %i base64 characters through start/chunks/finish",
+    async (length) => {
+      const sockets: MockSocket[] = [];
+      const client = clientOptions().create(
+        vi.fn(async () => jsonResponse({})) as any,
+        {
+          socketFactory: mockSocketFactory(sockets),
+          createFileRequestId: () => "upload-1",
+        },
+      );
+      client.realtime.connect();
+      const socket = sockets[0];
+      socket.connect();
+      const content = "A".repeat(length);
+      const upload = client.files.uploadFile("ws-1", {
+        directory: "/workspace",
+        filename: "a.bin",
+        base64: content,
+      });
+      const events = socket.emitted.filter(({ event }) =>
+        event.startsWith("frontend:files_upload"),
+      );
+      expect(events.map(({ event }) => event)).toEqual([
+        "frontend:files_upload_start",
+        ...Array(Math.ceil(length / (256 * 1024))).fill(
+          "frontend:files_upload_chunk",
+        ),
+        "frontend:files_upload_finish",
+      ]);
+      expect(events[0].data.total_chunks).toBe(
+        Math.ceil(length / (256 * 1024)),
+      );
+      socket.trigger("files:upload_result", {
+        workspace_id: "ws-1",
+        request_id: "upload-1",
+        path: "/workspace",
+        filename: "a.bin",
+        status: "success",
+      });
+      await expect(upload).resolves.toMatchObject({
+        status: "success",
+        path: "/workspace/a.bin",
+      });
+      client.realtime.dispose();
+    },
+  );
 
   it("bounds pending transfer time and provides deterministic connection status", async () => {
     const sockets: MockSocket[] = [];

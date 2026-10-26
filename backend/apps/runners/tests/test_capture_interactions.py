@@ -94,7 +94,7 @@ async def test_capture_blocks_interactive_dispatch(
         "files:read",
         "files:list",
         "files:find",
-        "files:upload",
+        "files:upload_start",
         "files:upload_chunk",
         "files:upload_finish",
         "files:download",

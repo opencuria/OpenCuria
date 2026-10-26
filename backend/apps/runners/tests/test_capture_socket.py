@@ -24,7 +24,6 @@ RELAYS = [
     ("files_list", "forward_files_event", "files:list_result"),
     ("files_find", "forward_files_event", "files:find_result"),
     ("files_read", "forward_files_event", "files:content_result"),
-    ("files_upload", "forward_files_event", "files:upload_result"),
     ("files_upload_start", "forward_files_event", "files:upload_result"),
     ("files_upload_chunk", "forward_files_event", "files:upload_result"),
     ("files_upload_finish", "forward_files_event", "files:upload_result"),

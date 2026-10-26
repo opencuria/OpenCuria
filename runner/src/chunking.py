@@ -1,15 +1,8 @@
-"""Chunked base64 file transport over Socket.IO.
+"""Bounded base64 file transport over Socket.IO.
 
-Daphne's default inbound message/frame cap is 1 MiB (oversize frames were
-dropped as disconnects), so no single ``files:*`` / ``harness:*`` event may
-carry a large base64 payload. Payloads above :data:`CHUNK_B64_SIZE` are
-split into ordered chunk events of at most 256 KiB base64 each, followed
-by a small final result event that only carries metadata
-(``chunked=True``, ``total_chunks=N``, empty content). Engine.IO keeps its
-separate 200 MiB HTTP buffer for pre-existing monolithic non-chunk events.
-
-Small payloads keep riding inline in the final result for backward
-compatibility with older peers.
+Read/download replies above ``CHUNK_B64_SIZE`` use ordered chunk events and
+a metadata-only result; smaller replies carry content inline. File uploads
+always use start/chunk/finish, with zero chunks for empty files.
 """
 
 from __future__ import annotations
@@ -30,9 +23,6 @@ CHUNK_B64_SIZE = 256 * 1024
 #: with headroom. Applies to ``files:upload_*`` and
 #: ``harness:write_file_*`` only.
 MAX_UPLOAD_CHUNKS_PER_TRANSFER = 64
-
-#: Backward-compatible alias for upload/write chunk caps.
-MAX_CHUNKS_PER_TRANSFER = MAX_UPLOAD_CHUNKS_PER_TRANSFER
 
 #: Upper bound for the number of chunks per read/download transfer. 100 MiB
 #: of raw bytes encode to ~139.81 M base64 chars, i.e. ~534 chunks at

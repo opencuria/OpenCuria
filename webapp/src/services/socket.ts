@@ -14,14 +14,7 @@ import { io, type Socket } from 'socket.io-client'
 import { ref } from 'vue'
 import { getConfig } from './config'
 import { tryRefreshToken } from './api'
-import {
-  FILE_CHUNK_B64_SIZE,
-  MAX_UPLOAD_CHUNKS_PER_TRANSFER,
-  UPLOAD_MAX_BYTES,
-  decodedBase64Size,
-  splitBase64Chunks,
-  stripBase64Whitespace,
-} from '@/lib/fileChunks'
+import { planFilesUpload } from '@opencuria/chat-core/fileChunks'
 import type {
   FilesListResultEvent,
   FilesFindResultEvent,
@@ -511,106 +504,9 @@ export function sendFilesRead(
 }
 
 /**
- * Upload event plan builder (pure, socket-free).
- *
- * `sendFilesUpload` is a thin wrapper around this: it computes the plan
- * and emits each event in order. Extracted so boundary/cap behaviour can
- * be unit-tested without touching the Socket.IO singleton state in
- * socket.ts (which has no established per-test socket convention).
- *
- * Throws before returning any event when the payload exceeds
- * MAX_UPLOAD_CHUNKS_PER_TRANSFER chunks or UPLOAD_MAX_BYTES exact raw
- * bytes, so an oversize upload never emits a partial stream.
- */
-export interface FilesUploadPlannedEvent {
-  event:
-    | 'frontend:files_upload'
-    | 'frontend:files_upload_start'
-    | 'frontend:files_upload_chunk'
-    | 'frontend:files_upload_finish'
-  payload: Record<string, unknown>
-}
-
-export function planFilesUpload(
-  workspaceId: string,
-  requestId: string,
-  path: string,
-  filename: string,
-  content: string,
-  isDirectory: boolean = false,
-): FilesUploadPlannedEvent[] {
-  const clean = stripBase64Whitespace(content ?? '')
-  // Exact raw size (padding-aware) — strict base64 shapes throw here
-  // before any event is planned.
-  const rawSize = decodedBase64Size(clean)
-  if (rawSize > UPLOAD_MAX_BYTES) {
-    throw new Error(`Upload exceeds the ${UPLOAD_MAX_BYTES / (1024 * 1024)} MB limit.`)
-  }
-  if (clean.length <= FILE_CHUNK_B64_SIZE) {
-    return [
-      {
-        event: 'frontend:files_upload',
-        payload: {
-          workspace_id: workspaceId,
-          request_id: requestId,
-          path,
-          filename,
-          content: clean,
-          is_directory: isDirectory,
-        },
-      },
-    ]
-  }
-  const chunks = splitBase64Chunks(clean)
-  const totalChunks = chunks.length
-  if (totalChunks > MAX_UPLOAD_CHUNKS_PER_TRANSFER) {
-    throw new Error(`Upload exceeds the ${MAX_UPLOAD_CHUNKS_PER_TRANSFER}-chunk limit.`)
-  }
-  const planned: FilesUploadPlannedEvent[] = [
-    {
-      event: 'frontend:files_upload_start',
-      payload: {
-        workspace_id: workspaceId,
-        request_id: requestId,
-        path,
-        filename,
-        is_directory: isDirectory,
-        chunked: true,
-        total_chunks: totalChunks,
-      },
-    },
-  ]
-  chunks.forEach((piece, index) => {
-    planned.push({
-      event: 'frontend:files_upload_chunk',
-      payload: {
-        workspace_id: workspaceId,
-        request_id: requestId,
-        path,
-        index,
-        total_chunks: totalChunks,
-        content: piece,
-      },
-    })
-  })
-  planned.push({
-    event: 'frontend:files_upload_finish',
-    payload: {
-      workspace_id: workspaceId,
-      request_id: requestId,
-      path,
-    },
-  })
-  return planned
-}
-
-/**
  * Upload a file to the workspace VM.
  *
- * Small payloads ride inline (backward compatible). Payloads above 256 KiB
- * base64 are split into `frontend:files_upload_start` + ordered
- * `frontend:files_upload_chunk` slices + `frontend:files_upload_finish so
- * no single event nears Daphne's default 1 MiB inbound cap.
+ * Uses the shared start/chunk/finish plan for every file size.
  *
  * Throws before emitting any event when the payload exceeds
  * MAX_UPLOAD_CHUNKS_PER_TRANSFER chunks or UPLOAD_MAX_BYTES exact raw

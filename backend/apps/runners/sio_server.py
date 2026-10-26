@@ -1051,24 +1051,6 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
             data=data,
         )
 
-    @sio.on("frontend:files_upload", namespace="/frontend")
-    @_frontend_conflict_response(
-        sio, "files:upload_result", status="error", path="/workspace", request_id=""
-    )
-    async def on_frontend_files_upload(sid: str, data: dict):
-        """Forward file upload from frontend to the runner."""
-        if not await _ensure_frontend_workspace_access(
-            sio, sid, data.get("workspace_id")
-        ):
-            return
-
-        service = get_runner_service()
-        await service.forward_files_event(
-            workspace_id=data["workspace_id"],
-            event="files:upload",
-            data=data,
-        )
-
     @sio.on("frontend:files_upload_start", namespace="/frontend")
     @_frontend_conflict_response(
         sio, "files:upload_result", status="error", path="/workspace", request_id=""
@@ -1083,8 +1065,8 @@ def _register_frontend_handlers(sio: socketio.AsyncServer) -> None:
         service = get_runner_service()
         await service.forward_files_event(
             workspace_id=data["workspace_id"],
-            event="files:upload",
-            data={**data, "chunked": True},
+            event="files:upload_start",
+            data=data,
         )
 
     @sio.on("frontend:files_upload_chunk", namespace="/frontend")

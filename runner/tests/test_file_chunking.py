@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock
 import pytest
 from src.chunking import (
     CHUNK_B64_SIZE,
-    MAX_CHUNKS_PER_TRANSFER,
     MAX_READ_CHUNKS_PER_TRANSFER,
+    MAX_UPLOAD_CHUNKS_PER_TRANSFER,
     normalize_base64,
     split_base64_chunks,
 )
@@ -151,7 +151,7 @@ def test_100mib_read_fits_read_cap_but_not_upload_cap() -> None:
     count = -(-total_chars // CHUNK_B64_SIZE)  # ceil without floats
     assert count == 534
     assert count <= MAX_READ_CHUNKS_PER_TRANSFER  # 560
-    assert count > MAX_CHUNKS_PER_TRANSFER  # 64-cap must not apply to reads
+    assert count > MAX_UPLOAD_CHUNKS_PER_TRANSFER  # 64-cap must not apply to reads
     assert count > 64
 
 
@@ -231,19 +231,21 @@ async def test_harness_read_large_emits_ordered_chunks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_files_upload_chunked_out_of_order_happy() -> None:
+@pytest.mark.parametrize("pieces", [[], ["QUJD"], ["QUJD", "REVG", "R0hJ"]])
+async def test_files_upload_chunked_out_of_order_happy(pieces: list[str]) -> None:
     service = FakeChunkService()
     interface = _interface(service)
     workspace_id = uuid.uuid4()
     request_id, path = "up-happy", "/workspace"
+    total = len(pieces)
     handlers = interface._sio.handlers["/"]
-    await handlers["files:upload"](_payload(workspace_id, request_id, path=path,
-        filename="a.txt", chunked=True, total_chunks=3))
-    pieces = ["QUJD", "REVG", "R0hJ"]
-    for index in (2, 0, 1):
+    await handlers["files:upload_start"](_payload(workspace_id, request_id, path=path,
+        filename="a.txt", total_chunks=total))
+    assert service.upload_calls == []
+    for index in reversed(range(total)):
         await handlers["files:upload_chunk"](_payload(workspace_id, request_id, path=path,
-            index=index, total_chunks=3, content=pieces[index]))
-    await handlers["files:upload_finish"](_payload(workspace_id, request_id, path=path, total_chunks=3))
+            index=index, total_chunks=total, content=pieces[index]))
+    await handlers["files:upload_finish"](_payload(workspace_id, request_id, path=path, total_chunks=total))
     assert len(service.upload_calls) == 1
     assert service.upload_calls[0]["content_b64"] == "".join(pieces)
     assert service.upload_calls[0]["filename"] == "a.txt"
@@ -258,8 +260,8 @@ async def test_files_upload_duplicate_chunk_fails_and_cleans_up() -> None:
     workspace_id = uuid.uuid4()
     request_id, path = "up-dup", "/workspace"
     handlers = interface._sio.handlers["/"]
-    await handlers["files:upload"](_payload(workspace_id, request_id, path=path,
-        filename="a.txt", chunked=True, total_chunks=2))
+    await handlers["files:upload_start"](_payload(workspace_id, request_id, path=path,
+        filename="a.txt", total_chunks=2))
     mk = lambda idx: _payload(workspace_id, request_id, path=path, index=idx,
                               total_chunks=2, content="QUJD")
     await handlers["files:upload_chunk"](mk(0))
@@ -272,13 +274,14 @@ async def test_files_upload_duplicate_chunk_fails_and_cleans_up() -> None:
 
 
 @pytest.mark.asyncio
-async def test_files_upload_invalid_start_and_unknown_chunk() -> None:
+@pytest.mark.parametrize("total", [-1, 65])
+async def test_files_upload_invalid_start_and_unknown_chunk(total: int) -> None:
     service = FakeChunkService()
     interface = _interface(service)
     workspace_id = uuid.uuid4()
     handlers = interface._sio.handlers["/"]
-    await handlers["files:upload"](_payload(workspace_id, "up-bad", path="/workspace",
-        filename="a.txt", chunked=True, total_chunks=0))  # bad total_chunks=0
+    await handlers["files:upload_start"](_payload(workspace_id, "up-bad", path="/workspace",
+        filename="a.txt", total_chunks=total))
     await handlers["files:upload_chunk"](_payload(workspace_id, "up-ghost", path="/workspace",
         index=0, total_chunks=1, content="QUJD"))  # unknown transfer
     results = _emits_of(interface, "files:upload_result")
@@ -296,8 +299,8 @@ async def test_files_upload_missing_chunk_finish_errors() -> None:
     workspace_id = uuid.uuid4()
     request_id, path = "up-gap", "/workspace"
     handlers = interface._sio.handlers["/"]
-    await handlers["files:upload"](_payload(workspace_id, request_id, path=path,
-        filename="a.txt", chunked=True, total_chunks=2))
+    await handlers["files:upload_start"](_payload(workspace_id, request_id, path=path,
+        filename="a.txt", total_chunks=2))
     await handlers["files:upload_chunk"](_payload(workspace_id, request_id, path=path,
         index=0, total_chunks=2, content="QUJD"))
     await handlers["files:upload_finish"](_payload(workspace_id, request_id, path=path, total_chunks=2))
@@ -306,19 +309,6 @@ async def test_files_upload_missing_chunk_finish_errors() -> None:
     assert results and results[-1]["status"] == "error"
     err = results[-1]["error"].lower()
     assert "missing" in err or "incomplete" in err
-
-
-@pytest.mark.asyncio
-async def test_files_upload_start_over_64_rejected() -> None:
-    service = FakeChunkService()
-    interface = _interface(service)
-    workspace_id = uuid.uuid4()
-    await interface._sio.handlers["/"]["files:upload"](_payload(workspace_id, "up-65",
-        path="/workspace", filename="a.txt", chunked=True, total_chunks=65))
-    results = _emits_of(interface, "files:upload_result")
-    assert len(results) == 1
-    assert results[0]["status"] == "error" and results[0].get("error")
-    assert service.upload_calls == []
 
 
 # ---------------------------------------------------------------------------

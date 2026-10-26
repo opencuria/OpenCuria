@@ -1,12 +1,10 @@
 import { io, type Socket } from "socket.io-client";
 import {
   CHUNK_TRANSFER_TIMEOUT_MS,
-  FILE_CHUNK_B64_SIZE,
   MAX_READ_CHUNKS_PER_TRANSFER,
-  UPLOAD_MAX_BYTES,
   createChunkedTransferStore,
   decodedBase64Size,
-  splitBase64Chunks,
+  planFilesUpload,
   stripBase64Whitespace,
 } from "@opencuria/chat-core/fileChunks";
 import type {
@@ -414,23 +412,6 @@ export class RealtimeClient {
     input: { directory: string; filename: string; base64: string },
   ): Promise<FileUploadResult> {
     const path = normalizedPath(input.directory);
-    const content = stripBase64Whitespace(input.base64);
-    let size: number;
-    try {
-      size = decodedBase64Size(content);
-    } catch {
-      return Promise.reject(
-        new FileTransferError("Invalid base64 file payload", "invalid_payload"),
-      );
-    }
-    if (size > UPLOAD_MAX_BYTES) {
-      return Promise.reject(
-        new FileTransferError(
-          `Upload exceeds the ${UPLOAD_MAX_BYTES / (1024 * 1024)} MB limit`,
-          "size_limit",
-        ),
-      );
-    }
     if (
       !input.filename ||
       input.filename.includes("/") ||
@@ -454,31 +435,28 @@ export class RealtimeClient {
         ),
       );
     }
+    let planned;
+    try {
+      planned = planFilesUpload(
+        workspaceId,
+        requestId,
+        path,
+        input.filename,
+        input.base64,
+      );
+    } catch (error) {
+      return Promise.reject(
+        new FileTransferError(
+          error instanceof Error ? error.message : "Invalid file upload",
+          error instanceof RangeError ? "size_limit" : "invalid_payload",
+        ),
+      );
+    }
     const promise = this.registerFile("upload", workspaceId, path, requestId);
     const pending = this.pendingFiles.get(requestId);
     if (pending) pending.requestedFilename = input.filename;
-    const base = { workspace_id: workspaceId, request_id: requestId };
-    if (content.length <= FILE_CHUNK_B64_SIZE) {
-      this.socket.emit("frontend:files_upload", {
-        ...base,
-        path,
-        filename: input.filename,
-        content,
-        is_directory: false,
-      });
-      return promise;
-    }
-
-    const pieces = splitBase64Chunks(content);
-    if (!pieces.length || pieces.length > 64) {
-      this.failPending(
-        requestId,
-        new FileTransferError("Upload exceeds the chunk limit", "size_limit"),
-      );
-      return promise;
-    }
-    // Recheck immediately before every event. Never buffer a partial upload across disconnects.
-    const emit = (event: string, payload: Record<string, unknown>): boolean => {
+    // Never buffer a partial upload across disconnects.
+    for (const { event, payload } of planned) {
       if (!this.socket?.connected || !this.active || this.disposed) {
         this.failPending(
           requestId,
@@ -487,39 +465,10 @@ export class RealtimeClient {
             "disconnected",
           ),
         );
-        return false;
+        break;
       }
       this.socket.emit(event, payload);
-      return true;
-    };
-    if (
-      !emit("frontend:files_upload_start", {
-        ...base,
-        path,
-        filename: input.filename,
-        is_directory: false,
-        chunked: true,
-        total_chunks: pieces.length,
-      })
-    )
-      return promise;
-    for (let index = 0; index < pieces.length; index += 1) {
-      if (
-        !emit("frontend:files_upload_chunk", {
-          ...base,
-          path,
-          index,
-          total_chunks: pieces.length,
-          content: pieces[index],
-        })
-      )
-        return promise;
     }
-    emit("frontend:files_upload_finish", {
-      ...base,
-      path,
-      total_chunks: pieces.length,
-    });
     return promise;
   }
 

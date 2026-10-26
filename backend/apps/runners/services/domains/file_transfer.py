@@ -40,19 +40,12 @@ class FileTransferMixin:
             "files:read": "files:content_result",
             "files:list": "files:list_result",
             "files:find": "files:find_result",
-            "files:upload": "files:upload_result",
+            "files:upload_start": "files:upload_result",
             "files:download": "files:download_result",
         }
 
-        # Chunk uploads use a start/chunk/finish convention. The single
-        # synthesized offline error per transfer fires only for an
-        # offline-at-start upload (chunked start or legacy single-shot;
-        # no finish will ever arrive). Intermediate chunks and the finish
-        # marker never synthesize errors on their own. Untrusted chunk
-        # metadata is validated before relay so oversized or malformed
-        # transfers fail fast with a small error instead of reaching
-        # the runner.
-
+        # Only the start synthesizes an offline error; later chunks and finish
+        # stay silent when the runner is offline.
         workspace = await sync_to_async(self.workspaces.get_by_id)(
             uuid.UUID(workspace_id)
         )
@@ -78,20 +71,7 @@ class FileTransferMixin:
                     workspace_id,
                 )
                 return
-        if event == "files:upload" and data.get("chunked"):
-            if not runner.is_online:
-                await realtime.emit_to_frontend(
-                    "files:upload_result",
-                    {
-                        "workspace_id": workspace_id,
-                        "request_id": data.get("request_id", ""),
-                        "path": data.get("path", ""),
-                        "status": "error",
-                        "error": "Runner is offline",
-                    },
-                    workspace_id,
-                )
-                return
+        if event == "files:upload_start" and runner.is_online:
             if not self._validate_upload_start(data):
                 await realtime.emit_to_frontend(
                     "files:upload_result",
@@ -145,10 +125,10 @@ class FileTransferMixin:
     def _validate_upload_start(data: dict) -> bool:
         """Pre-validate an untrusted chunked upload start before relay."""
         try:
-            total = int(data.get("total_chunks", 0))
+            total = int(data.get("total_chunks", -1))
         except (TypeError, ValueError):
             return False
-        if total <= 0 or total > 64:
+        if total < 0 or total > 64:
             return False
         if not str(data.get("request_id", "")):
             return False

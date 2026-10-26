@@ -5,7 +5,6 @@ import {
   FILE_CHUNK_B64_SIZE,
   createChunkedTransferStore,
   decodedBase64Size,
-  shouldChunkPayload,
   splitBase64Chunks,
   stripBase64Whitespace,
   type FileChunk,
@@ -63,17 +62,6 @@ describe('splitBase64Chunks', () => {
     expect(() => splitBase64Chunks('QUJD', -4)).toThrow()
     // size 3 aligns down to 0, which is unusable
     expect(() => splitBase64Chunks('QUJD', 3)).toThrow()
-  })
-})
-
-describe('shouldChunkPayload', () => {
-  it('is false at exactly FILE_CHUNK_B64_SIZE and true one char above', () => {
-    expect(shouldChunkPayload('A'.repeat(FILE_CHUNK_B64_SIZE))).toBe(false)
-    expect(shouldChunkPayload('A'.repeat(FILE_CHUNK_B64_SIZE + 1))).toBe(true)
-  })
-
-  it('ignores whitespace when measuring', () => {
-    expect(shouldChunkPayload(`${'A'.repeat(FILE_CHUNK_B64_SIZE)}\n  `)).toBe(false)
   })
 })
 
