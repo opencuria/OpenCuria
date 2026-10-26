@@ -1,5 +1,22 @@
-jest.mock('react-native-safe-area-context', () => require('react-native-safe-area-context/jest/mock'))
-jest.mock('react-native-keyboard-controller', () => require('react-native-keyboard-controller/jest'))
+jest.mock('react-native-safe-area-context', () => {
+  const mock = require('react-native-safe-area-context/jest/mock')
+  return mock.default ?? mock
+})
+jest.mock('react-native-keyboard-controller', () =>
+  require('react-native-keyboard-controller/jest'),
+)
+jest.mock('../src/ui/controls', () => require('./native-ui.cjs'))
+jest.mock('../src/ui/ModalFrame', () => require('./native-ui.cjs'))
+jest.mock('../src/ui/NativeScreen', () => require('./native-ui.cjs'))
+jest.mock('../src/ui/ComposerSurface', () => require('./native-ui.cjs'))
+jest.mock('../src/ui/NativeMenu', () => require('./native-ui.cjs'))
+jest.mock('../src/ui/NativeList', () => require('./native-ui.cjs'))
+jest.mock('../src/ui/selection', () => require('./native-ui.cjs'))
+jest.mock('../src/ui/NativeTextField', () => require('./native-ui.cjs'))
+jest.mock('../src/ui/Drawer', () => require('./native-ui.cjs'))
+jest.mock('@expo/ui/community/segmented-control', () => ({
+  SegmentedControl: () => null,
+}))
 jest.mock('react-native-enriched-markdown', () => ({
   EnrichedMarkdownText: ({ markdown, ...props }) => {
     const React = require('react')

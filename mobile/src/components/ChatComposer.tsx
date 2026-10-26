@@ -9,10 +9,7 @@ import { Image } from "expo-image";
 import {
   AtSign,
   ArrowUp,
-  Camera,
   FileText,
-  Images,
-  Paperclip,
   Plus,
   Settings2,
   Sparkles,
@@ -21,7 +18,6 @@ import {
 } from "lucide-react-native";
 import {
   Keyboard,
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -39,7 +35,10 @@ import {
   filterSkillCandidates,
   type MentionCandidate,
 } from "@opencuria/chat-core/harnessMentions";
-import { Banner, IconButton, Sheet } from "../ui/primitives";
+import { Banner, IconButton, NativeAction } from "../ui/primitives";
+import { NativeMenu } from "../ui/NativeMenu";
+import { ComposerSurface } from "../ui/ComposerSurface";
+import { ComposerEditor } from "./ComposerEditor";
 import { useTheme } from "../ui/theme";
 
 export interface ComposerSkill {
@@ -145,7 +144,6 @@ export function ChatComposer({
   });
   const [query, setQuery] = useState<ActiveQuery | null>(null);
   const [searched, setSearched] = useState<MentionCandidate[]>([]);
-  const [pickerOpen, setPickerOpen] = useState(false);
   const [focused, setFocused] = useState(false);
   const [inputHeight, setInputHeight] = useState(28);
   const [sending, setSending] = useState(false);
@@ -310,7 +308,6 @@ export function ChatComposer({
     setStopping(false);
     setQuery(null);
     setSearched([]);
-    setPickerOpen(false);
     setError(null);
     cancelSearch();
   }, [cancelSearch, contextKey]);
@@ -375,7 +372,6 @@ export function ChatComposer({
       const generation = operationGeneration.current;
       pickerInFlight.current = true;
       const context = contextKeyRef.current;
-      setPickerOpen(false);
       setError(null);
       try {
         const picked = await picker();
@@ -488,20 +484,62 @@ export function ChatComposer({
     attachments.length > 0 ||
     activeSkills.length > 0;
   const attachmentButton = hasPicker ? (
-    <IconButton
-      icon={<Plus size={25} strokeWidth={1.8} color={theme.text} />}
+    <NativeMenu
       label="Add attachment"
-      disabled={disabled}
-      onPress={() => {
-        Keyboard.dismiss();
-        setPickerOpen(true);
-      }}
       testID="chat-composer-attachments"
-    />
+      actions={[
+        ...(onTakePhoto
+          ? [
+              {
+                id: "camera",
+                title: "Take a photo",
+                symbol: "camera",
+                disabled,
+              },
+            ]
+          : []),
+        ...(onChoosePhotos
+          ? [
+              {
+                id: "photos",
+                title: "Choose photos",
+                symbol: "photo.on.rectangle",
+                disabled,
+              },
+            ]
+          : []),
+        ...(onChooseFiles
+          ? [{ id: "files", title: "Choose files", symbol: "doc", disabled }]
+          : []),
+      ]}
+      onSelect={(id) => {
+        void addAttachments(
+          id === "camera"
+            ? onTakePhoto
+            : id === "photos"
+              ? onChoosePhotos
+              : onChooseFiles,
+        );
+      }}
+    >
+      <View
+        pointerEvents="none"
+        style={{
+          width: 48,
+          height: 48,
+          alignItems: "center",
+          justifyContent: "center",
+          opacity: disabled ? 0.38 : 1,
+        }}
+      >
+        <Plus size={24} color={theme.primary} />
+      </View>
+    </NativeMenu>
   ) : null;
   const settingsButton =
     settings && onSettings ? (
       <IconButton
+        symbol="slider.horizontal.3"
         icon={<Settings2 size={22} strokeWidth={1.8} color={theme.text} />}
         label="Chat settings"
         accessibilityValue={{
@@ -520,30 +558,18 @@ export function ChatComposer({
     ) : null;
   const sendButton = (
     <IconButton
+      symbol={busy ? "stop.fill" : "arrow.up"}
+      tone="primary"
       icon={
-        <View
-          style={[
-            styles.sendCircle,
-            {
-              backgroundColor:
-                busy || canSubmit ? theme.primary : theme.disabledAction,
-            },
-          ]}
-        >
-          {busy ? (
-            <Square
-              size={14}
-              color={theme.primaryForeground}
-              fill={theme.primaryForeground}
-            />
-          ) : (
-            <ArrowUp
-              size={23}
-              strokeWidth={2.2}
-              color={canSubmit ? theme.primaryForeground : theme.subtleText}
-            />
-          )}
-        </View>
+        busy ? (
+          <Square
+            size={16}
+            color={theme.primaryForeground}
+            fill={theme.primaryForeground}
+          />
+        ) : (
+          <ArrowUp size={24} color={theme.primaryForeground} />
+        )
       }
       label={busy ? "Stop OpenCuria" : "Send message"}
       disabled={busy ? !onStop || stopping : !canSubmit || sending}
@@ -595,7 +621,7 @@ export function ChatComposer({
             style={{ maxHeight: 192 }}
           >
             {candidates.slice(0, 10).map((candidate) => (
-              <Pressable
+              <NativeAction
                 key={`${candidate.kind}:${candidate.insert}`}
                 accessibilityRole="button"
                 accessibilityLabel={`Add ${candidate.label}`}
@@ -623,21 +649,13 @@ export function ChatComposer({
                   {candidate.label}
                 </Text>
                 <Plus size={16} color={theme.subtleText} />
-              </Pressable>
+              </NativeAction>
             ))}
           </ScrollView>
         </View>
       ) : null}
 
-      <View
-        style={[
-          styles.composerCard,
-          {
-            backgroundColor: theme.composer,
-            borderColor: theme.scheme === "dark" ? theme.border : "transparent",
-          },
-        ]}
-      >
+      <ComposerSurface>
         {activeSkills.length ? (
           <ScrollView
             horizontal
@@ -659,7 +677,7 @@ export function ChatComposer({
                 >
                   {skill.name}
                 </Text>
-                <Pressable
+                <NativeAction
                   accessibilityRole="button"
                   accessibilityLabel={`Remove ${skill.name} skill`}
                   hitSlop={6}
@@ -671,7 +689,7 @@ export function ChatComposer({
                   style={styles.chipRemove}
                 >
                   <X size={14} color={theme.mutedText} />
-                </Pressable>
+                </NativeAction>
               </View>
             ))}
           </ScrollView>
@@ -706,7 +724,7 @@ export function ChatComposer({
                 >
                   {attachment.name}
                 </Text>
-                <Pressable
+                <NativeAction
                   accessibilityRole="button"
                   accessibilityLabel={`Remove ${attachment.name}`}
                   onPress={() => {
@@ -719,14 +737,14 @@ export function ChatComposer({
                   style={styles.chipRemove}
                 >
                   <X size={14} color={theme.mutedText} />
-                </Pressable>
+                </NativeAction>
               </View>
             ))}
           </ScrollView>
         ) : null}
         <View style={styles.editorRow}>
           {!expandedLayout ? attachmentButton : null}
-          <TextInput
+          <ComposerEditor
             key="message-input"
             ref={inputRef}
             value={draft}
@@ -768,55 +786,12 @@ export function ChatComposer({
             {sendButton}
           </View>
         ) : null}
-      </View>
+      </ComposerSurface>
       {disabled && !busy ? (
         <Text style={[styles.disabledHint, { color: theme.subtleText }]}>
           Chat is not available right now.
         </Text>
       ) : null}
-
-      <Sheet
-        visible={pickerOpen}
-        onClose={() => setPickerOpen(false)}
-        title="Add to message"
-        testID="chat-composer-picker-sheet"
-        maxHeight="58%"
-        placement="composer"
-        showHeader={false}
-      >
-        <View style={styles.pickerOptions}>
-          {onTakePhoto ? (
-            <PickerOption
-              icon={<Camera size={22} color={theme.text} />}
-              label="Take a photo"
-              title="Camera"
-              onPress={() => {
-                void addAttachments(onTakePhoto);
-              }}
-            />
-          ) : null}
-          {onChoosePhotos ? (
-            <PickerOption
-              icon={<Images size={22} color={theme.text} />}
-              label="Choose photos"
-              title="Photos"
-              onPress={() => {
-                void addAttachments(onChoosePhotos);
-              }}
-            />
-          ) : null}
-          {onChooseFiles ? (
-            <PickerOption
-              icon={<Paperclip size={22} color={theme.text} />}
-              label="Choose files"
-              title="Files"
-              onPress={() => {
-                void addAttachments(onChooseFiles);
-              }}
-            />
-          ) : null}
-        </View>
-      </Sheet>
     </View>
   );
 }
@@ -848,49 +823,8 @@ function isImage(attachment: ComposerAttachment): boolean {
   );
 }
 
-function PickerOption({
-  icon,
-  label,
-  title = label,
-  onPress,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  title?: string;
-  onPress: () => void;
-}): React.JSX.Element {
-  const { theme } = useTheme();
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.pickerOption,
-        { backgroundColor: pressed ? theme.surfaceMuted : "transparent" },
-      ]}
-    >
-      <View
-        style={[styles.pickerIcon, { backgroundColor: theme.surfaceMuted }]}
-      >
-        {icon}
-      </View>
-      <Text style={{ color: theme.text, fontSize: 17, fontWeight: "500" }}>
-        {title}
-      </Text>
-    </Pressable>
-  );
-}
-
 const styles = StyleSheet.create({
   root: { paddingHorizontal: 12, paddingTop: 10, paddingBottom: 10 },
-  composerCard: {
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 26,
-    paddingHorizontal: 2,
-    paddingVertical: 2,
-    boxShadow: "0 4px 32px rgba(0, 0, 0, 0.06)",
-  },
   editorRow: { flexDirection: "row", alignItems: "center" },
   input: {
     minWidth: 0,
@@ -905,13 +839,6 @@ const styles = StyleSheet.create({
     marginHorizontal: 14,
     marginTop: 8,
     marginBottom: 2,
-  },
-  sendCircle: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    alignItems: "center",
-    justifyContent: "center",
   },
   toolbar: {
     minHeight: 44,
@@ -981,20 +908,4 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
   },
   disabledHint: { fontSize: 12, textAlign: "center", paddingTop: 6 },
-  pickerOptions: { gap: 4 },
-  pickerOption: {
-    minHeight: 60,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 13,
-    paddingHorizontal: 4,
-    borderRadius: 13,
-  },
-  pickerIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    alignItems: "center",
-    justifyContent: "center",
-  },
 });

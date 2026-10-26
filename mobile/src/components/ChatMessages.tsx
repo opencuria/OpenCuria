@@ -1,6 +1,5 @@
 import React, { memo, useCallback, useMemo, useRef, useState } from "react";
 import {
-  Pressable,
   StyleSheet,
   Text,
   TextInput,
@@ -23,7 +22,6 @@ import {
   Code2,
   FileCode2,
   EllipsisVertical,
-  Pencil,
   GitBranch,
   Hammer,
   LoaderCircle,
@@ -50,8 +48,15 @@ import {
   resolveMessageUsage,
 } from "@opencuria/chat-core/harnessUsage";
 import { classifyWorkspaceFile } from "@opencuria/chat-core/workspaceFileRefs";
+import { NativeMenu } from "../ui/NativeMenu";
 import { useTheme } from "../ui/theme";
-import { Banner, Button, IconButton, Sheet } from "../ui/primitives";
+import {
+  Banner,
+  Button,
+  IconButton,
+  NativeModal,
+  NativeAction,
+} from "../ui/primitives";
 import { ChatMarkdown, type ResolvedChatMedia } from "./ChatMarkdown";
 
 export interface ChatMessagesProps {
@@ -276,6 +281,7 @@ export function ChatMessages({
         <View style={styles.jumpButton}>
           <IconButton
             icon={<ArrowDown size={20} color={theme.text} />}
+            symbol="arrow.down"
             label="Scroll to latest message"
             style={{
               backgroundColor: theme.composer,
@@ -287,7 +293,7 @@ export function ChatMessages({
           />
         </View>
       ) : null}
-      <Sheet
+      <NativeModal
         visible={todosOpen}
         onClose={() => setTodosOpen(false)}
         title="Tasks"
@@ -342,7 +348,7 @@ export function ChatMessages({
             );
           })
         )}
-      </Sheet>
+      </NativeModal>
     </View>
   );
 }
@@ -434,6 +440,62 @@ const MessageRow = memo(function MessageRow({
     }
   }, [copyText, message, onCopy]);
 
+  const userBubble = isUser ? (
+    <View
+      style={
+        editing
+          ? [styles.userBubble, { backgroundColor: theme.userBubble }]
+          : undefined
+      }
+    >
+      {editing ? (
+        <>
+          <TextInput
+            multiline
+            value={editText}
+            onChangeText={setEditText}
+            accessibilityLabel="Edit message"
+            testID={`chat-edit-${message.id}`}
+            style={[
+              styles.editInput,
+              { color: theme.text, borderColor: theme.border },
+            ]}
+          />
+          <View style={styles.inlineActions}>
+            <Button
+              title="Cancel"
+              variant="ghost"
+              compact
+              onPress={() => {
+                setEditing(false);
+                setEditText(message.content);
+              }}
+            />
+            <Button
+              title="Save & run"
+              variant="primary"
+              compact
+              onPress={() => {
+                setEditing(false);
+                void editUserMessage(message.id, editText.trim());
+              }}
+              disabled={!editText.trim() || editText.trim() === message.content}
+            />
+          </View>
+        </>
+      ) : (
+        <UserMessageContent
+          markdown={message.content}
+          mediaScopeKey={mediaScopeKey}
+          mediaVisible={mediaVisible}
+          resolveMedia={resolveMedia}
+          onOpenFile={onOpenFile}
+          testID={`chat-message-markdown-${message.id}`}
+        />
+      )}
+    </View>
+  ) : null;
+
   return (
     <View
       testID={`chat-message-${message.id}`}
@@ -443,65 +505,45 @@ const MessageRow = memo(function MessageRow({
       ]}
     >
       {isUser ? (
-        <Pressable
-          onLongPress={() => setActionsOpen(true)}
-          accessibilityLabel={`Your message: ${message.content}`}
-          accessibilityHint="Long press for message actions"
-          accessibilityActions={[
-            { name: "activate", label: "Message actions" },
-          ]}
-          onAccessibilityAction={() => setActionsOpen(true)}
-          testID={`chat-message-menu-${message.id}`}
-          style={[styles.userBubble, { backgroundColor: theme.userBubble }]}
-        >
-          {editing ? (
-            <>
-              <TextInput
-                multiline
-                value={editText}
-                onChangeText={setEditText}
-                accessibilityLabel="Edit message"
-                testID={`chat-edit-${message.id}`}
-                style={[
-                  styles.editInput,
-                  { color: theme.text, borderColor: theme.border },
-                ]}
-              />
-              <View style={styles.inlineActions}>
-                <Button
-                  title="Cancel"
-                  variant="ghost"
-                  compact
-                  onPress={() => {
-                    setEditing(false);
-                    setEditText(message.content);
-                  }}
-                />
-                <Button
-                  title="Save & run"
-                  variant="primary"
-                  compact
-                  onPress={() => {
-                    setEditing(false);
-                    void editUserMessage(message.id, editText.trim());
-                  }}
-                  disabled={
-                    !editText.trim() || editText.trim() === message.content
-                  }
-                />
-              </View>
-            </>
-          ) : (
-            <UserMessageContent
-              markdown={message.content}
-              mediaScopeKey={mediaScopeKey}
-              mediaVisible={mediaVisible}
-              resolveMedia={resolveMedia}
-              onOpenFile={onOpenFile}
-              testID={`chat-message-markdown-${message.id}`}
-            />
-          )}
-        </Pressable>
+        editing ? (
+          userBubble
+        ) : (
+          <NativeMenu
+            style={[styles.userBubble, { backgroundColor: theme.userBubble }]}
+            label={`Your message: ${message.content}`}
+            longPress
+            testID={`chat-message-menu-${message.id}`}
+            actions={[
+              {
+                id: "copy",
+                title: "Copy message",
+                symbol: "doc.on.doc",
+                disabled: !copyText,
+              },
+              ...(!editing &&
+              !disabled &&
+              !message.id.startsWith("local-user-") &&
+              onEdit
+                ? [
+                    {
+                      id: "edit",
+                      title: "Edit and run again",
+                      symbol: "pencil",
+                    },
+                  ]
+                : []),
+            ]}
+            onSelect={(action) => {
+              if (action === "copy") void doCopy();
+              else {
+                setEditText(message.content);
+                setEditing(true);
+              }
+            }}
+          >
+            {userBubble}
+          </NativeMenu>
+        )
       ) : (
         <View style={styles.assistantBody}>
           {message.error && !message.notice_dismissed_at ? (
@@ -573,13 +615,8 @@ const MessageRow = memo(function MessageRow({
       {!isUser && !streaming ? (
         <View style={styles.messageActions}>
           <IconButton
-            icon={
-              <Copy
-                size={19}
-                strokeWidth={1.7}
-                color={theme.mutedText}
-              />
-            }
+            icon={<Copy size={19} strokeWidth={1.7} color={theme.mutedText} />}
+            symbol="doc.on.doc"
             label="Copy message"
             onPress={() => {
               void doCopy();
@@ -597,6 +634,7 @@ const MessageRow = memo(function MessageRow({
                   color={theme.mutedText}
                 />
               }
+              symbol="arrow.triangle.branch"
               label="Fork conversation from this answer"
               onPress={() => {
                 void forkMessage(message.id);
@@ -612,13 +650,14 @@ const MessageRow = memo(function MessageRow({
                 color={theme.mutedText}
               />
             }
+            symbol="info.circle"
             label="Message details"
             onPress={() => setActionsOpen(true)}
             testID={`chat-message-menu-${message.id}`}
           />
         </View>
       ) : null}
-      <Sheet
+      <NativeModal
         visible={actionsOpen}
         onClose={() => setActionsOpen(false)}
         title={isUser ? "Message" : "OpenCuria"}
@@ -626,7 +665,7 @@ const MessageRow = memo(function MessageRow({
       >
         <Button
           title="Copy message"
-          icon={<Copy size={19} color={theme.text} />}
+          symbol="doc.on.doc"
           variant="ghost"
           disabled={!copyText}
           onPress={() => {
@@ -641,7 +680,7 @@ const MessageRow = memo(function MessageRow({
         !message.id.startsWith("local-user-") &&
         onEdit ? (
           <Button
-            icon={<Pencil size={19} color={theme.text} />}
+            symbol="pencil"
             title="Edit and run again"
             variant="ghost"
             onPress={() => {
@@ -654,7 +693,7 @@ const MessageRow = memo(function MessageRow({
         ) : null}
         {!isUser && !disabled && !streaming && onFork ? (
           <Button
-            icon={<GitBranch size={19} color={theme.text} />}
+            symbol="arrow.triangle.branch"
             title="Fork conversation from this answer"
             variant="ghost"
             onPress={() => {
@@ -678,7 +717,7 @@ const MessageRow = memo(function MessageRow({
             {formatMessageUsage(resolveMessageUsage(message))}
           </Text>
         ) : null}
-      </Sheet>
+      </NativeModal>
     </View>
   );
 });
@@ -735,7 +774,7 @@ export function UserMessageContent({
             resolveMedia={resolveMedia}
           />
         ) : (
-          <Pressable
+          <NativeAction
             key={`file:${segment.start}`}
             accessibilityRole="button"
             accessibilityLabel={`Open file ${segment.path}`}
@@ -746,7 +785,7 @@ export function UserMessageContent({
             <Text numberOfLines={1} style={{ color: theme.text, fontSize: 13 }}>
               {segment.name}
             </Text>
-          </Pressable>
+          </NativeAction>
         ),
       )}
     </View>
@@ -949,7 +988,7 @@ function WorkedForBlock(props: WorkedForProps): React.JSX.Element {
   );
   return (
     <View style={styles.workedFor} testID="chat-worked-for">
-      <Pressable
+      <NativeAction
         accessibilityRole="button"
         accessibilityLabel={`${open ? "Collapse" : "Expand"} work details, ${workCount} items`}
         accessibilityState={{ expanded: open }}
@@ -968,7 +1007,7 @@ function WorkedForBlock(props: WorkedForProps): React.JSX.Element {
         <Text style={[styles.workedForCount, { color: theme.subtleText }]}>
           {workCount} {workCount === 1 ? "step" : "steps"}
         </Text>
-      </Pressable>
+      </NativeAction>
       {open ? (
         <View
           style={[styles.workedForContent, { borderLeftColor: theme.border }]}
@@ -1014,7 +1053,7 @@ function WorkedGroup({
   );
   return (
     <View style={styles.workGroup} testID="chat-worked-group">
-      <Pressable
+      <NativeAction
         accessibilityRole="button"
         accessibilityLabel={`${open ? "Collapse" : "Expand"} ${parts.length} tool steps`}
         accessibilityState={{ expanded: open }}
@@ -1043,7 +1082,7 @@ function WorkedGroup({
             <LoaderCircle size={14} color={theme.primary} />
           </>
         ) : null}
-      </Pressable>
+      </NativeAction>
       {open ? (
         <View style={styles.groupContent}>
           {parts.map((part) => (
@@ -1124,7 +1163,7 @@ function WorkRow({
       style={grouped ? styles.groupRow : styles.standaloneRow}
       testID={`chat-work-row-${part.id}`}
     >
-      <Pressable
+      <NativeAction
         accessibilityRole="button"
         accessibilityLabel={`${open ? "Collapse" : "Expand"} ${title}`}
         accessibilityState={{ expanded: open }}
@@ -1159,7 +1198,7 @@ function WorkRow({
         {current.state === "running" || current.state === "pending" ? (
           <LoaderCircle size={14} color={theme.primary} />
         ) : null}
-      </Pressable>
+      </NativeAction>
       {open ? (
         <View style={[styles.workDetail, { borderLeftColor: theme.border }]}>
           {loading ? (
@@ -1267,7 +1306,7 @@ function ProcessRow({
   };
   return (
     <View testID={`chat-process-${part.id}`} style={styles.processRow}>
-      <Pressable
+      <NativeAction
         accessibilityRole="button"
         accessibilityLabel={`${open ? "Collapse" : "Expand"} ${label}`}
         accessibilityState={{ expanded: open }}
@@ -1286,7 +1325,7 @@ function ProcessRow({
         {part.state === "running" ? (
           <LoaderCircle size={14} color={theme.primary} />
         ) : null}
-      </Pressable>
+      </NativeAction>
       {open ? (
         <View style={[styles.workDetail, { borderLeftColor: theme.border }]}>
           {loading ? (
@@ -1370,7 +1409,7 @@ function PatchCard({
         { backgroundColor: theme.surface, borderColor: theme.border },
       ]}
     >
-      <Pressable
+      <NativeAction
         accessibilityRole="button"
         accessibilityLabel={`${open ? "Collapse" : "Expand"} changes to ${path}`}
         accessibilityState={{ expanded: open }}
@@ -1399,7 +1438,7 @@ function PatchCard({
             −{deletions}
           </Text>
         ) : null}
-      </Pressable>
+      </NativeAction>
       {open ? (
         <View style={[styles.diff, { backgroundColor: theme.codeBackground }]}>
           {loading ? (
@@ -1453,7 +1492,7 @@ function ToolAttachmentCard({
       : "Tool attachment");
   if (attachment.mime.toLowerCase().startsWith("image/")) {
     return (
-      <Pressable
+      <NativeAction
         accessibilityRole="button"
         accessibilityLabel={`Open image preview ${filename}`}
         onPress={() =>
@@ -1477,11 +1516,11 @@ function ToolAttachmentCard({
         >
           {filename}
         </Text>
-      </Pressable>
+      </NativeAction>
     );
   }
   return (
-    <Pressable
+    <NativeAction
       accessibilityRole="button"
       accessibilityLabel={`Open attachment ${filename}`}
       onPress={() =>
@@ -1503,7 +1542,7 @@ function ToolAttachmentCard({
         </Text>
       </View>
       <ChevronRight size={17} color={theme.mutedText} />
-    </Pressable>
+    </NativeAction>
   );
 }
 
@@ -1520,7 +1559,7 @@ function SubtaskCard({
   const child = resolveChildSessionId(part, sessions) ?? "";
   const agent = String(part.meta?.agent ?? part.display?.agent ?? "Agent");
   return (
-    <Pressable
+    <NativeAction
       accessibilityRole="button"
       accessibilityLabel={`${part.title || "Subtask"}, ${agent}${child ? ", open subtask conversation" : ""}`}
       disabled={!child}
@@ -1559,7 +1598,7 @@ function SubtaskCard({
         ) : null}
       </View>
       {child ? <ChevronRight size={17} color={theme.mutedText} /> : null}
-    </Pressable>
+    </NativeAction>
   );
 }
 
@@ -1643,7 +1682,7 @@ function TodoStrip({
     ? `${active[0]?.status === "in_progress" ? "In progress · " : ""}${active[0]?.content}${active.length > 1 ? ` · +${active.length - 1}` : ""}`
     : "All tasks complete";
   return (
-    <Pressable
+    <NativeAction
       accessibilityRole="button"
       accessibilityLabel={`Show tasks. ${active.length} open of ${todos.length}`}
       onPress={onPress}
@@ -1665,7 +1704,7 @@ function TodoStrip({
         {todos.length}
       </Text>
       <ChevronRight size={15} color={theme.mutedText} />
-    </Pressable>
+    </NativeAction>
   );
 }
 
@@ -1783,15 +1822,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 5,
   },
-  mentionImageCard: {
-    minHeight: 44,
-    maxWidth: 180,
-    gap: 3,
-    paddingVertical: 2,
-  },
-  mentionImage: { width: 140, height: 90, borderRadius: 10 },
-  mentionImagePreview: { width: "100%", height: 520 },
-  mentionImagePlaceholder: { width: 36, height: 30, borderRadius: 8 },
   assistantBody: { width: "100%", gap: 10 },
   steerRow: { alignSelf: "flex-end", alignItems: "flex-end", maxWidth: "94%" },
   steerCaption: { fontSize: 11, lineHeight: 16, marginTop: 3 },
@@ -1920,29 +1950,4 @@ const styles = StyleSheet.create({
     gap: 9,
   },
   questionHeader: { flexDirection: "row", alignItems: "center", gap: 8 },
-  glyph: { width: 16, height: 18, alignItems: "center" },
-  glyphFacet: { position: "absolute", width: 9, height: 9 },
-  glyphTop: {
-    top: 1,
-    borderLeftWidth: 5,
-    borderRightWidth: 5,
-    borderBottomWidth: 7,
-    borderLeftColor: "transparent",
-    borderRightColor: "transparent",
-  },
-  glyphRight: {
-    top: 5,
-    right: 0,
-    width: 6,
-    height: 10,
-    transform: [{ skewY: "-28deg" }],
-  },
-  glyphBottom: {
-    bottom: 0,
-    borderLeftWidth: 5,
-    borderRightWidth: 5,
-    borderTopWidth: 7,
-    borderLeftColor: "transparent",
-    borderRightColor: "transparent",
-  },
 });

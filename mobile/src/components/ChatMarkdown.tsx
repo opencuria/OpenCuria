@@ -1,17 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import {
-  Linking,
-  Modal,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
+import { ScrollView, Linking, StyleSheet, Text, View } from "react-native";
 import { Image } from "expo-image";
 import { VideoView, useVideoPlayer } from "expo-video";
 import { marked } from "marked";
 import { EnrichedMarkdownText } from "react-native-enriched-markdown";
-import { X } from "lucide-react-native";
+
 import {
   classifyWorkspaceFile,
   parseMarkdownLinkDest,
@@ -20,7 +13,8 @@ import {
 } from "@opencuria/chat-core/workspaceFileRefs";
 import remend from "remend";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { IconButton } from "../ui/primitives";
+import { NativeModal } from "../ui/primitives";
+import { NativeAction } from "../ui/controls";
 import { useTheme } from "../ui/theme";
 
 export type ResolvedChatMedia = string | { uri: string; release: () => void };
@@ -384,7 +378,7 @@ export function ChatMarkdown({
             </View>
           )
         ) : segment.uri ? (
-          <Pressable
+          <NativeAction
             key={`image-${index}`}
             accessibilityRole="button"
             accessibilityLabel={`Open image preview ${segment.label}`}
@@ -405,7 +399,7 @@ export function ChatMarkdown({
             >
               {segment.label}
             </Text>
-          </Pressable>
+          </NativeAction>
         ) : (
           <View key={`image-pending-${index}`} style={styles.inlineImageButton}>
             <Text style={{ color: theme.subtleText, fontSize: 13 }}>
@@ -416,50 +410,31 @@ export function ChatMarkdown({
           </View>
         ),
       )}
-      <Modal
+      <NativeModal
         visible={preview !== null}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setPreview(null)}
-        statusBarTranslucent
+        onClose={() => setPreview(null)}
+        title={preview?.label ?? "Image preview"}
+        testID="image-preview"
+        scrollable={false}
       >
-        <View
-          style={[
-            styles.previewRoot,
-            {
-              backgroundColor: theme.overlay,
-              paddingTop: insets.top,
-              paddingBottom: insets.bottom,
-            },
-          ]}
+        <ScrollView
+          style={{ flex: 1 }}
+          contentContainerStyle={{ flexGrow: 1 }}
+          maximumZoomScale={4}
+          minimumZoomScale={1}
+          centerContent
+          accessibilityLabel="Image preview"
         >
-          <View style={[styles.previewHeader, { top: insets.top + 8 }]}>
-            <Text numberOfLines={1} style={styles.previewLabel}>
-              {preview?.label ?? ""}
-            </Text>
-            <IconButton
-              icon={<X size={21} color="#FFFFFF" />}
-              label="Close image preview"
-              onPress={() => setPreview(null)}
+          {preview ? (
+            <Image
+              source={{ uri: preview.uri }}
+              contentFit="contain"
+              style={{ width: "100%", minHeight: 500, flex: 1 }}
+              accessibilityLabel={preview.label}
             />
-          </View>
-          <Pressable
-            accessibilityLabel="Close image preview"
-            accessibilityRole="button"
-            style={styles.previewImageArea}
-            onPress={() => setPreview(null)}
-          >
-            {preview ? (
-              <Image
-                source={{ uri: preview.uri }}
-                contentFit="contain"
-                style={styles.previewImage}
-                accessibilityLabel={preview.label}
-              />
-            ) : null}
-          </Pressable>
-        </View>
-      </Modal>
+          ) : null}
+        </ScrollView>
+      </NativeModal>
     </View>
   );
 }
@@ -499,7 +474,7 @@ export function WorkspaceFileLabel({
 }): React.JSX.Element {
   const { theme } = useTheme();
   return (
-    <Pressable
+    <NativeAction
       accessibilityRole="button"
       accessibilityLabel={`Open file ${path}`}
       onPress={() => onPress?.(path)}
@@ -508,7 +483,7 @@ export function WorkspaceFileLabel({
       <Text numberOfLines={1} style={{ color: theme.primary, fontSize: 14 }}>
         {path}
       </Text>
-    </Pressable>
+    </NativeAction>
   );
 }
 
@@ -671,19 +646,5 @@ const styles = StyleSheet.create({
   },
   inlineVideoPlaceholder: { minHeight: 44, justifyContent: "center" },
   videoLabel: { color: "#858590", fontSize: 12 },
-  previewRoot: { flex: 1, justifyContent: "center" },
-  previewHeader: {
-    position: "absolute",
-    left: 16,
-    right: 16,
-    zIndex: 1,
-    minHeight: 48,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  previewLabel: { color: "#FFFFFF", fontSize: 14, flex: 1, marginRight: 8 },
-  previewImageArea: { flex: 1, justifyContent: "center", alignItems: "center" },
-  previewImage: { width: "100%", height: "82%" },
   fileLabel: { minHeight: 44, justifyContent: "center" },
 });

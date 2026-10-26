@@ -1,14 +1,6 @@
 import React, { useEffect, useState } from "react";
+import { ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import {
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
-import {
-  Check,
   ChevronLeft,
   ChevronRight,
   CircleHelp,
@@ -19,7 +11,8 @@ import type {
   HarnessPermissionResponse,
   HarnessQuestionRequest,
 } from "@opencuria/chat-core/harness";
-import { Banner, Button, Sheet } from "../ui/primitives";
+import { Banner, Button, NativeModal, NativeAction } from "../ui/primitives";
+import { NativeOption } from "../ui/selection";
 import { useTheme } from "../ui/theme";
 
 export interface PermissionGateProps {
@@ -61,13 +54,12 @@ export function PermissionGate({
     }
   };
   return (
-    <Sheet
+    <NativeModal
       visible={visible && Boolean(request)}
       onClose={onClose}
       title="Permission required"
       testID={testID}
       dismissible={false}
-      maxHeight="86%"
     >
       {request ? (
         <>
@@ -163,7 +155,7 @@ export function PermissionGate({
           />
         </>
       ) : null}
-    </Sheet>
+    </NativeModal>
   );
 }
 
@@ -358,13 +350,12 @@ export function QuestionGate({
   };
 
   return (
-    <Sheet
+    <NativeModal
       visible={visible && Boolean(request)}
       onClose={onClose}
       title="A few questions"
       testID={testID}
       dismissible={false}
-      maxHeight="90%"
       footer={
         request ? (
           <View style={styles.gateButtons}>
@@ -446,68 +437,17 @@ export function QuestionGate({
                     .filter(Boolean)
                     .includes(option.label);
                   return (
-                    <Pressable
+                    <NativeOption
                       key={option.label}
-                      accessibilityRole={
-                        question.multiple ? "checkbox" : "radio"
-                      }
-                      accessibilityState={{ checked: selected }}
-                      accessibilityLabel={`${option.label}${option.description ? `, ${option.description}` : ""}`}
+                      label={option.label}
+                      description={option.description}
+                      selected={selected}
+                      multiple={question.multiple}
                       disabled={submitting}
                       onPress={() =>
                         toggle(index, option.label, Boolean(question.multiple))
                       }
-                      style={[
-                        styles.option,
-                        {
-                          backgroundColor: selected
-                            ? theme.surfaceMuted
-                            : theme.surface,
-                          borderColor: selected ? theme.primary : theme.border,
-                        },
-                      ]}
-                    >
-                      <View
-                        style={[
-                          styles.optionIndicator,
-                          {
-                            borderColor: selected
-                              ? theme.primary
-                              : theme.subtleText,
-                            backgroundColor: selected
-                              ? theme.primary
-                              : "transparent",
-                          },
-                        ]}
-                      >
-                        {selected ? (
-                          <Check size={14} color={theme.primaryForeground} />
-                        ) : null}
-                      </View>
-                      <View style={{ flex: 1, gap: 2 }}>
-                        <Text
-                          style={{
-                            color: theme.text,
-                            fontSize: 14,
-                            lineHeight: 20,
-                            fontWeight: "500",
-                          }}
-                        >
-                          {option.label}
-                        </Text>
-                        {option.description ? (
-                          <Text
-                            style={{
-                              color: theme.mutedText,
-                              fontSize: 13,
-                              lineHeight: 18,
-                            }}
-                          >
-                            {option.description}
-                          </Text>
-                        ) : null}
-                      </View>
-                    </Pressable>
+                    />
                   );
                 })}
                 <TextInput
@@ -534,7 +474,7 @@ export function QuestionGate({
           </ScrollView>
         </>
       ) : null}
-    </Sheet>
+    </NativeModal>
   );
 }
 
@@ -559,7 +499,7 @@ function Pager({
       <Text style={{ flex: 1, color: theme.mutedText, fontSize: 13 }}>
         {label} {page + 1} of {total}
       </Text>
-      <Pressable
+      <NativeAction
         accessibilityRole="button"
         accessibilityLabel={`Previous ${label.toLowerCase()}`}
         disabled={disabled || page === 0}
@@ -570,8 +510,8 @@ function Pager({
           size={19}
           color={disabled || page === 0 ? theme.subtleText : theme.text}
         />
-      </Pressable>
-      <Pressable
+      </NativeAction>
+      <NativeAction
         accessibilityRole="button"
         accessibilityLabel={`Next ${label.toLowerCase()}`}
         disabled={disabled || page === total - 1}
@@ -582,7 +522,7 @@ function Pager({
           size={19}
           color={disabled || page === total - 1 ? theme.subtleText : theme.text}
         />
-      </Pressable>
+      </NativeAction>
     </View>
   );
 }
@@ -619,24 +559,6 @@ const styles = StyleSheet.create({
   gateButtons: { flexDirection: "row", gap: 8 },
   questionSection: { gap: 9 },
   questionTitle: { fontSize: 16, lineHeight: 23, fontWeight: "600" },
-  option: {
-    minHeight: 54,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 14,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 11,
-  },
-  optionIndicator: {
-    width: 23,
-    height: 23,
-    borderRadius: 12,
-    borderWidth: 1.5,
-    alignItems: "center",
-    justifyContent: "center",
-  },
   freeInput: {
     minHeight: 52,
     maxHeight: 130,

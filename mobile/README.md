@@ -1,12 +1,20 @@
 # OpenCuria Mobile
 
-Native iOS and Android chat client built with Expo SDK 57 and React Native 0.86.3. The goal is to bring the OpenCuria/Cherry chat experience to phones with native navigation, input, media pickers and file previews; it talks directly to the configured OpenCuria server, not to the webapp.
+Native iOS and Android chat client built with Expo SDK 57 and React Native 0.86.3. The interface follows t3code’s use of platform controls: SwiftUI/UIKit on iOS and Material/Android controls on Android, with native navigation, text editing, menus and file pickers; it talks directly to the configured OpenCuria server, not to the webapp.
 
 ## Scope
 
 - Browse existing workspaces and conversations, read history, and start or continue harness chats; follow live output, tasks/subtasks, permission and question gates, Markdown, mentions, model choices and skills.
 - Attach photos, camera images and documents; preview supported workspace files. Chat and workspace data remain on the server.
 - Sign in to an existing server. The app does **not** create/delete workspaces or provide workspace CRUD, push notifications, offline chat/queue/replay. It refreshes chat from REST when brought back to the foreground; this is not background delivery or guaranteed event replay.
+
+## Native interface
+
+Buttons, selection rows, model/engine pickers and lists use platform controls via `@expo/ui`. Menus use `@react-native-menu/menu` (`UIMenu` / Android popup menus); no Expo bottom-sheet component is used. Modal screens use the OS presentation and native navigation bars. iOS navigation uses `NavigationSplitView`; Android uses `DrawerLayoutAndroid`. The composer uses a native `UITextView` / `EditText`, with `expo-glass-effect` on supported iOS versions and a Material surface on Android.
+
+The sidebar shares workspace eligibility, inbox and sorting rules with the webapp through `@opencuria/chat-core/conversationGroups`. Each workspace initially shows four recent chats, with independent four-chat pagination. Closing navigation retains pagination and collapsed groups; switching organization resets them. Stopped workspaces remain accessible through All workspaces. Scheduled tasks are not shown.
+
+These native dependencies require rebuilding the development client after updating the branch.
 
 ## Local development
 
@@ -56,4 +64,4 @@ npm run test
 npm run export -w mobile
 ```
 
-`npm run test` covers the shared packages, mobile logic/UI tests and webapp tests. `export` checks an Expo JS bundle for both platforms; it is **not** a signed native release build. An Android debug APK was built. See the [verification report](../docs/mobile-verification.md) for build results, native screenshots and remaining platform limits. This is not a claim of iOS native build, production-signing or store acceptance.
+`npm run test` covers the shared packages, mobile logic/UI tests and webapp tests. `export` checks an Expo JS bundle for both platforms; it is **not** a signed native release build. An Android debug APK was built. See the [native UI verification report](../docs/mobile-native-verification.md) for current checks and screenshots, and the [initial mobile verification](../docs/mobile-verification.md) for earlier transport/platform coverage. This is not a claim of iOS native build, production-signing or store acceptance.

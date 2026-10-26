@@ -11,11 +11,9 @@ import {
   Alert,
   Image,
   Platform,
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -23,24 +21,9 @@ import {
   KeyboardAvoidingView,
   useKeyboardState,
 } from "react-native-keyboard-controller";
-import Svg, { Path } from "react-native-svg";
+
 import { useVideoPlayer, VideoView } from "expo-video";
-import {
-  Check,
-  ChevronDown,
-  ChevronRight,
-  CircleAlert,
-  Ellipsis,
-  LogOut,
-  Moon,
-  MoreHorizontal,
-  Plus,
-  Search,
-  Settings2,
-  SquarePen,
-  Sun,
-  SunMoon,
-} from "lucide-react-native";
+import { CircleAlert, Settings2 } from "lucide-react-native";
 import { appendUploadMentions } from "@opencuria/chat-core/chatUploads";
 import {
   filterMentionCandidates,
@@ -87,8 +70,13 @@ import {
   uploadAttachments,
   type OpenedWorkspaceFile,
 } from "../platform";
-import { Banner, Button, IconButton, Sheet } from "../ui/primitives";
+import { Banner, Button, NativeModal, NativeAction } from "../ui/primitives";
 import { Drawer } from "../ui/Drawer";
+import { WorkspaceSidebar } from "../components/WorkspaceSidebar";
+import { NativeList } from "../ui/NativeList";
+import { SegmentedControl } from "@expo/ui/community/segmented-control";
+import { NativePicker } from "../ui/selection";
+import { NativeTextField } from "../ui/NativeTextField";
 import { useTheme } from "../ui/theme";
 import { useSession } from "./SessionContext";
 
@@ -118,7 +106,6 @@ type SheetName =
   | "settings"
   | "rename"
   | "media"
-  | "conversationActions"
   | null;
 type NavigationRequest = {
   revision: number;
@@ -165,9 +152,6 @@ export function MainScreen(): React.JSX.Element {
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [navigation, setNavigation] = useState<NavigationRequest | null>(null);
   const navigationRevision = useRef(0);
-  const [actionConversation, setActionConversation] =
-    useState<HarnessConversation | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
@@ -918,23 +902,32 @@ export function MainScreen(): React.JSX.Element {
     }
   };
   const sessionMenu = (item: HarnessConversation) => {
-    setActionConversation(item);
-    setConfirmDelete(false);
-    setSheet("conversationActions");
+    Alert.alert(
+      "Delete conversation?",
+      `Delete “${item.title || "New chat"}” and its history? This cannot be undone.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => {
+            void deleteConversation(item);
+          },
+        },
+      ],
+    );
   };
 
-  const markConversation = async () => {
-    if (!client || !actionConversation || actionBusy) return;
+  const markConversation = async (conversation: HarnessConversation) => {
+    if (!client || !conversation || actionBusy) return;
     setActionBusy(true);
     try {
-      if (actionConversation.unread)
-        await client.harness.markRead(actionConversation.session_id);
-      else await client.harness.markUnread(actionConversation.session_id);
-      if (actionConversation.workspace_id === workspaceId)
+      if (conversation.unread)
+        await client.harness.markRead(conversation.session_id);
+      else await client.harness.markUnread(conversation.session_id);
+      if (conversation.workspace_id === workspaceId)
         await controller?.refresh();
       await loadOverview(true);
-      setSheet(null);
-      setActionConversation(null);
       setError(null);
     } catch (cause) {
       setError(errorMessage(cause, "Could not update conversation status."));
@@ -943,17 +936,35 @@ export function MainScreen(): React.JSX.Element {
     }
   };
 
-  const deleteConversation = async () => {
-    if (!client || !actionConversation || actionBusy) return;
+  const markAllRead = async () => {
+    const running = new Set(
+      workspaces
+        .filter((item) => item.status === "running")
+        .map((item) => item.id),
+    );
+    try {
+      await Promise.all(
+        conversations
+          .filter((row) => row.unread && running.has(row.workspace_id))
+          .map((row) => client!.harness.markRead(row.session_id)),
+      );
+      await loadOverview(true);
+    } catch (cause) {
+      setDrawerError(
+        errorMessage(cause, "Could not mark conversations as read."),
+      );
+    }
+  };
+
+  const deleteConversation = async (conversation: HarnessConversation) => {
+    if (!client || actionBusy) return;
     setActionBusy(true);
     try {
-      await client.harness.deleteSession(actionConversation.session_id);
-      if (actionConversation.workspace_id === workspaceId)
+      await client.harness.deleteSession(conversation.session_id);
+      if (conversation.workspace_id === workspaceId)
         await controller?.refresh();
       await loadOverview(true);
       setSheet(null);
-      setActionConversation(null);
-      setConfirmDelete(false);
       setError(null);
     } catch (cause) {
       setError(errorMessage(cause, "Could not delete conversation."));
@@ -970,19 +981,6 @@ export function MainScreen(): React.JSX.Element {
   const filteredWorkspaces = visibleWorkspaces.filter((item) =>
     item.name.toLowerCase().includes(search.toLowerCase()),
   );
-  const filteredChats = conversations
-    .filter((item) =>
-      `${item.title} ${item.workspace_name}`
-        .toLowerCase()
-        .includes(search.toLowerCase()),
-    )
-    .sort(
-      (a, b) =>
-        Date.parse(b.last_message_at || b.updated_at) -
-        Date.parse(a.last_message_at || a.updated_at),
-    );
-  const attentionChats = filteredChats.filter((item) => item.needs_attention);
-  const recentChats = filteredChats.filter((item) => !item.needs_attention);
 
   if (!client || !user)
     return (
@@ -992,829 +990,538 @@ export function MainScreen(): React.JSX.Element {
     );
 
   return (
-    <KeyboardAvoidingView
-      style={[
-        styles.root,
-        {
-          backgroundColor: theme.background,
-          paddingBottom: keyboardVisible ? 0 : insets.bottom,
-        },
-      ]}
-      behavior="height"
+    <Drawer
+      visible={sheet === "drawer"}
+      onOpen={() => setSheet("drawer")}
+      onClose={() =>
+        setSheet((current) => (current === "drawer" ? null : current))
+      }
+      title={workspace?.name ?? "OpenCuria"}
+      profileTitle={profileTitle}
+      onProfile={() => setSheet("profile")}
+      onWorkspaces={() => {
+        setSearch("");
+        setSheet("workspaces");
+      }}
+      onCreate={newChat}
+      canCreate={canStart}
+      navigation={
+        <>
+          {drawerError ? (
+            <Banner
+              tone="error"
+              message={drawerError}
+              onDismiss={() => setDrawerError(null)}
+            />
+          ) : null}
+          <WorkspaceSidebar
+            workspaces={workspaces}
+            conversations={conversations}
+            activeWorkspaceId={workspaceId}
+            activeSessionId={chat.activeSessionId}
+            scopeKey={`${client.api.baseUrl}:${session?.organizationId ?? ""}`}
+            canCreate={canStart}
+            onCreate={newChat}
+            onWorkspace={chooseWorkspace}
+            onConversation={openConversation}
+            onMarkAllRead={() => {
+              void markAllRead();
+            }}
+            onAllWorkspaces={() => {
+              setSearch("");
+              setSheet("workspaces");
+            }}
+            onConversationAction={(row, action) => {
+              if (action === "rename") rename(row);
+              else if (action === "read") void markConversation(row);
+              else sessionMenu(row);
+            }}
+          />
+        </>
+      }
     >
-      <View
+      <KeyboardAvoidingView
+        automaticOffset
         style={[
-          styles.header,
+          styles.root,
           {
-            paddingTop: insets.top + 12,
             backgroundColor: theme.background,
+            paddingBottom: keyboardVisible ? 0 : insets.bottom,
           },
         ]}
+        behavior="height"
       >
-        <IconButton
-          icon={
-            <Svg width={24} height={24} viewBox="0 0 24 24">
-              <Path
-                d="M4 8h16M4 16h10"
-                stroke={theme.text}
-                strokeWidth={2}
-                strokeLinecap="round"
-              />
-            </Svg>
-          }
-          label="Open conversation drawer"
-          onPress={() => {
-            setSearch("");
-            setDrawerError(null);
-            setSheet("drawer");
-          }}
-          testID="main-menu"
-          style={{ backgroundColor: theme.composer }}
-        />
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Workspace: ${workspace?.name ?? "Select workspace"}`}
-          onPress={() => {
-            setSearch("");
-            setSheet("workspaces");
-          }}
-          style={styles.titleArea}
-        >
-          <Text numberOfLines={1} style={[styles.title, { color: theme.text }]}>
-            OpenCuria
-          </Text>
-          <View style={styles.subTitle}>
+        {workspace && !ready ? (
+          <View style={styles.notice}>
+            <Banner
+              tone={workspace.has_active_session ? "warning" : "info"}
+              message={readinessMessage(workspace, isTransitioning)}
+              testID="workspace-status"
+            />
+          </View>
+        ) : null}
+        {workspace && ready && !chat.connected ? (
+          <View style={styles.notice}>
+            <Banner
+              tone="warning"
+              message="Live connection is reconnecting. Chat history remains available; uploads need a live connection."
+              testID="realtime-status"
+            />
+          </View>
+        ) : null}
+        {workspace &&
+        workspace.status === "running" &&
+        !workspace.runner_online ? (
+          <View style={styles.notice}>
+            <Banner
+              tone="warning"
+              message="The workspace runner is offline. History is still available; messages and uploads require a running runner."
+              testID="runner-offline"
+            />
+          </View>
+        ) : null}
+        {error || chat.error ? (
+          <View style={styles.notice}>
+            <Banner
+              tone="error"
+              message={error || chat.error || ""}
+              actionLabel="Retry"
+              onAction={() => {
+                void refresh();
+              }}
+              onDismiss={() => setError(null)}
+              testID="chat-error"
+            />
+          </View>
+        ) : null}
+        {catalogError ? (
+          <View style={styles.notice}>
+            <Banner
+              tone="warning"
+              message={catalogError}
+              actionLabel="Retry"
+              onAction={() => {
+                void loadCatalogs();
+              }}
+              onDismiss={() => setCatalogError(null)}
+              testID="catalog-warning"
+            />
+          </View>
+        ) : null}
+        {loading && !workspaces.length ? (
+          <View style={styles.loading}>
+            <ActivityIndicator color={theme.primary} />
+            <Text style={{ color: theme.mutedText }}>Loading workspaces…</Text>
+          </View>
+        ) : null}
+        {!visibleWorkspaces.length && !loading ? (
+          <View style={styles.noWorkspace}>
             <View
               style={[
-                styles.dot,
-                {
-                  backgroundColor: ready
-                    ? theme.success
-                    : workspace?.has_active_session
-                      ? theme.warning
-                      : theme.subtleText,
-                },
-              ]}
-            />
-            <Text
-              numberOfLines={1}
-              style={{ color: theme.mutedText, fontSize: 12, flexShrink: 1 }}
-            >
-              {workspace?.name ?? "Select workspace"}
-            </Text>
-            <ChevronDown size={14} color={theme.mutedText} />
-          </View>
-        </Pressable>
-        <IconButton
-          icon={<SquarePen size={21} strokeWidth={1.8} color={theme.text} />}
-          label="New chat"
-          onPress={() => {
-            void newChat();
-          }}
-          disabled={!canStart}
-          testID="new-chat"
-          style={{ backgroundColor: theme.composer }}
-        />
-        <IconButton
-          icon={<MoreHorizontal size={21} color={theme.text} />}
-          label="Profile and settings"
-          onPress={() => setSheet("profile")}
-          testID="profile-menu"
-          style={{ backgroundColor: theme.composer }}
-        />
-      </View>
-
-      {workspace && !ready ? (
-        <View style={styles.notice}>
-          <Banner
-            tone={workspace.has_active_session ? "warning" : "info"}
-            message={readinessMessage(workspace, isTransitioning)}
-            testID="workspace-status"
-          />
-        </View>
-      ) : null}
-      {workspace && ready && !chat.connected ? (
-        <View style={styles.notice}>
-          <Banner
-            tone="warning"
-            message="Live connection is reconnecting. Chat history remains available; uploads need a live connection."
-            testID="realtime-status"
-          />
-        </View>
-      ) : null}
-      {workspace &&
-      workspace.status === "running" &&
-      !workspace.runner_online ? (
-        <View style={styles.notice}>
-          <Banner
-            tone="warning"
-            message="The workspace runner is offline. History is still available; messages and uploads require a running runner."
-            testID="runner-offline"
-          />
-        </View>
-      ) : null}
-      {error || chat.error ? (
-        <View style={styles.notice}>
-          <Banner
-            tone="error"
-            message={error || chat.error || ""}
-            actionLabel="Retry"
-            onAction={() => {
-              void refresh();
-            }}
-            onDismiss={() => setError(null)}
-            testID="chat-error"
-          />
-        </View>
-      ) : null}
-      {catalogError ? (
-        <View style={styles.notice}>
-          <Banner
-            tone="warning"
-            message={catalogError}
-            actionLabel="Retry"
-            onAction={() => {
-              void loadCatalogs();
-            }}
-            onDismiss={() => setCatalogError(null)}
-            testID="catalog-warning"
-          />
-        </View>
-      ) : null}
-      {loading && !workspaces.length ? (
-        <View style={styles.loading}>
-          <ActivityIndicator color={theme.primary} />
-          <Text style={{ color: theme.mutedText }}>Loading workspaces…</Text>
-        </View>
-      ) : null}
-      {!visibleWorkspaces.length && !loading ? (
-        <View style={styles.noWorkspace}>
-          <View
-            style={[styles.emptyMark, { backgroundColor: theme.surfaceMuted }]}
-          >
-            <CircleAlert size={24} color={theme.primary} />
-          </View>
-          <Text style={[styles.emptyTitle, { color: theme.text }]}>
-            No workspaces yet
-          </Text>
-          <Text style={[styles.emptyText, { color: theme.mutedText }]}>
-            Create a workspace in OpenCuria on the web, then return here to
-            chat.
-          </Text>
-          <Button
-            title="Refresh"
-            variant="outline"
-            onPress={() => {
-              void refresh();
-            }}
-            busy={refreshing}
-          />
-        </View>
-      ) : null}
-      {activeIsSubtask ? (
-        <View style={styles.notice}>
-          <Banner
-            tone="info"
-            message="This is a read-only subtask conversation. Continue the conversation from its parent chat."
-            testID="subtask-readonly"
-          />
-        </View>
-      ) : null}
-
-      {chat.activeSessionLineage.length > 1 ? (
-        <View
-          style={{
-            flexDirection: "row",
-            flexWrap: "wrap",
-            paddingHorizontal: 18,
-            gap: 4,
-          }}
-        >
-          {chat.activeSessionLineage.map((ancestor, index) => (
-            <Pressable
-              key={ancestor.id}
-              accessibilityRole="button"
-              accessibilityLabel={`Open parent conversation ${ancestor.title}`}
-              onPress={() => {
-                if (workspaceId)
-                  requestNavigation(workspaceId, { sessionId: ancestor.id });
-              }}
-              style={{
-                minHeight: 44,
-                justifyContent: "center",
-                paddingHorizontal: 6,
-              }}
-            >
-              <Text style={{ color: theme.primary, fontSize: 13 }}>
-                {index ? "› " : "‹ "}
-                {ancestor.title || ancestor.agent_name}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-      ) : null}
-
-      <ChatMessages
-        key={contextKey}
-        onDismissNotice={(id) => controller!.dismissNotice(id)}
-        messages={chat.messages}
-        sessions={chat.sessions}
-        todos={chat.todos}
-        busy={chat.busy}
-        disabled={!ready}
-        resolveMedia={resolveMedia}
-        mediaScopeKey={`${contextKey}:${chat.connected}`}
-        onEdit={async (messageId, text) => {
-          await controller!.edit(
-            messageId,
-            text,
-            runOptions(),
-            chat.activeSessionId,
-          );
-        }}
-        onFork={async (messageId) => {
-          await controller?.fork(messageId);
-          setError(null);
-        }}
-        onOpenSubtask={(id) => {
-          setDraft("");
-          setAttachments([]);
-          setSkillIds([]);
-          if (workspaceId) requestNavigation(workspaceId, { sessionId: id });
-        }}
-        onRequestPartDetail={(sessionId, partId) =>
-          controller!.requestPartDetail(sessionId, partId)
-        }
-        onOpenFile={(path) => {
-          void viewFile(path);
-        }}
-        onOpenAttachment={(attachment) => {
-          void viewAttachment(attachment);
-        }}
-        testID="chat-transcript"
-      />
-
-      {workspace ? (
-        <ChatComposer
-          draft={draft}
-          onDraftChange={(value) => setDraft(value)}
-          onSend={send}
-          onStop={async () => {
-            await controller?.abort();
-          }}
-          busy={chat.busy}
-          expanded={chat.messages.length > 0}
-          disabled={chatDisabled}
-          placeholder={
-            chatDisabled
-              ? !navigationReady
-                ? "Loading workspace conversations…"
-                : "Choose an available, running workspace…"
-              : chat.messages.length > 0
-                ? "Reply to OpenCuria"
-                : "Ask OpenCuria"
-          }
-          settings={{
-            harness: harnessEngineLabel(harness, engines),
-            mode,
-            model: selectedModel?.name ?? model,
-            effort: effort ? formatEffort(effort) : "",
-          }}
-          onSettings={() => setSheet("settings")}
-          skills={skills.map((item) => ({ id: item.id, name: item.name }))}
-          selectedSkillIds={skillIds}
-          onSelectedSkillIdsChange={setSkillIds}
-          attachments={attachments}
-          onAttachmentsChange={setAttachments}
-          onSearchMentions={searchMentions}
-          onTakePhoto={async () => pickPhoto("camera")}
-          onChoosePhotos={async () => pickPhoto("library")}
-          onChooseFiles={async () => pickDocuments()}
-          contextKey={contextKey}
-          testID="chat-composer"
-        />
-      ) : null}
-
-      <ChatGates
-        permissions={chat.permissions}
-        questions={chat.questions}
-        resolving={chat.permissions.some((item) =>
-          resolving.has(item.request_id),
-        )}
-        submitting={chat.questions.some((item) =>
-          resolving.has(item.request_id),
-        )}
-        onResolvePermission={(id, response) =>
-          gateAction(id, () => controller!.resolvePermission(id, response))
-        }
-        onSubmitQuestion={(id, answers) =>
-          gateAction(id, () => controller!.resolveQuestion(id, answers))
-        }
-        onSkipQuestion={(id) =>
-          gateAction(id, () => controller!.resolveQuestion(id, [], true))
-        }
-      />
-
-      <Sheet
-        visible={sheet === "workspaces"}
-        onClose={() => setSheet(null)}
-        title="Choose workspace"
-        testID="workspace-picker-sheet"
-      >
-        <SearchField
-          value={search}
-          onChangeText={setSearch}
-          placeholder="Search workspaces…"
-          label="Search workspaces"
-        />
-        {!filteredWorkspaces.length ? (
-          <Text style={{ color: theme.mutedText, textAlign: "center" }}>
-            No workspaces found.
-          </Text>
-        ) : (
-          filteredWorkspaces.map((item) => (
-            <WorkspaceRow
-              key={item.id}
-              workspace={item}
-              selected={workspaceId === item.id}
-              onPress={() => {
-                void chooseWorkspace(item);
-              }}
-            />
-          ))
-        )}
-      </Sheet>
-
-      <Drawer
-        visible={sheet === "drawer"}
-        onClose={() => setSheet(null)}
-        testID="conversation-drawer"
-        footer={
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Profile and settings"
-            onPress={() => setSheet("profile")}
-            style={styles.drawerAccount}
-            testID="drawer-profile"
-          >
-            <View
-              style={[
-                styles.drawerAvatar,
+                styles.emptyMark,
                 { backgroundColor: theme.surfaceMuted },
               ]}
             >
+              <CircleAlert size={24} color={theme.primary} />
+            </View>
+            <Text style={[styles.emptyTitle, { color: theme.text }]}>
+              No workspaces yet
+            </Text>
+            <Text style={[styles.emptyText, { color: theme.mutedText }]}>
+              Create a workspace in OpenCuria on the web, then return here to
+              chat.
+            </Text>
+            <Button
+              title="Refresh"
+              variant="outline"
+              onPress={() => {
+                void refresh();
+              }}
+              busy={refreshing}
+            />
+          </View>
+        ) : null}
+        {activeIsSubtask ? (
+          <View style={styles.notice}>
+            <Banner
+              tone="info"
+              message="This is a read-only subtask conversation. Continue the conversation from its parent chat."
+              testID="subtask-readonly"
+            />
+          </View>
+        ) : null}
+
+        {chat.activeSessionLineage.length > 1 ? (
+          <View
+            style={{
+              flexDirection: "row",
+              flexWrap: "wrap",
+              paddingHorizontal: 18,
+              gap: 4,
+            }}
+          >
+            {chat.activeSessionLineage.map((ancestor, index) => (
+              <NativeAction
+                key={ancestor.id}
+                accessibilityRole="button"
+                accessibilityLabel={`Open parent conversation ${ancestor.title}`}
+                onPress={() => {
+                  if (workspaceId)
+                    requestNavigation(workspaceId, { sessionId: ancestor.id });
+                }}
+                style={{
+                  minHeight: 44,
+                  justifyContent: "center",
+                  paddingHorizontal: 6,
+                }}
+              >
+                <Text style={{ color: theme.primary, fontSize: 13 }}>
+                  {index ? "› " : "‹ "}
+                  {ancestor.title || ancestor.agent_name}
+                </Text>
+              </NativeAction>
+            ))}
+          </View>
+        ) : null}
+
+        <ChatMessages
+          key={contextKey}
+          onDismissNotice={(id) => controller!.dismissNotice(id)}
+          messages={chat.messages}
+          sessions={chat.sessions}
+          todos={chat.todos}
+          busy={chat.busy}
+          disabled={!ready}
+          resolveMedia={resolveMedia}
+          mediaScopeKey={`${contextKey}:${chat.connected}`}
+          onEdit={async (messageId, text) => {
+            await controller!.edit(
+              messageId,
+              text,
+              runOptions(),
+              chat.activeSessionId,
+            );
+          }}
+          onFork={async (messageId) => {
+            await controller?.fork(messageId);
+            setError(null);
+          }}
+          onOpenSubtask={(id) => {
+            setDraft("");
+            setAttachments([]);
+            setSkillIds([]);
+            if (workspaceId) requestNavigation(workspaceId, { sessionId: id });
+          }}
+          onRequestPartDetail={(sessionId, partId) =>
+            controller!.requestPartDetail(sessionId, partId)
+          }
+          onOpenFile={(path) => {
+            void viewFile(path);
+          }}
+          onOpenAttachment={(attachment) => {
+            void viewAttachment(attachment);
+          }}
+          testID="chat-transcript"
+        />
+
+        {workspace ? (
+          <ChatComposer
+            draft={draft}
+            onDraftChange={(value) => setDraft(value)}
+            onSend={send}
+            onStop={async () => {
+              await controller?.abort();
+            }}
+            busy={chat.busy}
+            expanded={chat.messages.length > 0}
+            disabled={chatDisabled}
+            placeholder={
+              chatDisabled
+                ? !navigationReady
+                  ? "Loading workspace conversations…"
+                  : "Choose an available, running workspace…"
+                : chat.messages.length > 0
+                  ? "Reply to OpenCuria"
+                  : "Ask OpenCuria"
+            }
+            settings={{
+              harness: harnessEngineLabel(harness, engines),
+              mode,
+              model: selectedModel?.name ?? model,
+              effort: effort ? formatEffort(effort) : "",
+            }}
+            onSettings={() => setSheet("settings")}
+            skills={skills.map((item) => ({ id: item.id, name: item.name }))}
+            selectedSkillIds={skillIds}
+            onSelectedSkillIdsChange={setSkillIds}
+            attachments={attachments}
+            onAttachmentsChange={setAttachments}
+            onSearchMentions={searchMentions}
+            onTakePhoto={async () => pickPhoto("camera")}
+            onChoosePhotos={async () => pickPhoto("library")}
+            onChooseFiles={async () => pickDocuments()}
+            contextKey={contextKey}
+            testID="chat-composer"
+          />
+        ) : null}
+
+        <ChatGates
+          permissions={chat.permissions}
+          questions={chat.questions}
+          resolving={chat.permissions.some((item) =>
+            resolving.has(item.request_id),
+          )}
+          submitting={chat.questions.some((item) =>
+            resolving.has(item.request_id),
+          )}
+          onResolvePermission={(id, response) =>
+            gateAction(id, () => controller!.resolvePermission(id, response))
+          }
+          onSubmitQuestion={(id, answers) =>
+            gateAction(id, () => controller!.resolveQuestion(id, answers))
+          }
+          onSkipQuestion={(id) =>
+            gateAction(id, () => controller!.resolveQuestion(id, [], true))
+          }
+        />
+
+        <NativeModal
+          visible={sheet === "workspaces"}
+          onClose={() => setSheet(null)}
+          title="Choose workspace"
+          scrollable={false}
+          testID="workspace-picker-sheet"
+        >
+          <SearchField
+            value={search}
+            onChangeText={setSearch}
+            placeholder="Search workspaces…"
+            label="Search workspaces"
+          />
+          <NativeList
+            sections={[
+              {
+                id: "workspaces",
+                rows: filteredWorkspaces.length
+                  ? filteredWorkspaces.map((item) => ({
+                      id: item.id,
+                      title: item.name,
+                      subtitle: workspaceLabel(
+                        item,
+                        Boolean(
+                          item.active_operation || item.intervention_required,
+                        ),
+                      ),
+                      symbol: "desktopcomputer",
+                      selected: workspaceId === item.id,
+                      busy: Boolean(
+                        item.has_active_session || item.active_operation,
+                      ),
+                      onPress: () => chooseWorkspace(item),
+                    }))
+                  : [{ id: "empty", title: "No workspaces found" }],
+              },
+            ]}
+          />
+        </NativeModal>
+
+        <NativeModal
+          visible={sheet === "profile"}
+          onClose={() => setSheet(null)}
+          title="Profile & settings"
+          testID="profile-sheet"
+        >
+          <View
+            style={[
+              styles.accountCard,
+              { backgroundColor: theme.surfaceMuted },
+            ]}
+          >
+            <View style={[styles.avatar, { backgroundColor: theme.primary }]}>
               <Text
-                style={{ color: theme.text, fontSize: 16, fontWeight: "600" }}
+                style={{ color: theme.primaryForeground, fontWeight: "700" }}
               >
                 {profileTitle.slice(0, 1).toUpperCase()}
               </Text>
             </View>
-            <Text
-              numberOfLines={1}
-              style={{
-                flex: 1,
-                color: theme.text,
-                fontSize: 15,
-                fontWeight: "500",
-              }}
-            >
-              {profileTitle}
-            </Text>
-            <Settings2 size={19} color={theme.mutedText} />
-          </Pressable>
-        }
-      >
-        {drawerError ? (
-          <Banner
-            tone="error"
-            message={drawerError}
-            onDismiss={() => setDrawerError(null)}
+            <View style={{ flex: 1 }}>
+              <Text
+                style={{ color: theme.text, fontSize: 16, fontWeight: "600" }}
+              >
+                {profileTitle}
+              </Text>
+              <Text style={{ color: theme.mutedText, fontSize: 13 }}>
+                {user.email}
+              </Text>
+            </View>
+          </View>
+          <SectionTitle title="ORGANIZATION" />
+          <NativePicker
+            label="Organization"
+            value={session?.organizationId ?? ""}
+            options={organizations.map((org) => ({
+              value: org.id,
+              label: org.name,
+            }))}
+            onChange={(id) => {
+              setSheet(null);
+              void selectOrganization(id);
+            }}
           />
-        ) : null}
-        <Button
-          title="New chat"
-          variant="ghost"
-          icon={<SquarePen size={21} color={theme.text} />}
-          style={{
-            alignSelf: "stretch",
-            justifyContent: "flex-start",
-            paddingHorizontal: 8,
-          }}
-          onPress={() => {
-            void newChat();
-          }}
-          disabled={!canStart}
-          testID="drawer-new-chat"
-        />
-        {!canStart && workspace ? (
-          <Text style={{ color: theme.subtleText, fontSize: 12 }}>
-            New chats need an available, running workspace.
-          </Text>
-        ) : null}
-        <SearchField
-          value={search}
-          onChangeText={setSearch}
-          placeholder="Search workspaces and chats…"
-          label="Search workspaces and conversations"
-        />
-        <SectionTitle title="Workspaces" />
-        {visibleWorkspaces
-          .filter((item) =>
-            item.name.toLowerCase().includes(search.toLowerCase()),
-          )
-          .map((item) => (
-            <WorkspaceRow
-              key={item.id}
-              workspace={item}
-              selected={workspaceId === item.id}
-              onPress={() => {
-                void chooseWorkspace(item);
-              }}
-              compact
-            />
-          ))}
-        {attentionChats.length ? (
-          <>
-            <SectionTitle title="Needs attention" tone={theme.warning} />
-            {attentionChats.map((item) => (
-              <ConversationRow
-                key={item.session_id}
-                row={item}
-                onPress={() => {
-                  void openConversation(item);
-                }}
-                onMore={() => sessionMenu(item)}
-              />
-            ))}
-          </>
-        ) : null}
-        <SectionTitle title="Recent chats" />
-        {recentChats.map((item) => (
-          <ConversationRow
-            key={item.session_id}
-            row={item}
+          <SectionTitle title="APPEARANCE" />
+          <SegmentedControl
+            values={["System", "Light", "Dark"]}
+            selectedIndex={["system", "light", "dark"].indexOf(themeMode)}
+            appearance={theme.scheme}
+            onChange={({ nativeEvent }) =>
+              setThemeMode(
+                (["system", "light", "dark"] as const)[
+                  nativeEvent.selectedSegmentIndex
+                ]!,
+              )
+            }
+          />
+
+          <Button
+            title="Sign out"
+            variant="danger"
+            symbol="rectangle.portrait.and.arrow.right"
             onPress={() => {
-              void openConversation(item);
-            }}
-            onMore={() => sessionMenu(item)}
-          />
-        ))}
-        {!filteredChats.length ? (
-          <Text
-            style={{
-              color: theme.mutedText,
-              textAlign: "center",
-              paddingVertical: 18,
-            }}
-          >
-            No conversations yet.
-          </Text>
-        ) : null}
-      </Drawer>
-
-      <Sheet
-        visible={sheet === "profile"}
-        onClose={() => setSheet(null)}
-        title="Profile & settings"
-        testID="profile-sheet"
-      >
-        <View
-          style={[styles.accountCard, { backgroundColor: theme.surfaceMuted }]}
-        >
-          <View style={[styles.avatar, { backgroundColor: theme.primary }]}>
-            <Text style={{ color: theme.primaryForeground, fontWeight: "700" }}>
-              {profileTitle.slice(0, 1).toUpperCase()}
-            </Text>
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text
-              style={{ color: theme.text, fontSize: 16, fontWeight: "600" }}
-            >
-              {profileTitle}
-            </Text>
-            <Text style={{ color: theme.mutedText, fontSize: 13 }}>
-              {user.email}
-            </Text>
-          </View>
-        </View>
-        <SectionTitle title="ORGANIZATION" />
-        {!organizations.length ? (
-          <Text style={{ color: theme.mutedText }}>
-            No organizations available.
-          </Text>
-        ) : (
-          organizations.map((org) => (
-            <Pressable
-              key={org.id}
-              accessibilityRole="button"
-              accessibilityState={{
-                selected: org.id === session?.organizationId,
-              }}
-              onPress={() => {
-                setSheet(null);
-                void selectOrganization(org.id);
-              }}
-              style={[styles.row, { borderBottomColor: theme.border }]}
-            >
-              <Text style={{ color: theme.text, flex: 1 }}>{org.name}</Text>
-              {org.id === session?.organizationId ? (
-                <Check color={theme.primary} size={17} />
-              ) : null}
-            </Pressable>
-          ))
-        )}
-        <SectionTitle title="APPEARANCE" />
-        <View
-          style={[styles.themeGroup, { backgroundColor: theme.surfaceMuted }]}
-        >
-          {(
-            [
-              ["system", SunMoon, "System"],
-              ["light", Sun, "Light"],
-              ["dark", Moon, "Dark"],
-            ] as const
-          ).map(([value, Icon, label]) => (
-            <Pressable
-              key={value}
-              accessibilityRole="button"
-              accessibilityState={{ selected: themeMode === value }}
-              onPress={() => setThemeMode(value)}
-              style={[
-                styles.themeChoice,
-                themeMode === value && { backgroundColor: theme.surface },
-              ]}
-            >
-              <Icon
-                size={16}
-                color={themeMode === value ? theme.primary : theme.mutedText}
-              />
-              <Text style={{ color: theme.text, fontSize: 12 }}>{label}</Text>
-            </Pressable>
-          ))}
-        </View>
-        <Button
-          title="Sign out"
-          variant="outline"
-          icon={<LogOut size={17} color={theme.danger} />}
-          onPress={() => {
-            Alert.alert(
-              "Sign out?",
-              "Your secure sign-in token will be removed from this device.",
-              [
-                { text: "Cancel", style: "cancel" },
-                {
-                  text: "Sign out",
-                  style: "destructive",
-                  onPress: () => {
-                    setSheet(null);
-                    void signOut();
+              Alert.alert(
+                "Sign out?",
+                "Your secure sign-in token will be removed from this device.",
+                [
+                  { text: "Cancel", style: "cancel" },
+                  {
+                    text: "Sign out",
+                    style: "destructive",
+                    onPress: () => {
+                      setSheet(null);
+                      void signOut();
+                    },
                   },
-                },
-              ],
-            );
-          }}
-          textStyle={{ color: theme.danger }}
-          style={{ alignSelf: "stretch", marginTop: 8 }}
-          testID="sign-out"
-        />
-      </Sheet>
+                ],
+              );
+            }}
+            style={{ alignSelf: "stretch", marginTop: 8 }}
+            testID="sign-out"
+          />
+        </NativeModal>
 
-      <Sheet
-        visible={sheet === "settings"}
-        onClose={() => setSheet(null)}
-        title="Chat settings"
-        testID="model-settings-sheet"
-      >
-        <SectionTitle title="MODE" />
-        <View style={styles.chips}>
-          {(["build", "plan"] as const).map((item) => (
-            <Choice
-              key={item}
-              title={item === "build" ? "Build" : "Plan"}
-              selected={item === mode}
-              disabled={Boolean(
+        <NativeModal
+          visible={sheet === "settings"}
+          onClose={() => setSheet(null)}
+          title="Chat settings"
+          testID="model-settings-sheet"
+        >
+          <NativePicker
+            label="Mode"
+            value={mode}
+            onChange={(value) => selectMode(value as HarnessSessionMode)}
+            options={(["build", "plan"] as const).map((item) => ({
+              value: item,
+              label: item === "build" ? "Build" : "Plan",
+              disabled: Boolean(
                 engines.find((engine) => engine.id === harness) &&
                 !engines
                   .find((engine) => engine.id === harness)
                   ?.modes.includes(item),
-              )}
-              onPress={() => selectMode(item)}
+              ),
+            }))}
+          />
+          <NativePicker
+            label="Engine"
+            value={harness}
+            onChange={(value) => selectHarness(value as HarnessId)}
+            disabled={Boolean(chat.activeSessionId)}
+            options={harnessEngineChoices(engines).map((item) => ({
+              value: item.id,
+              label: item.name,
+              disabled: !item.connected || !item.modes.includes(mode),
+            }))}
+          />
+          {chosenModels.length ? (
+            <NativePicker
+              label="Model"
+              value={model}
+              onChange={selectModel}
+              options={[
+                ...new Set([
+                  ...recentModels.map((row) => row.model),
+                  ...chosenModels.map((item) => item.id),
+                ]),
+              ].flatMap((id) => {
+                const item = chosenModels.find((entry) => entry.id === id);
+                return item ? [{ value: id, label: item.name }] : [];
+              })}
             />
-          ))}
-        </View>
-        <SectionTitle title="ENGINE" />
-        <View style={styles.chips}>
-          {harnessEngineChoices(engines).map((item) => (
-            <Choice
-              key={item.id}
-              title={item.name}
-              selected={harness === item.id}
-              disabled={Boolean(
-                chat.activeSessionId ||
-                !item.connected ||
-                !item.modes.includes(mode),
-              )}
-              onPress={() => selectHarness(item.id)}
-            />
-          ))}
-        </View>
-        <SectionTitle title="MODEL" />
-        {!chosenModels.length ? (
-          <Text style={{ color: theme.mutedText }}>
-            {`${harnessEngineLabel(harness, engines)} models unavailable. Check the selected provider account in Settings and retry.`}
-          </Text>
-        ) : (
-          <ScrollView style={{ maxHeight: 250 }} nestedScrollEnabled>
-            {[
-              ...new Set([
-                ...recentModels
-                  .filter((row) =>
-                    chosenModels.some((item) => item.id === row.model),
-                  )
-                  .map((row) => row.model),
-                ...chosenModels.map((item) => item.id),
-              ]),
-            ].map((id) => {
-              const item = chosenModels.find((entry) => entry.id === id);
-              if (!item) return null;
-              return (
-                <Pressable
-                  key={id}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: model === id }}
-                  onPress={() => selectModel(id)}
-                  style={[styles.row, { borderBottomColor: theme.border }]}
-                >
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ color: theme.text, fontSize: 14 }}>
-                      {item.name}
-                    </Text>
-                    <Text style={{ color: theme.mutedText, fontSize: 11 }}>
-                      {item.provider ?? "Model"}
-                      {item.context_length
-                        ? ` · ${Math.round(item.context_length / 1000)}k context`
-                        : ""}
-                    </Text>
-                  </View>
-                  {model === id ? (
-                    <Check color={theme.primary} size={17} />
-                  ) : null}
-                </Pressable>
-              );
-            })}
-          </ScrollView>
-        )}
-        <SectionTitle title="REASONING EFFORT" />
-        {selectedModel?.reasoning_efforts.length ? (
-          <View style={styles.chips}>
-            {selectedModel.reasoning_efforts.map((item) => (
-              <Choice
-                key={item}
-                title={formatEffort(item)}
-                selected={effort === item}
-                onPress={() => {
-                  selectionDirty.current = true;
-                  setEffort(item);
-                }}
-              />
-            ))}
-          </View>
-        ) : (
-          <Text style={{ color: theme.mutedText, fontSize: 13 }}>
-            This model does not expose reasoning effort settings.
-          </Text>
-        )}
-        <Button
-          title="Done"
-          variant="primary"
-          onPress={() => setSheet(null)}
-          style={{ alignSelf: "stretch", marginTop: 8 }}
-        />
-      </Sheet>
-
-      <Sheet
-        visible={sheet === "rename"}
-        onClose={() => setSheet(null)}
-        title="Rename conversation"
-        testID="rename-session-sheet"
-      >
-        <TextInput
-          value={renameText}
-          onChangeText={setRenameText}
-          accessibilityLabel="Conversation name"
-          placeholder="Conversation name"
-          placeholderTextColor={theme.subtleText}
-          style={[
-            styles.renameInput,
-            { color: theme.text, borderColor: theme.border },
-          ]}
-          autoFocus
-        />
-        <Button
-          title="Save name"
-          variant="primary"
-          onPress={() => {
-            void saveRename();
-          }}
-          disabled={!renameText.trim()}
-          busy={renaming}
-          style={{ alignSelf: "stretch" }}
-        />
-      </Sheet>
-      <Sheet
-        visible={sheet === "conversationActions"}
-        onClose={() => {
-          setSheet(null);
-          setActionConversation(null);
-          setConfirmDelete(false);
-        }}
-        title={confirmDelete ? "Delete conversation?" : "Conversation actions"}
-        testID="conversation-actions-sheet"
-      >
-        {actionConversation ? (
-          confirmDelete ? (
-            <>
-              <Text style={{ color: theme.text, fontSize: 15, lineHeight: 22 }}>
-                Delete “{actionConversation.title || "New chat"}” and its
-                history? This cannot be undone.
-              </Text>
-              <Button
-                title="Delete conversation"
-                variant="danger"
-                onPress={() => {
-                  void deleteConversation();
-                }}
-                busy={actionBusy}
-                style={{ alignSelf: "stretch" }}
-                testID="confirm-delete-conversation"
-              />
-              <Button
-                title="Cancel"
-                variant="outline"
-                onPress={() => setConfirmDelete(false)}
-                disabled={actionBusy}
-                style={{ alignSelf: "stretch" }}
-              />
-            </>
           ) : (
-            <>
-              <Text
-                numberOfLines={2}
-                style={{ color: theme.mutedText, fontSize: 13 }}
-              >
-                {actionConversation.title || "New chat"} ·{" "}
-                {actionConversation.workspace_name}
-              </Text>
-              <Button
-                title="Rename"
-                variant="secondary"
-                onPress={() => {
-                  rename(actionConversation);
-                  setActionConversation(null);
-                }}
-                style={{ alignSelf: "stretch" }}
-              />
-              <Button
-                title={actionConversation.unread ? "Mark read" : "Mark unread"}
-                variant="secondary"
-                onPress={() => {
-                  void markConversation();
-                }}
-                busy={actionBusy}
-                style={{ alignSelf: "stretch" }}
-              />
-              <Button
-                title="Delete"
-                variant="outline"
-                textStyle={{ color: theme.danger }}
-                onPress={() => setConfirmDelete(true)}
-                disabled={actionBusy}
-                style={{ alignSelf: "stretch" }}
-              />
-              <Button
-                title="Cancel"
-                variant="ghost"
-                onPress={() => {
-                  setSheet(null);
-                  setActionConversation(null);
-                }}
-                style={{ alignSelf: "stretch" }}
-              />
-            </>
-          )
-        ) : null}
-      </Sheet>
-      <MediaSheet
-        visible={sheet === "media"}
-        file={file}
-        error={fileError}
-        onError={setFileError}
-        onClose={() => {
-          setSheet(null);
-          setFile(null);
-        }}
-      />
-    </KeyboardAvoidingView>
+            <Text
+              style={{ color: theme.mutedText }}
+            >{`${harnessEngineLabel(harness, engines)} models unavailable. Check the selected provider account in Settings and retry.`}</Text>
+          )}
+          {selectedModel?.reasoning_efforts.length ? (
+            <NativePicker
+              label="Reasoning effort"
+              value={effort}
+              onChange={(value) => {
+                selectionDirty.current = true;
+                setEffort(value);
+              }}
+              options={selectedModel.reasoning_efforts.map((item) => ({
+                value: item,
+                label: formatEffort(item),
+              }))}
+            />
+          ) : (
+            <Text style={{ color: theme.mutedText }}>
+              This model does not expose reasoning effort settings.
+            </Text>
+          )}
+
+          <Button
+            title="Done"
+            variant="primary"
+            onPress={() => setSheet(null)}
+            style={{ alignSelf: "stretch", marginTop: 8 }}
+          />
+        </NativeModal>
+
+        <NativeModal
+          visible={sheet === "rename"}
+          onClose={() => setSheet(null)}
+          title="Rename conversation"
+          testID="rename-session-sheet"
+        >
+          <NativeTextField
+            label="Conversation name"
+            value={renameText}
+            onChangeText={setRenameText}
+            autoFocus
+          />
+          <Button
+            title="Save name"
+            variant="primary"
+            onPress={() => {
+              void saveRename();
+            }}
+            disabled={!renameText.trim()}
+            busy={renaming}
+            style={{ alignSelf: "stretch" }}
+          />
+        </NativeModal>
+        <MediaSheet
+          visible={sheet === "media"}
+          file={file}
+          error={fileError}
+          onError={setFileError}
+          onClose={() => {
+            setSheet(null);
+            setFile(null);
+          }}
+        />
+      </KeyboardAvoidingView>
+    </Drawer>
   );
 }
 
@@ -1873,205 +1580,16 @@ function SearchField({
   placeholder: string;
   label: string;
 }): React.JSX.Element {
-  const { theme } = useTheme();
   return (
-    <View
-      style={[
-        styles.searchBox,
-        { backgroundColor: theme.surfaceMuted, borderColor: theme.border },
-      ]}
-    >
-      <Search size={16} color={theme.subtleText} />
-      <TextInput
-        value={value}
-        onChangeText={onChangeText}
-        placeholder={placeholder}
-        placeholderTextColor={theme.subtleText}
-        accessibilityLabel={label}
-        style={[styles.searchInput, { color: theme.text }]}
-      />
-    </View>
+    <NativeTextField
+      value={value}
+      onChangeText={onChangeText}
+      placeholder={placeholder}
+      label={label}
+    />
   );
 }
-function WorkspaceRow({
-  workspace,
-  selected,
-  onPress,
-  compact = false,
-}: {
-  workspace: Workspace;
-  selected: boolean;
-  onPress: () => void;
-  compact?: boolean;
-}): React.JSX.Element {
-  const { theme } = useTheme();
-  const ready = isWorkspaceReadyForChat(
-    workspace,
-    Boolean(workspace.active_operation || workspace.intervention_required),
-  );
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityState={{ selected }}
-      onPress={onPress}
-      style={[
-        styles.row,
-        { borderBottomColor: theme.border, minHeight: compact ? 44 : 56 },
-      ]}
-    >
-      <View
-        style={[
-          styles.dot,
-          {
-            backgroundColor: ready
-              ? theme.success
-              : workspace.has_active_session
-                ? theme.warning
-                : theme.subtleText,
-          },
-        ]}
-      />
-      <View style={{ flex: 1 }}>
-        <Text
-          numberOfLines={1}
-          style={{ color: theme.text, fontSize: compact ? 14 : 15 }}
-        >
-          {workspace.name}
-        </Text>
-        {!compact || workspace.has_active_session ? (
-          <Text style={{ color: theme.mutedText, fontSize: 11 }}>
-            {workspaceLabel(
-              workspace,
-              Boolean(
-                workspace.active_operation || workspace.intervention_required,
-              ),
-            )}
-            {workspace.has_active_session ? " · history only" : ""}
-          </Text>
-        ) : null}
-      </View>
-      {selected ? (
-        <Check size={17} color={theme.primary} />
-      ) : (
-        <ChevronRight size={17} color={theme.subtleText} />
-      )}
-    </Pressable>
-  );
-}
-function ConversationRow({
-  row,
-  onPress,
-  onMore,
-}: {
-  row: HarnessConversation;
-  onPress: () => void;
-  onMore: () => void;
-}): React.JSX.Element {
-  const { theme } = useTheme();
-  const state = row.needs_attention
-    ? "Needs attention"
-    : row.status === "busy"
-      ? "Working"
-      : row.unread
-        ? "Unread"
-        : ago(row.last_message_at || row.updated_at);
-  return (
-    <View style={[styles.conversationRow, { borderBottomColor: theme.border }]}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={`${row.title || "New chat"} in ${row.workspace_name}, ${state}`}
-        onPress={onPress}
-        style={styles.conversationMain}
-      >
-        <View
-          style={[
-            styles.dot,
-            {
-              backgroundColor: row.needs_attention
-                ? theme.warning
-                : row.status === "busy"
-                  ? theme.primary
-                  : row.unread
-                    ? theme.info
-                    : theme.subtleText,
-            },
-          ]}
-        />
-        <View style={{ flex: 1 }}>
-          <Text
-            numberOfLines={1}
-            style={{
-              color: theme.text,
-              fontSize: 14,
-              fontWeight: row.unread || row.needs_attention ? "600" : "400",
-            }}
-          >
-            {row.title || "New chat"}
-          </Text>
-          <Text
-            numberOfLines={1}
-            style={{ color: theme.mutedText, fontSize: 12 }}
-          >
-            {row.workspace_name} · {state}
-          </Text>
-        </View>
-      </Pressable>
-      <IconButton
-        icon={<Ellipsis size={18} color={theme.mutedText} />}
-        label={`Actions for ${row.title || "conversation"}`}
-        onPress={onMore}
-        testID={`conversation-actions-${row.session_id}`}
-      />
-    </View>
-  );
-}
-function Choice({
-  title,
-  selected,
-  disabled = false,
-  onPress,
-}: {
-  title: string;
-  selected: boolean;
-  disabled?: boolean;
-  onPress: () => void;
-}): React.JSX.Element {
-  const { theme } = useTheme();
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityState={{ selected, disabled }}
-      disabled={disabled}
-      onPress={onPress}
-      style={[
-        styles.choice,
-        {
-          backgroundColor: selected ? theme.primary : theme.surfaceMuted,
-          opacity: disabled ? 0.45 : 1,
-        },
-      ]}
-    >
-      <Text
-        style={{
-          color: selected ? theme.primaryForeground : theme.text,
-          fontSize: 13,
-          fontWeight: "600",
-        }}
-      >
-        {title}
-      </Text>
-    </Pressable>
-  );
-}
-function ago(value: string): string {
-  const when = Date.parse(value);
-  if (!Number.isFinite(when)) return "";
-  const mins = Math.max(0, Math.floor((Date.now() - when) / 60000));
-  if (mins < 1) return "now";
-  if (mins < 60) return `${mins}m ago`;
-  if (mins < 1440) return `${Math.floor(mins / 60)}h ago`;
-  return `${Math.floor(mins / 1440)}d ago`;
-}
+
 function MediaSheet({
   visible,
   file,
@@ -2087,12 +1605,11 @@ function MediaSheet({
 }): React.JSX.Element {
   const { theme } = useTheme();
   return (
-    <Sheet
+    <NativeModal
       visible={visible}
       onClose={onClose}
       title={file?.name ?? "Attachment"}
       testID="media-viewer-sheet"
-      maxHeight="94%"
     >
       {error ? <Banner tone="error" message={error} /> : null}
       {file?.kind === "image" ? (
@@ -2148,7 +1665,7 @@ function MediaSheet({
           />
         </View>
       ) : null}
-    </Sheet>
+    </NativeModal>
   );
 }
 function VideoPreview({ uri }: { uri: string }): React.JSX.Element {
@@ -2168,28 +1685,6 @@ function VideoPreview({ uri }: { uri: string }): React.JSX.Element {
 const styles = StyleSheet.create({
   root: { flex: 1 },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
-  header: {
-    paddingBottom: 14,
-    paddingHorizontal: 14,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  titleArea: {
-    flex: 1,
-    minWidth: 0,
-    paddingHorizontal: 6,
-    paddingVertical: 1,
-    alignItems: "flex-start",
-  },
-  title: { fontSize: 17, fontWeight: "600", lineHeight: 23 },
-  subTitle: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-    marginTop: 2,
-  },
-  dot: { width: 7, height: 7, borderRadius: 4 },
   notice: { paddingHorizontal: 12, paddingTop: 7 },
   loading: {
     position: "absolute",
@@ -2227,50 +1722,6 @@ const styles = StyleSheet.create({
     marginTop: 18,
     marginBottom: 6,
   },
-  row: {
-    minHeight: 54,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingHorizontal: 8,
-  },
-  conversationRow: {
-    minHeight: 56,
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  conversationMain: {
-    flex: 1,
-    minHeight: 56,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingLeft: 8,
-  },
-  searchBox: {
-    minHeight: 46,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    borderRadius: 24,
-    paddingHorizontal: 12,
-    marginVertical: 4,
-  },
-  searchInput: { flex: 1, fontSize: 15, paddingVertical: 10 },
-  drawerAccount: {
-    minHeight: 56,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingHorizontal: 4,
-  },
-  drawerAvatar: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
-  },
   accountCard: {
     minHeight: 72,
     borderRadius: 16,
@@ -2285,32 +1736,6 @@ const styles = StyleSheet.create({
     borderRadius: 15,
     alignItems: "center",
     justifyContent: "center",
-  },
-  themeGroup: { flexDirection: "row", padding: 4, borderRadius: 14 },
-  themeChoice: {
-    flex: 1,
-    minHeight: 42,
-    alignItems: "center",
-    justifyContent: "center",
-    flexDirection: "row",
-    gap: 6,
-    borderRadius: 11,
-  },
-  chips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  choice: {
-    minHeight: 39,
-    borderRadius: 13,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-  },
-  renameInput: {
-    minHeight: 52,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    fontSize: 16,
   },
   docPreview: {
     minHeight: 210,

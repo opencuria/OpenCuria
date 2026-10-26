@@ -1,10 +1,10 @@
-export { Banner, Button, IconButton, Sheet } from "./primitives";
+export { Banner, Button, IconButton, NativeModal } from "./primitives";
 export type {
   BannerProps,
   BannerTone,
   ButtonProps,
   IconButtonProps,
-  SheetProps,
+  NativeModalProps,
 } from "./primitives";
 export { ThemeProvider, getTheme, useTheme } from "./theme";
 export type { ColorScheme, OpenCuriaTheme, ThemeMode } from "./theme";

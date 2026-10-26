@@ -3,27 +3,21 @@ import {
   KeyboardAvoidingView,
   LayoutAnimation,
   Platform,
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
   type TextInputProps,
 } from "react-native";
-import Svg, { Defs, RadialGradient, Rect, Stop } from "react-native-svg";
+
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import {
-  ChevronDown,
-  Eye,
-  EyeOff,
-  Globe,
-  LockKeyhole,
-  LockOpen,
-  Mail,
-  Server,
-} from "lucide-react-native";
+import { Eye, EyeOff } from "lucide-react-native";
 import { Banner, Button, IconButton } from "../ui/primitives";
+
+import {
+  NativeTextField,
+  type NativeTextFieldHandle,
+} from "../ui/NativeTextField";
 import { useTheme } from "../ui/theme";
 import { OpenCuriaMark } from "../ui/OpenCuriaMark";
 import { useSession } from "./SessionContext";
@@ -43,8 +37,8 @@ export function LoginScreen(): React.JSX.Element {
   const server = tryNormalizeServerUrl(serverUrl);
   // The server only needs attention while it is unset or rejected.
   const [serverOpen, setServerOpen] = useState(!server);
-  const emailRef = useRef<TextInput>(null);
-  const passwordRef = useRef<TextInput>(null);
+  const emailRef = useRef<NativeTextFieldHandle>(null);
+  const passwordRef = useRef<NativeTextFieldHandle>(null);
 
   useEffect(() => {
     if (error && !server) setServerOpen(true);
@@ -76,20 +70,6 @@ export function LoginScreen(): React.JSX.Element {
       style={[styles.root, { backgroundColor: theme.background }]}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
-      <Svg
-        pointerEvents="none"
-        width="100%"
-        height={380}
-        style={StyleSheet.absoluteFill}
-      >
-        <Defs>
-          <RadialGradient id="glow" cx="50%" cy="0%" rx="85%" ry="100%">
-            <Stop offset="0" stopColor={theme.primary} stopOpacity={0.2} />
-            <Stop offset="1" stopColor={theme.primary} stopOpacity={0} />
-          </RadialGradient>
-        </Defs>
-        <Rect width="100%" height="100%" fill="url(#glow)" />
-      </Svg>
       <ScrollView
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
@@ -121,43 +101,14 @@ export function LoginScreen(): React.JSX.Element {
             >
               Sign in to OpenCuria
             </Text>
-            <Pressable
-              accessibilityRole="button"
+            <Button
+              title={serverLabel}
+              variant="ghost"
+              symbol="server.rack"
               accessibilityLabel={`Server ${serverLabel}`}
-              accessibilityHint={
-                serverOpen ? "Hide server address" : "Change server"
-              }
-              accessibilityState={{ expanded: serverOpen }}
               onPress={toggleServer}
-              hitSlop={8}
               testID="login-server-toggle"
-              style={({ pressed }) => [
-                styles.serverToggle,
-                { opacity: pressed ? 0.6 : 1 },
-              ]}
-            >
-              {insecure ? (
-                <LockOpen size={13} color={theme.warning} />
-              ) : (
-                <Globe size={13} color={theme.subtleText} />
-              )}
-              <Text
-                numberOfLines={1}
-                style={[
-                  styles.serverToggleText,
-                  { color: insecure ? theme.warning : theme.mutedText },
-                ]}
-              >
-                {serverLabel}
-              </Text>
-              <View
-                style={{
-                  transform: [{ rotate: serverOpen ? "180deg" : "0deg" }],
-                }}
-              >
-                <ChevronDown size={14} color={theme.subtleText} />
-              </View>
-            </Pressable>
+            />
           </View>
 
           {error ? (
@@ -168,7 +119,6 @@ export function LoginScreen(): React.JSX.Element {
             {serverOpen ? (
               <Field
                 label="Server"
-                icon={<Server size={18} color={theme.subtleText} />}
                 hint="Use http:// only inside your local network."
                 value={serverUrl}
                 onChangeText={setServerUrl}
@@ -185,7 +135,6 @@ export function LoginScreen(): React.JSX.Element {
             <Field
               inputRef={emailRef}
               label="Email"
-              icon={<Mail size={18} color={theme.subtleText} />}
               value={email}
               onChangeText={setEmail}
               onFocus={clearError}
@@ -202,7 +151,6 @@ export function LoginScreen(): React.JSX.Element {
             <Field
               inputRef={passwordRef}
               label="Password"
-              icon={<LockKeyhole size={18} color={theme.subtleText} />}
               value={password}
               onChangeText={setPassword}
               onFocus={clearError}
@@ -219,6 +167,7 @@ export function LoginScreen(): React.JSX.Element {
               }}
               trailing={
                 <IconButton
+                  symbol={showPassword ? "eye.slash" : "eye"}
                   icon={
                     showPassword ? (
                       <EyeOff size={18} color={theme.subtleText} />
@@ -244,7 +193,6 @@ export function LoginScreen(): React.JSX.Element {
             busy={submitting || booting}
             disabled={!serverUrl.trim() || !email.trim() || !password}
             style={styles.submit}
-            textStyle={styles.submitText}
             testID="login-submit"
           />
         </View>
@@ -253,62 +201,58 @@ export function LoginScreen(): React.JSX.Element {
   );
 }
 
-interface FieldProps extends TextInputProps {
+interface FieldProps extends Omit<
+  TextInputProps,
+  "onFocus" | "onSubmitEditing" | "keyboardType" | "returnKeyType"
+> {
+  onFocus?: () => void;
+  onSubmitEditing?: () => void;
+  keyboardType?: "email-address" | "url" | "default";
+  returnKeyType?: "next" | "go" | "done";
   label: string;
-  icon: React.ReactNode;
   hint?: string;
   trailing?: React.ReactNode;
-  inputRef?: React.Ref<TextInput>;
+  inputRef?: React.Ref<NativeTextFieldHandle>;
   testID: string;
 }
 
-/** Labelled input row whose border highlights while focused. */
+/** Platform text fields retain native keyboard, password and accessibility behavior. */
 function Field({
   label,
-  icon,
   hint,
   trailing,
   inputRef,
+  value = "",
+  onChangeText,
   onFocus,
-  onBlur,
-  style,
-  ...input
+  onSubmitEditing,
+  placeholder,
+  secureTextEntry,
+  keyboardType,
+  returnKeyType,
+  testID,
 }: FieldProps): React.JSX.Element {
   const { theme } = useTheme();
-  const [focused, setFocused] = useState(false);
   return (
-    <View style={styles.field}>
-      <Text style={[styles.label, { color: theme.mutedText }]}>{label}</Text>
-      <View
-        style={[
-          styles.inputWrap,
-          {
-            backgroundColor: focused ? theme.surface : theme.surfaceMuted,
-            borderColor: focused ? theme.primary : theme.border,
-          },
-        ]}
-      >
-        {icon}
-        <TextInput
-          ref={inputRef}
-          accessibilityLabel={label}
-          placeholderTextColor={theme.subtleText}
-          selectionColor={theme.primary}
-          style={[styles.input, { color: theme.text }, style]}
-          onFocus={(event) => {
-            setFocused(true);
-            onFocus?.(event);
-          }}
-          onBlur={(event) => {
-            setFocused(false);
-            onBlur?.(event);
-          }}
-          {...input}
-        />
-        {trailing}
-      </View>
+    <View style={{ gap: 4 }}>
+      <NativeTextField
+        ref={inputRef}
+        label={label}
+        value={value}
+        onChangeText={(text) => onChangeText?.(text)}
+        onFocus={onFocus}
+        onSubmitEditing={onSubmitEditing}
+        placeholder={placeholder}
+        secureTextEntry={secureTextEntry}
+        keyboardType={keyboardType}
+        returnKeyType={returnKeyType}
+        testID={testID}
+      />
+      {trailing ? (
+        <View style={{ alignSelf: "flex-end" }}>{trailing}</View>
+      ) : null}
       {hint ? (
-        <Text style={[styles.hint, { color: theme.subtleText }]}>{hint}</Text>
+        <Text style={{ color: theme.mutedText, fontSize: 12 }}>{hint}</Text>
       ) : null}
     </View>
   );
@@ -344,28 +288,8 @@ const styles = StyleSheet.create({
     letterSpacing: -0.3,
     textAlign: "center",
   },
-  serverToggle: {
-    maxWidth: "100%",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-  },
-  serverToggleText: { flexShrink: 1, fontSize: 13, lineHeight: 18 },
   fields: { gap: 14 },
-  field: { gap: 6 },
-  label: { fontSize: 13, fontWeight: "600", marginLeft: 4 },
-  inputWrap: {
-    minHeight: 54,
-    borderWidth: 1,
-    borderRadius: 16,
-    paddingHorizontal: 14,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-  },
-  input: { flex: 1, paddingVertical: 13, fontSize: 16 },
   trailing: { marginRight: -10 },
-  hint: { fontSize: 12, lineHeight: 17, marginLeft: 4 },
   submit: { alignSelf: "stretch", minHeight: 54, borderRadius: 16 },
   submitText: { fontSize: 16 },
 });

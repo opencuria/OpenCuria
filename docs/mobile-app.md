@@ -2,7 +2,7 @@
 
 ## Product boundary
 
-`mobile/` is a native iOS/Android chat app for an existing OpenCuria server, aiming for a phone-sized Cherry-style chat experience. Its native layout is independently composed around familiar chat interaction patterns; no Cherry source code is copied or ported. Reference reviewed: [Cherry Studio commit `3296f68`](https://github.com/CherryHQ/cherry-studio-app/tree/3296f68f85c4300a8136b5fe501b966dbeeb3e3f). It reuses the same OpenCuria chat rules, data types and REST/Socket.IO transport as the web client; it is not a second backend or a webview wrapper.
+`mobile/` is a native iOS/Android chat app for an existing OpenCuria server. It follows the native-control boundaries in the workspace’s `t3code/apps/mobile/` reference: SwiftUI/UIKit on iOS, Jetpack Compose/Android on Android. OpenCuria keeps its workspace/chat structure and shared chat protocol, data types and REST/Socket.IO transport. See [Native chat design](mobile-chat-design.md) for the control and navigation mapping.
 
 **Included:** sign-in, organization selection, workspace/conversation browsing, persisted history, create/open chats, streaming harness turns, abort/edit/fork/rename/delete session actions, live task/subtask status, permission/question gates, model/effort/harness/mode/skill selection, mention search, Markdown and workspace file references, photo/camera/document attachments, and bounded file/media preview/share. Workspace operations exposed by the client library are not the same as app features: mobile intentionally does not offer workspace create/update/delete. Mobile can delete a conversation/session, but not its workspace. Offline chat history, send queues, push notifications and background delivery are out of scope.
 

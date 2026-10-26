@@ -1,4 +1,3 @@
-import React from "react";
 import {
   fireEvent,
   render,
@@ -117,7 +116,7 @@ describe("ChatMessages", () => {
     );
     expect(screen.queryByTestId("chat-edit-action-prompt")).toBeNull();
     fireEvent(screen.getByTestId("chat-message-menu-prompt"), "longPress");
-    fireEvent.press(await screen.findByTestId("chat-edit-action-prompt"));
+    fireEvent.press(screen.getByRole("button", { name: "Edit and run again" }));
     fireEvent.changeText(
       screen.getByTestId("chat-edit-prompt"),
       "Updated prompt",
