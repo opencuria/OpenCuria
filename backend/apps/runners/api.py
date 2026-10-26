@@ -27,8 +27,6 @@ from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from apps.organizations.services import OrganizationService
-from apps.plugins.schemas import WorkspacePluginOut
-from apps.plugins.services import PluginService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.request_context import get_organization_id
 from common.schemas import ErrorOut
@@ -1195,34 +1193,6 @@ async def delete_process(
         return 404, ErrorOut(detail=e.message, code=e.code)
     except ConflictError as e:
         return 409, ErrorOut(detail=e.message, code=e.code)
-
-
-# ===========================================================================
-# Workspace plugin router — /api/v1/workspaces/{workspace_id}/plugins/
-# ===========================================================================
-
-workspace_plugin_router = Router(tags=["workspace-plugins"])
-
-
-@workspace_plugin_router.get(
-    "/{workspace_id}/plugins/",
-    response={200: list[WorkspacePluginOut], 403: ErrorOut, 404: ErrorOut},
-    summary="List org-enabled plugins for a workspace",
-)
-def list_workspace_plugins(request: HttpRequest, workspace_id: uuid.UUID):
-    """List org-enabled plugins with workspace state and credential gaps."""
-    if not check_api_key_permission(request, APIKeyPermission.PLUGINS_READ):
-        return _perm_denied(APIKeyPermission.PLUGINS_READ)
-    org_id = get_organization_id(request)
-    _get_org_service().require_membership(request.user, org_id)
-    try:
-        workspace = _get_owned_workspace(request, org_id, workspace_id)
-        payloads = PluginService().list_workspace_plugins(
-            workspace=workspace, org_id=org_id
-        )
-        return 200, [WorkspacePluginOut(**p) for p in payloads]
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
 
 
 # ===========================================================================

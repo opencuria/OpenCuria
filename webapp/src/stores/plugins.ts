@@ -1,8 +1,8 @@
 /**
  * Plugin Pinia store.
  *
- * Manages the org-visible plugin catalog (global + org-owned) and per
- * workspace plugin activations. Org-switch-safe: `clear()` empties the
+ * Manages the org-visible plugin catalog (global + org-owned).
+ * Org-switch-safe: `clear()` empties the
  * state and `reload()` re-fetches from the active org (callers watch the
  * active organization id and call `reload`, same pattern the settings
  * panels use via `loadData()` on org change).
@@ -11,7 +11,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
-import type { Plugin, PluginCreateIn, PluginUpdateIn, WorkspacePlugin } from '@/types'
+import type { Plugin, PluginCreateIn, PluginUpdateIn } from '@/types'
 import { useAuthStore } from './auth'
 import { useNotificationStore } from './notifications'
 import * as pluginsApi from '@/services/plugins.api'
@@ -26,12 +26,6 @@ export const usePluginStore = defineStore('plugins', () => {
   const loadedOrgId = ref<string | null>(null)
   /** Monotonic request generation; stale org fetches are discarded. */
   let catalogRequestId = 0
-  const workspacePluginsRequestId = ref<Record<string, number>>({})
-
-  /** Workspace plugin lists keyed by workspace id. */
-  const workspacePlugins = ref<Record<string, WorkspacePlugin[]>>({})
-  const workspacePluginsLoading = ref<Record<string, boolean>>({})
-  const workspacePluginsError = ref<Record<string, string | null>>({})
 
   // --- Getters ---
   const globalPlugins = computed(() => plugins.value.filter((p) => p.is_global))
@@ -51,10 +45,6 @@ export const usePluginStore = defineStore('plugins', () => {
     error.value = null
     togglingIds.value = []
     loadedOrgId.value = null
-    workspacePlugins.value = {}
-    workspacePluginsLoading.value = {}
-    workspacePluginsError.value = {}
-    workspacePluginsRequestId.value = {}
   }
 
   /** Ensure catalog matches the active org; refetch on org switch. */
@@ -159,39 +149,6 @@ export const usePluginStore = defineStore('plugins', () => {
     }
   }
 
-  async function fetchWorkspacePlugins(workspaceId: string): Promise<void> {
-    const authStore = useAuthStore()
-    const orgId = authStore.activeOrganizationId
-    const requestId = (workspacePluginsRequestId.value[workspaceId] ?? 0) + 1
-    workspacePluginsRequestId.value[workspaceId] = requestId
-    workspacePluginsLoading.value[workspaceId] = true
-    workspacePluginsError.value[workspaceId] = null
-    try {
-      const list = await pluginsApi.listWorkspacePlugins(workspaceId)
-      // Discard stale responses after an org switch / clear.
-      if (workspacePluginsRequestId.value[workspaceId] !== requestId) return
-      if (authStore.activeOrganizationId !== orgId) return
-      workspacePlugins.value[workspaceId] = list
-    } catch (e: unknown) {
-      if (workspacePluginsRequestId.value[workspaceId] !== requestId) return
-      if (authStore.activeOrganizationId !== orgId) return
-      workspacePluginsError.value[workspaceId] =
-        e instanceof Error ? e.message : 'Failed to load workspace plugins'
-    } finally {
-      if (
-        workspacePluginsRequestId.value[workspaceId] === requestId &&
-        authStore.activeOrganizationId === orgId
-      ) {
-        workspacePluginsLoading.value[workspaceId] = false
-      }
-    }
-  }
-
-  /** Re-fetch workspace plugins after a failed multi-step save (resync UI). */
-  async function resyncWorkspacePlugins(workspaceId: string): Promise<void> {
-    await fetchWorkspacePlugins(workspaceId)
-  }
-
   return {
     // State
     plugins,
@@ -200,9 +157,6 @@ export const usePluginStore = defineStore('plugins', () => {
     togglingIds,
     togglingId,
     loadedOrgId,
-    workspacePlugins,
-    workspacePluginsLoading,
-    workspacePluginsError,
     // Getters
     globalPlugins,
     orgPlugins,
@@ -215,7 +169,5 @@ export const usePluginStore = defineStore('plugins', () => {
     updatePlugin,
     deletePlugin,
     toggleActivation,
-    fetchWorkspacePlugins,
-    resyncWorkspacePlugins,
   }
 })

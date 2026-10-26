@@ -21,7 +21,6 @@ vi.mock('@/services/plugins.api', () => ({
   updatePlugin: vi.fn(),
   deletePlugin: vi.fn(),
   togglePluginActivation: vi.fn(),
-  listWorkspacePlugins: vi.fn(),
 }))
 
 vi.mock('@/stores/auth', () => ({
@@ -81,10 +80,8 @@ describe('plugin store', () => {
     const store = usePluginStore()
     store.loadedOrgId = 'org-old'
     store.plugins = [makePlugin({ id: 'stale' })]
-    store.workspacePlugins = { 'ws-1': [] }
     await store.reload()
     expect(store.plugins[0]?.id).toBe('plugin-1')
-    expect(store.workspacePlugins).toEqual({})
   })
 
   it('creates/updates/deletes plugins and toasts without secrets', async () => {
@@ -123,25 +120,6 @@ describe('plugin store', () => {
     )
   })
 
-  it('loads workspace plugin catalog metadata only', async () => {
-    const store = usePluginStore()
-    vi.mocked(pluginsApi.listWorkspacePlugins).mockResolvedValue([
-      {
-        id: 'plugin-1',
-        name: 'Playwright',
-        slug: 'playwright',
-        description: '',
-        organization_id: null,
-        is_global: true,
-        workspace_enabled: true,
-        missing_required_credentials: [],
-        ready: true,
-      },
-    ])
-    await store.fetchWorkspacePlugins('ws-1')
-    expect(store.workspacePlugins['ws-1']).toHaveLength(1)
-  })
-
   it('tracks concurrent toggles per plugin id', async () => {
     const store = usePluginStore()
     store.plugins = [makePlugin(), makePlugin({ id: 'plugin-2', name: 'Other' })]
@@ -174,21 +152,5 @@ describe('plugin store', () => {
     firstResolve([makePlugin({ id: 'plugin-stale' })])
     await pendingFirst
     expect(store.plugins[0]?.id).toBe('plugin-new')
-  })
-
-  it('discards stale workspace plugin fetches after a clear', async () => {
-    const store = usePluginStore()
-    let firstResolve!: (value: never[]) => void
-    const first = new Promise<never[]>((resolve) => {
-      firstResolve = resolve
-    })
-    vi.mocked(pluginsApi.listWorkspacePlugins).mockReturnValueOnce(first)
-    const pendingFirst = store.fetchWorkspacePlugins('ws-1')
-    store.clear()
-    vi.mocked(pluginsApi.listWorkspacePlugins).mockResolvedValue([])
-    await store.fetchWorkspacePlugins('ws-1')
-    firstResolve([])
-    await pendingFirst
-    expect(store.workspacePlugins['ws-1']).toEqual([])
   })
 })

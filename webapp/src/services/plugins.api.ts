@@ -4,7 +4,6 @@ import type {
   PluginActivationIn,
   PluginCreateIn,
   PluginUpdateIn,
-  WorkspacePlugin,
 } from '@/types'
 import { del, get, patch, post } from './api'
 
@@ -26,7 +25,4 @@ export function deletePlugin(id: string): Promise<void> {
 export function togglePluginActivation(id: string, active: boolean): Promise<Plugin> {
   const payload: PluginActivationIn = { active }
   return post<Plugin>(`/plugins/${id}/activation/`, payload)
-}
-export function listWorkspacePlugins(workspaceId: string): Promise<WorkspacePlugin[]> {
-  return get<WorkspacePlugin[]>(`/workspaces/${workspaceId}/plugins/`)
 }

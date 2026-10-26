@@ -87,8 +87,6 @@ vi.mock('@/stores/plugins', () => ({
     updatePlugin: vi.fn(),
     deletePlugin: vi.fn(),
     toggleActivation: vi.fn(),
-    fetchWorkspacePlugins: vi.fn(),
-    resyncWorkspacePlugins: vi.fn(),
   }),
 }))
 vi.mock('@/stores/credentials', () => ({

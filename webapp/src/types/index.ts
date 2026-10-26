@@ -645,18 +645,6 @@ export interface PluginActivationIn {
   active: boolean
 }
 
-export interface WorkspacePlugin {
-  id: string
-  name: string
-  slug: string
-  description: string
-  organization_id: string | null
-  is_global: boolean
-  workspace_enabled: boolean
-  missing_required_credentials: Array<{ key: string; service_id: string; service_slug: string }>
-  ready: boolean
-}
-
 // --- API Keys ---
 
 export interface APIKeyPermissionInfo {

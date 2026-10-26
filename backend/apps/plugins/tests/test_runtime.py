@@ -271,6 +271,15 @@ def test_org_deactivate_makes_workspace_activation_ineffective(org_ctx):
     )
     assert snapshot.plugins == ()
 
+    # Re-enabling restores the existing workspace selection.
+    PluginService().set_org_activation(
+        plugin_id, org_id=org_ctx["org"].id, user=org_ctx["user"], active=True
+    )
+    snapshot = plugin_runtime.build_workspace_plugin_snapshot(
+        workspace=org_ctx["workspace"], org_id=org_ctx["org"].id
+    )
+    assert [plugin.id for plugin in snapshot.plugins] == [plugin_id]
+
 
 @pytest.mark.django_db
 def test_foreign_plugin_rows_ignored(org_ctx):

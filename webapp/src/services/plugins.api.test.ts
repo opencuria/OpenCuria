@@ -6,7 +6,6 @@ import {
   updatePlugin,
   deletePlugin,
   togglePluginActivation,
-  listWorkspacePlugins,
 } from './plugins.api'
 import * as api from './api'
 

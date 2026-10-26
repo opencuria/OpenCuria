@@ -32,7 +32,6 @@ from apps.runners.api import (
     image_definition_router,
     runner_router,
     workspace_image_artifact_router,
-    workspace_plugin_router,
     workspace_router,
 )
 from apps.scheduled_tasks.api import scheduled_task_router
@@ -78,7 +77,6 @@ api.add_router("/", scheduled_task_router)
 api.add_router("/org-credential-services/", org_credential_service_router)
 api.add_router("/image-definitions/", image_definition_router)
 api.add_router("/plugins/", plugin_router)
-api.add_router("/workspaces/", workspace_plugin_router)
 
 urlpatterns = [
     path("api/v1/mcp-oauth/callback/", mcp_oauth_callback, name="mcp_oauth_callback"),

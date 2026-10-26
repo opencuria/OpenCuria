@@ -168,17 +168,3 @@ class PluginActivationIn(Schema):
     """Toggle org-wide activation of a plugin."""
 
     active: bool
-
-
-class WorkspacePluginOut(Schema):
-    """An org-enabled plugin with workspace activation + readiness state."""
-
-    id: uuid.UUID
-    name: str
-    slug: str
-    description: str
-    organization_id: uuid.UUID | None = None
-    is_global: bool = False
-    workspace_enabled: bool = False
-    missing_required_credentials: list[dict] = []
-    ready: bool = True

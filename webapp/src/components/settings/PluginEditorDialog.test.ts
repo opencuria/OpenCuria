@@ -64,7 +64,6 @@ vi.mock('@/services/plugins.api', () => ({
   updatePlugin: vi.fn(),
   deletePlugin: vi.fn(),
   togglePluginActivation: vi.fn(),
-  listWorkspacePlugins: vi.fn(async () => []),
 }))
 
 const dialogStubs = {

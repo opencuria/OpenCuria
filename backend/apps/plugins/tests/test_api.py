@@ -3,8 +3,7 @@ API tests for the plugins domain.
 
 Covers RBAC/API-key permissions, cross-org 404s, nested creation,
 activation inheritance, workspace activation credential gating,
-org disable/re-enable behavior, the credential removal guard, and the
-global Playwright seed exposure via the API.
+the credential removal guard, and the global Playwright seed exposure via the API.
 """
 
 from __future__ import annotations
@@ -462,7 +461,6 @@ def test_builtin_opencuria_plugin_needs_no_setup_and_cannot_be_deleted(
 
     # Org and workspace switches are the only configuration.
     workspace = _create_workspace(ctx)
-    plugins_path = f"/api/v1/workspaces/{workspace.id}/plugins/"
     activation = f"{path}activation/"
     assert _post(client, activation, ctx["headers"], {"active": True}).json()[
         "org_enabled"
@@ -472,13 +470,7 @@ def test_builtin_opencuria_plugin_needs_no_setup_and_cannot_be_deleted(
         client, workspace_path, ctx["headers"], {"plugin_ids": [payload["id"]]}
     )
     assert enabled.status_code == 200, enabled.content[:500]
-    entry = next(
-        p
-        for p in client.get(plugins_path, **ctx["headers"]).json()
-        if p["id"] == payload["id"]
-    )
-    assert entry["workspace_enabled"] is True
-    assert entry["ready"] is True
+    assert enabled.json()["plugin_ids"] == [payload["id"]]
     disabled = _put(client, workspace_path, ctx["headers"], {"plugin_ids": []})
     assert disabled.json()["plugin_ids"] == []
     assert not _post(client, activation, ctx["headers"], {"active": False}).json()[
@@ -620,11 +612,6 @@ def test_activation_inheritance_and_workspace_flow(client: Client):
 
     workspace = _create_workspace(ctx)
 
-    # Not org-enabled yet: workspace list hides the plugin.
-    listed = client.get(f"/api/v1/workspaces/{workspace.id}/plugins/", **ctx["headers"])
-    assert listed.status_code == 200
-    assert all(p["id"] != plugin_id for p in listed.json())
-
     # Enable org-wide.
     toggled = _post(
         client,
@@ -634,14 +621,6 @@ def test_activation_inheritance_and_workspace_flow(client: Client):
     )
     assert toggled.status_code == 200
     assert toggled.json()["org_enabled"] is True
-
-    listed = client.get(
-        f"/api/v1/workspaces/{workspace.id}/plugins/", **ctx["headers"]
-    ).json()
-    entry = next(p for p in listed if p["id"] == plugin_id)
-    assert entry["workspace_enabled"] is False
-    assert entry["ready"] is False
-    assert entry["missing_required_credentials"]
 
     # Missing credential -> 409 with machine-readable detail.
     blocked = _put(
@@ -672,15 +651,6 @@ def test_activation_inheritance_and_workspace_flow(client: Client):
     )
     assert ok.status_code == 200, ok.content[:500]
     assert ok.json()["plugin_ids"] == [plugin_id]
-    entry = next(
-        p
-        for p in client.get(
-            f"/api/v1/workspaces/{workspace.id}/plugins/", **ctx["headers"]
-        ).json()
-        if p["id"] == plugin_id
-    )
-    assert entry["workspace_enabled"] is True
-    assert entry["ready"] is True
     row = WorkspacePluginActivation.objects.filter(
         workspace=workspace, plugin_id=plugin_id
     ).first()
@@ -907,7 +877,7 @@ def test_workspace_activation_rejects_unpublished_plugin(client: Client):
         {"active": True},
     )
     # Unpublish after org activation: workspace activation now 409s with
-    # a machine-readable code (org toggle stays as-is, listing hides it).
+    # a machine-readable code (org toggle stays as-is).
     _patch(
         client, f"/api/v1/plugins/{plugin_id}/", ctx["headers"], {"published": False}
     )
@@ -919,10 +889,6 @@ def test_workspace_activation_rejects_unpublished_plugin(client: Client):
     )
     assert blocked.status_code == 409
     assert blocked.json()["code"] == "plugin_not_available"
-    listed = client.get(
-        f"/api/v1/workspaces/{workspace.id}/plugins/", **ctx["headers"]
-    ).json()
-    assert all(p["id"] != plugin_id for p in listed)
 
 
 @pytest.mark.django_db
@@ -978,87 +944,6 @@ def test_requirement_service_is_independent_after_plugin_delete(client: Client):
     deleted = client.delete(f"/api/v1/plugins/{plugin_id}/", **ctx["headers"])
     assert deleted.status_code == 204
     assert CredentialService.objects.filter(pk=service.id).exists()
-
-
-@pytest.mark.django_db
-def test_org_disable_keeps_workspace_rows_and_reenable_restores(client: Client):
-    ctx = _ctx()
-    created = _post(
-        client, "/api/v1/plugins/", ctx["headers"], _minimal_plugin_body("Toggle")
-    ).json()
-    plugin_id = created["id"]
-    workspace = _create_workspace(ctx)
-
-    _post(
-        client,
-        f"/api/v1/plugins/{plugin_id}/activation/",
-        ctx["headers"],
-        {"active": True},
-    )
-    ok = _put(
-        client,
-        f"/api/v1/workspaces/{workspace.id}/",
-        ctx["headers"],
-        {"plugin_ids": [plugin_id]},
-    )
-    assert ok.status_code == 200
-
-    _post(
-        client,
-        f"/api/v1/plugins/{plugin_id}/activation/",
-        ctx["headers"],
-        {"active": False},
-    )
-    # Workspace row is kept but temporarily ineffective (hidden from list).
-    assert WorkspacePluginActivation.objects.filter(
-        workspace=workspace, plugin_id=plugin_id
-    ).exists()
-    listed = client.get(
-        f"/api/v1/workspaces/{workspace.id}/plugins/", **ctx["headers"]
-    ).json()
-    assert all(p["id"] != plugin_id for p in listed)
-
-    _post(
-        client,
-        f"/api/v1/plugins/{plugin_id}/activation/",
-        ctx["headers"],
-        {"active": True},
-    )
-    listed = client.get(
-        f"/api/v1/workspaces/{workspace.id}/plugins/", **ctx["headers"]
-    ).json()
-    entry = next(p for p in listed if p["id"] == plugin_id)
-    assert entry["workspace_enabled"] is True
-
-
-@pytest.mark.django_db
-def test_workspace_lookup_is_owner_only_for_admin(client: Client):
-    owner_ctx = _ctx()
-    other_ctx = _ctx()
-    created = _post(
-        client, "/api/v1/plugins/", owner_ctx["headers"], _minimal_plugin_body()
-    ).json()
-    plugin_id = created["id"]
-    _post(
-        client,
-        f"/api/v1/plugins/{plugin_id}/activation/",
-        owner_ctx["headers"],
-        {"active": True},
-    )
-    workspace = _create_workspace(owner_ctx)
-    # Second user joins the same org as non-owner member: membership passes,
-    # but the owner-scoped workspace lookup must still 404.
-    Membership.objects.create(
-        user=other_ctx["user"],
-        organization=owner_ctx["org"],
-        role=MembershipRole.MEMBER,
-    )
-    foreign_headers = dict(other_ctx["headers"])
-    foreign_headers["HTTP_X_ORGANIZATION_ID"] = str(owner_ctx["org"].id)
-    response = client.get(
-        f"/api/v1/workspaces/{workspace.id}/plugins/", **foreign_headers
-    )
-    assert response.status_code == 404
 
 
 @pytest.mark.django_db
