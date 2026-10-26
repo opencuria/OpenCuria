@@ -70,6 +70,7 @@ const fileExplorerStore = {
   tree: [] as never[],
   fetchDirectory: vi.fn().mockResolvedValue(undefined),
   findFiles: vi.fn().mockResolvedValue([]),
+  reset: vi.fn(),
 }
 
 vi.mock('@/stores/fileExplorer', () => ({
@@ -167,6 +168,7 @@ async function mountHome(settle = true) {
             <div data-testid="chat-home-composer">
               <textarea data-testid="composer-textarea" />
               <button data-testid="select-claude" @click="$emit('update:harnessId', 'claude')" />
+              <button data-testid="select-codex" @click="$emit('update:harnessId', 'codex')" />
               <button
                 data-testid="send-composer-prompt"
                 @click="$emit('send', 'hello', 'build', '', [], '', harnessId)"
@@ -289,7 +291,7 @@ describe('ChatHomeView', () => {
     expect(wrapper.get('[data-testid="workspace-picker-trigger"]').text()).toContain('Beta')
   })
 
-  it('passes the selected Claude harness to the new session and navigates to workspace-detail', async () => {
+  it.each(['native', 'claude', 'codex'] as const)('starts a %s chat and navigates to workspace-detail', async (harnessId) => {
     vi.stubGlobal(
       'matchMedia',
       vi.fn(() => ({ matches: true })),
@@ -298,18 +300,9 @@ describe('ChatHomeView', () => {
     const pushSpy = vi.spyOn(router, 'push')
     harnessStore.createSession.mockResolvedValue({ id: 'session-1' })
 
-    const vm = wrapper.vm as unknown as {
-      handleSend: (
-        prompt: string,
-        mode: 'build',
-        model: string,
-        skillIds: string[],
-        effort: string,
-        harnessId?: 'native' | 'claude',
-      ) => Promise<void>
+    if (harnessId !== 'native') {
+      await wrapper.get(`[data-testid="select-${harnessId}"]`).trigger('click')
     }
-    expect(vm.handleSend).toBeTypeOf('function')
-    await wrapper.get('[data-testid="select-claude"]').trigger('click')
     await wrapper.get('[data-testid="send-composer-prompt"]').trigger('click')
     await flushPromises()
 
@@ -320,13 +313,14 @@ describe('ChatHomeView', () => {
       '',
       [],
       '',
-      'claude',
+      harnessId,
     )
     expect(pushSpy).toHaveBeenCalledWith({
       name: 'workspace-detail',
       params: { id: 'ws-1' },
       query: { session: 'session-1' },
     })
+    wrapper.unmount()
   })
 
   it('animates the hero out, arms the composer morph and seeds the workspace on send', async () => {
