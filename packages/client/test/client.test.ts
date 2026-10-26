@@ -579,6 +579,7 @@ describe("realtime and file transfers", () => {
       reconnectCount += 1;
     });
     const release = client.realtime.subscribeWorkspace("ws-1");
+    const releaseSecond = client.realtime.subscribeWorkspace("ws-1");
     client.realtime.connect();
     const socket = sockets[0];
     socket.connect();
@@ -599,6 +600,9 @@ describe("realtime and file transfers", () => {
       expect(data.token).toBe("old-access"),
     );
     release();
+    expect(socket.emitted.at(-1)?.event).toBe("frontend:subscribe_workspace");
+    release();
+    releaseSecond();
     expect(socket.emitted.at(-1)).toEqual({
       event: "frontend:unsubscribe_workspace",
       data: { workspace_id: "ws-1" },

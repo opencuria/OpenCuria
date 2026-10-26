@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ChatSidebar from './ChatSidebar.vue'
 import { useScheduledTaskStore } from '@/stores/scheduledTasks'
+import { subscribeToWorkspace } from '@/services/socket'
 
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { WorkspaceStatus } from '@/types'
@@ -130,8 +131,7 @@ vi.mock('@/services/socket', () => ({
   connect: vi.fn(),
   disconnect: vi.fn(),
   isConnected: { value: true },
-  subscribeToWorkspace: vi.fn(),
-  unsubscribeFromWorkspace: vi.fn(),
+  subscribeToWorkspace: vi.fn(() => vi.fn()),
   onEvent: () => () => {},
   onReconnect: () => () => {},
 }))
@@ -215,7 +215,9 @@ describe('ChatSidebar', () => {
 
     expect(workspaceStore.fetchWorkspaces).toHaveBeenCalledTimes(1)
     expect(conversationStore.fetchConversations).toHaveBeenCalledTimes(1)
+    const releases = vi.mocked(subscribeToWorkspace).mock.results.map((result) => result.value)
     wrapper.unmount()
+    for (const release of releases) expect(release).toHaveBeenCalledOnce()
   })
 
   it('shows unread chats in their workspace and hides empty stopped workspaces', () => {

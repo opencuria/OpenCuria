@@ -1,20 +1,11 @@
-import { useWorkspaceStore } from '@/stores/workspaces'
-import { getActivePinia } from 'pinia'
-/**
- * Socket.IO client for real-time frontend updates.
- *
- * Connects to the backend's /frontend namespace to receive
- * workspace status changes and harness streaming events.
- *
- * The client is a singleton — call `connect()` once on app init
- * and `disconnect()` on teardown.
- */
-
-import { io, type Socket } from 'socket.io-client'
-import { ref } from 'vue'
-import { getConfig } from './config'
-import { tryRefreshToken } from './api'
+/** Browser state and frontend commands over the shared realtime transport. */
+import { RealtimeClient } from '@opencuria/client/realtime'
 import { planFilesUpload } from '@opencuria/chat-core/fileChunks'
+import { getActivePinia } from 'pinia'
+import { ref } from 'vue'
+import { useWorkspaceStore } from '@/stores/workspaces'
+import { getConfig } from './config'
+import { getApiClient } from './api'
 import type {
   FilesListResultEvent,
   FilesFindResultEvent,
@@ -56,45 +47,34 @@ export type {
   HarnessTodoUpdatedEvent,
 }
 
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
+export const isConnected = ref(false)
+let client: RealtimeClient | null = null
 
-let socket: Socket | null = null
-
-/** Whether the socket has ever connected (used to distinguish reconnect from initial connect). */
-let hasConnectedOnce = false
-
-/** Workspace subscription owners, keyed by ID. A room is joined once while at least one consumer needs it. */
-const subscribedWorkspaces = new Map<string, number>()
-
-function emitWorkspaceSubscriptions(
-  event: 'frontend:subscribe_workspace' | 'frontend:unsubscribe_workspace',
-  ids: Iterable<string>,
-): void {
-  if (!socket?.connected) return
-  for (const workspaceId of ids) {
-    socket.emit(event, { workspace_id: workspaceId })
+function getClient(): RealtimeClient {
+  if (!client) {
+    const api = getApiClient()
+    client = new RealtimeClient({
+      wsBaseUrl: getConfig().wsBaseUrl,
+      getAccessToken: () => localStorage.getItem('kern_access_token'),
+      getContextKey: () => {
+        const context = api.getContext()
+        return `${context.generation}:${context.baseUrl}:${context.organizationId ?? ''}`
+      },
+      onContextChange: (callback) => api.onContextChange(callback),
+      refreshAccessToken: () => api.refreshAccessToken(),
+    })
+    client.on('connect', () => {
+      isConnected.value = true
+    })
+    client.on('disconnect', () => {
+      isConnected.value = false
+    })
   }
+  return client
 }
 
-/** Callbacks fired on every socket reconnection (not the initial connect). */
-const reconnectCallbacks = new Set<() => void>()
-
-export const isConnected = ref(false)
-
-/** Whether the Page Visibility listener has been registered. */
-let visibilityListenerAdded = false
-
-// ---------------------------------------------------------------------------
-// Page Visibility — reconnect when the tab comes back into focus
-// ---------------------------------------------------------------------------
-
 function handleVisibilityChange(): void {
-  if (document.visibilityState === 'visible' && socket && !socket.connected) {
-    console.debug('[socket] page became visible — triggering reconnect')
-    socket.connect()
-  }
+  if (document.visibilityState === 'visible' && client && !client.isConnected) client.connect()
 }
 
 // ---------------------------------------------------------------------------
@@ -208,197 +188,36 @@ type EventMap = {
 
 type EventName = keyof EventMap
 
-// Listener storage for typed, removable subscriptions
-const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
-
-// ---------------------------------------------------------------------------
-// Connection management
-// ---------------------------------------------------------------------------
-
-/**
- * Connect to the backend Socket.IO server's /frontend namespace.
- */
+/** Connect the shared transport and resume it when the browser tab becomes visible. */
 export function connect(): void {
-  // Register the Page Visibility listener exactly once.
-  if (!visibilityListenerAdded) {
-    document.addEventListener('visibilitychange', handleVisibilityChange)
-    visibilityListenerAdded = true
-  }
-
-  // If a socket instance already exists, reuse it instead of creating a new one.
-  // This handles the case where Socket.IO is already in the middle of reconnecting.
-  if (socket) {
-    if (!socket.connected) socket.connect()
-    return
-  }
-
-  const config = getConfig()
-
-  // In production, wsBaseUrl is a full URL (e.g. https://api.example.com).
-  // In dev, it's empty and Socket.IO connects to the same origin (proxied by Vite).
-  const baseUrl = config.wsBaseUrl || undefined
-
-  socket = io(baseUrl ? `${baseUrl}/frontend` : '/frontend', {
-    path: '/ws/runner',
-    transports: ['websocket', 'polling'],
-    reconnection: true,
-    reconnectionDelay: 1000,
-    reconnectionDelayMax: 10000,
-    // Use a callback so every reconnect attempt reads the freshest token from
-    // localStorage rather than the (possibly expired) token captured at init time.
-    auth: (cb: (data: Record<string, string>) => void) => {
-      const latestToken = localStorage.getItem('kern_access_token')
-      cb(latestToken ? { token: latestToken } : {})
-    },
-  })
-
-  // Attach early listeners that were registered before connect().
-  for (const [event, handlers] of listeners) {
-    for (const handler of handlers) socket.on(event, handler)
-  }
-
-  socket.on('connect', () => {
-    const isReconnect = hasConnectedOnce
-    hasConnectedOnce = true
-    isConnected.value = true
-    console.debug('[socket] connected to /frontend namespace')
-
-    // Subscribe on the initial connection too: callers may have registered
-    // workspace interest before the transport was ready.
-    console.debug('[socket] connected — subscribing', subscribedWorkspaces.size, 'workspace(s)')
-    emitWorkspaceSubscriptions('frontend:subscribe_workspace', subscribedWorkspaces.keys())
-
-    if (isReconnect) {
-      // Notify registered reconnect callbacks (e.g. terminal)
-      for (const cb of [...reconnectCallbacks]) cb()
-    }
-  })
-
-  socket.on('disconnect', () => {
-    isConnected.value = false
-    console.debug('[socket] disconnected')
-  })
-
-  socket.on('connect_error', async (err) => {
-    console.warn('[socket] connection error:', err.message)
-
-    // If the error looks auth-related, proactively refresh the JWT so the
-    // next automatic reconnect attempt (handled by Socket.IO internally) will
-    // use the fresh token via the auth callback above.
-    const msg = err.message.toLowerCase()
-    if (
-      msg.includes('auth') ||
-      msg.includes('401') ||
-      msg.includes('unauthorized') ||
-      msg.includes('forbidden')
-    ) {
-      console.debug('[socket] auth error — attempting token refresh')
-      await tryRefreshToken()
-      // Socket.IO will retry automatically; the auth callback will pick up the new token.
-    }
-  })
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  getClient().connect()
 }
 
-/**
- * Disconnect from Socket.IO.
- */
+/** Release the transport and all subscriptions on logout or organization switch. */
 export function disconnect(): void {
   document.removeEventListener('visibilitychange', handleVisibilityChange)
-  visibilityListenerAdded = false
-  socket?.disconnect()
-  socket = null
-  hasConnectedOnce = false
+  client?.dispose()
+  client = null
   isConnected.value = false
-  listeners.clear()
-  subscribedWorkspaces.clear()
-  reconnectCallbacks.clear()
 }
 
-// ---------------------------------------------------------------------------
-// Workspace subscriptions
-// ---------------------------------------------------------------------------
-
-/**
- * Tell the server to send events for a specific workspace.
- * The subscription is tracked and automatically restored on reconnect.
- */
+/** Hold a workspace room until the returned release callback is called. */
 export function subscribeToWorkspace(workspaceId: string): () => void {
-  const count = subscribedWorkspaces.get(workspaceId) ?? 0
-  subscribedWorkspaces.set(workspaceId, count + 1)
-  if (count === 0) emitWorkspaceSubscriptions('frontend:subscribe_workspace', [workspaceId])
-
-  let released = false
-  return () => {
-    if (released) return
-    released = true
-    const currentCount = subscribedWorkspaces.get(workspaceId) ?? 0
-    if (currentCount <= 1) {
-      subscribedWorkspaces.delete(workspaceId)
-      emitWorkspaceSubscriptions('frontend:unsubscribe_workspace', [workspaceId])
-    } else {
-      subscribedWorkspaces.set(workspaceId, currentCount - 1)
-    }
-  }
+  return getClient().subscribeWorkspace(workspaceId)
 }
 
-/**
- * Stop receiving events for a specific workspace.
- */
-export function unsubscribeFromWorkspace(workspaceId: string): void {
-  const count = subscribedWorkspaces.get(workspaceId) ?? 0
-  if (count <= 1) {
-    subscribedWorkspaces.delete(workspaceId)
-    emitWorkspaceSubscriptions('frontend:unsubscribe_workspace', [workspaceId])
-  } else {
-    subscribedWorkspaces.set(workspaceId, count - 1)
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Typed event listeners
-// ---------------------------------------------------------------------------
-
-/**
- * Register a typed listener for a real-time event.
- * Returns an unsubscribe function.
- */
+/** Register a typed frontend event listener. */
 export function onEvent<E extends EventName>(
   event: E,
   callback: (data: EventMap[E]) => void,
 ): () => void {
-  const handler = callback as (...args: unknown[]) => void
-  if (!listeners.has(event)) listeners.set(event, new Set())
-  listeners.get(event)!.add(handler)
-  socket?.on(event as string, handler)
-
-  return () => {
-    socket?.off(event as string, handler)
-    const handlers = listeners.get(event)
-    handlers?.delete(handler)
-    if (handlers?.size === 0) listeners.delete(event)
-  }
+  return getClient().on(event, callback as (data: unknown) => void)
 }
 
-/**
- * Remove all registered listeners.
- */
-export function removeAllListeners(): void {
-  for (const [event, handlers] of listeners) {
-    for (const handler of handlers) {
-      socket?.off(event, handler)
-    }
-  }
-  listeners.clear()
-}
-
-/**
- * Register a callback that fires on every socket reconnection (not the initial connect).
- * Useful for components that need to re-establish backend state after a reconnect.
- * Returns an unsubscribe function.
- */
+/** Refresh mounted views after an ordinary transport reconnection. */
 export function onReconnect(callback: () => void): () => void {
-  reconnectCallbacks.add(callback)
-  return () => reconnectCallbacks.delete(callback)
+  return getClient().onReconnect(callback)
 }
 
 // ---------------------------------------------------------------------------
@@ -410,7 +229,7 @@ export function onReconnect(callback: () => void): () => void {
  */
 export function sendTerminalInput(workspaceId: string, terminalId: string, data: string): void {
   if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
-  socket?.emit('frontend:terminal_input', {
+  client?.emit('frontend:terminal_input', {
     workspace_id: workspaceId,
     terminal_id: terminalId,
     data,
@@ -427,7 +246,7 @@ export function sendTerminalResize(
   rows: number,
 ): void {
   if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
-  socket?.emit('frontend:terminal_resize', {
+  client?.emit('frontend:terminal_resize', {
     workspace_id: workspaceId,
     terminal_id: terminalId,
     cols,
@@ -440,7 +259,7 @@ export function sendTerminalResize(
  */
 export function sendTerminalClose(workspaceId: string, terminalId: string): void {
   if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
-  socket?.emit('frontend:terminal_close', {
+  client?.emit('frontend:terminal_close', {
     workspace_id: workspaceId,
     terminal_id: terminalId,
   })
@@ -455,7 +274,7 @@ export function sendTerminalClose(workspaceId: string, terminalId: string): void
  */
 export function sendFilesList(workspaceId: string, requestId: string, path: string): void {
   if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
-  socket?.emit('frontend:files_list', {
+  client?.emit('frontend:files_list', {
     workspace_id: workspaceId,
     request_id: requestId,
     path,
@@ -475,14 +294,14 @@ export function sendFilesFind(
   limit: number,
 ): boolean {
   if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return false
-  if (!socket) return false
-  socket.emit('frontend:files_find', {
-    workspace_id: workspaceId,
-    request_id: requestId,
-    query,
-    limit,
-  })
-  return true
+  return (
+    client?.emit('frontend:files_find', {
+      workspace_id: workspaceId,
+      request_id: requestId,
+      query,
+      limit,
+    }) ?? false
+  )
 }
 
 /**
@@ -495,7 +314,7 @@ export function sendFilesRead(
   maxSize?: number,
 ): void {
   if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
-  socket?.emit('frontend:files_read', {
+  client?.emit('frontend:files_read', {
     workspace_id: workspaceId,
     request_id: requestId,
     path,
@@ -521,7 +340,7 @@ export function sendFilesUpload(
   isDirectory: boolean = false,
 ): void {
   if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
-  if (!socket) return
+  if (!client) return
   for (const planned of planFilesUpload(
     workspaceId,
     requestId,
@@ -530,7 +349,7 @@ export function sendFilesUpload(
     content,
     isDirectory,
   )) {
-    socket.emit(planned.event, planned.payload)
+    client.emit(planned.event, planned.payload)
   }
 }
 
@@ -539,7 +358,7 @@ export function sendFilesUpload(
  */
 export function sendFilesDownload(workspaceId: string, requestId: string, path: string): void {
   if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
-  socket?.emit('frontend:files_download', {
+  client?.emit('frontend:files_download', {
     workspace_id: workspaceId,
     request_id: requestId,
     path,

@@ -49,7 +49,6 @@ import {
   onEvent,
   onReconnect,
   subscribeToWorkspace,
-  unsubscribeFromWorkspace,
 } from '@/services/socket'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import type { HarnessConversation } from '@/types/harness'
@@ -187,24 +186,21 @@ const { start: startWorkspacePolling } = usePolling(() => workspaceStore.fetchWo
 const { start: startConvPolling } = usePolling(() => conversationStore.fetchConversations(), 60000)
 
 const cleanupFns: (() => void)[] = []
-const subscribedWorkspaceIds: string[] = []
+const workspaceSubscriptions = new Map<string, () => void>()
 
 function subscribeVisibleWorkspaces(): void {
   const ids = new Set<string>([
     ...workspaceStore.workspaces.map((workspace) => workspace.id),
     ...conversationStore.uniqueWorkspaceIds,
   ])
-  for (const workspaceId of subscribedWorkspaceIds) {
+  for (const [workspaceId, release] of workspaceSubscriptions) {
     if (ids.has(workspaceId)) continue
-    unsubscribeFromWorkspace(workspaceId)
-  }
-  for (let index = subscribedWorkspaceIds.length - 1; index >= 0; index -= 1) {
-    if (!ids.has(subscribedWorkspaceIds[index]!)) subscribedWorkspaceIds.splice(index, 1)
+    release()
+    workspaceSubscriptions.delete(workspaceId)
   }
   for (const workspaceId of ids) {
-    if (subscribedWorkspaceIds.includes(workspaceId)) continue
-    subscribeToWorkspace(workspaceId)
-    subscribedWorkspaceIds.push(workspaceId)
+    if (workspaceSubscriptions.has(workspaceId)) continue
+    workspaceSubscriptions.set(workspaceId, subscribeToWorkspace(workspaceId))
   }
 }
 
@@ -308,10 +304,8 @@ function setupSocketListeners(): void {
 }
 
 function cleanupSocket(): void {
-  for (const workspaceId of subscribedWorkspaceIds) {
-    unsubscribeFromWorkspace(workspaceId)
-  }
-  subscribedWorkspaceIds.length = 0
+  for (const release of workspaceSubscriptions.values()) release()
+  workspaceSubscriptions.clear()
   cleanupFns.forEach((fn) => fn())
   cleanupFns.length = 0
 }

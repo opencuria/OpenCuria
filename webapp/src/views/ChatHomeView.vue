@@ -30,7 +30,7 @@ import { useHarnessStore } from '@/stores/harness'
 import { useSidePanelStore } from '@/stores/sidePanel'
 import { useSkillStore } from '@/stores/skills'
 import { useWorkspaceStore } from '@/stores/workspaces'
-import { subscribeToWorkspace, unsubscribeFromWorkspace } from '@/services/socket'
+import { subscribeToWorkspace } from '@/services/socket'
 
 const WorkspaceToolsSplit = defineAsyncComponent(
   () => import('@/components/workspaces/WorkspaceToolsSplit.vue'),
@@ -98,17 +98,18 @@ function handleMentionHover(index: number): void {
 }
 
 /** Seed the explorer tree so `@` file search works like in the chat. */
-const homeSocketCleanup: Array<() => void> = []
+let releaseHomeWorkspace: (() => void) | null = null
 let disposed = false
 
-function cleanupHomeSocket(workspaceId: string | null): void {
-  if (workspaceId) unsubscribeFromWorkspace(workspaceId)
-  for (const fn of homeSocketCleanup.splice(0)) fn()
+function cleanupHomeSocket(): void {
+  releaseHomeWorkspace?.()
+  releaseHomeWorkspace = null
 }
 
 function setupHomeFileSearch(workspaceId: string | null): void {
   if (disposed || !workspaceId) return
-  subscribeToWorkspace(workspaceId)
+  cleanupHomeSocket()
+  releaseHomeWorkspace = subscribeToWorkspace(workspaceId)
   // The split side-panel (when open) and composer share the root listing.
   // Avoid overlapping socket requests while retaining an initial root load.
   if (!fileExplorer.loadingPaths?.has('/workspace')) {
@@ -340,14 +341,14 @@ onMounted(async () => {
 
 onUnmounted(() => {
   disposed = true
-  cleanupHomeSocket(selectedWorkspaceId.value)
+  cleanupHomeSocket()
 })
 
 watch(
   () => selectedWorkspaceId.value,
   (next, prev) => {
     if (next === prev) return
-    cleanupHomeSocket(prev)
+    cleanupHomeSocket()
     setupHomeFileSearch(next)
   },
 )

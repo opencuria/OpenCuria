@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { io } = vi.hoisted(() => ({ io: vi.fn() }))
 vi.mock('socket.io-client', () => ({ io }))
@@ -49,81 +49,80 @@ let service: typeof import('./socket')
 beforeEach(async () => {
   vi.resetModules()
   vi.clearAllMocks()
+  localStorage.clear()
+  const { createPinia, setActivePinia } = await import('pinia')
+  setActivePinia(createPinia())
   socket = makeSocket()
   io.mockReturnValue(socket)
   service = await import('./socket')
 })
 
-describe('socket workspace subscriptions and event listeners', () => {
-  it('subscribes once per workspace while multiple consumers hold a reference', () => {
+afterEach(() => {
+  service.disconnect()
+  vi.restoreAllMocks()
+  localStorage.clear()
+})
+
+describe('browser realtime adapter', () => {
+  it('reflects connection state and resumes on tab visibility without retaining disposed listeners', () => {
+    const listener = vi.fn()
+    service.onEvent('workspace:error', listener)
     service.connect()
     socket.connect()
-    socket.emit.mockClear()
-
-    const releaseFirst = service.subscribeToWorkspace('ws-1')
-    const releaseSecond = service.subscribeToWorkspace('ws-1')
-    expect(socket.emit).toHaveBeenCalledTimes(1)
-    expect(socket.emit).toHaveBeenLastCalledWith('frontend:subscribe_workspace', { workspace_id: 'ws-1' })
-
-    releaseFirst()
-    expect(socket.emit).toHaveBeenCalledTimes(1)
-    releaseSecond()
-    expect(socket.emit).toHaveBeenLastCalledWith('frontend:unsubscribe_workspace', { workspace_id: 'ws-1' })
-    expect(socket.emit).toHaveBeenCalledTimes(2)
-    releaseSecond()
-    expect(socket.emit).toHaveBeenCalledTimes(2)
-  })
-
-  it('subscribes IDs registered before initial connection and restores them on reconnect', () => {
-    service.subscribeToWorkspace('ws-before-connect')
-    service.connect()
-    expect(socket.emit).not.toHaveBeenCalled()
-
-    socket.connect()
-    expect(socket.emit).toHaveBeenCalledWith('frontend:subscribe_workspace', {
-      workspace_id: 'ws-before-connect',
-    })
-    socket.emit.mockClear()
+    expect(service.isConnected.value).toBe(true)
+    socket.trigger('workspace:error', {})
+    expect(listener).toHaveBeenCalledOnce()
     socket.disconnect()
-    socket.connect()
-    expect(socket.emit).toHaveBeenCalledTimes(1)
-    expect(socket.emit).toHaveBeenCalledWith('frontend:subscribe_workspace', {
-      workspace_id: 'ws-before-connect',
-    })
-  })
-
-  it('attaches events registered before connect and removes only the released callback', () => {
-    const first = vi.fn()
-    const second = vi.fn()
-    const releaseFirst = service.onEvent('workspace:error', first)
-    const releaseSecond = service.onEvent('workspace:error', second)
-
-    service.connect()
-    socket.trigger('workspace:error', { workspace_id: 'ws-1', task_id: 't-1', error: 'failed' })
-    expect(first).toHaveBeenCalledTimes(1)
-    expect(second).toHaveBeenCalledTimes(1)
-
-    releaseFirst()
-    socket.trigger('workspace:error', { workspace_id: 'ws-1', task_id: 't-1', error: 'again' })
-    expect(first).toHaveBeenCalledTimes(1)
-    expect(second).toHaveBeenCalledTimes(2)
-    releaseSecond()
-  })
-
-  it('allows new event registrations after disconnect and clears old callback state', () => {
-    const oldHandler = vi.fn()
-    service.connect()
-    service.onEvent('workspace:error', oldHandler)
+    expect(service.isConnected.value).toBe(false)
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(service.isConnected.value).toBe(true)
+    expect(socket.connect).toHaveBeenCalledTimes(2)
     service.disconnect()
-    expect(oldHandler).not.toHaveBeenCalled()
+    document.dispatchEvent(new Event('visibilitychange'))
+    socket.trigger('workspace:error', {})
+    expect(service.isConnected.value).toBe(false)
+    expect(socket.connect).toHaveBeenCalledTimes(2)
+    expect(listener).toHaveBeenCalledOnce()
+  })
 
-    const nextSocket = makeSocket()
-    io.mockReturnValue(nextSocket)
-    const newHandler = vi.fn()
-    service.onEvent('workspace:error', newHandler)
+  it('uses the REST client for auth recovery and reads the latest browser token on reconnect', async () => {
+    const { getApiClient } = await import('./api')
+    const refresh = vi.spyOn(getApiClient(), 'refreshAccessToken').mockResolvedValue(false)
     service.connect()
-    nextSocket.connect()
-    nextSocket.trigger('workspace:error', { workspace_id: 'ws-2', task_id: 't-2', error: 'new' })
-    expect(newHandler).toHaveBeenCalledTimes(1)
+    socket.trigger('connect_error', new Error('Unauthorized'))
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledOnce())
+    expect(socket.connect).not.toHaveBeenCalled()
+    refresh.mockResolvedValue(true)
+    socket.trigger('connect_error', new Error('Unauthorized'))
+    await vi.waitFor(() => expect(service.isConnected.value).toBe(true))
+    localStorage.setItem('kern_access_token', 'refreshed-token')
+    const authenticate = io.mock.calls[0]![1].auth
+    const accept = vi.fn()
+    authenticate(accept)
+    expect(accept).toHaveBeenCalledWith({ token: 'refreshed-token' })
+  })
+
+  it('forwards terminal and file commands while fencing a transitioning workspace', async () => {
+    const { useWorkspaceStore } = await import('@/stores/workspaces')
+    service.connect()
+    service.sendTerminalInput('ws-1', 'terminal-1', 'aGk=')
+    expect(socket.emit).toHaveBeenLastCalledWith('frontend:terminal_input', {
+      workspace_id: 'ws-1',
+      terminal_id: 'terminal-1',
+      data: 'aGk=',
+    })
+    service.sendFilesUpload('ws-1', 'request-1', '/workspace', 'a.txt', 'aGk=')
+    expect(socket.emit.mock.calls.map(([event]) => event)).toEqual([
+      'frontend:terminal_input',
+      'frontend:files_upload_start',
+      'frontend:files_upload_chunk',
+      'frontend:files_upload_finish',
+    ])
+    vi.spyOn(useWorkspaceStore(), 'isWorkspaceTransitioning').mockReturnValue(true)
+    socket.emit.mockClear()
+    service.sendTerminalInput('ws-1', 'terminal-1', 'aGk=')
+    service.sendFilesUpload('ws-1', 'request-2', '/workspace', 'a.txt', 'aGk=')
+    expect(service.sendFilesFind('ws-1', 'request-3', 'a', 50)).toBe(false)
+    expect(socket.emit).not.toHaveBeenCalled()
   })
 })

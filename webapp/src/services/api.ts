@@ -2,13 +2,9 @@
  * Shared REST transport for the webapp.
  *
  * Authentication, retries, response parsing, and structured errors are owned by
- * `@opencuria/client`; this adapter preserves the webapp's historic exports.
+ * `@opencuria/client`; the Socket.IO adapter shares its auth context.
  */
-import {
-  ApiClient,
-  ApiRequestError,
-  type FetchLike,
-} from '@opencuria/client/api'
+import { ApiClient, ApiRequestError, type FetchLike } from '@opencuria/client/api'
 import { clearQuestionInputCaches } from '@/lib/questionInputCache'
 import { getConfig } from './config'
 
@@ -24,7 +20,8 @@ function getApiBaseUrl(): string {
   return getConfig().apiBaseUrl
 }
 
-function getClient(): ApiClient {
+/** Share REST authentication and organization context with the realtime transport. */
+export function getApiClient(): ApiClient {
   const apiBaseUrl = getApiBaseUrl()
   if (!client || clientBaseUrl !== apiBaseUrl) {
     clientBaseUrl = apiBaseUrl
@@ -52,11 +49,6 @@ function getClient(): ApiClient {
     })
   }
   return client
-}
-
-/** Legacy compatibility helper used by the web Socket.IO connector. */
-export async function tryRefreshToken(): Promise<boolean> {
-  return getClient().refreshAccessToken()
 }
 
 function getAuthHeaders(): Record<string, string> {
@@ -91,7 +83,7 @@ export function postDuringClipboardGesture<T>(path: string, body: unknown, conte
 }
 
 export function get<T>(path: string, signal?: AbortSignal): Promise<T> {
-  return getClient().requestWithCredentials<T>('GET', path, undefined, 'same-origin', signal)
+  return getApiClient().requestWithCredentials<T>('GET', path, undefined, 'same-origin', signal)
 }
 
 export function post<T>(
@@ -100,19 +92,19 @@ export function post<T>(
   credentials?: RequestCredentials,
   signal?: AbortSignal,
 ): Promise<T> {
-  return getClient().postWithCredentials<T>(path, body, credentials, signal)
+  return getApiClient().postWithCredentials<T>(path, body, credentials, signal)
 }
 
 export function del<T>(path: string, credentials?: RequestCredentials): Promise<T> {
-  return getClient().deleteWithCredentials<T>(path, credentials)
+  return getApiClient().deleteWithCredentials<T>(path, credentials)
 }
 
 export function patch<T>(path: string, body?: unknown): Promise<T> {
-  return getClient().requestWithCredentials<T>('PATCH', path, body, 'same-origin')
+  return getApiClient().requestWithCredentials<T>('PATCH', path, body, 'same-origin')
 }
 
 export function put<T>(path: string, body?: unknown): Promise<T> {
-  return getClient().requestWithCredentials<T>('PUT', path, body, 'same-origin')
+  return getApiClient().requestWithCredentials<T>('PUT', path, body, 'same-origin')
 }
 
 /** Fetch JSON and return HTTP status without throwing for non-2xx responses. */
@@ -121,5 +113,5 @@ export function requestWithStatus<T>(
   path: string,
   body?: unknown,
 ): Promise<{ ok: boolean; status: number; data: T }> {
-  return getClient().requestWithStatus<T>(method, path, body, undefined, 'same-origin')
+  return getApiClient().requestWithStatus<T>(method, path, body, undefined, 'same-origin')
 }

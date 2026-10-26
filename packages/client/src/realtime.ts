@@ -327,6 +327,14 @@ export class RealtimeClient {
     return () => this.reconnectListeners.delete(callback);
   }
 
+  /** Send a frontend command through the current transport, if it exists. */
+  emit(event: string, payload: unknown): boolean {
+    this.assertNotDisposed();
+    if (!this.socket) return false;
+    this.socket.emit(event, payload);
+    return true;
+  }
+
   /** Releasing a context-changed subscription is intentionally a no-op. Obtain
    * fresh workspace handles after organization, auth, or API-base changes.
    */

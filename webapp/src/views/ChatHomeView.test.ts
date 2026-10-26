@@ -102,8 +102,7 @@ vi.mock('@/lib/recentModels', async () => {
 
 vi.mock('@/services/socket', () => ({
   onEvent: vi.fn(() => () => {}),
-  subscribeToWorkspace: vi.fn(),
-  unsubscribeFromWorkspace: vi.fn(),
+  subscribeToWorkspace: vi.fn(() => vi.fn()),
 }))
 
 function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
