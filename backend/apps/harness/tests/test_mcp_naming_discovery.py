@@ -141,72 +141,54 @@ def test_normalize_resource_link_and_embedded():
     assert "file body here" in normalize_call_result(embedded).output
 
 
-def test_normalize_jpeg_image_maps_to_image_jpeg():
-    tiny_jpeg = (
-        b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
-    )
-    result = types.CallToolResult(
-        content=[
-            types.ImageContent(
-                type="image",
-                data=base64.b64encode(tiny_jpeg).decode(),
-                mimeType="image/jpeg",
-            )
-        ],
-    )
-    normalized = normalize_call_result(result)
-    assert normalized.image_jpeg == tiny_jpeg
-    assert normalized.attachments[0]["url"] == (
-        f"data:image/jpeg;base64,{base64.b64encode(tiny_jpeg).decode()}"
-    )
-    png = types.CallToolResult(
-        content=[
-            types.ImageContent(
-                type="image",
-                data=base64.b64encode(b"fakepng").decode(),
-                mimeType="image/png",
-            )
-        ],
-    )
-    out = normalize_call_result(png)
-    assert out.image_jpeg is None
-    assert out.attachments[0]["mime"] == "image/png"
+@pytest.mark.parametrize(
+    "mime", ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"]
+)
+def test_normalize_image_attachment_reaches_model_and_persistence(mime):
     from apps.harness.images import (
         build_tool_message_content,
         select_persisted_tool_attachments,
     )
 
+    encoded = base64.b64encode(b"image").decode()
+    result = types.CallToolResult(
+        content=[types.ImageContent(type="image", data=encoded, mimeType=mime)]
+    )
+    out = normalize_call_result(result)
+    assert out.output == "[MCP tool returned no text output]"
+    normalized_mime = "image/jpeg" if mime == "image/jpg" else mime
+    url = f"data:{normalized_mime};base64,{encoded}"
+    assert out.attachments == [
+        {"type": "file", "mime": normalized_mime, "url": url, "filename": ""}
+    ]
+    assert out.metadata["attachments"] == out.attachments
     parts = build_tool_message_content(out.output, out.attachments)
-    assert parts[1]["type"] == "image_url"
+    assert parts[1] == {"type": "image_url", "image_url": {"url": url}}
     assert select_persisted_tool_attachments(out.attachments) == out.attachments
 
 
-def test_normalize_oversize_image_is_descriptor():
-    from apps.harness.mcp_client.connection import MAX_MCP_IMAGE_BYTES
+@pytest.mark.parametrize("data", [base64.b64encode(b"a" * 16).decode(), "A" * 64])
+def test_normalize_oversize_image_is_descriptor(monkeypatch, data):
+    monkeypatch.setattr("apps.harness.mcp_client.connection.MAX_MCP_IMAGE_BYTES", 8)
 
-    big = b"a" * (MAX_MCP_IMAGE_BYTES + 8)
     result = types.CallToolResult(
         content=[
-            types.ImageContent(
-                type="image",
-                data=base64.b64encode(big).decode(),
-                mimeType="image/jpeg",
-            )
+            types.ImageContent(type="image", data=data, mimeType="image/jpeg")
         ],
     )
     out = normalize_call_result(result)
-    assert out.image_jpeg is None
     assert out.attachments == []
     assert "exceeds" in out.output
 
 
-def test_normalize_mcp_image_rejects_unsupported_and_caps_count():
+@pytest.mark.parametrize("mime", ["image/jpeg", "image/png"])
+def test_normalize_mcp_image_rejects_unsupported_and_caps_count(mime):
     encoded = base64.b64encode(b"image").decode()
     result = types.CallToolResult(
         content=[
             types.ImageContent(type="image", data=encoded, mimeType="image/svg+xml"),
             *[
-                types.ImageContent(type="image", data=encoded, mimeType="image/png")
+                types.ImageContent(type="image", data=encoded, mimeType=mime)
                 for _ in range(3)
             ],
         ]

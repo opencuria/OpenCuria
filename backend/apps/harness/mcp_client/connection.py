@@ -305,7 +305,7 @@ def normalize_call_result(result: types.CallToolResult) -> ToolResult:
       as JSON when no text exists (or supplements it).
     - ``ResourceLink``/``EmbeddedResource`` become readable descriptors.
     - Bounded image blocks become tool attachments for the model and
-      persisted chat; JPEG also retains the legacy ``image_jpeg`` field.
+      persisted chat.
     """
     if getattr(result, "isError", False):
         texts = [
@@ -317,7 +317,6 @@ def normalize_call_result(result: types.CallToolResult) -> ToolResult:
         raise ToolError(message[:2000], tool="")
     texts: list[str] = []
     attachments: list[dict[str, str]] = []
-    image_jpeg: bytes | None = None
     for block in result.content or []:
         block_type = getattr(block, "type", "")
         if block_type == "text":
@@ -325,9 +324,7 @@ def normalize_call_result(result: types.CallToolResult) -> ToolResult:
         elif block_type == "image":
             mime = str(getattr(block, "mimeType", "") or "").lower()
             data = str(getattr(block, "data", "") or "")
-            image_jpeg, descriptor, attachment = _decode_image_block(
-                mime, data, image_jpeg, len(attachments)
-            )
+            descriptor, attachment = _decode_image_block(mime, data, len(attachments))
             if attachment:
                 attachments.append(attachment)
             if descriptor:
@@ -364,7 +361,6 @@ def normalize_call_result(result: types.CallToolResult) -> ToolResult:
     return ToolResult(
         output=output,
         metadata={"attachments": attachments} if attachments else {},
-        image_jpeg=image_jpeg,
         attachments=attachments,
     )
 
@@ -381,12 +377,12 @@ def _serializes(texts: list[str], structured: Any) -> bool:
 
 
 def _decode_image_block(
-    mime: str, data: str, current_jpeg: bytes | None, attachment_count: int
-) -> tuple[bytes | None, str, dict[str, str] | None]:
+    mime: str, data: str, attachment_count: int
+) -> tuple[str, dict[str, str] | None]:
     """Decode a bounded image into a model-visible attachment.
 
-    Keep at most two images (the persistence cap) and the legacy first
-    JPEG. Restrict MIME to formats accepted by our image provider path;
+    Keep at most two images (the persistence cap). Restrict MIME to
+    formats accepted by our image provider path;
     never send untrusted/unsupported MIME data URLs to a provider.
     """
     import base64 as _base64
@@ -394,24 +390,19 @@ def _decode_image_block(
     supported = {"image/png", "image/jpeg", "image/gif", "image/webp"}
     normalized_mime = "image/jpeg" if mime == "image/jpg" else mime
     if normalized_mime not in supported:
-        return current_jpeg, f"[image ({mime or 'unknown'}) not supported]", None
+        return f"[image ({mime or 'unknown'}) not supported]", None
     if not data:
-        return current_jpeg, "[empty image content]", None
+        return "[empty image content]", None
     if len(data) > (MAX_MCP_IMAGE_BYTES * 4) // 3 + 16:
-        return (
-            current_jpeg,
-            (f"[image ({mime}) exceeds {MAX_MCP_IMAGE_BYTES} byte limit]"),
-            None,
-        )
+        return f"[image ({mime}) exceeds {MAX_MCP_IMAGE_BYTES} byte limit]", None
     if attachment_count >= 2:
-        return current_jpeg, f"[additional image ({mime}) omitted]", None
+        return f"[additional image ({mime}) omitted]", None
     try:
         raw = _base64.b64decode(data, validate=True)
     except Exception:
-        return current_jpeg, f"[image ({mime}) with undecodable data]", None
+        return f"[image ({mime}) with undecodable data]", None
     if len(raw) > MAX_MCP_IMAGE_BYTES:
         return (
-            current_jpeg,
             (
                 f"[image ({mime}, {len(raw)} bytes) exceeds "
                 f"{MAX_MCP_IMAGE_BYTES} byte limit]"
@@ -424,9 +415,7 @@ def _decode_image_block(
         "url": f"data:{normalized_mime};base64,{data}",
         "filename": "",
     }
-    if normalized_mime == "image/jpeg" and current_jpeg is None:
-        current_jpeg = raw
-    return current_jpeg, "", attachment
+    return "", attachment
 
 
 def _embedded_resource_text(resource: Any) -> str:

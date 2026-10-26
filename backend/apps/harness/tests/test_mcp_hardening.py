@@ -17,9 +17,8 @@ Covers, against fakes (no sockets, no runner):
   POST endpoint via workspace streams (no backend socket);
 - stdio split multibyte chars reassemble; oversize/invalid fail the
   server without logging payload content;
-- ``normalize_call_result``: empty output is meaningful, second JPEG
-  becomes a descriptor, oversize base64 is bounded pre-decode, blob
-  sizes never str() the payload;
+- ``normalize_call_result``: empty output is meaningful and blob sizes
+  never str() the payload;
 - snapshot fail-closed: workspace org mismatch raises; foreign attached
   credentials are ignored (missing-required gap, no leak).
 """
@@ -27,7 +26,6 @@ Covers, against fakes (no sockets, no runner):
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import uuid
 
@@ -1010,32 +1008,6 @@ def test_normalize_empty_output_is_meaningful():
     result = types.CallToolResult(content=[])
     out = normalize_call_result(result)
     assert out.output.strip()
-
-
-def test_normalize_second_jpeg_is_descriptor():
-    tiny = base64.b64encode(b"\xff\xd8\xff fake").decode()
-    result = types.CallToolResult(
-        content=[
-            types.ImageContent(type="image", data=tiny, mimeType="image/jpeg"),
-            types.ImageContent(type="image", data=tiny, mimeType="image/jpeg"),
-        ]
-    )
-    out = normalize_call_result(result)
-    assert out.image_jpeg is not None
-    assert len(out.attachments) == 2
-    assert out.output == "[MCP tool returned no text output]"
-
-
-def test_normalize_oversize_base64_bounded_pre_decode():
-    from apps.harness.mcp_client.connection import MAX_MCP_IMAGE_BYTES
-
-    huge = "A" * (((MAX_MCP_IMAGE_BYTES * 4) // 3) + 64)
-    result = types.CallToolResult(
-        content=[types.ImageContent(type="image", data=huge, mimeType="image/jpeg")]
-    )
-    out = normalize_call_result(result)
-    assert out.image_jpeg is None
-    assert "exceeds" in out.output
 
 
 def test_embedded_blob_size_never_str_payload():
