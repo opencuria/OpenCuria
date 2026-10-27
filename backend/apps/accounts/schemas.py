@@ -15,13 +15,6 @@ from pydantic import Field
 # ---------------------------------------------------------------------------
 
 
-class RegisterIn(Schema):
-    """Request schema for user registration."""
-
-    email: str
-    password: str
-
-
 class LoginIn(Schema):
     """Request schema for login."""
 

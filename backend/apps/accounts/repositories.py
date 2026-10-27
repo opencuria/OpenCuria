@@ -36,21 +36,9 @@ class UserRepository:
             return None
 
     @staticmethod
-    def email_exists(email: str) -> bool:
-        """Return whether the exact email is already registered."""
-        return User.objects.filter(email=email).exists()
-
-    @staticmethod
     def verify_password(user: User, password: str) -> bool:
         """Check a password, persisting Django's hash upgrade when needed."""
         return user.check_password(password)
-
-    @staticmethod
-    def create_user(*, email: str, password: str, **fields: Any) -> User:
-        """Create a user through the manager's normalization and password hashing."""
-        return User.objects.create_user(
-            username=email, email=email, password=password, **fields
-        )
 
     @staticmethod
     def get_or_create_by_email(

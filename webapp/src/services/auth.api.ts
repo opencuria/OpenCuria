@@ -4,7 +4,6 @@
 
 import type {
   LoginRequest,
-  RegisterRequest,
   TokenPair,
   RefreshRequest,
   SsoCallbackRequest,
@@ -17,10 +16,6 @@ import type {
   APIKeyPermissionInfo,
 } from '@/types'
 import { get, post, del, patch } from './api'
-
-export function register(data: RegisterRequest): Promise<TokenPair> {
-  return post<TokenPair>('/auth/register/', data)
-}
 
 export function login(data: LoginRequest): Promise<TokenPair> {
   return post<TokenPair>('/auth/login/', data)

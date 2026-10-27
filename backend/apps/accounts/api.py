@@ -1,7 +1,7 @@
 """
 REST API endpoints for authentication.
 
-Public endpoints (auth=None): register, login, refresh.
+Public endpoints (auth=None): login, refresh, providers, SSO callback.
 API key management requires a valid JWT.
 """
 
@@ -25,7 +25,6 @@ from .schemas import (
     AuthProvidersOut,
     LoginIn,
     RefreshIn,
-    RegisterIn,
     SsoCallbackIn,
     SsoProviderOut,
     TokenOut,
@@ -33,20 +32,6 @@ from .schemas import (
 from .services import APIKeyService
 
 auth_router = Router(tags=["auth"])
-
-
-@auth_router.post(
-    "/register/",
-    response={201: TokenOut, 403: dict, 409: dict},
-    auth=None,
-    summary="Register a new user",
-)
-def register(request: HttpRequest, payload: RegisterIn):
-    """Create a new user account and return JWT tokens.
-
-    Registration is currently disabled — the system is closed.
-    """
-    return 403, {"detail": "Registration is currently disabled.", "code": "registration_disabled"}
 
 
 @auth_router.post(

@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from apps.accounts.auth_backends import DjangoJWTBackend
 from apps.accounts.models import User
-from common.exceptions import AuthenticationError, ConflictError
+from common.exceptions import AuthenticationError
 
 pytestmark = pytest.mark.django_db
 
@@ -110,39 +110,6 @@ def test_login_rejections(client: Client, user: User, case: str, detail: str) ->
     )
     assert response.status_code == 401
     assert response.json() == {"detail": detail, "code": "authentication_error"}
-
-
-def test_create_user_preserves_manager_normalization_and_profile() -> None:
-    backend = DjangoJWTBackend()
-    created = backend.create_user(
-        email="New.User@EXAMPLE.COM",
-        password="new-password",
-        first_name="New",
-        last_name="User",
-        is_staff=True,
-    )
-
-    stored = User.objects.get(pk=created.id)
-    assert stored.email == "New.User@example.com"
-    assert stored.username == "New.User@EXAMPLE.COM"
-    assert (stored.first_name, stored.last_name, stored.is_staff) == (
-        "New",
-        "User",
-        True,
-    )
-    assert stored.password != "new-password"
-    assert backend.authenticate(stored.email, "new-password") == created
-
-
-def test_duplicate_user_keeps_existing_account(user: User) -> None:
-    with pytest.raises(ConflictError) as error:
-        DjangoJWTBackend().create_user(email=user.email, password="replacement")
-
-    assert error.value.message == f"A user with email '{user.email}' already exists"
-    assert error.value.code == "conflict"
-    assert User.objects.count() == 1
-    user.refresh_from_db()
-    assert user.check_password("correct-password")
 
 
 @override_settings(

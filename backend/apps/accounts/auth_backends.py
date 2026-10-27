@@ -15,12 +15,11 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
 
 import jwt
 from django.conf import settings
 
-from common.exceptions import AuthenticationError, ConflictError
+from common.exceptions import AuthenticationError
 
 from .models import User
 from .repositories import UserRepository
@@ -35,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class TokenPair:
-    """Access + refresh token pair returned after login / register / refresh."""
+    """Access + refresh token pair returned after login or refresh."""
 
     access_token: str
     refresh_token: str
@@ -50,10 +49,9 @@ class AuthBackend(ABC):
     """
     Abstract authentication backend.
 
-    Implementations must provide methods for user creation, credential
-    validation, and JWT token management. To swap the entire auth system
-    (e.g. to Keycloak), implement a new subclass and update the
-    AUTH_BACKEND_CLASS setting.
+    Implementations must provide credential validation and JWT token management.
+    To swap the entire auth system (e.g. to Keycloak), implement a new subclass
+    and update the AUTH_BACKEND_CLASS setting.
     """
 
     @abstractmethod
@@ -62,14 +60,6 @@ class AuthBackend(ABC):
         Validate credentials and return the User instance.
 
         Raises AuthenticationError on failure.
-        """
-
-    @abstractmethod
-    def create_user(self, *, email: str, password: str, **kwargs):
-        """
-        Create a new user and return the User instance.
-
-        Raises ConflictError if email already exists.
         """
 
     @abstractmethod
@@ -132,19 +122,6 @@ class DjangoJWTBackend(AuthBackend):
             raise AuthenticationError("Account is disabled")
 
         return user
-
-    # -- Create user --------------------------------------------------
-
-    def create_user(self, *, email: str, password: str, **kwargs: Any) -> User:
-        """Register a local account, rejecting an already registered email."""
-        if UserRepository.email_exists(email):
-            raise ConflictError(f"A user with email '{email}' already exists")
-
-        return UserRepository.create_user(
-            email=email,
-            password=password,
-            **kwargs,
-        )
 
     # -- Token generation ---------------------------------------------
 

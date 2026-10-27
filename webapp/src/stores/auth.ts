@@ -97,24 +97,6 @@ export const useAuthStore = defineStore('auth', () => {
 
   // --- Actions ---
 
-  async function register(email: string, password: string): Promise<boolean> {
-    const notifications = useNotificationStore()
-    loading.value = true
-    try {
-      const tokens = await authApi.register({ email, password })
-      _saveTokens(tokens)
-      await fetchMe()
-      notifications.success('Welcome!', 'Account created successfully.')
-      return true
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Registration failed'
-      notifications.error('Registration failed', msg)
-      return false
-    } finally {
-      loading.value = false
-    }
-  }
-
   async function login(email: string, password: string): Promise<boolean> {
     const notifications = useNotificationStore()
     loading.value = true
@@ -325,7 +307,6 @@ export const useAuthStore = defineStore('auth', () => {
     isAdmin,
     hasOrganizations,
     // Actions
-    register,
     login,
     loginWithTokens,
     logout,

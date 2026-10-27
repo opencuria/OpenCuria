@@ -12,10 +12,6 @@ const router = createRouter({
       meta: { guest: true },
     },
     {
-      path: '/register',
-      redirect: '/login',
-    },
-    {
       path: '/sso/callback',
       name: 'sso-callback',
       component: () => import('@/views/SsoCallbackView.vue'),
