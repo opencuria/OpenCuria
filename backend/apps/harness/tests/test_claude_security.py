@@ -5,10 +5,7 @@ from __future__ import annotations
 import pytest
 
 from apps.harness.engines.claude.security import StreamingRedactor, redact_text
-from apps.harness.engines.claude.shellpolicy import (
-    shell_command_is_explore_safe,
-    shell_command_may_mutate,
-)
+from apps.harness.engines.shared.shellpolicy import shell_command_is_explore_safe
 
 
 @pytest.mark.parametrize(
@@ -137,8 +134,8 @@ def test_streaming_redactor_is_fresh_per_content_block() -> None:
         "git status -c alias.x=sh",
     ],
 )
-def test_git_mutation_commands_are_classified_as_mutating(command: str) -> None:
-    assert shell_command_may_mutate(command), command
+def test_explore_rejects_git_writes_and_execution_options(command: str) -> None:
+    assert not shell_command_is_explore_safe(command), command
 
 
 @pytest.mark.parametrize(
@@ -155,55 +152,11 @@ def test_git_mutation_commands_are_classified_as_mutating(command: str) -> None:
         "git config --get user.name",
         "git config --get alias.cleanup rm",
         "git diff",
-        "git branch --list",
         "/usr/bin/git status --short",
     ],
 )
 def test_git_read_only_inspection_commands_remain_available(command: str) -> None:
-    assert not shell_command_may_mutate(command), command
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        'env python -c \'open("x", "w")\'',
-        "timeout 1 rm -f x",
-        "xargs rm",
-        "command sh -c 'touch x'",
-        "make clean",
-        "npm run lint",
-        "npm exec eslint",
-        "git status > result.txt",
-        "git remote add origin https://example.invalid/repo.git",
-        "git remote set-url origin https://example.invalid/repo.git",
-        "sed -i s/a/b/ file.txt",
-        "sed -n '1,4p' file.txt -i.bak",
-        "sed -n '1,4p' file.txt --in-place=backup",
-        "sed -n 'w output.txt' file.txt",
-        "rg --pre rm pattern .",
-        "rg --pre=rm pattern .",
-        "rg --pre=rm=argument pattern .",
-        "find . -fprint0 result.txt",
-        "find . -fprintf result.txt %p",
-        "find . -fls result.txt",
-        "ruff check --fix .",
-        "ruff format .",
-        "pip install package",
-        "npm install package",
-        "pnpm add package",
-    ],
-)
-def test_shell_wrappers_and_script_commands_fail_closed(command: str) -> None:
-    assert shell_command_may_mutate(command), command
-
-
-@pytest.mark.parametrize(
-    "command", ["pytest -q", "grep -R foo .", "git status", "make -n clean"]
-)
-def test_known_inspection_and_explicit_dry_run_commands_are_read_only(
-    command: str,
-) -> None:
-    assert not shell_command_may_mutate(command), command
+    assert shell_command_is_explore_safe(command), command
 
 
 @pytest.mark.parametrize(
@@ -225,6 +178,10 @@ def test_strict_explore_read_only_command_allowlist(command: str) -> None:
 @pytest.mark.parametrize(
     "command",
     [
+        "",
+        "   ",
+        "git status 'unterminated",
+        "git status && git diff",
         "git remote add origin URL",
         "sed -n 'w output.txt' file.txt",
         "git status; touch file",
@@ -285,49 +242,6 @@ def test_strict_explore_read_only_command_allowlist(command: str) -> None:
 )
 def test_strict_explore_rejects_unknown_or_mutating_commands(command: str) -> None:
     assert not shell_command_is_explore_safe(command), command
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "pytest -q --junitxml=src/generated.py",
-        "pytest -q --junitxml=src/config.json",
-        "pytest -q --junitxml=src/config.yml",
-        "pytest -q --junitxml=src/config.toml",
-        "pytest -q --junitxml=src/notes.md",
-        "pytest -q --junitxml=src/component.vue",
-        "pytest -q --junitxml=src/component.ts",
-        "pytest -q --junitxml=artifacts/config.json",
-        "pytest -q --junitxml=src/generated.xml",
-        "pytest -q --result-json=src/result.json",
-        "pytest -q --basetemp=src/tmp",
-        "pytest -q --cov-report=xml:src/coverage.xml",
-        "pytest -q --cov-report=html:src/htmlcov",
-        "ruff check --no-cache --output-file=src/config.json .",
-        "ruff check --no-cache --output-file=reports/output.json .",
-        "coverage xml -o src/coverage.json",
-        "coverage html -d src/htmlcov",
-        "npm run build -- --output-path=src/generated.vue",
-        "npm run build -- --output-path=src/config.toml",
-        "npm run build -- --config=artifacts/vite.config.ts",
-        "npm run build -- --config=src/vite.config.ts",
-        "pytest -q $(touch generated.py)",
-        "pytest -q `touch generated.py`",
-        "git remote add origin URL",
-        "ruff check --fix .",
-        "sed -i s/a/b/ file.txt",
-        "npm install package",
-        "python script.py",
-        "echo report > out.txt",
-        "npm run custom-task",
-        "git remote add origin URL",
-        "ruff check .",
-        "ruff check --no-cache --fix .",
-        "sed -n 'w out.txt' file.txt",
-    ],
-)
-def test_generic_mutation_classifier_marks_unrecognized_writes(command: str) -> None:
-    assert shell_command_may_mutate(command), command
 
 
 def test_numeric_usage_metadata_is_not_redacted_as_a_token_secret() -> None:

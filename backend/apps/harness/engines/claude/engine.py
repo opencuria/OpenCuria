@@ -776,13 +776,6 @@ class ClaudeEngine:
         return "explore" if name in {"explore", "explorer"} else "general"
 
     @staticmethod
-    def _command_may_mutate(command: str) -> bool:
-        """Compatibility helper for conservative shell mutation classification."""
-        from .shellpolicy import shell_command_may_mutate
-
-        return shell_command_may_mutate(command)
-
-    @staticmethod
     def _event_arguments(source_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Normalize Claude native file arguments for harness events."""
         result = dict(arguments)

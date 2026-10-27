@@ -12,6 +12,7 @@ from ...permissions.evaluator import ASK, DENY, PermissionEvaluator
 from ...permissions.scopes import is_permission_scope, permission_scope
 from ...tools.base import ToolRegistry
 from ..base import RunOptions
+from ..shared.shellpolicy import shell_command_is_explore_safe
 from .events import StepState
 from .policy import (
     NATIVE_TOOL_KEYS,
@@ -21,7 +22,6 @@ from .policy import (
     tool_identity,
 )
 from .security import redact_action, redact_arguments, redact_title
-from .shellpolicy import shell_command_is_explore_safe
 
 
 class PermissionBridge:

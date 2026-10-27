@@ -589,13 +589,6 @@ def test_plan_native_write_asks_and_bash_is_exposed() -> None:
         depth=0,
         max_depth=2,
     )
-    assert ClaudeEngine._command_may_mutate("pytest -q") is False
-    assert ClaudeEngine._command_may_mutate("touch notes.py") is True
-    assert ClaudeEngine._command_may_mutate('env python -c \'open("x","w")\'') is True
-    assert ClaudeEngine._command_may_mutate("make clean") is True
-    assert ClaudeEngine._command_may_mutate("npm run lint") is True
-    assert ClaudeEngine._command_may_mutate("git branch -D feature") is True
-    assert ClaudeEngine._command_may_mutate("git status") is False
 
 
 def _sse(event_type: str, payload: dict[str, Any]) -> bytes:
