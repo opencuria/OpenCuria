@@ -58,6 +58,7 @@ const runnerStore = {
 }
 
 const workspaceStore = {
+  workspaces: [],
   createWorkspace,
 }
 
@@ -87,8 +88,8 @@ const imageStore = {
       ],
     },
   ],
-  imageDefinitions: [],
-  runnerBuildsByDefinition: {},
+  imageDefinitions: [] as Record<string, unknown>[],
+  runnerBuildsByDefinition: {} as Record<string, Record<string, unknown>[]>,
   fetchCapturedImages,
   fetchImageDefinitionsWithBuilds,
   createWorkspaceFromCapturedImage,
@@ -206,5 +207,61 @@ describe('CreateWorkspaceDialog', () => {
     })
     expect(vm.selectedCredentialIds).toEqual(['cred-1'])
     expect(createWorkspace).not.toHaveBeenCalled()
+  })
+
+  it('creates with the image runner defaults when resources are left untouched', async () => {
+    const runner = runnerStore.runners[0]!
+    const original = { ...runner }
+    Object.assign(runner, {
+      qemu_max_vcpus: 4,
+      qemu_default_vcpus: 1,
+      qemu_max_memory_mb: 8192,
+      qemu_default_memory_mb: 1024,
+      qemu_max_disk_size_gb: 100,
+      qemu_default_disk_size_gb: 20,
+    })
+    imageStore.imageDefinitions = [
+      { id: 'definition-1', name: 'Ubuntu', is_active: true, status: 'active' },
+    ]
+    imageStore.runnerBuildsByDefinition = {
+      'definition-1': [
+        {
+          id: 'build-1',
+          image_definition_id: 'definition-1',
+          runner_id: 'runner-1',
+          image_artifact_id: 'artifact-1',
+          status: 'active',
+        },
+      ],
+    }
+    try {
+      const wrapper = shallowMount(CreateWorkspaceDialog)
+      const vm = wrapper.vm as typeof wrapper.vm & {
+        open: boolean
+        name: string
+        pluginSelectionValid: boolean
+        handleSubmit: () => Promise<void>
+      }
+      vm.open = true
+      vm.name = 'Small runner'
+      vm.pluginSelectionValid = true
+      await nextTick()
+
+      await vm.handleSubmit()
+
+      expect(createWorkspace).toHaveBeenCalledWith(
+        expect.objectContaining({
+          runner_id: 'runner-1',
+          image_id: 'artifact-1',
+          qemu_vcpus: 1,
+          qemu_memory_mb: 1024,
+          qemu_disk_size_gb: 20,
+        }),
+      )
+    } finally {
+      Object.assign(runner, original)
+      imageStore.imageDefinitions = []
+      imageStore.runnerBuildsByDefinition = {}
+    }
   })
 })
