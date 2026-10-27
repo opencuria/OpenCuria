@@ -26,7 +26,6 @@ from .models_catalog import (
 )
 from .openai_compatible import OpenAICompatibleAdapter
 from .openrouter import DEFAULT_BASE_URL, OpenRouterAdapter
-from .registry import ProviderRegistry, default_registry
 
 log = structlog.get_logger(__name__)
 
@@ -109,13 +108,11 @@ class ProviderResolver:
         organization_id: uuid.UUID,
         *,
         user_id: int,
-        registry: ProviderRegistry | None = None,
         account_ids: dict[str, str] | None = None,
         on_account_used: Callable | None = None,
     ) -> None:
         self._organization_id = organization_id
         self._user_id = user_id
-        self._registry = registry or default_registry
         connections = selected_catalog_connections(
             organization_id,
             user_id,
@@ -183,9 +180,9 @@ class ProviderResolver:
         if provider_id == "openrouter":
             api_key = str(credentials.get("api_key", "") or "")
             base_url = str(config.get("base_url") or DEFAULT_BASE_URL)
-            adapter = OpenRouterAdapter(api_key=api_key, base_url=base_url)
+            return OpenRouterAdapter(api_key=api_key, base_url=base_url)
         elif provider_id == "chatgpt":
-            adapter = ChatGPTAdapter(
+            return ChatGPTAdapter(
                 credentials=credentials,
                 fresh_credentials=self._chatgpt_credentials_callback(connection),
             )
@@ -195,7 +192,7 @@ class ProviderResolver:
             elif config.get("auth_method") == "bearer":
                 credentials = {"bearer_token": credentials.get("bearer_token", "")}
             region = str(config.get("region") or DEFAULT_REGION)
-            adapter = BedrockAdapter(credentials=credentials, region=region)
+            return BedrockAdapter(credentials=credentials, region=region)
         elif provider_id == "openai-compatible":
             base_url = str(config.get("base_url", "") or "").strip()
             if not base_url:
@@ -203,13 +200,8 @@ class ProviderResolver:
                     "Provider 'openai-compatible' needs base_url in config"
                 )
             api_key = str(credentials.get("api_key", "") or "")
-            adapter = OpenAICompatibleAdapter(base_url=base_url, api_key=api_key)
-        else:
-            factory = self._registry.get(provider_id)
-            adapter = factory(credentials=credentials, config=config)
-        if not isinstance(adapter, ProviderAdapter):
-            raise TypeError(f"Provider {provider_id!r} did not build an adapter")
-        return adapter
+            return OpenAICompatibleAdapter(base_url=base_url, api_key=api_key)
+        raise ValueError(f"Unknown provider: {provider_id!r}")
 
     def _chatgpt_credentials_callback(self, connection: Any) -> Callable:
         """Freeze exact account identity and initiating authority, not selection."""

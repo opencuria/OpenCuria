@@ -20,8 +20,6 @@ from .agents.definitions import AGENT_DEFINITIONS
 from .constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
 from .models import AgentSConfig, ProviderConfig, RecentModel
 from .provider_accounts import ProviderAccountService
-from .providers.bedrock import BedrockAdapter
-from .providers.chatgpt import ChatGPTAdapter
 from .providers.model_ref import parse_model_ref
 from .providers.models_catalog import (
     ProviderModel,
@@ -29,9 +27,6 @@ from .providers.models_catalog import (
     list_merged_provider_models,
     normalize_reasoning_effort,
 )
-from .providers.openai_compatible import OpenAICompatibleAdapter
-from .providers.openrouter import OpenRouterAdapter
-from .providers.registry import ProviderRegistry, default_registry
 from .providers.resolver import ProviderResolver
 from .repositories import (
     AgentConfigRepository,
@@ -42,24 +37,6 @@ from .repositories import (
 )
 
 log = structlog.get_logger(__name__)
-
-
-def _ensure_default_adapters(registry: ProviderRegistry) -> None:
-    """Register the built-in adapters if missing."""
-    if "openrouter" not in registry:
-        registry.register("openrouter", OpenRouterAdapter)
-    if "chatgpt" not in registry:
-        # ProviderConnection resolver constructs ChatGPTAdapter with OAuth
-        # credentials; registration exposes the factory for discovery only.
-        registry.register("chatgpt", ChatGPTAdapter)
-    if "amazon-bedrock" not in registry:
-        # ProviderConnection resolver constructs BedrockAdapter with AWS
-        # credentials; registration exposes the factory for discovery only.
-        registry.register("amazon-bedrock", BedrockAdapter)
-    if "openai-compatible" not in registry:
-        # ProviderConnection resolver constructs OpenAICompatibleAdapter
-        # with base_url/api_key; registration exposes it for discovery only.
-        registry.register("openai-compatible", OpenAICompatibleAdapter)
 
 
 CONFIGURABLE_AGENTS = ("build", "plan", "general", "explore", "computeruse")
@@ -373,11 +350,8 @@ class ProviderConfigService:
     def __init__(
         self,
         repository: type[ProviderConfigRepository] | None = None,
-        registry: ProviderRegistry | None = None,
     ) -> None:
         self.repository = repository or ProviderConfigRepository
-        self.registry = registry or default_registry
-        _ensure_default_adapters(self.registry)
 
     def save_config(
         self,
@@ -437,7 +411,6 @@ class ProviderConfigService:
         """Build a resolver for the user's active or answer-frozen accounts."""
         return ProviderResolver(
             organization_id,
-            registry=self.registry,
             user_id=user_id,
             account_ids=account_ids,
             on_account_used=on_account_used,
