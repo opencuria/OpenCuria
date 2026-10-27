@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 
 from django.db import IntegrityError, transaction
@@ -460,21 +462,15 @@ class ScheduledTaskRepository:
         ScheduledTaskRun.objects.filter(id=run_id).update(completion_check_pending=False)
 
     @staticmethod
-    def recover_backend_restart() -> int:
-        """Recover lost scheduled turns without changing unrelated chat turns."""
-        from apps.harness.models import (
-            HarnessMessage,
-            HarnessPart,
-            HarnessSession,
-            QuestionRequest,
-        )
-        from apps.harness.permissions.models import PermissionRequest
+    @contextmanager
+    def restart_runs() -> Iterator[list[ScheduledTaskRun]]:
+        """Hold active ledger locks and the transaction used by restart recovery.
 
-        now = timezone.now()
-        error = "Backend restarted before the run completed"
-        recovered = 0
+        The service settles the ledger and calls the harness recovery service
+        inside this scope, so both contexts roll back together on failure.
+        """
         with transaction.atomic():
-            runs = list(
+            yield list(
                 ScheduledTaskRun.objects.select_for_update(of=("self",))
                 .filter(
                     status__in=[
@@ -484,109 +480,6 @@ class ScheduledTaskRepository:
                 )
                 .select_related("assistant_message")
             )
-            for run in runs:
-                assistant = run.assistant_message
-                if assistant is None and run.session_id is not None:
-                    assistant = (
-                        HarnessMessage.objects.filter(
-                            session_id=run.session_id, role="assistant"
-                        )
-                        .order_by("position", "created_at")
-                        .first()
-                    )
-                if assistant is not None and run.assistant_message_id != assistant.id:
-                    run.assistant_message = assistant
-                completed = assistant is not None and assistant.completed_at is not None
-                if completed:
-                    run.status = (
-                        ScheduledTaskRun.Status.ERROR
-                        if assistant.error or assistant.finish == "error"
-                        else ScheduledTaskRun.Status.SUCCEEDED
-                    )
-                    run.finished_at = assistant.completed_at
-                    run.error = assistant.error or ""
-                    update_fields = ["status", "finished_at", "error"]
-                else:
-                    run.status = ScheduledTaskRun.Status.INTERRUPTED
-                    run.finished_at = now
-                    run.error = error
-                    run.reason = "backend_restart"
-                    update_fields = ["status", "finished_at", "error", "reason"]
-                run.save(update_fields=["assistant_message", *update_fields])
-                recovered += 1
-                if completed or run.session_id is None:
-                    continue
-
-                root_session_id = run.session_id
-                if assistant is not None:
-                    HarnessMessage.objects.filter(id=assistant.id).update(
-                        finish="aborted", error=error, completed_at=now
-                    )
-                    child_ids = set(
-                        HarnessPart.objects.filter(
-                            message_id=assistant.id, type="subtask"
-                        ).values_list("meta__child_session_id", flat=True)
-                    )
-                    child_ids.discard(None)
-                    child_ids.discard("")
-                    session_ids: set[uuid.UUID] = set()
-                    frontier = {uuid.UUID(str(child_id)) for child_id in child_ids}
-                    while frontier:
-                        descendants = set(
-                            HarnessSession.objects.filter(
-                                id__in=frontier
-                            ).values_list("id", flat=True)
-                        )
-                        descendants -= session_ids
-                        if not descendants:
-                            break
-                        session_ids.update(descendants)
-                        frontier = set(
-                            HarnessSession.objects.filter(
-                                parent_id__in=descendants
-                            ).values_list("id", flat=True)
-                        ) - session_ids
-                    if session_ids:
-                        HarnessMessage.objects.filter(
-                            session_id__in=session_ids,
-                            role="assistant",
-                            completed_at__isnull=True,
-                        ).update(finish="aborted", error=error, completed_at=now)
-                        HarnessSession.objects.filter(id__in=session_ids).update(
-                            status="idle"
-                        )
-                        PermissionRequest.objects.filter(
-                            session_id__in=session_ids, status="pending"
-                        ).update(status="rejected", resolved_at=now)
-                        QuestionRequest.objects.filter(
-                            session_id__in=session_ids, status="pending"
-                        ).update(status="rejected", resolved_at=now)
-
-                # Do not idle a root session if it has any other incomplete
-                # assistant message (for example a follow-up after this run).
-                other_incomplete = HarnessMessage.objects.filter(
-                    session_id=root_session_id,
-                    role="assistant",
-                    completed_at__isnull=True,
-                )
-                if assistant is not None:
-                    other_incomplete = other_incomplete.exclude(id=assistant.id)
-                if not other_incomplete.exists():
-                    HarnessSession.objects.filter(
-                        id=root_session_id, status="busy"
-                    ).update(status="idle")
-                if assistant is not None:
-                    PermissionRequest.objects.filter(
-                        session_id=root_session_id,
-                        status="pending",
-                        message_id=assistant.id,
-                    ).update(status="rejected", resolved_at=now)
-                    QuestionRequest.objects.filter(
-                        session_id=root_session_id,
-                        status="pending",
-                        message_id=assistant.id,
-                    ).update(status="rejected", resolved_at=now)
-        return recovered
 
     @staticmethod
     def mark_missed(

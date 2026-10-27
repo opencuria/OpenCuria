@@ -10,9 +10,6 @@ from apps.scheduled_tasks.services import ScheduledTaskScheduler, ScheduledTaskS
 
 
 class FakeRepository:
-    def recover_backend_restart(self):
-        return 0
-
     def due(self, now):
         return []
 
@@ -47,6 +44,51 @@ async def test_scheduler_fails_duplicate_start_before_recovery(monkeypatch):
     with pytest.raises(RuntimeError, match="Another backend process"):
         await scheduler.start()
     assert events == ["acquire", "release"]
+    assert scheduler._task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovery_fails", [False, True])
+async def test_scheduler_recovers_under_lease_before_dispatch(
+    monkeypatch, recovery_fails
+):
+    events = []
+
+    class FakeLease:
+        async def acquire(self):
+            events.append("acquire")
+            return True
+
+        async def release(self):
+            events.append("release")
+
+    class FakeRecovery:
+        def recover_backend_restart(self):
+            events.append("recover")
+            if recovery_fails:
+                raise RuntimeError("recovery failed")
+            return 0
+
+    async def skip_due():
+        events.append("skip_due")
+
+    monkeypatch.setattr("apps.scheduled_tasks.lease.ScheduledTaskLease", FakeLease)
+    service = ScheduledTaskService(repository=FakeRepository())
+    service.skip_due_on_startup = skip_due
+    scheduler = ScheduledTaskScheduler(service=service, recovery=FakeRecovery())
+    if recovery_fails:
+        with pytest.raises(RuntimeError, match="recovery failed"):
+            await scheduler.start()
+        assert events == ["acquire", "recover", "release"]
+    else:
+        await scheduler.start()
+        try:
+            assert events == ["acquire", "recover", "skip_due"]
+            assert scheduler._task is not None
+        finally:
+            await scheduler.stop()
+        assert events == ["acquire", "recover", "skip_due", "release"]
+    assert scheduler._lease is None
     assert scheduler._task is None
 
 

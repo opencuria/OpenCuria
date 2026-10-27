@@ -68,6 +68,9 @@ coordinators. Their shared read boundary is WorkspaceOperationRepository.
 Lifecycle outbox persistence never imports task allocation or workflow coordinators.
 RecoveryService supplies domain delivery approval, checked under the existing
 runner locks before command expiry and lease allocation.
+Scheduled-task restart recovery coordinates ledger outcomes through services;
+harness turn, descendant and input cleanup belongs to RunRecoveryService, which
+never imports live orchestration or its scheduling consumers.
 """
 
 from __future__ import annotations
@@ -238,6 +241,57 @@ def test_lifecycle_outbox_never_imports_its_consumers() -> None:
         "RecoveryService must supply domain delivery approval to the lifecycle "
         "outbox; persistence and its dependencies must not import task allocation "
         "or workflow coordination, even through local imports:\n"
+        + "\n".join(sorted(violations))
+    )
+
+
+def test_scheduled_restart_recovery_reaches_harness_only_through_its_service() -> None:
+    """The schedule workflow must not read or mutate harness storage directly."""
+    path = APPS_ROOT / "scheduled_tasks" / "recovery.py"
+    service = "apps.harness.run_recovery_service"
+    imported = _imported_modules(path, ast.parse(path.read_text()))
+    assert service in imported
+    violations = sorted(
+        module
+        for module in imported
+        if module.startswith("apps.harness.")
+        and module != service
+        and not module.startswith(f"{service}.")
+    )
+    assert violations == [], (
+        "Restart recovery must call RunRecoveryService instead of importing "
+        "harness models, repositories or live execution:\n" + "\n".join(violations)
+    )
+
+
+def test_harness_restart_recovery_is_independent_of_live_orchestration() -> None:
+    """Restart cleanup must stay independent even through local imports."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    modules = {_module_name(path): path for path in trees}
+    pending = {"apps.harness.run_recovery_service"}
+    forbidden = (
+        "apps.harness.harness_service",
+        "apps.harness.runner",
+        "apps.harness.tools",
+        "apps.scheduled_tasks",
+    )
+    checked: set[str] = set()
+    violations = set()
+    while pending:
+        module = pending.pop()
+        checked.add(module)
+        path = modules[module]
+        for imported in _imported_modules(path, trees[path]):
+            if any(
+                imported == owner or imported.startswith(f"{owner}.")
+                for owner in forbidden
+            ):
+                violations.add(f"{module} -> {imported}")
+            elif imported in modules and imported not in checked:
+                pending.add(imported)
+    assert violations == set(), (
+        "Harness restart recovery and its dependencies must not import live "
+        "orchestration, tools or scheduling consumers:\n"
         + "\n".join(sorted(violations))
     )
 

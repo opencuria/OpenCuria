@@ -20,6 +20,7 @@ from apps.skills.services import SkillService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .models import ScheduledTask, ScheduledTaskRun
+from .recovery import ScheduledTaskRecoveryService
 from .recurrence import next_occurrence, normalize_cron_expression, valid_timezone
 from .repositories import ScheduledTaskRepository
 
@@ -962,9 +963,16 @@ class ScheduledTaskScheduler:
     """Single asyncio-loop scheduler started only by ASGI lifespan."""
 
     def __init__(
-        self, service: ScheduledTaskService | None = None, *, interval: float = 5.0
+        self,
+        service: ScheduledTaskService | None = None,
+        *,
+        interval: float = 5.0,
+        recovery: ScheduledTaskRecoveryService | None = None,
     ) -> None:
         self.service = service or ScheduledTaskService()
+        self.recovery = recovery or ScheduledTaskRecoveryService(
+            repository=self.service.repository
+        )
         self.interval = interval
         self._task: asyncio.Task[None] | None = None
         self._lease_task: asyncio.Task[None] | None = None
@@ -987,7 +995,7 @@ class ScheduledTaskScheduler:
             )
         self._lease = lease
         try:
-            await sync_to_async(self.service.repository.recover_backend_restart)()
+            await sync_to_async(self.recovery.recover_backend_restart)()
             await self.service.skip_due_on_startup()
         except BaseException:
             try:

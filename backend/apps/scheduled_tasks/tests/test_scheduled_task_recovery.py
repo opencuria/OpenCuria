@@ -18,6 +18,7 @@ from apps.organizations.models import Membership, MembershipRole, Organization
 from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.models import Runner, Workspace
 from apps.scheduled_tasks.models import ScheduledTask, ScheduledTaskRun
+from apps.scheduled_tasks.recovery import ScheduledTaskRecoveryService
 from apps.scheduled_tasks.repositories import ScheduledTaskRepository
 
 
@@ -179,7 +180,7 @@ def test_restart_recovery_keeps_terminal_result_and_cleans_only_lost_run():
         questions=[],
     )
 
-    assert ScheduledTaskRepository.recover_backend_restart() == 2
+    assert ScheduledTaskRecoveryService().recover_backend_restart() == 2
 
     finished_run.refresh_from_db()
     lost_run.refresh_from_db()
