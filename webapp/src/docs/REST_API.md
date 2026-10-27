@@ -8,7 +8,7 @@ Interactive docs (Swagger UI): `/api/v1/docs`
 
 ## Authentication
 
-All endpoints (except `/auth/login/`, `/auth/register/`, `/auth/refresh/`, and `/health/`) require authentication.
+All endpoints (except `/auth/login/`, `/auth/refresh/`, `/auth/providers/`, `/auth/sso/callback/`, and `/health/`) require authentication.
 
 Two authentication methods are supported and can be used interchangeably:
 

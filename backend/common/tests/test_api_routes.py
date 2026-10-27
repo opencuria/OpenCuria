@@ -8,6 +8,7 @@ from config.urls import api
 @pytest.mark.parametrize(
     ("method", "path", "replacement"),
     [
+        ("post", "/auth/register/", "/auth/login/"),
         ("get", "/organizations/", "/auth/me/"),
         ("get", "/plugins/{plugin_id}/", "/plugins/"),
         ("get", "/captured-images/{captured_image_id}/", "/captured-images/"),
