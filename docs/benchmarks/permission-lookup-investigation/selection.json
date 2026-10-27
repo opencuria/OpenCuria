@@ -1,0 +1,30 @@
+{
+  "baseline_ref": "b52ad4b",
+  "utc": "2026-10-27T10:04:11.034191+00:00",
+  "method": "secrets.randbelow(3), OS randomness; fixed ranked shortlist before draw",
+  "top_three": [
+    {
+      "rank": 1,
+      "id": "permission-pending-index",
+      "component": "backend/harness",
+      "evidence": "100,001 retained requests: single-session p50 11.693 ms, 50-session p50 24.522 ms; EXPLAIN shows full table scan and temporary order sort. Every timeline/feed and permission cleanup calls this.",
+      "risk": "Low: additive database index; preserve repository queries and all gate semantics."
+    },
+    {
+      "rank": 2,
+      "id": "untracked-git-diff",
+      "component": "runner",
+      "evidence": "60 untracked files: complete working_diff RPC 65 guest commands, p50 133.128 ms, local Git with no SSH delay.",
+      "risk": "Moderate: batch guest work with exact path/output/error/cancellation behavior and resource bounds."
+    },
+    {
+      "rank": 3,
+      "id": "credential-removal-requirements",
+      "component": "backend/plugins",
+      "evidence": "40 effective plugins: credential_removal_gaps 43 SQL queries, p50 33.860 ms. Repeated for each attached workspace during deletion.",
+      "risk": "Low: reuse bulk requirements repository; settings/destructive path less frequent than chat."
+    }
+  ],
+  "selected_index": 0,
+  "selected": "permission-pending-index"
+}
