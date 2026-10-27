@@ -7,8 +7,9 @@ import uuid
 import pytest
 
 from apps.harness.models import HarnessSession
+from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.exceptions import WorkspaceNotFoundError
-from apps.runners.models import Workspace
+from apps.runners.models import Task, Workspace
 from apps.runners.services import RunnerService
 
 
@@ -74,3 +75,28 @@ def test_missing_workspace_read_contract() -> None:
     assert service.get_workspace_or_none(missing) is None
     with pytest.raises(WorkspaceNotFoundError):
         service.get_workspace(missing)
+
+
+@pytest.mark.django_db
+def test_launch_state_reports_committed_lifecycle_facts(workspace, runner) -> None:
+    """Unattended launches see the intervention fence and a missing workspace."""
+    lifecycle_task = Task.objects.create(
+        runner=runner, type="create_image_artifact", status="failed"
+    )
+    Workspace.objects.filter(pk=workspace.pk).update(current_task_id=lifecycle_task.id)
+    service = RunnerService()
+
+    assert service.get_workspace_launch_state(workspace.id) == (
+        WorkspaceStatus.RUNNING,
+        None,
+        RunnerStatus.ONLINE,
+        True,
+        lifecycle_task.id,
+    )
+    assert service.get_workspace_launch_state(uuid.uuid4()) == (
+        None,
+        None,
+        None,
+        False,
+        None,
+    )

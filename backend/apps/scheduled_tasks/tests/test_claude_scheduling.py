@@ -35,10 +35,9 @@ class Repository:
             setattr(run, key, value)
         return run
 
-    def delete_unstarted_session(self, *args, **kwargs):
-        return True
 
-    def touch_workspace_activity(self, *_):
+class Runner:
+    async def touch_workspace_activity(self, workspace_id):
         return None
 
 
@@ -197,7 +196,9 @@ def test_claude_run_dispatch_passes_harness_and_owner_without_secret(name):
             return SimpleNamespace(id=uuid.uuid4())
 
     repo = Repository()
-    service = ScheduledTaskService(repository=repo, harness=FakeHarness())
+    service = ScheduledTaskService(
+        repository=repo, harness=FakeHarness(), runner=Runner()
+    )
     task = SimpleNamespace(
         id=uuid.uuid4(),
         name=name,

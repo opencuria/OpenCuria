@@ -76,56 +76,31 @@ class ScheduledTaskRepository:
         task.save(update_fields=["is_deleted", "enabled", "updated_at"])
 
     @staticmethod
-    def delete_unstarted_session(
-        run_id: uuid.UUID,
-        session_id: uuid.UUID,
-        *,
-        task_id: uuid.UUID,
-        workspace_id: uuid.UUID,
-        organization_id: uuid.UUID,
+    def release_unstarted_claim(
+        run_id: uuid.UUID, session_id: uuid.UUID, *, task_id: uuid.UUID
     ) -> bool:
-        """Atomically discard only this claim's empty, idle root conversation.
+        """Detach an unstarted claim from the chat it alone created.
 
-        Share admission's runner/workspace serialization, without applying the
-        user-facing lifecycle fence to internal rollback of an unstarted chat.
+        Runs under the harness admission locks before the chat is discarded;
+        False keeps the chat because the claim started or another run uses it.
         """
-        from apps.harness.models import HarnessSession, HarnessSessionStatus
-        from apps.runners.locking import lock_runner
-        from apps.runners.models import Workspace
-
-        runner_id = Workspace.objects.filter(pk=workspace_id).values_list(
-            "runner_id", flat=True
+        claim = ScheduledTaskRun.objects.select_for_update().filter(
+            pk=run_id,
+            scheduled_task_id=task_id,
+            session_id=session_id,
+            status=ScheduledTaskRun.Status.CLAIMED,
+            started_at__isnull=True,
+            assistant_message__isnull=True,
         ).first()
-        if runner_id is None:
+        if claim is None:
             return False
-        with transaction.atomic():
-            lock_runner(runner_id)
-            Workspace.objects.select_for_update().get(pk=workspace_id)
-            session = HarnessSession.objects.select_for_update().filter(
-                pk=session_id,
-                workspace_id=workspace_id,
-                organization_id=organization_id,
-                parent__isnull=True,
-                status=HarnessSessionStatus.IDLE,
-            ).first()
-            if session is None:
-                return False
-            claim = ScheduledTaskRun.objects.select_for_update().filter(
-                pk=run_id,
-                scheduled_task_id=task_id,
-                session_id=session_id,
-                status=ScheduledTaskRun.Status.CLAIMED,
-                started_at__isnull=True,
-                assistant_message__isnull=True,
-            ).first()
-            if claim is None or session.messages.exists() or session.children.exists():
-                return False
-            if session.scheduled_task_runs.exclude(pk=run_id).exists():
-                return False
-            claim.session = None
-            claim.save(update_fields=["session"])
-            session.delete()
-            return True
+        if ScheduledTaskRun.objects.filter(session_id=session_id).exclude(
+            pk=run_id
+        ).exists():
+            return False
+        claim.session = None
+        claim.save(update_fields=["session"])
+        return True
 
     @staticmethod
     def has_active_run(task_id: uuid.UUID) -> bool:
@@ -164,92 +139,6 @@ class ScheduledTaskRepository:
             ).order_by(
                 "next_run_at"
             )[:100]
-        )
-
-    @staticmethod
-    def has_busy_harness_session(workspace_id: uuid.UUID) -> bool:
-        from apps.harness.models import HarnessSession
-
-        return HarnessSession.objects.filter(
-            workspace_id=workspace_id, status="busy"
-        ).exists()
-
-    @staticmethod
-    def _workspace_active_session_query():
-        from apps.harness.models import HarnessSession
-
-        return Exists(
-            HarnessSession.objects.filter(workspace_id=OuterRef("pk"), status="busy")
-        )
-
-    @staticmethod
-    def workspace_autostop_settings(
-        workspace_id: uuid.UUID,
-    ) -> tuple[str, bool, int | None, datetime | None] | None:
-        from apps.runners.models import Workspace
-
-        return (
-            Workspace.objects.filter(id=workspace_id)
-            .annotate(
-                has_active_harness_session=(
-                    ScheduledTaskRepository._workspace_active_session_query()
-                )
-            )
-            .values_list(
-                "status",
-                "has_active_harness_session",
-                "runner__organization__workspace_auto_stop_timeout_minutes",
-                "last_activity_at",
-            )
-            .first()
-        )
-
-    @staticmethod
-    def workspace_resume_state(
-        workspace_id: uuid.UUID,
-    ) -> tuple[str | None, str | None, str | None, bool, uuid.UUID | None]:
-        from apps.runners.models import Workspace
-
-        row = (
-            Workspace.objects.filter(id=workspace_id)
-            .values_list(
-                "status",
-                "active_operation",
-                "runner__status",
-                "created_by__is_active",
-                "current_task_id",
-            )
-            .first()
-        )
-        return row or (None, None, None, False, None)
-
-    @staticmethod
-    def touch_workspace_activity(workspace_id: uuid.UUID) -> None:
-        from apps.runners.models import Workspace
-
-        Workspace.objects.filter(id=workspace_id).update(
-            last_activity_at=timezone.now(), updated_at=timezone.now()
-        )
-
-    @staticmethod
-    def workspace_is_owned(
-        workspace_id: uuid.UUID, *, organization_id: uuid.UUID, owner_id: int
-    ) -> bool:
-        from apps.organizations.models import Membership
-        from apps.runners.models import Workspace
-
-        from django.contrib.auth import get_user_model
-
-        return (
-            Workspace.objects.filter(
-                id=workspace_id,
-                runner__organization_id=organization_id,
-                created_by_id=owner_id,
-            ).exists()
-            and Membership.objects.filter(
-                user_id=owner_id, organization_id=organization_id
-            ).exists()
-            and get_user_model().objects.filter(id=owner_id, is_active=True).exists()
         )
 
     @staticmethod

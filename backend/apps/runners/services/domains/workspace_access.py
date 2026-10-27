@@ -49,6 +49,21 @@ class WorkspaceAccessMixin:
         workspace, membership = found
         return workspace.created_by_id == membership.user_id
 
+    def is_active_workspace_owner(
+        self, user_id: int, workspace_id: uuid.UUID, *, organization_id: uuid.UUID
+    ) -> bool:
+        """Return whether an active member of the org still owns the workspace.
+
+        Unattended work acting for the owner re-checks this before each step.
+        """
+        return (
+            self.workspaces.is_created_by(
+                workspace_id, user_id=user_id, organization_id=organization_id
+            )
+            and OrganizationService().get_active_membership(user_id, organization_id)
+            is not None
+        )
+
     def can_user_view_workspace_desktop(
         self, user_id: int | str, workspace_id: str
     ) -> bool:

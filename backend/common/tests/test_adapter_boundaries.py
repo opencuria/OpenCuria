@@ -70,7 +70,10 @@ RecoveryService supplies domain delivery approval, checked under the existing
 runner locks before command expiry and lease allocation.
 Scheduled-task restart recovery coordinates ledger outcomes through services;
 harness turn, descendant and input cleanup belongs to RunRecoveryService, which
-never imports live orchestration or its scheduling consumers.
+never imports live orchestration or its scheduling consumers. Scheduled tasks
+persist only their own ledger: workspace launch state, ownership, activity and
+the single auto-stop policy come from the runner service, and unstarted chats
+are rolled back through ConversationService.
 """
 
 from __future__ import annotations
@@ -261,6 +264,33 @@ def test_scheduled_restart_recovery_reaches_harness_only_through_its_service() -
     assert violations == [], (
         "Restart recovery must call RunRecoveryService instead of importing "
         "harness models, repositories or live execution:\n" + "\n".join(violations)
+    )
+
+
+def test_scheduled_tasks_persist_only_their_ledger() -> None:
+    """Schedules reach workspaces, chats and members through their services."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    package = APPS_ROOT / "scheduled_tasks"
+    foreign = {
+        module
+        for module in _persistence_modules(trees) | {"apps.runners.locking"}
+        if not module.startswith("apps.scheduled_tasks.")
+    }
+    assert {"apps.harness.models", "apps.runners.repositories"} <= foreign
+    adapters = _adapter_modules(trees)
+    violations = sorted(
+        f"{_module_name(path)} -> {module}"
+        for path, tree in trees.items()
+        if path.is_relative_to(package) and path not in adapters
+        for module in _imported_modules(path, tree)
+        if module in foreign
+    )
+    assert violations == [], (
+        "Scheduled tasks persist only their schedule ledger. Read workspace "
+        "state, activity and auto-stop through apps.runners.services, members "
+        "through OrganizationService and roll back unstarted chats through "
+        "ConversationService instead of importing their models, repositories "
+        "or locks, even function-locally:\n" + "\n".join(violations)
     )
 
 

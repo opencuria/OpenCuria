@@ -317,3 +317,35 @@ def test_realtime_access_rules_share_one_membership_lookup(workspace_access_setu
     ):
         with pytest.raises(WorkspaceNotFoundError):
             service.resolve_desktop_viewer(user_id, target)
+
+
+@pytest.mark.django_db
+def test_active_workspace_owner_requires_creator_org_and_active_membership(
+    workspace_access_setup,
+):
+    """Unattended work acts only while an active org member owns the workspace."""
+    from apps.runners.services import RunnerService
+
+    service = RunnerService(sio_server=None)
+    org = workspace_access_setup["org"]
+    owner = workspace_access_setup["owner"]
+    workspace_id = workspace_access_setup["owner_workspace"].id
+    other_org = Organization.objects.create(
+        name="Other", slug=f"other-{uuid.uuid4().hex[:8]}"
+    )
+
+    def owns(user, *, organization=org, workspace=workspace_id):
+        return service.is_active_workspace_owner(
+            user.id, workspace, organization_id=organization.id
+        )
+
+    assert owns(owner)
+    assert not owns(workspace_access_setup["foreign_admin"])
+    assert not owns(owner, organization=other_org)
+    assert not owns(owner, workspace=uuid.uuid4())
+
+    get_user_model().objects.filter(pk=owner.pk).update(is_active=False)
+    assert not owns(owner)
+    get_user_model().objects.filter(pk=owner.pk).update(is_active=True)
+    Membership.objects.filter(user=owner, organization=org).delete()
+    assert not owns(owner)

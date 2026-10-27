@@ -49,6 +49,7 @@ from ...workspace_operation_repository import WorkspaceOperationRepository
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids runtime cycles
     from ...models import ImageInstance, Runner, Task, Workspace
+    from ...repositories import WorkspaceLaunchState
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,12 @@ class WorkspaceLifecycleMixin:
         if workspace is None:
             return
         await sync_to_async(self.workspaces.touch_activity)(workspace, at=at)
+
+    def get_workspace_launch_state(
+        self, workspace_id: uuid.UUID
+    ) -> WorkspaceLaunchState:
+        """Return committed lifecycle facts for unattended launch decisions."""
+        return self.workspaces.get_launch_state(workspace_id)
 
     @staticmethod
     def _derive_workspace_name(

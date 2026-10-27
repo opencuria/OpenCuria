@@ -1,6 +1,7 @@
 """Internal scheduled admission rollback works under lifecycle fences."""
 
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -13,7 +14,6 @@ from apps.harness.models import HarnessMessage, HarnessSession
 from apps.organizations.models import Membership, Organization
 from apps.runners.models import Runner, Task, Workspace
 from apps.scheduled_tasks.models import ScheduledTask, ScheduledTaskRun
-from apps.scheduled_tasks.repositories import ScheduledTaskRepository
 from apps.scheduled_tasks.services import ScheduledTaskService
 
 
@@ -78,45 +78,72 @@ def test_real_harness_admission_rollback_under_lifecycle_fence(
     assert notify.await_count == 2
 
 
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    "preserve", ["message", "busy", "started", "other_claim", "wrong_claim", "child"]
-)
-def test_cleanup_preserves_real_or_unowned_sessions(schedule, preserve):
+def _claimed_chat(schedule):
     session = HarnessSession.objects.create(
         workspace=schedule.workspace, organization_id=schedule.organization_id
     )
     run = ScheduledTaskRun.objects.create(
         scheduled_task=schedule, scheduled_for=timezone.now(), session=session
     )
-    run_id = run.id
+    return session, run
+
+
+def _cleanup(schedule, session, run):
+    notify = AsyncMock()
+    harness = SimpleNamespace(conversation_events=SimpleNamespace(emit=notify))
+    async_to_sync(ScheduledTaskService()._cleanup_unstarted_session)(
+        harness, session, run, schedule
+    )
+    return notify
+
+
+@pytest.mark.django_db
+def test_cleanup_discards_unstarted_chat_and_detaches_claim(schedule):
+    session, run = _claimed_chat(schedule)
+
+    notify = _cleanup(schedule, session, run)
+
+    assert not HarnessSession.objects.filter(pk=session.pk).exists()
+    assert run.session is None
+    run.refresh_from_db()
+    assert run.session_id is None
+    assert run.status == ScheduledTaskRun.Status.CLAIMED
+    notify.assert_awaited_once_with(schedule.workspace_id)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "preserve",
+    ["message", "busy", "started", "other_claim", "wrong_claim", "child", "foreign"],
+)
+def test_cleanup_preserves_real_or_unowned_sessions(schedule, preserve):
+    session, run = _claimed_chat(schedule)
+    claim = run
     if preserve == "message":
         HarnessMessage.objects.create(session=session, role="user", content="Real chat")
     elif preserve == "busy":
-        session.status = "busy"
-        session.save()
+        HarnessSession.objects.filter(pk=session.pk).update(status="busy")
     elif preserve == "started":
-        run.started_at = timezone.now()
-        run.save()
+        ScheduledTaskRun.objects.filter(pk=run.pk).update(started_at=timezone.now())
     elif preserve == "other_claim":
         ScheduledTaskRun.objects.create(
             scheduled_task=schedule, scheduled_for=timezone.now(), session=session
         )
     elif preserve == "wrong_claim":
-        run_id = uuid.uuid4()
+        claim = SimpleNamespace(id=uuid.uuid4(), session=session)
     elif preserve == "child":
         HarnessSession.objects.create(
             workspace=schedule.workspace,
             organization_id=schedule.organization_id,
             parent=session,
         )
-    assert not ScheduledTaskRepository.delete_unstarted_session(
-        run_id,
-        session.id,
-        task_id=schedule.id,
-        workspace_id=schedule.workspace_id,
-        organization_id=schedule.organization_id,
-    )
-    assert HarnessSession.objects.filter(pk=session.id).exists()
+    else:
+        other = Organization.objects.create(name="Other", slug=uuid.uuid4().hex)
+        HarnessSession.objects.filter(pk=session.pk).update(organization_id=other.id)
+
+    notify = _cleanup(schedule, session, claim)
+
+    assert HarnessSession.objects.filter(pk=session.pk).exists()
     run.refresh_from_db()
     assert run.session_id == session.id
+    notify.assert_not_awaited()

@@ -19,9 +19,6 @@ class FakeRepository:
         self.rows = []
         self.advanced = []
         self.skipped = []
-        self.busy = False
-        self.status = "running"
-        self.autostop_settings = None
 
     def due(self, now):
         return self.rows
@@ -57,26 +54,8 @@ class FakeRepository:
             setattr(task, key, value)
         return task
 
-    def delete_unstarted_session(self, run_id, session_id, **scope):
+    def release_unstarted_claim(self, run_id, session_id, *, task_id):
         return True
-
-    def workspace_resume_state(self, workspace_id):
-        return self.status, None, "online", True, None
-
-    def workspace_is_owned(self, workspace_id, *, organization_id, owner_id):
-        return True
-
-    def has_busy_harness_session(self, workspace_id):
-        return self.busy
-
-    def touch_workspace_activity(self, workspace_id):
-        return None
-
-    def running_workspaces_with_autostop(self):
-        return []
-
-    def workspace_autostop_settings(self, workspace_id):
-        return self.autostop_settings
 
     def create_run(self, task, scheduled_for):
         return SimpleNamespace(
@@ -89,8 +68,35 @@ class FakeRepository:
 
     create_manual_run = create_run
 
-    def lock_workspace_for_launch(self, workspace_id):
-        return self.status, self.busy
+
+class FakeRunner:
+    """Runner service double for the workspace facts a launch reads."""
+
+    def __init__(self, status="running"):
+        self.status = status
+
+    def get_workspace_launch_state(self, workspace_id):
+        return self.status, None, "online", True, None
+
+    def is_active_workspace_owner(self, user_id, workspace_id, *, organization_id):
+        return True
+
+    async def touch_workspace_activity(self, workspace_id):
+        return None
+
+
+class FakeConversations:
+    def discard_unstarted(self, session_id, *, workspace_id, organization_id, release):
+        return release()
+
+
+def make_service(repo, *, runner=None, harness=None):
+    return ScheduledTaskService(
+        repository=repo,
+        runner=runner or FakeRunner(),
+        harness=harness,
+        conversations=FakeConversations(),
+    )
 
 
 @pytest.mark.asyncio
@@ -98,31 +104,23 @@ class FakeRepository:
 async def test_auto_stop_reconciles_via_runner_auto_stop_guard_and_ignores_conflict(
     diagnostic,
 ):
-    now = datetime.now(timezone.utc)
     workspace_id = uuid.uuid4()
-    repo = FakeRepository()
-    repo.autostop_settings = (
-        "running",
-        False,
-        5,
-        now - timedelta(minutes=10),
-    )
-    repo.has_busy_harness_session = lambda _workspace_id: False
 
-    class FakeRunner:
+    class AutoStopRunner(FakeRunner):
         def __init__(self):
+            super().__init__()
             self.calls = []
 
-        async def stop_workspace(self, workspace_id, *, auto_stop=False):
-            self.calls.append((workspace_id, auto_stop))
+        async def auto_stop_if_inactive(self, workspace_id):
+            self.calls.append(workspace_id)
             raise ConflictError(diagnostic)
 
-    runner = FakeRunner()
-    service = ScheduledTaskService(repository=repo, runner=runner)
+    runner = AutoStopRunner()
+    service = make_service(FakeRepository(), runner=runner)
 
     await service._maybe_stop_workspace(workspace_id)
 
-    assert runner.calls == [(workspace_id, True)]
+    assert runner.calls == [workspace_id]
 
 
 @pytest.mark.asyncio
@@ -149,11 +147,10 @@ async def test_dispatch_skips_missed_occurrence_and_advances_without_catchup():
 @pytest.mark.asyncio
 async def test_stopped_workspace_resumes_then_starts_a_new_root_session():
     repo = FakeRepository()
-    repo.status = "stopped"
 
-    class FakeRunner:
+    class ResumingRunner(FakeRunner):
         async def resume_workspace(self, workspace_id):
-            repo.status = "running"
+            self.status = "running"
 
     class FakeHarness:
         def create_session(self, **values):
@@ -179,14 +176,13 @@ async def test_stopped_workspace_resumes_then_starts_a_new_root_session():
         reasoning_effort="",
         skill_ids=[],
     )
-    service = ScheduledTaskService(
-        repository=repo, harness=FakeHarness(), runner=FakeRunner()
-    )
+    runner = ResumingRunner(status="stopped")
+    service = make_service(repo, harness=FakeHarness(), runner=runner)
     run = await service.run_now(task)
     assert run.status == ScheduledTaskRun.Status.RUNNING
     assert run.session is not None
     assert run.assistant_message is not None
-    assert repo.status == "running"
+    assert runner.status == "running"
 
 
 @pytest.mark.asyncio
@@ -194,9 +190,11 @@ async def test_heartbeat_running_status_does_not_end_own_resume_wait(monkeypatch
     """A heartbeat may report running before the runner confirms the resume."""
     repo = FakeRepository()
     state = {"value": ("stopped", None, "online", True, None)}
-    repo.workspace_resume_state = lambda workspace_id: state["value"]
 
-    class FakeRunner:
+    class ResumingRunner(FakeRunner):
+        def get_workspace_launch_state(self, workspace_id):
+            return state["value"]
+
         async def resume_workspace(self, workspace_id):
             # The resume operation is allocated, then a heartbeat sees the VM.
             state["value"] = (
@@ -231,9 +229,7 @@ async def test_heartbeat_running_status_does_not_end_own_resume_wait(monkeypatch
         reasoning_effort="",
         skill_ids=[],
     )
-    service = ScheduledTaskService(
-        repository=repo, harness=FakeHarness(), runner=FakeRunner()
-    )
+    service = make_service(repo, harness=FakeHarness(), runner=ResumingRunner())
     run = await service._launch(task, scheduled_for=task.next_run_at)
     assert run.status == ScheduledTaskRun.Status.RUNNING
     assert run.assistant_message is not None
@@ -242,7 +238,6 @@ async def test_heartbeat_running_status_does_not_end_own_resume_wait(monkeypatch
 @pytest.mark.asyncio
 async def test_existing_starting_operation_waits_for_resume_confirmation(monkeypatch):
     repo = FakeRepository()
-    repo.status = "stopped"
     resume_states = iter(
         [
             ("stopped", WorkspaceOperation.STARTING, "online", True, None),
@@ -251,9 +246,11 @@ async def test_existing_starting_operation_waits_for_resume_confirmation(monkeyp
             ("running", None, "online", True, None),
         ]
     )
-    repo.workspace_resume_state = lambda workspace_id: next(resume_states)
 
-    class UnexpectedRunner:
+    class UnexpectedRunner(FakeRunner):
+        def get_workspace_launch_state(self, workspace_id):
+            return next(resume_states)
+
         async def resume_workspace(self, workspace_id):
             pytest.fail("an existing resume must not be dispatched again")
 
@@ -280,9 +277,8 @@ async def test_existing_starting_operation_waits_for_resume_confirmation(monkeyp
         reasoning_effort="",
         skill_ids=[],
     )
-    service = ScheduledTaskService(
-        repository=repo, runner=UnexpectedRunner(), harness=FakeHarness()
-    )
+    service = make_service(repo, runner=UnexpectedRunner(), harness=FakeHarness())
+
     async def no_sleep(_):
         return None
 
@@ -301,11 +297,12 @@ async def test_existing_starting_operation_waits_for_resume_confirmation(monkeyp
 )
 async def test_running_workspace_is_skipped_when_runner_unavailable_or_busy(state):
     repo = FakeRepository()
-    repo.status, operation, runner = state
-    repo.workspace_resume_state = lambda workspace_id: (
-        repo.status,
+    status, operation, runner_status = state
+    runner = FakeRunner()
+    runner.get_workspace_launch_state = lambda workspace_id: (
+        status,
         operation,
-        runner,
+        runner_status,
         True,
         None,
     )
@@ -327,7 +324,7 @@ async def test_running_workspace_is_skipped_when_runner_unavailable_or_busy(stat
         def create_session(self, **values):
             pytest.fail("an unsafe workspace cannot start a harness run")
 
-    service = ScheduledTaskService(repository=repo, harness=UnexpectedHarness())
+    service = make_service(repo, runner=runner, harness=UnexpectedHarness())
     run = await service._launch(task, scheduled_for=task.next_run_at)
     assert run.status == ScheduledTaskRun.Status.SKIPPED
     assert run.reason == "workspace_operation_active"
@@ -336,7 +333,6 @@ async def test_running_workspace_is_skipped_when_runner_unavailable_or_busy(stat
 @pytest.mark.asyncio
 async def test_resume_revalidates_state_before_start(monkeypatch):
     repo = FakeRepository()
-    repo.status = "stopped"
     state_reads = iter(
         [
             ("stopped", WorkspaceOperation.STARTING, "online", True, None),
@@ -344,12 +340,14 @@ async def test_resume_revalidates_state_before_start(monkeypatch):
             ("running", WorkspaceOperation.STOPPING, "online", True, None),
         ]
     )
-    repo.workspace_resume_state = lambda workspace_id: next(state_reads)
+    runner = FakeRunner()
+    runner.get_workspace_launch_state = lambda workspace_id: next(state_reads)
+
     class UnexpectedHarness:
         def create_session(self, **values):
             pytest.fail("state changed during resume; do not start a run")
 
-    service = ScheduledTaskService(repository=repo, harness=UnexpectedHarness())
+    service = make_service(repo, runner=runner, harness=UnexpectedHarness())
 
     async def no_sleep(_):
         return None
@@ -375,16 +373,15 @@ async def test_resume_revalidates_state_before_start(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_resume_waits_when_status_is_resuming(monkeypatch):
-    repo = FakeRepository()
-    repo.status = "resuming"
     states = iter(
         [
             ("resuming", WorkspaceOperation.STARTING, "online", True, None),
             ("running", None, "online", True, None),
         ]
     )
-    repo.workspace_resume_state = lambda workspace_id: next(states)
-    service = ScheduledTaskService(repository=repo)
+    runner = FakeRunner()
+    runner.get_workspace_launch_state = lambda workspace_id: next(states)
+    service = make_service(FakeRepository(), runner=runner)
 
     async def no_sleep(_):
         return None
@@ -510,9 +507,10 @@ def test_update_can_move_task_to_another_workspace(monkeypatch):
 @pytest.mark.asyncio
 async def test_started_run_survives_activity_touch_failure():
     repo = FakeRepository()
-    repo.touch_workspace_activity = lambda workspace_id: (_ for _ in ()).throw(
-        RuntimeError("database unavailable")
-    )
+
+    class UnavailableRunner(FakeRunner):
+        async def touch_workspace_activity(self, workspace_id):
+            raise RuntimeError("database unavailable")
 
     class FakeHarness:
         def create_session(self, **values):
@@ -537,7 +535,7 @@ async def test_started_run_survives_activity_touch_failure():
         skill_ids=[],
     )
     run = repo.create_run(task, datetime.now(timezone.utc))
-    service = ScheduledTaskService(repository=repo, harness=FakeHarness())
+    service = make_service(repo, runner=UnavailableRunner(), harness=FakeHarness())
     result = await service._launch(task, scheduled_for=run.scheduled_for, ledger=run)
     assert result.status == ScheduledTaskRun.Status.RUNNING
     assert result.assistant_message is not None
@@ -546,9 +544,11 @@ async def test_started_run_survives_activity_touch_failure():
 @pytest.mark.asyncio
 async def test_resume_is_skipped_when_runner_offline():
     repo = FakeRepository()
-    repo.status = "stopped"
 
-    class RunnerOffline:
+    class RunnerOffline(FakeRunner):
+        def get_workspace_launch_state(self, workspace_id):
+            return "stopped", None, "offline", True, None
+
         async def resume_workspace(self, workspace_id):
             raise AssertionError("must not ask an offline runner to resume")
 
@@ -565,14 +565,7 @@ async def test_resume_is_skipped_when_runner_offline():
         reasoning_effort="",
         skill_ids=[],
     )
-    repo.workspace_resume_state = lambda workspace_id: (
-        "stopped",
-        None,
-        "offline",
-        True,
-        None,
-    )
-    service = ScheduledTaskService(repository=repo, runner=RunnerOffline())
+    service = make_service(repo, runner=RunnerOffline())
     run = await service.run_now(task)
     assert run.status == ScheduledTaskRun.Status.SKIPPED
     assert run.reason == "workspace_resume_failed"
@@ -621,7 +614,7 @@ async def test_second_manual_run_of_same_task_is_skipped():
         async def delete_session(self, session_id):
             return None
 
-    service = ScheduledTaskService(repository=repo, harness=FakeHarness())
+    service = make_service(repo, harness=FakeHarness())
     first = await service.run_now(task)
     second = await service.run_now(task)
     assert first.status == ScheduledTaskRun.Status.RUNNING
@@ -632,7 +625,6 @@ async def test_second_manual_run_of_same_task_is_skipped():
 @pytest.mark.asyncio
 async def test_manual_run_skips_busy_workspace_without_changing_schedule():
     repo = FakeRepository()
-    repo.busy = True
     scheduled = datetime(2025, 1, 4, 9, tzinfo=timezone.utc)
     task = SimpleNamespace(
         name="Daily review",
@@ -658,7 +650,7 @@ async def test_manual_run_skips_busy_workspace_without_changing_schedule():
         async def delete_session(self, session_id):
             return None
 
-    service = ScheduledTaskService(repository=repo, harness=FakeHarness())
+    service = make_service(repo, harness=FakeHarness())
     run = await service.run_now(task)
     assert run.status == ScheduledTaskRun.Status.SKIPPED
     assert run.reason == "other_chat_active"
@@ -684,19 +676,19 @@ def lifecycle_task():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["running", "stopped"])
 async def test_intervention_fence_skips_before_chat_creation_or_resume(status):
-    repo = FakeRepository()
-    repo.workspace_resume_state = lambda _: (status, None, "online", True, uuid.uuid4())
-
     class UnexpectedHarness:
         def create_session(self, **values):
             pytest.fail("intervention must block chat creation")
 
-    class UnexpectedRunner:
+    class UnexpectedRunner(FakeRunner):
+        def get_workspace_launch_state(self, workspace_id):
+            return status, None, "online", True, uuid.uuid4()
+
         async def resume_workspace(self, workspace_id):
             pytest.fail("intervention must block resume")
 
-    service = ScheduledTaskService(
-        repository=repo, harness=UnexpectedHarness(), runner=UnexpectedRunner()
+    service = make_service(
+        FakeRepository(), harness=UnexpectedHarness(), runner=UnexpectedRunner()
     )
     run = await service.run_now(lifecycle_task())
     assert run.status == ScheduledTaskRun.Status.SKIPPED
@@ -723,11 +715,12 @@ async def test_admission_conflict_uses_fresh_lifecycle_state(
     manual, admission, operation, current_task, reason
 ):
     repo = FakeRepository()
+    runner = FakeRunner()
     task = lifecycle_task()
     cleaned = []
 
     def conflict():
-        repo.workspace_resume_state = lambda _: (
+        runner.get_workspace_launch_state = lambda _: (
             "running",
             operation,
             "online",
@@ -751,7 +744,7 @@ async def test_admission_conflict_uses_fresh_lifecycle_state(
         async def start_run(self, session, prompt, **values):
             conflict()
 
-    service = ScheduledTaskService(repository=repo, harness=Harness())
+    service = make_service(repo, runner=runner, harness=Harness())
     if manual:
         run = await service.run_now(task)
     else:

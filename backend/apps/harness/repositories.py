@@ -7,6 +7,7 @@ Encapsulates all database queries. Services never use the ORM directly.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from contextlib import nullcontext
 from datetime import datetime
 
@@ -402,6 +403,49 @@ class HarnessSessionRepository:
                 .update(status=HarnessSessionStatus.BUSY)
                 == 1
             )
+
+    @staticmethod
+    def delete_unstarted_root(
+        session_id: uuid.UUID,
+        *,
+        workspace_id: uuid.UUID,
+        organization_id: uuid.UUID,
+        release: Callable[[], bool],
+    ) -> bool:
+        """Atomically delete an empty, idle root session its creator releases.
+
+        Share admission's runner/workspace serialization, without applying the
+        user-facing lifecycle fence to internal rollback of an unstarted chat.
+        ``release`` runs under these locks and returns False to keep the chat.
+        """
+        from apps.runners.locking import lock_runner
+        from apps.runners.models import Workspace
+
+        runner_id = Workspace.objects.filter(pk=workspace_id).values_list(
+            "runner_id", flat=True
+        ).first()
+        if runner_id is None:
+            return False
+        with transaction.atomic():
+            lock_runner(runner_id)
+            Workspace.objects.select_for_update().get(pk=workspace_id)
+            session = HarnessSession.objects.select_for_update().filter(
+                pk=session_id,
+                workspace_id=workspace_id,
+                organization_id=organization_id,
+                parent__isnull=True,
+                status=HarnessSessionStatus.IDLE,
+            ).first()
+            if (
+                session is None
+                or session.messages.exists()
+                or session.children.exists()
+            ):
+                return False
+            if not release():
+                return False
+            session.delete()
+            return True
 
     @staticmethod
     def get_by_id(session_id: uuid.UUID) -> HarnessSession | None:

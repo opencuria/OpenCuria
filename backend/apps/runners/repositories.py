@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 from django.db import connection, transaction
 from django.db.models import Count, F, Q, QuerySet, Value
@@ -225,6 +225,19 @@ class RunnerSystemMetricsRepository:
 # ---------------------------------------------------------------------------
 
 
+class WorkspaceLaunchState(NamedTuple):
+    """Committed lifecycle facts checked before unattended work starts.
+
+    Every field keeps its default when the workspace no longer exists.
+    """
+
+    status: str | None = None
+    active_operation: str | None = None
+    runner_status: str | None = None
+    owner_is_active: bool = False
+    current_task_id: uuid.UUID | None = None
+
+
 class WorkspaceRepository:
     """Data access for Workspace records."""
 
@@ -263,6 +276,33 @@ class WorkspaceRepository:
             .values_list("runner_id", flat=True)
             .first()
         )
+
+    @staticmethod
+    def get_launch_state(workspace_id: uuid.UUID) -> WorkspaceLaunchState:
+        """Return the committed lifecycle facts in one lightweight read."""
+        row = (
+            Workspace.objects.filter(id=workspace_id)
+            .values_list(
+                "status",
+                "active_operation",
+                "runner__status",
+                "created_by__is_active",
+                "current_task_id",
+            )
+            .first()
+        )
+        return WorkspaceLaunchState(*row) if row else WorkspaceLaunchState()
+
+    @staticmethod
+    def is_created_by(
+        workspace_id: uuid.UUID, *, user_id: int, organization_id: uuid.UUID
+    ) -> bool:
+        """Return whether *user_id* created the workspace in *organization_id*."""
+        return Workspace.objects.filter(
+            id=workspace_id,
+            runner__organization_id=organization_id,
+            created_by_id=user_id,
+        ).exists()
 
     @staticmethod
     def list_all() -> QuerySet[Workspace]:

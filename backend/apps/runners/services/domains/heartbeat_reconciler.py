@@ -51,6 +51,7 @@ class HeartbeatReconcilerMixin:
         )
         if (
             timeout_minutes is None
+            or timeout_minutes <= 0
             or workspace.status != WorkspaceStatus.RUNNING
             or workspace.last_activity_at is None
         ):
@@ -104,21 +105,9 @@ class HeartbeatReconcilerMixin:
 
         dispatched: list["Task"] = []
         for workspace in workspaces:
-            # Heartbeat reconciliation may have loaded this workspace before a
-            # scheduled/manual harness run started. Refresh its busy-session
-            # state through the gateway at the auto-stop decision boundary.
-            # Manual stops keep their existing behavior in stop_workspace().
-            current_workspace = await sync_to_async(self.get_workspace_or_none)(
-                workspace.id
-            )
-            if current_workspace is None or not self._should_auto_stop_workspace(
-                current_workspace, now=evaluation_time
-            ):
-                continue
             try:
-                task = await self.stop_workspace(
-                    current_workspace.id,
-                    auto_stop=True,
+                task = await self.auto_stop_if_inactive(
+                    workspace.id, now=evaluation_time
                 )
             except (ConflictError, RunnerOfflineError, WorkspaceStateError) as exc:
                 logger.info(
@@ -127,6 +116,8 @@ class HeartbeatReconcilerMixin:
                     exc,
                 )
                 continue
+            if task is None:
+                continue
             logger.info(
                 "Dispatched inactivity auto-stop for workspace %s",
                 workspace.id,
@@ -134,6 +125,29 @@ class HeartbeatReconcilerMixin:
             dispatched.append(task)
 
         return dispatched
+
+    async def auto_stop_if_inactive(
+        self,
+        workspace_id: uuid.UUID,
+        *,
+        now: datetime | None = None,
+    ) -> "Task | None":
+        """Stop one workspace when the inactivity policy requires it.
+
+        Returns None when the workspace stays running. ``stop_workspace``
+        re-checks eligibility under the runner lock and raises
+        ``ConflictError`` when state changed since this read.
+        """
+        # Heartbeat reconciliation may have loaded this workspace before a
+        # scheduled/manual harness run started. Refresh its busy-session
+        # state through the gateway at the auto-stop decision boundary.
+        # Manual stops keep their existing behavior in stop_workspace().
+        workspace = await sync_to_async(self.get_workspace_or_none)(workspace_id)
+        if workspace is None or not self._should_auto_stop_workspace(
+            workspace, now=now
+        ):
+            return None
+        return await self.stop_workspace(workspace.id, auto_stop=True)
 
     def handle_heartbeat(
         self,

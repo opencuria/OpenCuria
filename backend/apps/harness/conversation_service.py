@@ -7,6 +7,7 @@ Repositories own persistence; conversation events publish feed invalidations.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -111,6 +112,28 @@ class ConversationService:
         if message is None or message.session_id != session.id:
             raise NotFoundError("HarnessMessage", str(message_id))
         return self.messages.dismiss_notice(message)
+
+    def discard_unstarted(
+        self,
+        session_id: uuid.UUID,
+        *,
+        workspace_id: uuid.UUID,
+        organization_id: uuid.UUID,
+        release: Callable[[], bool],
+    ) -> bool:
+        """Delete an empty, idle root chat whose first run was never admitted.
+
+        The creator rolls back its own admission: ``release`` detaches the
+        creator's references under the admission locks and returns False to
+        keep the chat. Returns whether the chat was deleted; the caller
+        publishes the feed change through its conversation events.
+        """
+        return self.sessions.delete_unstarted_root(
+            session_id,
+            workspace_id=workspace_id,
+            organization_id=organization_id,
+            release=release,
+        )
 
     def unread_for_sessions(
         self, sessions: list[HarnessSession]

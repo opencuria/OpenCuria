@@ -1,3 +1,4 @@
+import uuid
 from datetime import timedelta
 from unittest.mock import AsyncMock, Mock
 
@@ -101,6 +102,35 @@ async def test_auto_stop_refreshes_busy_harness_state(runner, workspace):
     manual_service = RunnerService(sio_server=AsyncMock())
     task = await manual_service.stop_workspace(workspace.id)
     assert task.workspace_id == workspace.id
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "timeout,idle_minutes,stops",
+    [(1, 60, True), (5, 1, False), (0, 60, False), (None, 60, False)],
+)
+async def test_auto_stop_if_inactive_applies_the_policy_to_one_workspace(
+    runner, workspace, timeout, idle_minutes, stops
+):
+    """A zero or missing timeout disables auto-stop like the stop claim does."""
+    runner.organization.workspace_auto_stop_timeout_minutes = timeout
+    runner.organization.save(update_fields=["workspace_auto_stop_timeout_minutes"])
+    workspace.last_activity_at = timezone.now() - timedelta(minutes=idle_minutes)
+    workspace.save(update_fields=["last_activity_at"])
+    service = RunnerService()
+    stopped = object()
+    service.stop_workspace = AsyncMock(return_value=stopped)  # type: ignore[method-assign]
+
+    result = await service.auto_stop_if_inactive(workspace.id)
+
+    if stops:
+        assert result is stopped
+        service.stop_workspace.assert_awaited_once_with(workspace.id, auto_stop=True)
+    else:
+        assert result is None
+        service.stop_workspace.assert_not_awaited()
+    assert await service.auto_stop_if_inactive(uuid.uuid4()) is None
 
 
 @pytest.mark.django_db(transaction=True)

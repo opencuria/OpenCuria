@@ -5,7 +5,6 @@
 
 import asyncio
 from datetime import timedelta
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -14,6 +13,7 @@ from django.utils import timezone
 
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessMessage, HarnessSession
+from apps.runners.services import RunnerService
 from apps.scheduled_tasks.models import ScheduledTask, ScheduledTaskRun
 from apps.scheduled_tasks.repositories import ScheduledTaskRepository
 from apps.scheduled_tasks.services import ScheduledTaskService
@@ -212,7 +212,9 @@ def test_eager_completion_defers_one_shot_auto_stop_and_retries_errors(
     stop = AsyncMock(
         side_effect=[RuntimeError("runner unavailable"), None] if retry else None
     )
-    service = ScheduledTaskService(runner=SimpleNamespace(stop_workspace=stop))
+    runner = RunnerService()
+    runner.stop_workspace = stop
+    service = ScheduledTaskService(runner=runner)
     service.complete_assistant_run(run.assistant_message_id)
     run.refresh_from_db()
     assert run.status == "succeeded" and run.completion_check_pending
@@ -238,7 +240,9 @@ def test_pending_auto_stop_noop_is_consumed_not_replayed_later(completed_run):
     org.workspace_auto_stop_timeout_minutes = 0
     org.save(update_fields=["workspace_auto_stop_timeout_minutes"])
     stop = AsyncMock()
-    service = ScheduledTaskService(runner=SimpleNamespace(stop_workspace=stop))
+    runner = RunnerService()
+    runner.stop_workspace = stop
+    service = ScheduledTaskService(runner=runner)
     service.list_runs(run.scheduled_task)
     asyncio.run(service.reconcile_runs())
     run.refresh_from_db()

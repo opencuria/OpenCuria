@@ -13,6 +13,7 @@ import structlog
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
+from apps.harness.conversation_service import ConversationService
 from apps.harness.harness_service import HarnessService, get_harness_service
 from apps.runners.enums import WorkspaceOperation, WorkspaceStatus
 from apps.runners.services import get_runner_service
@@ -36,11 +37,13 @@ class ScheduledTaskService:
         harness: HarnessService | None = None,
         runner: Any | None = None,
         skills: SkillService | None = None,
+        conversations: ConversationService | None = None,
     ) -> None:
         self.repository = repository or ScheduledTaskRepository
         self.harness = harness
         self.runner = runner
         self.skills = skills or SkillService()
+        self.conversations = conversations or ConversationService()
 
     def _harness(self) -> HarnessService:
         return self.harness or get_harness_service()
@@ -495,12 +498,13 @@ class ScheduledTaskService:
     ) -> None:
         """Delete an empty scheduled chat when admission failed before a run."""
         try:
-            deleted = await sync_to_async(self.repository.delete_unstarted_session)(
-                run.id,
+            deleted = await sync_to_async(self.conversations.discard_unstarted)(
                 session.id,
-                task_id=task.id,
                 workspace_id=task.workspace_id,
                 organization_id=task.organization_id,
+                release=lambda: self.repository.release_unstarted_claim(
+                    run.id, session.id, task_id=task.id
+                ),
             )
             if deleted:
                 run.session = None
@@ -570,13 +574,13 @@ class ScheduledTaskService:
             runner_status,
             owner_is_active,
             current_task_id,
-        ) = await sync_to_async(self.repository.workspace_resume_state)(
+        ) = await sync_to_async(self._runner().get_workspace_launch_state)(
             task.workspace_id
         )
-        owned = await sync_to_async(self.repository.workspace_is_owned)(
+        owned = await sync_to_async(self._runner().is_active_workspace_owner)(
+            task.owner_id,
             task.workspace_id,
             organization_id=task.organization_id,
-            owner_id=task.owner_id,
         )
         if status is None or not owned or not owner_is_active:
             return await self._skip(
@@ -648,13 +652,13 @@ class ScheduledTaskService:
             runner_status,
             owner_is_active,
             current_task_id,
-        ) = await sync_to_async(self.repository.workspace_resume_state)(
+        ) = await sync_to_async(self._runner().get_workspace_launch_state)(
             task.workspace_id
         )
-        owned = await sync_to_async(self.repository.workspace_is_owned)(
+        owned = await sync_to_async(self._runner().is_active_workspace_owner)(
+            task.owner_id,
             task.workspace_id,
             organization_id=task.organization_id,
-            owner_id=task.owner_id,
         )
         if not owner_is_active or not owned:
             return await self._skip(
@@ -776,9 +780,7 @@ class ScheduledTaskService:
                 "scheduled_task_completion_failed", run_id=str(run.id)
             )
         try:
-            await sync_to_async(self.repository.touch_workspace_activity)(
-                task.workspace_id
-            )
+            await self._runner().touch_workspace_activity(task.workspace_id)
         except Exception:
             log.exception(
                 "scheduled_task_workspace_activity_touch_failed",
@@ -799,7 +801,7 @@ class ScheduledTaskService:
         deadline = asyncio.get_running_loop().time() + timeout_seconds
         while asyncio.get_running_loop().time() < deadline:
             status, active_operation, *_ = await sync_to_async(
-                self.repository.workspace_resume_state
+                self._runner().get_workspace_launch_state
             )(workspace_id)
             if (
                 status == WorkspaceStatus.RUNNING
@@ -827,7 +829,7 @@ class ScheduledTaskService:
             runner_status,
             owner_active,
             current_task_id,
-        ) = await sync_to_async(self.repository.workspace_resume_state)(
+        ) = await sync_to_async(self._runner().get_workspace_launch_state)(
             task.workspace_id
         )
         if status is None or not owner_active:
@@ -854,32 +856,18 @@ class ScheduledTaskService:
         )
 
     async def _maybe_stop_workspace(self, workspace_id: uuid.UUID) -> None:
-        """Stop only when configured and no harness sessions are busy."""
-        # Respect org auto-stop policy but never stop another active chat.
-        workspace_details = await sync_to_async(
-            self.repository.workspace_autostop_settings
-        )(workspace_id)
-        if workspace_details is None or workspace_details[0] != WorkspaceStatus.RUNNING:
-            return
-        _, has_active_session, timeout, idle_since = workspace_details
-        if timeout is None or timeout <= 0 or has_active_session:
-            return
-        active = await sync_to_async(self.repository.has_busy_harness_session)(
-            workspace_id
-        )
-        if active:
-            return
-        if idle_since and timezone.now() - idle_since >= timedelta(minutes=timeout):
-            try:
-                await self._runner().stop_workspace(workspace_id, auto_stop=True)
-            except ConflictError as exc:
-                # A chat or lifecycle operation may have won admission since
-                # the reconciliation snapshot. Treat this as a normal no-op.
-                log.info(
-                    "scheduled_task_auto_stop_skipped",
-                    workspace_id=str(workspace_id),
-                    reason=str(exc),
-                )
+        """Apply the runner's inactivity auto-stop policy after a scheduled run."""
+        # The runner never stops a workspace with a busy chat or operation.
+        try:
+            await self._runner().auto_stop_if_inactive(workspace_id)
+        except ConflictError as exc:
+            # A chat or lifecycle operation may have won admission since
+            # the policy read. Treat this as a normal no-op.
+            log.info(
+                "scheduled_task_auto_stop_skipped",
+                workspace_id=str(workspace_id),
+                reason=str(exc),
+            )
 
     @staticmethod
     def _validate_schedule(values: dict[str, Any]) -> dict[str, Any]:

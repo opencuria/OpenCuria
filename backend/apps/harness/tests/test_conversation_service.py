@@ -10,7 +10,10 @@ from asgiref.sync import sync_to_async
 
 from apps.harness.conversation_events import ConversationEvents
 from apps.harness.conversation_service import ConversationService
-from apps.harness.repositories import HarnessSessionRepository
+from apps.harness.repositories import (
+    HarnessMessageRepository,
+    HarnessSessionRepository,
+)
 from apps.runners.services.infra import realtime
 from common.exceptions import NotFoundError
 
@@ -128,3 +131,53 @@ def test_notification_transport_failure_keeps_read_mutation(
             str(session.workspace_id),
         )
     ]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "state,releases,deleted",
+    [
+        ("empty", True, True),
+        ("empty", False, False),
+        ("message", True, False),
+        ("child", True, False),
+        ("busy", True, False),
+    ],
+)
+def test_discard_unstarted_deletes_only_empty_idle_roots_its_creator_releases(
+    harness_workspace, state: str, releases: bool, deleted: bool
+) -> None:
+    """The creator's release runs under admission locks after harness checks."""
+    session = HarnessSessionRepository.create(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+    )
+    if state == "message":
+        HarnessMessageRepository.create(
+            session_id=session.id, role="user", content="Real chat"
+        )
+    elif state == "child":
+        HarnessSessionRepository.create(
+            workspace_id=session.workspace_id,
+            organization_id=session.organization_id,
+            parent_id=session.id,
+        )
+    elif state == "busy":
+        HarnessSessionRepository.mark_status(session, "busy")
+    released = []
+
+    def release() -> bool:
+        released.append(session.id)
+        return releases
+
+    assert (
+        ConversationService().discard_unstarted(
+            session.id,
+            workspace_id=session.workspace_id,
+            organization_id=session.organization_id,
+            release=release,
+        )
+        is deleted
+    )
+    assert (HarnessSessionRepository.get_by_id(session.id) is None) is deleted
+    assert released == ([session.id] if state == "empty" else [])
