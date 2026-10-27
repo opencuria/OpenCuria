@@ -9,6 +9,7 @@ export const SETTINGS_QUERY_PARAM = 'settings'
 
 const SETTINGS_TABS = [
   'general',
+  'notifications',
   'provider',
   'agents',
   'skills',

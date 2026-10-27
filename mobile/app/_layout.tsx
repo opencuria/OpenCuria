@@ -7,6 +7,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { ThemeProvider, useTheme } from "../src/ui/theme";
 import { SessionProvider } from "../src/screens/SessionContext";
+import { NotificationProvider } from "../src/notifications/NotificationContext";
 
 export default function RootLayout(): React.JSX.Element {
   return (
@@ -16,9 +17,13 @@ export default function RootLayout(): React.JSX.Element {
           <ThemeProvider initialMode="system">
             <NativeStatusBar />
             <SessionProvider>
-              <Stack screenOptions={{ headerShown: false, animation: "fade" }}>
-                <Stack.Screen name="index" />
-              </Stack>
+              <NotificationProvider>
+                <Stack
+                  screenOptions={{ headerShown: false, animation: "fade" }}
+                >
+                  <Stack.Screen name="index" />
+                </Stack>
+              </NotificationProvider>
             </SessionProvider>
           </ThemeProvider>
         </KeyboardProvider>

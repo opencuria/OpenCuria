@@ -4,6 +4,7 @@ import { resolveSettingsTab } from './settingsTabs'
 describe('resolveSettingsTab', () => {
   it.each([
     'general',
+    'notifications',
     'provider',
     'agents',
     'skills',

@@ -22,6 +22,7 @@ from apps.credentials.oauth_api import credential_oauth_router, service_oauth_ro
 from apps.harness.api import harness_router
 from apps.harness.commit_message_api import commit_message_router
 from apps.harness.engines.api import engines_router
+from apps.notifications.api import notification_router
 from apps.organizations.api import org_router
 from apps.organizations.member_profile_api import member_profile_router
 from apps.plugins.api import plugin_router
@@ -57,6 +58,7 @@ def health_check(request):
 
 
 api.add_router("/auth/", auth_router)
+api.add_router("/notifications/", notification_router)
 api.add_router("/auth/", member_profile_router)
 api.add_router("/organizations/", org_router)
 api.add_router("/runners/", runner_router)

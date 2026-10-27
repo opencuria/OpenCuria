@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     "apps.credentials",
     "apps.harness",
     "apps.scheduled_tasks",
+    "apps.notifications",
     "apps.plugins",
     "apps.skills",
     "apps.mcp_app",
@@ -214,6 +215,11 @@ LOGGING = {
         "level": os.getenv("DJANGO_LOG_LEVEL", "INFO"),
     },
     "loggers": {
+        # APNs destinations contain private device tokens in their URL paths.
+        "httpx": {"handlers": ["console"], "level": "WARNING", "propagate": False},
+        "httpcore": {"handlers": ["console"], "level": "WARNING", "propagate": False},
+        "hpack": {"handlers": ["console"], "level": "WARNING", "propagate": False},
+        "h2": {"handlers": ["console"], "level": "WARNING", "propagate": False},
         "django": {
             "handlers": ["console"],
             "level": "INFO",

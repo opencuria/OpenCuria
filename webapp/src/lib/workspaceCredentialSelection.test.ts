@@ -30,6 +30,10 @@ function makeCredential(overrides: Partial<Credential> = {}): Credential {
 }
 
 describe('workspaceCredentialSelection', () => {
+  it('never offers server signing credentials as workspace attachments', () => {
+    const secret = makeCredential({ id: 'server', credential_type: 'server_secret' })
+    expect(groupWorkspaceCredentials([secret], ['server'])).toEqual([])
+  })
   it('replaces the existing selection for the same service', () => {
     const credentials = [
       makeCredential({ id: 'cred-1', name: 'Personal GitHub', service_id: 'github' }),

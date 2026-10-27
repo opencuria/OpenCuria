@@ -62,7 +62,7 @@ from .repositories import (
     HarnessSessionRepository,
     QuestionRequestRepository,
 )
-from .run_events import publish_assistant_run_finished
+from .run_events import publish_assistant_run_finished, publish_session_activity
 from .run_timeline import (
     FRONTEND_EVENT_PART,
     FRONTEND_EVENT_SUBTASK_STARTED,
@@ -3662,6 +3662,7 @@ class HarnessService:
         self, event: str, data: dict[str, Any], workspace_id: str
     ) -> None:
         """Forward an event to subscribed frontend clients (never breaks)."""
+        await publish_session_activity(event, data)
         # Cache each part's immutable position: text/reasoning emit many
         # token deltas, so querying the database on every socket emit would
         # add an avoidable round trip to the streaming hot path.

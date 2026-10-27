@@ -26,19 +26,25 @@ sio_asgi = create_sio_app()
 async def application(scope, receive, send):
     """Route requests and run the scheduler in the ASGI server's event loop."""
     if scope["type"] == "lifespan":
+        from apps.notifications.worker import NotificationWorker
         from apps.scheduled_tasks.services import ScheduledTaskScheduler
 
         scheduler = ScheduledTaskScheduler()
+        notifications = NotificationWorker()
         while True:
             message = await receive()
             if message["type"] == "lifespan.startup":
                 try:
                     await scheduler.start()
+                    await notifications.start()
                 except Exception as exc:
+                    await notifications.stop()
+                    await scheduler.stop()
                     await send({"type": "lifespan.startup.failed", "message": str(exc)})
                     return
                 await send({"type": "lifespan.startup.complete"})
             elif message["type"] == "lifespan.shutdown":
+                await notifications.stop()
                 await scheduler.stop()
                 await send({"type": "lifespan.shutdown.complete"})
                 return

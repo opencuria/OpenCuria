@@ -11,6 +11,33 @@ import type { ProviderModel, Workspace } from "@opencuria/client";
 import { ThemeProvider } from "../ui/theme";
 import { MainScreen } from "./MainScreen";
 import { useSession } from "./SessionContext";
+import type { NotificationState } from "../notifications/controller";
+
+const mockNotificationState: NotificationState = {
+  ready: false,
+  busy: false,
+  notifications: false,
+  liveActivities: false,
+  permissionGranted: false,
+  capabilities: null,
+  error: null,
+  target: null,
+};
+const mockConsumeTarget = jest.fn(() => {
+  mockNotificationState.target = null;
+});
+jest.mock("../notifications/NotificationContext", () => ({
+  useNotifications: () => ({
+    controller: {
+      consumeTarget: mockConsumeTarget,
+      live: { available: false },
+    },
+    state: mockNotificationState,
+  }),
+}));
+jest.mock("../notifications/native", () => ({
+  setViewedNotificationSession: jest.fn(),
+}));
 
 const listeners = new Set<() => void>();
 let snapshot = {
@@ -189,6 +216,7 @@ function mockClient() {
       last_used_at: "now",
     }),
     markRead: jest.fn().mockResolvedValue(undefined),
+    listSessions: jest.fn().mockResolvedValue([{ id: "notified-session" }]),
     markUnread: jest.fn().mockResolvedValue(undefined),
     deleteSession: jest.fn().mockResolvedValue(undefined),
   };
@@ -201,7 +229,10 @@ function mockClient() {
       onReconnect: jest.fn(() => jest.fn()),
     },
     harness,
-    workspaces: { list: jest.fn().mockResolvedValue([runningWorkspace]) },
+    workspaces: {
+      list: jest.fn().mockResolvedValue([runningWorkspace]),
+      get: jest.fn().mockResolvedValue(runningWorkspace),
+    },
     conversations: { list: jest.fn().mockResolvedValue([]) },
     skills: { list: jest.fn().mockResolvedValue([]) },
     files: { findFiles: jest.fn().mockResolvedValue({ paths: [] }) },
@@ -209,6 +240,7 @@ function mockClient() {
 }
 
 beforeEach(() => {
+  mockNotificationState.target = null;
   jest.clearAllMocks();
   listeners.clear();
   snapshot = {
@@ -302,6 +334,84 @@ it("selects the initial ready workspace, creates a new chat and accepts the firs
       }),
     ),
   );
+  tree.unmount();
+});
+
+it("opens a cold-start notification after checking workspace and session access", async () => {
+  const client = mockClient();
+  mockNotificationState.target = {
+    deviceId: "device",
+    organizationId: "org-a",
+    workspaceId: runningWorkspace.id,
+    sessionId: "notified-session",
+  };
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() =>
+    expect(mockController.openWorkspace).toHaveBeenCalledWith(
+      runningWorkspace.id,
+      "notified-session",
+    ),
+  );
+  expect(client.workspaces.get).toHaveBeenCalledWith(runningWorkspace.id);
+  expect(client.harness.listSessions).toHaveBeenCalledWith(runningWorkspace.id);
+  expect(mockConsumeTarget).toHaveBeenCalled();
+  tree.unmount();
+});
+
+it("rejects a deleted notification target without navigating", async () => {
+  const client = mockClient();
+  client.workspaces.get.mockRejectedValue({ status: 404 });
+  mockNotificationState.target = {
+    deviceId: "device",
+    organizationId: "org-a",
+    workspaceId: runningWorkspace.id,
+    sessionId: "deleted-session",
+  };
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() => expect(mockConsumeTarget).toHaveBeenCalled());
+  expect(mockController.openWorkspace).not.toHaveBeenCalled();
+  expect(
+    screen.getByText(
+      "This notification's conversation is no longer available.",
+    ),
+  ).toBeTruthy();
+  tree.unmount();
+});
+
+it("keeps an offline notification target available for a foreground retry", async () => {
+  const client = mockClient();
+  client.workspaces.get.mockRejectedValue(new Error("Offline"));
+  mockNotificationState.target = {
+    deviceId: "device",
+    organizationId: "org-a",
+    workspaceId: runningWorkspace.id,
+    sessionId: "notified-session",
+  };
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByText(
+        "Could not open this conversation. Check your connection and retry.",
+      ),
+    ).toBeTruthy(),
+  );
+  expect(mockConsumeTarget).not.toHaveBeenCalled();
+  expect(mockController.openWorkspace).not.toHaveBeenCalled();
   tree.unmount();
 });
 

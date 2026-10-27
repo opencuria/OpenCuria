@@ -23,6 +23,7 @@
     "jsdom": "29.0.1"
   },
   "overrides": {
+    "@expo/ui": "57.0.26",
     "shell-quote": "^1.8.5",
     "tinypool": "^2.1.2",
     "proxy-addr": "^2.0.8",

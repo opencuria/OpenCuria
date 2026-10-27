@@ -5,6 +5,10 @@ import {
   type SocketFactory,
 } from "./realtime";
 import type {
+  AgentActivitySnapshot,
+  MobileDevice,
+  MobileDeviceRegistration,
+  PushCapabilities,
   AgentConfig,
   AgentConfigInput,
   AuthUser,
@@ -55,6 +59,22 @@ export interface ClientApi extends ApiClient {
 
 export interface OpenCuriaClient {
   api: ClientApi;
+  notifications: {
+    capabilities(signal?: AbortSignal): Promise<PushCapabilities>;
+    registerDevice(
+      id: string,
+      input: MobileDeviceRegistration,
+      signal?: AbortSignal,
+    ): Promise<MobileDevice>;
+    unregisterDevice(id: string, signal?: AbortSignal): Promise<void>;
+    registerActivity(
+      id: string,
+      activityId: string,
+      pushToken: string,
+      signal?: AbortSignal,
+    ): Promise<void>;
+    activity(id: string, signal?: AbortSignal): Promise<AgentActivitySnapshot>;
+  };
   auth: {
     login(email: string, password: string): Promise<TokenPair>;
     me(signal?: AbortSignal): Promise<AuthUser>;
@@ -241,6 +261,29 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
 
   return {
     api,
+    notifications: {
+      capabilities: (signal) =>
+        api.get<PushCapabilities>("/notifications/capabilities/", signal),
+      registerDevice: (id, input, signal) =>
+        api.put<MobileDevice>(
+          `/notifications/devices/${segment(id)}/`,
+          input,
+          signal,
+        ),
+      unregisterDevice: (id, signal) =>
+        api.delete<void>(`/notifications/devices/${segment(id)}/`, signal),
+      registerActivity: (id, activityId, pushToken, signal) =>
+        api.put<void>(
+          `/notifications/devices/${segment(id)}/activity/`,
+          { activity_id: activityId, push_token: pushToken },
+          signal,
+        ),
+      activity: (id, signal) =>
+        api.get<AgentActivitySnapshot>(
+          `/notifications/devices/${segment(id)}/activity/`,
+          signal,
+        ),
+    },
     auth: {
       async login(email, password) {
         const tokens = await api.post<TokenPair>("/auth/login/", {

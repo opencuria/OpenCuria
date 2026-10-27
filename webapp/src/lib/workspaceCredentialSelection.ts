@@ -41,6 +41,7 @@ export function groupWorkspaceCredentials(
   })
 
   for (const credential of sortedCredentials) {
+    if (credential.credential_type === 'server_secret') continue
     const existingGroup = groups.get(credential.service_id)
     if (existingGroup) {
       existingGroup.credentials.push(credential)

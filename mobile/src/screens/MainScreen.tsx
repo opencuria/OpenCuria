@@ -79,6 +79,9 @@ import { NativePicker } from "../ui/selection";
 import { NativeTextField } from "../ui/NativeTextField";
 import { useTheme } from "../ui/theme";
 import { useSession } from "./SessionContext";
+import { useNotifications } from "../notifications/NotificationContext";
+import { NotificationSettings } from "../notifications/NotificationSettings";
+import { setViewedNotificationSession } from "../notifications/native";
 
 const HIDDEN = new Set(["removed", "deleted", "deleting", "pending_deletion"]);
 const EMPTY: ChatControllerSnapshot = {
@@ -115,6 +118,7 @@ type NavigationRequest = {
 };
 
 export function MainScreen(): React.JSX.Element {
+  const notifications = useNotifications();
   const insets = useSafeAreaInsets();
   const keyboardVisible = useKeyboardState((state) => state.isVisible);
   const { theme, mode: themeMode, setMode: setThemeMode } = useTheme();
@@ -780,6 +784,73 @@ export function MainScreen(): React.JSX.Element {
     setNavigation({ revision, workspaceId, ...options });
   };
 
+  useEffect(() => {
+    setViewedNotificationSession(chat.activeSessionId);
+    return () => setViewedNotificationSession(null);
+  }, [chat.activeSessionId]);
+
+  useEffect(() => {
+    const target = notifications.state.target;
+    if (
+      !target ||
+      !client ||
+      loading ||
+      target.organizationId !== session?.organizationId
+    )
+      return;
+    let active = true;
+    // Resolve through authenticated REST first. A push cannot grant access to
+    // another account's workspace or make us silently open a different session.
+    void Promise.all([
+      client.workspaces.get(target.workspaceId),
+      client.harness.listSessions(target.workspaceId),
+    ])
+      .then(([owner, sessions]) => {
+        if (!active) return;
+        if (!sessions.some((item) => item.id === target.sessionId))
+          throw Object.assign(
+            new Error("This conversation is no longer available."),
+            { status: 404 },
+          );
+        setWorkspaces((rows) =>
+          rows.some((item) => item.id === owner.id) ? rows : [...rows, owner],
+        );
+        setSheet(null);
+        setDraft("");
+        setAttachments([]);
+        requestNavigation(owner.id, { sessionId: target.sessionId });
+        notifications.controller?.consumeTarget();
+      })
+      .catch((cause: unknown) => {
+        if (active) {
+          const status =
+            cause && typeof cause === "object" && "status" in cause
+              ? cause.status
+              : undefined;
+          if (status === 403 || status === 404) {
+            setError(
+              "This notification's conversation is no longer available.",
+            );
+            notifications.controller?.consumeTarget();
+          } else {
+            setError(
+              "Could not open this conversation. Check your connection and retry.",
+            );
+          }
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    notifications.state.target,
+    notifications.controller,
+    client,
+    loading,
+    workspaces,
+    session?.organizationId,
+  ]);
+
   const openConversation = (row: HarnessConversation) => {
     const owner = workspaces.find((item) => item.id === row.workspace_id);
     if (!owner) {
@@ -1368,6 +1439,8 @@ export function MainScreen(): React.JSX.Element {
               void selectOrganization(id);
             }}
           />
+          <SectionTitle title="NOTIFICATIONS" />
+          <NotificationSettings />
           <SectionTitle title="APPEARANCE" />
           <SegmentedControl
             values={["System", "Light", "Dark"]}
