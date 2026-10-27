@@ -725,6 +725,59 @@ describe("realtime and file transfers", () => {
     client.realtime.dispose();
   });
 
+  it.each([false, true])(
+    "cancels media reads and releases their room (already aborted: %s)",
+    async (alreadyAborted) => {
+      const sockets: MockSocket[] = [];
+      const client = clientOptions().create(
+        vi.fn(async () => jsonResponse({})) as any,
+        {
+          socketFactory: mockSocketFactory(sockets),
+          createFileRequestId: () => "cancel-read",
+        },
+      );
+      client.realtime.connect();
+      const socket = sockets[0];
+      socket.connect();
+      const controller = new AbortController();
+      if (alreadyAborted) controller.abort();
+      const read = client.files.readFile(
+        "ws-1",
+        "/workspace/image.png",
+        undefined,
+        controller.signal,
+      );
+      if (!alreadyAborted) {
+        socket.trigger("files:content_chunk", {
+          workspace_id: "ws-1",
+          request_id: "cancel-read",
+          path: "/workspace/image.png",
+          index: 0,
+          total_chunks: 1,
+          content: "YWJj",
+        });
+        controller.abort();
+        expect(socket.emitted.at(-1)?.event).toBe(
+          "frontend:unsubscribe_workspace",
+        );
+      } else {
+        expect(socket.emitted).toHaveLength(0);
+      }
+      await expect(read).rejects.toMatchObject({ code: "cancelled" });
+      socket.trigger("files:content_result", {
+        workspace_id: "ws-1",
+        request_id: "cancel-read",
+        path: "/workspace/image.png",
+        content: "",
+        size: 3,
+        truncated: false,
+        chunked: true,
+        total_chunks: 1,
+      });
+      client.realtime.dispose();
+    },
+  );
+
   it("reassembles chunked content with strict correlation", async () => {
     const sockets: MockSocket[] = [];
     const client = clientOptions().create(

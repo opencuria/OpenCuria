@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises } from '@vue/test-utils'
 
 const { io } = vi.hoisted(() => ({ io: vi.fn() }))
 vi.mock('socket.io-client', () => ({ io }))
@@ -123,6 +124,52 @@ describe('browser realtime adapter', () => {
     service.sendTerminalInput('ws-1', 'terminal-1', 'aGk=')
     service.sendFilesUpload('ws-1', 'request-2', '/workspace', 'a.txt', 'aGk=')
     expect(service.sendFilesFind('ws-1', 'request-3', 'a', 50)).toBe(false)
+    await expect(service.readWorkspaceFile('ws-1', '/workspace/a.png')).rejects.toMatchObject({
+      code: 'workspace_transitioning',
+    })
     expect(socket.emit).not.toHaveBeenCalled()
+  })
+
+  it('loads chat media through the shared client without view-level file event listeners', async () => {
+    const { useWorkspaceImageStore } = await import('@/stores/workspaceImages')
+    service.connect()
+    socket.connect()
+    const store = useWorkspaceImageStore()
+    const path = '/workspace/shot.png'
+    store.fetchImage('ws-1', path)
+    const request = socket.emit.mock.calls.find(([event]) => event === 'frontend:files_read')![1]
+    const identity = { workspace_id: 'ws-1', request_id: request.request_id, path }
+    socket.trigger('files:content_chunk', {
+      ...identity,
+      index: 1,
+      total_chunks: 2,
+      content: 'ZGVm',
+    })
+    socket.trigger('files:content_chunk', {
+      ...identity,
+      index: 0,
+      total_chunks: 2,
+      content: 'YWJj',
+    })
+    socket.trigger('files:content_result', {
+      ...identity,
+      content: '',
+      size: 6,
+      truncated: false,
+      mime_type: 'image/png',
+      chunked: true,
+      total_chunks: 2,
+    })
+    await flushPromises()
+    expect(store.getImageUrl(path)).toBe('data:image/png;base64,YWJjZGVm')
+    expect(store.isFetchingImage(path)).toBe(false)
+
+    store.fetchImage('ws-1', '/workspace/pending.png')
+    store.reset()
+    await flushPromises()
+    expect(store.isFetchingImage('/workspace/pending.png')).toBe(false)
+    expect(socket.emit).toHaveBeenLastCalledWith('frontend:unsubscribe_workspace', {
+      workspace_id: 'ws-1',
+    })
   })
 })

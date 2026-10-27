@@ -124,6 +124,7 @@ type PendingFile = {
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
   releaseRoom?: () => void;
+  removeAbortListener?: () => void;
 };
 
 // Runner file downloads are capped at 100 MiB raw (≈ 133.4 MiB base64).
@@ -386,6 +387,7 @@ export class RealtimeClient {
     workspaceId: string,
     path: string,
     maxSize?: number,
+    signal?: AbortSignal,
   ): Promise<FileContentResult> {
     const wantedPath = normalizedPath(path);
     return this.requestFile(
@@ -398,6 +400,7 @@ export class RealtimeClient {
         path: wantedPath,
         ...(maxSize === undefined ? {} : { max_size: maxSize }),
       },
+      signal,
     );
   }
 
@@ -626,9 +629,15 @@ export class RealtimeClient {
     resultEvent: string,
     requestEvent: string,
     extra: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<T> {
     this.assertNotDisposed();
     this.resetForContextChange();
+    if (signal?.aborted) {
+      return Promise.reject(
+        new FileTransferError("File read cancelled", "cancelled"),
+      );
+    }
     if (!this.socket?.connected || !this.active) {
       return Promise.reject(
         new FileTransferError("Socket is not connected", "disconnected"),
@@ -644,6 +653,16 @@ export class RealtimeClient {
       );
     }
     const promise = this.registerFile(kind, workspaceId, path, requestId);
+    if (signal) {
+      const abort = () =>
+        this.failPending(
+          requestId,
+          new FileTransferError("File read cancelled", "cancelled"),
+        );
+      signal.addEventListener("abort", abort, { once: true });
+      this.pendingFiles.get(requestId)!.removeAbortListener = () =>
+        signal.removeEventListener("abort", abort);
+    }
     // addWorkspaceOwner emits a join before the correlated request.
     this.socket.emit(requestEvent, {
       workspace_id: workspaceId,
@@ -869,6 +888,7 @@ export class RealtimeClient {
     const pending = this.pendingFiles.get(requestId);
     if (!pending) return;
     clearTimeout(pending.timer);
+    pending.removeAbortListener?.();
     pending.releaseRoom?.();
     this.pendingFiles.delete(requestId);
     this.chunks.cancel(requestId);

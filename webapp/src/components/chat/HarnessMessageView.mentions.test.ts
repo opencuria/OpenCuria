@@ -8,10 +8,10 @@ import type { HarnessMessage } from '@/types/harness'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { resetProviderCatalogCache } from '@/lib/providerCatalog'
-import { sendFilesRead } from '@/services/socket'
+import { readWorkspaceFile } from '@/services/socket'
 
 vi.mock('@/services/socket', () => ({
-  sendFilesRead: vi.fn(),
+  readWorkspaceFile: vi.fn(() => new Promise(() => {})),
 }))
 
 vi.mock('@/services/harness.api', async () => {
@@ -76,7 +76,7 @@ describe('HarnessMessageView mentions', () => {
     setActivePinia(createPinia())
     useWorkspaceImageStore().reset()
     resetProviderCatalogCache()
-    vi.mocked(sendFilesRead).mockClear()
+    vi.mocked(readWorkspaceFile).mockClear()
     class ResizeObserverStub {
       observe(): void {}
       disconnect(): void {}

@@ -1,11 +1,11 @@
 /**
  * useWorkspaceFileEvents — routes workspace file Socket.IO results into
- * the file-explorer and workspace-image stores. Callers own workspace
- * subscribe/unsubscribe; this only registers typed listeners.
+ * the file-explorer store and upload status in the media store. Media reads
+ * are handled by the shared client. Callers own workspace subscriptions.
  *
  * Chunk events carry payload only; the final result carries authoritative
- * metadata (size/truncated/mime/filename). Both stores validate
- * request/path/total and fail closed on mismatch.
+ * metadata (size/truncated/mime/filename). The explorer validates
+ * request/path/total before displaying content.
  */
 import { onMounted, onUnmounted, toValue, type MaybeRefOrGetter } from 'vue'
 import { onEvent } from '@/services/socket'
@@ -69,17 +69,6 @@ export function useWorkspaceFileEvents(workspaceId: MaybeRefOrGetter<string>): v
             mimeType: data.mime_type,
           },
         )
-        workspaceImageStore.handleContentResult(
-          data.request_id,
-          data.path,
-          data.content,
-          data.error,
-          data.mime_type,
-          {
-            chunked: data.chunked,
-            totalChunks: data.total_chunks,
-          },
-        )
       }),
     )
 
@@ -87,13 +76,6 @@ export function useWorkspaceFileEvents(workspaceId: MaybeRefOrGetter<string>): v
       onEvent('files:content_chunk', (data: FilesContentChunkEvent) => {
         if (data.workspace_id !== currentId()) return
         fileExplorerStore.handleContentChunk(
-          data.request_id,
-          data.path,
-          data.index,
-          data.total_chunks,
-          data.content,
-        )
-        workspaceImageStore.handleContentChunk(
           data.request_id,
           data.path,
           data.index,

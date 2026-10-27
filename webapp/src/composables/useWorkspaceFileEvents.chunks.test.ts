@@ -5,7 +5,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useWorkspaceFileEvents } from './useWorkspaceFileEvents'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
-import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { sendFilesRead } from '@/services/socket'
 
 const listeners: Partial<Record<string, (data: never) => void>> = {}
@@ -39,7 +38,6 @@ const FileEventsHost = defineComponent({
   setup(props) {
     const workspaceId = ref(props.workspaceId)
     useWorkspaceFileEvents(workspaceId)
-    return { workspaceId }
   },
   template: '<div />',
 })
@@ -55,26 +53,6 @@ describe('useWorkspaceFileEvents chunk forwarding', () => {
     for (const key of Object.keys(listeners)) {
       delete listeners[key]
     }
-  })
-
-  it('routes files:content_chunk into both the explorer and image stores', () => {
-    const explorer = useFileExplorerStore()
-    const images = useWorkspaceImageStore()
-    const explorerSpy = vi.spyOn(explorer, 'handleContentChunk')
-    const imageSpy = vi.spyOn(images, 'handleContentChunk')
-    mount(FileEventsHost, { props: { workspaceId: 'ws-1' } })
-
-    emit('files:content_chunk', {
-      workspace_id: 'ws-1',
-      request_id: 'req-1',
-      path: '/workspace/a.txt',
-      index: 0,
-      total_chunks: 2,
-      content: 'QUJD',
-    })
-
-    expect(explorerSpy).toHaveBeenCalledWith('req-1', '/workspace/a.txt', 0, 2, 'QUJD')
-    expect(imageSpy).toHaveBeenCalledWith('req-1', '/workspace/a.txt', 0, 2, 'QUJD')
   })
 
   it('routes files:download_chunk into the explorer store', () => {

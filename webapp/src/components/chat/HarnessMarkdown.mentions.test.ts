@@ -8,10 +8,10 @@ import HarnessMentionImages, { type MentionFileToken } from './HarnessMentionIma
 import ImageLightbox from './ImageLightbox.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
-import { sendFilesRead } from '@/services/socket'
+import { readWorkspaceFile } from '@/services/socket'
 
 vi.mock('@/services/socket', () => ({
-  sendFilesRead: vi.fn(),
+  readWorkspaceFile: vi.fn(() => new Promise(() => {})),
 }))
 
 function fileToken(path: string, overrides: Partial<MentionFileToken> = {}): MentionFileToken {
@@ -54,7 +54,7 @@ describe('HarnessMarkdown mentions', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     useWorkspaceImageStore().reset()
-    vi.mocked(sendFilesRead).mockClear()
+    vi.mocked(readWorkspaceFile).mockClear()
     class ResizeObserverStub {
       observe(): void {}
       disconnect(): void {}
@@ -107,7 +107,7 @@ describe('HarnessMarkdown mentions', () => {
     expect(wrapper.findAll('[data-testid="mention-badge-file"]')).toHaveLength(1)
     expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(false)
     expect(wrapper.emitted('mention-images')?.slice(-1)[0]?.[0]).toEqual([])
-    expect(vi.mocked(sendFilesRead)).not.toHaveBeenCalled()
+    expect(vi.mocked(readWorkspaceFile)).not.toHaveBeenCalled()
   })
 
   it('reports rendered image mentions to the message view instead of drawing them inside prose', async () => {
@@ -132,7 +132,7 @@ describe('HarnessMarkdown mentions', () => {
     expect(wrapper.emitted('mention-images')?.slice(-1)[0]?.[0]).toEqual([
       expect.objectContaining({ path: '/workspace/cat.png' }),
     ])
-    expect(vi.mocked(sendFilesRead)).not.toHaveBeenCalled()
+    expect(vi.mocked(readWorkspaceFile)).not.toHaveBeenCalled()
   })
 
   it('ignores sandbox escapes and malformed tokens', async () => {
@@ -148,7 +148,7 @@ describe('HarnessMarkdown mentions', () => {
     expect(wrapper.find('[data-testid="mention-images"]').exists()).toBe(false)
     expect(wrapper.emitted('mention-images')?.slice(-1)[0]?.[0]).toEqual([])
     expect(wrapper.text()).toContain('stuck@email.com')
-    expect(vi.mocked(sendFilesRead)).not.toHaveBeenCalled()
+    expect(vi.mocked(readWorkspaceFile)).not.toHaveBeenCalled()
   })
 
   it('leaves code blocks and assistant responses unchanged', async () => {
@@ -166,7 +166,7 @@ describe('HarnessMarkdown mentions', () => {
     await flushBadges()
     expect(imageCode.find('[data-testid="mention-images"]').exists()).toBe(false)
     expect(imageCode.emitted('mention-images')?.slice(-1)[0]?.[0]).toEqual([])
-    expect(vi.mocked(sendFilesRead)).not.toHaveBeenCalled()
+    expect(vi.mocked(readWorkspaceFile)).not.toHaveBeenCalled()
 
     const assistant = mountMarkdown('Fix @file:/workspace/a.ts with @agent:plan', 'ws-mentions')
     await flushBadges()
@@ -238,7 +238,7 @@ describe('HarnessMentionImages', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     useWorkspaceImageStore().reset()
-    vi.mocked(sendFilesRead).mockClear()
+    vi.mocked(readWorkspaceFile).mockClear()
     class ResizeObserverStub {
       observe(): void {}
       disconnect(): void {}
@@ -304,7 +304,7 @@ describe('HarnessMentionImages', () => {
     const wrapper = mountStrip([fileToken('/workspace/missing.png')], '')
     expect(wrapper.find('[data-testid="mention-image-fallback"]').classes()).toContain('h-14')
     expect(wrapper.find('[data-testid="mention-image-fallback"]').classes()).toContain('w-full')
-    expect(vi.mocked(sendFilesRead)).not.toHaveBeenCalled()
+    expect(vi.mocked(readWorkspaceFile)).not.toHaveBeenCalled()
   })
 
   it('ignores non-image and escaping tokens without fetching', () => {
@@ -318,7 +318,7 @@ describe('HarnessMentionImages', () => {
     )
 
     expect(wrapper.html()).not.toContain('mention-images')
-    expect(vi.mocked(sendFilesRead)).not.toHaveBeenCalled()
+    expect(vi.mocked(readWorkspaceFile)).not.toHaveBeenCalled()
   })
 
   it('has no remove affordance in history, but emits offsets when removable', async () => {

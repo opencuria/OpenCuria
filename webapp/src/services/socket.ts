@@ -1,5 +1,6 @@
 /** Browser state and frontend commands over the shared realtime transport. */
-import { RealtimeClient } from '@opencuria/client/realtime'
+import { FileTransferError, RealtimeClient } from '@opencuria/client/realtime'
+import type { FileContentResult } from '@opencuria/client/types'
 import { planFilesUpload } from '@opencuria/chat-core/fileChunks'
 import { getActivePinia } from 'pinia'
 import { ref } from 'vue'
@@ -268,6 +269,19 @@ export function sendTerminalClose(workspaceId: string, terminalId: string): void
 // ---------------------------------------------------------------------------
 // File explorer helpers
 // ---------------------------------------------------------------------------
+
+/** Read media through the same correlated file transport as the mobile client. */
+export async function readWorkspaceFile(
+  workspaceId: string,
+  path: string,
+  maxSize?: number,
+  signal?: AbortSignal,
+): Promise<FileContentResult> {
+  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) {
+    throw new FileTransferError('Workspace is transitioning', 'workspace_transitioning')
+  }
+  return getClient().readFile(workspaceId, path, maxSize, signal)
+}
 
 /**
  * Request a directory listing inside the workspace VM.

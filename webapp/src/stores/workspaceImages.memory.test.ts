@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { ref } from 'vue'
 
 import { useWorkspaceImageStore, MEDIA_CACHE_BUDGET_BYTES } from './workspaceImages'
@@ -8,9 +8,9 @@ import HarnessMentionImages, {
   type MentionFileToken,
 } from '@/components/chat/HarnessMentionImages.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
-import { sendFilesRead } from '@/services/socket'
+import { readWorkspaceFile } from '@/services/socket'
 
-vi.mock('@/services/socket', () => ({ sendFilesRead: vi.fn() }))
+vi.mock('@/services/socket', () => ({ readWorkspaceFile: vi.fn(() => new Promise(() => {})) }))
 vi.mock('vue-sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
 }))
@@ -145,13 +145,19 @@ describe('workspace media memory cache', () => {
     const wrapper = mountStrip([token(IMAGE_A)])
     store.pinMedia(IMAGE_A, false)
     await wrapper.vm.$nextTick()
-    store.reset()
-    await wrapper.vm.$nextTick()
-    expect(store.imageCache[IMAGE_A]).toBeUndefined()
-    const calls = vi.mocked(sendFilesRead).mock.calls
-    const requestId = calls[calls.length - 1]![1]
     const payload = Buffer.alloc(20 * 1024 * 1024, 1).toString('base64')
-    store.handleContentResult(requestId, IMAGE_A, payload, undefined, 'image/png')
+    vi.mocked(readWorkspaceFile).mockResolvedValueOnce({
+      workspace_id: 'ws-1',
+      request_id: 'read-1',
+      path: IMAGE_A,
+      content: payload,
+      size: 20 * 1024 * 1024,
+      truncated: false,
+      mime_type: 'image/png',
+    })
+    store.reset()
+    expect(store.imageCache[IMAGE_A]).toBeUndefined()
+    await flushPromises()
     expect(store.imageCache[IMAGE_A]).toBeDefined()
 
     store.storeLocalImage(IMAGE_B, dataUrl(20 * 1024 * 1024))
@@ -160,13 +166,21 @@ describe('workspace media memory cache', () => {
     expect(store.getImageUrl(IMAGE_A)).toBeNull()
   })
 
-  it('does not revoke a video while pinned and revokes it after release', () => {
+  it('does not revoke a video while pinned and revokes it after release', async () => {
     const store = useWorkspaceImageStore()
     const payload = Buffer.alloc(40 * 1024 * 1024, 1).toString('base64')
+    vi.mocked(readWorkspaceFile).mockResolvedValueOnce({
+      workspace_id: 'ws-1',
+      request_id: 'read-1',
+      path: VIDEO,
+      content: payload,
+      size: Buffer.from(payload, 'base64').length,
+      truncated: false,
+      mime_type: 'video/mp4',
+    })
     store.fetchVideo('ws-1', VIDEO)
-    const requestId = vi.mocked(sendFilesRead).mock.calls[0]![1]
     store.pinMedia(VIDEO, true)
-    store.handleContentResult(requestId, VIDEO, payload, undefined, 'video/mp4')
+    await flushPromises()
 
     expect(store.videoCache[VIDEO]).toBe('blob:mock-video')
     expect(URL.revokeObjectURL).not.toHaveBeenCalled()
@@ -175,13 +189,21 @@ describe('workspace media memory cache', () => {
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock-video')
   })
 
-  it('revokes videos when evicted from cache', () => {
+  it('revokes videos when evicted from cache', async () => {
     const store = useWorkspaceImageStore()
     const payload = Buffer.alloc(20 * 1024 * 1024, 1).toString('base64')
     store.pinMedia(VIDEO, true)
+    vi.mocked(readWorkspaceFile).mockResolvedValueOnce({
+      workspace_id: 'ws-1',
+      request_id: 'read-1',
+      path: VIDEO,
+      content: payload,
+      size: Buffer.from(payload, 'base64').length,
+      truncated: false,
+      mime_type: 'video/mp4',
+    })
     store.fetchVideo('ws-1', VIDEO)
-    const requestId = vi.mocked(sendFilesRead).mock.calls[0]![1]
-    store.handleContentResult(requestId, VIDEO, payload, undefined, 'video/mp4')
+    await flushPromises()
     store.pinMedia(VIDEO, false)
     store.storeLocalImage(IMAGE_A, dataUrl(20 * 1024 * 1024))
 

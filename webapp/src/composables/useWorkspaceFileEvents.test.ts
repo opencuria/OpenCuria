@@ -261,29 +261,4 @@ describe('useWorkspaceFileEvents', () => {
     })
     expect(refresh).not.toHaveBeenCalled()
   })
-
-  it('forwards matching files:content_result events to the image store', () => {
-    const imageStore = useWorkspaceImageStore()
-    const spy = vi.spyOn(imageStore, 'handleContentResult')
-    mount(FileEventsHost, { props: { workspaceId: 'ws-1' } })
-
-    emitEvent('files:content_result', {
-      workspace_id: 'ws-1',
-      request_id: 'req-3',
-      path: '/workspace/shot.png',
-      content: 'abc',
-      size: 3,
-      truncated: false,
-      mime_type: 'image/png',
-    })
-
-    expect(spy).toHaveBeenCalledWith(
-      'req-3',
-      '/workspace/shot.png',
-      'abc',
-      undefined,
-      'image/png',
-      { chunked: undefined, totalChunks: undefined },
-    )
-  })
 })

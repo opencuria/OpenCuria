@@ -11,13 +11,14 @@ import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useSidePanelStore } from '@/stores/sidePanel'
 import FileViewer from '@/components/files/FileViewer.vue'
-import { sendFilesList, sendFilesRead } from '@/services/socket'
+import { readWorkspaceFile, sendFilesList, sendFilesRead } from '@/services/socket'
 
 vi.mock('@/services/socket', () => ({
   sendFilesList: vi.fn(),
   sendFilesFind: vi.fn(),
   sendFilesDownload: vi.fn(),
   sendFilesRead: vi.fn(),
+  readWorkspaceFile: vi.fn(() => new Promise(() => {})),
 }))
 
 function mountMarkdown(
@@ -119,6 +120,12 @@ describe('HarnessMarkdown', () => {
   })
 
   it('reacquires markdown media pins after store reset without stale unpinning', async () => {
+    let resolveRead!: (value: Awaited<ReturnType<typeof readWorkspaceFile>>) => void
+    vi.mocked(readWorkspaceFile).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveRead = resolve
+      }),
+    )
     const store = useWorkspaceImageStore()
     const payload = Buffer.alloc(20 * 1024 * 1024, 1).toString('base64')
     store.pinMedia('/workspace/a.png', true)
@@ -131,9 +138,18 @@ describe('HarnessMarkdown', () => {
     store.reset()
     await nextTick()
     expect(store.getImageUrl('/workspace/a.png')).toBeNull()
-    const calls = vi.mocked(sendFilesRead).mock.calls
-    const requestId = calls[calls.length - 1]![1]
-    store.handleContentResult(requestId, '/workspace/a.png', payload, undefined, 'image/png')
+    expect(readWorkspaceFile).toHaveBeenCalled()
+    resolveRead({
+      workspace_id: 'ws-1',
+      request_id: 'media-1',
+      path: '/workspace/a.png',
+      content: payload,
+      size: 20 * 1024 * 1024,
+      truncated: false,
+      mime_type: 'image/png',
+    })
+    await flushPromises()
+
     expect(store.imageCache['/workspace/a.png']).toBeDefined()
 
     store.storeLocalImage('/workspace/b.png', `data:image/png;base64,${payload}`)
@@ -415,7 +431,9 @@ describe('HarnessMarkdown', () => {
     const store = useWorkspaceImageStore()
     const wrapper = mountMarkdown('[![Photo](/workspace/photo.png)](https://example.com/full)')
 
-    expect(sendFilesRead).toHaveBeenCalledWith('ws-1', expect.any(String), '/workspace/photo.png')
+    expect(readWorkspaceFile).toHaveBeenCalledWith(
+      'ws-1', '/workspace/photo.png', undefined, expect.any(AbortSignal),
+    )
     store.imageCache['/workspace/photo.png'] = 'data:image/png;base64,abc'
     await wrapper.vm.$nextTick()
 
@@ -426,10 +444,10 @@ describe('HarnessMarkdown', () => {
     expect(image.attributes('role')).toBeUndefined()
     expect(wrapper.find('button[aria-haspopup="dialog"]').exists()).toBe(false)
 
-    vi.mocked(sendFilesRead).mockClear()
+    vi.mocked(readWorkspaceFile).mockClear()
     await image.trigger('click')
     expect(wrapper.findComponent(ImageLightbox).exists()).toBe(false)
-    expect(sendFilesRead).not.toHaveBeenCalled()
+    expect(readWorkspaceFile).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
