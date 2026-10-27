@@ -20,10 +20,6 @@ class _FakeService:
     """Minimal fake WorkspaceService for harness handler tests."""
 
     def __init__(self) -> None:
-        self.sync_from_runtime = AsyncMock()
-        self.recover_desktop_sessions_from_runtime = AsyncMock()
-        self.run_health_check_loop = AsyncMock()
-        self.get_workspace_heartbeat_statuses = AsyncMock(return_value=[])
         self.exec_calls: list[dict] = []
         self.list_calls: list[tuple[str, str]] = []
         self.find_calls: list[tuple[object, str, object]] = []

@@ -20,12 +20,17 @@ from src.services.sessions.desktop import DESKTOP_STOP_COMMAND
 
 class DummyService:
     def __init__(self) -> None:
-        self.registry = SimpleNamespace(_cache={})
-        self.sync_from_runtime = AsyncMock()
+        self.registry = SimpleNamespace(
+            _cache={},
+            sync_from_runtime=AsyncMock(),
+            get_workspace_heartbeat_statuses=AsyncMock(return_value=[]),
+        )
+        self.lifecycle = SimpleNamespace(
+            run_health_check_loop=AsyncMock(),
+            create_workspace=AsyncMock(side_effect=self._create_workspace),
+            inject_credentials=AsyncMock(side_effect=self._inject_credentials),
+        )
         self.recover_desktop_sessions_from_runtime = AsyncMock()
-        self.run_health_check_loop = AsyncMock()
-        self.get_workspace_heartbeat_statuses = AsyncMock(return_value=[])
-        self.create_workspace_calls = []
         # WebSocket terminal and image handlers call the managers directly.
         self.terminal_manager = AsyncMock()
         self.images = AsyncMock()
@@ -116,13 +121,12 @@ class DummyService:
             kwargs.get("env_vars") or kwargs.get("ssh_keys") or kwargs.get("files")
         )
 
-    async def create_workspace(self, **kwargs):
-        self.create_workspace_calls.append(kwargs)
+    async def _create_workspace(self, **kwargs):
         return kwargs.get("workspace_id") or uuid.uuid4(), bool(
             kwargs.get("env_vars") or kwargs.get("ssh_keys") or kwargs.get("files")
         )
 
-    async def inject_credentials(self, workspace_id, **kwargs):
+    async def _inject_credentials(self, workspace_id, **kwargs):
         return bool(
             kwargs.get("env_vars") or kwargs.get("ssh_keys") or kwargs.get("files")
         )
@@ -211,7 +215,7 @@ async def test_observation_tolerates_workspace_changes_during_probe(
         return []
 
     service.workspace_incarnation = AsyncMock(side_effect=incarnation)
-    service.get_workspace_heartbeat_statuses.side_effect = statuses
+    service.registry.get_workspace_heartbeat_statuses.side_effect = statuses
     interface = WebSocketInterface(
         service,
         RunnerSettings(state_dir=str(tmp_path), inventory_interval=10**12),
@@ -356,7 +360,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         """Connect snapshot is not immediately re-probed for the first heartbeat."""
         service = DummyService()
         workspaces = [{"workspace_id": str(uuid.uuid4()), "status": "running"}]
-        service.get_workspace_heartbeat_statuses = AsyncMock(return_value=workspaces)
+        service.registry.get_workspace_heartbeat_statuses.return_value = workspaces
         interface = WebSocketInterface(
             service, RunnerSettings(state_dir=tempfile.mkdtemp())
         )
@@ -376,12 +380,12 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat
 
-        service.sync_from_runtime.assert_not_awaited()
-        service.get_workspace_heartbeat_statuses.assert_not_awaited()
+        service.registry.sync_from_runtime.assert_not_awaited()
+        service.registry.get_workspace_heartbeat_statuses.assert_not_awaited()
 
     async def test_connect_recovers_desktop_sessions_before_reannounce(self) -> None:
         service = DummyService()
-        service.get_workspace_heartbeat_statuses = AsyncMock(
+        service.registry.get_workspace_heartbeat_statuses = AsyncMock(
             return_value=[
                 {
                     "workspace_id": str(uuid.uuid4()),
@@ -402,7 +406,7 @@ class WebSocketDesktopTests(unittest.IsolatedAsyncioTestCase):
         await interface._sio.handlers["/"]["connect"]()
 
         # Registration must finish before slow observation starts.
-        service.sync_from_runtime.assert_not_awaited()
+        service.registry.sync_from_runtime.assert_not_awaited()
         interface._sio.emit.assert_any_await(
             "runner:register",
             {
@@ -1028,8 +1032,8 @@ class WebSocketCreateWorkspaceTests(unittest.IsolatedAsyncioTestCase):
         )
         await handler(payload)
 
-        self.assertEqual(len(service.create_workspace_calls), 1)
-        forwarded = service.create_workspace_calls[0]
+        service.lifecycle.create_workspace.assert_awaited_once()
+        forwarded = service.lifecycle.create_workspace.await_args.kwargs
         self.assertEqual(forwarded["env_vars"], payload["env_vars"])
         self.assertEqual(forwarded["ssh_keys"], payload["ssh_keys"])
 

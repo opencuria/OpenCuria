@@ -90,7 +90,7 @@ def serve(
         from .interfaces.websocket import WebSocketInterface
 
         service = WorkspaceService(QemuRuntime(settings=settings), settings)
-        await service.sync_from_runtime()
+        await service.registry.sync_from_runtime()
         ws_interface = WebSocketInterface(service, settings)
 
         log.info(

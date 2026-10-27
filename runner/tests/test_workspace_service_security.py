@@ -88,7 +88,7 @@ async def test_create_workspace_clones_with_persistent_credentials(
     monkeypatch.setattr("src.services.workspace_lifecycle.logger", log)
     repos = ["repo 'name'; touch injected", "another-repo"]
 
-    workspace_id, credentials_present = await service.create_workspace(
+    workspace_id, credentials_present = await service.lifecycle.create_workspace(
         repos=repos,
         env_vars={"GITHUB_TOKEN": "secret", "PATH": f"{tmp_path}:{os.defpath}"},
         ssh_keys=[
@@ -202,7 +202,7 @@ async def test_stop_workspace_removes_credentials_before_runtime_stop(tmp_path) 
         status="running",
     )
 
-    present = await service.stop_workspace(workspace_id)
+    present = await service.lifecycle.stop_workspace(workspace_id)
 
     assert present is False
     service.credentials.remove_workspace_credentials.assert_awaited_once()

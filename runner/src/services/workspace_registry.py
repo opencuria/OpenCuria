@@ -149,51 +149,6 @@ class WorkspaceRegistry:
         """Return True when *workspace_id* is present in the cache."""
         return workspace_id in self._cache
 
-    # -- read surface ----------------------------------------------------
-
-    async def list_workspaces(self) -> list[WorkspaceInfo]:
-        """Return all known workspaces, refreshing from the runtime."""
-        await self.sync_from_runtime()
-        return list(self._cache.values())
-
-    async def get_workspace(self, workspace_id: uuid.UUID) -> WorkspaceInfo:
-        """Return a single workspace by ID, checking live status."""
-        info = self.get_cached(workspace_id)
-        runtime = self.get_runtime(workspace_id)
-
-        epoch = self._epochs.get(workspace_id, 0)
-        # Refresh status from runtime
-        if info.instance_id:
-            try:
-                status = await runtime.get_workspace_status(info.instance_id)
-                if (
-                    workspace_id not in self._active
-                    and epoch == self._epochs.get(workspace_id, 0)
-                    and self._cache.get(workspace_id) is info
-                ):
-                    info.status = status.status
-            except Exception:
-                if workspace_id not in self._active and epoch == self._epochs.get(
-                    workspace_id, 0
-                ):
-                    info.status = "unknown"
-
-        return info
-
-    def get_workspace_statuses(self) -> list[dict]:
-        """Return lightweight status list for heartbeat reporting.
-
-        Reads from the in-memory cache without hitting the runtime,
-        so it's fast enough for periodic heartbeats.
-        """
-        return [
-            {
-                "workspace_id": str(info.workspace_id),
-                "status": info.status,
-            }
-            for info in self._cache.values()
-        ]
-
     async def get_workspace_heartbeat_statuses(self) -> list[dict]:
         """Return workspace heartbeat payload including live desktop sessions."""
         sessions = self.desktop_sessions if self.desktop_sessions is not None else {}

@@ -174,19 +174,21 @@ async def test_snapshot_started_before_operation_cannot_overwrite_completion(
     await runtime.scan_entered.wait()
     runtime.release.set()
     if operation == "create":
-        await service.create_workspace([], workspace_id=ws_id, base_image_path="/base")
+        await service.lifecycle.create_workspace(
+            [], workspace_id=ws_id, base_image_path="/base"
+        )
     elif operation == "resume":
-        await service.resume_workspace(
+        await service.lifecycle.resume_workspace(
             ws_id, qemu_vcpus=1, qemu_memory_mb=512, qemu_disk_size_gb=10
         )
     else:
-        await service.stop_workspace(ws_id)
+        await service.lifecycle.stop_workspace(ws_id)
     canonical = service.registry.get_cached(ws_id)
     runtime.scan_release.set()
     await refresh
     assert service.registry.get_cached(ws_id) is canonical
     assert canonical.status == ("exited" if operation == "stop" else "running")
-    await service.stop_workspace(ws_id)
+    await service.lifecycle.stop_workspace(ws_id)
     interface._operations.journal.close()
 
 
@@ -206,7 +208,7 @@ async def test_same_instance_merge_preserves_credentials_different_instance_does
     assert service.registry.get_cached(ws_id).credentials_present is None
     assert not await interface._workspace_scrub_proof(ws_id)
     with pytest.raises(RuntimeError, match="no exact scrub proof"):
-        await service.stop_workspace(ws_id)
+        await service.lifecycle.stop_workspace(ws_id)
     interface._operations.journal.close()
 
 
@@ -214,7 +216,7 @@ async def test_live_running_status_overrides_stale_stopped_cache(tmp_path):
     ws_id, runtime, service, interface = setup(tmp_path)
     runtime.state = "running"
     runtime.release.set()
-    await service.stop_workspace(ws_id)
+    await service.lifecycle.stop_workspace(ws_id)
     assert runtime.scrubs
     assert runtime.state == "stopped"
     interface._operations.journal.close()
@@ -264,7 +266,7 @@ async def test_clone_preserves_creating_entry_and_identity_during_inventory(tmp_
     assert service.registry.get_cached(ws_id) is canonical
     assert canonical.status == "running"
     assert canonical.credentials_present is False
-    await service.stop_workspace(ws_id)
+    await service.lifecycle.stop_workspace(ws_id)
     interface._operations.journal.close()
 
 
@@ -278,7 +280,7 @@ async def test_failed_refresh_and_failed_resume_keep_unknown_credentials(tmp_pat
     canonical.credentials_present = False
     runtime.start_workspace = AsyncMock(side_effect=OSError("boot uncertain"))
     with pytest.raises(OSError):
-        await service.resume_workspace(
+        await service.lifecycle.resume_workspace(
             ws_id, qemu_vcpus=1, qemu_memory_mb=512, qemu_disk_size_gb=10
         )
     assert canonical.credentials_present is None
@@ -292,7 +294,9 @@ async def test_incomplete_create_failure_is_preserved_for_recovery(tmp_path):
     runtime.exists = False
     runtime.create_workspace = AsyncMock(side_effect=OSError("creation uncertain"))
     with pytest.raises(OSError):
-        await service.create_workspace([], workspace_id=ws_id, base_image_path="/base")
+        await service.lifecycle.create_workspace(
+            [], workspace_id=ws_id, base_image_path="/base"
+        )
     await service.registry.sync_from_runtime()
     assert service.registry.get_cached(ws_id).status == "creating"
     assert service.registry.get_cached(ws_id).credentials_present is None

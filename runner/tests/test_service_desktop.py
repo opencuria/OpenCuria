@@ -361,7 +361,9 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.removal_started = asyncio.Event()
         self.runtime.finish_removal = asyncio.Event()
 
-        removal = asyncio.create_task(self.service.remove_workspace(self.workspace_id))
+        removal = asyncio.create_task(
+            self.service.lifecycle.remove_workspace(self.workspace_id)
+        )
         await asyncio.wait_for(self.runtime.removal_started.wait(), timeout=1)
         self.assertIn(self.workspace_id, self.service.registry._cache)
         self.assertEqual(
@@ -383,7 +385,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
             RuntimeError,
             "Managed workspace removal requires physical registry identity",
         ):
-            await self.service.remove_workspace(uuid.uuid4())
+            await self.service.lifecycle.remove_workspace(uuid.uuid4())
         self.runtime.remove_workspace.assert_not_awaited()
 
     async def test_failed_physical_confirmation_keeps_registry_identity(self) -> None:
@@ -394,7 +396,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(
             RuntimeError, "physical disposal confirmation failed"
         ):
-            await self.service.remove_workspace(self.workspace_id)
+            await self.service.lifecycle.remove_workspace(self.workspace_id)
 
         self.assertIn(self.workspace_id, self.service.registry._cache)
         self.runtime.remove_workspace.assert_awaited_once_with("instance-1")

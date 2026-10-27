@@ -120,7 +120,7 @@ class WebSocketInterface(Interface):
             reconciler=getattr(self._service, "publication_evidence", None),
             observer=self._service,
         )
-        lifecycle = getattr(self._service, "_lifecycle", None)
+        lifecycle = getattr(self._service, "lifecycle", None)
         if lifecycle is not None:
             lifecycle.checkpoint_hook = self._checkpoint_workspace
             lifecycle.scrub_proof_hook = self._workspace_scrub_proof
@@ -632,7 +632,7 @@ class WebSocketInterface(Interface):
         """Collect slow observations separately from transport health."""
         while True:
             try:
-                await self._service.sync_from_runtime()
+                await self._service.registry.sync_from_runtime()
                 desktop = getattr(self._service, "desktop", None)
                 registry = self._service.registry
                 previous_desktops = (
@@ -677,7 +677,7 @@ class WebSocketInterface(Interface):
                             and observed[1] in {"exited", "stopped"}
                         ):
                             info.credentials_present = proof.get("credentials_present")
-                workspaces = await self._service.get_workspace_heartbeat_statuses()
+                workspaces = await registry.get_workspace_heartbeat_statuses()
                 self._cached_heartbeat_workspaces = workspaces
                 if self._sio.connected:
                     await self._sio.emit(
@@ -732,7 +732,7 @@ class WebSocketInterface(Interface):
                     continue
 
                 payload = await self._system_metrics.collect(
-                    self._service.get_vm_metrics
+                    self._service.registry.get_vm_metrics
                 )
                 await self._sio.emit("runner:system_metrics", payload)
                 logger.debug(
@@ -787,7 +787,7 @@ class WebSocketInterface(Interface):
             # Start SSH health check loop (self-healing)
             if self._health_check_task is None or self._health_check_task.done():
                 self._health_check_task = asyncio.create_task(
-                    self._service.run_health_check_loop()
+                    self._service.lifecycle.run_health_check_loop()
                 )
 
         @sio.event
@@ -1039,7 +1039,10 @@ class WebSocketInterface(Interface):
             log.info("task_received", task="create_workspace")
 
             try:
-                ws_id, credentials_present = await self._service.create_workspace(
+                (
+                    ws_id,
+                    credentials_present,
+                ) = await self._service.lifecycle.create_workspace(
                     repos=data.get("repos", []),
                     qemu_vcpus=data.get("qemu_vcpus"),
                     qemu_memory_mb=data.get("qemu_memory_mb"),
@@ -1123,7 +1126,9 @@ class WebSocketInterface(Interface):
             workspace_id = uuid.UUID(data["workspace_id"])
             log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
             try:
-                credentials_present = await self._service.stop_workspace(workspace_id)
+                credentials_present = await self._service.lifecycle.stop_workspace(
+                    workspace_id
+                )
                 await sio.emit(
                     "workspace:stopped",
                     {
@@ -1150,7 +1155,7 @@ class WebSocketInterface(Interface):
             workspace_id = uuid.UUID(data["workspace_id"])
             log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
             try:
-                credentials_present = await self._service.resume_workspace(
+                credentials_present = await self._service.lifecycle.resume_workspace(
                     workspace_id,
                     qemu_vcpus=data.get("qemu_vcpus"),
                     qemu_memory_mb=data.get("qemu_memory_mb"),
@@ -1188,7 +1193,7 @@ class WebSocketInterface(Interface):
                 workspace_id=str(workspace_id),
             )
             try:
-                await self._service.update_workspace_resources(
+                await self._service.lifecycle.update_workspace_resources(
                     workspace_id,
                     qemu_vcpus=int(data["qemu_vcpus"]),
                     qemu_memory_mb=int(data["qemu_memory_mb"]),
@@ -1215,7 +1220,7 @@ class WebSocketInterface(Interface):
             workspace_id = uuid.UUID(data["workspace_id"])
             log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
             try:
-                credentials_present = await self._service.inject_credentials(
+                credentials_present = await self._service.lifecycle.inject_credentials(
                     workspace_id,
                     env_vars=data.get("env_vars", {}),
                     files=data.get("files", []),
@@ -1252,11 +1257,13 @@ class WebSocketInterface(Interface):
             log = logger.bind(task_id=task_id, workspace_id=str(workspace_id))
             try:
                 # A fresh successful runtime scan is required for absence proof.
-                await self._service.sync_from_runtime()
-                already_absent = not self._service.workspace_exists(workspace_id)
-                await self._service.remove_workspace(workspace_id)
-                await self._service.sync_from_runtime()
-                if self._service.workspace_exists(workspace_id):
+                await self._service.registry.sync_from_runtime()
+                already_absent = not self._service.registry.workspace_exists(
+                    workspace_id
+                )
+                await self._service.lifecycle.remove_workspace(workspace_id)
+                await self._service.registry.sync_from_runtime()
+                if self._service.registry.workspace_exists(workspace_id):
                     raise RuntimeError("Runtime removal could not be verified")
                 await sio.emit(
                     "workspace:removed",
@@ -1585,8 +1592,10 @@ class WebSocketInterface(Interface):
                 assert current is not None
                 self._running_tasks[task_key] = current
                 try:
-                    ensured = await self._service.ensure_runtime_artifact(
-                        workspace_id, artifact_id, version
+                    ensured = (
+                        await self._service.runtime_artifacts.ensure_runtime_artifact(
+                            workspace_id, artifact_id, version
+                        )
                     )
                 finally:
                     if self._running_tasks.get(task_key) is current:
