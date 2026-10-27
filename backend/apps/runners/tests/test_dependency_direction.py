@@ -8,6 +8,8 @@ Runner services also delegate ORM queries to repositories, including filtering
 and existence checks on querysets returned by a repository.
 Lifecycle result policy belongs to its service; journal persistence never
 imports that service or its transport consumers.
+Operator disposition policy also belongs to its service; its repository never
+imports any application's services, including through function-local imports.
 """
 
 from __future__ import annotations
@@ -197,4 +199,57 @@ def test_lifecycle_result_service_never_imports_orm_modules() -> None:
     assert violations == [], (
         "Keep result models, transactions and locking behind "
         "OperationResultRepository:\n" + "\n".join(violations)
+    )
+
+
+def test_disposition_repository_never_imports_services() -> None:
+    """Authorization and action policy must not flow back into persistence."""
+    path = RUNNERS_DIR / "disposition_repository.py"
+    violations = []
+    for node in ast.walk(ast.parse(path.read_text())):
+        modules = []
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            modules = [module, *(f"{module}.{alias.name}" for alias in node.names)]
+        for module in modules:
+            if {"service", "services"} & set(module.split(".")):
+                violations.append(f"{path.name}:{node.lineno} imports {module}")
+    assert violations == [], (
+        "Keep organization authorization, allowed actions and disposition policy "
+        "in DispositionService; repositories only load, lock and persist:\n"
+        + "\n".join(violations)
+    )
+
+
+def test_disposition_service_delegates_transactions_and_writes() -> None:
+    """The disposition service cannot bypass its transaction-scoped repository."""
+    path = RUNNERS_DIR / "services" / "disposition.py"
+    violations = []
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            modules = [node.module or "", *(alias.name for alias in node.names)]
+        else:
+            modules = []
+        for module in modules:
+            if module.split(".")[0] == "django" or module in {
+                "apps.runners.models",
+                "apps.runners.locking",
+                "models",
+                "locking",
+            }:
+                violations.append(f"{path.name}:{node.lineno} imports {module}")
+        if isinstance(node, ast.Attribute) and node.attr in {
+            "save",
+            "asave",
+            "delete",
+            "adelete",
+        }:
+            violations.append(f"{path.name}:{node.lineno} calls {node.attr}")
+    assert violations == [], (
+        "Keep transactions, model writes and locking behind DispositionRepository:\n"
+        + "\n".join(violations)
     )

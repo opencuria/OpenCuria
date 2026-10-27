@@ -1,15 +1,17 @@
 """Operator workflow shared by REST and automatic reconciliation."""
 
+from __future__ import annotations
+
 import uuid
 from typing import Any
 
 from asgiref.sync import sync_to_async
 
 from apps.accounts.models import APIKeyPermission
-from common.exceptions import ConflictError
+from apps.organizations.services import OrganizationService
+from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
-from ..disposition_repository import DispositionRepository
-from ..operations import OperationRepository
+from ..disposition_repository import DispositionRepository, DispositionState
 from .operation_results import apply_result
 
 #: API-key scope a retry needs, per retryable lifecycle task type.
@@ -26,15 +28,176 @@ class DispositionService:
     @staticmethod
     def list_operations(user: Any, organization_id: uuid.UUID) -> list[dict]:
         """List sanitized operations visible to an owner or organization admin."""
-        return DispositionRepository.listing(user, organization_id)
+        OrganizationService().require_membership(user, organization_id)
+        visible = []
+        for state in DispositionRepository.list_by_org(organization_id):
+            try:
+                DispositionService.authorized(user, organization_id, state.operation_id)
+            except (AuthenticationError, NotFoundError):
+                continue
+            visible.append(DispositionService._summary(state))
+        return visible
+
+    @staticmethod
+    def authorized(
+        user: Any,
+        organization_id: uuid.UUID,
+        operation_id: uuid.UUID,
+        *,
+        admin: bool = False,
+    ) -> DispositionState:
+        """Owners inspect workspace operations; org admins inspect every operation."""
+        organizations = OrganizationService()
+        organizations.require_membership(user, organization_id)
+        state = DispositionRepository.get(organization_id, operation_id)
+        if state is None:
+            raise NotFoundError("Operation", str(operation_id))
+        if admin or not state.workspace_id or state.workspace_owner_id != user.id:
+            organizations.require_admin(user, organization_id)
+        return state
+
+    @staticmethod
+    def _summary(state: DispositionState) -> dict:
+        """Hide recipes, repository URLs and credential associations."""
+        return {
+            "operation_id": str(state.operation_id),
+            "task_type": state.task_type,
+            "status": state.status,
+            "phase": state.phase,
+            "runner_id": str(state.runner.id),
+            "target": state.identity["target"],
+            "attempt": state.identity["attempt"],
+            "diagnostic": state.diagnostic,
+            "intervention_required": state.phase == "intervention",
+        }
+
+    @staticmethod
+    def permitted_actions(
+        state: DispositionState, evidence: dict, user: Any, organization_id: uuid.UUID
+    ) -> list[str]:
+        """Presentation-only eligibility from current inspection; POST revalidates."""
+        if state.status == "completed" or state.phase == "disposed":
+            return []
+        terminal = evidence.get("status") == "terminal"
+        known = evidence.get("outcome_known")
+        finished = evidence.get("execution_finished")
+        actions = ["reconcile"] if terminal and known and finished else []
+        identity = evidence.get("identity", {})
+        exact = all(identity.get(k) == v for k, v in state.identity.items())
+        safe = (
+            exact
+            and finished
+            and evidence.get("instance_id")
+            and evidence.get("quiescent")
+        )
+        if (
+            safe
+            and terminal
+            and known
+            and evidence.get("event") == "workspace:error"
+            and state.task_type in RETRY_PERMISSIONS
+            and state.retry_count < 2
+        ):
+            actions.append("retry")
+        if safe and not known and evidence.get("status") in {"terminal", "unknown"}:
+            try:
+                OrganizationService().require_admin(user, organization_id)
+                actions.append("acknowledge_interrupted")
+            except AuthenticationError:
+                pass
+        return actions
+
+    @staticmethod
+    def _dispose(state: DispositionState, evidence: dict, action: str) -> dict:
+        """Revalidate a preauthorized disposition and apply it atomically."""
+        if (
+            not evidence.get("instance_id")
+            or not evidence.get("execution_finished")
+            or not evidence.get("quiescent")
+            or evidence.get("status") not in {"terminal", "unknown"}
+        ):
+            raise ConflictError(
+                "No fresh proof of finished execution and complete resource scan"
+            )
+        identity = evidence.get("identity", {})
+        if any(identity.get(k) != v for k, v in state.identity.items()):
+            raise ConflictError("Runner evidence identity mismatch")
+        if action == "acknowledge_interrupted" and evidence.get("outcome_known"):
+            raise ConflictError(
+                "Known outcome must be reconciled, not acknowledged as interrupted"
+            )
+        with DispositionRepository.locked(state) as repository:
+            current = repository.state()
+            if current.runner.sid != state.runner.sid or not current.runner.is_online:
+                raise ConflictError("Runner session changed during inspection")
+            if current.workspace_id and current.current_task_id not in {
+                None,
+                current.operation_id,
+            }:
+                raise ConflictError("Another operation owns the workspace")
+            if action == "retry" and current.retry_count >= 2:
+                raise ConflictError("Safe retry limit reached")
+            if action == "retry" and (
+                evidence.get("status") != "terminal"
+                or current.task_type not in RETRY_PERMISSIONS
+                or not evidence.get("outcome_known")
+                or evidence.get("event") != "workspace:error"
+            ):
+                raise ConflictError(
+                    "Only proven finished failed start/stop/remove may retry"
+                )
+            if action not in {"acknowledge_interrupted", "retry"}:
+                raise ConflictError("Unsupported disposition")
+            if current.status == "completed" or current.phase == "disposed":
+                raise ConflictError("Operation already resolved")
+            repository.fail_task(
+                "Interrupted execution acknowledged after fresh runtime scan; "
+                "no resources deleted or recreated"
+            )
+            if action == "acknowledge_interrupted":
+                repository.interrupt_children(
+                    capture_diagnostic=(
+                        "Interrupted child acknowledged; resources preserved, "
+                        "no automatic restart"
+                    ),
+                    recreate_diagnostic=(
+                        "Interrupted reset acknowledged; retry the reset or "
+                        "delete the workspace"
+                    ),
+                )
+            workspace_status = current.workspace_status
+            if current.workspace_id:
+                if current.task_type in {
+                    "create_workspace",
+                    "create_workspace_from_image_artifact",
+                }:
+                    workspace_status = "failed"
+                elif current.task_type == "remove_workspace":
+                    workspace_status = (
+                        "failed"
+                        if repository.has_recreate_request()
+                        else "delete_failed"
+                    )
+            repository.release(workspace_status)
+            if action == "retry":
+                new_id = repository.create_retry(current.retry_count + 1)
+                return {
+                    "operation_id": str(new_id),
+                    "previous_operation_id": str(current.operation_id),
+                }
+            return {
+                "operation_id": str(current.operation_id),
+                "released": True,
+                "resources_preserved": True,
+            }
 
     @staticmethod
     def retry_permission(
         user: Any, organization_id: uuid.UUID, operation_id: uuid.UUID
     ) -> APIKeyPermission | None:
         """Return the API-key scope retrying the operation needs, if retryable."""
-        row = DispositionRepository.authorized(user, organization_id, operation_id)
-        return RETRY_PERMISSIONS.get(row.task.type)
+        row = DispositionService.authorized(user, organization_id, operation_id)
+        return RETRY_PERMISSIONS.get(row.task_type)
 
     async def inspect(
         self,
@@ -44,10 +207,10 @@ class DispositionService:
         operation_id: uuid.UUID,
     ) -> dict:
         """Request journal status and a fresh scan on the current authenticated SID."""
-        row = await sync_to_async(DispositionRepository.authorized)(
+        row = await sync_to_async(DispositionService.authorized)(
             user, organization_id, operation_id
         )
-        result = DispositionRepository.summary(row)
+        result = self._summary(row)
         result["evidence"] = {
             "status": "unknown",
             "execution_finished": False,
@@ -57,25 +220,25 @@ class DispositionService:
         result["review_message"] = (
             "The runner is unavailable. Restore its connection, then check again."
         )
-        if not row.task.runner.is_online or not row.task.runner.sid:
+        if not row.runner.is_online or not row.runner.sid:
             return result
         try:
             evidence = await transport._call_runner(
-                row.task.runner,
+                row.runner,
                 "operation:inspect",
-                OperationRepository.envelope(row, {}),
+                row.identity,
                 timeout=60,
             )
             # Recheck connection binding after RPC: old SID responses cannot resolve.
-            current = await sync_to_async(DispositionRepository.authorized)(
+            current = await sync_to_async(DispositionService.authorized)(
                 user, organization_id, operation_id
             )
-            if current.task.runner.sid != row.task.runner.sid:
+            if current.runner.sid != row.runner.sid:
                 return result
             result["evidence"] = evidence
-            result["permitted_actions"] = await sync_to_async(
-                DispositionRepository.permitted_actions
-            )(current, evidence, user, organization_id)
+            result["permitted_actions"] = await sync_to_async(self.permitted_actions)(
+                current, evidence, user, organization_id
+            )
             result["review_message"] = self.review_message(
                 evidence, result["permitted_actions"]
             )
@@ -134,7 +297,7 @@ class DispositionService:
         action: str,
     ) -> dict:
         """Explicit reconciliation/retry/acknowledgment; never rerun create/build."""
-        row = await sync_to_async(DispositionRepository.authorized)(
+        row = await sync_to_async(DispositionService.authorized)(
             user,
             organization_id,
             operation_id,
@@ -147,20 +310,17 @@ class DispositionService:
             and evidence.get("diagnostic_code") == "identity_not_recorded"
         ):
             evidence = await transport._call_runner(
-                row.task.runner,
+                row.runner,
                 "operation:seal",
-                OperationRepository.envelope(row, {}),
+                row.identity,
                 timeout=60,
             )
             if evidence.get("status") != "terminal":
                 raise ConflictError("Runner could not seal delayed delivery identity")
-        current = await sync_to_async(DispositionRepository.authorized)(
+        current = await sync_to_async(DispositionService.authorized)(
             user, organization_id, operation_id
         )
-        if (
-            current.task.runner.sid != row.task.runner.sid
-            or not current.task.runner.is_online
-        ):
+        if current.runner.sid != row.runner.sid or not current.runner.is_online:
             raise ConflictError("Runner session changed during inspection")
         if action == "reconcile":
             if (
@@ -171,11 +331,11 @@ class DispositionService:
                 raise ConflictError("Exact terminal journal outcome unavailable")
             accepted = await sync_to_async(apply_result)(
                 transport,
-                str(row.task.runner_id),
+                str(row.runner.id),
                 evidence["event"],
                 evidence["result"],
             )
             if not accepted:
                 raise ConflictError("Journal result could not resolve this operation")
             return {"operation_id": str(operation_id), "reconciled": True}
-        return await sync_to_async(DispositionRepository.dispose)(row, evidence, action)
+        return await sync_to_async(self._dispose)(row, evidence, action)

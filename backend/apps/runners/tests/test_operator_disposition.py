@@ -4,11 +4,12 @@ import uuid
 from unittest.mock import AsyncMock
 
 import pytest
-from common.exceptions import ConflictError
+
 from apps.runners.disposition_repository import DispositionRepository
 from apps.runners.operations import OperationRepository
 from apps.runners.repositories import TaskRepository
 from apps.runners.services.disposition import DispositionService
+from common.exceptions import ConflictError
 
 pytestmark = pytest.mark.django_db
 
@@ -35,10 +36,16 @@ def test_acknowledge_preserves_failed_create_disk_and_releases_fence(runner, wor
     }
     for missing in ["execution_finished", "quiescent", "instance_id"]:
         with pytest.raises(ConflictError):
-            DispositionRepository.dispose(
-                row, {**evidence, missing: False}, "acknowledge_interrupted"
+            DispositionService._dispose(
+                DispositionRepository.get(runner.organization_id, row.task_id),
+                {**evidence, missing: False},
+                "acknowledge_interrupted",
             )
-    result = DispositionRepository.dispose(row, evidence, "acknowledge_interrupted")
+    result = DispositionService._dispose(
+        DispositionRepository.get(runner.organization_id, row.task_id),
+        evidence,
+        "acknowledge_interrupted",
+    )
     workspace.refresh_from_db()
     assert result["resources_preserved"]
     assert workspace.current_task_id is None
@@ -63,7 +70,11 @@ def test_retry_new_identity_bounded_and_no_create_retry(runner, workspace):
         "event": "workspace:error",
         "identity": OperationRepository.envelope(row, {}),
     }
-    result = DispositionRepository.dispose(row, evidence, "retry")
+    result = DispositionService._dispose(
+        DispositionRepository.get(runner.organization_id, row.task_id),
+        evidence,
+        "retry",
+    )
     assert result["operation_id"] != str(task.id)
     next_task = TaskRepository.get_by_id(result["operation_id"])
     assert next_task.lifecyclecommand.payload["task_id"] == str(next_task.id)
@@ -240,18 +251,23 @@ def test_unrecorded_interrupted_allocation_release_requires_current_scan(
         "identity": OperationRepository.envelope(row, {}),
     }
     with pytest.raises(ConflictError):
-        DispositionRepository.dispose(
-            row, {**evidence, "quiescent": False}, "acknowledge_interrupted"
+        DispositionService._dispose(
+            DispositionRepository.get(runner.organization_id, row.task_id),
+            {**evidence, "quiescent": False},
+            "acknowledge_interrupted",
         )
-    assert DispositionRepository.dispose(row, evidence, "acknowledge_interrupted")[
-        "released"
-    ]
+    assert DispositionService._dispose(
+        DispositionRepository.get(runner.organization_id, row.task_id),
+        evidence,
+        "acknowledge_interrupted",
+    )["released"]
     workspace.refresh_from_db()
     assert workspace.status == "failed" and workspace.current_task_id is None
 
 
 def test_other_owner_requires_admin_and_other_org_hidden(runner, workspace, user):
     from django.contrib.auth import get_user_model
+
     from apps.organizations.models import Membership, Organization
     from common.exceptions import AuthenticationError, NotFoundError
 
@@ -268,10 +284,12 @@ def test_other_owner_requires_admin_and_other_org_hidden(runner, workspace, user
         task_type="stop_workspace",
     )
     with pytest.raises(AuthenticationError):
-        DispositionRepository.authorized(other, runner.organization_id, task.id)
+        DispositionService.authorized(other, runner.organization_id, task.id)
     Membership.objects.filter(user=other).update(role="admin")
     assert (
-        DispositionRepository.authorized(other, runner.organization_id, task.id).task_id
+        DispositionService.authorized(
+            other, runner.organization_id, task.id
+        ).operation_id
         == task.id
     )
     foreign = Organization.objects.create(
@@ -279,7 +297,7 @@ def test_other_owner_requires_admin_and_other_org_hidden(runner, workspace, user
     )
     Membership.objects.create(user=other, organization=foreign, role="admin")
     with pytest.raises(NotFoundError):
-        DispositionRepository.authorized(other, foreign.id, task.id)
+        DispositionService.authorized(other, foreign.id, task.id)
 
 
 def test_permitted_actions_are_current_evidence_not_task_status(
@@ -293,8 +311,11 @@ def test_permitted_actions_are_current_evidence_not_task_status(
     )
     row = task.lifecyclecommand
     assert (
-        DispositionRepository.permitted_actions(
-            row, {}, workspace.created_by, organization.id
+        DispositionService.permitted_actions(
+            DispositionRepository.get(runner.organization_id, row.task_id),
+            {},
+            workspace.created_by,
+            organization.id,
         )
         == []
     )
@@ -307,9 +328,15 @@ def test_permitted_actions_are_current_evidence_not_task_status(
         "identity": OperationRepository.envelope(row, {}),
         "event": "workspace:error",
     }
-    assert DispositionRepository.permitted_actions(
-        row, evidence, workspace.created_by, organization.id
+    assert DispositionService.permitted_actions(
+        DispositionRepository.get(runner.organization_id, row.task_id),
+        evidence,
+        workspace.created_by,
+        organization.id,
     ) == ["reconcile", "retry"]
-    assert "retry" not in DispositionRepository.permitted_actions(
-        row, {**evidence, "quiescent": False}, workspace.created_by, organization.id
+    assert "retry" not in DispositionService.permitted_actions(
+        DispositionRepository.get(runner.organization_id, row.task_id),
+        {**evidence, "quiescent": False},
+        workspace.created_by,
+        organization.id,
     )

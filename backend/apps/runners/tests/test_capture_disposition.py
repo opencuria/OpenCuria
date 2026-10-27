@@ -13,6 +13,7 @@ from apps.runners.capture_repository import CaptureRepository
 from apps.runners.disposition_repository import DispositionRepository
 from apps.runners.models import CaptureRequest, LifecycleCommand, Task
 from apps.runners.operations import OperationRepository
+from apps.runners.services.disposition import DispositionService
 from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_capture_pipeline import result
 from apps.runners.tests.test_services import service as service
@@ -77,7 +78,11 @@ def test_acknowledge_capture_closes_reservation_and_preserves_ready_image(
     count = Task.objects.count()
     if phase == "stop":
         assert request.image.creating_task_id is None
-    DispositionRepository.dispose(command, evidence, "acknowledge_interrupted")
+    DispositionService._dispose(
+        DispositionRepository.get(runner.organization_id, command.task_id),
+        evidence,
+        "acknowledge_interrupted",
+    )
     CaptureRepository.tick()
     request.refresh_from_db()
     workspace.refresh_from_db()
@@ -103,8 +108,10 @@ def test_missing_disposition_proof_cannot_release_image_reservation(
 ):
     request, command, evidence = interrupted_capture(service, runner, workspace, "stop")
     with pytest.raises(ConflictError, match="No fresh proof"):
-        DispositionRepository.dispose(
-            command, {**evidence, missing: False}, "acknowledge_interrupted"
+        DispositionService._dispose(
+            DispositionRepository.get(runner.organization_id, command.task_id),
+            {**evidence, missing: False},
+            "acknowledge_interrupted",
         )
     request.refresh_from_db()
     workspace.refresh_from_db()
@@ -121,7 +128,11 @@ def test_stop_disposition_does_not_overwrite_finished_or_deleting_image(
     image.status = status
     image.runner_ref = "/preserved.qcow2"
     image.save()
-    DispositionRepository.dispose(command, evidence, "acknowledge_interrupted")
+    DispositionService._dispose(
+        DispositionRepository.get(runner.organization_id, command.task_id),
+        evidence,
+        "acknowledge_interrupted",
+    )
     image.refresh_from_db()
     assert image.status == status and image.runner_ref == "/preserved.qcow2"
 

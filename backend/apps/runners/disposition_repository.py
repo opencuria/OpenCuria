@@ -1,111 +1,92 @@
-"""Authorized operation inspection and transactional operator disposition."""
+"""Loaded operation state and transaction-scoped disposition persistence."""
+
+from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any
 
 from django.db import transaction
 from django.db.models import Q
-
-from apps.organizations.services import OrganizationService
-from common.exceptions import AuthenticationError, ConflictError, NotFoundError
+from django.utils import timezone
 
 from .locking import lock_runner
-from .models import LifecycleCommand, Task, Workspace
+from .models import (
+    CaptureRequest,
+    ImageInstance,
+    LifecycleCommand,
+    Runner,
+    Task,
+    Workspace,
+    WorkspaceRecreateRequest,
+)
+from .operations import OperationRepository
 from .repositories import TaskRepository
 
 
+@dataclass(frozen=True)
+class DispositionState:
+    """Operation snapshot with an eagerly loaded runner for transport calls."""
+
+    operation_id: uuid.UUID
+    runner: Runner
+    identity: dict[str, Any]
+    task_type: str
+    status: str
+    phase: str
+    diagnostic: str
+    retry_count: int
+    workspace_id: uuid.UUID | None
+    workspace_owner_id: int | None
+    workspace_status: str | None
+    current_task_id: uuid.UUID | None
+
+
+def _snapshot(command: LifecycleCommand) -> DispositionState:
+    """Copy loaded operation/workspace fields without exposing lazy relations."""
+    task = command.task
+    workspace = task.workspace if task.workspace_id else None
+    return DispositionState(
+        operation_id=task.id,
+        runner=task.runner,
+        identity=OperationRepository.envelope(command, {}),
+        task_type=task.type,
+        status=task.status,
+        phase=command.phase,
+        diagnostic=task.error,
+        retry_count=command.payload.get("_retry_count", 0),
+        workspace_id=task.workspace_id,
+        workspace_owner_id=workspace.created_by_id if workspace else None,
+        workspace_status=workspace.status if workspace else None,
+        current_task_id=workspace.current_task_id if workspace else None,
+    )
+
+
 class DispositionRepository:
-    """The runner boundary serializes disposition with new allocation/callbacks."""
+    """Hold runner → workspace → task locks and persist service-selected changes."""
+
+    def __init__(self, command: LifecycleCommand) -> None:
+        self._command = command
+        self._task = command.task
+        self._workspace = self._task.workspace if self._task.workspace_id else None
 
     @staticmethod
-    def authorized(
-        user: Any,
-        organization_id: uuid.UUID,
-        operation_id: uuid.UUID,
-        *,
-        admin: bool = False,
-    ) -> LifecycleCommand:
-        """Owners inspect workspace operations; org admins inspect every operation."""
-        OrganizationService().require_membership(user, organization_id)
+    def get(
+        organization_id: uuid.UUID, operation_id: uuid.UUID
+    ) -> DispositionState | None:
+        """Read a fully loaded operation in the requested organization."""
         row = (
             LifecycleCommand.objects.select_related("task__runner", "task__workspace")
             .filter(task_id=operation_id, task__runner__organization_id=organization_id)
             .first()
         )
-        if row is None:
-            raise NotFoundError("Operation", str(operation_id))
-        if (
-            admin
-            or not row.task.workspace_id
-            or row.task.workspace.created_by_id != user.id
-        ):
-            OrganizationService().require_admin(user, organization_id)
-        return row
+        return _snapshot(row) if row is not None else None
 
     @staticmethod
-    def summary(row: LifecycleCommand) -> dict:
-        """Hide recipes, repository URLs and credential associations."""
-        return {
-            "operation_id": str(row.task_id),
-            "task_type": row.task.type,
-            "status": row.task.status,
-            "phase": row.phase,
-            "runner_id": str(row.task.runner_id),
-            "target": row.target,
-            "attempt": row.attempt,
-            "diagnostic": row.task.error,
-            "intervention_required": row.phase == "intervention",
-        }
-
-    @staticmethod
-    def permitted_actions(row, evidence: dict, user, organization_id) -> list[str]:
-        """Presentation-only eligibility from current inspection; POST revalidates."""
-        if row.task.status == "completed" or row.phase == "disposed":
-            return []
-        terminal = evidence.get("status") == "terminal"
-        known = evidence.get("outcome_known")
-        finished = evidence.get("execution_finished")
-        actions = ["reconcile"] if terminal and known and finished else []
-        identity = evidence.get("identity", {})
-        exact = all(
-            identity.get(k) == v
-            for k, v in {
-                "operation_id": str(row.task_id),
-                "runner_id": str(row.task.runner_id),
-                "attempt": row.attempt,
-                "target": row.target,
-            }.items()
-        )
-        safe = (
-            exact
-            and finished
-            and evidence.get("instance_id")
-            and evidence.get("quiescent")
-        )
-        if (
-            safe
-            and terminal
-            and known
-            and evidence.get("event") == "workspace:error"
-            and (
-                row.task.type
-                in {"stop_workspace", "resume_workspace", "remove_workspace"}
-                and row.payload.get("_retry_count", 0) < 2
-            )
-        ):
-            actions.append("retry")
-        if safe and not known and evidence.get("status") in {"terminal", "unknown"}:
-            try:
-                OrganizationService().require_admin(user, organization_id)
-                actions.append("acknowledge_interrupted")
-            except AuthenticationError:
-                pass
-        return actions
-
-    @staticmethod
-    def listing(user: Any, organization_id: uuid.UUID) -> list[dict]:
-        """List operations visible to an owner or organization administrator."""
-        OrganizationService().require_membership(user, organization_id)
+    def list_by_org(organization_id: uuid.UUID) -> list[DispositionState]:
+        """Read at most 100 operations, newest first, without applying visibility."""
         rows = (
             LifecycleCommand.objects.filter(
                 task__runner__organization_id=organization_id
@@ -113,148 +94,87 @@ class DispositionRepository:
             .select_related("task__runner", "task__workspace")
             .order_by("-created_at")[:100]
         )
-        visible = []
-        for row in rows:
-            try:
-                DispositionRepository.authorized(user, organization_id, row.task_id)
-            except (AuthenticationError, NotFoundError):
-                continue
-            visible.append(DispositionRepository.summary(row))
-        return visible
+        return [_snapshot(row) for row in rows]
 
     @staticmethod
-    def dispose(row: LifecycleCommand, evidence: dict, action: str) -> dict:
-        """Release only with fresh identity, exclusive-process and runtime proof."""
-        if (
-            not evidence.get("instance_id")
-            or not evidence.get("execution_finished")
-            or not evidence.get("quiescent")
-            or evidence.get("status") not in {"terminal", "unknown"}
-        ):
-            raise ConflictError(
-                "No fresh proof of finished execution and complete resource scan"
-            )
-        identity = evidence.get("identity", {})
-        if any(
-            identity.get(k) != v
-            for k, v in {
-                "operation_id": str(row.task_id),
-                "runner_id": str(row.task.runner_id),
-                "attempt": row.attempt,
-                "target": row.target,
-            }.items()
-        ):
-            raise ConflictError("Runner evidence identity mismatch")
-        if action == "acknowledge_interrupted" and evidence.get("outcome_known"):
-            raise ConflictError(
-                "Known outcome must be reconciled, not acknowledged as interrupted"
-            )
+    @contextmanager
+    def locked(state: DispositionState) -> Iterator[DispositionRepository]:
+        """Keep the existing allocation/callback lock order through all writes.
+
+        Policy validation and retry allocation run inside this transaction so
+        stale state is rechecked and failures roll back the whole disposition.
+        """
         with transaction.atomic():
-            runner = lock_runner(row.task.runner_id)
-            if runner.sid != row.task.runner.sid or not runner.is_online:
-                raise ConflictError("Runner session changed during inspection")
-            ws = None
-            if row.task.workspace_id:
-                ws = Workspace.objects.select_for_update().get(pk=row.task.workspace_id)
-                if ws.current_task_id not in {None, row.task_id}:
-                    raise ConflictError("Another operation owns the workspace")
-            task = Task.objects.select_for_update().get(pk=row.task_id)
-            row = LifecycleCommand.objects.select_for_update().get(pk=task.id)
-            if action == "retry" and row.payload.get("_retry_count", 0) >= 2:
-                raise ConflictError("Safe retry limit reached")
-            if action == "retry" and (
-                evidence.get("status") != "terminal"
-                or task.type
-                not in {"stop_workspace", "resume_workspace", "remove_workspace"}
-                or not evidence.get("outcome_known")
-                or evidence.get("event") != "workspace:error"
-            ):
-                raise ConflictError(
-                    "Only proven finished failed start/stop/remove may retry"
+            runner = lock_runner(state.runner.id)
+            workspace = None
+            if state.workspace_id:
+                workspace = Workspace.objects.select_for_update().get(
+                    pk=state.workspace_id
                 )
-            if action not in {"acknowledge_interrupted", "retry"}:
-                raise ConflictError("Unsupported disposition")
-            if task.status == "completed" or row.phase == "disposed":
-                raise ConflictError("Operation already resolved")
-            task.status = "failed"
-            task.error = (
-                "Interrupted execution acknowledged after fresh runtime scan; "
-                "no resources deleted or recreated"
-            )
-            from django.utils import timezone
+            task = Task.objects.select_for_update().get(pk=state.operation_id)
+            command = LifecycleCommand.objects.select_for_update().get(pk=task.id)
+            task.runner = runner
+            task.workspace = workspace
+            command.task = task
+            yield DispositionRepository(command)
 
-            task.completed_at = timezone.now()
-            task.save(update_fields=["status", "error", "completed_at"])
-            if action == "acknowledge_interrupted":
-                from .models import (
-                    CaptureRequest,
-                    ImageInstance,
-                    WorkspaceRecreateRequest,
-                )
+    def state(self) -> DispositionState:
+        """Read the current locked operation and workspace fence."""
+        return _snapshot(self._command)
 
-                captures = CaptureRequest.objects.filter(child=task)
-                capture_image_ids = list(captures.values_list("image_id", flat=True))
-                captures.update(
-                    phase="failed",
-                    resume_suppressed=True,
-                    diagnostic=(
-                        "Interrupted child acknowledged; resources preserved, "
-                        "no automatic restart"
-                    ),
-                )
-                WorkspaceRecreateRequest.objects.filter(child=task).exclude(
-                    phase__in=["completed", "failed"]
-                ).update(
-                    phase="failed",
-                    diagnostic=(
-                        "Interrupted reset acknowledged; retry the reset or "
-                        "delete the workspace"
-                    ),
-                )
-                # The reservation precedes the capture task: an interrupted stop
-                # still owns an unfinished image with no creating_task yet.
-                ImageInstance.objects.filter(
-                    Q(creating_task=task)
-                    | Q(pk__in=capture_image_ids, status="capturing")
-                ).exclude(
-                    status__in=["ready", "deleted", "pending_deletion"]
-                ).update(status="failed", updated_at=timezone.now())
-            row.phase = "disposed"
-            row.save(update_fields=["phase"])
-            if ws:
-                ws.current_task = None
-                ws.active_operation = None
-                if task.type in {
-                    "create_workspace",
-                    "create_workspace_from_image_artifact",
-                }:
-                    ws.status = "failed"
-                elif task.type == "remove_workspace":
-                    from .models import WorkspaceRecreateRequest
+    def fail_task(self, error: str) -> None:
+        """Persist the terminal task outcome selected by the service."""
+        task = self._task
+        task.status = "failed"
+        task.error = error
+        task.completed_at = timezone.now()
+        task.save(update_fields=["status", "error", "completed_at"])
 
-                    ws.status = (
-                        "failed"
-                        if WorkspaceRecreateRequest.objects.filter(child=task).exists()
-                        else "delete_failed"
-                    )
-                ws.save(update_fields=["current_task", "active_operation", "status"])
-            if action == "retry":
-                new = TaskRepository.create(
-                    task_id=uuid.uuid4(),
-                    runner=runner,
-                    task_type=task.type,
-                    workspace=ws,
-                    operation_payload={
-                        **row.payload,
-                        "_retry_count": row.payload.get("_retry_count", 0) + 1,
-                    },
-                )
-                return {
-                    "operation_id": str(new.id),
-                    "previous_operation_id": str(task.id),
-                }
-            return {
-                "operation_id": str(task.id),
-                "released": True,
-                "resources_preserved": True,
-            }
+    def interrupt_children(
+        self, capture_diagnostic: str, recreate_diagnostic: str
+    ) -> None:
+        """Close child reservations while retaining finished/deleting images."""
+        task = self._task
+        captures = CaptureRequest.objects.filter(child=task)
+        capture_image_ids = list(captures.values_list("image_id", flat=True))
+        captures.update(
+            phase="failed",
+            resume_suppressed=True,
+            diagnostic=capture_diagnostic,
+        )
+        WorkspaceRecreateRequest.objects.filter(child=task).exclude(
+            phase__in=["completed", "failed"]
+        ).update(phase="failed", diagnostic=recreate_diagnostic)
+        # The reservation precedes the capture task: an interrupted stop
+        # still owns an unfinished image with no creating_task yet.
+        ImageInstance.objects.filter(
+            Q(creating_task=task) | Q(pk__in=capture_image_ids, status="capturing")
+        ).exclude(status__in=["ready", "deleted", "pending_deletion"]).update(
+            status="failed", updated_at=timezone.now()
+        )
+
+    def has_recreate_request(self) -> bool:
+        """Read whether the locked child belongs to a workspace reset."""
+        return WorkspaceRecreateRequest.objects.filter(child=self._task).exists()
+
+    def release(self, workspace_status: str | None) -> None:
+        """Mark the command disposed and release its workspace reservation."""
+        self._command.phase = "disposed"
+        self._command.save(update_fields=["phase"])
+        if self._workspace is not None:
+            workspace = self._workspace
+            workspace.current_task = None
+            workspace.active_operation = None
+            workspace.status = workspace_status
+            workspace.save(update_fields=["current_task", "active_operation", "status"])
+
+    def create_retry(self, retry_count: int) -> uuid.UUID:
+        """Allocate a new task identity inside the disposition transaction."""
+        new = TaskRepository.create(
+            task_id=uuid.uuid4(),
+            runner=self._task.runner,
+            task_type=self._task.type,
+            workspace=self._workspace,
+            operation_payload={**self._command.payload, "_retry_count": retry_count},
+        )
+        return new.id
