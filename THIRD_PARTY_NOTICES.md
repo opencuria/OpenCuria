@@ -12,8 +12,10 @@ The Computer Use runtime in `packages/computer-use` is independently written
 OpenCuria code. It does not distribute ChatGPT binaries or source code.
 Its bundled MCP SDK and transitive dependencies retain their upstream license
 notices in `runner/src/runtime/assets/computer-use-0.1.0.NOTICES.txt`.
-Node.js is downloaded from its pinned official release at runtime; its license
-is available at https://github.com/nodejs/node/blob/v22.23.2/LICENSE.
+Node.js is downloaded from its pinned official release at runtime. Its complete
+license notice is retained in `packages/computer-use/third_party/` and included
+in the installed runtime's `NOTICES.txt`; the upstream copy is available at
+https://github.com/nodejs/node/blob/v22.23.2/LICENSE.
 
 ## Claude Agent SDK for Python
 

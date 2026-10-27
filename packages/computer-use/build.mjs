@@ -30,7 +30,7 @@ for (const input of Object.keys(bundled.metafile.inputs)) {
     directory = path.dirname(directory);
   }
 }
-const notices = [];
+const notices = [`Node.js 22.23.2\n${await readFile(path.join(root, 'third_party/NODE-22.23.2-LICENSE.txt'), 'utf8')}`];
 for (const directory of [...packages].sort()) {
   const pkg = JSON.parse(await readFile(path.join(directory, 'package.json'), 'utf8'));
   const licenses = (await readdir(directory)).filter(name => /^(licen[sc]e|copying|notice)([.\-]|$)/i.test(name));

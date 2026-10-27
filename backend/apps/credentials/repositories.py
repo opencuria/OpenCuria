@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hmac
 import uuid
+from contextlib import AbstractContextManager
 
 from django.db import IntegrityError, connection, transaction
 from django.db.models import F, Q, QuerySet, Value
 from django.db.models.functions import Concat
 from django.utils import timezone
 
-from apps.organizations.services import OrganizationService
 from common.exceptions import ConflictError
 
 from .models import (
@@ -19,7 +19,6 @@ from .models import (
     McpOAuthAuthorizationState,
     McpOAuthClientRegistration,
 )
-from .oauth_metadata import registration_fingerprint, registration_metadata_safe
 
 
 def _lock_queryset_self(query: QuerySet) -> QuerySet:
@@ -618,6 +617,11 @@ class McpOAuthRepository:
     """Repository access for OAuth services, registration, state, and grants."""
 
     @staticmethod
+    def grant_transaction() -> AbstractContextManager[None]:
+        """Keep grant authorization reads, row locks and writes in one transaction."""
+        return transaction.atomic()
+
+    @staticmethod
     def get_service(service_id: uuid.UUID, *, lock: bool = False):
         query = CredentialService.objects.all()
         if lock:
@@ -721,36 +725,26 @@ class McpOAuthRepository:
         return query.filter(pk=credential_id).first()
 
     @staticmethod
-    def owner_matches_state(state, credential: Credential) -> bool:
-        if state.organization_credential:
-            return (
-                credential.organization_id == state.organization_id
-                and credential.user_id is None
-            )
-        return (
-            credential.user_id == state.user_id and credential.organization_id is None
-        )
-
-    @staticmethod
     def create_grant(
         *,
-        user,
-        organization,
+        user_id: int | None,
+        organization_id: uuid.UUID | None,
         service: CredentialService,
         name: str,
         server_url: str,
         resource: str,
         registration: McpOAuthClientRegistration,
         encrypted_value: str,
-        created_by,
+        created_by_id: int,
     ) -> Credential:
+        """Insert a service-bound grant without resolving owner relationships."""
         return Credential.objects.create(
-            user=user,
-            organization=organization,
+            user_id=user_id,
+            organization_id=organization_id,
             service=service,
             name=name,
             encrypted_value=encrypted_value,
-            created_by=created_by,
+            created_by_id=created_by_id,
             oauth_server_url=server_url,
             oauth_resource=resource,
             oauth_registration=registration,
@@ -762,91 +756,6 @@ class McpOAuthRepository:
         for key, value in values.items():
             setattr(credential, key, value)
         credential.save(update_fields=[*values, "updated_at"])
-
-    @staticmethod
-    def persist_authorization_grant(*, state, encrypted_value: str) -> uuid.UUID:
-        """Atomically recheck service/registration/owner state and persist grant."""
-        with transaction.atomic():
-            service = McpOAuthRepository.get_service(state.service_id, lock=True)
-            registration = McpOAuthRepository.get_registration(
-                state.registration_id, lock=True
-            )
-            membership = OrganizationService().get_active_membership(
-                state.user_id, state.organization_id, lock=True
-            )
-
-            if (
-                service is None
-                or registration is None
-                or membership is None
-                or (state.organization_credential and membership.role != "admin")
-                or service.credential_type != "mcp_oauth"
-                or service.oauth_server_url != state.server_url
-                or not McpOAuthRepository.service_visible_to_org(
-                    state.service_id, state.organization_id
-                )
-                or not registration_metadata_safe(
-                    registration,
-                    expected_url=state.server_url,
-                    expected_issuer=state.issuer,
-                )
-                or registration_fingerprint(registration)
-                != state.registration_fingerprint
-            ):
-                raise ValueError("OAuth service, registration, or membership changed")
-            if state.reconnect_existing:
-                target = (
-                    McpOAuthRepository.get_reconnect_target(
-                        state.credential_id, lock=True
-                    )
-                    if state.credential_id
-                    else None
-                )
-                if (
-                    target is None
-                    or target.service_id != state.service_id
-                    or target.oauth_server_url != state.credential_server_url_snapshot
-                    or not McpOAuthRepository.owner_matches_state(state, target)
-                    or not McpOAuthRepository.service_visible_to_org(
-                        target.service_id, state.organization_id
-                    )
-                ):
-                    raise ValueError("OAuth reconnect target was deleted or changed")
-                target.name = state.credential_name or target.name
-                target.oauth_server_url = state.server_url
-                target.oauth_resource = state.resource
-                target.oauth_registration = registration
-                target.oauth_status = "connected"
-                target.encrypted_value = encrypted_value
-                target.save(
-                    update_fields=[
-                        "name",
-                        "oauth_server_url",
-                        "oauth_resource",
-                        "oauth_registration",
-                        "oauth_status",
-                        "encrypted_value",
-                        "updated_at",
-                    ]
-                )
-                return target.id
-            if not McpOAuthRepository.service_active_for_org(
-                state.service_id, state.organization_id, lock=True
-            ):
-                raise ValueError("OAuth service is inactive")
-            return McpOAuthRepository.create_grant(
-                user=None if state.organization_credential else state.user,
-                organization=state.organization
-                if state.organization_credential
-                else None,
-                service=service,
-                name=state.credential_name or f"{service.name} OAuth",
-                server_url=state.server_url,
-                resource=state.resource,
-                registration=registration,
-                encrypted_value=encrypted_value,
-                created_by=state.user,
-            ).id
 
     @staticmethod
     def update_oauth(credential_id: uuid.UUID, **values) -> int:

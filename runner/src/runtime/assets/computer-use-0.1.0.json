@@ -1,6 +1,6 @@
 {
-  "sha256": "ff889a6c5ae9967594339fbbcf72b494979f2d6fef7a1cce7c8382fdf4412dae",
-  "size": 156995,
+  "sha256": "4d8a7ee6c440fcae873e54c78ffb886abb60d897bfce7701d4a9f90fdaaeeb76",
+  "size": 179858,
   "manifest": {
     "version": "0.1.0",
     "protocol_version": 1,
@@ -8,7 +8,7 @@
       "server.js": "188a0d274c153ad5c456631a2f096d9e3d7f8696d9001376390d1ddd4fd0e1d8",
       "worker.js": "18b3dd29fa07b960a94e9b8270e2d0bae004b0fe6068ef33febe16fdd4850b35",
       "linux.py": "f839a3ed46342d8092da47fa0e839ff3bf8af3804e9621e1a6dfa12e1a7f4a0a",
-      "NOTICES.txt": "a4f95e3bd3810e03b697ced471f0b148ca39ad0bcd7501185e9e38d88f95ee1c"
+      "NOTICES.txt": "e3093bc61a9331e6b7ee021eb3842a5ee4ff1773f894c622a8d89c39a98c377f"
     }
   }
 }

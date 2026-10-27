@@ -24,7 +24,7 @@ from django.utils import timezone
 
 from common.utils import decrypt_value, encrypt_value
 
-from .models import Credential
+from .models import Credential, McpOAuthAuthorizationState
 from .oauth_metadata import (
     grant_metadata,
     is_safe_registration_url,
@@ -743,12 +743,12 @@ def _token_expiry(lifetime: int | None) -> str:
     )
 
 
-def _store_authorization_grant(state, token: dict) -> uuid.UUID:
-    """Validate a callback token and atomically store its service-bound grant."""
+def authorization_grant_payload(state: McpOAuthAuthorizationState, token: dict) -> dict:
+    """Validate a callback token and build its service-bound grant payload."""
     access, refresh, lifetime, scope = _validated_token_fields(
         token, default_scope=state.scope
     )
-    payload = {
+    return {
         "access_token": access,
         "refresh_token": refresh,
         "token_type": "Bearer",
@@ -764,14 +764,6 @@ def _store_authorization_grant(state, token: dict) -> uuid.UUID:
             if key in token and isinstance(token[key], str)
         },
     }
-    try:
-        return McpOAuthRepository.persist_authorization_grant(
-            state=state, encrypted_value=encrypt_value(json.dumps(payload))
-        )
-    except ValueError as exc:
-        from common.exceptions import AuthenticationError
-
-        raise AuthenticationError(str(exc)) from None
 
 
 def _mark_reconnect(credential_id: uuid.UUID) -> None:
