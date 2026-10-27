@@ -8,7 +8,7 @@ import HarnessMessageView from './HarnessMessageView.vue'
 import { harnessWorkspaceIdKey } from '@/lib/harnessWorkspaceContext'
 import type { HarnessMessage, HarnessPart } from '@/types/harness'
 
-vi.mock('@/services/socket', () => ({ sendFilesRead: vi.fn() }))
+vi.mock('@/services/socket', () => ({ readWorkspaceFile: vi.fn(() => new Promise(() => {})) }))
 
 function makeSteerPart(output: string): HarnessPart {
   return {

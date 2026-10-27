@@ -11,8 +11,6 @@ import { sendFilesUpload } from '@/services/socket'
 vi.mock('@/services/socket', () => ({
   sendFilesList: vi.fn(),
   sendFilesFind: vi.fn(),
-  sendFilesRead: vi.fn(),
-  sendFilesDownload: vi.fn(),
   sendFilesUpload: vi.fn(),
 }))
 

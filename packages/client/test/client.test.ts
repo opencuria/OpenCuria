@@ -725,9 +725,14 @@ describe("realtime and file transfers", () => {
     client.realtime.dispose();
   });
 
-  it.each([false, true])(
-    "cancels media reads and releases their room (already aborted: %s)",
-    async (alreadyAborted) => {
+  it.each([
+    ["read", false],
+    ["read", true],
+    ["download", false],
+    ["download", true],
+  ] as const)(
+    "cancels %s and releases its room (already aborted: %s)",
+    async (kind, alreadyAborted) => {
       const sockets: MockSocket[] = [];
       const client = clientOptions().create(
         vi.fn(async () => jsonResponse({})) as any,
@@ -741,21 +746,31 @@ describe("realtime and file transfers", () => {
       socket.connect();
       const controller = new AbortController();
       if (alreadyAborted) controller.abort();
-      const read = client.files.readFile(
-        "ws-1",
-        "/workspace/image.png",
-        undefined,
-        controller.signal,
-      );
+      const read =
+        kind === "read"
+          ? client.files.readFile(
+              "ws-1",
+              "/workspace/image.png",
+              undefined,
+              controller.signal,
+            )
+          : client.files.downloadFile(
+              "ws-1",
+              "/workspace/image.png",
+              controller.signal,
+            );
       if (!alreadyAborted) {
-        socket.trigger("files:content_chunk", {
-          workspace_id: "ws-1",
-          request_id: "cancel-read",
-          path: "/workspace/image.png",
-          index: 0,
-          total_chunks: 1,
-          content: "YWJj",
-        });
+        socket.trigger(
+          `files:${kind === "read" ? "content" : "download"}_chunk`,
+          {
+            workspace_id: "ws-1",
+            request_id: "cancel-read",
+            path: "/workspace/image.png",
+            index: 0,
+            total_chunks: 1,
+            content: "YWJj",
+          },
+        );
         controller.abort();
         expect(socket.emitted.at(-1)?.event).toBe(
           "frontend:unsubscribe_workspace",
@@ -764,16 +779,19 @@ describe("realtime and file transfers", () => {
         expect(socket.emitted).toHaveLength(0);
       }
       await expect(read).rejects.toMatchObject({ code: "cancelled" });
-      socket.trigger("files:content_result", {
-        workspace_id: "ws-1",
-        request_id: "cancel-read",
-        path: "/workspace/image.png",
-        content: "",
-        size: 3,
-        truncated: false,
-        chunked: true,
-        total_chunks: 1,
-      });
+      socket.trigger(
+        `files:${kind === "read" ? "content" : "download"}_result`,
+        {
+          workspace_id: "ws-1",
+          request_id: "cancel-read",
+          path: "/workspace/image.png",
+          content: "",
+          size: 3,
+          truncated: false,
+          chunked: true,
+          total_chunks: 1,
+        },
+      );
       client.realtime.dispose();
     },
   );
@@ -795,8 +813,16 @@ describe("realtime and file transfers", () => {
       workspace_id: "ws-1",
       request_id: "read-1",
       path: "/workspace/a.txt",
+      index: 1,
+      total_chunks: 2,
+      content: "ZGVm",
+    });
+    socket.trigger("files:content_chunk", {
+      workspace_id: "ws-1",
+      request_id: "read-1",
+      path: "/workspace/a.txt",
       index: 0,
-      total_chunks: 1,
+      total_chunks: 2,
       content: "YWJj",
     });
     socket.trigger("files:content_result", {
@@ -804,13 +830,76 @@ describe("realtime and file transfers", () => {
       request_id: "read-1",
       path: "/workspace/a.txt",
       content: "",
-      size: 3,
+      size: 6,
       truncated: false,
       chunked: true,
-      total_chunks: 1,
+      total_chunks: 2,
     });
-    await expect(read).resolves.toMatchObject({ content: "YWJj", size: 3 });
+    await expect(read).resolves.toMatchObject({ content: "YWJjZGVm", size: 6 });
     client.realtime.dispose();
+  });
+
+  describe.each([false, true])("file payloads (chunked: %s)", (chunked) => {
+    it.each([
+      ["read", true, 10, true],
+      ["read", true, 3, false],
+      ["read", false, 3, true],
+      ["read", false, 4, false],
+      ["download", false, 3, true],
+      ["download", false, 4, false],
+      ["download", false, 100 * 1024 * 1024 + 1, false],
+      ["download", false, 3.5, false],
+      ["download", false, -1, false],
+    ] as const)(
+      "%s truncated=%s size=%s accepted=%s",
+      async (kind, truncated, size, accepted) => {
+        const sockets: MockSocket[] = [];
+        const client = clientOptions().create(
+          vi.fn(async () => jsonResponse({})) as any,
+          {
+            socketFactory: mockSocketFactory(sockets),
+            createFileRequestId: () => "payload",
+          },
+        );
+        client.realtime.connect();
+        const socket = sockets[0];
+        socket.connect();
+        const pending =
+          kind === "read"
+            ? client.files.readFile("ws-1", "/workspace/a.txt")
+            : client.files.downloadFile("ws-1", "/workspace/a.txt");
+        const identity = {
+          workspace_id: "ws-1",
+          request_id: "payload",
+          path: "/workspace/a.txt",
+        };
+        const event = kind === "read" ? "content" : "download";
+        if (chunked)
+          socket.trigger(`files:${event}_chunk`, {
+            ...identity,
+            index: 0,
+            total_chunks: 1,
+            content: "YWJj",
+          });
+        socket.trigger(`files:${event}_result`, {
+          ...identity,
+          content: chunked ? "" : "YWJj",
+          size,
+          truncated,
+          filename: "a.txt",
+          is_archive: false,
+          chunked,
+          total_chunks: chunked ? 1 : undefined,
+        });
+        if (accepted)
+          await expect(pending).resolves.toMatchObject({
+            content: "YWJj",
+            size,
+          });
+        else await expect(pending).rejects.toBeInstanceOf(FileTransferError);
+        client.realtime.dispose();
+      },
+    );
   });
 
   it("fails pending transfer on disconnect, rejects disconnected uploads, and bounds upload size", async () => {

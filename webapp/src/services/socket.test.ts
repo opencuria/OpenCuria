@@ -61,6 +61,8 @@ beforeEach(async () => {
 afterEach(() => {
   service.disconnect()
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+  vi.useRealTimers()
   localStorage.clear()
 })
 
@@ -127,6 +129,9 @@ describe('browser realtime adapter', () => {
     await expect(service.readWorkspaceFile('ws-1', '/workspace/a.png')).rejects.toMatchObject({
       code: 'workspace_transitioning',
     })
+    await expect(service.downloadWorkspaceFile('ws-1', '/workspace')).rejects.toMatchObject({
+      code: 'workspace_transitioning',
+    })
     expect(socket.emit).not.toHaveBeenCalled()
   })
 
@@ -171,5 +176,72 @@ describe('browser realtime adapter', () => {
     expect(socket.emit).toHaveBeenLastCalledWith('frontend:unsubscribe_workspace', {
       workspace_id: 'ws-1',
     })
+  })
+
+  it('loads explorer previews and downloads without view-level file event listeners', async () => {
+    const { useFileExplorerStore } = await import('@/stores/fileExplorer')
+    service.connect()
+    socket.connect()
+    const store = useFileExplorerStore()
+    const path = '/workspace/a.txt'
+    store.selectFile(path, 'ws-1')
+    const read = socket.emit.mock.calls.find(([event]) => event === 'frontend:files_read')![1]
+    const readIdentity = { workspace_id: 'ws-1', request_id: read.request_id, path }
+    socket.trigger('files:content_chunk', {
+      ...readIdentity,
+      index: 0,
+      total_chunks: 1,
+      content: 'YWJj',
+    })
+    socket.trigger('files:content_result', {
+      ...readIdentity,
+      content: '',
+      size: 10_000_000,
+      truncated: true,
+      chunked: true,
+      total_chunks: 1,
+      mime_type: 'text/plain',
+    })
+    await flushPromises()
+    expect(store.viewingFile).toMatchObject({ content: 'abc', size: 10_000_000, truncated: true })
+    expect(store.isLoadingContent).toBe(false)
+
+    vi.useFakeTimers()
+    const save = vi.fn(() => 'blob:download')
+    vi.stubGlobal(
+      'URL',
+      class extends URL {
+        static createObjectURL = save
+        static revokeObjectURL = vi.fn()
+      },
+    )
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const pending = store.downloadFile('ws-1', path)
+    const download = socket.emit.mock.calls.find(
+      ([event]) => event === 'frontend:files_download',
+    )![1]
+    const downloadIdentity = { workspace_id: 'ws-1', request_id: download.request_id, path }
+    socket.trigger('files:download_chunk', {
+      ...downloadIdentity,
+      index: 0,
+      total_chunks: 1,
+      content: 'YWJj',
+    })
+    socket.trigger('files:download_result', {
+      ...downloadIdentity,
+      content: '',
+      filename: 'a.txt',
+      is_archive: false,
+      size: 3,
+      chunked: true,
+      total_chunks: 1,
+    })
+    await pending
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ size: 3 }))
+    expect(click).toHaveBeenCalledOnce()
+    expect(socket.emit).toHaveBeenLastCalledWith('frontend:unsubscribe_workspace', {
+      workspace_id: 'ws-1',
+    })
+    vi.advanceTimersByTime(1000)
   })
 })

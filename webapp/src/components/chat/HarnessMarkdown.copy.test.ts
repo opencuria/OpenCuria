@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import HarnessMarkdown from './HarnessMarkdown.vue'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 
-vi.mock('@/services/socket', () => ({ sendFilesRead: vi.fn() }))
+vi.mock('@/services/socket', () => ({ readWorkspaceFile: vi.fn(() => new Promise(() => {})) }))
 vi.mock('@/components/common/CopyButton.vue', () => ({
   default: {
     props: ['text', 'label', 'disabled'],

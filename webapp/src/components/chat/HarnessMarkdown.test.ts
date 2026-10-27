@@ -11,13 +11,11 @@ import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
 import { useSidePanelStore } from '@/stores/sidePanel'
 import FileViewer from '@/components/files/FileViewer.vue'
-import { readWorkspaceFile, sendFilesList, sendFilesRead } from '@/services/socket'
+import { readWorkspaceFile, sendFilesList } from '@/services/socket'
 
 vi.mock('@/services/socket', () => ({
   sendFilesList: vi.fn(),
   sendFilesFind: vi.fn(),
-  sendFilesDownload: vi.fn(),
-  sendFilesRead: vi.fn(),
   readWorkspaceFile: vi.fn(() => new Promise(() => {})),
 }))
 
@@ -201,7 +199,7 @@ describe('HarnessMarkdown', () => {
     const image = wrapper.find('img')
     expect(image.exists()).toBe(true)
     expect(image.attributes('src')).toBe('https://example.com/a.png')
-    expect(sendFilesRead).not.toHaveBeenCalled()
+    expect(readWorkspaceFile).not.toHaveBeenCalled()
   })
 
   it('still renders non-media markdown', () => {
@@ -226,22 +224,31 @@ describe('HarnessMarkdown', () => {
       queueMicrotask(() => store.handleListResult(requestId, directory, [], undefined, id))
       return true
     })
+    let resolveRead!: (value: Awaited<ReturnType<typeof readWorkspaceFile>>) => void
+    vi.mocked(readWorkspaceFile).mockReturnValueOnce(
+      new Promise((resolve) => { resolveRead = resolve }),
+    )
     const wrapper = mountMarkdown(`**[Aktualisierte PDF öffnen](${href})**`)
     const viewer = mount(FileViewer, { props: { workspaceId: 'ws-1' } })
 
     expect(wrapper.get('strong a').text()).toBe('Aktualisierte PDF öffnen')
     expect(wrapper.get('a').attributes('target')).toBeUndefined()
-    expect(sendFilesRead).not.toHaveBeenCalled()
+    expect(readWorkspaceFile).not.toHaveBeenCalled()
     expect(click(wrapper.get('strong a').element)).toBe(false)
     await flushPromises()
     expect(useSidePanelStore().isOpen).toBe(false)
     expect(store.selectedPath).toBe(path)
-    expect(sendFilesRead).toHaveBeenCalledWith('ws-1', expect.any(String), path)
+    expect(readWorkspaceFile).toHaveBeenCalledWith('ws-1', path, undefined, expect.any(AbortSignal))
     expect(viewer.find('[data-testid="file-viewer-loading"]').exists()).toBe(true)
 
-    const calls = vi.mocked(sendFilesRead).mock.calls
-    const requestId = calls[calls.length - 1]![1]
-    store.handleContentResult(requestId, path, btoa('%PDF-1.4\n'), 9, false)
+    resolveRead({
+      workspace_id: 'ws-1',
+      request_id: 'pdf',
+      path,
+      content: btoa('%PDF-1.4\n'),
+      size: 9,
+      truncated: false,
+    })
     await flushPromises()
     expect(viewer.get('[data-testid="file-viewer-name"]').text()).toBe('sb-laden-konzept.pdf')
     expect(viewer.get('iframe[title="PDF preview"]').attributes('src')).toMatch(
@@ -268,7 +275,7 @@ describe('HarnessMarkdown', () => {
     const wrapper = mountMarkdown(text)
     await wrapper.get('a').trigger('click')
     await flushPromises()
-    expect(sendFilesRead).toHaveBeenCalledWith('ws-1', expect.any(String), path)
+    expect(readWorkspaceFile).toHaveBeenCalledWith('ws-1', path, undefined, expect.any(AbortSignal))
     wrapper.unmount()
   })
 
@@ -278,20 +285,10 @@ describe('HarnessMarkdown', () => {
       queueMicrotask(() => store.handleListResult(requestId, directory, [], undefined, id))
       return true
     })
+    vi.mocked(readWorkspaceFile).mockRejectedValueOnce(new Error('Permission denied'))
     const wrapper = mountMarkdown('[Missing](missing.pdf)')
     const viewer = mount(FileViewer, { props: { workspaceId: 'ws-1' } })
     await wrapper.get('a').trigger('click')
-    await flushPromises()
-    const calls = vi.mocked(sendFilesRead).mock.calls
-    const requestId = calls[calls.length - 1]![1]
-    store.handleContentResult(
-      requestId,
-      '/workspace/missing.pdf',
-      '',
-      0,
-      false,
-      'Permission denied',
-    )
     await flushPromises()
     expect(viewer.get('[data-testid="file-viewer-error"]').text()).toContain('Permission denied')
     expect(viewer.find('iframe').exists()).toBe(false)
@@ -315,7 +312,7 @@ describe('HarnessMarkdown', () => {
     const wrapper = mountMarkdown(`[Link](${href})`)
     expect(click(wrapper.get('a').element)).toBe(true)
     expect(openPath).not.toHaveBeenCalled()
-    expect(sendFilesRead).not.toHaveBeenCalled()
+    expect(readWorkspaceFile).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -363,7 +360,7 @@ describe('HarnessMarkdown', () => {
 
     expect(wrapper.find('[data-testid="harness-markdown-media-loading"]').exists()).toBe(true)
     expect(wrapper.find('video').exists()).toBe(false)
-    expect(sendFilesRead).not.toHaveBeenCalled()
+    expect(readWorkspaceFile).not.toHaveBeenCalled()
   })
 
   it('falls back to alt text when workspace id is missing', () => {
@@ -410,7 +407,7 @@ describe('HarnessMarkdown', () => {
     expect(image.attributes('aria-label')).toBe('Open image preview Remote photo')
     await image.trigger(activation === 'click' ? 'click' : 'keydown', { key: activation })
     expect(wrapper.getComponent(ImageLightbox).props('src')).toBe('https://example.com/photo.png')
-    expect(sendFilesRead).not.toHaveBeenCalled()
+    expect(readWorkspaceFile).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -461,7 +458,7 @@ describe('HarnessMarkdown', () => {
     await icon.trigger('keydown', { key: 'Enter' })
     expect(wrapper.findComponent(ImageLightbox).exists()).toBe(false)
     expect(icon.attributes('role')).toBeUndefined()
-    expect(sendFilesRead).not.toHaveBeenCalled()
+    expect(readWorkspaceFile).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 

@@ -129,6 +129,25 @@ type PendingFile = {
 
 // Runner file downloads are capped at 100 MiB raw (≈ 133.4 MiB base64).
 const MAX_FILE_RESULT_CHARS = 140 * 1024 * 1024;
+const MAX_FILE_RESULT_BYTES = 100 * 1024 * 1024;
+
+function validateFilePayload(
+  kind: "read" | "download",
+  data: FileContentResult | FileDownloadResult,
+  content: string,
+): void {
+  const rawSize = decodedBase64Size(stripBase64Whitespace(content));
+  const truncated =
+    kind === "read" && "truncated" in data && data.truncated === true;
+  if (
+    !Number.isSafeInteger(data.size) ||
+    data.size < 0 ||
+    rawSize > MAX_FILE_RESULT_BYTES ||
+    (truncated ? data.size <= rawSize : data.size !== rawSize)
+  ) {
+    throw new Error("Invalid file payload size");
+  }
+}
 
 function makeId(): string {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -404,7 +423,11 @@ export class RealtimeClient {
     );
   }
 
-  downloadFile(workspaceId: string, path: string): Promise<FileDownloadResult> {
+  downloadFile(
+    workspaceId: string,
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<FileDownloadResult> {
     const wantedPath = normalizedPath(path);
     return this.requestFile(
       "download",
@@ -415,6 +438,7 @@ export class RealtimeClient {
       {
         path: wantedPath,
       },
+      signal,
     );
   }
 
@@ -818,9 +842,7 @@ export class RealtimeClient {
             data.request_id,
             data.total_chunks,
           );
-          const rawSize = decodedBase64Size(complete.content);
-          if (data.size !== rawSize)
-            throw new Error("file content size mismatch");
+          validateFilePayload(pending.kind, data, complete.content);
           pending.resolve({ ...data, content: complete.content });
           this.clearPending(data.request_id);
         } catch (error) {
@@ -847,11 +869,7 @@ export class RealtimeClient {
         return;
       }
       try {
-        const rawSize = decodedBase64Size(
-          stripBase64Whitespace(data.content ?? ""),
-        );
-        if (data.size !== rawSize)
-          throw new Error("file content size mismatch");
+        validateFilePayload(pending.kind, data, data.content ?? "");
       } catch {
         this.failPending(
           data.request_id,

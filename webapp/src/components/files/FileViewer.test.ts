@@ -5,13 +5,12 @@ import { nextTick } from 'vue'
 
 import FileViewer from './FileViewer.vue'
 import { useFileExplorerStore } from '@/stores/fileExplorer'
-import { sendFilesRead } from '@/services/socket'
+import { readWorkspaceFile } from '@/services/socket'
 
 vi.mock('@/services/socket', () => ({
   sendFilesList: vi.fn(),
   sendFilesFind: vi.fn(),
-  sendFilesRead: vi.fn(),
-  sendFilesDownload: vi.fn(),
+  readWorkspaceFile: vi.fn(() => new Promise(() => {})),
 }))
 
 vi.mock('vue-sonner', () => ({
@@ -46,10 +45,11 @@ describe('FileViewer error/retry and truncation', () => {
 
     await retry.trigger('click')
 
-    expect(vi.mocked(sendFilesRead)).toHaveBeenCalledWith(
+    expect(vi.mocked(readWorkspaceFile)).toHaveBeenCalledWith(
       'ws-1',
-      expect.any(String),
       '/workspace/a.txt',
+      undefined,
+      expect.any(AbortSignal),
     )
     await nextTick()
   })

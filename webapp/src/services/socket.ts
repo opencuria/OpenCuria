@@ -1,6 +1,6 @@
 /** Browser state and frontend commands over the shared realtime transport. */
 import { FileTransferError, RealtimeClient } from '@opencuria/client/realtime'
-import type { FileContentResult } from '@opencuria/client/types'
+import type { FileContentResult, FileDownloadResult } from '@opencuria/client/types'
 import { planFilesUpload } from '@opencuria/chat-core/fileChunks'
 import { getActivePinia } from 'pinia'
 import { ref } from 'vue'
@@ -10,11 +10,7 @@ import { getApiClient } from './api'
 import type {
   FilesListResultEvent,
   FilesFindResultEvent,
-  FilesContentResultEvent,
-  FilesContentChunkEvent,
   FilesUploadResultEvent,
-  FilesDownloadResultEvent,
-  FilesDownloadChunkEvent,
   ProcessRemovedEvent,
   ProcessStatusChangedEvent,
   WorkspaceDiskUsage,
@@ -176,11 +172,7 @@ type EventMap = {
   'desktop:viewer_released': DesktopViewerReleasedEvent
   'files:list_result': FilesListResultEvent
   'files:find_result': FilesFindResultEvent
-  'files:content_result': FilesContentResultEvent
-  'files:content_chunk': FilesContentChunkEvent
   'files:upload_result': FilesUploadResultEvent
-  'files:download_result': FilesDownloadResultEvent
-  'files:download_chunk': FilesDownloadChunkEvent
   'runner:offline': RunnerOfflineEvent
   'runner:online': RunnerOnlineEvent
   'process:status_changed': ProcessStatusChangedEvent
@@ -270,7 +262,7 @@ export function sendTerminalClose(workspaceId: string, terminalId: string): void
 // File explorer helpers
 // ---------------------------------------------------------------------------
 
-/** Read media through the same correlated file transport as the mobile client. */
+/** Read workspace content through the shared correlated file transport. */
 export async function readWorkspaceFile(
   workspaceId: string,
   path: string,
@@ -319,24 +311,6 @@ export function sendFilesFind(
 }
 
 /**
- * Request file content (base64-encoded) from the workspace VM.
- */
-export function sendFilesRead(
-  workspaceId: string,
-  requestId: string,
-  path: string,
-  maxSize?: number,
-): void {
-  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
-  client?.emit('frontend:files_read', {
-    workspace_id: workspaceId,
-    request_id: requestId,
-    path,
-    max_size: maxSize,
-  })
-}
-
-/**
  * Upload a file to the workspace VM.
  *
  * Uses the shared start/chunk/finish plan for every file size.
@@ -367,14 +341,14 @@ export function sendFilesUpload(
   }
 }
 
-/**
- * Download a file or directory from the workspace VM.
- */
-export function sendFilesDownload(workspaceId: string, requestId: string, path: string): void {
-  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) return
-  client?.emit('frontend:files_download', {
-    workspace_id: workspaceId,
-    request_id: requestId,
-    path,
-  })
+/** Download workspace content through the shared correlated file transport. */
+export async function downloadWorkspaceFile(
+  workspaceId: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<FileDownloadResult> {
+  if (getActivePinia() && useWorkspaceStore().isWorkspaceTransitioning(workspaceId)) {
+    throw new FileTransferError('Workspace is transitioning', 'workspace_transitioning')
+  }
+  return getClient().downloadFile(workspaceId, path, signal)
 }
