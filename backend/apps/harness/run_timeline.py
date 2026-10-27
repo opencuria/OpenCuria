@@ -16,7 +16,7 @@ from typing import Any
 
 from asgiref.sync import sync_to_async
 
-from .agent_s.plan_meta import parse_plan_meta
+from .computer_use.legacy_events import parse_plan_meta
 from .models import HarnessMessage, HarnessPart, HarnessSession
 from .providers.base import Usage
 from .repositories import HarnessMessageRepository, HarnessPartRepository

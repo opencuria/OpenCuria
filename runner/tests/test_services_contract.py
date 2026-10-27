@@ -242,7 +242,7 @@ async def test_remove_workspace_uses_managed_lifecycle_confirmation() -> None:
         confirmed = AsyncMock(return_value=True)
         service.streams.confirm_workspace_ended = confirmed
 
-        await service.remove_workspace(workspace_id)
+        await service.lifecycle.remove_workspace(workspace_id)
 
     service.streams.close_workspace_streams.assert_awaited_once_with(
         workspace_id, reason="remove"

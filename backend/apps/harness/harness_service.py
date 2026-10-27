@@ -69,7 +69,9 @@ from .run_timeline import (
     tail_remainder,
 )
 from .runner import HarnessRunner
+from .session_access_service import SessionAccessService
 from .session_metadata_service import SessionMetadataService, title_from_prompt
+from .session_settings_service import SessionSettingsService
 from .steering import NO_ACTIVE_RUN_CODE, SteerEntry, SteeringChannel
 from .todos.repositories import TodoRepository
 from .todos.service import TodoService
@@ -122,6 +124,9 @@ class HarnessService:
         self.skills = skills or SkillService()
         self._emit = emit
         self.conversation_events = ConversationEvents(emit=self._emit_frontend)
+        self.session_settings = SessionSettingsService(
+            sessions=self.sessions, skills=self.skills, events=self.conversation_events
+        )
         self.interactions = InteractionService(
             sessions=self.sessions,
             permissions=self.permissions,
@@ -473,8 +478,6 @@ class HarnessService:
         if normalized_mode not in ("plan", "build"):
             raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
         requested = (agent_name or "").strip().lower()
-        if engine_id in {"claude", "codex"} and requested == "computeruse":
-            raise ValueError(f"{engine_id} engine does not support Agent-S computeruse")
         if engine_id in {"claude", "codex"} and requested in {
             "title",
             "summary",
@@ -605,16 +608,6 @@ class HarnessService:
             raise NotFoundError("HarnessSession", str(session_id))
         return session
 
-    def ensure_user_promptable(self, session: HarnessSession) -> None:
-        """Raise when users must not send follow-up prompts to *session*.
-
-        Subagent child sessions (``parent_id`` set) are launched internally
-        and are not a user-addressable chat. ``start_run`` itself stays
-        allowed so the task tool can start the child run.
-        """
-        if session.parent_id is not None:
-            raise ValueError("Cannot send messages to a subagent session")
-
     def get_session_for_workspace(
         self,
         session_id: uuid.UUID,
@@ -626,114 +619,12 @@ class HarnessService:
             raise NotFoundError("HarnessSession", str(session_id))
         return session
 
-    def set_mode(self, session_id: uuid.UUID, mode: str) -> HarnessSession:
-        """Persist a mode change (plan|build) and align primary agent_name."""
-        normalized = (mode or "").strip().lower()
-        if normalized not in ("plan", "build"):
-            raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
-        session = self.get_session(session_id)
-        self.sessions.ensure_interactions_available(session.workspace_id)
-        updated = self.sessions.set_mode(session, normalized)
-        if updated.parent_id is None:
-            self.conversation_events.emit_sync(updated.workspace_id)
-        return updated
-
     @staticmethod
     def _codex_provider_for_session(session) -> str:
         """Read the immutable non-secret provider binding."""
         from .engines.codex.catalog import codex_provider
 
         return codex_provider(session.model, session.engine_state)
-
-    def _validate_codex_session_config(
-        self, session, model, effort, *, user_id=None, account_ids=None
-    ) -> tuple[str, str]:
-        """Validate the candidate without mutating model/provider binding."""
-        from .engines.codex.catalog import codex_provider
-        from .engines.service import EngineCatalogService
-
-        provider = codex_provider(session.model, session.engine_state)
-        return EngineCatalogService().validate_codex_config(
-            session.organization_id,
-            user_id or getattr(session, "created_by_id", None),
-            model,
-            effort,
-            provider=provider,
-            account_ids=account_ids,
-        )
-
-    def set_model(self, session_id: uuid.UUID, model: str) -> HarnessSession:
-        """Persist a model override for subsequent runs."""
-        session = self.get_session(session_id)
-        self.sessions.ensure_interactions_available(session.workspace_id)
-        value = (model or "").strip()
-        if getattr(session, "harness_id", "native") == "claude":
-            from .engines.catalog import normalize_claude_model
-
-            value = normalize_claude_model(value)
-        if getattr(session, "harness_id", "native") == "codex":
-            value, default_effort = self._validate_codex_session_config(
-                session, value, ""
-            )
-            # Model changes within a provider remain possible when the old
-            # model supported an effort (e.g. ultra) that the new one does not.
-            try:
-                self._validate_codex_session_config(
-                    session, value, session.reasoning_effort
-                )
-            except ValueError:
-                session = self.sessions.set_reasoning_effort(session, default_effort)
-        return self.sessions.set_model(session, value)
-
-    def set_reasoning_effort(
-        self, session_id: uuid.UUID, reasoning_effort: str
-    ) -> HarnessSession:
-        """Persist a reasoning-effort override for subsequent runs."""
-        session = self.get_session(session_id)
-        self.sessions.ensure_interactions_available(session.workspace_id)
-        if getattr(session, "harness_id", "native") == "claude":
-            from .engines.catalog import normalize_claude_effort
-
-            effort = normalize_claude_effort(reasoning_effort or None)
-        elif getattr(session, "harness_id", "native") == "codex":
-            _, effort = self._validate_codex_session_config(
-                session, session.model, reasoning_effort
-            )
-        else:
-            effort = normalize_reasoning_effort(reasoning_effort)
-        return self.sessions.set_reasoning_effort(session, effort)
-
-    def update_title(self, session_id: uuid.UUID, title: str) -> HarnessSession:
-        """Rename a session (title only)."""
-        session = self.get_session(session_id)
-        self.sessions.ensure_interactions_available(session.workspace_id)
-        normalized = (title or "").strip()
-        if not normalized:
-            raise ValueError("title must not be empty")
-        updated = self.sessions.set_title(session, normalized)
-        if updated.parent_id is None:
-            self.conversation_events.emit_sync(updated.workspace_id)
-        return updated
-
-    def update_skill_ids(
-        self,
-        session_id: uuid.UUID,
-        skill_ids: list[str],
-        *,
-        user_id: int,
-        organization_id: uuid.UUID,
-    ) -> HarnessSession:
-        """Persist skill selection after validating visibility."""
-        session = self.get_session(session_id)
-        self.sessions.ensure_interactions_available(session.workspace_id)
-        normalized = SkillService.normalize_ids(skill_ids)
-        if normalized:
-            self.skills.resolve_bodies(
-                normalized,
-                user_id=user_id,
-                organization_id=organization_id,
-            )
-        return self.sessions.set_skill_ids(session, normalized)
 
     def _available_session_skill_ids(
         self,
@@ -823,7 +714,7 @@ class HarnessService:
         await sync_to_async(self.sessions.ensure_interactions_available)(
             session.workspace_id
         )
-        self.ensure_user_promptable(session)
+        SessionAccessService.require_user_promptable(session.parent_id)
         # Fork is read-only (no assertNotBusy, like OpenCode): it must
         # also work while the source session has an active run.
         if message_id is not None:
@@ -848,7 +739,8 @@ class HarnessService:
                 external_session_id="",
                 engine_state=(
                     {"provider_id": self._codex_provider_for_session(session)}
-                    if session.harness_id == "codex" else {}
+                    if session.harness_id == "codex"
+                    else {}
                 ),
             )
         forked = await sync_to_async(self.sessions.create_fork)(**fork_kwargs)
@@ -887,17 +779,18 @@ class HarnessService:
         await sync_to_async(self.sessions.ensure_interactions_available)(
             session.workspace_id
         )
-        self.ensure_user_promptable(session)
+        SessionAccessService.require_user_promptable(session.parent_id)
         if self.is_running(session.id):
             raise ConflictError(
                 f"Harness session '{session.id}' already has an active run"
             )
-        if getattr(session, "harness_id", "native") != "native":
-            owner_id = getattr(session, "created_by_id", None)
-            if user_id is None or owner_id is None or str(user_id) != str(owner_id):
-                raise AuthenticationError(
-                    "Only the session owner may edit an external conversation"
-                )
+        owner_id = getattr(session, "created_by_id", None)
+        SessionAccessService.require_external_owner(
+            engine_id=getattr(session, "harness_id", "native"),
+            owner_id=owner_id,
+            user_id=user_id,
+            message="Only the session owner may edit an external conversation",
+        )
         await self._ensure_external_attempt_reconciled(session, force=True)
         normalized_mode = None
         normalized_model = None
@@ -914,7 +807,7 @@ class HarnessService:
                 normalized_model = normalize_claude_model(normalized_model)
         if getattr(session, "harness_id", "native") == "codex":
             normalized_model, normalized_effort = await sync_to_async(
-                self._validate_codex_session_config
+                self.session_settings.validate_codex_config
             )(
                 session,
                 normalized_model or session.model,
@@ -1114,7 +1007,7 @@ class HarnessService:
         session_model = (session.model or "").strip()
         if getattr(session, "harness_id", "native") == "codex":
             session.model, session.reasoning_effort = (
-                self._validate_codex_session_config(
+                self.session_settings.validate_codex_config(
                     session,
                     session_model,
                     session.reasoning_effort,
@@ -1152,25 +1045,6 @@ class HarnessService:
         config_service.provider_connected_for_model(
             organization_id, model, user_id=account_user_id, account_ids=account_ids
         )
-        if (session.agent_name or "").strip().lower() == "computeruse":
-            # Explicit grounding models must resolve to a connected
-            # provider; empty grounding falls back to the main model
-            # (validated above). No network check — connection only.
-            from .services import AgentSConfigService
-
-            grounding = str(
-                AgentSConfigService()
-                .get_or_default(organization_id)
-                .get("grounding_model")
-                or ""
-            ).strip()
-            if grounding and grounding.strip() != model.strip():
-                config_service.provider_connected_for_model(
-                    organization_id,
-                    grounding,
-                    user_id=account_user_id,
-                    account_ids=account_ids,
-                )
         if not (session.reasoning_effort or "").strip():
             agent_effort = (
                 "" if agent_defaults["inherit_model"] else agent_defaults["effort"]
@@ -1262,16 +1136,11 @@ class HarnessService:
                     "Subagent provider accounts inherit their owner's snapshot"
                 )
             run_user_id = snapshot_owner
-        if engine_id != "native":
-            owner_id = getattr(session, "created_by_id", None)
-            if (
-                run_user_id is None
-                or owner_id is None
-                or str(run_user_id) != str(owner_id)
-            ):
-                raise AuthenticationError(
-                    "Only the session owner may use its external engine connection"
-                )
+        SessionAccessService.require_external_owner(
+            engine_id=engine_id,
+            owner_id=getattr(session, "created_by_id", None),
+            user_id=run_user_id,
+        )
         if engine_id == "codex":
             user_id = run_user_id
         self._remember_run(session)
@@ -1386,7 +1255,7 @@ class HarnessService:
             if _edit_message_id is not None:
                 session.skill_ids = SkillService.normalize_ids(skill_ids)
             else:
-                session = await sync_to_async(self.update_skill_ids)(
+                session = await sync_to_async(self.session_settings.update_skill_ids)(
                     session.id,
                     skill_ids,
                     user_id=user_id,
@@ -1456,9 +1325,9 @@ class HarnessService:
                 if index is None:
                     raise NotFoundError("HarnessMessage", str(_edit_message_id))
                 edit_suffix_ids = [row.id for row in stored[index:]]
-            prior_user_messages = await sync_to_async(
-                self.messages.count_for_session
-            )(session.id, role="user")
+            prior_user_messages = await sync_to_async(self.messages.count_for_session)(
+                session.id, role="user"
+            )
             user_message = await sync_to_async(self.messages.create)(
                 session_id=session.id,
                 role="user",
@@ -1755,14 +1624,16 @@ class HarnessService:
                 try:
                     await durable_owner.stop_heartbeat()
                     await durable_owner.begin_close()
-                    await durable_owner.finish(
+                    await durable_owner.finalize_turn(
                         status=(
                             HarnessRunStatus.INTERRUPTED
                             if user_abort
                             else HarnessRunStatus.ERROR
                         ),
-                        error="Run admission failed",
-                        cleanup_confirmed=True,
+                        finish="aborted" if user_abort else "error",
+                        error=(
+                            "aborted by user" if user_abort else "Run admission failed"
+                        ),
                     )
                 except Exception:
                     log.warning("harness_run_attempt_finalize_failed", session_id=key)
@@ -1832,7 +1703,7 @@ class HarnessService:
                 (idle, stopping, or already settled).
             ValueError: For empty/oversized prompts and subagent sessions.
         """
-        self.ensure_user_promptable(session)
+        SessionAccessService.require_user_promptable(session.parent_id)
         channel = self._steering_channel(session.id)
         if (
             channel is None
@@ -2245,9 +2116,7 @@ class HarnessService:
         )
         if prev is None:
             return 0, 0, 0
-        part = HarnessPartRepository.get_latest_for_message(
-            prev.id, type="step-finish"
-        )
+        part = HarnessPartRepository.get_latest_for_message(prev.id, type="step-finish")
         if part is not None:
             meta = dict(part.meta or {})
             tokens = dict(meta.get("tokens") or {})
@@ -2311,11 +2180,8 @@ class HarnessService:
 
     def _tools_for_session(self, session_id: str, agent_name: str = "build"):  # type: ignore[no-untyped-def]
         """Build the tool registry for a session agent."""
-        from .tools import agent_s_tool_registry, default_tool_registry
+        from .tools import default_tool_registry
 
-        if (agent_name or "").strip().lower() == "computeruse":
-            # Agent-S children never see OpenCuria tool schemas.
-            return agent_s_tool_registry()
         registry = default_tool_registry()
         try:
             registry._tools["todowrite"] = TodoWriteTool(
@@ -2364,7 +2230,7 @@ class HarnessService:
             # configuration or registering/calling any harness tools.
             mcp_snapshot = None
             agent_key = (session.agent_name or "").strip().lower()
-            if agent_key not in {"computeruse", "title", "summary", "compaction"}:
+            if agent_key not in {"title", "summary", "compaction"}:
                 mcp_snapshot = await sync_to_async(self._prepare_mcp_snapshot_for_run)(
                     session, organization_id
                 )
@@ -2447,17 +2313,17 @@ class HarnessService:
             ) = await sync_to_async(self._last_assistant_step_tokens)(
                 session.id, assistant.id
             )
-            agent_s_run_config = None
-            if (session.agent_name or "").strip().lower() == "computeruse":
-                agent_s_run_config = await sync_to_async(
-                    self._resolve_agent_s_run_config
-                )(organization_id, model)
             accessor = None
             if self._accessor_factory is not None:
                 accessor = await self._accessor_factory(str(session.workspace_id))
             if accessor is not None:
                 history = await hydrate_user_messages(history, accessor)
             tools = self._tools_for_session(key, session.agent_name or "build")
+            from .services import ComputerUseConfigService
+
+            computer_options = await sync_to_async(
+                ComputerUseConfigService().get_or_default
+            )(organization_id)
             # MCP plugin runtime: snapshot + connections are prepared BEFORE
             # the runner is constructed so any injected runner_factory sees
             # the same fully-registered ToolRegistry (an injected factory may
@@ -2467,7 +2333,6 @@ class HarnessService:
             mcp_enabled = accessor is not None and (
                 session.agent_name or ""
             ).strip().lower() not in (
-                "computeruse",
                 "title",
                 "summary",
                 "compaction",
@@ -2482,9 +2347,14 @@ class HarnessService:
                     accessor=accessor,
                     core_tool_names=tools.names(),
                     prepared=mcp_snapshot,
-                    owner_id=str(uuid.uuid4()),
+                    owner_id=str(assistant.id),
+                    session_id=key,
+                    turn_id=str(assistant.id),
+                    runtime_options=computer_options,
                 )
                 mcp_runtime.register_tools(tools)
+                if agent_key == "computeruse":
+                    mcp_runtime.require_computer_use()
                 if mcp_runtime.skipped:
                     log.warning(
                         "mcp_discovery_health",
@@ -2511,6 +2381,9 @@ class HarnessService:
                     chat_options=ChatOptions(reasoning_effort=effort),
                 )
             opts = RunOptions(
+                max_steps=computer_options["max_steps"]
+                if agent_key == "computeruse"
+                else None,
                 depth=depth,
                 max_depth=max_depth,
                 history=history,
@@ -2518,7 +2391,6 @@ class HarnessService:
                 workspace_id=str(session.workspace_id),
                 organization_id=str(organization_id),
                 small_model=small_model,
-                agent_s_config=agent_s_run_config,
                 current_user_message_id=str(
                     self._runs.get(key, {}).get("user_message_id", "")
                 ),
@@ -2553,6 +2425,11 @@ class HarnessService:
             result = await loop_runner.run(
                 prompt, session.agent_name or "build", model, session.mode, opts
             )
+            if mcp_runtime is not None:
+                from .computer_use.recordings import append_video_to_output
+
+                for path in await mcp_runtime.finish():
+                    result.output = append_video_to_output(result.output or "", path)
             if self._user_abort_requested(session):
                 raise asyncio.CancelledError()
             # Text deltas were already appended to the assistant message
@@ -2620,7 +2497,12 @@ class HarnessService:
                 try:
                     if mcp_runtime is not None:
                         try:
-                            await mcp_runtime.aclose()
+                            try:
+                                await self._finish_mcp_recordings(
+                                    mcp_runtime, session, assistant
+                                )
+                            finally:
+                                await mcp_runtime.aclose()
                         except asyncio.CancelledError:
                             current = asyncio.current_task()
                             if current is not None and current.cancelling():
@@ -2636,6 +2518,24 @@ class HarnessService:
                     )
             finally:
                 await self._finalize_run(session, assistant)
+
+    async def _finish_mcp_recordings(
+        self, runtime: Any, session: Any, assistant: Any
+    ) -> None:
+        """Retain confirmed recordings after success, failure and interruption."""
+        from .computer_use.recordings import append_video_to_output
+
+        paths = await runtime.finish()
+        if not paths:
+            return
+        await sync_to_async(self.messages.refresh, thread_sensitive=True)(assistant)
+        for path in paths:
+            existing = assistant.content or ""
+            output = append_video_to_output(existing, path)
+            remainder = tail_remainder(existing, output)
+            if remainder:
+                await sync_to_async(self.messages.append_content)(assistant, remainder)
+                await self.timeline.append_tail_text(session, assistant, remainder)
 
     @staticmethod
     def _redact_claude_error(error: object, auth: Any | None) -> str:
@@ -3243,9 +3143,7 @@ class HarnessService:
             position = positions.get(str(part_id))
             if position is None:
                 try:
-                    position = await sync_to_async(self.parts.get_position)(
-                        part_id
-                    )
+                    position = await sync_to_async(self.parts.get_position)(part_id)
                 except (ValueError, TypeError):
                     position = None
                 if position is not None:
@@ -3314,18 +3212,6 @@ class HarnessService:
                     self._finish_provider_hold(turn_id, holder)
                 )
             )
-
-    @staticmethod
-    def _resolve_agent_s_run_config(organization_id: uuid.UUID, model: str):  # type: ignore[no-untyped-def]
-        """Build the persisted Agent-S run config for a computeruse run.
-
-        Only computeruse children receive a config; other agents resolve
-        ``None`` downstream. Grounding falls back to the effective session
-        model when unconfigured (see ``AgentSConfigService.to_run_config``).
-        """
-        from .services import AgentSConfigService
-
-        return AgentSConfigService().to_run_config(organization_id, main_model=model)
 
     @staticmethod
     def _catalog_efforts_for_model(
@@ -3418,14 +3304,10 @@ class HarnessService:
                 tool="task",
             )
         if codex_parent:
-            if agent == "computeruse":
-                raise ToolError(
-                    "Codex task computeruse is not supported yet; "
-                    "use a native Agent-S session",
-                    tool="task",
-                )
             try:
-                model, _ = await sync_to_async(self._validate_codex_session_config)(
+                model, _ = await sync_to_async(
+                    self.session_settings.validate_codex_config
+                )(
                     parent,
                     model,
                     "",
@@ -3440,9 +3322,7 @@ class HarnessService:
                 "Parent assistant message missing for subagent run",
                 tool="task",
             )
-        parent_assistant = await sync_to_async(self.messages.get_required)(
-            message_id
-        )
+        parent_assistant = await sync_to_async(self.messages.get_required)(message_id)
         child = await self._resolve_resume_child(parent, args.task_id)
         resumed = child is not None
         if resumed:
@@ -3488,7 +3368,9 @@ class HarnessService:
             assert child is not None
             if override:
                 if codex_parent:
-                    await sync_to_async(self._validate_codex_session_config)(
+                    await sync_to_async(
+                        self.session_settings.validate_codex_config
+                    )(
                         child,
                         override,
                         child.reasoning_effort,
@@ -3553,9 +3435,7 @@ class HarnessService:
             # error the model can recover from by launching another subagent.
             if self._parent_stop_in_progress(parent):
                 raise asyncio.CancelledError()
-            assistant = await sync_to_async(self.messages.get_required)(
-                assistant.id
-            )
+            assistant = await sync_to_async(self.messages.get_required)(assistant.id)
             output = assistant.content or ""
             if assistant.finish in ("error", "aborted"):
                 error = assistant.error or "Subagent run interrupted"

@@ -31,7 +31,7 @@ from pydantic import BaseModel, ConfigDict
 
 from common import stream_diagnostics
 
-from ..desktop_leases import DesktopLease
+from ..desktop_leases import DesktopLease, cleanup_rpc
 from ..tools.base import Tool, ToolContext, ToolError, ToolResult
 from .builtin import open_builtin_server
 from .naming import TOOL_NAME_RE, mcp_tool_name
@@ -176,9 +176,16 @@ class McpTool(Tool):
         self.input_schema = dict(input_schema or {"type": "object"})
         self._connection = connection
         self._title_text = title_text
+        self.execution_tool = original_name in getattr(
+            connection, "tool_policy", {}
+        ).get("execution_tools", [])
 
     def title(self, args: BaseModel) -> str:
         """Return the Plugin / Server / Tool title for permission UI."""
+        if self.execution_tool:
+            value = getattr(args, "title", "")
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:80]
         return self._title_text
 
     def parameters_schema(self) -> dict[str, Any]:
@@ -358,9 +365,19 @@ def normalize_call_result(result: types.CallToolResult) -> ToolResult:
     output = "\n".join(part for part in texts if part).strip()
     if not output:
         output = "[MCP tool returned no text output]"
+    metadata = {"attachments": attachments} if attachments else {}
+    computer_use = (
+        structured.get("computer_use") if isinstance(structured, dict) else None
+    )
+    if isinstance(computer_use, dict):
+        metadata["computer_use"] = {
+            key: value[:240]
+            for key, value in computer_use.items()
+            if key in {"title", "code", "effect_status"} and isinstance(value, str)
+        }
     return ToolResult(
         output=output,
-        metadata={"attachments": attachments} if attachments else {},
+        metadata=metadata,
         attachments=attachments,
     )
 
@@ -473,6 +490,8 @@ class McpServerConnection:
     organization_id: Any = None
     startup_timeout_seconds: float = 30.0
     request_timeout_seconds: float = 60.0
+    tool_policy: dict[str, Any] = field(default_factory=dict)
+    run_context: dict[str, Any] = field(default_factory=dict, repr=False)
     tools: list[DiscoveredMcpTool] = field(default_factory=list)
     healthy: bool = True
     harness_tools: list[Any] = field(default_factory=list)
@@ -484,6 +503,11 @@ class McpServerConnection:
     _session: ClientSession | None = None
     _lock: Any = None
     _closed: bool = False
+    _accessor: Any = field(default=None, repr=False)
+    _turn_ended: bool = False
+    _recording_path: str = ""
+    recording_path: str = ""
+    _finished: bool = False
 
     @property
     def desc(self) -> str:
@@ -509,6 +533,7 @@ class McpServerConnection:
         """
         if self._lock is None:
             self._lock = anyio.Lock()
+        self._accessor = accessor
         stack = AsyncExitStack()
         timeout = float(self.startup_timeout_seconds or 30.0)
         log.info(
@@ -794,6 +819,102 @@ class McpServerConnection:
             )
         self.tools = discovered
 
+    def model_tools(self) -> list[DiscoveredMcpTool]:
+        """Filter model exposure independently from internal tool discovery."""
+        exposed = self.tool_policy.get("exposed_tools")
+        internal = set(self.tool_policy.get("internal_tools", []))
+        available = {tool.name for tool in self.tools}
+        declared = set(exposed or []) | internal
+        if not declared <= available:
+            raise McpServerHealthError(
+                "Configured MCP tools are missing from discovery"
+            )
+        return [
+            tool
+            for tool in self.tools
+            if tool.name not in internal and (exposed is None or tool.name in exposed)
+        ]
+
+    def _request_meta(self) -> dict[str, Any] | None:
+        if not self.tool_policy.get("on_run_end"):
+            return None
+        binding = self.desktop_lease.binding if self.desktop_lease else {}
+        context = {
+            **self.run_context,
+            **{
+                key: binding[key]
+                for key in (
+                    "display",
+                    "xauthority",
+                    "epoch",
+                    "generation",
+                    "input_generation",
+                    "dbus_session_bus_address",
+                )
+                if key in binding
+            },
+        }
+        return {"opencuria/context": context}
+
+    async def notify_turn_ended(self, reason: str = "Stop") -> None:
+        """Send a bounded control request without waiting on the execution lock."""
+        name = self.tool_policy.get("on_run_end")
+        if not name or self._turn_ended or self._session is None:
+            return
+        self._turn_ended = True
+        try:
+            result = await asyncio.wait_for(
+                self._session.call_tool(
+                    name,
+                    {
+                        "session_id": self.run_context.get("session_id", ""),
+                        "turn_id": self.run_context.get("turn_id", ""),
+                        "hook_event_name": reason,
+                    },
+                    meta=self._request_meta(),
+                    read_timeout_seconds=timedelta(seconds=5),
+                ),
+                5,
+            )
+            normalize_call_result(result)
+        except Exception:
+            self.healthy = False
+            log.warning("mcp_lifecycle_unconfirmed", server=self.desc)
+
+    async def _prepare_desktop(self, original_name: str) -> bool:
+        """Activate only operational tools and acquire their input ownership."""
+        lease = self.desktop_lease
+        required = self.tool_policy.get("desktop_tools")
+        if lease is None or (required is not None and original_name not in required):
+            return False
+        lease.check_health()
+        await lease.hold()
+        if (
+            self.tool_policy.get("desktop_kind") == "computeruse"
+            and self.run_context.get("enable_recording")
+            and not self._recording_path
+        ):
+            result = await self._accessor.desktop_action(
+                "record_start", {"run_id": lease.owner_id, **lease.owner}
+            )
+            from ..computer_use.recordings import is_valid_recording_path
+
+            path = result.get("path", "")
+            if not is_valid_recording_path(path):
+                raise ToolError(
+                    "Invalid recording path returned by runner", tool=self.desc
+                )
+            self._recording_path = path
+        if self.tool_policy.get("exclusive_input"):
+            binding = await self._accessor.desktop_action(
+                "input_acquire", lease._args()
+            )
+            if not binding.get("ok"):
+                raise ToolError("Workspace desktop is busy", tool=self.desc)
+            lease.binding.update(binding)
+            return True
+        return False
+
     async def call_tool(self, original_name: str, args: dict[str, Any]) -> ToolResult:
         """Call one tool with per-server serialization + request timeout.
 
@@ -803,23 +924,32 @@ class McpServerConnection:
         """
         if self._session is None or self._closed:
             raise ToolError(f"MCP server {self.desc} is not connected", tool=self.desc)
+        if original_name in self.tool_policy.get("internal_tools", []):
+            raise ToolError(
+                "Internal lifecycle tools cannot be invoked by agents", tool=self.desc
+            )
         lock = self._lock or anyio.Lock()
         async with lock:
             if self._closed or self._session is None or not self.healthy:
                 raise ToolError("MCP connection is closed", tool=self.desc)
             timeout = float(self.request_timeout_seconds or 60.0)
+            owns_input = False
             try:
                 try:
                     with anyio.fail_after(timeout):
-                        if self.desktop_lease is not None:
-                            self.desktop_lease.check_health()
-                            await self.desktop_lease.hold()
+                        owns_input = await self._prepare_desktop(original_name)
                         result = await self._session.call_tool(
                             original_name,
                             dict(args or {}),
                             read_timeout_seconds=timedelta(seconds=timeout),
+                            **(
+                                {"meta": self._request_meta()}
+                                if self._request_meta()
+                                else {}
+                            ),
                         )
                 except TimeoutError as exc:
+                    await cleanup_rpc(self.notify_turn_ended("Interrupt"))
                     raise ToolError(
                         f"MCP tool '{original_name}' timed out after {timeout}s",
                         tool=original_name,
@@ -827,6 +957,7 @@ class McpServerConnection:
             except ToolError:
                 raise
             except (asyncio.CancelledError, anyio.get_cancelled_exc_class()):
+                await cleanup_rpc(self.notify_turn_ended("Interrupt"))
                 raise
             except Exception as exc:
                 from apps.credentials.mcp_oauth import McpOAuthUnauthorizedError
@@ -839,6 +970,13 @@ class McpServerConnection:
                 raise ToolError(
                     f"MCP tool '{original_name}' failed", tool=original_name
                 ) from exc
+            finally:
+                if owns_input and self.desktop_lease is not None:
+                    await cleanup_rpc(
+                        self._accessor.desktop_action(
+                            "input_release", self.desktop_lease._args()
+                        )
+                    )
             try:
                 return normalize_call_result(result)
             except ToolError:
@@ -846,11 +984,35 @@ class McpServerConnection:
             except Exception as exc:  # pragma: no cover - defensive
                 raise ToolError("MCP result invalid", tool=original_name) from exc
 
+    async def finish(self) -> None:
+        """Fence execution and finalize recording before the final chat message."""
+        if self._finished:
+            return
+        self._finished = True
+        with anyio.CancelScope(shield=True):
+            await self.notify_turn_ended()
+            if self._recording_path and self.desktop_lease is not None:
+                try:
+                    result = await cleanup_rpc(
+                        self._accessor.desktop_action(
+                            "record_stop",
+                            {
+                                "run_id": self.desktop_lease.owner_id,
+                                **self.desktop_lease.owner,
+                            },
+                        )
+                    )
+                    if result and result.get("ok"):
+                        self.recording_path = self._recording_path
+                except Exception:
+                    log.warning("mcp_recording_close_failed", server=self.desc)
+
     async def aclose(self) -> None:
         """Close the session + transport (idempotent, never raises)."""
         if self._closed:
             await self._close_desktop_lease()
             return
+        await self.finish()
         self._closed = True
         stack, self._stack = self._stack, None
         self._session = None

@@ -100,41 +100,14 @@ export type HarnessEngine = import('@opencuria/chat-core/harnessModels').Harness
 
 export type HarnessEngineOut = HarnessEngine
 
-/**
- * Org-wide Agent-S harness parameters (`GET/PUT /agent-s-config/`).
- *
- * `AgentConfig['computeruse']` stays the source for the Agent-S main
- * model/effort; this row only holds harness behavior values plus the
- * separate grounding model. `grounding_model` empty falls back to the
- * run's main model; `model_temperature` null means provider default.
- */
-export interface AgentSConfig {
-  grounding_model: string
-  grounding_width: number
-  grounding_height: number
-  model_temperature: number | null
+/** Org-wide Computer Use execution limits and optional desktop recording. */
+export interface ComputerUseConfig {
   max_steps: number
-  max_trajectory_length: number
-  enable_reflection: boolean
-  enable_code_agent: boolean
-  /**
-   * Opt-in mp4 session recording for computer-use runs (org-wide).
-   * Off by default; captures the workspace display (may include
-   * sensitive content). Mirrors `AgentSConfigOut.enable_recording`.
-   */
   enable_recording: boolean
   screenshot_max_dimension: number
-  action_pre_delay: number
-  action_post_delay: number
-  wait_delay: number
 }
 
-/**
- * Partial Agent-S save payload. The backend merges partial payloads over
- * stored values (or defaults when unstored), so callers send only changed
- * fields. Unknown keys are ignored server-side.
- */
-export type AgentSConfigIn = Partial<AgentSConfig>
+export type ComputerUseConfigIn = Partial<ComputerUseConfig>
 
 export interface ChatGptOAuthStart {
   flow_id: string
@@ -439,20 +412,20 @@ export function saveSubagentConfig(data: SubagentConfigIn): Promise<SubagentConf
 }
 
 /**
- * Load the org-wide Agent-S harness config (defaults when unstored).
- * Mirrors `GET /agent-s-config/`.
+ * Load the org-wide Computer Use config (defaults when unstored).
+ * Mirrors `GET /computer-use-config/`.
  */
-export function getAgentSConfig(): Promise<AgentSConfig> {
-  return get<AgentSConfig>('/agent-s-config/')
+export function getComputerUseConfig(): Promise<ComputerUseConfig> {
+  return get<ComputerUseConfig>('/computer-use-config/')
 }
 
 /**
- * Save (upsert) the org-wide Agent-S harness config.
+ * Save (upsert) the org-wide Computer Use config.
  * Accepts a partial payload; the backend merges it over stored values
- * (or defaults when unstored). Mirrors `PUT /agent-s-config/`.
+ * (or defaults when unstored). Mirrors `PUT /computer-use-config/`.
  */
-export function saveAgentSConfig(data: AgentSConfigIn): Promise<AgentSConfig> {
-  return put<AgentSConfig>('/agent-s-config/', data)
+export function saveComputerUseConfig(data: ComputerUseConfigIn): Promise<ComputerUseConfig> {
+  return put<ComputerUseConfig>('/computer-use-config/', data)
 }
 
 export function startChatGptOAuth(payload: ChatGptOAuthStartIn): Promise<ChatGptOAuthStart> {

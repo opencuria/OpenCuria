@@ -372,7 +372,7 @@ class StreamManager:
             lease = await self.lease_store.get(owner["lease_id"])
             if (
                 not lease
-                or lease["kind"] not in {"mcp", "agent"}
+                or lease["kind"] not in {"mcp", "computeruse", "agent"}
                 or lease["epoch"] != owner["epoch"]
                 or (self.epoch is not None and owner["epoch"] != self.epoch)
                 or not isinstance(lease.get("expires_at"), (int, float))
@@ -412,7 +412,7 @@ class StreamManager:
             lease = await self.lease_store.get(owner["lease_id"])
             if (
                 not lease
-                or lease["kind"] not in {"mcp", "agent"}
+                or lease["kind"] not in {"mcp", "computeruse", "agent"}
                 or lease["state"] not in {"reserved", "held"}
                 or lease["epoch"] != owner["epoch"]
                 or lease["expires_at"] <= time.time()

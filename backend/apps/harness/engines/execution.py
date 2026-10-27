@@ -100,8 +100,12 @@ async def execute_external_run(
             session, organization_id
         )
         tools = service._tools_for_session(key, session.agent_name or session.mode)
+        from ..services import ComputerUseConfigService
+
+        computer_options = await sync_to_async(
+            ComputerUseConfigService().get_or_default
+        )(organization_id)
         if accessor is not None and (session.agent_name or "").lower() not in {
-            "computeruse",
             "title",
             "summary",
             "compaction",
@@ -113,9 +117,14 @@ async def execute_external_run(
                 accessor=accessor,
                 core_tool_names=tools.names(),
                 prepared=mcp_snapshot,
-                owner_id=str(uuid.uuid4()),
+                owner_id=str(assistant.id),
+                session_id=key,
+                turn_id=str(assistant.id),
+                runtime_options=computer_options,
             )
             mcp_runtime.register_tools(tools)
+            if session.agent_name == "computeruse":
+                mcp_runtime.require_computer_use()
             if mcp_runtime.skipped:
                 log.warning(
                     "mcp_discovery_health",
@@ -132,6 +141,9 @@ async def execute_external_run(
             ensure_current=ensure_current,
         )
         run_options = RunOptions(
+            max_steps=computer_options["max_steps"]
+            if session.agent_name == "computeruse"
+            else None,
             depth=depth,
             max_depth=max_depth,
             history=history,
@@ -158,10 +170,8 @@ async def execute_external_run(
                 organization_id=organization_id,
             ),
         )
-        run_options.authorize_file_read = (
-            lambda path: service.interactions.authorize_file_read(
-                session, assistant, path
-            )
+        run_options.authorize_file_read = lambda path: (
+            service.interactions.authorize_file_read(session, assistant, path)
         )
         run_options.reasoning_effort = session.reasoning_effort or (
             "" if engine_id == "codex" else "high"
@@ -264,9 +274,12 @@ async def execute_external_run(
                 context["provider_revocation_message"] = revocation_message
                 raise asyncio.CancelledError() from None
             raise
-        await sync_to_async(service.messages.refresh, thread_sensitive=True)(
-            assistant
-        )
+        if mcp_runtime is not None:
+            from ..computer_use.recordings import append_video_to_output
+
+            for path in await mcp_runtime.finish():
+                result.output = append_video_to_output(result.output or "", path)
+        await sync_to_async(service.messages.refresh, thread_sensitive=True)(assistant)
         remainder = tail_remainder(assistant.content or "", result.output or "")
         usage = result.usage or Usage()
         metadata = dict(getattr(result, "metadata", {}) or {})
@@ -364,7 +377,12 @@ async def execute_external_run(
         try:
             if mcp_runtime is not None:
                 try:
-                    await mcp_runtime.aclose()
+                    try:
+                        await service._finish_mcp_recordings(
+                            mcp_runtime, session, assistant
+                        )
+                    finally:
+                        await mcp_runtime.aclose()
                 except asyncio.CancelledError:
                     current = asyncio.current_task()
                     if current is not None and current.cancelling():

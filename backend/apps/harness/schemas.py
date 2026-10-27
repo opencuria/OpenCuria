@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from ninja import Schema
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from .constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
 from .timeline import (
@@ -286,40 +286,18 @@ class SubagentConfigOut(Schema):
     max_depth: int = DEFAULT_MAX_DEPTH
 
 
-class AgentSConfigIn(Schema):
-    """Request schema for saving the org-wide Agent-S harness config."""
+class ComputerUseConfigIn(Schema):
+    """Partial update of desktop runtime settings."""
 
-    grounding_model: str = ""
-    grounding_width: int = 1920
-    grounding_height: int = 1080
-    model_temperature: float | None = None
-    max_steps: int = 15
-    max_trajectory_length: int = 8
-    enable_reflection: bool = True
-    enable_code_agent: bool = True
-    enable_recording: bool = False
-    screenshot_max_dimension: int = 2400
-    action_pre_delay: float = 1.0
-    action_post_delay: float = 1.0
-    wait_delay: float = 5.0
+    model_config = ConfigDict(extra="forbid")
+
+    max_steps: int = Field(default=15, ge=1, le=1000, strict=True)
+    enable_recording: bool = Field(default=False, strict=True)
+    screenshot_max_dimension: int = Field(default=2400, ge=320, le=7680, strict=True)
 
 
-class AgentSConfigOut(Schema):
-    """Response schema for the org-wide Agent-S harness config."""
-
-    grounding_model: str = ""
-    grounding_width: int = 1920
-    grounding_height: int = 1080
-    model_temperature: float | None = None
-    max_steps: int = 15
-    max_trajectory_length: int = 8
-    enable_reflection: bool = True
-    enable_code_agent: bool = True
-    enable_recording: bool = False
-    screenshot_max_dimension: int = 2400
-    action_pre_delay: float = 1.0
-    action_post_delay: float = 1.0
-    wait_delay: float = 5.0
+class ComputerUseConfigOut(ComputerUseConfigIn):
+    """Effective desktop runtime settings."""
 
 
 class ProviderAccountOut(Schema):
@@ -410,23 +388,9 @@ def provider_config_to_out(config) -> ProviderConfigOut:  # type: ignore[no-unty
     )
 
 
-def agent_s_config_to_out(row: dict) -> AgentSConfigOut:
-    """Map an AgentSConfigService view to AgentSConfigOut."""
-    return AgentSConfigOut(
-        grounding_model=row.get("grounding_model") or "",
-        grounding_width=int(row.get("grounding_width", 1920)),
-        grounding_height=int(row.get("grounding_height", 1080)),
-        model_temperature=row.get("model_temperature"),
-        max_steps=int(row.get("max_steps", 15)),
-        max_trajectory_length=int(row.get("max_trajectory_length", 8)),
-        enable_reflection=bool(row.get("enable_reflection", True)),
-        enable_code_agent=bool(row.get("enable_code_agent", True)),
-        enable_recording=bool(row.get("enable_recording", False)),
-        screenshot_max_dimension=int(row.get("screenshot_max_dimension", 2400)),
-        action_pre_delay=float(row.get("action_pre_delay", 1.0)),
-        action_post_delay=float(row.get("action_post_delay", 1.0)),
-        wait_delay=float(row.get("wait_delay", 5.0)),
-    )
+def computer_use_config_to_out(row: dict) -> ComputerUseConfigOut:
+    """Map effective computer-use values to their public schema."""
+    return ComputerUseConfigOut(**row)
 
 
 def session_to_out(

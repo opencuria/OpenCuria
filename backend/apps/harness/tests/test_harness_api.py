@@ -1261,3 +1261,54 @@ def test_steer_rejects_empty_subagent_foreign_and_read_only_keys(
         user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
     )
     assert steer(read_only, session).status_code == 403
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("engine", ["claude", "codex"])
+@pytest.mark.parametrize("missing_owner", [False, True])
+@pytest.mark.parametrize(
+    ("method", "suffix", "payload", "code"),
+    [
+        ("post", "message", {"prompt": "hello"}, "permission_denied"),
+        ("post", "steer", {"prompt": "hello"}, "authentication_error"),
+        ("delete", "steer/{id}", None, "authentication_error"),
+        ("post", "messages/{id}/edit", {"prompt": "edit"}, "permission_denied"),
+        ("post", "permissions/{id}", {"response": "once"}, "permission_denied"),
+        ("post", "questions/{id}", {"answers": [["yes"]]}, "permission_denied"),
+    ],
+)
+def test_external_session_actions_preserve_owner_denial_contract(
+    harness_setup,
+    fake_harness_service,
+    engine: str,
+    missing_owner: bool,
+    method: str,
+    suffix: str,
+    payload: dict | None,
+    code: str,
+) -> None:
+    """Workspace access must not grant access to a session's personal account."""
+    session = HarnessSession.objects.create(
+        workspace=harness_setup["owned"],
+        organization_id=harness_setup["org"].id,
+        harness_id=engine,
+        created_by=None if missing_owner else harness_setup["stranger"],
+    )
+    client = _client(
+        user=harness_setup["owner"],
+        org=harness_setup["org"],
+        permissions=RUN + PERMS,
+    )
+    route = suffix.format(id=uuid.uuid4())
+    response = getattr(client, method)(
+        f"/api/v1/harness/sessions/{session.id}/{route}",
+        data=json.dumps(payload) if payload is not None else None,
+        content_type="application/json",
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": "Only the session owner may use its external engine connection",
+        "code": code,
+    }
+    assert HarnessMessageRepository.list_for_session(session.id) == []

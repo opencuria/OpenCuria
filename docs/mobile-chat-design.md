@@ -30,7 +30,16 @@ The chat follows the Claude app layout. The header has no title: the leading but
 
 The composer shows the editor on top and one toolbar below it: attachments (`+`), a pill with the model and effort that opens the model sheet, and Send/Stop. The model sheet combines recent models (up to six, with "All models" and search), reasoning effort and agent (engine plus Build/Plan, as in the webapp). An existing chat keeps its engine, so only that engine's modes are offered.
 
-The composer keeps its native text input mounted while it expands for replies, focus, drafts, skills or attachments. Native editing retains selection, dictation, undo, spell checking and IME composition; only explicit mention insertion moves the caret. Attachment/search/send results remain scoped to their owning chat. The keyboard controller manages keyboard avoidance.
+The composer keeps its native text input mounted while it grows for drafts, skills or attachments. Native editing retains selection, dictation, undo, spell checking and IME composition; only explicit mention insertion moves the caret. Attachment/search/send results remain scoped to their owning chat. Sending clears the draft at once and restores it if the send fails.
+
+## Keyboard
+
+`ChatLayout` follows native messengers: the transcript keeps a fixed full-screen layout and scrolls beneath the header and the floating composer, while `react-native-keyboard-controller` shifts only its content. The composer dock rides on top of the keyboard frame by frame through natively driven `Animated` values; JavaScript and React renders never sit between a keyboard frame and the composer.
+
+- Opening the keyboard lifts the transcript only when the reader is at the newest message; sending closes the keyboard and keeps following the reply.
+- The transcript scrolls freely with the keyboard open. On iOS (`keyboardDismissMode="interactive"`) and Android 11+ (`KeyboardGestureArea`) the keyboard follows the finger as soon as a drag reaches the composer. On iPhone the dismiss area is extended to the composer through the composer input's `nativeID`; iPad keeps the system area because a minimized hardware keyboard can swallow the extender's events.
+- Pulling the composer down closes the keyboard: on Android 11+ the keyboard follows the finger, on iOS a short, quick pull hands over to the system close animation. Holds (caret, selection), side swipes and scrolling drafts keep their native text gestures.
+- On iOS 26 the composer is interactive liquid glass (`GlassView isInteractive`), unclipped so it can react to touches; “Scroll to latest” is a glass button floating above the composer.
 
 The transcript retains unboxed assistant text, quiet user bubbles, native Markdown, media previews, task details and copy/fork controls. User-message context menus are removed during editing to preserve native selection gestures. Question choices use native selection controls; unresolved question/permission gates remain non-dismissible.
 

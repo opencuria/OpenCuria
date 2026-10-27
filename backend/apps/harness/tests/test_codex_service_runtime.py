@@ -587,7 +587,7 @@ async def test_plan_permission_then_build_same_thread(runtime):
     session.refresh_from_db()
     old_thread = session.external_session_id
     old_fingerprint = session.engine_state["codex_tools"]
-    session = data.service.set_mode(session.id, "build")
+    session = data.service.session_settings.set_mode(session.id, "build")
     assert session.mode == session.agent_name == "build"
     assistant = await finish(data, session, "Now build")
     assert_settled(data, session, assistant)

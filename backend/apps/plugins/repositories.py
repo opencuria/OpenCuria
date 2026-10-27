@@ -198,6 +198,8 @@ class PluginMcpServerRepository:
             PluginMcpServer.objects.filter(id__in=stale_ids).delete()
 
         mutable_fields = {
+            "tool_policy",
+            "runtime_artifact",
             "name",
             "transport",
             "command",

@@ -122,6 +122,7 @@ class DesktopLease:
                 ):
                     raise RuntimeError("Desktop lease activation rejected")
                 self.check_health()
+                self.binding.update(result)
                 self.held = True
         except BaseException as exc:
             self.healthy = False

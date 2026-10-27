@@ -16,6 +16,7 @@ import type {
   PluginCredentialServiceType,
   CredentialService,
   PluginMcpAuthType,
+  PluginMcpToolPolicy,
   PluginMcpServerIn,
   PluginMcpTransport,
   PluginSkillIn,
@@ -58,6 +59,8 @@ export interface PluginMcpForm {
   requestTimeout: number
   authType: PluginMcpAuthType
   oauthRequirementKey: string
+  toolPolicy?: PluginMcpToolPolicy
+  runtimeArtifact?: { id: string; version: string } | null
 }
 
 export interface PluginRequirementForm {
@@ -185,6 +188,8 @@ export function pluginToForm(plugin: Plugin): PluginFormModel {
     mcps: (plugin.mcp_servers ?? []).map((m) => ({
       uid: newUid('mcp'),
       name: m.name,
+      toolPolicy: m.tool_policy,
+      runtimeArtifact: m.runtime_artifact,
       transport: toTransport(m.transport),
       desktop: m.resources?.desktop ? (m.resources.desktop.activation ?? 'server_start') : 'none',
       command: m.command ?? '',
@@ -243,6 +248,8 @@ function mcpToIn(mcp: PluginMcpForm): PluginMcpServerIn {
   const request = Number(mcp.requestTimeout)
   const base = {
     name: mcp.name.trim(),
+    ...(mcp.toolPolicy ? { tool_policy: mcp.toolPolicy } : {}),
+    ...(mcp.runtimeArtifact ? { runtime_artifact: mcp.runtimeArtifact } : {}),
     // Backend derives the slug from the name (also on rename).
     slug: '',
     transport: mcp.transport,

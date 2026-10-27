@@ -1303,6 +1303,26 @@ class DesktopManager:
         if action in {"binding", "reserve", "renew", "lease_status", "hold", "release"}:
             return await self._lease_action(workspace_id, action, payload)
 
+        if action in {"input_acquire", "input_release"}:
+            if payload.get("epoch") != self.epoch:
+                raise ValueError("Stale desktop input epoch")
+            lock = await self._desktop_lock(workspace_id)
+            async with lock:
+                if self.capture_fence is not None:
+                    self.capture_fence.check_current(workspace_id)
+                fence = await self.lease_store.input_ownership(
+                    str(workspace_id),
+                    str(payload.get("lease_id", "")),
+                    self.epoch,
+                    payload.get("revision", 1),
+                    acquire=action == "input_acquire",
+                )
+                return {
+                    "ok": True,
+                    "input_generation": fence,
+                    "generation": self.get_desktop_generation(workspace_id),
+                }
+
         execute_code = self._validate_desktop_execute_code(action, payload)
 
         if action != "record_stop":
@@ -1476,7 +1496,7 @@ class DesktopManager:
         execute_code: str,
     ) -> dict[str, Any]:
         """Run a caller-provided snippet via ``python3 -c``."""
-        # Generic Agent-S action execution: run exactly the passed
+        # Generic desktop execution: run exactly the passed
         # internal code (materialized by the backend core) via
         # ``python3 -c`` with the desktop env. No agent logic lives
         # here; validation only guards the RPC boundary. Validation ran

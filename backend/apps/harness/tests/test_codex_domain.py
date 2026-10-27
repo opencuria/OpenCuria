@@ -11,7 +11,6 @@ from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.test import Client
 
-from apps.harness.api import _require_claude_session_owner
 from apps.harness.engines.codex.auth import resolve_codex_auth
 from apps.harness.engines.codex.catalog import (
     DEFAULT_CODEX_MODEL,
@@ -27,6 +26,7 @@ from apps.harness.models import HarnessSession
 from apps.harness.provider_accounts import ProviderAccountService
 from apps.harness.providers.models_catalog import clear_models_cache
 from apps.harness.repositories import HarnessMessageRepository
+from apps.harness.session_access_service import SessionAccessService
 from apps.organizations.models import Membership
 from apps.scheduled_tasks.services import ScheduledTaskService
 from common.exceptions import AuthenticationError, NotFoundError
@@ -130,15 +130,15 @@ def test_create_setters_and_direct_run_reject_provider_switch(codex_setup):
     assert session.created_by_id == data.owner.id
     assert session.model == DEFAULT_CODEX_MODEL
     assert session.reasoning_effort == "high"
-    data.service.set_reasoning_effort(session.id, "ultra")
-    data.service.set_model(session.id, "chatgpt/gpt-6-astra")
+    data.service.session_settings.set_reasoning_effort(session.id, "ultra")
+    data.service.session_settings.set_model(session.id, "chatgpt/gpt-6-astra")
     for invalid in (
         "openrouter/openai/test",
         "openai-compatible/test",
         "chatgpt/invented",
     ):
         with pytest.raises(ValueError):
-            data.service.set_model(session.id, invalid)
+            data.service.session_settings.set_model(session.id, invalid)
     # Direct mutation followed by admission cannot bypass immutable state binding.
     session.model = "openrouter/openai/test"
     with pytest.raises(ValueError, match="provider cannot be changed"):
@@ -146,7 +146,7 @@ def test_create_setters_and_direct_run_reject_provider_switch(codex_setup):
     session.refresh_from_db()
     assert session.model == "chatgpt/gpt-6-astra"
     assert session.reasoning_effort == "ultra"
-    updated = data.service.set_model(session.id, "chatgpt/gpt-6-luna")
+    updated = data.service.session_settings.set_model(session.id, "chatgpt/gpt-6-luna")
     assert updated.reasoning_effort == "high"
     with pytest.raises(ValueError, match="selected provider account"):
         create_session(data, connection_id=data.account.id)
@@ -198,7 +198,11 @@ def test_auth_snapshot_acl_explicit_empty_and_secrets(codex_setup):
         resolve_codex_auth(data.org, stranger.id, snapshot, DEFAULT_CODEX_MODEL)
     session = create_session_after_reselect(data)
     with pytest.raises(AuthenticationError):
-        _require_claude_session_owner(session, stranger.id)
+        SessionAccessService.require_external_owner(
+            engine_id=session.harness_id,
+            owner_id=session.created_by_id,
+            user_id=stranger.id,
+        )
 
 
 def create_session_after_reselect(data):
@@ -224,8 +228,9 @@ def test_children_use_parent_owner_provider_and_captured_account(codex_setup):
     assert child.engine_state == root.engine_state
     with pytest.raises(ValueError, match="provider cannot be changed"):
         create_session(data, parent_id=root.id, model="openrouter/openai/test")
-    with pytest.raises(ValueError, match="does not support Agent-S"):
-        create_session(data, parent_id=root.id, agent_name="computeruse")
+    computer = create_session(data, parent_id=root.id, agent_name="computeruse")
+    assert computer.harness_id == "codex"
+    assert computer.model == root.model
     # Follow-up root validation resolves selection afresh; children stay snapshotted.
     with pytest.raises(AuthenticationError):
         data.service.validate_provider_for_run(data.org, root, user_id=data.owner.id)

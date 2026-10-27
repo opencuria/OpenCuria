@@ -337,6 +337,12 @@ def decide_tool(
         evaluator.evaluate(key, action, mode=mode),
         agent_eval.evaluate(key, action, mode=mode),
     )
+    if (
+        mode == "plan"
+        and registered is not None
+        and getattr(registered, "execution_tool", False)
+    ):
+        decision = combine_decisions(decision, ASK)
     if key in ("bash", "process") and action:
         from ...tools.shell import detect_external_directory
 

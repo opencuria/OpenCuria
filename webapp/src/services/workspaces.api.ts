@@ -243,10 +243,6 @@ export function updateImageDefinition(id: string, data: Partial<ImageDefinition>
   return patch<ImageDefinition>(`/image-definitions/${id}/`, data)
 }
 
-export function deactivateImageDefinition(id: string): Promise<ImageDefinition> {
-  return post<ImageDefinition>(`/image-definitions/${id}/deactivate/`)
-}
-
 export function activateImageDefinition(id: string): Promise<ImageDefinition> {
   return post<ImageDefinition>(`/image-definitions/${id}/activate/`)
 }

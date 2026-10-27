@@ -32,10 +32,11 @@ def test_all_agents_defined() -> None:
     assert get_agent("explore").mode == "subagent"
     assert get_agent("computeruse").mode == "subagent"
     assert get_agent("computeruse").steps == 15
-    assert get_agent("computeruse").system_prompt == ""
+    assert "Computer Use" in get_agent("computeruse").system_prompt
     assert get_agent("computeruse").permissions == {
-        "*": "allow",
-        "question": "deny",
+        "*": "deny",
+        "mcp_computer-use_cua_repl_js": "allow",
+        "mcp_computer-use_cua_repl_js_reset": "allow",
     }
     assert get_agent("title").mode == "hidden"
     assert get_agent("summary").mode == "hidden"
@@ -106,13 +107,9 @@ def test_subagent_question_denied_but_build_allowed() -> None:
     from apps.harness.permissions.evaluator import PermissionEvaluator
 
     for name in ("general", "explore", "computeruse"):
-        evaluator = PermissionEvaluator(
-            agent_rules=dict(get_agent(name).permissions)
-        )
+        evaluator = PermissionEvaluator(agent_rules=dict(get_agent(name).permissions))
         assert evaluator.evaluate("question", "") == "deny"
-    build_eval = PermissionEvaluator(
-        agent_rules=dict(get_agent("build").permissions)
-    )
+    build_eval = PermissionEvaluator(agent_rules=dict(get_agent("build").permissions))
     assert build_eval.evaluate("question", "") == "allow"
 
 
@@ -129,7 +126,7 @@ def test_global_read_env_is_allowed_for_every_agent() -> None:
         tools=default_tool_registry(),
         accessor=FakeAccessor(files={"/workspace/a.txt": b"hi"}),
     )
-    for name in ("build", "general", "plan", "explore", "computeruse"):
+    for name in ("build", "general", "plan", "explore"):
         agent = get_agent(name)
         for path in ("/workspace/.env", "/etc/app.env.local", "/tmp/readme"):
             assert runner._decide(agent, "read", path, "build") == "allow"

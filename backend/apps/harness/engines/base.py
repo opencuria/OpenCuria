@@ -41,12 +41,6 @@ class RunOptions:
     run_subagent: Any | None = None
     depth: int = 0
     max_depth: int = DEFAULT_MAX_DEPTH
-    # Optional Agent-S config port for ``computeruse`` runs (second-layer
-    # integration in ``agent_s/``). ``None`` resolves to the persisted
-    # org Agent-S config (``AgentSConfigService.to_run_config``) with
-    # controlled grounding fallback. Kept as ``Any`` so shared contracts
-    # do not depend on the Agent-S implementation.
-    agent_s_config: Any | None = None
     # Per-run cache of once-approved (tool, action) pairs, reset at
     # the start of every run() call. ``always`` continues to flow
     # through the allowlist/service; this set only suppresses repeat

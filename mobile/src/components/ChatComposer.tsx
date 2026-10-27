@@ -16,7 +16,6 @@ import {
   X,
 } from "lucide-react-native";
 import {
-  Keyboard,
   ScrollView,
   StyleSheet,
   Text,
@@ -39,6 +38,11 @@ import { Banner, IconButton, NativeAction } from "../ui/primitives";
 import { NativeMenu } from "../ui/NativeMenu";
 import { ComposerSurface } from "../ui/ComposerSurface";
 import { ComposerEditor } from "./ComposerEditor";
+import {
+  COMPOSER_INPUT_NATIVE_ID,
+  ComposerDismissArea,
+  useChatLayout,
+} from "./ChatLayout";
 import { useTheme } from "../ui/theme";
 
 export interface ComposerSkill {
@@ -106,6 +110,9 @@ interface ActiveQuery {
   query: string;
 }
 
+/** Shared empty result, so clearing an empty list does not re-render. */
+const NO_CANDIDATES: MentionCandidate[] = [];
+
 /**
  * Controlled native composer. Native editing keeps its own caret; the parent
  * receives the best synchronous selection estimate and native selection events
@@ -137,20 +144,19 @@ export function ChatComposer({
 }: ChatComposerProps): React.JSX.Element {
   const { theme } = useTheme();
   const { width: windowWidth } = useWindowDimensions();
-  const [selection, setSelection] = useState({
-    start: draft.length,
-    end: draft.length,
-  });
+  const { dismissKeyboard, onComposerLayout } = useChatLayout();
   const [query, setQuery] = useState<ActiveQuery | null>(null);
-  const [searched, setSearched] = useState<MentionCandidate[]>([]);
-  const [inputHeight, setInputHeight] = useState(28);
+  const [searched, setSearched] = useState<MentionCandidate[]>(NO_CANDIDATES);
+  const [inputScrolls, setInputScrolls] = useState(false);
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
   const sendingRef = useRef(false);
   const stopInFlight = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<TextInput>(null);
-  const selectionRef = useRef(selection);
+  // Selection lives in refs: re-rendering on focus would race the keyboard
+  // animation, and the native input owns the caret anyway.
+  const selectionRef = useRef({ start: draft.length, end: draft.length });
   const nativeSelectionRef = useRef(false);
   const nativeEditTextRef = useRef<string | null>(null);
   const draftRef = useRef(draft);
@@ -197,7 +203,7 @@ export function ChatComposer({
       const mention = detectMentionQuery(text, cursor);
       if (mention !== null) {
         setQuery({ kind: "mention", query: mention });
-        setSearched([]);
+        setSearched(NO_CANDIDATES);
         if (onSearchMentions && !mention.toLowerCase().startsWith("agent:")) {
           const generation = queryGeneration.current;
           timerRef.current = setTimeout(() => {
@@ -209,7 +215,7 @@ export function ChatComposer({
               })
               .catch(() => {
                 if (mounted.current && generation === queryGeneration.current)
-                  setSearched([]);
+                  setSearched(NO_CANDIDATES);
               });
           }, 150);
         }
@@ -217,11 +223,11 @@ export function ChatComposer({
       }
       const slash = detectSlashQuery(text, cursor);
       if (slash !== null) {
-        setSearched([]);
+        setSearched(NO_CANDIDATES);
         setQuery({ kind: "skill", query: slash });
       } else {
         setQuery(null);
-        setSearched([]);
+        setSearched(NO_CANDIDATES);
       }
     },
     [cancelSearch, onSearchMentions],
@@ -243,7 +249,6 @@ export function ChatComposer({
       nativeEditTextRef.current = null;
       draftRef.current = text;
       selectionRef.current = nextSelection;
-      setSelection(nextSelection);
       setError(null);
       onDraftChange(text, nextSelection);
       refreshQuery(text, nextSelection.end);
@@ -274,9 +279,8 @@ export function ChatComposer({
       nativeSelectionRef.current = false;
       nativeEditTextRef.current = null;
       selectionRef.current = nextSelection;
-      setSelection(nextSelection);
       setQuery(null);
-      setSearched([]);
+      setSearched(NO_CANDIDATES);
       setError(null);
       cancelSearch();
       onDraftChange(result.text, nextSelection);
@@ -305,7 +309,7 @@ export function ChatComposer({
     setSending(false);
     setStopping(false);
     setQuery(null);
-    setSearched([]);
+    setSearched(NO_CANDIDATES);
     setError(null);
     cancelSearch();
   }, [cancelSearch, contextKey]);
@@ -329,9 +333,8 @@ export function ChatComposer({
     const next = { start: draft.length, end: draft.length };
     nativeEditTextRef.current = null;
     selectionRef.current = next;
-    setSelection(next);
     setQuery(null);
-    setSearched([]);
+    setSearched(NO_CANDIDATES);
     setError(null);
     cancelSearch();
   }, [cancelSearch, draft]);
@@ -353,7 +356,6 @@ export function ChatComposer({
       nativeSelectionRef.current = true;
       nativeEditTextRef.current = draftRef.current;
       selectionRef.current = next;
-      setSelection(next);
       refreshQuery(draftRef.current, next.end);
     },
     [refreshQuery],
@@ -435,10 +437,18 @@ export function ChatComposer({
     nativeSelectionRef.current = false;
     nativeEditTextRef.current = null;
     const originalSelection = selectionRef.current;
-    Keyboard.dismiss();
+    dismissKeyboard({ revealLatest: true });
     sendingRef.current = true;
     setSending(true);
     setError(null);
+    // Clear at once, as messengers do; a failed send restores the draft.
+    const cleared = { start: 0, end: 0 };
+    draftRef.current = "";
+    selectionRef.current = cleared;
+    setQuery(null);
+    setSearched(NO_CANDIDATES);
+    cancelSearch();
+    onDraftChange("", cleared);
     try {
       await onSend({
         text,
@@ -449,7 +459,7 @@ export function ChatComposer({
       if (
         mounted.current &&
         generation === operationGeneration.current &&
-        draftRef.current === originalDraft
+        (draftRef.current === "" || draftRef.current === originalDraft)
       ) {
         const restoredSelection = {
           start: Math.min(originalSelection.start, originalDraft.length),
@@ -457,8 +467,8 @@ export function ChatComposer({
         };
         nativeSelectionRef.current = false;
         nativeEditTextRef.current = null;
+        draftRef.current = originalDraft;
         selectionRef.current = restoredSelection;
-        setSelection(restoredSelection);
         onDraftChange(originalDraft, restoredSelection);
         setError(
           "Your message could not be sent. Your draft is still here. Please try again.",
@@ -470,7 +480,16 @@ export function ChatComposer({
       if (mounted.current && generation === operationGeneration.current)
         setSending(false);
     }
-  }, [busy, disabled, onDraftChange, onSend, onStop, selectedSkillIds]);
+  }, [
+    busy,
+    cancelSearch,
+    disabled,
+    dismissKeyboard,
+    onDraftChange,
+    onSend,
+    onStop,
+    selectedSkillIds,
+  ]);
 
   const hasPicker = Boolean(onTakePhoto || onChoosePhotos || onChooseFiles);
   const canSubmit =
@@ -593,10 +612,7 @@ export function ChatComposer({
   );
 
   return (
-    <View
-      testID={testID}
-      style={[styles.root, { backgroundColor: theme.background }]}
-    >
+    <View testID={testID} pointerEvents="box-none" style={styles.root}>
       {error ? (
         <Banner
           tone="error"
@@ -630,6 +646,7 @@ export function ChatComposer({
           </View>
           <ScrollView
             keyboardShouldPersistTaps="handled"
+            scrollsToTop={false}
             style={{ maxHeight: 192 }}
           >
             {candidates.slice(0, 10).map((candidate) => (
@@ -667,130 +684,139 @@ export function ChatComposer({
         </View>
       ) : null}
 
-      <ComposerSurface>
-        {activeSkills.length ? (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.chips}
-          >
-            {activeSkills.map((skill) => (
-              <View
-                key={skill.id}
-                style={[
-                  styles.skillChip,
-                  { backgroundColor: theme.surfaceMuted },
-                ]}
+      <ComposerDismissArea enabled={!inputScrolls}>
+        <View
+          collapsable={false}
+          onLayout={onComposerLayout}
+          style={styles.core}
+        >
+          <ComposerSurface>
+            {activeSkills.length ? (
+              <ScrollView
+                horizontal
+                scrollsToTop={false}
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.chips}
               >
-                <Sparkles size={13} color={theme.primary} />
-                <Text
-                  numberOfLines={1}
-                  style={[styles.skillName, { color: theme.text }]}
-                >
-                  {skill.name}
-                </Text>
-                <NativeAction
-                  accessibilityRole="button"
-                  accessibilityLabel={`Remove ${skill.name} skill`}
-                  hitSlop={6}
-                  onPress={() =>
-                    onSelectedSkillIdsChange?.(
-                      selectedSkillIds.filter((id) => id !== skill.id),
-                    )
-                  }
-                  style={styles.chipRemove}
-                >
-                  <X size={14} color={theme.mutedText} />
-                </NativeAction>
-              </View>
-            ))}
-          </ScrollView>
-        ) : null}
-        {attachments.length ? (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.chips}
-          >
-            {attachments.map((attachment) => (
-              <View
-                key={attachment.id}
-                style={[
-                  styles.attachmentChip,
-                  { backgroundColor: theme.surfaceMuted },
-                ]}
+                {activeSkills.map((skill) => (
+                  <View
+                    key={skill.id}
+                    style={[
+                      styles.skillChip,
+                      { backgroundColor: theme.surfaceMuted },
+                    ]}
+                  >
+                    <Sparkles size={13} color={theme.primary} />
+                    <Text
+                      numberOfLines={1}
+                      style={[styles.skillName, { color: theme.text }]}
+                    >
+                      {skill.name}
+                    </Text>
+                    <NativeAction
+                      accessibilityRole="button"
+                      accessibilityLabel={`Remove ${skill.name} skill`}
+                      hitSlop={6}
+                      onPress={() =>
+                        onSelectedSkillIdsChange?.(
+                          selectedSkillIds.filter((id) => id !== skill.id),
+                        )
+                      }
+                      style={styles.chipRemove}
+                    >
+                      <X size={14} color={theme.mutedText} />
+                    </NativeAction>
+                  </View>
+                ))}
+              </ScrollView>
+            ) : null}
+            {attachments.length ? (
+              <ScrollView
+                horizontal
+                scrollsToTop={false}
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.chips}
               >
-                {isImage(attachment) ? (
-                  <Image
-                    source={{ uri: attachment.uri }}
-                    contentFit="cover"
-                    style={styles.attachmentThumbnail}
-                    accessibilityLabel={`${attachment.name} preview`}
-                  />
-                ) : (
-                  <FileText size={14} color={theme.mutedText} />
-                )}
-                <Text
-                  numberOfLines={1}
-                  style={[styles.skillName, { color: theme.text }]}
-                >
-                  {attachment.name}
-                </Text>
-                <NativeAction
-                  accessibilityRole="button"
-                  accessibilityLabel={`Remove ${attachment.name}`}
-                  onPress={() => {
-                    const next = attachmentsRef.current.filter(
-                      (item) => item.id !== attachment.id,
-                    );
-                    attachmentsRef.current = next;
-                    onAttachmentsChange?.(next);
-                  }}
-                  style={styles.chipRemove}
-                >
-                  <X size={14} color={theme.mutedText} />
-                </NativeAction>
-              </View>
-            ))}
-          </ScrollView>
-        ) : null}
-        <ComposerEditor
-          key="message-input"
-          ref={inputRef}
-          value={draft}
-          onChangeText={changeText}
-          onSelectionChange={onSelectionChange}
-          onContentSizeChange={({ nativeEvent }) =>
-            setInputHeight(nativeEvent.contentSize.height)
-          }
-          multiline
-          editable={!disabled}
-          placeholder={placeholder}
-          placeholderTextColor={theme.subtleText}
-          accessibilityLabel="Chat message"
-          testID="chat-composer-input"
-          returnKeyType="default"
-          blurOnSubmit={false}
-          textAlignVertical="top"
-          style={[
-            styles.input,
-            {
-              color: theme.text,
-              height: Math.max(36, Math.min(170, inputHeight)),
-            },
-          ]}
-        />
-        <View style={styles.toolbar}>
-          {attachmentButton}
-          <View style={styles.settings}>{settingsButton}</View>
-          {sendButton}
+                {attachments.map((attachment) => (
+                  <View
+                    key={attachment.id}
+                    style={[
+                      styles.attachmentChip,
+                      { backgroundColor: theme.surfaceMuted },
+                    ]}
+                  >
+                    {isImage(attachment) ? (
+                      <Image
+                        source={{ uri: attachment.uri }}
+                        contentFit="cover"
+                        style={styles.attachmentThumbnail}
+                        accessibilityLabel={`${attachment.name} preview`}
+                      />
+                    ) : (
+                      <FileText size={14} color={theme.mutedText} />
+                    )}
+                    <Text
+                      numberOfLines={1}
+                      style={[styles.skillName, { color: theme.text }]}
+                    >
+                      {attachment.name}
+                    </Text>
+                    <NativeAction
+                      accessibilityRole="button"
+                      accessibilityLabel={`Remove ${attachment.name}`}
+                      onPress={() => {
+                        const next = attachmentsRef.current.filter(
+                          (item) => item.id !== attachment.id,
+                        );
+                        attachmentsRef.current = next;
+                        onAttachmentsChange?.(next);
+                      }}
+                      style={styles.chipRemove}
+                    >
+                      <X size={14} color={theme.mutedText} />
+                    </NativeAction>
+                  </View>
+                ))}
+              </ScrollView>
+            ) : null}
+            <ComposerEditor
+              key="message-input"
+              ref={inputRef}
+              value={draft}
+              onChangeText={changeText}
+              onSelectionChange={onSelectionChange}
+              onContentSizeChange={({ nativeEvent }) => {
+                const scrolls =
+                  nativeEvent.contentSize.height > INPUT_MAX_HEIGHT;
+                setInputScrolls((current) =>
+                  current === scrolls ? current : scrolls,
+                );
+              }}
+              nativeID={COMPOSER_INPUT_NATIVE_ID}
+              multiline
+              editable={!disabled}
+              placeholder={placeholder}
+              placeholderTextColor={theme.subtleText}
+              accessibilityLabel="Chat message"
+              testID="chat-composer-input"
+              returnKeyType="default"
+              blurOnSubmit={false}
+              textAlignVertical="top"
+              style={[styles.input, { color: theme.text }]}
+            />
+            <View style={styles.toolbar}>
+              {attachmentButton}
+              <View style={styles.settings}>{settingsButton}</View>
+              {sendButton}
+            </View>
+          </ComposerSurface>
+          {disabled && !busy ? (
+            <Text style={[styles.disabledHint, { color: theme.subtleText }]}>
+              Chat is not available right now.
+            </Text>
+          ) : null}
         </View>
-      </ComposerSurface>
-      {disabled && !busy ? (
-        <Text style={[styles.disabledHint, { color: theme.subtleText }]}>
-          Chat is not available right now.
-        </Text>
-      ) : null}
+      </ComposerDismissArea>
     </View>
   );
 }
@@ -822,10 +848,16 @@ function isImage(attachment: ComposerAttachment): boolean {
   );
 }
 
+/** The editor grows with its draft up to this height, then scrolls. */
+const INPUT_MAX_HEIGHT = 170;
+
 const styles = StyleSheet.create({
-  root: { paddingHorizontal: 12, paddingTop: 8, paddingBottom: 8 },
+  root: { paddingHorizontal: 12 },
+  core: { paddingTop: 6 },
   input: {
     minWidth: 0,
+    minHeight: 36,
+    maxHeight: INPUT_MAX_HEIGHT,
     paddingVertical: 6,
     marginHorizontal: 12,
     marginTop: 6,

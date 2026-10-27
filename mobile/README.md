@@ -11,7 +11,7 @@ Native iOS and Android chat client built with Expo SDK 57 and React Native 0.86.
 
 ## Native interface
 
-Buttons, selection rows, model/engine pickers and lists use platform controls via `@expo/ui`. Menus use `@react-native-menu/menu` (`UIMenu` / Android popup menus); no Expo bottom-sheet component is used. Modal screens use the OS presentation and native navigation bars. iOS navigation uses `NavigationSplitView`; Android uses `DrawerLayoutAndroid`. The composer uses a native `UITextView` / `EditText`, with `expo-glass-effect` on supported iOS versions and a Material surface on Android.
+Buttons, selection rows, model/engine pickers and lists use platform controls via `@expo/ui`. Menus use `@react-native-menu/menu` (`UIMenu` / Android popup menus); no Expo bottom-sheet component is used. Modal screens use the OS presentation and native navigation bars. iOS navigation uses `NavigationSplitView`; Android uses `DrawerLayoutAndroid`. The composer uses a native `UITextView` / `EditText`, with interactive `expo-glass-effect` liquid glass on supported iOS versions and a Material surface on Android. `react-native-keyboard-controller` keeps the composer on top of the keyboard and lets the keyboard follow the finger when the transcript or the composer is dragged down.
 
 The sidebar shares workspace eligibility, inbox and sorting rules with the webapp through `@opencuria/chat-core/conversationGroups`. Each workspace initially shows four recent chats, with independent four-chat pagination. Closing navigation retains pagination and collapsed groups; switching organization resets them. Stopped workspaces remain accessible through All workspaces. Scheduled tasks are not shown.
 

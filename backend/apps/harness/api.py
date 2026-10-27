@@ -3,7 +3,7 @@ REST API for harness sessions.
 
 Thin Ninja routers: validate input, resolve organization + owner
 scoping via the runners ``RunnerService`` (``get_workspace_for_user``
-equivalent), delegate to ``HarnessService``, and format responses.
+equivalent), delegate to harness services, and format responses.
 No business logic here.
 
 Fine-grained API key permissions (new keys, never auto-granted to
@@ -34,12 +34,12 @@ from .conversation_service import ConversationService
 from .schemas import (
     AgentConfigOut,
     AgentConfigSaveIn,
-    AgentSConfigIn,
-    AgentSConfigOut,
     ChatGPTOAuthCancelIn,
     ChatGPTOAuthStartIn,
     ChatGPTOAuthStartOut,
     ChatGPTOAuthStatusOut,
+    ComputerUseConfigIn,
+    ComputerUseConfigOut,
     HarnessConversationOut,
     HarnessForkIn,
     HarnessMessageEditIn,
@@ -64,13 +64,15 @@ from .schemas import (
     RecentModelSaveIn,
     SubagentConfigIn,
     SubagentConfigOut,
-    agent_s_config_to_out,
+    computer_use_config_to_out,
     part_to_out,
     provider_config_to_out,
     session_to_out,
     session_to_out_with_unread,
     timeline_to_out,
 )
+from .session_access_service import SessionAccessService
+from .session_settings_service import SessionSettingsService
 
 harness_router = Router(tags=["harness"])
 
@@ -110,16 +112,6 @@ def _non_empty(value: str) -> str | None:
     """Return the stripped string or None when blank (edit no-op)."""
     stripped = (value or "").strip()
     return stripped or None
-
-
-def _require_claude_session_owner(session, user_id: object) -> None:
-    """Prevent another workspace collaborator from using personal Claude auth."""
-    if getattr(session, "harness_id", "native") != "native" and str(
-        getattr(session, "created_by_id", "")
-    ) != str(user_id):
-        raise AuthenticationError(
-            "Only the session owner may use its external engine connection"
-        )
 
 
 def _owned_workspace(request: HttpRequest, org_id: uuid.UUID, workspace_id: uuid.UUID):  # type: ignore[no-untyped-def]
@@ -287,21 +279,26 @@ async def send_harness_message(
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         try:
-            _require_claude_session_owner(session, request.user.id)
+            SessionAccessService.require_external_owner(
+                engine_id=getattr(session, "harness_id", "native"),
+                owner_id=getattr(session, "created_by_id", None),
+                user_id=request.user.id,
+            )
         except AuthenticationError as exc:
             return 403, {"detail": exc.message, "code": "permission_denied"}
-        await sync_to_async(service.ensure_user_promptable)(session)
+        SessionAccessService.require_user_promptable(session.parent_id)
         if not service.is_running(session.id):
+            settings = SessionSettingsService()
             if payload.mode and payload.mode.strip():
-                session = await sync_to_async(service.set_mode)(
+                session = await sync_to_async(settings.set_mode)(
                     session.id, payload.mode
                 )
             if payload.model and payload.model.strip():
-                session = await sync_to_async(service.set_model)(
+                session = await sync_to_async(settings.set_model)(
                     session.id, payload.model
                 )
             if payload.reasoning_effort and payload.reasoning_effort.strip():
-                session = await sync_to_async(service.set_reasoning_effort)(
+                session = await sync_to_async(settings.set_reasoning_effort)(
                     session.id, payload.reasoning_effort
                 )
         await service.start_run(
@@ -357,7 +354,11 @@ async def steer_harness_session(
         service = _resolve_harness_service()
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
-        _require_claude_session_owner(session, request.user.id)
+        SessionAccessService.require_external_owner(
+            engine_id=getattr(session, "harness_id", "native"),
+            owner_id=getattr(session, "created_by_id", None),
+            user_id=request.user.id,
+        )
         entry = await service.steer_run(
             session, payload.prompt, user_id=request.user.id
         )
@@ -391,7 +392,11 @@ async def withdraw_harness_steer(
         service = _resolve_harness_service()
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
-        _require_claude_session_owner(session, request.user.id)
+        SessionAccessService.require_external_owner(
+            engine_id=getattr(session, "harness_id", "native"),
+            owner_id=getattr(session, "created_by_id", None),
+            user_id=request.user.id,
+        )
         entry = await service.withdraw_steer(session, str(steer_id))
         return 200, _steer_to_out(entry)
     except AuthenticationError as exc:
@@ -466,7 +471,11 @@ async def edit_harness_message(
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         try:
-            _require_claude_session_owner(session, request.user.id)
+            SessionAccessService.require_external_owner(
+                engine_id=getattr(session, "harness_id", "native"),
+                owner_id=getattr(session, "created_by_id", None),
+                user_id=request.user.id,
+            )
         except AuthenticationError as exc:
             return 403, {"detail": exc.message, "code": "permission_denied"}
         await service.edit_user_message(
@@ -512,12 +521,13 @@ async def patch_harness_session(
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
-        service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         if not (payload.title or "").strip():
             raise ValueError("title must not be empty")
-        updated = await sync_to_async(service.update_title)(session.id, payload.title)
+        updated = await sync_to_async(SessionSettingsService().update_title)(
+            session.id, payload.title
+        )
         return 200, await sync_to_async(session_to_out_with_unread)(
             ConversationService(), updated
         )
@@ -687,7 +697,9 @@ async def set_harness_session_mode(
             raise ConflictError(
                 f"Harness session '{session.id}' already has an active run"
             )
-        updated = await sync_to_async(service.set_mode)(session.id, payload.mode)
+        updated = await sync_to_async(SessionSettingsService().set_mode)(
+            session.id, payload.mode
+        )
         return 200, await sync_to_async(session_to_out_with_unread)(
             ConversationService(), updated
         )
@@ -824,7 +836,11 @@ async def resolve_harness_permission(
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         try:
-            _require_claude_session_owner(session, request.user.id)
+            SessionAccessService.require_external_owner(
+                engine_id=getattr(session, "harness_id", "native"),
+                owner_id=getattr(session, "created_by_id", None),
+                user_id=request.user.id,
+            )
         except AuthenticationError as exc:
             return 403, {"detail": exc.message, "code": "permission_denied"}
         outcome = await service.interactions.resolve_permission(
@@ -869,7 +885,11 @@ async def resolve_harness_question(
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         try:
-            _require_claude_session_owner(session, request.user.id)
+            SessionAccessService.require_external_owner(
+                engine_id=getattr(session, "harness_id", "native"),
+                owner_id=getattr(session, "created_by_id", None),
+                user_id=request.user.id,
+            )
         except AuthenticationError as exc:
             return 403, {"detail": exc.message, "code": "permission_denied"}
         outcome = await service.interactions.resolve_question(
@@ -1015,9 +1035,7 @@ def get_org_subagent_config(request: HttpRequest):
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.services import SubagentConfigService
 
-        return 200, SubagentConfigOut(
-            **SubagentConfigService().get_or_default(org_id)
-        )
+        return 200, SubagentConfigOut(**SubagentConfigService().get_or_default(org_id))
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -1051,20 +1069,49 @@ def save_org_subagent_config(request: HttpRequest, payload: SubagentConfigIn):
 
 @harness_router.get(
     "/agent-s-config/",
-    response={200: AgentSConfigOut, 401: dict, 403: dict, 404: dict},
-    summary="Get the org-wide Agent-S harness config",
+    response={410: dict, 403: dict, 404: dict},
+    operation_id="retired_agent_s_config_get",
+    deprecated=True,
 )
-def get_org_agent_s_config(request: HttpRequest):
-    """Return the org Agent-S config (defaults when unstored)."""
+@harness_router.put(
+    "/agent-s-config/",
+    response={410: dict, 403: dict, 404: dict},
+    operation_id="retired_agent_s_config_put",
+    deprecated=True,
+)
+def retired_agent_s_config(request: HttpRequest):
+    """Explain the retired API without silently discarding obsolete settings."""
+    permission = (
+        APIKeyPermission.HARNESS_READ
+        if request.method == "GET"
+        else APIKeyPermission.HARNESS_RUN
+    )
+    if not check_api_key_permission(request, permission):
+        return _perm_denied(permission)
+    org_id = _get_org_id(request)
+    OrganizationService().require_membership(request.user, org_id)
+    return 410, {
+        "detail": "Agent-S was replaced by Computer Use. Use /computer-use-config/.",
+        "code": "agent_s_retired",
+    }
+
+
+@harness_router.get(
+    "/computer-use-config/",
+    response={200: ComputerUseConfigOut, 401: dict, 403: dict, 404: dict},
+    summary="Get the org-wide computer-use runtime config",
+)
+def get_org_computer_use_config(request: HttpRequest):
+    """Return the org computer-use config (defaults when unstored)."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_READ):
         return _perm_denied(APIKeyPermission.HARNESS_READ)
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        from apps.harness.services import AgentSConfigService
+        from apps.harness.services import ComputerUseConfigService
 
-        return 200, agent_s_config_to_out(
-            AgentSConfigService().get_or_default(org_id)
+        return 200, computer_use_config_to_out(
+            ComputerUseConfigService().get_or_default(org_id)
         )
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
@@ -1073,24 +1120,24 @@ def get_org_agent_s_config(request: HttpRequest):
 
 
 @harness_router.put(
-    "/agent-s-config/",
-    response={200: AgentSConfigOut, 400: dict, 401: dict, 403: dict, 404: dict},
-    summary="Save (upsert) the org-wide Agent-S harness config",
+    "/computer-use-config/",
+    response={200: ComputerUseConfigOut, 400: dict, 401: dict, 403: dict, 404: dict},
+    summary="Save (upsert) the org-wide computer-use runtime config",
 )
-def save_org_agent_s_config(request: HttpRequest, payload: AgentSConfigIn):
-    """Validate and upsert the org Agent-S config."""
+def save_org_computer_use_config(request: HttpRequest, payload: ComputerUseConfigIn):
+    """Validate and upsert the org computer-use config."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
         return _perm_denied(APIKeyPermission.HARNESS_RUN)
     try:
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
-        from apps.harness.services import AgentSConfigService
+        from apps.harness.services import ComputerUseConfigService
 
         # Partial payloads merge: only explicitly sent fields are updated.
-        row = AgentSConfigService().save_config(
+        row = ComputerUseConfigService().save_config(
             org_id, payload.model_dump(exclude_unset=True)
         )
-        return 200, agent_s_config_to_out(row)
+        return 200, computer_use_config_to_out(row)
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
@@ -1113,9 +1160,7 @@ def get_org_provider_config(request: HttpRequest):
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.services import ProviderConfigService
 
-        return 200, provider_config_to_out(
-            ProviderConfigService().find_config(org_id)
-        )
+        return 200, provider_config_to_out(ProviderConfigService().find_config(org_id))
     except AuthenticationError as exc:
         return 401, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:

@@ -82,10 +82,18 @@ function formatPoint(
   return `(${x}, ${y})`;
 }
 
+/** Recognize the stable product tool identity, including persisted calls. */
+export function isComputerUseTool(part: HarnessPart): boolean {
+  return /^mcp_computer-use_cua_repl_js(?:_reset)?$/.test(resolveToolName(part));
+}
+
 /** Compact one-line summary for computer-use tool arguments. */
 export function computerUseSummary(part: HarnessPart): string {
   const tool = resolveToolName(part);
   const args = parseToolArguments(part);
+  if (isComputerUseTool(part)) {
+    return stringArg(args, "title").slice(0, 80) || (tool.endsWith("_reset") ? "Reset Computer Use" : "Computer Use");
+  }
   switch (tool) {
     case "view_screen":
       return "View screen";
@@ -127,6 +135,7 @@ export function computerUseSummary(part: HarnessPart): string {
 /** Row label: persisted title, then a tool-specific fallback from arguments. */
 export function toolDisplayLabel(part: HarnessPart): string {
   if (part.type === "reasoning") return "Thought";
+  if (isComputerUseTool(part)) return part.title || computerUseSummary(part);
   if ((part.title || "").trim()) return part.title;
   const tool = resolveToolName(part);
   const args = parseToolArguments(part);

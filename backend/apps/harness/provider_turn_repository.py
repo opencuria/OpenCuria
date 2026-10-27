@@ -164,8 +164,6 @@ class ProviderTurnRepository:
         cls, account_id: uuid.UUID, *, allowed_user_id: int | None = None
     ) -> int:
         """Flag active turn snapshots that already depend on a revoked account."""
-        # Domainservice calls this inside its transaction; keep a defensive
-        # atomic scope for the compatibility path too.
         with transaction.atomic():
             cls.lock_mutex()
             query = ProviderTurn.objects.filter(active=True)
@@ -178,31 +176,6 @@ class ProviderTurnRepository:
                 for row in query.only(
                     "id", "account_ids", "dependency_account_ids"
                 ).iterator()
-                if str(account_id)
-                in {
-                    *list((row.account_ids or {}).values()),
-                    *list(row.dependency_account_ids or []),
-                }
-            ]
-            if not matching_ids:
-                return 0
-            return ProviderTurn.objects.filter(id__in=matching_ids).update(
-                cancel_requested=True,
-                revoked_account_id=account_id,
-            )
-
-    @classmethod
-    def revoke_account_for_user(cls, account_id: uuid.UUID, user_id: int) -> int:
-        """Revoke active snapshots for one member losing account access."""
-        with transaction.atomic():
-            cls.lock_mutex()
-            matching_ids = [
-                row.id
-                for row in ProviderTurn.objects.filter(
-                    active=True, initiated_by_id=user_id
-                )
-                .only("id", "account_ids", "dependency_account_ids")
-                .iterator()
                 if str(account_id)
                 in {
                     *list((row.account_ids or {}).values()),
@@ -284,16 +257,6 @@ class ProviderTurnRepository:
             return True
 
     @classmethod
-    def finish(cls, turn_id: uuid.UUID | str) -> None:
-        """Release one legacy anonymous holder."""
-        turn = cls.get(turn_id)
-        if turn is None:
-            return
-        token = str((turn.holder_tokens or [""])[0]) if turn.holder_tokens else ""
-        if token:
-            cls.finish_once(turn_id, token)
-
-    @classmethod
     def set_monitor_required(cls, turn_id: uuid.UUID | str) -> None:
         """Mark turn cancellation as retained until local followers drain."""
         with transaction.atomic():
@@ -332,7 +295,7 @@ class ProviderTurnRepository:
             turn.save(update_fields=fields)
 
     @classmethod
-    def add_hold(cls, turn_id: uuid.UUID | str, holder: str | None = None) -> bool:
+    def add_hold(cls, turn_id: uuid.UUID | str, holder: str) -> bool:
         """Keep a turn snapshot active for one unique follow-up holder."""
         with transaction.atomic():
             cls.lock_mutex()
@@ -344,10 +307,9 @@ class ProviderTurnRepository:
             if turn is None or turn.cancel_requested:
                 return False
             holders = list(turn.holder_tokens or [])
-            token = str(holder or uuid.uuid4())
-            if token in holders:
+            if holder in holders:
                 return True
-            holders.append(token)
+            holders.append(holder)
             turn.holder_tokens = holders
             turn.holds = len(holders)
             turn.save(update_fields=["holder_tokens", "holds"])
@@ -357,24 +319,3 @@ class ProviderTurnRepository:
     def get(turn_id: uuid.UUID | str) -> ProviderTurn | None:
         """Return one durable turn sidecar."""
         return ProviderTurn.objects.filter(id=turn_id).first()
-
-    @staticmethod
-    def account_map(turn_id: uuid.UUID | str) -> dict[str, str]:
-        """Return immutable provider account IDs captured at admission."""
-        row = (
-            ProviderTurn.objects.filter(id=turn_id)
-            .values_list("account_ids", flat=True)
-            .first()
-        )
-        return dict(row or {})
-
-    @staticmethod
-    def dependent_active_turn_ids(account_id: uuid.UUID) -> list[uuid.UUID]:
-        """Find active turn IDs already registered as dependent on an account."""
-        return [
-            row.id
-            for row in ProviderTurn.objects.filter(active=True)
-            .only("id", "used_account_ids")
-            .iterator()
-            if str(account_id) in list(row.used_account_ids or [])
-        ]

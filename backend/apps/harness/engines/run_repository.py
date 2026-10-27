@@ -26,11 +26,6 @@ LIVE_STATUSES = (
     HarnessRunStatus.RUNNING,
     HarnessRunStatus.CLOSING,
 )
-TERMINAL_STATUSES = (
-    HarnessRunStatus.COMPLETED,
-    HarnessRunStatus.INTERRUPTED,
-    HarnessRunStatus.ERROR,
-)
 INTERRUPTED_ERROR = "Run interrupted after worker ownership expired."
 
 
@@ -204,25 +199,6 @@ class HarnessRunRepository:
         )
 
     @staticmethod
-    def set_external_session_if_owner(
-        run_id: uuid.UUID,
-        owner_token: uuid.UUID,
-        *,
-        external_session_id: str,
-    ) -> bool:
-        """Persist an upstream transcript identifier under the live owner."""
-        cleaned = (external_session_id or "").strip()
-        if not cleaned or len(cleaned) > 64:
-            raise ValueError("external_session_id must be 1..64 characters")
-        return bool(
-            HarnessRun.objects.filter(
-                id=run_id,
-                owner_token=owner_token,
-                status__in=(HarnessRunStatus.STARTING, HarnessRunStatus.RUNNING),
-            ).update(external_session_id=cleaned, heartbeat_at=timezone.now())
-        )
-
-    @staticmethod
     def begin_close_if_owner(run_id: uuid.UUID, owner_token: uuid.UUID) -> bool:
         """Stop the owner heartbeat and fence further writes before cleanup."""
         return bool(
@@ -261,105 +237,6 @@ class HarnessRunRepository:
         return HarnessRun.objects.filter(
             id=run_id, status=HarnessRunStatus.CLOSING
         ).exists()
-
-    @staticmethod
-    def complete_if_owner(
-        run_id: uuid.UUID,
-        owner_token: uuid.UUID,
-        *,
-        status: str = HarnessRunStatus.COMPLETED,
-        error: str = "",
-        cleanup_confirmed: bool = True,
-        now: datetime | None = None,
-    ) -> bool:
-        """Complete only the current owner after an external lease is closed.
-
-        When cleanup is unconfirmed, retain CLOSING even if the lease identity
-        was not persisted; the caller cannot assume no process started.
-        """
-        if status not in TERMINAL_STATUSES:
-            raise ValueError("status must be terminal")
-        moment = now or timezone.now()
-        with transaction.atomic():
-            row = (
-                HarnessRun.objects.select_for_update()
-                .filter(
-                    id=run_id,
-                    owner_token=owner_token,
-                    status__in=LIVE_STATUSES,
-                )
-                .only("id", "lease_id", "session_id", "assistant_message_id")
-                .first()
-            )
-            if row is None:
-                return False
-            if not cleanup_confirmed:
-                HarnessRun.objects.filter(
-                    id=run_id,
-                    owner_token=owner_token,
-                    status__in=LIVE_STATUSES,
-                ).update(status=HarnessRunStatus.CLOSING)
-                return False
-
-            changed = HarnessRun.objects.filter(
-                id=run_id,
-                owner_token=owner_token,
-                status__in=LIVE_STATUSES,
-            ).update(
-                status=status,
-                # Persist no arbitrary exception text: SDK/runner failures can
-                # include user data or credential material. The UI gets only a
-                # generic, secret-free marker; detailed diagnostics stay in logs.
-                error="Engine run failed." if error else "",
-                heartbeat_at=moment,
-                completed_at=moment,
-            )
-            if not changed:
-                return False
-            # A durable attempt and its assistant turn form one terminal fact.
-            # Late callbacks are fenced by the status transition and the owner
-            # token is checked again inside this transaction.
-            HarnessMessage.objects.filter(id=row.assistant_message_id).update(
-                completed_at=moment,
-                finish=(
-                    "aborted"
-                    if status == HarnessRunStatus.INTERRUPTED
-                    else "error"
-                    if status == HarnessRunStatus.ERROR
-                    else "stop"
-                ),
-                error=(
-                    INTERRUPTED_ERROR
-                    if status == HarnessRunStatus.INTERRUPTED
-                    else "Claude run failed."
-                    if status == HarnessRunStatus.ERROR
-                    else ""
-                ),
-            )
-            HarnessSession.objects.filter(id=row.session_id).update(
-                status=HarnessSessionStatus.IDLE,
-                last_message_at=moment,
-                updated_at=moment,
-            )
-            if status != HarnessRunStatus.COMPLETED:
-                HarnessPart.objects.filter(
-                    message_id=row.assistant_message_id,
-                    state__in=("pending", "running"),
-                ).exclude(type__in=("text", "reasoning")).update(
-                    state="error",
-                    updated_at=moment,
-                )
-                HarnessPart.objects.filter(
-                    message_id=row.assistant_message_id,
-                    state__in=("pending", "running"),
-                    type__in=("text", "reasoning"),
-                ).update(state="completed", updated_at=moment)
-            else:
-                HarnessPart.objects.filter(
-                    message_id=row.assistant_message_id,
-                    state__in=("pending", "running"),
-                ).update(state="completed", updated_at=moment)
-            return True
 
     @staticmethod
     def finish_interrupted_after_cleanup(

@@ -1,4 +1,4 @@
-"""Compose runner managers and expose workspace lifecycle operations.
+"""Compose runner managers and shared lifecycle coordination.
 
 The backend owns agent logic; runner managers execute its lifecycle,
 terminal, file, desktop, image, git, and harness RPCs.
@@ -10,7 +10,6 @@ import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
 from functools import partial
-from typing import Any
 
 import structlog
 
@@ -44,158 +43,83 @@ class WorkspaceService:
     ) -> None:
         self._runtime = runtime
         self._settings = settings
-        self._registry = WorkspaceRegistry(runtime, settings)
-        get_cached = self._registry.get_cached
-        get_runtime = self._registry.get_runtime
-        self._credentials_manager = CredentialManager()
-        self._terminals_manager = TerminalManager(
+        self.registry = WorkspaceRegistry(runtime, settings)
+        get_cached = self.registry.get_cached
+        get_runtime = self.registry.get_runtime
+        self.credentials = CredentialManager()
+        self.terminal_manager = TerminalManager(
             runtime,
             get_cached,
             get_runtime,
-            lambda workspace_id: self._registry._cache.pop(workspace_id, None),
+            lambda workspace_id: self.registry._cache.pop(workspace_id, None),
             WORKSPACE_CREDENTIAL_ENV_FILE,
         )
-        self._images = ImageManager(
+        self.images = ImageManager(
             runtime,
             get_cached,
             get_runtime,
-            store_workspace=lambda info: self._registry._cache.__setitem__(
+            store_workspace=lambda info: self.registry._cache.__setitem__(
                 info.workspace_id, info
             ),
-            credentials_injector=self._credentials_manager.inject_workspace_credentials,
+            credentials_injector=self.credentials.inject_workspace_credentials,
         )
-        self._images.lifecycle_context = self._registry.lifecycle
-        self._streams_manager = StreamManager(
+        self.images.lifecycle_context = self.registry.lifecycle
+        self.streams = StreamManager(
             runtime, get_cached, get_runtime, sanitize_exec_workdir
         )
-        self._background = BackgroundProcessManager(
+        self.background = BackgroundProcessManager(
             runtime,
             get_cached,
             get_runtime,
             sanitize_exec_workdir,
             WORKSPACE_CREDENTIAL_ENV_FILE,
         )
-        self._files_manager = FileManager(runtime, get_cached, get_runtime)
-        self._harness = HarnessExecService(
+        self.files = FileManager(runtime, get_cached, get_runtime)
+        self.harness = HarnessExecService(
             runtime,
             get_cached,
             get_runtime,
             sanitize_exec_workdir,
             WORKSPACE_CREDENTIAL_ENV_FILE,
         )
-        self._git = GitService(get_cached, get_runtime)
-        self._desktop = DesktopManager(
-            runtime, get_cached, get_runtime, self._harness.exec_harness_command
+        self.git = GitService(get_cached, get_runtime)
+        self.desktop = DesktopManager(
+            runtime, get_cached, get_runtime, self.harness.exec_harness_command
         )
-        self._lifecycle = WorkspaceLifecycle(
-            self._registry,
+        self.lifecycle = WorkspaceLifecycle(
+            self.registry,
             settings,
             runtime,
-            self._credentials_manager,
-            self._harness.exec_harness_command,
-            self._background,
-            self._streams_manager,
-            self._desktop,
+            self.credentials,
+            self.harness.exec_harness_command,
+            self.background,
+            self.streams,
+            self.desktop,
         )
-        self._registry.desktop_sessions = self._desktop._desktop_sessions
-        self._registry.background_entries = self._background._background_processes
-        self._registry.background_statuses = partial(
-            self._background._background_statuses, tolerate_errors=True
+        self.registry.desktop_sessions = self.desktop._desktop_sessions
+        self.registry.background_entries = self.background._background_processes
+        self.registry.background_statuses = partial(
+            self.background._background_statuses, tolerate_errors=True
         )
-        self._registry.desktop_live = self._desktop._is_desktop_session_live
-        self._registry.desktop_manager = self._desktop
-        self.capture_fence = CaptureFence(self._registry)
-        self._runtime_artifacts = RuntimeArtifactManager(
+        self.registry.desktop_live = self.desktop._is_desktop_session_live
+        self.registry.desktop_manager = self.desktop
+        self.capture_fence = CaptureFence(self.registry)
+        self.runtime_artifacts = RuntimeArtifactManager(
             runtime, get_cached, get_runtime, settings.state_dir
         )
         for manager in (
-            self._images,
-            self._terminals_manager,
-            self._streams_manager,
-            self._background,
-            self._files_manager,
-            self._harness,
-            self._git,
-            self._desktop,
-            self._lifecycle,
-            self._runtime_artifacts,
+            self.images,
+            self.terminal_manager,
+            self.streams,
+            self.background,
+            self.files,
+            self.harness,
+            self.git,
+            self.desktop,
+            self.lifecycle,
+            self.runtime_artifacts,
         ):
             manager.capture_fence = self.capture_fence
-
-    @property
-    def registry(self) -> WorkspaceRegistry:
-        """Return the workspace registry (cache ownership)."""
-        return self._registry
-
-    @property
-    def lifecycle(self) -> WorkspaceLifecycle:
-        """Return the workspace lifecycle orchestrator."""
-        return self._lifecycle
-
-    @property
-    def streams(self) -> StreamManager:
-        """Return the generic stream session manager."""
-        return self._streams_manager
-
-    @property
-    def background(self) -> BackgroundProcessManager:
-        """Return the background process manager."""
-        return self._background
-
-    @property
-    def terminal_manager(self) -> TerminalManager:
-        """Return the terminal session manager."""
-        return self._terminals_manager
-
-    @property
-    def images(self) -> ImageManager:
-        """Return the image build/artifact manager."""
-        return self._images
-
-    @property
-    def files(self) -> FileManager:
-        """Return the file operation manager."""
-        return self._files_manager
-
-    @property
-    def harness(self) -> HarnessExecService:
-        """Return the harness command execution manager."""
-        return self._harness
-
-    @property
-    def runtime_artifacts(self) -> RuntimeArtifactManager:
-        """Return the pinned runtime artifact manager."""
-        return self._runtime_artifacts
-
-    async def ensure_runtime_artifact(
-        self,
-        workspace_id: uuid.UUID,
-        artifact_id: str,
-        version: str,
-    ) -> dict[str, Any]:
-        """Ensure one approved native runtime tool in a workspace."""
-        return await self._runtime_artifacts.ensure_runtime_artifact(
-            workspace_id, artifact_id, version
-        )
-
-    @property
-    def credentials(self) -> CredentialManager:
-        """Return the credential inject/remove manager."""
-        return self._credentials_manager
-
-    @property
-    def desktop(self) -> DesktopManager:
-        """Return the desktop session manager."""
-        return self._desktop
-
-    @property
-    def git(self) -> GitService:
-        """Return the git orchestration manager."""
-        return self._git
-
-    async def sync_from_runtime(self) -> None:
-        """Rebuild the in-memory cache from live runtime state."""
-        await self._registry.sync_from_runtime()
 
     async def inventory_for_runner(self) -> dict:
         """Collect the QEMU storage inventory with explicit completeness."""
@@ -324,105 +248,10 @@ class WorkspaceService:
                     }
         return None
 
-
-    def workspace_exists(self, workspace_id: uuid.UUID) -> bool:
-        """Return True when *workspace_id* is present in the cache."""
-        return self._registry.workspace_exists(workspace_id)
-
-    async def create_workspace(
-        self,
-        repos: list[str],
-        qemu_vcpus: int | None = None,
-        qemu_memory_mb: int | None = None,
-        qemu_disk_size_gb: int | None = None,
-        env_vars: dict[str, str] | None = None,
-        files: list[dict[str, Any]] | None = None,
-        ssh_keys: list[str] | None = None,
-        workspace_id: uuid.UUID | None = None,
-        base_image_path: str | None = None,
-    ) -> tuple[uuid.UUID, bool]:
-        """Create a new workspace, inject credentials, and clone repos."""
-        return await self._lifecycle.create_workspace(
-            repos,
-            qemu_vcpus=qemu_vcpus,
-            qemu_memory_mb=qemu_memory_mb,
-            qemu_disk_size_gb=qemu_disk_size_gb,
-            env_vars=env_vars,
-            files=files,
-            ssh_keys=ssh_keys,
-            workspace_id=workspace_id,
-            base_image_path=base_image_path,
-        )
-
-    async def stop_workspace(self, workspace_id: uuid.UUID) -> bool:
-        """Remove credentials then stop a running workspace."""
-        return await self._lifecycle.stop_workspace(workspace_id)
-
-    async def resume_workspace(
-        self,
-        workspace_id: uuid.UUID,
-        qemu_vcpus: int | None = None,
-        qemu_memory_mb: int | None = None,
-        qemu_disk_size_gb: int | None = None,
-        env_vars: dict[str, str] | None = None,
-        files: list[dict[str, Any]] | None = None,
-        ssh_keys: list[str] | None = None,
-    ) -> bool:
-        """Resume a stopped workspace and re-inject persistent credentials."""
-        return await self._lifecycle.resume_workspace(
-            workspace_id,
-            qemu_vcpus=qemu_vcpus,
-            qemu_memory_mb=qemu_memory_mb,
-            qemu_disk_size_gb=qemu_disk_size_gb,
-            env_vars=env_vars,
-            files=files,
-            ssh_keys=ssh_keys,
-        )
-
-    async def inject_credentials(
-        self,
-        workspace_id: uuid.UUID,
-        env_vars: dict[str, str] | None = None,
-        files: list[dict[str, Any]] | None = None,
-        ssh_keys: list[str] | None = None,
-    ) -> bool:
-        """Replace persistent credentials on a running workspace."""
-        return await self._lifecycle.inject_credentials(
-            workspace_id, env_vars=env_vars, files=files, ssh_keys=ssh_keys
-        )
-
-    async def update_workspace_resources(
-        self,
-        workspace_id: uuid.UUID,
-        *,
-        qemu_vcpus: int,
-        qemu_memory_mb: int,
-        qemu_disk_size_gb: int,
-    ) -> None:
-        """Reconfigure resources for an existing QEMU workspace."""
-        await self._lifecycle.update_workspace_resources(
-            workspace_id,
-            qemu_vcpus=qemu_vcpus,
-            qemu_memory_mb=qemu_memory_mb,
-            qemu_disk_size_gb=qemu_disk_size_gb,
-        )
-
-    async def remove_workspace(self, workspace_id: uuid.UUID) -> None:
-        """Remove a workspace and clean up resources."""
-        await self._lifecycle.remove_workspace(workspace_id)
-
-    async def run_health_check_loop(self) -> None:
-        """Periodically probe running workspaces and restart unreachable ones."""
-        await self._lifecycle.run_health_check_loop()
-
-    async def get_workspace_heartbeat_statuses(self) -> list[dict]:
-        """Return workspace heartbeat payload including live desktop sessions."""
-        return await self._registry.get_workspace_heartbeat_statuses()
-
     async def recover_desktop_sessions_from_runtime(self) -> None:
         """Reconcile desktops from live runtime state with bounded workers."""
         await self.run_desktop_workers(
-            list(self._registry._cache), self._desktop.maintain_workspace
+            list(self.registry._cache), self.desktop.maintain_workspace
         )
 
     async def run_desktop_workers(
@@ -461,20 +290,16 @@ class WorkspaceService:
                 task.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
 
-    async def get_vm_metrics(self) -> dict[str, dict[str, Any]]:
-        """Collect host-observed metrics for QEMU workspaces."""
-        return await self._registry.get_vm_metrics()
-
     def configure_desktop_leases(self, state_dir: str, epoch: str) -> None:
         """Wire durable ownership after the transport acquires its writer lock."""
         from .services.sessions.desktop_leases import DesktopLeaseStore
         from .services.sessions.stream_intents import StreamIntentStore
 
         store = DesktopLeaseStore(state_dir)
-        self._streams_manager.intent_store = StreamIntentStore(state_dir)
-        self._streams_manager.lease_store = store
-        self._streams_manager.epoch = epoch
-        self._desktop.configure_leases(
-            store, epoch, self._streams_manager.close_owner_streams
+        self.streams.intent_store = StreamIntentStore(state_dir)
+        self.streams.lease_store = store
+        self.streams.epoch = epoch
+        self.desktop.configure_leases(
+            store, epoch, self.streams.close_owner_streams
         )
-        self._registry.desktop_manager = self._desktop
+        self.registry.desktop_manager = self.desktop

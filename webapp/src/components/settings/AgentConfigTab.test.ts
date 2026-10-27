@@ -98,7 +98,7 @@ function mountTab() {
     global: {
       stubs: {
         ...stubs,
-        AgentSConfigPanel: { template: '<div data-testid="agent-s-config-panel" />' },
+        ComputerUseConfigPanel: { template: '<div data-testid="computer-use-config-panel" />' },
       },
     },
   })
@@ -185,7 +185,7 @@ describe('AgentConfigTab', () => {
   it('renders the Agent-S harness panel below the agent saves', async () => {
     const wrapper = mountTab()
     await flushPromises()
-    expect(wrapper.find('[data-testid="agent-s-config-panel"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="computer-use-config-panel"]').exists()).toBe(true)
   })
   it('loads default depth and explains the org-wide limit', async () => {
     const wrapper = mountTab()

@@ -45,16 +45,6 @@ def default_tool_registry() -> ToolRegistry:
     return registry
 
 
-def agent_s_tool_registry() -> ToolRegistry:
-    """Build the tool registry for ``computeruse`` (Agent-S) children.
-
-    Agent-S plans never see OpenCuria tool schemas: the registry is
-    intentionally empty so ``HarnessRunner._filtered_schemas`` offers
-    ``tools=[]`` and the Agent-S wire uses no function calls.
-    """
-    return ToolRegistry()
-
-
 __all__ = [
     "BashTool",
     "EditTool",
@@ -73,6 +63,5 @@ __all__ = [
     "TodoWriteTool",
     "WebfetchTool",
     "WriteTool",
-    "agent_s_tool_registry",
     "default_tool_registry",
 ]

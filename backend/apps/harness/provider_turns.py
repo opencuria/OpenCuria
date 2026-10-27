@@ -60,10 +60,6 @@ class ProviderTurnService:
             account_ids=account_ids,
         )
 
-    def account_ids(self, turn_id: uuid.UUID | str) -> dict[str, str]:
-        """Return account IDs pinned to one answer."""
-        return self.repository.account_map(turn_id)
-
     def get(self, turn_id: uuid.UUID | str) -> ProviderTurn | None:
         """Read a turn state through the repository boundary."""
         return self.repository.get(turn_id)
@@ -84,15 +80,11 @@ class ProviderTurnService:
         """Check durable cancellation state for one live answer."""
         return self.repository.cancellation_reason(turn_id)
 
-    def finish(self, turn_id: uuid.UUID | str) -> None:
-        """Release one anonymous legacy holder."""
-        self.repository.finish(turn_id)
-
     def finish_once(self, turn_id: uuid.UUID | str, holder: str) -> bool:
         """Idempotently release a named local holder for one answer."""
         return self.repository.finish_once(turn_id, holder)
 
-    def add_hold(self, turn_id: uuid.UUID | str, holder: str | None = None) -> bool:
+    def add_hold(self, turn_id: uuid.UUID | str, holder: str) -> bool:
         """Keep the snapshot active for one title or other answer task."""
         return self.repository.add_hold(turn_id, holder)
 
@@ -107,7 +99,3 @@ class ProviderTurnService:
     def clear_monitor_required(self, turn_id: uuid.UUID | str) -> None:
         """Release the monitor holder after all tracked followers drain."""
         self.repository.clear_monitor_required(turn_id)
-
-    def account(self, organization_id: uuid.UUID, user_id: int, account_id: str):
-        """Resolve a frozen account through its normal visibility rules."""
-        return self.accounts.get_account(organization_id, user_id, account_id)

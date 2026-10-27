@@ -87,10 +87,9 @@ async def test_each_answer_snapshots_current_provider_account(codex_setup):
     "agent,override,message",
     [
         ("general", "openrouter/vendor/model", "provider cannot be changed"),
-        ("computeruse", None, "computeruse is not supported"),
     ],
 )
-async def test_managed_task_rejects_provider_switch_or_computeruse(
+async def test_managed_task_rejects_provider_switch(
     codex_setup, agent, override, message
 ):
     data = codex_setup
@@ -162,9 +161,7 @@ async def test_managed_task_happy_path_keeps_codex_owner_skills_and_snapshot(
         return real_create(**kwargs)
 
     data.service.create_session = create
-    monkeypatch.setattr(
-        SkillService, "resolve_bodies", lambda *a, **kw: ["skill body"]
-    )
+    monkeypatch.setattr(SkillService, "resolve_bodies", lambda *a, **kw: ["skill body"])
 
     async def start(child, prompt, **kwargs):
         assert child.harness_id == "codex"

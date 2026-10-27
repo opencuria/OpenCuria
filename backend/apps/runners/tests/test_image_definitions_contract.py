@@ -128,7 +128,7 @@ def test_recipe_mutations_require_org_admin(client, recipe_org):
             headers,
         ),
         client.post(
-            f"/api/v1/image-definitions/{definition.id}/deactivate/", **headers
+            f"/api/v1/image-definitions/{definition.id}/activate/", **headers
         ),
         _post(
             client,
@@ -226,15 +226,15 @@ def test_global_recipe_is_not_editable(client, recipe_org):
     assert global_definition.name == "Global"
 
 
-def test_deactivate_and_activate_recipe(client, recipe_org):
+def test_activate_recipe(client, recipe_org):
     definition = recipe_org["definition"]
-    base = f"/api/v1/image-definitions/{definition.id}"
+    ImageDefinition.objects.filter(pk=definition.id).update(status="deactivated")
 
-    deactivated = client.post(f"{base}/deactivate/", **recipe_org["admin_headers"])
-    activated = client.post(f"{base}/activate/", **recipe_org["admin_headers"])
+    activated = client.post(
+        f"/api/v1/image-definitions/{definition.id}/activate/",
+        **recipe_org["admin_headers"],
+    )
 
-    assert deactivated.status_code == 200
-    assert deactivated.json()["status"] == "deactivated"
     assert activated.status_code == 200
     assert activated.json()["status"] == "active"
 

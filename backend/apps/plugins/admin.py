@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from django.contrib import admin
 
+from .bundled.computer_use import PLUGIN_ID as COMPUTER_USE_PLUGIN_ID
 from .models import (
     OrgPluginActivation,
     Plugin,
@@ -18,6 +19,8 @@ from .models import (
     WorkspacePluginActivation,
 )
 from .services import OPENCURIA_PLUGIN_ID
+
+BUILTIN_PLUGIN_IDS = {OPENCURIA_PLUGIN_ID, COMPUTER_USE_PLUGIN_ID}
 
 
 class PluginSkillInline(admin.TabularInline):
@@ -32,7 +35,7 @@ class PluginMcpServerInline(admin.TabularInline):
     fields = ["name", "slug", "transport", "command", "url"]
 
     def has_delete_permission(self, request, obj=None) -> bool:
-        if obj is not None and obj.id == OPENCURIA_PLUGIN_ID:
+        if obj is not None and obj.id in BUILTIN_PLUGIN_IDS:
             return False
         return super().has_delete_permission(request, obj)
 
@@ -64,7 +67,7 @@ class PluginAdmin(admin.ModelAdmin):
     ]
 
     def has_delete_permission(self, request, obj=None) -> bool:
-        if obj is not None and obj.id == OPENCURIA_PLUGIN_ID:
+        if obj is not None and obj.id in BUILTIN_PLUGIN_IDS:
             return False
         return super().has_delete_permission(request, obj)
 
@@ -90,7 +93,7 @@ class PluginMcpServerAdmin(admin.ModelAdmin):
     readonly_fields = ["id", "created_at", "updated_at"]
 
     def has_delete_permission(self, request, obj=None) -> bool:
-        if obj is not None and obj.plugin_id == OPENCURIA_PLUGIN_ID:
+        if obj is not None and obj.plugin_id in BUILTIN_PLUGIN_IDS:
             return False
         return super().has_delete_permission(request, obj)
 

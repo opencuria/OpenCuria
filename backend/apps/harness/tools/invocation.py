@@ -246,10 +246,17 @@ class AuthorizedToolDispatcher:
                 ),
                 agent_eval.evaluate(key, action, mode=mode, external_directory=True),
             )
-        return _combine_decisions(
+        decision = _combine_decisions(
             self.evaluator.evaluate(key, action, mode=mode),
             agent_eval.evaluate(key, action, mode=mode),
         )
+        try:
+            execution_tool = getattr(self.tools.get(tool_name), "execution_tool", False)
+        except KeyError:
+            execution_tool = False
+        if mode == "plan" and execution_tool:
+            decision = _combine_decisions(decision, ASK)
+        return decision
 
     def _permission_key(self, tool_name: str) -> str:
         """Return the permission key for *tool_name* (falls back to name)."""

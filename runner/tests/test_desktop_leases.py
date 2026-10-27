@@ -33,6 +33,38 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         values.update(kwargs)
         return await self.store.reserve(**values)
 
+    async def test_input_ownership_serializes_consumers_and_fences_handover(self):
+        await self.reserve()
+        await self.reserve(lease_id="two", owner_id="second", kind="computeruse")
+        with self.assertRaisesRegex(ValueError, "live held lease"):
+            await self.store.input_ownership(
+                str(self.ws), "one", "epoch", 1, acquire=True
+            )
+        await self.store.activate("one", "epoch", 1)
+        await self.store.activate("two", "epoch", 1)
+
+        async def input_owner(lease, acquire=True, epoch="epoch"):
+            return await self.store.input_ownership(
+                str(self.ws), lease, epoch, 1, acquire=acquire
+            )
+
+        self.assertEqual(await input_owner("one"), 1)
+        with self.assertRaisesRegex(ValueError, "busy"):
+            await input_owner("two")
+        with self.assertRaisesRegex(ValueError, "stale"):
+            await input_owner("one", epoch="old")
+        await input_owner("one", False)
+        self.assertEqual(await input_owner("one"), 1)
+        await input_owner("one", False)
+        self.assertEqual(await input_owner("two"), 2)
+        # A delayed release from the previous owner cannot unlock the new one.
+        await input_owner("one", False)
+        with self.assertRaisesRegex(ValueError, "busy"):
+            await input_owner("one")
+        await self.store.mark_closing("two")
+        await self.store.finish("two")
+        self.assertEqual(await input_owner("one"), 3)
+
     async def test_reserve_durable_unactivated_and_tombstone(self):
         row = await self.reserve()
         self.assertFalse(row["activated"])
@@ -478,7 +510,13 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
         runtime.process_detach.assert_awaited_once()
 
     async def test_same_id_remove_allows_a_new_desktop_lease(self):
-        manager, _runtime, lifecycle, registry, _streams = await self.lifecycle_manager()
+        (
+            manager,
+            _runtime,
+            lifecycle,
+            registry,
+            _streams,
+        ) = await self.lifecycle_manager()
         await lifecycle.remove_workspace(self.ws)
         self.assertEqual(await self.store.list_unfinished(str(self.ws)), [])
         from src.models import WorkspaceInfo
@@ -521,7 +559,13 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_workspace_ended_mismatched_evidence_rejected(self):
         from src.services.sessions.desktop import WorkspaceEndedEvidence
 
-        manager, _runtime, _lifecycle, _registry, _streams = await self.lifecycle_manager()
+        (
+            manager,
+            _runtime,
+            _lifecycle,
+            _registry,
+            _streams,
+        ) = await self.lifecycle_manager()
         with self.assertRaises(ValueError):
             await manager.workspace_ended(
                 self.ws,
@@ -532,14 +576,22 @@ class DesktopLeaseTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_preclose_errors_do_not_skip_physical_proof(self):
         manager, runtime, lifecycle, _registry, streams = await self.lifecycle_manager()
-        streams.close_workspace_streams.side_effect = RuntimeError("streams unreachable")
+        streams.close_workspace_streams.side_effect = RuntimeError(
+            "streams unreachable"
+        )
         manager.release_workspace.side_effect = RuntimeError("desktop unreachable")
         await lifecycle.stop_workspace(self.ws)
         runtime.stop_workspace.assert_awaited_once_with("guest")
         self.assertFalse(await self.store.list_unfinished(str(self.ws)))
 
     async def test_failed_post_remove_confirmation_keeps_lookup(self):
-        _manager, _runtime, lifecycle, registry, streams = await self.lifecycle_manager()
+        (
+            _manager,
+            _runtime,
+            lifecycle,
+            registry,
+            streams,
+        ) = await self.lifecycle_manager()
         streams.confirm_workspace_ended.return_value = False
         with self.assertRaisesRegex(RuntimeError, "confirmation failed"):
             await lifecycle.remove_workspace(self.ws)

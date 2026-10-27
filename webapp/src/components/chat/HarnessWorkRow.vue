@@ -16,7 +16,7 @@ import ToolDetailRead from './tools/ToolDetailRead.vue'
 import ToolDetailSearch from './tools/ToolDetailSearch.vue'
 import ToolDetailTodos from './tools/ToolDetailTodos.vue'
 import ToolDetailWebfetch from './tools/ToolDetailWebfetch.vue'
-import { resolveToolName, toolDisplayIcon, toolDisplayLabel } from '@/lib/toolDisplay'
+import { isComputerUseTool, resolveToolName, toolDisplayIcon, toolDisplayLabel } from '@/lib/toolDisplay'
 import { toolRowLabel } from '@/lib/toolRowLabel'
 import { cn } from '@/lib/utils'
 
@@ -110,7 +110,7 @@ const reasoningPreview = computed(() => {
 const detailComponent = computed<Component>(() => {
   const tool = resolveToolName(props.part).toLowerCase()
   if (DETAIL_BY_TOOL[tool]) return DETAIL_BY_TOOL[tool]!
-  if (COMPUTER_USE_DETAIL_TOOLS.has(tool)) return ToolDetailComputerUse
+  if (isComputerUseTool(props.part) || COMPUTER_USE_DETAIL_TOOLS.has(tool)) return ToolDetailComputerUse
   return ToolDetailDefault
 })
 

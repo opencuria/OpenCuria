@@ -27,7 +27,7 @@ from .permissions.models import PermissionAllowlist, PermissionRequest
 
 __all__ = [
     "AgentConfig",
-    "AgentSConfig",
+    "ComputerUseConfig",
     "HarnessMessage",
     "HarnessPart",
     "HarnessRun",
@@ -266,62 +266,27 @@ class ProviderSelection(models.Model):
         return f"ProviderSelection(org={self.organization_id}, {self.provider})"
 
 
-class AgentSConfig(models.Model):
-    """Org-wide Agent-S harness parameters (no secrets).
-
-    ``AgentConfig['computeruse']`` stays the source for the Agent-S main
-    model/effort; this row only holds harness behavior values plus the
-    separate grounding model. ``grounding_model`` may be empty (stored
-    as ``""``); production falls back to the run's main model in a
-    controlled way so upgrades keep working. ``model_temperature=None``
-    means the Agent-S SDK default (provider default wiring).
-    """
+class ComputerUseConfig(models.Model):
+    """Org-wide desktop runtime settings; model selection stays in AgentConfig."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     organization = models.OneToOneField(
         "organizations.Organization",
         on_delete=models.CASCADE,
-        related_name="harness_agent_s_config",
-        help_text=(
-            "Owning organization (exactly one Agent-S config per org)."
-        ),
+        related_name="harness_computer_use_config",
     )
-    grounding_model = models.CharField(
-        max_length=255,
-        default="",
-        blank=True,
-        help_text=(
-            "Grounding model ref; empty falls back to the run's main model."
-        ),
-    )
-    grounding_width = models.PositiveIntegerField(default=1920)
-    grounding_height = models.PositiveIntegerField(default=1080)
-    model_temperature = models.FloatField(null=True, blank=True, default=None)
-    max_steps = models.IntegerField(default=15)
-    max_trajectory_length = models.IntegerField(default=8)
-    enable_reflection = models.BooleanField(default=True)
-    enable_code_agent = models.BooleanField(default=True)
-    enable_recording = models.BooleanField(
-        default=False,
-        help_text=(
-            "Opt-in session recording for computer-use runs (mp4, "
-            "org-wide, default off)."
-        ),
-    )
-    screenshot_max_dimension = models.IntegerField(default=2400)
-    action_pre_delay = models.FloatField(default=1.0)
-    action_post_delay = models.FloatField(default=1.0)
-    wait_delay = models.FloatField(default=5.0)
+    max_steps = models.PositiveIntegerField(default=15)
+    enable_recording = models.BooleanField(default=False)
+    screenshot_max_dimension = models.PositiveIntegerField(default=2400)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        db_table = "harness_agent_s_config"
-        ordering = ["-updated_at"]
+        db_table = "harness_computer_use_config"
 
     def __str__(self) -> str:
-        """Return a short representation of the config."""
-        return f"AgentSConfig(org={self.organization_id})"
+        """Return the owning organization without runtime data."""
+        return f"ComputerUseConfig(org={self.organization_id})"
 
 
 class SubagentConfig(models.Model):
@@ -441,8 +406,7 @@ class HarnessSession(models.Model):
         default=timezone.now,
         db_index=True,
         help_text=(
-            "Last completed user or assistant message "
-            "(not tools, not last open)."
+            "Last completed user or assistant message (not tools, not last open)."
         ),
     )
     summary = models.CharField(

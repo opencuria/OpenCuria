@@ -11,16 +11,18 @@ from apps.accounts.models import APIKeyPermission
 from apps.harness.constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
 from apps.harness.models import SubagentConfig
 from apps.harness.services import SubagentConfigService
-from apps.harness.tests.test_agent_s_config import _client
-from apps.harness.tests.test_agent_s_config import agent_s_setup as _agent_s_setup
+from apps.harness.tests.test_computer_use_config import _client
+from apps.harness.tests.test_computer_use_config import (
+    computer_use_setup as _computer_use_setup,
+)
 from apps.organizations.models import Organization
 from common.exceptions import NotFoundError
 
 
 @pytest.fixture
-def agent_s_setup(db):
+def computer_use_setup(db):
     """Reuse the established org/member/outsider setup."""
-    return _agent_s_setup.__wrapped__(db)
+    return _computer_use_setup.__wrapped__(db)
 
 
 pytestmark = pytest.mark.django_db
@@ -30,9 +32,9 @@ RUN = [APIKeyPermission.HARNESS_RUN.value]
 INVALID = [True, False, 1.0, 2.5, "2", None, 0, -1, MAX_SUBAGENT_DEPTH + 1]
 
 
-def test_service_defaults_and_upsert(agent_s_setup) -> None:
+def test_service_defaults_and_upsert(computer_use_setup) -> None:
     """Reads do not write; saves upsert a single org-scoped row."""
-    org_id = agent_s_setup["org"].id
+    org_id = computer_use_setup["org"].id
     service = SubagentConfigService()
     assert service.get_or_default(org_id) == {"max_depth": DEFAULT_MAX_DEPTH}
     assert not SubagentConfig.objects.exists()
@@ -50,9 +52,9 @@ def test_service_defaults_and_upsert(agent_s_setup) -> None:
 
 
 @pytest.mark.parametrize("value", INVALID)
-def test_service_rejects_invalid_values(agent_s_setup, value) -> None:
+def test_service_rejects_invalid_values(computer_use_setup, value) -> None:
     """Reject coercion and out-of-range values without changing stored data."""
-    org_id = agent_s_setup["org"].id
+    org_id = computer_use_setup["org"].id
     service = SubagentConfigService()
     with pytest.raises(ValueError, match="max_depth"):
         service.save_config(org_id, value)
@@ -70,9 +72,9 @@ def test_service_missing_org() -> None:
     assert not SubagentConfig.objects.exists()
 
 
-def test_model_defaults_and_constraint(agent_s_setup) -> None:
+def test_model_defaults_and_constraint(computer_use_setup) -> None:
     """Model defaults match the service; database rejects zero depth."""
-    row = SubagentConfig.objects.create(organization=agent_s_setup["org"])
+    row = SubagentConfig.objects.create(organization=computer_use_setup["org"])
     assert row.max_depth == DEFAULT_MAX_DEPTH
     with pytest.raises(IntegrityError), transaction.atomic():
         SubagentConfig.objects.filter(pk=row.pk).update(max_depth=0)
@@ -80,13 +82,15 @@ def test_model_defaults_and_constraint(agent_s_setup) -> None:
     assert row.max_depth == DEFAULT_MAX_DEPTH
 
 
-def test_rest_roundtrip_and_default_input(agent_s_setup) -> None:
+def test_rest_roundtrip_and_default_input(computer_use_setup) -> None:
     """REST exposes only max_depth and uses default two for an omitted value."""
     read = _client(
-        user=agent_s_setup["owner"], org=agent_s_setup["org"], permissions=READ
+        user=computer_use_setup["owner"],
+        org=computer_use_setup["org"],
+        permissions=READ,
     )
     run = _client(
-        user=agent_s_setup["owner"], org=agent_s_setup["org"], permissions=RUN
+        user=computer_use_setup["owner"], org=computer_use_setup["org"], permissions=RUN
     )
     assert read.get(URL).json() == {"max_depth": 2}
     assert not SubagentConfig.objects.exists()
@@ -103,10 +107,10 @@ def test_rest_roundtrip_and_default_input(agent_s_setup) -> None:
 
 
 @pytest.mark.parametrize("value", INVALID)
-def test_rest_validation(agent_s_setup, value) -> None:
+def test_rest_validation(computer_use_setup, value) -> None:
     """Schema validation rejects non-integers and bounds before persistence."""
     run = _client(
-        user=agent_s_setup["owner"], org=agent_s_setup["org"], permissions=RUN
+        user=computer_use_setup["owner"], org=computer_use_setup["org"], permissions=RUN
     )
     response = run.put(
         URL, data=json.dumps({"max_depth": value}), content_type="application/json"
@@ -115,7 +119,7 @@ def test_rest_validation(agent_s_setup, value) -> None:
     assert not SubagentConfig.objects.exists()
 
 
-def test_rest_permissions_and_membership(agent_s_setup) -> None:
+def test_rest_permissions_and_membership(computer_use_setup) -> None:
     """Read/run permissions, authentication and org membership are enforced."""
     for permissions, get_status, put_status in (
         (READ, 200, 403),
@@ -123,8 +127,8 @@ def test_rest_permissions_and_membership(agent_s_setup) -> None:
         ([], 403, 403),
     ):
         client = _client(
-            user=agent_s_setup["owner"],
-            org=agent_s_setup["org"],
+            user=computer_use_setup["owner"],
+            org=computer_use_setup["org"],
             permissions=permissions,
         )
         assert client.get(URL).status_code == get_status
@@ -133,15 +137,15 @@ def test_rest_permissions_and_membership(agent_s_setup) -> None:
             == put_status
         )
     outsider = _client(
-        user=agent_s_setup["outsider"],
-        org=agent_s_setup["org"],
+        user=computer_use_setup["outsider"],
+        org=computer_use_setup["org"],
         permissions=READ + RUN,
     )
     assert outsider.get(URL).status_code == 404
     assert (
         outsider.put(URL, data="{}", content_type="application/json").status_code == 404
     )
-    anonymous = Client(HTTP_X_ORGANIZATION_ID=str(agent_s_setup["org"].id))
+    anonymous = Client(HTTP_X_ORGANIZATION_ID=str(computer_use_setup["org"].id))
     assert anonymous.get(URL).status_code == 401
     assert (
         anonymous.put(URL, data="{}", content_type="application/json").status_code

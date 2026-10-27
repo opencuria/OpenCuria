@@ -1,0 +1,20 @@
+{
+  "name": "@opencuria/computer-use",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "build": "node build.mjs",
+    "type-check": "tsc --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "0.25.12"
+  },
+  "engines": { "node": ">=22.13.0" }
+}

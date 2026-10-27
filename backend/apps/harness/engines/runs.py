@@ -132,33 +132,6 @@ class RunOwnership:
             self.repository.begin_close_if_owner, thread_sensitive=True
         )(self.run_id, self.owner_token)
 
-    async def set_external_session(self, external_session_id: str) -> bool:
-        """Attach only a bounded, non-secret upstream session identifier."""
-        cleaned = (external_session_id or "").strip()
-        if not cleaned or len(cleaned) > 64:
-            raise ValueError("external_session_id must be 1..64 characters")
-        return await sync_to_async(
-            self.repository.set_external_session_if_owner, thread_sensitive=True
-        )(self.run_id, self.owner_token, external_session_id=cleaned)
-
-    async def finish(
-        self,
-        *,
-        status: str = HarnessRunStatus.COMPLETED,
-        error: str = "",
-        cleanup_confirmed: bool = True,
-    ) -> bool:
-        """Finish if still owner; retain CLOSING if runner cleanup is unknown."""
-        return await sync_to_async(
-            self.repository.complete_if_owner, thread_sensitive=True
-        )(
-            self.run_id,
-            self.owner_token,
-            status=status,
-            error=error,
-            cleanup_confirmed=cleanup_confirmed,
-        )
-
     def start_heartbeat(
         self,
         *,

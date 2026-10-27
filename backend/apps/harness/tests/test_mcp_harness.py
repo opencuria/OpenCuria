@@ -294,6 +294,9 @@ async def test_harness_service_mcp_wiring_success_and_cleanup(harness_workspace)
             accessor,
             core_tool_names,
             owner_id=None,
+            session_id="",
+            turn_id="",
+            runtime_options=None,
         ):
             seen["skills"] = prepared.snapshot.plugin_skills
 
@@ -303,6 +306,9 @@ async def test_harness_service_mcp_wiring_success_and_cleanup(harness_workspace)
             registry.register(fake_tool)
             seen["tool"] = fake_tool
             return [fake_tool.name]
+
+        async def finish(self) -> list[str]:
+            return []
 
         async def aclose(self) -> None:
             closed.append("closed")
@@ -372,6 +378,9 @@ async def test_harness_service_mcp_missing_credentials_fail_run(harness_workspac
         def register_tools(self, registry):  # type: ignore[no-untyped-def]
             return []
 
+        async def finish(self) -> list[str]:
+            return []
+
         async def aclose(self) -> None:
             return None
 
@@ -413,6 +422,9 @@ async def test_harness_service_mcp_partial_discovery_failure(harness_workspace):
             accessor,
             core_tool_names,
             owner_id=None,
+            session_id="",
+            turn_id="",
+            runtime_options=None,
         ):
             return None
 
@@ -421,6 +433,9 @@ async def test_harness_service_mcp_partial_discovery_failure(harness_workspace):
             FakeMcpConnection(fake_tool)
             registry.register(fake_tool)
             return [fake_tool.name]
+
+        async def finish(self) -> list[str]:
+            return []
 
         async def aclose(self) -> None:
             return None

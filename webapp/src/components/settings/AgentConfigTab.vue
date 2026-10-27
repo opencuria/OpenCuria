@@ -4,15 +4,15 @@
   Primary agents (build, plan) always use a fixed model; subagents
   (general, explore, computeruse) may inherit the parent run model or
   use a fixed model, or map the parent effort via a strategy.
-  The Agent-S harness parameters below reuse the Computer Use subagent
-  row as their main model (`AgentSConfigPanel`).
+  The Computer Use execution limits below reuse the Computer Use subagent
+  row as their main model (`ComputerUseConfigPanel`).
 -->
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
-import AgentSConfigPanel from './AgentSConfigPanel.vue'
+import ComputerUseConfigPanel from './ComputerUseConfigPanel.vue'
 import ModelPicker from '@/components/common/ModelPicker.vue'
 import SettingsSection from './SettingsSection.vue'
 import {
@@ -337,7 +337,7 @@ onMounted(() => {
 
       <AutosaveStatus :state="modelsAutosave" data-testid="agent-configs-status" />
 
-      <AgentSConfigPanel />
+      <ComputerUseConfigPanel />
     </template>
   </div>
 </template>

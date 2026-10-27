@@ -58,35 +58,11 @@ apt-get install -y --no-install-recommends \
     xdotool
 apt-get install -y libasound2t64 || apt-get install -y libasound2
 
-# Agent-S computer-use workspace dependencies (all 15 actions):
-# PyAutoGUI/pyperclip (click/type/...), tesseract OCR (highlight_text_span),
-# wmctrl (switch_applications), xclip/xsel (clipboard/type), sudo/iproute2
-# `ss` (SET_CELL_VALUES_CMD), LibreOffice Calc + python3-uno
-# (set_cell_values). python3-pyautogui has no Ubuntu 22.04/24.04 apt
-# package, so it falls back to a minimal pip install into the system
-# python (python3 -m pip keeps the distribution visible to apt-Python).
-# pip on 24.04 requires --break-system-packages (PEP 668); pip on 22.04
-# does not know the flag, so retry without it. python3-pyperclip from
-# apt already provides `import pyperclip` (no pip needed). python3-tk is
-# a pure runtime dep: pyautogui imports mouseinfo, which imports tkinter —
-# without it every execute snippet dies at import time with
-# "You must install tkinter on Linux to use MouseInfo". No Agent-S
-# CLI is installed here. Rebuild the image after changing this block.
+# Native Computer Use: X11 input, AT-SPI observations and clipboard text.
 apt-get install -y --no-install-recommends \
-    tesseract-ocr \
-    wmctrl \
-    xclip \
-    xsel \
-    libreoffice-calc \
-    python3-uno \
-    python3-pyperclip \
-    python3-tk \
-    sudo \
-    iproute2 \
-    python3-pip
-apt-get install -y python3-pyautogui \
-    || python3 -m pip install --break-system-packages pyautogui \
-    || python3 -m pip install pyautogui
+    python3-xlib python3-pil python3-structlog python3-gi \
+    gir1.2-atspi-2.0 at-spi2-core xclip wmctrl \
+    libreoffice-calc python3-uno sudo iproute2
 
 # Exposé: Ubuntu 22.04 ships skippy-xd; 24.04 does not.
 if ! apt-get install -y skippy-xd; then
@@ -120,7 +96,7 @@ touch /root/.vnc/.de-was-selected
 printf "password\npassword\n" | vncpasswd -u root -w -r 2>/dev/null || true
 # python-Xlib unconditionally opens $XAUTHORITY/~/.Xauthority on connect,
 # even against the auth-less Xvnc (-SecurityTypes None). Bake an empty
-# file into the image so X11 Python clients (PyAutoGUI, mouseinfo, ...)
+# file into the image so X11 Python clients (native desktop input)
 # connect out of the box; the runner additionally touches it at every
 # desktop start and before each execute for self-healing.
 touch /root/.Xauthority
@@ -148,7 +124,7 @@ for browser in google-chrome-stable google-chrome chromium chromium-browser /usr
     if [ "${browser#/}" != "$browser" ]; then
         if [ -x "$browser" ]; then
             exec "$browser" --no-sandbox --disable-gpu \
-                --disable-dev-shm-usage --no-first-run
+                --disable-dev-shm-usage --no-first-run --force-renderer-accessibility
         fi
         continue
     fi
@@ -157,7 +133,7 @@ for browser in google-chrome-stable google-chrome chromium chromium-browser /usr
             continue
         fi
         exec "$browser" --no-sandbox --disable-gpu \
-            --disable-dev-shm-usage --no-first-run
+            --disable-dev-shm-usage --no-first-run --force-renderer-accessibility
     fi
 done
 echo "No supported browser binary found for desktop session" >&2
@@ -587,6 +563,7 @@ export XDG_CONFIG_HOME=/root/.config
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-root}"
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
+export NO_AT_BRIDGE=0
 exec dbus-launch --exit-with-session startxfce4
 XSTARTUP
 chmod +x /root/.vnc/xstartup

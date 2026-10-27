@@ -31,7 +31,7 @@ from django.utils import timezone
 
 from .models import (
     AgentConfig,
-    AgentSConfig,
+    ComputerUseConfig,
     HarnessMessage,
     HarnessMessageRole,
     HarnessPart,
@@ -155,24 +155,25 @@ class AgentConfigRepository:
         return deleted > 0
 
 
-class AgentSConfigRepository:
-    """Data access for AgentSConfig records."""
+class ComputerUseConfigRepository:
+    """Data access for ComputerUseConfig records."""
 
     @staticmethod
-    def get_by_org(org_id: uuid.UUID) -> AgentSConfig | None:
-        """Fetch the Agent-S config for an organization."""
-        return AgentSConfig.objects.filter(organization_id=org_id).first()
+    def get_by_org(org_id: uuid.UUID) -> ComputerUseConfig | None:
+        """Fetch the computer-use config for an organization."""
+        return ComputerUseConfig.objects.filter(organization_id=org_id).first()
 
     @staticmethod
-    def create(*, organization_id: uuid.UUID, **fields: object) -> AgentSConfig:
-        """Create the Agent-S config row for an organization."""
-        return AgentSConfig.objects.create(
-            organization_id=organization_id, **fields  # type: ignore[arg-type]
+    def create(*, organization_id: uuid.UUID, **fields: object) -> ComputerUseConfig:
+        """Create the computer-use config row for an organization."""
+        return ComputerUseConfig.objects.create(
+            organization_id=organization_id,
+            **fields,  # type: ignore[arg-type]
         )
 
     @staticmethod
-    def update(config: AgentSConfig, **fields: object) -> AgentSConfig:
-        """Update Agent-S config fields (only provided fields)."""
+    def update(config: ComputerUseConfig, **fields: object) -> ComputerUseConfig:
+        """Update computer-use config fields (only provided fields)."""
         update_fields = ["updated_at"]
         for name, value in fields.items():
             setattr(config, name, value)
@@ -391,11 +392,16 @@ class HarnessSessionRepository:
             session = HarnessSession.objects.get(id=session_id)
             if session.status == HarnessSessionStatus.BUSY:
                 return False
-            if scheduled and HarnessSession.objects.filter(
-                workspace_id=session.workspace_id,
-                parent__isnull=True,
-                status=HarnessSessionStatus.BUSY,
-            ).exclude(id=session_id).exists():
+            if (
+                scheduled
+                and HarnessSession.objects.filter(
+                    workspace_id=session.workspace_id,
+                    parent__isnull=True,
+                    status=HarnessSessionStatus.BUSY,
+                )
+                .exclude(id=session_id)
+                .exists()
+            ):
                 return False
             return (
                 HarnessSession.objects.filter(id=session_id)
@@ -421,21 +427,27 @@ class HarnessSessionRepository:
         from apps.runners.locking import lock_runner
         from apps.runners.models import Workspace
 
-        runner_id = Workspace.objects.filter(pk=workspace_id).values_list(
-            "runner_id", flat=True
-        ).first()
+        runner_id = (
+            Workspace.objects.filter(pk=workspace_id)
+            .values_list("runner_id", flat=True)
+            .first()
+        )
         if runner_id is None:
             return False
         with transaction.atomic():
             lock_runner(runner_id)
             Workspace.objects.select_for_update().get(pk=workspace_id)
-            session = HarnessSession.objects.select_for_update().filter(
-                pk=session_id,
-                workspace_id=workspace_id,
-                organization_id=organization_id,
-                parent__isnull=True,
-                status=HarnessSessionStatus.IDLE,
-            ).first()
+            session = (
+                HarnessSession.objects.select_for_update()
+                .filter(
+                    pk=session_id,
+                    workspace_id=workspace_id,
+                    organization_id=organization_id,
+                    parent__isnull=True,
+                    status=HarnessSessionStatus.IDLE,
+                )
+                .first()
+            )
             if (
                 session is None
                 or session.messages.exists()
@@ -463,11 +475,15 @@ class HarnessSessionRepository:
             if parent_id in seen:
                 raise ValueError("Cyclic subagent session ancestry")
             seen.add(parent_id)
-            parent = HarnessSession.objects.filter(
-                id=parent_id,
-                organization_id=session.organization_id,
-                workspace_id=session.workspace_id,
-            ).only("parent_id").first()
+            parent = (
+                HarnessSession.objects.filter(
+                    id=parent_id,
+                    organization_id=session.organization_id,
+                    workspace_id=session.workspace_id,
+                )
+                .only("parent_id")
+                .first()
+            )
             if parent is None:
                 raise ValueError("Invalid subagent session ancestry")
             depth += 1
@@ -549,13 +565,27 @@ class HarnessSessionRepository:
     def list_busy_computeruse_for_workspace(
         workspace_id: uuid.UUID,
     ) -> list[HarnessSession]:
-        """Return busy computer-use sessions for *workspace_id*."""
+        """Return busy specialist and root runs currently using Computer Use."""
+        latest = (
+            HarnessMessage.objects.filter(
+                session_id=OuterRef("message__session_id"), role="assistant"
+            )
+            .order_by("-created_at")
+            .values("id")[:1]
+        )
+        parts = HarnessPart.objects.filter(
+            message__session_id=OuterRef("pk"),
+            message_id=Subquery(latest),
+            input__tool__startswith="mcp_computer-use_cua_repl_",
+        )
         return list(
             HarnessSession.objects.filter(
                 workspace_id=workspace_id,
-                agent_name="computeruse",
                 status=HarnessSessionStatus.BUSY,
-            ).order_by("created_at")
+            )
+            .annotate(_uses_computer_use=Exists(parts))
+            .filter(Q(agent_name="computeruse") | Q(_uses_computer_use=True))
+            .order_by("created_at")
         )
 
     @staticmethod
@@ -765,9 +795,9 @@ class HarnessSessionRepository:
                 prior_usage["prompt"] = int(prior_usage.get("prompt", 0)) + int(
                     session_usage.get("prompt", 0)
                 )
-                prior_usage["completion"] = int(
-                    prior_usage.get("completion", 0)
-                ) + int(session_usage.get("completion", 0))
+                prior_usage["completion"] = int(prior_usage.get("completion", 0)) + int(
+                    session_usage.get("completion", 0)
+                )
                 prior_usage["total"] = int(prior_usage.get("total", 0)) + int(
                     session_usage.get("total", 0)
                 )
@@ -1771,9 +1801,7 @@ class HarnessPartRepository:
         if row is None:
             return
         display, part_type = row
-        next_display = append_part_display(
-            display, part_type=part_type, delta=delta
-        )
+        next_display = append_part_display(display, part_type=part_type, delta=delta)
         HarnessPart.objects.filter(id=part_id).update(
             output=Concat(F("output"), Value(delta), output_field=TextField()),
             display=next_display,

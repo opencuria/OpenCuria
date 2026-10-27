@@ -438,16 +438,6 @@ class ImageLifecycleMixin:
             return
         self.image_definitions.mark_delete_failed(definition_id, error=error)
 
-    async def deactivate_image_definition(self, definition_id: uuid.UUID) -> None:
-        """Deactivate a definition — immediately not selectable for new workspaces."""
-        definition = await sync_to_async(self.image_definitions.get_by_id)(
-            definition_id
-        )
-        if definition is None:
-            raise ValueError(f"Image definition '{definition_id}' not found")
-        await sync_to_async(self.image_definitions.deactivate)(definition_id)
-        logger.info("Image definition deactivated: %s", definition_id)
-
     async def activate_image_definition(self, definition_id: uuid.UUID) -> None:
         """Re-activate a deactivated definition."""
         from ...models import ImageDefinition

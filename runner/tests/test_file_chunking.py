@@ -31,10 +31,6 @@ class FakeChunkService:
     """Minimal fake WorkspaceService for chunked-transfer handler tests."""
 
     def __init__(self, *, read_content: str = "aGk=", download_content: str = "aGk=") -> None:
-        self.sync_from_runtime = AsyncMock()
-        self.recover_desktop_sessions_from_runtime = AsyncMock()
-        self.run_health_check_loop = AsyncMock()
-        self.get_workspace_heartbeat_statuses = AsyncMock(return_value=[])
         self.read_content = read_content
         self.download_content = download_content
         self.read_calls: list[tuple] = []

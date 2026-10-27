@@ -45,6 +45,9 @@ class DesktopLeaseStore:
                     owner_id TEXT NOT NULL, epoch TEXT NOT NULL,
                     control_path TEXT NOT NULL, path TEXT NOT NULL,
                     state TEXT NOT NULL)""")
+                db.execute("""CREATE TABLE IF NOT EXISTS desktop_input (
+                    workspace_id TEXT PRIMARY KEY, lease_id TEXT,
+                    last_lease_id TEXT NOT NULL, fence INTEGER NOT NULL)""")
                 # Upgrade existing recording ledgers without inventing old tokens.
                 if "guest_token" not in {
                     r[1] for r in db.execute("PRAGMA table_info(desktop_recordings)")
@@ -78,6 +81,55 @@ class DesktopLeaseStore:
         result = dict(row)
         result["activated"] = bool(result["activated"])
         return result
+
+    async def input_ownership(
+        self,
+        workspace_id: str,
+        lease_id: str,
+        epoch: str,
+        revision: int,
+        *,
+        acquire: bool,
+    ) -> int:
+        """Serialize input across desktop consumers under live lease fencing."""
+
+        def operation(db: sqlite3.Connection) -> int:
+            lease = self._row(
+                db.execute(
+                    "SELECT * FROM desktop_leases WHERE lease_id=?", (lease_id,)
+                ).fetchone()
+            )
+            if (
+                not lease
+                or lease["workspace_id"] != workspace_id
+                or lease["epoch"] != epoch
+                or lease["revision"] != revision
+            ):
+                raise ValueError("Unknown or stale desktop input owner")
+            row = db.execute(
+                "SELECT * FROM desktop_input WHERE workspace_id=?", (workspace_id,)
+            ).fetchone()
+            if acquire:
+                if lease["state"] != "held" or lease["expires_at"] <= time.time():
+                    raise ValueError("Desktop input requires a live held lease")
+                if row and row["lease_id"] not in (None, lease_id):
+                    raise ValueError("Workspace desktop is busy")
+                fence = (row["fence"] if row else 0) + int(
+                    row is None or row["last_lease_id"] != lease_id
+                )
+                db.execute(
+                    "INSERT OR REPLACE INTO desktop_input VALUES (?,?,?,?)",
+                    (workspace_id, lease_id, lease_id, fence),
+                )
+                return fence
+            if row and row["lease_id"] == lease_id:
+                db.execute(
+                    "UPDATE desktop_input SET lease_id=NULL WHERE workspace_id=?",
+                    (workspace_id,),
+                )
+            return row["fence"] if row else 0
+
+        return await asyncio.to_thread(self._run, operation)
 
     async def get(self, lease_id: str) -> dict | None:
         """Read one intent, including durable ended tombstones."""
@@ -294,16 +346,20 @@ class DesktopLeaseStore:
 
         def operation(db: sqlite3.Connection) -> None:
             if db.execute(
-                "SELECT 1 FROM desktop_recordings WHERE lease_id=? "
-                "AND state!='closed'",
+                "SELECT 1 FROM desktop_recordings WHERE lease_id=? AND state!='closed'",
                 (lease_id,),
             ).fetchone():
                 raise ValueError("Recording closure is unverified")
-            db.execute(
+            changed = db.execute(
                 "UPDATE desktop_leases SET state=?,activated=0 "
                 "WHERE lease_id=? AND state='closing'",
                 (state, lease_id),
             )
+            if changed.rowcount:
+                db.execute(
+                    "UPDATE desktop_input SET lease_id=NULL WHERE lease_id=?",
+                    (lease_id,),
+                )
 
         await asyncio.to_thread(self._run, operation)
 

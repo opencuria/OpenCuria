@@ -502,6 +502,16 @@ export interface PluginSkillIn {
   position?: number
 }
 
+export interface PluginMcpToolPolicy {
+  exposed_tools?: string[] | null
+  internal_tools?: string[]
+  desktop_tools?: string[] | null
+  execution_tools?: string[]
+  on_run_end?: string
+  desktop_kind?: 'mcp' | 'computeruse'
+  exclusive_input?: boolean
+}
+
 export interface PluginMcpServer {
   id: string
   name: string
@@ -511,6 +521,8 @@ export interface PluginMcpServer {
   args: string[]
   cwd: string
   resources?: PluginResources
+  tool_policy?: PluginMcpToolPolicy
+  runtime_artifact?: { id: string; version: string } | null
   env: Record<string, string>
   url: string
   headers: Record<string, string>
@@ -528,6 +540,8 @@ export interface PluginMcpServerIn {
   args?: string[]
   cwd?: string
   resources?: PluginResources
+  tool_policy?: PluginMcpToolPolicy
+  runtime_artifact?: { id: string; version: string } | null
   env?: Record<string, string>
   url?: string
   headers?: Record<string, string>

@@ -14,8 +14,9 @@
     "dev:mobile": "npm run start -w mobile",
     "test:shared": "vitest run --config packages/chat-core/vitest.config.ts && vitest run --config packages/client/vitest.config.ts",
     "test:mobile": "npm run test -w mobile",
-    "type-check": "npm run type-check -w webapp && npm run type-check -w mobile && tsc -p packages/client/tsconfig.json",
-    "test": "npm run test:shared && npm run test:mobile && npm test -w webapp"
+    "type-check": "npm run type-check -w webapp && npm run type-check -w mobile && tsc -p packages/client/tsconfig.json && npm run type-check -w packages/computer-use",
+    "test": "npm run test:computer-use && npm run test:shared && npm run test:mobile && npm test -w webapp",
+    "test:computer-use": "npm test -w packages/computer-use"
   },
   "devDependencies": {
     "typescript": "~5.9.3",

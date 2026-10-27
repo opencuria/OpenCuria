@@ -104,3 +104,10 @@ in a length-framed private stdin preamble, never process argv or durable records
 Subscription authentication can subsequently use app-server stdin, without an
 authentication environment variable. Model, tool, approval and prompt policy
 remain outside the runner.
+
+## Computer Use
+
+The product-owned Computer Use stdio runtime is installed through
+`ensure_runtime_artifact("computer-use", "0.1.0")`. See the
+[Computer Use guide](../docs/computer-use.md) for architecture, dependencies,
+rollout, immutable bundle builds and real desktop verification.

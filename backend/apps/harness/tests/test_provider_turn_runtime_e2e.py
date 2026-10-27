@@ -209,27 +209,7 @@ async def test_http_sse_selection_is_frozen_then_next_turn_uses_new_account(
         workspace_id=str(harness_workspace.id),
         user_id=provider_member.id,
     )
-    run_owner = service._tasks.get(str(session.id))
-    await asyncio.sleep(0.4)
-    assert run_owner is not None and not run_owner.done(), (
-        repr(run_owner.exception())
-        if run_owner and not run_owner.cancelled()
-        else "owner cancelled"
-    )
-    entered = await asyncio.to_thread(local_openrouter.wait_entered, 0)
-    assert entered, {
-        "requests": local_openrouter.requests,
-        "run": service._runs.get(str(session.id)),
-        "task_done": service._tasks.get(str(session.id)).done()
-        if service._tasks.get(str(session.id))
-        else None,
-        "task_stack": [
-            frame.f_code.co_name
-            for frame in service._tasks[str(session.id)].get_stack()
-        ]
-        if service._tasks.get(str(session.id))
-        else [],
-    }
+    assert await asyncio.to_thread(local_openrouter.wait_entered, 0)
     await sync_to_async(service_accounts.select_account)(
         org.id, provider_member.id, "openrouter", second.id
     )
@@ -243,26 +223,7 @@ async def test_http_sse_selection_is_frozen_then_next_turn_uses_new_account(
         workspace_id=str(harness_workspace.id),
         user_id=provider_member.id,
     )
-    second_owner = service._tasks.get(str(session.id))
-    await asyncio.sleep(0.25)
-    assert second_owner is not None and not second_owner.done(), (
-        repr(second_owner.exception())
-        if second_owner and not second_owner.cancelled()
-        else "second owner cancelled"
-    )
-    entered2 = await asyncio.to_thread(local_openrouter.wait_entered, 1)
-    if not entered2:
-        second_owner = service._tasks.get(str(session.id))
-        raise AssertionError(
-            {
-                "requests": local_openrouter.requests,
-                "second_owner": repr(second_owner),
-                "stack": [frame.f_code.co_name for frame in second_owner.get_stack()]
-                if second_owner
-                else [],
-                "context": service._runs.get(str(session.id)),
-            }
-        )
+    assert await asyncio.to_thread(local_openrouter.wait_entered, 1)
     local_openrouter.release(1)
     await _wait_run(service, session.id)
 
@@ -271,6 +232,7 @@ async def test_http_sse_selection_is_frozen_then_next_turn_uses_new_account(
         await sync_to_async(HarnessMessageRepository.get_by_id)(answer2.id),
     ]
     assert [message.finish for message in messages] == ["stop", "stop"]
+    assert [message.content for message in messages] == ["local answer", "local answer"]
     assert [request["authorization"] for request in local_openrouter.requests] == [
         "Bearer first-key",
         "Bearer second-key",
@@ -281,6 +243,7 @@ async def test_http_sse_selection_is_frozen_then_next_turn_uses_new_account(
     ]
     assert snapshots[0].account_ids == {"openrouter": str(first.id)}
     assert snapshots[1].account_ids == {"openrouter": str(second.id)}
+    assert "first-key" not in repr(snapshots[0].account_ids)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -315,16 +278,7 @@ async def test_http_sse_revocation_aborts_blocked_turn_without_account_fallback(
         workspace_id=str(harness_workspace.id),
         user_id=provider_member.id,
     )
-    owner_task = service._tasks.get(str(session.id))
-    await asyncio.sleep(0.25)
-    assert owner_task is not None and not owner_task.done(), (
-        repr(owner_task.exception())
-        if owner_task and not owner_task.cancelled()
-        else "owner cancelled"
-    )
-    assert await asyncio.to_thread(local_openrouter.wait_entered, 0), (
-        local_openrouter.requests
-    )
+    assert await asyncio.to_thread(local_openrouter.wait_entered, 0)
     await sync_to_async(service_accounts.delete_account)(
         org.id, provider_member.id, selected.id
     )

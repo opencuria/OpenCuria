@@ -73,7 +73,10 @@ async def build_task_result(
 ) -> ToolResult:
     """Build a bounded child result, preserving the full answer when clipped."""
     if agent == "computeruse":
-        from ..agent_s.harness import extract_recording_path, truncate_task_output
+        from ..computer_use.recordings import (
+            extract_recording_path,
+            truncate_task_output,
+        )
 
         preview, truncated = truncate_task_output(
             output, extract_recording_path(output), TASK_OUTPUT_MAX_CHARS

@@ -178,6 +178,8 @@ def build_workspace_plugin_snapshot(
                 oauth_service_id=service_by_key.get(server.oauth_requirement_key),
                 startup_timeout_seconds=server.startup_timeout_seconds,
                 request_timeout_seconds=server.request_timeout_seconds,
+                tool_policy=dict(server.tool_policy or {}),
+                runtime_artifact=dict(server.runtime_artifact or {}),
             )
             for server in servers_by_plugin.pop(plugin.id, [])
         )

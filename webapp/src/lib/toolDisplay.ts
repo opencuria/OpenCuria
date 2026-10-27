@@ -20,10 +20,11 @@ import {
   Wrench,
 } from '@lucide/vue'
 import type { HarnessPart } from '@/types/harness'
-import { resolveToolName } from '@opencuria/chat-core/toolDisplay'
+import { isComputerUseTool, resolveToolName } from '@opencuria/chat-core/toolDisplay'
 
 export {
   computerUseSummary,
+  isComputerUseTool,
   hydrateHarnessPart,
   parseToolArguments,
   resolveToolName,
@@ -45,6 +46,7 @@ const COMPUTER_USE_POINTER_TOOLS = new Set([
 
 /** Lucide icon for a tool or reasoning row. */
 export function toolDisplayIcon(part: HarnessPart): Component {
+  if (isComputerUseTool(part)) return Monitor
   if (part.type === 'reasoning') return Lightbulb
   const tool = resolveToolName(part).toLowerCase()
   switch (tool) {

@@ -325,26 +325,7 @@ class HarnessRunner(AuthorizedToolDispatcher):
         effective_model = model
         if agent.model_override == SMALL_MODEL and options.small_model:
             effective_model = options.small_model
-        if agent.name == "computeruse":
-            # Persisted AgentSConfig.max_steps is the effective budget;
-            # RunOptions.max_steps stays an optional extra cap (resolved in
-            # resolve_run_config). The static AgentDefinition steps=15 is
-            # only the default when no RunOptions cap is set.
-            explicit_cfg = getattr(options, "agent_s_config", None)
-            persisted_steps = getattr(explicit_cfg, "max_steps", None)
-            run_cap = options.max_steps
-            if persisted_steps:
-                max_steps = int(persisted_steps)
-                if run_cap:
-                    max_steps = min(max_steps, int(run_cap))
-            elif run_cap:
-                max_steps = int(run_cap)
-            else:
-                max_steps = agent.steps
-        else:
-            # No default cap. The loop runs until the model stops
-            # calling tools, unless RunOptions or the agent sets one.
-            max_steps = options.max_steps or agent.steps
+        max_steps = options.max_steps or agent.steps
         max_depth = options.max_depth if options.max_depth > 0 else DEFAULT_MAX_DEPTH
         depth = max(0, options.depth)
         if depth > max_depth:
@@ -381,18 +362,6 @@ class HarnessRunner(AuthorizedToolDispatcher):
         max_depth: int = DEFAULT_MAX_DEPTH,
     ) -> engine_contracts.RunResult:
         """Execute the step loop (cancellation handled by :meth:`run`)."""
-        if agent.name == "computeruse":
-            return await self._run_computeruse_inner(
-                prompt=prompt,
-                agent=agent,
-                model=model,
-                mode=mode,
-                opts=opts,
-                cwd=cwd,
-                max_steps=max_steps,
-                depth=depth,
-                max_depth=max_depth,
-            )
         schemas = self._filtered_schemas(agent, mode, depth=depth, max_depth=max_depth)
         composed = await compose_system_prompt(
             agent=agent,
@@ -675,125 +644,6 @@ class HarnessRunner(AuthorizedToolDispatcher):
                 content = await hydrate_workspace_images(content, self.accessor)
             steered.append(LLMMessage(role="user", content=content))
         return steered
-
-    async def _run_computeruse_inner(
-        self,
-        *,
-        prompt: str,
-        agent: AgentDefinition,
-        model: str,
-        mode: str,
-        opts: engine_contracts.RunOptions,
-        cwd: str,
-        max_steps: int | None,
-        depth: int = 0,
-        max_depth: int = DEFAULT_MAX_DEPTH,
-    ) -> engine_contracts.RunResult:
-        """Execute the Agent-S computer-use loop (no OpenCuria tool loop).
-
-        Delegates to :mod:`apps.harness.agent_s.harness`: the child-visible
-        behaviour is Agent-S only — no OpenCuria system-prompt composition,
-        no ToolSchema/function calls, no 1000-grid tools. The runner stays a
-        generic executor (provider resolution, accessor, events); all
-        Agent-S logic lives in the backend ``agent_s`` layer. The run
-        config (including ``enable_recording``) is preserved verbatim so
-        the opt-in recording gate survives the pre-hold rebuild.
-        """
-        from .agent_s.adapters import (
-            ACTION_EXECUTE_TIMEOUT_S,
-            DesktopScreenshotAdapter,
-            HarnessCompletionAdapter,
-            WorkspaceActionExecutor,
-            WorkspaceCodeExecutionAdapter,
-            WorkspaceOcrAdapter,
-        )
-        from .agent_s.harness import (
-            resolve_run_config,
-            run_agent_s_computeruse,
-            sanitize_run_id,
-        )
-
-        accessor = self.accessor or _MissingAccessor(
-            workspace_id=opts.workspace_id or "workspace"
-        )
-        run_id = sanitize_run_id(opts.session_id or "session")
-        # No ``display_info`` before hold here: the cold desktop is not
-        # live yet, and ``run_agent_s_computeruse`` resolves the real
-        # geometry itself right after hold (before materializer/session
-        # creation). Only the effective model/config is resolved up front.
-        config = resolve_run_config(effective_model=model, run_options=opts)
-        # ``RunOptions.max_steps`` still caps the Agent-S budget explicitly
-        # (also resolved inside resolve_run_config; the extra rebuild here
-        # keeps the pre-hold config object consistent for adapters).
-        if max_steps and int(max_steps) != int(config.max_steps):
-            from .agent_s.config import AgentSRunConfig
-
-            config = AgentSRunConfig(
-                main_model=config.main_model,
-                grounding_model=config.grounding_model,
-                desktop_width=config.desktop_width,
-                desktop_height=config.desktop_height,
-                grounding_width=config.grounding_width,
-                grounding_height=config.grounding_height,
-                model_temperature=config.model_temperature,
-                max_steps=min(int(config.max_steps), int(max_steps)),
-                max_trajectory_length=config.max_trajectory_length,
-                enable_reflection=config.enable_reflection,
-                enable_code_agent=config.enable_code_agent,
-                enable_recording=bool(getattr(config, "enable_recording", False)),
-                screenshot_max_dimension=config.screenshot_max_dimension,
-                action_pre_delay=config.action_pre_delay,
-                action_post_delay=config.action_post_delay,
-                wait_delay=config.wait_delay,
-                extra=dict(config.extra or {}),
-            )
-
-        def _chat_options_factory() -> ChatOptions:
-            return self.chat_options
-
-        completion = HarnessCompletionAdapter(
-            self._resolve_model,
-            main_model=config.main_model,
-            grounding_model=config.grounding_model,
-            chat_options_factory=_chat_options_factory,
-            emit=self._send,
-        )
-        code_execution = WorkspaceCodeExecutionAdapter(accessor=accessor)
-        ocr = WorkspaceOcrAdapter(accessor=accessor, run_id=run_id)
-        action_executor = WorkspaceActionExecutor(
-            accessor=accessor, timeout=ACTION_EXECUTE_TIMEOUT_S
-        )
-        screenshot = DesktopScreenshotAdapter(
-            accessor=accessor,
-            max_dimension=int(config.screenshot_max_dimension),
-        )
-        try:
-            # No explicit engine params: the harness layer derives the bare
-            # resolved model id for ``Worker.use_thinking`` itself.
-            result = await run_agent_s_computeruse(
-                prompt=prompt,
-                run_id=run_id,
-                accessor=accessor,
-                completion=completion,
-                code_execution=code_execution,
-                ocr=ocr,
-                action_executor=action_executor,
-                screenshot=screenshot,
-                config=config,
-                emit=self._send,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            raise RuntimeError(f"Agent-S computer-use run failed: {exc}") from exc
-        return engine_contracts.RunResult(
-            output=result.output,
-            steps=result.steps,
-            usage=result.usage,
-            cost=result.cost,
-            finish_reason=result.finish_reason,
-            metadata=result.metadata,
-        )
 
     def _last_step_request(
         self,

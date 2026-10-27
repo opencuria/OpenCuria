@@ -1929,24 +1929,6 @@ def update_image_definition(
 
 
 @image_definition_router.post(
-    "/{definition_id}/deactivate/",
-    response={200: ImageDefinitionOut, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
-    summary="Deactivate image definition",
-)
-async def deactivate_image_definition(request: HttpRequest, definition_id: uuid.UUID):
-    """Deactivate a definition — immediately not selectable for new workspaces."""
-    if not check_api_key_permission(request, APIKeyPermission.IMAGE_DEFINITIONS_WRITE):
-        return _perm_denied(APIKeyPermission.IMAGE_DEFINITIONS_WRITE)
-    try:
-        definition = await _image_definitions().deactivate(
-            request.user, get_organization_id(request), definition_id
-        )
-    except _IMAGE_RECIPE_ERRORS as exc:
-        return _image_recipe_error(exc)
-    return 200, await sync_to_async(_image_definition_to_out)(definition)
-
-
-@image_definition_router.post(
     "/{definition_id}/activate/",
     response={200: ImageDefinitionOut, 404: ErrorOut, 403: ErrorOut, 409: ErrorOut},
     summary="Activate image definition",

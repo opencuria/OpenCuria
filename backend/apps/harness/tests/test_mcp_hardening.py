@@ -317,9 +317,7 @@ async def test_runtime_collision_first_wins_collider_closed():
     McpServerConnection.open = _fake_open  # type: ignore[assignment]
     McpServerConnection.aclose = _fake_close  # type: ignore[assignment]
     try:
-        prepared = PreparedPluginRuntime(
-            snapshot=snapshot, plaintexts={plugin_id: {}}
-        )
+        prepared = PreparedPluginRuntime(snapshot=snapshot, plaintexts={plugin_id: {}})
         await runtime.setup(
             accessor=object(),
             core_tool_names=[],
@@ -418,9 +416,7 @@ async def test_runtime_same_server_normalized_name_collision_skips_server(monkey
 
     monkeypatch.setattr(McpServerConnection, "open", _fake_open)
     monkeypatch.setattr(McpServerConnection, "aclose", _tracking_close)
-    prepared = PreparedPluginRuntime(
-        snapshot=snapshot, plaintexts={plugin_id: {}}
-    )
+    prepared = PreparedPluginRuntime(snapshot=snapshot, plaintexts={plugin_id: {}})
 
     await runtime.setup(
         accessor=object(),
@@ -519,9 +515,7 @@ async def test_runtime_setup_exception_closes_opened():
 
     McpServerConnection.open = _fake_open  # type: ignore[assignment]
     try:
-        prepared = PreparedPluginRuntime(
-            snapshot=snapshot, plaintexts={plugin_id: {}}
-        )
+        prepared = PreparedPluginRuntime(snapshot=snapshot, plaintexts={plugin_id: {}})
         await runtime.setup(
             accessor=object(),
             prepared=prepared,
@@ -562,6 +556,9 @@ async def test_runner_factory_sees_registered_mcp_tools(harness_workspace):
         def register_tools(self, registry):
             registry.register(FakeMcpTool("mcp_demo_srv_echo"))
             return ["mcp_demo_srv_echo"]
+
+        async def finish(self):
+            return []
 
         async def aclose(self):
             return None
@@ -1508,9 +1505,7 @@ async def test_runtime_setup_skipped_carries_real_error_detail():
         ),
     )
     runtime = McpRuntime()
-    prepared = PreparedPluginRuntime(
-        snapshot=snapshot, plaintexts={plugin_id: {}}
-    )
+    prepared = PreparedPluginRuntime(snapshot=snapshot, plaintexts={plugin_id: {}})
     await runtime.setup(
         accessor=_DeadAccessor(stderr=b"Error: chrome crashed\n"),
         prepared=prepared,

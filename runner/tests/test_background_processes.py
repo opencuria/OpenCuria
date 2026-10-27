@@ -214,7 +214,7 @@ class BackgroundServiceTests(unittest.IsolatedAsyncioTestCase):
         await _start_process(service, ws_id, "p1", "sleep 10")
         await _start_process(service, ws_id, "p2", "sleep 10")
         self.assertEqual(len(service.background._background_processes[ws_id]), 2)
-        await service.stop_workspace(ws_id)
+        await service.lifecycle.stop_workspace(ws_id)
         self.assertNotIn(ws_id, service.background._background_processes)
         self.assertTrue(runtime.killed)
 
@@ -255,7 +255,7 @@ class BackgroundServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_remove_workspace_cleans_processes(self) -> None:
         service, runtime, ws_id = _service_with_workspace()
         await _start_process(service, ws_id, "p-rm", "sleep 5")
-        await service.remove_workspace(ws_id)
+        await service.lifecycle.remove_workspace(ws_id)
         self.assertNotIn(ws_id, service.background._background_processes)
 
     async def test_restart_replaces_entry_and_stops_old_pid(self) -> None:
@@ -599,7 +599,7 @@ class BackgroundVerifyTests(unittest.IsolatedAsyncioTestCase):
         calls_before = len(runtime.calls)
 
         with self.assertRaisesRegex(RuntimeError, "physical registry identity"):
-            await service.remove_workspace(ws_id)
+            await service.lifecycle.remove_workspace(ws_id)
 
         self.assertIn(ws_id, service.background._background_processes)
         self.assertTrue(runtime.alive[100])

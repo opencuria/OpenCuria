@@ -16,11 +16,7 @@ import {
   Text,
   View,
 } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
-import {
-  KeyboardAvoidingView,
-  useKeyboardState,
-} from "react-native-keyboard-controller";
+import { KeyboardController } from "react-native-keyboard-controller";
 
 import { useVideoPlayer, VideoView } from "expo-video";
 import { CircleAlert, Settings2 } from "lucide-react-native";
@@ -55,6 +51,7 @@ import type {
 import {
   ChatComposer,
   ChatGates,
+  ChatLayout,
   ChatMessages,
   type ComposerAttachment,
 } from "../components";
@@ -122,8 +119,6 @@ type NavigationRequest = {
 
 export function MainScreen(): React.JSX.Element {
   const notifications = useNotifications();
-  const insets = useSafeAreaInsets();
-  const keyboardVisible = useKeyboardState((state) => state.isVisible);
   const { theme, mode: themeMode, setMode: setThemeMode } = useTheme();
   const {
     client,
@@ -160,7 +155,6 @@ export function MainScreen(): React.JSX.Element {
   const [navigation, setNavigation] = useState<NavigationRequest | null>(null);
   const navigationRevision = useRef(0);
   const [actionBusy, setActionBusy] = useState(false);
-  const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
   const workspaceRef = useRef<string | null>(null);
   const [sheet, setSheet] = useState<SheetName>(null);
@@ -229,8 +223,8 @@ export function MainScreen(): React.JSX.Element {
     chat.workspaceId === workspaceId &&
     !chat.loading,
   );
-  const chatDisabled =
-    sending ||
+  /** The chat cannot take a message, as opposed to one being on its way. */
+  const chatUnavailable =
     !navigationReady ||
     !ready ||
     activeIsSubtask ||
@@ -717,7 +711,6 @@ export function MainScreen(): React.JSX.Element {
           "Connect to the workspace before uploading attachments.",
         );
       sendingRef.current = true;
-      setSending(true);
       const ownerGeneration = generation.current;
       const ownerWorkspace = workspace.id;
       const ownerSession = chat.activeSessionId;
@@ -762,7 +755,6 @@ export function MainScreen(): React.JSX.Element {
         ]);
       } finally {
         sendingRef.current = false;
-        setSending(false);
       }
     },
     [
@@ -1110,10 +1102,15 @@ export function MainScreen(): React.JSX.Element {
         ]
       : []),
   ];
+  /** Sheets cover the chat, so the keyboard closes before one opens. */
+  const openSheet = (name: Exclude<SheetName, null>) => {
+    void KeyboardController.dismiss().catch(() => undefined);
+    setSheet(name);
+  };
   const chatMenuAction = (id: string) => {
     if (id === "workspace") {
       setSearch("");
-      setSheet("workspaces");
+      openSheet("workspaces");
     } else if (id === "rename" && chat.activeSession) {
       rename(chat.activeSession);
     } else if (id === "delete" && activeConversation) {
@@ -1178,16 +1175,194 @@ export function MainScreen(): React.JSX.Element {
           </>
         }
       >
-        <KeyboardAvoidingView
-          automaticOffset
-          style={[
-            styles.root,
-            {
-              backgroundColor: theme.background,
-              paddingBottom: keyboardVisible ? 0 : insets.bottom,
-            },
-          ]}
-          behavior="height"
+        <ChatLayout
+          composer={
+            workspace ? (
+              <ChatComposer
+                draft={draft}
+                onDraftChange={(value) => setDraft(value)}
+                onSend={send}
+                onStop={async () => {
+                  await controller?.abort();
+                }}
+                busy={chat.busy}
+                disabled={chatUnavailable}
+                placeholder={
+                  !navigationReady
+                    ? "Loading workspace conversations…"
+                    : chatUnavailable
+                      ? "Choose an available, running workspace…"
+                      : chat.messages.length > 0
+                        ? "Reply to OpenCuria"
+                        : "Ask OpenCuria"
+                }
+                settings={{
+                  harness: harnessEngineLabel(harness, engines),
+                  mode,
+                  model: selectedModel?.name ?? model,
+                  effort: effort ? formatEffort(effort) : "",
+                }}
+                onSettings={() => openSheet("settings")}
+                skills={skills.map((item) => ({
+                  id: item.id,
+                  name: item.name,
+                }))}
+                selectedSkillIds={skillIds}
+                onSelectedSkillIdsChange={setSkillIds}
+                attachments={attachments}
+                onAttachmentsChange={setAttachments}
+                onSearchMentions={searchMentions}
+                onTakePhoto={async () => pickPhoto("camera")}
+                onChoosePhotos={async () => pickPhoto("library")}
+                onChooseFiles={async () => pickDocuments()}
+                contextKey={contextKey}
+                testID="chat-composer"
+              />
+            ) : null
+          }
+          overlay={
+            <>
+              <ChromeOverlay onHeightChange={setNoticeInset}>
+                {workspace && !ready ? (
+                  <View style={styles.notice}>
+                    <Banner
+                      tone={workspace.has_active_session ? "warning" : "info"}
+                      message={readinessMessage(workspace, isTransitioning)}
+                      testID="workspace-status"
+                    />
+                  </View>
+                ) : null}
+                {workspace && ready && !chat.connected ? (
+                  <View style={styles.notice}>
+                    <Banner
+                      tone="warning"
+                      message="Live connection is reconnecting. Chat history remains available; uploads need a live connection."
+                      testID="realtime-status"
+                    />
+                  </View>
+                ) : null}
+                {workspace &&
+                workspace.status === "running" &&
+                !workspace.runner_online ? (
+                  <View style={styles.notice}>
+                    <Banner
+                      tone="warning"
+                      message="The workspace runner is offline. History is still available; messages and uploads require a running runner."
+                      testID="runner-offline"
+                    />
+                  </View>
+                ) : null}
+                {error || chat.error ? (
+                  <View style={styles.notice}>
+                    <Banner
+                      tone="error"
+                      message={error || chat.error || ""}
+                      actionLabel="Retry"
+                      onAction={() => {
+                        void refresh();
+                      }}
+                      onDismiss={() => setError(null)}
+                      testID="chat-error"
+                    />
+                  </View>
+                ) : null}
+                {catalogError ? (
+                  <View style={styles.notice}>
+                    <Banner
+                      tone="warning"
+                      message={catalogError}
+                      actionLabel="Retry"
+                      onAction={() => {
+                        void loadCatalogs();
+                      }}
+                      onDismiss={() => setCatalogError(null)}
+                      testID="catalog-warning"
+                    />
+                  </View>
+                ) : null}
+                {loading && !workspaces.length ? (
+                  <View style={styles.loading}>
+                    <ActivityIndicator color={theme.primary} />
+                    <Text style={{ color: theme.mutedText }}>
+                      Loading workspaces…
+                    </Text>
+                  </View>
+                ) : null}
+                {activeIsSubtask ? (
+                  <View style={styles.notice}>
+                    <Banner
+                      tone="info"
+                      message="This is a read-only subtask conversation. Continue the conversation from its parent chat."
+                      testID="subtask-readonly"
+                    />
+                  </View>
+                ) : null}
+
+                {chat.activeSessionLineage.length > 1 ? (
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      flexWrap: "wrap",
+                      paddingHorizontal: 18,
+                      gap: 4,
+                      backgroundColor: theme.background,
+                    }}
+                  >
+                    {chat.activeSessionLineage.map((ancestor, index) => (
+                      <NativeAction
+                        key={ancestor.id}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Open parent conversation ${ancestor.title}`}
+                        onPress={() => {
+                          if (workspaceId)
+                            requestNavigation(workspaceId, {
+                              sessionId: ancestor.id,
+                            });
+                        }}
+                        style={{
+                          minHeight: 44,
+                          justifyContent: "center",
+                          paddingHorizontal: 6,
+                        }}
+                      >
+                        <Text style={{ color: theme.primary, fontSize: 13 }}>
+                          {index ? "› " : "‹ "}
+                          {ancestor.title || ancestor.agent_name}
+                        </Text>
+                      </NativeAction>
+                    ))}
+                  </View>
+                ) : null}
+              </ChromeOverlay>
+              {!visibleWorkspaces.length && !loading ? (
+                <View style={styles.noWorkspace}>
+                  <View
+                    style={[
+                      styles.emptyMark,
+                      { backgroundColor: theme.surfaceMuted },
+                    ]}
+                  >
+                    <CircleAlert size={24} color={theme.primary} />
+                  </View>
+                  <Text style={[styles.emptyTitle, { color: theme.text }]}>
+                    No workspaces yet
+                  </Text>
+                  <Text style={[styles.emptyText, { color: theme.mutedText }]}>
+                    Create a workspace in OpenCuria on the web, then return here
+                    to chat.
+                  </Text>
+                  <Button
+                    title="Refresh"
+                    variant="outline"
+                    onPress={() => {
+                      void refresh();
+                    }}
+                    busy={refreshing}
+                  />
+                </View>
+              ) : null}
+            </>
+          }
         >
           <ChatMessages
             key={contextKey}
@@ -1230,187 +1405,7 @@ export function MainScreen(): React.JSX.Element {
             }}
             testID="chat-transcript"
           />
-
-          {workspace ? (
-            <ChatComposer
-              draft={draft}
-              onDraftChange={(value) => setDraft(value)}
-              onSend={send}
-              onStop={async () => {
-                await controller?.abort();
-              }}
-              busy={chat.busy}
-              disabled={chatDisabled}
-              placeholder={
-                chatDisabled
-                  ? !navigationReady
-                    ? "Loading workspace conversations…"
-                    : "Choose an available, running workspace…"
-                  : chat.messages.length > 0
-                    ? "Reply to OpenCuria"
-                    : "Ask OpenCuria"
-              }
-              settings={{
-                harness: harnessEngineLabel(harness, engines),
-                mode,
-                model: selectedModel?.name ?? model,
-                effort: effort ? formatEffort(effort) : "",
-              }}
-              onSettings={() => setSheet("settings")}
-              skills={skills.map((item) => ({ id: item.id, name: item.name }))}
-              selectedSkillIds={skillIds}
-              onSelectedSkillIdsChange={setSkillIds}
-              attachments={attachments}
-              onAttachmentsChange={setAttachments}
-              onSearchMentions={searchMentions}
-              onTakePhoto={async () => pickPhoto("camera")}
-              onChoosePhotos={async () => pickPhoto("library")}
-              onChooseFiles={async () => pickDocuments()}
-              contextKey={contextKey}
-              testID="chat-composer"
-            />
-          ) : null}
-
-          <ChromeOverlay onHeightChange={setNoticeInset}>
-            {workspace && !ready ? (
-              <View style={styles.notice}>
-                <Banner
-                  tone={workspace.has_active_session ? "warning" : "info"}
-                  message={readinessMessage(workspace, isTransitioning)}
-                  testID="workspace-status"
-                />
-              </View>
-            ) : null}
-            {workspace && ready && !chat.connected ? (
-              <View style={styles.notice}>
-                <Banner
-                  tone="warning"
-                  message="Live connection is reconnecting. Chat history remains available; uploads need a live connection."
-                  testID="realtime-status"
-                />
-              </View>
-            ) : null}
-            {workspace &&
-            workspace.status === "running" &&
-            !workspace.runner_online ? (
-              <View style={styles.notice}>
-                <Banner
-                  tone="warning"
-                  message="The workspace runner is offline. History is still available; messages and uploads require a running runner."
-                  testID="runner-offline"
-                />
-              </View>
-            ) : null}
-            {error || chat.error ? (
-              <View style={styles.notice}>
-                <Banner
-                  tone="error"
-                  message={error || chat.error || ""}
-                  actionLabel="Retry"
-                  onAction={() => {
-                    void refresh();
-                  }}
-                  onDismiss={() => setError(null)}
-                  testID="chat-error"
-                />
-              </View>
-            ) : null}
-            {catalogError ? (
-              <View style={styles.notice}>
-                <Banner
-                  tone="warning"
-                  message={catalogError}
-                  actionLabel="Retry"
-                  onAction={() => {
-                    void loadCatalogs();
-                  }}
-                  onDismiss={() => setCatalogError(null)}
-                  testID="catalog-warning"
-                />
-              </View>
-            ) : null}
-            {loading && !workspaces.length ? (
-              <View style={styles.loading}>
-                <ActivityIndicator color={theme.primary} />
-                <Text style={{ color: theme.mutedText }}>
-                  Loading workspaces…
-                </Text>
-              </View>
-            ) : null}
-            {activeIsSubtask ? (
-              <View style={styles.notice}>
-                <Banner
-                  tone="info"
-                  message="This is a read-only subtask conversation. Continue the conversation from its parent chat."
-                  testID="subtask-readonly"
-                />
-              </View>
-            ) : null}
-
-            {chat.activeSessionLineage.length > 1 ? (
-              <View
-                style={{
-                  flexDirection: "row",
-                  flexWrap: "wrap",
-                  paddingHorizontal: 18,
-                  gap: 4,
-                  backgroundColor: theme.background,
-                }}
-              >
-                {chat.activeSessionLineage.map((ancestor, index) => (
-                  <NativeAction
-                    key={ancestor.id}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Open parent conversation ${ancestor.title}`}
-                    onPress={() => {
-                      if (workspaceId)
-                        requestNavigation(workspaceId, {
-                          sessionId: ancestor.id,
-                        });
-                    }}
-                    style={{
-                      minHeight: 44,
-                      justifyContent: "center",
-                      paddingHorizontal: 6,
-                    }}
-                  >
-                    <Text style={{ color: theme.primary, fontSize: 13 }}>
-                      {index ? "› " : "‹ "}
-                      {ancestor.title || ancestor.agent_name}
-                    </Text>
-                  </NativeAction>
-                ))}
-              </View>
-            ) : null}
-          </ChromeOverlay>
-          {!visibleWorkspaces.length && !loading ? (
-            <View style={styles.noWorkspace}>
-              <View
-                style={[
-                  styles.emptyMark,
-                  { backgroundColor: theme.surfaceMuted },
-                ]}
-              >
-                <CircleAlert size={24} color={theme.primary} />
-              </View>
-              <Text style={[styles.emptyTitle, { color: theme.text }]}>
-                No workspaces yet
-              </Text>
-              <Text style={[styles.emptyText, { color: theme.mutedText }]}>
-                Create a workspace in OpenCuria on the web, then return here to
-                chat.
-              </Text>
-              <Button
-                title="Refresh"
-                variant="outline"
-                onPress={() => {
-                  void refresh();
-                }}
-                busy={refreshing}
-              />
-            </View>
-          ) : null}
-        </KeyboardAvoidingView>
+        </ChatLayout>
       </Drawer>
       <ChatGates
         permissions={chat.permissions}

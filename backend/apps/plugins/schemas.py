@@ -36,6 +36,27 @@ class PluginResources(Schema):
 # --- Nested component inputs ---
 
 
+class McpToolPolicy(Schema):
+    """Explicit model exposure and managed lifecycle for one MCP server."""
+
+    model_config = ConfigDict(extra="forbid")
+    exposed_tools: list[str] | None = None
+    internal_tools: list[str] = Field(default_factory=list)
+    desktop_tools: list[str] | None = None
+    execution_tools: list[str] = Field(default_factory=list)
+    on_run_end: str = ""
+    desktop_kind: Literal["mcp", "computeruse"] = "mcp"
+    exclusive_input: bool = False
+
+
+class RuntimeArtifact(Schema):
+    """An allowlisted runner-provisioned executable, never an arbitrary URL."""
+
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1, max_length=64)
+    version: str = Field(min_length=1, max_length=64)
+
+
 class PluginSkillIn(Schema):
     """Nested skill definition for plugin create/replace."""
 
@@ -65,6 +86,8 @@ class PluginMcpServerIn(Schema):
     args: list[str] = []
     cwd: str = "/workspace"
     resources: PluginResources = Field(default_factory=PluginResources)
+    tool_policy: McpToolPolicy = Field(default_factory=McpToolPolicy)
+    runtime_artifact: RuntimeArtifact | None = None
     env: dict[str, str] = {}
     url: str = ""
     headers: dict[str, str] = {}
@@ -85,6 +108,8 @@ class PluginMcpServerOut(Schema):
     args: list[str]
     cwd: str
     resources: PluginResources = Field(default_factory=PluginResources)
+    tool_policy: McpToolPolicy = Field(default_factory=McpToolPolicy)
+    runtime_artifact: RuntimeArtifact | None = None
     env: dict[str, str]
     url: str
     headers: dict[str, str]

@@ -9,6 +9,7 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 
+from apps.harness.engines.repositories import HarnessEngineRepository
 from apps.harness.engines.run_repository import HarnessRunRepository
 from apps.harness.engines.runs import HarnessRunService
 from apps.harness.models import (
@@ -124,10 +125,11 @@ def test_one_unresolved_attempt_per_session_and_fresh_owner_token(harness_worksp
             harness_id="claude",
         )
 
-    assert HarnessRunRepository.complete_if_owner(
+    assert HarnessEngineRepository.finalize_owned_turn(
         first_owner.run_id,
         first_owner.owner_token,
         status=HarnessRunStatus.COMPLETED,
+        finish="stop",
     )
     new_assistant = HarnessMessageRepository.create(
         session_id=session.id, role=HarnessMessageRole.ASSISTANT
@@ -174,49 +176,15 @@ def test_fencing_blocks_missing_rows_stale_workers_and_terminal_mutations(
         lease_id=uuid.uuid4(),
         lease_epoch=epoch,
     )
-    assert not HarnessRunRepository.complete_if_owner(owner.run_id, owner.owner_token)
+    assert not HarnessEngineRepository.finalize_owned_turn(
+        owner.run_id,
+        owner.owner_token,
+        status=HarnessRunStatus.COMPLETED,
+        finish="stop",
+    )
     assert not HarnessRunRepository.touch_if_owner(uuid.uuid4(), uuid.uuid4())
     session.refresh_from_db()
     assert session.status == HarnessSessionStatus.BUSY
-
-
-@pytest.mark.django_db(transaction=True)
-def test_closing_attempt_cannot_complete_without_confirmed_lease_cleanup(
-    harness_workspace,
-):
-    _session, _assistant, owner = _make_attempt(harness_workspace)
-    assert HarnessRunRepository.start_if_owner(owner.run_id, owner.owner_token)
-    assert HarnessRunRepository.set_identity_if_owner(
-        owner.run_id,
-        owner.owner_token,
-        lease_id=uuid.uuid4(),
-        lease_epoch="epoch",
-    )
-    assert HarnessRunRepository.begin_close_if_owner(owner.run_id, owner.owner_token)
-
-    assert not HarnessRunRepository.complete_if_owner(
-        owner.run_id,
-        owner.owner_token,
-        status=HarnessRunStatus.INTERRUPTED,
-        error="safe sanitized failure",
-        cleanup_confirmed=False,
-    )
-    row = HarnessRunRepository.get_by_id(owner.run_id)
-    assert row is not None and row.status == HarnessRunStatus.CLOSING
-    assert row.completed_at is None
-    assert not HarnessRunRepository.touch_if_owner(owner.run_id, owner.owner_token)
-
-    assert HarnessRunRepository.complete_if_owner(
-        owner.run_id,
-        owner.owner_token,
-        status=HarnessRunStatus.INTERRUPTED,
-        error="safe sanitized failure",
-        cleanup_confirmed=True,
-    )
-    row.refresh_from_db()
-    assert row.status == HarnessRunStatus.INTERRUPTED
-    assert row.error == "Engine run failed."
-    assert row.completed_at is not None
 
 
 class _FakeAccessor:
@@ -313,8 +281,6 @@ def test_owner_fenced_part_persistence_is_not_accidentally_native(harness_worksp
 
 @pytest.mark.django_db(transaction=True)
 def test_finalize_turn_persists_cost_baseline_with_session_cost(harness_workspace):
-    from apps.harness.engines.repositories import HarnessEngineRepository
-
     session, _assistant, owner = _make_attempt(harness_workspace)
     session.engine_state = {"harness_id": "claude", "cli_total_cost_usd": 1.0}
     session.cost = 1.0
@@ -338,8 +304,6 @@ def test_finalize_turn_persists_cost_baseline_with_session_cost(harness_workspac
 
 @pytest.mark.django_db(transaction=True)
 def test_finalize_turn_without_updates_keeps_engine_state(harness_workspace):
-    from apps.harness.engines.repositories import HarnessEngineRepository
-
     session, _assistant, owner = _make_attempt(harness_workspace)
     session.engine_state = {"cli_total_cost_usd": 2.0}
     session.save(update_fields=["engine_state"])

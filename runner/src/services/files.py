@@ -152,6 +152,31 @@ class FileManager:
         # Each read_file call opens at most 1 SSH channel, so a limit of 4
         # keeps peak channel usage well below 10.
         self._file_read_semaphores: dict[uuid.UUID, asyncio.Semaphore] = {}
+        # Keep conversion serial across this runner's workspaces, as it was on
+        # the event loop, without blocking other requests or multiplying workers.
+        self._archive_conversion_lock = asyncio.Lock()
+
+    async def _convert_upload_archive(self, content: bytes) -> bytes:
+        """Convert off-loop and retain capacity/admission until the worker exits."""
+        async with self._archive_conversion_lock:
+            conversion = asyncio.create_task(
+                asyncio.to_thread(convert_archive_to_tar, content)
+            )
+            try:
+                return await asyncio.shield(conversion)
+            except asyncio.CancelledError:
+                # Threads cannot be cancelled. Drain even on repeated cancel()
+                # calls, keeping capture admission and the worker budget held.
+                while not conversion.done():
+                    try:
+                        await asyncio.shield(conversion)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if not conversion.cancelled():
+                    conversion.exception()
+                raise
 
     @staticmethod
     def _file_path(path: str, *, allow_external: bool) -> str:
@@ -462,7 +487,9 @@ class FileManager:
         )
 
         if is_directory:
-            archive_data = convert_archive_to_tar(decoded_content)
+            archive_data = await self._convert_upload_archive(decoded_content)
+            if self.capture_fence is not None:
+                self.capture_fence.check_current(workspace_id)
         else:
             archive_data = build_single_file_tar(safe_filename, decoded_content)
 

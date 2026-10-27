@@ -1506,16 +1506,6 @@ class ImageDefinitionRepository:
         )
 
     @staticmethod
-    def deactivate(definition_id: uuid.UUID) -> None:
-        """Deactivate definition: immediately no longer selectable for new workspaces."""
-        ImageDefinition.objects.filter(
-            id=definition_id, status__in=["active", "deactivated"]
-        ).update(
-            status=ImageDefinition.Status.DEACTIVATED,
-            deactivated_at=timezone.now(),
-        )
-
-    @staticmethod
     def activate(definition_id: uuid.UUID) -> None:
         """Re-activate only when no durable deletion request still owns retirement."""
         from .models import ImageDeletionRequest

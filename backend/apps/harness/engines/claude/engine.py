@@ -1495,8 +1495,6 @@ class ClaudeEngine:
         skills = validate_claude_skills(options.skills)
         options.once_approved = set()
         agent = get_agent(agent_name)
-        if agent.name == "computeruse":
-            raise ValueError("Claude engine does not run Agent-S computeruse agents")
         if agent.mode == "hidden":
             raise ValueError("Claude engine cannot run hidden helper agents")
         depth = max(0, int(options.depth or 0))

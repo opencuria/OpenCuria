@@ -112,6 +112,8 @@ jest.mock("../components", () => {
   return {
     ChatComposer: (props: {
       settings?: { model?: string; effort?: string };
+      placeholder?: string;
+      disabled?: boolean;
       onSettings: () => void;
       onSend: (value: {
         text: string;
@@ -133,6 +135,11 @@ jest.mock("../components", () => {
           `${props.settings?.model ?? ""}|${props.settings?.effort ?? ""}`,
         ),
         ReactRuntime.createElement(
+          Text,
+          { testID: "composer-state" },
+          `${props.placeholder ?? ""}|${props.disabled ? "disabled" : "ready"}`,
+        ),
+        ReactRuntime.createElement(
           Pressable,
           {
             accessibilityRole: "button",
@@ -149,6 +156,22 @@ jest.mock("../components", () => {
         ),
       ),
     ChatGates: () => ReactRuntime.createElement(View),
+    ChatLayout: ({
+      children,
+      composer,
+      overlay,
+    }: {
+      children: React.ReactNode;
+      composer?: React.ReactNode;
+      overlay?: React.ReactNode;
+    }) =>
+      ReactRuntime.createElement(
+        View,
+        { testID: "chat-layout" },
+        children,
+        composer,
+        overlay,
+      ),
     ChatMessages: () => ReactRuntime.createElement(View),
   };
 });
@@ -334,6 +357,35 @@ it("selects the initial ready workspace, creates a new chat and accepts the firs
       }),
     ),
   );
+  tree.unmount();
+});
+
+it("keeps the composer ready while a message is on its way", async () => {
+  const client = mockClient();
+  let accept: (value: { mode: string }) => void = () => undefined;
+  mockController.send.mockImplementationOnce(
+    () => new Promise((resolve) => (accept = resolve)),
+  );
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("composer-state")).toHaveTextContent(
+      "Ask OpenCuria|ready",
+    ),
+  );
+
+  fireEvent.press(screen.getByTestId("test-send"));
+  await waitFor(() => expect(mockController.send).toHaveBeenCalled());
+
+  // No "unavailable workspace" hint while the send round trip is pending.
+  expect(screen.getByTestId("composer-state")).toHaveTextContent(
+    "Ask OpenCuria|ready",
+  );
+  await act(async () => accept({ mode: "build" }));
   tree.unmount();
 });
 

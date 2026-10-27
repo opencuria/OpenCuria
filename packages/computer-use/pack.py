@@ -1,0 +1,40 @@
+"""Create the reproducible, reviewed runtime asset shipped with the runner."""
+
+import gzip
+import hashlib
+import io
+import json
+import tarfile
+from pathlib import Path
+
+root = Path(__file__).resolve().parent
+output = root.parents[1] / "runner/src/runtime/assets"
+output.mkdir(exist_ok=True)
+buffer = io.BytesIO()
+with tarfile.open(fileobj=buffer, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+    for name in ["server.js", "worker.js", "linux.py", "manifest.json", "NOTICES.txt"]:
+        data = (root / "dist" / name).read_bytes()
+        entry = tarfile.TarInfo(name)
+        entry.size = len(data)
+        entry.mode = 0o444
+        archive.addfile(entry, io.BytesIO(data))
+compressed = io.BytesIO()
+with gzip.GzipFile(filename="", fileobj=compressed, mode="wb", mtime=0) as stream:
+    stream.write(buffer.getvalue())
+asset = compressed.getvalue()
+(output / "computer-use-0.1.0.tar.gz").write_bytes(asset)
+(output / "computer-use-0.1.0.json").write_text(
+    json.dumps(
+        {
+            "sha256": hashlib.sha256(asset).hexdigest(),
+            "size": len(asset),
+            "manifest": json.loads((root / "dist/manifest.json").read_text()),
+        },
+        indent=2,
+    )
+    + "\n"
+)
+
+(output / "computer-use-0.1.0.NOTICES.txt").write_bytes(
+    (root / "dist/NOTICES.txt").read_bytes()
+)

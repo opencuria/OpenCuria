@@ -115,16 +115,6 @@ class ImageDefinitionService:
             {field: values[field] for field in RECIPE_FIELDS if field in values},
         )
 
-    async def deactivate(
-        self, user, organization_id: uuid.UUID, definition_id: uuid.UUID
-    ):
-        """Hide a recipe from new workspaces and return its new state."""
-        definition = await sync_to_async(self._owned_definition_for_admin)(
-            user, organization_id, definition_id
-        )
-        await self._runner_service.deactivate_image_definition(definition.id)
-        return await sync_to_async(ImageDefinitionRepository.get_by_id)(definition.id)
-
     async def activate(
         self, user, organization_id: uuid.UUID, definition_id: uuid.UUID
     ):

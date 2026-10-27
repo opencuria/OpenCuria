@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from src.config import RunnerSettings
@@ -13,13 +14,15 @@ from src.interfaces.websocket import WebSocketInterface
 
 class DummyService:
     def __init__(self):
-        self.ensure_runtime_artifact = AsyncMock(
-            return_value={
-                "ok": True,
-                "path": "/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
-                "version": "2.1.310",
-                "platform": "linux-x64",
-            }
+        self.runtime_artifacts = SimpleNamespace(
+            ensure_runtime_artifact=AsyncMock(
+                return_value={
+                    "ok": True,
+                    "path": "/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
+                    "version": "2.1.310",
+                    "platform": "linux-x64",
+                }
+            )
         )
 
 
@@ -43,7 +46,7 @@ class ArtifactEnsureHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         result = await self.handler(request)
 
-        self.service.ensure_runtime_artifact.assert_awaited_once()
+        self.service.runtime_artifacts.ensure_runtime_artifact.assert_awaited_once()
         self.assertTrue(result["ok"])
         self.assertEqual(result["workspace_id"], self.workspace_id)
         self.assertEqual(result["request_id"], "agent-1")
@@ -52,8 +55,8 @@ class ArtifactEnsureHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_failure_reply_does_not_leak_runtime_output(self):
-        self.service.ensure_runtime_artifact.side_effect = RuntimeError(
-            "PRIVATE GUEST STDERR"
+        self.service.runtime_artifacts.ensure_runtime_artifact.side_effect = (
+            RuntimeError("PRIVATE GUEST STDERR")
         )
 
         result = await self.handler(

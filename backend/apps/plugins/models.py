@@ -158,6 +158,8 @@ class PluginMcpServer(models.Model):
         help_text="Env mapping; values may use {{credential.KEY}} placeholders.",
     )
     resources = models.JSONField(default=dict, blank=True)
+    tool_policy = models.JSONField(default=dict, blank=True)
+    runtime_artifact = models.JSONField(default=dict, blank=True)
     url = models.CharField(max_length=2048, blank=True, default="")
     headers = models.JSONField(
         default=dict,

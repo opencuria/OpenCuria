@@ -61,6 +61,9 @@ class McpRuntime:
         accessor: Any,
         core_tool_names: list[str] | None = None,
         owner_id: str | None = None,
+        session_id: str = "",
+        turn_id: str = "",
+        runtime_options: dict[str, Any] | None = None,
     ) -> None:
         """Open connections using the harness's already resolved credentials.
 
@@ -116,6 +119,12 @@ class McpRuntime:
                         server_slug=server.slug,
                         server_name=server.name,
                         transport=server.transport,
+                        tool_policy=dict(server.tool_policy),
+                        run_context={
+                            "session_id": session_id,
+                            "turn_id": turn_id or owner_id,
+                            **dict(runtime_options or {}),
+                        },
                         command=(
                             [server.command, *list(server.args)]
                             if (server.transport or "").lower() == "stdio"
@@ -148,12 +157,18 @@ class McpRuntime:
 
                         connection.desktop_lease = DesktopLease(
                             accessor,
-                            kind="mcp",
+                            kind=server.tool_policy.get("desktop_kind", "mcp"),
                             owner_id=owner_id,
                             on_failure=failed,
                         )
                         connection.desktop_activation = desktop.activation
                     try:
+                        if server.runtime_artifact:
+                            artifact = await accessor.ensure_runtime_artifact(
+                                server.runtime_artifact["id"],
+                                server.runtime_artifact["version"],
+                            )
+                            connection.command = [artifact["path"], *list(server.args)]
                         await connection.open(accessor)
                     except plugin_runtime.PluginCredentialConfigError:
                         raise
@@ -190,10 +205,10 @@ class McpRuntime:
                         except Exception:  # pragma: no cover - best effort
                             pass
                         continue
-                    tools = self._tools_for_connection(connection)
-                    names = [tool.name for tool in tools]
-                    lowered = [name.strip().lower() for name in names]
                     try:
+                        tools = self._tools_for_connection(connection)
+                        names = [tool.name for tool in tools]
+                        lowered = [name.strip().lower() for name in names]
                         # Validate this server's names together before registering
                         # any of them, as well as against core + kept servers.
                         check_name_collisions(names, existing=[*core, *seen])
@@ -246,7 +261,7 @@ class McpRuntime:
                 connection=connection,
                 title_text=item.title,
             )
-            for item in connection.tools
+            for item in connection.model_tools()
         ]
 
     def register_tools(self, registry: ToolRegistry) -> list[str]:
@@ -259,6 +274,26 @@ class McpRuntime:
                 registry.register(tool)
                 names.append(tool.name)
         return names
+
+    async def finish(self) -> list[str]:
+        """Finalize runtime effects and return only confirmed recording paths."""
+        for connection in self.connections:
+            await connection.finish()
+        return [
+            connection.recording_path
+            for connection in self.connections
+            if connection.recording_path
+        ]
+
+    def require_computer_use(self) -> None:
+        """Fail an explicitly requested specialist before calling its model."""
+        if not any(
+            c.plugin_slug == "computer-use" and c.healthy for c in self.connections
+        ):
+            raise McpServerHealthError(
+                "Computer Use is unavailable. Activate the Computer Use plugin "
+                "in this workspace and check its runtime health."
+            )
 
     async def aclose(self) -> None:
         """Close all connections (idempotent, never raises).

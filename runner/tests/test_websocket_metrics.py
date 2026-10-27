@@ -17,7 +17,9 @@ from src.interfaces.websocket import WebSocketInterface
 @pytest.fixture
 def interface(tmp_path: Path) -> Iterator[WebSocketInterface]:
     """Provide an isolated metrics owner with a fake runtime and transport."""
-    service = SimpleNamespace(get_vm_metrics=AsyncMock(return_value={}))
+    service = SimpleNamespace(
+        registry=SimpleNamespace(get_vm_metrics=AsyncMock(return_value={}))
+    )
     result = WebSocketInterface(service, RunnerSettings(state_dir=str(tmp_path)))
     result._sio.emit = AsyncMock()
     yield result
@@ -44,7 +46,7 @@ async def test_metrics_loop_preserves_wire_payload_and_cpu_warmup(
     sleep = AsyncMock(side_effect=[None, asyncio.CancelledError()])
     monkeypatch.setattr("src.interfaces.websocket.asyncio.sleep", sleep)
     interface._sio.connected = True
-    interface._service.get_vm_metrics.return_value = {
+    interface._service.registry.get_vm_metrics.return_value = {
         "ws": {
             "cpu_time_ns": 2_000_000_000,
             "vcpu_count": 2,
@@ -64,7 +66,7 @@ async def test_metrics_loop_preserves_wire_payload_and_cpu_warmup(
     assert cpu.call_args_list == [call(interval=None), call(1)]
     assert [call.args for call in sleep.await_args_list] == [(60,), (60,)]
     disk.assert_called_once_with(interface._system_metrics.disk_usage_path)
-    interface._service.get_vm_metrics.assert_awaited_once_with()
+    interface._service.registry.get_vm_metrics.assert_awaited_once_with()
     interface._sio.emit.assert_awaited_once_with(
         "runner:system_metrics",
         {
@@ -100,7 +102,7 @@ async def test_metrics_loop_skips_disconnected_samples(
         AsyncMock(side_effect=[None, asyncio.CancelledError()]),
     )
     await interface._metrics_loop()
-    interface._service.get_vm_metrics.assert_not_awaited()
+    interface._service.registry.get_vm_metrics.assert_not_awaited()
     interface._sio.emit.assert_not_awaited()
 
 
@@ -123,8 +125,10 @@ async def test_metrics_loop_recovers_after_collection_failure(
         AsyncMock(side_effect=[None, None, asyncio.CancelledError()]),
     )
     interface._sio.connected = True
-    interface._service.get_vm_metrics.side_effect = [OSError("runtime gone"), {}]
+    interface._service.registry.get_vm_metrics.side_effect = [
+        OSError("runtime gone"), {}
+    ]
     await interface._metrics_loop()
-    assert interface._service.get_vm_metrics.await_count == 2
+    assert interface._service.registry.get_vm_metrics.await_count == 2
     interface._sio.emit.assert_awaited_once()
     assert interface._sio.emit.await_args.args[0] == "runner:system_metrics"

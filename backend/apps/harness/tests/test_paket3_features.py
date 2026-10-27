@@ -375,13 +375,18 @@ async def test_fork_copies_per_message_skill_ids(paket3_setup, fake_harness_serv
 
 
 @pytest.mark.django_db(transaction=True)
-def test_patch_session_title_happy(paket3_setup, fake_harness_service):
-    """PATCH session title succeeds with harness:run."""
+def test_patch_session_title_happy(paket3_setup, fake_harness_service, monkeypatch):
+    """PATCH session title succeeds without resolving the live run orchestrator."""
     session = fake_harness_service.create_session(
         workspace_id=paket3_setup["owned"].id,
         organization_id=paket3_setup["org"].id,
         prompt="rename me",
     )
+
+    def unexpected_execution() -> None:
+        pytest.fail("Renaming a saved session must not resolve agent execution")
+
+    monkeypatch.setattr(harness_api, "_resolve_harness_service", unexpected_execution)
     client = _client(
         user=paket3_setup["owner"], org=paket3_setup["org"], permissions=RUN
     )
@@ -535,7 +540,7 @@ async def test_title_agent_does_not_overwrite_user_rename(harness_workspace) -> 
         organization_id=harness_workspace.runner.organization_id,
         prompt=prompt,
     )
-    service.update_title(session.id, "User Renamed Early")
+    service.session_settings.update_title(session.id, "User Renamed Early")
     await service.metadata.generate_title(
         session_id=session.id,
         prompt=prompt,

@@ -1,13 +1,21 @@
-import React, { memo, useCallback, useMemo, useRef, useState } from "react";
+import React, {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
+  Animated,
+  Platform,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
 } from "react-native";
-import { LegendList } from "@legendapp/list/react-native";
+import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import type {
   LegendListRef,
   OnViewableItemsChangedInfo,
@@ -40,6 +48,7 @@ import {
   type RenderBlock,
 } from "@opencuria/chat-core/harnessBlocks";
 import { getMessageCopyText } from "@opencuria/chat-core/harnessMessageCopy";
+import { sortHarnessMessages } from "@opencuria/chat-core/harnessReducer";
 import { toolAttachments } from "@opencuria/chat-core/harnessAttachments";
 import { resolveChildSessionId } from "@opencuria/chat-core/harnessSubtaskActivity";
 import { parseComposerSegments } from "@opencuria/chat-core/composerTokens";
@@ -49,6 +58,7 @@ import {
 } from "@opencuria/chat-core/harnessUsage";
 import { classifyWorkspaceFile } from "@opencuria/chat-core/workspaceFileRefs";
 import { useChromeTopInset } from "../ui/chromeInset";
+import { useChatLayout } from "./ChatLayout";
 import { NativeMenu } from "../ui/NativeMenu";
 import { useTheme } from "../ui/theme";
 import {
@@ -90,7 +100,18 @@ export interface ChatMessagesProps {
   testID?: string;
 }
 
-/** Native ordered transcript with scroll anchoring and host-owned workflow adapters. */
+const VIEWABILITY = { itemVisiblePercentThreshold: 1 };
+/** Stay pinned to the newest output while it streams in and grows. */
+const FOLLOW_END = {
+  animated: false,
+  on: { dataChange: true, itemLayout: true, layout: true },
+};
+
+/**
+ * Native ordered transcript. It fills the chat and scrolls beneath the header
+ * and the docked composer; the keyboard shifts its content, never its layout.
+ * While the reader stays at the end it follows new and streaming output.
+ */
 export function ChatMessages({
   messages,
   sessions = [],
@@ -112,9 +133,18 @@ export function ChatMessages({
   testID = "chat-messages",
 }: ChatMessagesProps): React.JSX.Element {
   const { theme } = useTheme();
+  const layout = useChatLayout();
   // Messages scroll beneath translucent navigation chrome and host overlays.
   const topInset = useChromeTopInset() + contentInsetTop;
   const listRef = useRef<LegendListRef>(null);
+  const { registerScrollToEnd } = layout;
+  useEffect(
+    () =>
+      registerScrollToEnd(async () => {
+        await listRef.current?.scrollToEnd({ animated: true });
+      }),
+    [registerScrollToEnd],
+  );
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const visibleMessageIds = useRef(new Set<string>());
   const [visibleMessageIdsState, setVisibleMessageIdsState] = useState(
@@ -137,22 +167,32 @@ export function ChatMessages({
     [],
   );
   const [todosOpen, setTodosOpen] = useState(false);
-  const visibleContent = useRef(true);
-  const didInitialScroll = useRef(false);
-  const ordered = useMemo(
-    () =>
-      [...messages].sort(
-        (a, b) =>
-          (a.position ?? a.message_position ?? 0) -
-          (b.position ?? b.message_position ?? 0),
-      ),
-    [messages],
-  );
+  // Live replies have no server position yet; the shared rule keeps them last.
+  const ordered = useMemo(() => sortHarnessMessages(messages), [messages]);
+  // Hosts often pass inline handlers. Stable ones keep `renderItem` unchanged
+  // while a reply streams, so only the growing message renders again.
+  const handleEdit = useLatestHandler(onEdit);
+  const handleFork = useLatestHandler(onFork);
+  const handleCopy = useLatestHandler(onCopy);
+  const handleDismissNotice = useLatestHandler(onDismissNotice);
+  const handleOpenSubtask = useLatestHandler(onOpenSubtask);
+  const handleRequestPartDetail = useLatestHandler(onRequestPartDetail);
+  const handleOpenFile = useLatestHandler(onOpenFile);
+  const handleOpenAttachment = useLatestHandler(onOpenAttachment);
+  // Snapshots clone every session on each streamed token; rows only need to
+  // re-render when the session tree they resolve subtasks against changes.
+  const sessionTreeKey = sessions
+    .map(
+      (session) =>
+        `${session.id}\u0001${session.parent_id ?? ""}\u0001${session.title}`,
+    )
+    .join("\u0002");
+  const rowSessions = useMemo(() => sessions, [sessionTreeKey]);
   const renderItem = useCallback(
     ({ item }: { item: HarnessMessage }) => (
       <MessageRow
         message={item}
-        sessions={sessions}
+        sessions={rowSessions}
         mediaVisible={visibleMessageIds.current.has(item.id)}
         mediaScopeKey={mediaScopeKey ?? item.session_id}
         disabled={disabled || busy}
@@ -164,47 +204,50 @@ export function ChatMessages({
             : item.completed_at == null)
         }
         resolveMedia={resolveMedia}
-        onEdit={onEdit}
-        onFork={onFork}
-        onCopy={onCopy}
-        onDismissNotice={onDismissNotice}
-        onOpenSubtask={onOpenSubtask}
-        onRequestPartDetail={onRequestPartDetail}
-        onOpenFile={onOpenFile}
-        onOpenAttachment={onOpenAttachment}
+        onEdit={handleEdit}
+        onFork={handleFork}
+        onCopy={handleCopy}
+        onDismissNotice={handleDismissNotice}
+        onOpenSubtask={handleOpenSubtask}
+        onRequestPartDetail={handleRequestPartDetail}
+        onOpenFile={handleOpenFile}
+        onOpenAttachment={handleOpenAttachment}
       />
     ),
     [
       busy,
       disabled,
-      onCopy,
-      onDismissNotice,
-      onEdit,
-      onFork,
-      onOpenAttachment,
-      onOpenFile,
-      onOpenSubtask,
-      onRequestPartDetail,
+      handleCopy,
+      handleDismissNotice,
+      handleEdit,
+      handleFork,
+      handleOpenAttachment,
+      handleOpenFile,
+      handleOpenSubtask,
+      handleRequestPartDetail,
       resolveMedia,
-      sessions,
+      rowSessions,
       streamingMessageId,
       visibleMessageIdsState,
       mediaScopeKey,
     ],
   );
   const keyExtractor = useCallback((message: HarnessMessage) => message.id, []);
-  const header = useMemo(() => {
-    const active = sessions.find((session) => session.status === "busy");
-    return (
+  const activeRun = sessions.find((session) => session.status === "busy");
+  const runLabel = activeRun
+    ? `OpenCuria is working${activeRun.agent_name ? ` · ${activeRun.agent_name}` : ""}`
+    : null;
+  const todosKey = JSON.stringify(todos);
+  const header = useMemo(
+    () => (
       <>
-        {active ? (
+        {runLabel ? (
           <View
             style={[styles.runHeader, { backgroundColor: theme.surfaceMuted }]}
           >
             <View style={[styles.runDot, { backgroundColor: theme.primary }]} />
             <Text style={[styles.runText, { color: theme.mutedText }]}>
-              OpenCuria is working
-              {active.agent_name ? ` · ${active.agent_name}` : ""}
+              {runLabel}
             </Text>
             <LoaderCircle size={16} color={theme.primary} />
           </View>
@@ -213,56 +256,33 @@ export function ChatMessages({
           <TodoStrip todos={todos} onPress={() => setTodosOpen(true)} />
         ) : null}
       </>
-    );
-  }, [sessions, theme, todos]);
-  const handleScroll = useCallback(
-    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      const { contentOffset, contentSize, layoutMeasurement } =
-        event.nativeEvent;
-      const shouldShow =
-        contentSize.height - layoutMeasurement.height - contentOffset.y > 180;
-      visibleContent.current = !shouldShow;
-      setShowJumpToLatest(shouldShow);
-    },
-    [],
+    ),
+    // `todos` is a fresh clone per snapshot; its content decides the header.
+    [runLabel, theme, todosKey],
   );
+  // "Scroll to latest" follows the list's own end tracking, which includes the
+  // keyboard and composer insets and also reacts to content growing below.
+  const hasMessages = ordered.length > 0;
+  useEffect(() => {
+    const state = hasMessages ? listRef.current?.getState() : undefined;
+    if (!state) return;
+    setShowJumpToLatest(!state.isNearEnd);
+    return state.listen("isNearEnd", (nearEnd) =>
+      setShowJumpToLatest(!nearEnd),
+    );
+  }, [hasMessages]);
   const jumpToLatest = useCallback(() => {
-    void listRef.current?.scrollToEnd({ animated: true });
-    visibleContent.current = true;
     setShowJumpToLatest(false);
+    void listRef.current?.scrollToEnd({ animated: true });
   }, []);
 
-  // On first mount start at the latest messages; later prepend/resize events
-  // retain LegendList's visible anchor unless the reader chose to follow tail.
-  React.useEffect(() => {
-    if (!didInitialScroll.current) {
-      didInitialScroll.current = true;
-      void listRef.current?.scrollToEnd({ animated: false });
-      return;
-    }
-    if (visibleContent.current)
-      void listRef.current?.scrollToEnd({ animated: false });
-  }, [ordered.length]);
-
   if (ordered.length === 0) {
-    return (
-      <View
-        testID={testID}
-        style={[
-          styles.empty,
-          { backgroundColor: theme.background, paddingTop: topInset },
-        ]}
-      >
-        <Text style={[styles.emptyTitle, { color: theme.text }]}>
-          What can I help with?
-        </Text>
-      </View>
-    );
+    return <EmptyTranscript topInset={topInset} testID={testID} />;
   }
 
   return (
     <View style={styles.listRoot}>
-      <LegendList
+      <KeyboardAwareLegendList
         ref={listRef}
         testID={testID}
         data={ordered}
@@ -270,41 +290,32 @@ export function ChatMessages({
         keyExtractor={keyExtractor}
         ListHeaderComponent={header}
         estimatedItemSize={220}
+        drawDistance={600}
         onViewableItemsChanged={onViewableItemsChanged}
-        viewabilityConfig={{ itemVisiblePercentThreshold: 1 }}
-        onScroll={handleScroll}
-        scrollEventThrottle={120}
-        maintainScrollAtEnd
+        viewabilityConfig={VIEWABILITY}
+        initialScrollAtEnd
+        maintainScrollAtEnd={FOLLOW_END}
         maintainVisibleContentPosition
         recycleItems={false}
+        contentInsetEndAdjustment={layout.dockHeight}
+        keyboardOffset={layout.keyboardOffset}
+        keyboardLiftBehavior="whenAtEnd"
+        // Short transcripts must stay draggable in the inset area, so the
+        // keyboard can be pulled down from anywhere (facebook/react-native#54123).
+        applyWorkaroundForContentInsetHitTestBug={Platform.OS === "ios"}
+        keyboardDismissMode={layout.keyboardDismissMode}
         keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
+        // Insets are owned by the keyboard-aware list, never by UIKit.
+        automaticallyAdjustContentInsets={false}
+        contentInsetAdjustmentBehavior="never"
         showsVerticalScrollIndicator={false}
         contentContainerStyle={[
           styles.listContent,
-          {
-            backgroundColor: theme.background,
-            paddingTop: styles.listContent.paddingTop + topInset,
-          },
+          { paddingTop: styles.listContent.paddingTop + topInset },
         ]}
         style={{ backgroundColor: theme.background }}
       />
-      {showJumpToLatest ? (
-        <View
-          style={[
-            styles.jumpButton,
-            { backgroundColor: theme.surfaceMuted, borderColor: theme.border },
-          ]}
-        >
-          <IconButton
-            icon={<ArrowDown size={20} color={theme.text} />}
-            symbol="arrow.down"
-            label="Scroll to latest message"
-            onPress={jumpToLatest}
-            testID="chat-scroll-to-latest"
-          />
-        </View>
-      ) : null}
+      <JumpToLatest visible={showJumpToLatest} onPress={jumpToLatest} />
       <NativeModal
         visible={todosOpen}
         onClose={() => setTodosOpen(false)}
@@ -363,6 +374,120 @@ export function ChatMessages({
       </NativeModal>
     </View>
   );
+}
+
+/** Floats just above the composer and rides along with the keyboard. */
+function JumpToLatest({
+  visible,
+  onPress,
+}: {
+  visible: boolean;
+  onPress: () => void;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  const { dockOffset, dockTranslateY } = useChatLayout();
+  const appearance = useRef(new Animated.Value(visible ? 1 : 0)).current;
+  useEffect(() => {
+    Animated.spring(appearance, {
+      toValue: visible ? 1 : 0,
+      speed: 28,
+      bounciness: 0,
+      useNativeDriver: true,
+    }).start();
+  }, [appearance, visible]);
+  const style = useMemo(
+    () => [
+      styles.jumpButton,
+      {
+        opacity: appearance,
+        transform: [
+          { translateY: Animated.add(dockTranslateY, -(dockOffset + 10)) },
+          {
+            scale: appearance.interpolate({
+              inputRange: [0, 1],
+              outputRange: [0.8, 1],
+            }),
+          },
+        ],
+      },
+    ],
+    [appearance, dockOffset, dockTranslateY],
+  );
+  return (
+    <Animated.View
+      pointerEvents={visible ? "box-none" : "none"}
+      accessibilityElementsHidden={!visible}
+      importantForAccessibility={visible ? "auto" : "no-hide-descendants"}
+      style={style}
+    >
+      <IconButton
+        icon={<ArrowDown size={20} color={theme.text} />}
+        symbol="arrow.down"
+        tone="floating"
+        label="Scroll to latest message"
+        onPress={onPress}
+        testID="chat-scroll-to-latest"
+      />
+    </Animated.View>
+  );
+}
+
+/**
+ * New chats greet in the middle of the space left between header, composer
+ * and keyboard. It still scrolls, so the keyboard can be dragged away here too.
+ */
+function EmptyTranscript({
+  topInset,
+  testID,
+}: {
+  topInset: number;
+  testID: string;
+}): React.JSX.Element {
+  const { theme } = useTheme();
+  const { dockOffset, dockTranslateY, keyboardDismissMode } = useChatLayout();
+  const centered = useMemo(
+    () => ({
+      transform: [
+        {
+          translateY: Animated.add(
+            Animated.multiply(dockTranslateY, 0.5),
+            (topInset - dockOffset) / 2,
+          ),
+        },
+      ],
+    }),
+    [dockOffset, dockTranslateY, topInset],
+  );
+  return (
+    <ScrollView
+      testID={testID}
+      style={{ backgroundColor: theme.background }}
+      contentContainerStyle={styles.empty}
+      keyboardDismissMode={keyboardDismissMode}
+      keyboardShouldPersistTaps="handled"
+      showsVerticalScrollIndicator={false}
+      alwaysBounceVertical
+    >
+      <Animated.View style={centered}>
+        <Text style={[styles.emptyTitle, { color: theme.text }]}>
+          What can I help with?
+        </Text>
+      </Animated.View>
+    </ScrollView>
+  );
+}
+
+/** A stable callback that calls the latest handler; `undefined` without one. */
+function useLatestHandler<Handler extends (...args: never[]) => unknown>(
+  handler: Handler | undefined,
+): Handler | undefined {
+  const latest = useRef(handler);
+  latest.current = handler;
+  const stable = useCallback(
+    (...args: Parameters<Handler>) => latest.current?.(...args),
+    [],
+  ) as unknown as Handler;
+  return handler ? stable : undefined;
 }
 
 interface MessageRowProps extends Omit<
@@ -1757,11 +1882,10 @@ function blockKey(
 const styles = StyleSheet.create({
   listRoot: { flex: 1, minHeight: 0 },
   empty: {
-    flex: 1,
+    flexGrow: 1,
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 32,
-    paddingBottom: 8,
   },
   emptyTitle: {
     fontSize: 22,
@@ -1770,20 +1894,11 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
   listContent: {
-    flexGrow: 1,
     paddingHorizontal: 16,
     paddingTop: 10,
-    paddingBottom: 24,
+    paddingBottom: 4,
   },
-  jumpButton: {
-    position: "absolute",
-    alignSelf: "center",
-    bottom: 16,
-    borderRadius: 24,
-    borderWidth: StyleSheet.hairlineWidth,
-    overflow: "hidden",
-    elevation: 3,
-  },
+  jumpButton: { position: "absolute", alignSelf: "center", bottom: 0 },
   runHeader: {
     alignSelf: "center",
     minHeight: 38,

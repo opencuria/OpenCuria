@@ -16,9 +16,8 @@ from django.test import AsyncClient
 import apps.harness.api as harness_api
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.engines.connections import EngineConnectionService
-from apps.harness.engines.repositories import HarnessEngineRepository
 from apps.harness.engines.run_repository import HarnessRunRepository
-from apps.harness.engines.runs import HarnessRunService, RunOwnership
+from apps.harness.engines.runs import HarnessRunService
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import (
     HarnessMessage,
@@ -45,7 +44,7 @@ class _FakeClaudeEngine:
     async def run(self, prompt, agent, model, mode, opts):  # type: ignore[no-untyped-def]
         self.registry.prompts.append(prompt)
         lease = {"lease_id": str(uuid.uuid4()), "epoch": "api-test-epoch"}
-        external_id = str(uuid.uuid4())
+        external_id = self.kwargs["external_session_id"] or str(uuid.uuid4())
         answer = f"fake Claude answer: {prompt}"
         try:
             await self.kwargs["on_owner"](lease, "reserved")
@@ -174,114 +173,6 @@ def claude_api_setup(db, monkeypatch):
         },
     )
     registry = _FakeEngineRegistry()
-    def finalize_fake_turn(
-        run_id,
-        owner_token,
-        *,
-        status,
-        finish,
-        error="",
-        assistant_content=None,
-        engine_meta=None,
-        session_usage=None,
-        session_cost=0.0,
-        tail_remainder="",
-        engine_state_updates=None,
-    ):
-        attempt = HarnessRunRepository.get_by_id(run_id)
-        if attempt is None or attempt.owner_token != owner_token:
-            return False
-        completed = HarnessRunRepository.complete_if_owner(
-            run_id,
-            owner_token,
-            status=status,
-            error=error,
-            cleanup_confirmed=True,
-        )
-        if not completed:
-            return False
-        assistant = HarnessMessageRepository.model.objects.get(
-            id=attempt.assistant_message_id
-        )
-        updates = {"finish": finish, "error": error}
-        if assistant_content is not None:
-            updates["content"] = assistant_content
-        if engine_meta is not None:
-            updates["engine_meta"] = engine_meta
-        for field, value in updates.items():
-            setattr(assistant, field, value)
-        assistant.save(update_fields=list(updates))
-        if tail_remainder:
-            HarnessMessageRepository.append_content(assistant, tail_remainder)
-        return True
-
-    async def finalize_fake_ownership(
-        self,
-        *,
-        status,
-        finish,
-        error="",
-        assistant_content=None,
-        engine_meta=None,
-        session_usage=None,
-        session_cost=0.0,
-        tail_remainder="",
-        engine_state_updates=None,
-    ):
-        return finalize_fake_turn(
-            self.run_id,
-            self.owner_token,
-            status=status,
-            finish=finish,
-            error=error,
-            assistant_content=assistant_content,
-            engine_meta=engine_meta,
-            session_usage=session_usage,
-            session_cost=session_cost,
-            tail_remainder=tail_remainder,
-            engine_state_updates=engine_state_updates,
-        )
-
-    monkeypatch.setattr(RunOwnership, "finalize_turn", finalize_fake_ownership)
-    monkeypatch.setattr(
-        RunOwnership,
-        "finalize_error",
-        lambda self, **kwargs: None,
-        raising=False,
-    )
-
-    def bind_fake_session(
-        run_id, owner_token, session_id, *, external_session_id, engine_state
-    ):
-        attempt = HarnessRunRepository.get_by_id(run_id)
-        if (
-            attempt is None
-            or attempt.owner_token != owner_token
-            or attempt.session_id != session_id
-            or not HarnessRunRepository.set_external_session_if_owner(
-                run_id, owner_token, external_session_id=external_session_id
-            )
-        ):
-            return False
-        HarnessEngineRepository.set_session_engine_state(
-            session_id,
-            external_session_id=external_session_id,
-            engine_state=engine_state,
-        )
-        return True
-
-    monkeypatch.setattr(
-        HarnessEngineRepository,
-        "bind_external_session_if_owner",
-        staticmethod(bind_fake_session),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        HarnessEngineRepository,
-        "update_message_engine_meta",
-        staticmethod(lambda _message_id, _engine_meta: None),
-        raising=False,
-    )
     service = _CompletedRunHarnessService(
         emit=_drop_emit,
         accessor_factory=_fake_accessor,
@@ -403,6 +294,12 @@ async def test_rest_create_followup_and_read_projections_keep_claude_engine(
     assert followup.status_code == 202, followup.content[:500]
     assert followup.json()["harness_id"] == "claude"
     messages = await _wait_for_completed_messages(service, session_id)
+    await sync_to_async(session.refresh_from_db)()
+    assert session.cost == pytest.approx(0.02)
+    assert session.tokens == {"prompt": 6, "completion": 4, "total": 10}
+    assert data["registry"].created[1][1]["external_session_id"] == (
+        session.external_session_id
+    )
     assert [message.content for message in messages if message.role == "user"] == [
         "first API turn",
         "second API turn",
@@ -421,6 +318,49 @@ async def test_rest_create_followup_and_read_projections_keep_claude_engine(
     for response in (listed, conversations, timeline, followup):
         assert secret not in response.content.decode()
         assert "connection_id" not in response.content.decode()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("aborted", [False, True])
+async def test_claude_admission_failure_finalizes_the_owned_attempt(
+    claude_api_setup: dict[str, Any], monkeypatch: pytest.MonkeyPatch, aborted: bool
+) -> None:
+    """A failure before engine execution releases the durable attempt and turn."""
+    data = claude_api_setup
+    service = data["service"]
+    session = service.create_session(
+        workspace_id=data["owned"].id,
+        organization_id=data["org"].id,
+        prompt="fail before execution",
+        harness_id="claude",
+        user_id=data["owner"].id,
+    )
+
+    def fail_before_execution(**_kwargs: Any) -> None:
+        if aborted:
+            service._abort_requested.add(str(session.id))
+            raise asyncio.CancelledError()
+        raise RuntimeError("private admission failure")
+
+    monkeypatch.setattr(service, "_execute_run", fail_before_execution)
+    expected = asyncio.CancelledError if aborted else RuntimeError
+    with pytest.raises(expected):
+        await service.start_run(
+            session, "fail before execution", user_id=data["owner"].id
+        )
+
+    attempt = HarnessRunRepository.model.objects.get(session=session)
+    session.refresh_from_db()
+    assistant = attempt.assistant_message
+    assert attempt.status == ("interrupted" if aborted else "error")
+    assert attempt.error == "Engine run failed."
+    assert attempt.completed_at is not None and attempt.lease_id is None
+    assert assistant.finish == ("aborted" if aborted else "error")
+    assert assistant.error == ("aborted by user" if aborted else "Run admission failed")
+    assert assistant.completed_at is not None and session.status == "idle"
+    assert HarnessRunRepository.get_open_for_session(session.id) is None
+    assert data["registry"].created == []
 
 
 @pytest.mark.django_db(transaction=True)

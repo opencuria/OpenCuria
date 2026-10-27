@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -19,7 +20,7 @@ jest.mock("lucide-react-native", () => {
     React.createElement(ReactNative.View, props);
   return new Proxy({}, { get: () => icon });
 });
-jest.mock("@legendapp/list/react-native", () => {
+jest.mock("@legendapp/list/keyboard", () => {
   const React = require("react");
   const ReactNative = require("react-native");
   const MockList = ({
@@ -36,7 +37,15 @@ jest.mock("@legendapp/list/react-native", () => {
       });
     }, [data, onViewableItemsChanged]);
     React.useImperativeHandle(listRef, () => ({
-      scrollToEnd: jest.fn().mockResolvedValue(undefined),
+      scrollToEnd: mockScrollToEnd,
+      getState: () => ({
+        isNearEnd: mockNearEnd.current,
+        listen: (type: string, callback: (value: boolean) => void) => {
+          if (type !== "isNearEnd") return () => undefined;
+          mockNearEndListeners.add(callback);
+          return () => mockNearEndListeners.delete(callback);
+        },
+      }),
     }));
     return React.createElement(
       ReactNative.ScrollView,
@@ -51,8 +60,11 @@ jest.mock("@legendapp/list/react-native", () => {
       ),
     );
   };
-  return { LegendList: MockList };
+  return { KeyboardAwareLegendList: MockList };
 });
+const mockScrollToEnd = jest.fn().mockResolvedValue(undefined);
+const mockNearEnd = { current: true };
+const mockNearEndListeners = new Set<(nearEnd: boolean) => void>();
 jest.mock("react-native-enriched-markdown", () => ({
   EnrichedMarkdownText: ({ markdown }: { markdown: string }) => {
     const React = require("react");
@@ -99,7 +111,82 @@ const part = (
   position,
 });
 
+beforeEach(() => {
+  mockScrollToEnd.mockClear();
+  mockNearEnd.current = true;
+  mockNearEndListeners.clear();
+});
+
 describe("ChatMessages", () => {
+  it("keeps a live reply without a server position after the persisted turns", () => {
+    const persisted = (
+      id: string,
+      role: HarnessMessage["role"],
+      position: number,
+    ): HarnessMessage => ({
+      id,
+      session_id: "s1",
+      role,
+      content: id,
+      parts: [],
+      position,
+      completed_at: "2026-10-27T10:00:00Z",
+    });
+    const live: HarnessMessage = {
+      id: "live",
+      session_id: "s1",
+      role: "assistant",
+      content: "",
+      parts: [part("live-text", "text", "Streaming reply", 0)],
+      created_at: "2026-10-27T10:05:00Z",
+    };
+    render(
+      <ThemeProvider>
+        <ChatMessages
+          busy
+          messages={[
+            persisted("first", "user", 0),
+            live,
+            persisted("answer", "assistant", 1),
+            persisted("follow-up", "user", 2),
+          ]}
+        />
+      </ThemeProvider>,
+    );
+    const order = screen
+      .getAllByTestId(/^chat-message-(first|answer|follow-up|live)$/)
+      .map((row) => row.props.testID);
+    expect(order).toEqual([
+      "chat-message-first",
+      "chat-message-answer",
+      "chat-message-follow-up",
+      "chat-message-live",
+    ]);
+  });
+
+  it("offers scroll to latest only while the reader is away from the end", async () => {
+    render(
+      <ThemeProvider>
+        <ChatMessages messages={[message([part("t", "text", "Answer", 0)])]} />
+      </ThemeProvider>,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Scroll to latest message" }),
+    ).toBeNull();
+
+    act(() => mockNearEndListeners.forEach((listener) => listener(false)));
+    fireEvent.press(
+      screen.getByRole("button", { name: "Scroll to latest message" }),
+    );
+
+    expect(mockScrollToEnd).toHaveBeenCalledWith({ animated: true });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Scroll to latest message" }),
+      ).toBeNull(),
+    );
+  });
+
   it("opens user actions on long press and keeps edit-and-run available", async () => {
     const onEdit = jest.fn().mockResolvedValue(undefined);
     const prompt: HarnessMessage = {

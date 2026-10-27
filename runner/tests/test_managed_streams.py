@@ -192,12 +192,12 @@ async def test_old_guest_boot_never_signals_new_group(tmp_path):
     assert await proc.wait() == 125
 
 
-def manager(tmp_path, runtime, workspace_id, owner, info):
+def manager(tmp_path, runtime, workspace_id, owner, info, kind="mcp"):
     lease = dict(
         owner,
         workspace_id=str(workspace_id),
         instance_id="instance",
-        kind="mcp",
+        kind=kind,
         expires_at=time.time() + 180,
         state="reserved",
     )
@@ -215,12 +215,13 @@ def manager(tmp_path, runtime, workspace_id, owner, info):
 
 
 @pytest.mark.asyncio
-async def test_restart_intents_no_secrets_and_failure_retained(tmp_path):
+@pytest.mark.parametrize("kind", ["mcp", "computeruse"])
+async def test_restart_intents_no_secrets_and_failure_retained(tmp_path, kind):
     workspace = uuid.uuid4()
     owner = {"lease_id": str(uuid.uuid4()), "epoch": str(uuid.uuid4())}
     runtime = LocalRuntime()
     info = SimpleNamespace(instance_id="instance")
-    first = manager(tmp_path, runtime, workspace, owner, info)
+    first = manager(tmp_path, runtime, workspace, owner, info, kind)
     session = await first.stream_start_process(
         workspace,
         "stdio",
@@ -234,7 +235,7 @@ async def test_restart_intents_no_secrets_and_failure_retained(tmp_path):
     assert "secret-value" not in first.intent_store.path.read_bytes().decode(
         errors="ignore"
     )
-    restarted = manager(tmp_path, runtime, workspace, owner, info)
+    restarted = manager(tmp_path, runtime, workspace, owner, info, kind)
     runtime.fail_close = True
     assert not await restarted.close_owner_streams(owner["lease_id"])
     assert (await restarted.stream_record("stdio"))["state"] == "closing"

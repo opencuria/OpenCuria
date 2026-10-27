@@ -27,19 +27,6 @@ class HarnessEngineRepository:
     """Persistence boundary for resumable Claude sessions and transcripts."""
 
     @staticmethod
-    def is_owner_for_finalization(run_id: uuid.UUID, owner_token: uuid.UUID) -> bool:
-        """Check finalization authority, including an owner-fenced CLOSING row."""
-        return HarnessRun.objects.filter(
-            id=run_id,
-            owner_token=owner_token,
-            status__in=(
-                HarnessRunStatus.STARTING,
-                HarnessRunStatus.RUNNING,
-                HarnessRunStatus.CLOSING,
-            ),
-        ).exists()
-
-    @staticmethod
     def settle_owned_shell(
         run_id: uuid.UUID,
         owner_token: uuid.UUID,
@@ -221,15 +208,6 @@ class HarnessEngineRepository:
             return True
 
     @staticmethod
-    def update_message_engine_meta(message_id: uuid.UUID, engine_meta: dict) -> None:
-        """Update metadata only for an assistant message."""
-        if not isinstance(engine_meta, dict):
-            raise ValueError("engine_meta must be an object")
-        HarnessMessage.objects.filter(id=message_id).update(
-            engine_meta=dict(engine_meta)
-        )
-
-    @staticmethod
     def bind_external_session_if_owner(
         run_id: uuid.UUID,
         owner_token: uuid.UUID,
@@ -292,47 +270,6 @@ class HarnessEngineRepository:
                 ),
             ).update(external_session_id=external_id)
             return True
-
-    @staticmethod
-    def set_session_engine_state(
-        session_id: uuid.UUID,
-        *,
-        external_session_id: str | None = None,
-        engine_state: dict[str, Any] | None = None,
-    ) -> HarnessSession:
-        """Persist engine resume state without mixing it into provider history."""
-        session = HarnessSession.objects.get(id=session_id)
-        fields = ["updated_at"]
-        if external_session_id is not None:
-            cleaned_id = external_session_id.strip()
-            if len(cleaned_id) > 64:
-                raise ValueError("external_session_id must be at most 64 characters")
-            session.external_session_id = cleaned_id
-            fields.append("external_session_id")
-        if engine_state is not None:
-            if not isinstance(engine_state, dict):
-                raise ValueError("engine_state must be an object")
-            session.engine_state = dict(engine_state)
-            fields.append("engine_state")
-        session.save(update_fields=fields)
-        return session
-
-    @staticmethod
-    def append_transcript_entry(
-        session_id: uuid.UUID,
-        *,
-        external_session_id: str,
-        subpath: str,
-        entry: dict[str, Any],
-    ) -> HarnessTranscriptBatch | None:
-        """Encrypt and append one opaque entry, deduplicating stable UUIDs."""
-        rows = HarnessEngineRepository.append_transcript_entries(
-            session_id,
-            external_session_id=external_session_id,
-            subpath=subpath,
-            entries=[entry],
-        )
-        return rows[0] if rows else None
 
     @staticmethod
     def append_transcript_entries(
@@ -567,7 +504,3 @@ class HarnessEngineRepository:
             query = query.filter(subpath=subpath)
         count, _ = query.delete()
         return count
-
-
-# Backwards-compatible, more domain-oriented name for service callers.
-HarnessTranscriptRepository = HarnessEngineRepository

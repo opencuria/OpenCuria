@@ -8,6 +8,7 @@ from apps.harness.conversation_service import ConversationService
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessSession
 from apps.harness.repositories import HarnessMessageRepository, HarnessSessionRepository
+from apps.harness.session_settings_service import SessionSettingsService
 from apps.runners.models import Workspace
 from common.exceptions import ConflictError
 
@@ -55,7 +56,7 @@ def test_manual_roots_and_children_remain_concurrent(harness_workspace):
     "action", ["set_mode", "set_model", "set_reasoning_effort", "update_title"]
 )
 def test_session_mutations_reload_workspace_fence(harness_workspace, action):
-    service = HarnessService()
+    service = SessionSettingsService()
     session = session_for(harness_workspace)
     Workspace.objects.filter(id=harness_workspace.id).update(
         active_operation="capturing_image"
@@ -63,7 +64,7 @@ def test_session_mutations_reload_workspace_fence(harness_workspace, action):
     with pytest.raises(ConflictError):
         getattr(service, action)(session.id, "plan")
     with pytest.raises(ConflictError):
-        service.create_session(
+        HarnessService().create_session(
             workspace_id=harness_workspace.id,
             organization_id=session.organization_id,
             prompt="new chat",
@@ -204,10 +205,10 @@ def test_mode_change_preserves_inbox_notifications_and_capture_guard(
     """Blocked changes never publish; permitted root changes refresh the inbox."""
     root = session_for(harness_workspace)
     session = session_for(harness_workspace, parent=root) if child else root
-    service = HarnessService()
+    service = SessionSettingsService()
     notifications = []
     monkeypatch.setattr(
-        service.conversation_events, "emit_sync", notifications.append
+        service.events, "emit_sync", notifications.append
     )
     Workspace.objects.filter(id=harness_workspace.id).update(
         active_operation="capturing_image"

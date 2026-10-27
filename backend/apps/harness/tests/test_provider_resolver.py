@@ -7,7 +7,7 @@ import pytest
 from apps.harness.engines.base import RunOptions
 from apps.harness.providers.bedrock import BedrockAdapter
 from apps.harness.providers.openrouter import OpenRouterAdapter
-from apps.harness.providers.resolver import StaticModelResolver
+from apps.harness.providers.resolver import ProviderResolver, StaticModelResolver
 from apps.harness.runner import HarnessRunner
 from apps.harness.services import ProviderConfigService
 from apps.harness.tests.test_runner_loop import FakeProvider, _text_step
@@ -29,6 +29,31 @@ def test_provider_resolver_openrouter_adapter(
     assert resolved.model_id == "openai/gpt-5"
     assert resolved.provider == "openrouter"
     assert resolved.adapter._base_url == "https://example.com/v1"
+
+
+@pytest.mark.django_db
+def test_prepared_callback_resolver_routes_without_database_queries(
+    organization,
+    provider_account_factory,
+    provider_account_user,
+    django_assert_num_queries,
+) -> None:
+    """Routing a prepared account-bound adapter is safe on the async run loop."""
+    account = provider_account_factory("openrouter")
+    resolver = ProviderResolver(
+        organization.id,
+        user_id=provider_account_user.id,
+        account_ids={"openrouter": str(account.id)},
+        on_account_used=lambda _account_id: None,
+    )
+    resolver.prepare_adapters()
+
+    with django_assert_num_queries(0):
+        resolved = resolver.resolve("openrouter/acme/test-model")
+
+    assert resolved.model_id == "acme/test-model"
+    assert resolved.provider == "openrouter"
+    assert resolved.adapter.name == "openrouter"
 
 
 @pytest.mark.django_db

@@ -23,7 +23,7 @@ import aiohttp
 import structlog
 
 from ..services.capture_fence import CaptureFence, live_interaction
-from . import codex_artifact
+from . import codex_artifact, computer_use_artifact
 from .base import RuntimeBackend
 
 logger = structlog.get_logger(__name__)
@@ -230,6 +230,10 @@ class RuntimeArtifactManager:
         ):
             raise RuntimeError("Runtime artifact manifest integrity check failed")
 
+        self._manifest["artifacts"]["computer-use"] = (
+            computer_use_artifact.manifest_entry()
+        )
+
     @staticmethod
     def _platform_key(output: str) -> str:
         """Validate the guest's fixed platform-probe result."""
@@ -299,6 +303,11 @@ class RuntimeArtifactManager:
         if (
             not url.startswith("https://downloads.claude.ai/claude-code-releases/")
             and url not in codex_urls
+            and url
+            not in {
+                s["url"]
+                for s in computer_use_artifact.manifest_entry()["platforms"].values()
+            }
         ):
             raise ArtifactProvisionError("Artifact source is not approved")
         if url in codex_urls and expected_size > codex_artifact.MAX_ARCHIVE_SIZE:
@@ -546,6 +555,137 @@ class RuntimeArtifactManager:
             json.dumps(hashes, sort_keys=True, separators=(",", ":")),
         ]
 
+    async def _ensure_computer_use(self, workspace_id: uuid.UUID) -> dict[str, Any]:
+        """Reuse the pinned cache, upload and fenced guest installer pipeline."""
+        package = computer_use_artifact
+        info = self._get_cached(workspace_id)
+        if not getattr(info, "instance_id", None):
+            raise ArtifactRequestError("Workspace has no active instance")
+        instance_id = info.instance_id
+        runtime = self._get_runtime(workspace_id)
+        platform = await self._guest_platform(runtime, instance_id)
+        spec = package.manifest_entry()["platforms"].get(platform)
+        if spec is None:
+            raise ArtifactRequestError("Computer Use requires Linux glibc x64 or arm64")
+        async with self._locked(("computer-use", package.VERSION, platform)):
+            cache = self._safe_cache_dirs(
+                platform, spec["sha256"], "computer-use", package.VERSION
+            )
+            node = cache / "node.tar.xz"
+            if (
+                not node.exists()
+                or node.stat().st_size != spec["size"]
+                or await asyncio.to_thread(self._hash_file, node) != spec["sha256"]
+            ):
+                await self._download(spec["url"], spec["size"], spec["sha256"], node)
+            bundle_spec = json.loads(
+                package.ASSET.with_suffix("").with_suffix(".json").read_text()
+            )
+            if (
+                package.ASSET.stat().st_size != bundle_spec["size"]
+                or await asyncio.to_thread(self._hash_file, package.ASSET)
+                != bundle_spec["sha256"]
+            ):
+                raise ArtifactProvisionError(
+                    "Computer Use bundle integrity check failed"
+                )
+            hashes = await asyncio.to_thread(package.inspect_bundle, package.ASSET)
+
+            def node_hash() -> str:
+                with tarfile.open(node, "r:xz") as archive:
+                    stream = archive.extractfile(package.node_member(archive, platform))
+                    digest = hashlib.sha256()
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(block)
+                    return digest.hexdigest()
+
+            hashes["node"] = await asyncio.to_thread(node_hash)
+            final = Path(self._guest_runtime_root) / "computer-use" / package.VERSION
+            hashes["opencuria-cua"] = hashlib.sha256(
+                package.launcher(final)
+            ).hexdigest()
+            token = uuid.uuid4().hex
+            sources = [
+                f"/tmp/opencuria-cua-{token}-{kind}" for kind in ("node", "bundle")
+            ]
+
+            def command(action: str) -> list[str]:
+                return [
+                    "/usr/bin/python3",
+                    "-c",
+                    Path(package.__file__).read_text(),
+                    action,
+                    self._guest_runtime_root,
+                    *sources,
+                    platform,
+                    bundle_spec["sha256"],
+                    json.dumps(hashes, sort_keys=True),
+                ]
+
+            # A complete verified installation needs no guest upload or package-manager work.
+            code, output = await asyncio.wait_for(
+                runtime.exec_command_wait(instance_id, command("verify")), 30
+            )
+            if code != 0 or output.strip() != package.VERSION:
+
+                def upload_archive() -> bytes:
+                    buffer = io.BytesIO()
+                    with tarfile.open(fileobj=buffer, mode="w") as archive:
+                        for source, path in zip(sources, (node, package.ASSET)):
+                            entry = tarfile.TarInfo(Path(source).name)
+                            entry.size = path.stat().st_size
+                            entry.mode = 0o600
+                            with path.open("rb") as stream:
+                                archive.addfile(entry, stream)
+                    return buffer.getvalue()
+
+                payload = await asyncio.to_thread(upload_archive)
+                upload = asyncio.create_task(
+                    asyncio.wait_for(
+                        runtime.put_archive(instance_id, "/tmp", payload), 600
+                    )
+                )
+                try:
+                    await asyncio.shield(upload)
+                    code, output = await self._complete_guest_operation(
+                        runtime.exec_command_wait(instance_id, command("install")),
+                        timeout=660,
+                    )
+                    if code != 0 or output.strip() != package.VERSION:
+                        raise ArtifactProvisionError("Computer Use provisioning failed")
+                finally:
+
+                    async def cleanup() -> None:
+                        await asyncio.gather(
+                            *(
+                                self._settle_cancelled_upload(
+                                    upload, runtime, instance_id, source
+                                )
+                                for source in sources
+                            )
+                        )
+
+                    cleanup_task = asyncio.create_task(cleanup())
+                    self._retain_background_task(cleanup_task)
+                    await asyncio.shield(cleanup_task)
+            if self._get_cached(workspace_id).instance_id != instance_id:
+                raise ArtifactProvisionError(
+                    "Workspace changed during artifact provisioning"
+                )
+            if self.capture_fence is not None:
+                self.capture_fence.check_current(workspace_id)
+            code, output = await asyncio.wait_for(
+                runtime.exec_command_wait(instance_id, command("verify")), 30
+            )
+            if code != 0 or output.strip() != package.VERSION:
+                raise ArtifactProvisionError("Computer Use runtime verification failed")
+            return {
+                "ok": True,
+                "path": str(final / "opencuria-cua"),
+                "version": package.VERSION,
+                "platform": platform,
+            }
+
     @live_interaction
     async def ensure_runtime_artifact(
         self,
@@ -558,6 +698,10 @@ class RuntimeArtifactManager:
             raise ArtifactRequestError("workspace_id must be a UUID")
         if not isinstance(artifact_id, str) or not isinstance(version, str):
             raise ArtifactRequestError("Invalid artifact identity")
+        if artifact_id == "computer-use":
+            if version != computer_use_artifact.VERSION:
+                raise ArtifactRequestError("Unapproved runtime artifact or version")
+            return await self._ensure_computer_use(workspace_id)
         entry = self._manifest.get("artifacts", {}).get(artifact_id)
         if not entry or entry.get("version") != version:
             raise ArtifactRequestError("Unapproved runtime artifact or version")

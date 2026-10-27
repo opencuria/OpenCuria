@@ -550,14 +550,15 @@ def test_provider_history_is_independent_of_run_orchestration() -> None:
     )
 
 
-def test_saved_conversations_are_independent_of_run_orchestration() -> None:
-    """Saved-state queries and navigation must not load agent execution."""
+def test_saved_session_state_is_independent_of_run_orchestration() -> None:
+    """Saved-state queries, navigation and settings must not load agent execution."""
     trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     modules = {_module_name(path): path for path in trees}
     lifecycle = "apps.harness.harness_service"
     owners = {
         "apps.harness.conversation_service",
         "apps.harness.conversation_events",
+        "apps.harness.session_settings_service",
     }
     execution = {
         lifecycle,
@@ -582,7 +583,8 @@ def test_saved_conversations_are_independent_of_run_orchestration() -> None:
             elif imported in modules and imported not in checked:
                 pending.add(imported)
     assert violations == set(), (
-        "ConversationService and ConversationEvents must work independently "
+        "ConversationService, ConversationEvents and SessionSettingsService "
+        "must work independently "
         "of live run orchestration:\n" + "\n".join(sorted(violations))
     )
 
@@ -597,12 +599,18 @@ def test_saved_conversations_are_independent_of_run_orchestration() -> None:
         "attention_for_sessions",
         "_emit_conversations_changed",
         "_emit_conversations_changed_sync",
+        "set_mode",
+        "set_model",
+        "set_reasoning_effort",
+        "update_title",
+        "update_skill_ids",
+        "_validate_codex_session_config",
     }
     assert not {
         node.name
         for node in ast.walk(trees[modules[lifecycle]])
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    } & moved_operations, "Keep saved-conversation operations out of HarnessService"
+    } & moved_operations, "Keep saved conversations and settings out of HarnessService"
 
 
 def test_provider_accounts_never_import_their_orchestration_consumers() -> None:

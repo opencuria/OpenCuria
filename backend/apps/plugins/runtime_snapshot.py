@@ -67,6 +67,8 @@ class PluginMcpServerSnapshot:
     oauth_service_id: uuid.UUID | None = None
     startup_timeout_seconds: int = 30
     request_timeout_seconds: int = 60
+    tool_policy: dict = field(default_factory=dict)
+    runtime_artifact: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

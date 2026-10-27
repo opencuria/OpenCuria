@@ -216,9 +216,25 @@ def normalize_mcp_payload(item: dict) -> dict:
     cwd = cwd.strip()
     if len(cwd) > _MAX_COMMAND_LEN or "\x00" in cwd:
         raise ValueError("MCP cwd is invalid")
-    from .schemas import PluginResources
+    from .schemas import McpToolPolicy, PluginResources, RuntimeArtifact
 
     resources = PluginResources.model_validate(item.get("resources", {}))
+    policy = McpToolPolicy.model_validate(item.get("tool_policy") or {})
+    artifact = (
+        RuntimeArtifact.model_validate(item["runtime_artifact"])
+        if item.get("runtime_artifact")
+        else None
+    )
+    if artifact and transport != PluginTransport.STDIO:
+        raise ValueError("Runtime artifacts require stdio transport")
+    if policy.on_run_end and policy.on_run_end not in policy.internal_tools:
+        raise ValueError("The lifecycle tool must be declared internal")
+    if set(policy.internal_tools) & set(policy.exposed_tools or []):
+        raise ValueError("Internal tools cannot be exposed to the model")
+    if policy.exclusive_input and resources.desktop is None:
+        raise ValueError("Exclusive input requires a managed desktop")
+    if policy.desktop_kind == "computeruse" and resources.desktop is None:
+        raise ValueError("Computer-use tools require a managed desktop")
     env = validate_placeholder_mapping(item.get("env") or {}, field="MCP env")
     if resources.desktop is not None:
         if transport != PluginTransport.STDIO:
@@ -273,6 +289,8 @@ def normalize_mcp_payload(item: dict) -> dict:
         "cwd": cwd,
         "env": env,
         "resources": resources.model_dump(exclude_none=True),
+        "tool_policy": policy.model_dump(exclude_defaults=True),
+        "runtime_artifact": artifact.model_dump() if artifact else {},
         "url": url,
         "headers": headers,
         "auth_type": auth_type,
@@ -478,6 +496,8 @@ class PluginService:
                         "cwd": m.cwd,
                         "env": m.env,
                         "resources": m.resources,
+                        "tool_policy": m.tool_policy,
+                        "runtime_artifact": m.runtime_artifact or None,
                         "url": m.url,
                         "headers": m.headers,
                         "auth_type": m.auth_type,
@@ -829,6 +849,10 @@ class PluginService:
                     "cwd": m.cwd,
                     "env": dict(m.env or {}),
                     "resources": dict(m.resources or {}),
+                    "tool_policy": dict(m.tool_policy or {}),
+                    "runtime_artifact": dict(m.runtime_artifact)
+                    if m.runtime_artifact
+                    else None,
                     "url": m.url,
                     "headers": dict(m.headers or {}),
                     "auth_type": m.auth_type,

@@ -24,13 +24,15 @@ class _WorkspaceService:
     """Minimal runner service for the WebSocket handler, no guest or network."""
 
     def __init__(self) -> None:
-        self.ensure_runtime_artifact = AsyncMock(
-            return_value={
-                "ok": True,
-                "path": "/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
-                "version": "2.1.310",
-                "platform": "linux-x64",
-            }
+        self.runtime_artifacts = types.SimpleNamespace(
+            ensure_runtime_artifact=AsyncMock(
+                return_value={
+                    "ok": True,
+                    "path": "/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
+                    "version": "2.1.310",
+                    "platform": "linux-x64",
+                }
+            )
         )
 
 
@@ -129,7 +131,7 @@ async def test_runner_handler_reply_routes_through_owned_backend_to_accessor(
         assert event == "workspace:artifact_ensure"
         runner_reply = await runner_interface._sio.handlers["/"][event](request)
         assert runner_reply["ok"] is True
-        assert workspace_service.ensure_runtime_artifact.await_count == 1
+        workspace_service.runtime_artifacts.ensure_runtime_artifact.assert_awaited_once()
 
     backend["service"].sio = AsyncMock()
     backend["service"].sio.emit = AsyncMock(side_effect=backend_emit)
