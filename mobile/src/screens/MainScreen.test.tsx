@@ -481,7 +481,9 @@ it("selects Codex defaults, preserves explicit effort across catalog refresh and
   );
   await waitFor(() => expect(listEngineModels).toHaveBeenCalledWith("codex"));
   fireEvent.press(screen.getByTestId("test-settings"));
-  fireEvent.press(screen.getByText("Codex"));
+  fireEvent.press(
+    within(screen.getByTestId("model-sheet")).getByText("Codex Build"),
+  );
   await waitFor(() =>
     expect(screen.getByTestId("chat-settings").props.children).toBe(
       "Codex Sol|Low",
@@ -548,12 +550,12 @@ it("resumes a Codex session with an immutable engine/provider and no native-mode
     ),
   );
   fireEvent.press(screen.getByTestId("test-settings"));
-  expect(screen.queryByText("Codex Sol")).toBeNull();
-  expect(
-    within(screen.getByTestId("model-settings-sheet")).getByRole("button", {
-      name: "OpenCuria",
-    }),
-  ).toBeDisabled();
+  const sheet = within(screen.getByTestId("model-sheet"));
+  expect(sheet.queryByText("Codex Sol")).toBeNull();
+  expect(sheet.getByText("Router Codex")).toBeTruthy();
+  // An existing chat keeps its engine; only its modes remain selectable.
+  expect(sheet.queryByText("OpenCuria Build")).toBeNull();
+  expect(sheet.getByText("Codex Plan")).toBeTruthy();
   fireEvent.press(screen.getByTestId("test-send"));
   await waitFor(() =>
     expect(mockController.send).toHaveBeenCalledWith(
@@ -561,5 +563,85 @@ it("resumes a Codex session with an immutable engine/provider and no native-mode
       expect.objectContaining({ harnessId: "codex", model: routerModel.id }),
     ),
   );
+  tree.unmount();
+});
+
+it("offers model, effort and agent in one sheet and applies a new agent's defaults", async () => {
+  const client = mockClient();
+  client.harness.listAgentConfigs.mockResolvedValue([
+    { agent: "build", mode: "build", model: "native-model", effort: "low" },
+    { agent: "plan", mode: "plan", model: "native-model", effort: "medium" },
+  ]);
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("chat-settings").props.children).toBe(
+      "Native model|Low",
+    ),
+  );
+  fireEvent.press(screen.getByTestId("test-settings"));
+  const sheet = within(screen.getByTestId("model-sheet"));
+  expect(sheet.getByText("Native model")).toBeTruthy();
+  expect(sheet.getByText("Medium")).toBeTruthy();
+  expect(
+    sheet.getByRole("button", { name: "Claude Agent Build, Not connected" }),
+  ).toBeDisabled();
+
+  fireEvent.press(sheet.getByText("OpenCuria Plan"));
+  await waitFor(() =>
+    expect(screen.getByTestId("chat-settings").props.children).toBe(
+      "Native model|Medium",
+    ),
+  );
+  fireEvent.press(screen.getByTestId("test-send"));
+  await waitFor(() =>
+    expect(mockController.send).toHaveBeenCalledWith(
+      "hello from mobile",
+      expect.objectContaining({ mode: "plan", reasoningEffort: "medium" }),
+    ),
+  );
+  tree.unmount();
+});
+
+it("puts workspace and chat actions in the header menu", async () => {
+  const client = mockClient();
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() => expect(mockController.newChat).toHaveBeenCalled());
+
+  fireEvent.press(screen.getByTestId("chat-menu"));
+  // A new chat has nothing to rename or delete yet.
+  expect(screen.queryByRole("button", { name: "Rename chat" })).toBeNull();
+  fireEvent.press(screen.getByRole("button", { name: "Switch workspace" }));
+  expect(screen.getByTestId("workspace-picker-sheet")).toBeTruthy();
+
+  await act(async () => {
+    snapshot = {
+      ...snapshot,
+      activeSessionId: "session-a",
+      activeSession: {
+        id: "session-a",
+        title: "Release notes",
+        harness_id: "native",
+        model: "native-model",
+        reasoning_effort: "low",
+        mode: "build",
+        skill_ids: [],
+      } as never,
+    };
+    listeners.forEach((listener) => listener());
+  });
+  fireEvent.press(screen.getByTestId("chat-menu"));
+  fireEvent.press(screen.getByRole("button", { name: "Rename chat" }));
+  expect(screen.getByTestId("rename-session-sheet")).toBeTruthy();
+  expect(screen.getByDisplayValue("Release notes")).toBeTruthy();
   tree.unmount();
 });

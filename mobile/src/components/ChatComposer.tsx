@@ -11,7 +11,6 @@ import {
   ArrowUp,
   FileText,
   Plus,
-  Settings2,
   Sparkles,
   Square,
   X,
@@ -23,6 +22,7 @@ import {
   Text,
   TextInput,
   View,
+  useWindowDimensions,
   type NativeSyntheticEvent,
   type TextInputSelectionChangeEventData,
 } from "react-native";
@@ -76,8 +76,7 @@ export interface ChatComposerProps {
   busy?: boolean;
   disabled?: boolean;
   placeholder?: string;
-  /** Keep the two-row reply composer once a conversation has started. */
-  expanded?: boolean;
+  /** Summary shown on the model control; pressing it calls `onSettings`. */
   settings?: ComposerSettingsSummary;
   onSettings?: () => void;
   skills?: ComposerSkill[];
@@ -121,7 +120,6 @@ export function ChatComposer({
   busy = false,
   disabled = false,
   placeholder = "Ask OpenCuria",
-  expanded = false,
   settings,
   onSettings,
   skills = [],
@@ -138,13 +136,13 @@ export function ChatComposer({
   testID = "chat-composer",
 }: ChatComposerProps): React.JSX.Element {
   const { theme } = useTheme();
+  const { width: windowWidth } = useWindowDimensions();
   const [selection, setSelection] = useState({
     start: draft.length,
     end: draft.length,
   });
   const [query, setQuery] = useState<ActiveQuery | null>(null);
   const [searched, setSearched] = useState<MentionCandidate[]>([]);
-  const [focused, setFocused] = useState(false);
   const [inputHeight, setInputHeight] = useState(28);
   const [sending, setSending] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -477,12 +475,6 @@ export function ChatComposer({
   const hasPicker = Boolean(onTakePhoto || onChoosePhotos || onChooseFiles);
   const canSubmit =
     !disabled && (draft.trim().length > 0 || attachments.length > 0);
-  const expandedLayout =
-    expanded ||
-    focused ||
-    Boolean(draft) ||
-    attachments.length > 0 ||
-    activeSkills.length > 0;
   const attachmentButton = hasPicker ? (
     <NativeMenu
       label="Add attachment"
@@ -524,37 +516,57 @@ export function ChatComposer({
     >
       <View
         pointerEvents="none"
-        style={{
-          width: 48,
-          height: 48,
-          alignItems: "center",
-          justifyContent: "center",
-          opacity: disabled ? 0.38 : 1,
-        }}
+        style={[
+          styles.control,
+          styles.round,
+          { backgroundColor: theme.controlFill, opacity: disabled ? 0.38 : 1 },
+        ]}
       >
-        <Plus size={24} color={theme.primary} />
+        <Plus size={22} color={theme.text} />
       </View>
     </NativeMenu>
   ) : null;
   const settingsButton =
     settings && onSettings ? (
-      <IconButton
-        symbol="slider.horizontal.3"
-        icon={<Settings2 size={22} strokeWidth={1.8} color={theme.text} />}
-        label="Chat settings"
-        accessibilityValue={{
-          text: [
-            settings.harness,
-            settings.mode,
-            settings.model,
-            settings.effort,
-          ]
-            .filter(Boolean)
-            .join(" · "),
-        }}
+      <NativeAction
+        fitContent
+        accessibilityRole="button"
+        accessibilityLabel={`Chat settings: ${[
+          settings.harness,
+          settings.mode,
+          settings.model,
+          settings.effort,
+        ]
+          .filter(Boolean)
+          .join(", ")}`}
+        accessibilityHint="Choose model, effort and agent"
         onPress={onSettings}
         testID="chat-composer-settings"
-      />
+        style={[
+          styles.control,
+          styles.pill,
+          { backgroundColor: theme.controlFill },
+        ]}
+      >
+        <Text
+          numberOfLines={1}
+          // Native hosts size the pill to its label; bound it beside +/send.
+          style={[
+            styles.pillText,
+            { maxWidth: Math.max(96, windowWidth - 176) },
+          ]}
+        >
+          {settings.mode === "plan" ? (
+            <Text style={{ color: theme.mutedText }}>Plan · </Text>
+          ) : null}
+          <Text style={{ color: theme.text }}>
+            {settings.model || "Choose model"}
+          </Text>
+          {settings.effort ? (
+            <Text style={{ color: theme.mutedText }}> {settings.effort}</Text>
+          ) : null}
+        </Text>
+      </NativeAction>
     ) : null;
   const sendButton = (
     <IconButton
@@ -742,50 +754,37 @@ export function ChatComposer({
             ))}
           </ScrollView>
         ) : null}
-        <View style={styles.editorRow}>
-          {!expandedLayout ? attachmentButton : null}
-          <ComposerEditor
-            key="message-input"
-            ref={inputRef}
-            value={draft}
-            onChangeText={changeText}
-            onSelectionChange={onSelectionChange}
-            onFocus={() => setFocused(true)}
-            onBlur={() => setFocused(false)}
-            onContentSizeChange={({ nativeEvent }) =>
-              setInputHeight(nativeEvent.contentSize.height)
-            }
-            multiline
-            editable={!disabled}
-            placeholder={placeholder}
-            placeholderTextColor={theme.subtleText}
-            accessibilityLabel="Chat message"
-            testID="chat-composer-input"
-            returnKeyType="default"
-            blurOnSubmit={false}
-            textAlignVertical="top"
-            style={[
-              styles.input,
-              expandedLayout ? styles.expandedInput : styles.compactInput,
-              {
-                color: theme.text,
-                height: expandedLayout
-                  ? Math.max(36, Math.min(170, inputHeight))
-                  : 44,
-              },
-            ]}
-          />
-          {!expandedLayout ? settingsButton : null}
-          {!expandedLayout ? sendButton : null}
+        <ComposerEditor
+          key="message-input"
+          ref={inputRef}
+          value={draft}
+          onChangeText={changeText}
+          onSelectionChange={onSelectionChange}
+          onContentSizeChange={({ nativeEvent }) =>
+            setInputHeight(nativeEvent.contentSize.height)
+          }
+          multiline
+          editable={!disabled}
+          placeholder={placeholder}
+          placeholderTextColor={theme.subtleText}
+          accessibilityLabel="Chat message"
+          testID="chat-composer-input"
+          returnKeyType="default"
+          blurOnSubmit={false}
+          textAlignVertical="top"
+          style={[
+            styles.input,
+            {
+              color: theme.text,
+              height: Math.max(36, Math.min(170, inputHeight)),
+            },
+          ]}
+        />
+        <View style={styles.toolbar}>
+          {attachmentButton}
+          <View style={styles.settings}>{settingsButton}</View>
+          {sendButton}
         </View>
-        {expandedLayout ? (
-          <View style={styles.toolbar}>
-            {attachmentButton}
-            <View style={{ flex: 1 }} />
-            {settingsButton}
-            {sendButton}
-          </View>
-        ) : null}
       </ComposerSurface>
       {disabled && !busy ? (
         <Text style={[styles.disabledHint, { color: theme.subtleText }]}>
@@ -824,29 +823,28 @@ function isImage(attachment: ComposerAttachment): boolean {
 }
 
 const styles = StyleSheet.create({
-  root: { paddingHorizontal: 12, paddingTop: 10, paddingBottom: 10 },
-  editorRow: { flexDirection: "row", alignItems: "center" },
+  root: { paddingHorizontal: 12, paddingTop: 8, paddingBottom: 8 },
   input: {
     minWidth: 0,
-    paddingVertical: 9,
-    fontSize: 17,
-    lineHeight: 26,
-  },
-  compactInput: { flex: 1, paddingHorizontal: 2 },
-  expandedInput: {
-    flex: 1,
     paddingVertical: 6,
-    marginHorizontal: 14,
-    marginTop: 8,
-    marginBottom: 2,
+    marginHorizontal: 12,
+    marginTop: 6,
+    fontSize: 17,
+    lineHeight: 24,
   },
   toolbar: {
-    minHeight: 44,
+    minHeight: 48,
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 0,
-    paddingBottom: 2,
+    gap: 8,
+    paddingLeft: 4,
+    paddingTop: 2,
   },
+  control: { height: 40, alignItems: "center", justifyContent: "center" },
+  round: { width: 40, borderRadius: 20 },
+  settings: { flex: 1, flexDirection: "row", minWidth: 0 },
+  pill: { maxWidth: "100%", borderRadius: 20, paddingHorizontal: 15 },
+  pillText: { fontSize: 15, fontWeight: "500" },
   chips: {
     alignItems: "center",
     gap: 7,

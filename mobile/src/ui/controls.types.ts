@@ -10,6 +10,8 @@ export interface NativeActionProps extends Omit<
 > {
   children?: React.ReactNode;
   onPress?: () => void;
+  /** Size the native hit surface to its rich label instead of the parent width. */
+  fitContent?: boolean;
 }
 
 export interface ButtonProps extends Omit<

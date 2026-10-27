@@ -220,10 +220,12 @@ exports.Drawer = ({
   visible,
   navigation,
   children,
+  title,
   onOpen,
   onCreate,
   canCreate,
-  onWorkspaces,
+  menuActions,
+  onMenuAction,
   onProfile,
   profileTitle,
 }) =>
@@ -231,22 +233,26 @@ exports.Drawer = ({
     View,
     null,
     h(exports.IconButton, {
-      label: 'Open conversation drawer',
+      label: 'Open chats',
       onPress: onOpen,
       testID: 'main-menu',
     }),
-    h(exports.Button, { title: 'Choose workspace', onPress: onWorkspaces }),
     h(exports.Button, {
       title: 'New chat',
       onPress: onCreate,
       disabled: !canCreate,
       testID: 'new-chat',
     }),
-    h(exports.Button, {
-      title: 'Profile and settings',
-      onPress: onProfile,
-      testID: 'profile-menu',
-    }),
+    h(
+      exports.NativeMenu,
+      {
+        label: `More for ${title}`,
+        actions: menuActions,
+        onSelect: onMenuAction,
+        testID: 'chat-menu',
+      },
+      h(Text, null, 'More'),
+    ),
     h(
       View,
       {
@@ -264,6 +270,9 @@ exports.Drawer = ({
     ),
     children,
   )
+
+exports.NativeSheet = ({ visible, children, testID }) =>
+  visible ? h(View, { testID }, children) : null
 
 exports.ModalFrame = ({ title, onClose, children }) =>
   h(

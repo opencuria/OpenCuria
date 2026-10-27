@@ -130,6 +130,7 @@ export function NativeAction({
   children,
   onPress,
   disabled: inactive,
+  fitContent,
   style,
   testID,
   accessibilityLabel: label,
@@ -139,8 +140,8 @@ export function NativeAction({
   return (
     <View style={controlLayout(style)}>
       <Host
-        style={{ width: "100%" }}
-        matchContents={{ vertical: true }}
+        style={fitContent ? undefined : { width: "100%" }}
+        matchContents={fitContent ? true : { vertical: true }}
         colorScheme={theme.scheme}
         seedColor={theme.primary}
         ignoreSafeArea="all"
@@ -155,7 +156,7 @@ export function NativeAction({
             ...(hint ? [accessibilityHint(hint)] : []),
           ]}
         >
-          <RNHostView matchContents={{ vertical: true }}>
+          <RNHostView matchContents={fitContent ? true : { vertical: true }}>
             <View style={controlContentStyle(style)}>{children}</View>
           </RNHostView>
         </SwiftButton>

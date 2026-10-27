@@ -71,22 +71,37 @@ function renderComposer(
 }
 
 describe("ChatComposer", () => {
-  it("keeps model settings accessible in both compact and expanded input", () => {
+  it("shows the model and effort on one control below the input", () => {
     const onSettings = jest.fn();
     renderComposer({
-      settings: { model: "Workspace model", mode: "plan", effort: "High" },
+      settings: {
+        harness: "OpenCuria",
+        model: "Workspace model",
+        mode: "plan",
+        effort: "High",
+      },
       onSettings,
     });
-    expect(
-      screen.getByRole("button", { name: "Chat settings" }).props
-        .accessibilityValue.text,
-    ).toBe("plan · Workspace model · High");
-    fireEvent.press(screen.getByTestId("chat-composer-settings"));
-    fireEvent(screen.getByTestId("chat-composer-input"), "focus");
+    const pill = screen.getByRole("button", {
+      name: "Chat settings: OpenCuria, plan, Workspace model, High",
+    });
+    expect(pill).toHaveTextContent("Plan · Workspace model High");
+    fireEvent.press(pill);
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Hi");
     expect(screen.getAllByTestId("chat-composer-input")).toHaveLength(1);
     fireEvent.press(screen.getByTestId("chat-composer-settings"));
     expect(onSettings).toHaveBeenCalledTimes(2);
-    expect(screen.getByTestId("chat-composer-send")).toBeDisabled();
+    expect(screen.getByTestId("chat-composer-send")).toBeEnabled();
+  });
+
+  it("asks for a model when none is selected", () => {
+    renderComposer({
+      settings: { model: "", mode: "build" },
+      onSettings: jest.fn(),
+    });
+    expect(screen.getByTestId("chat-composer-settings")).toHaveTextContent(
+      "Choose model",
+    );
   });
 
   it("stops a busy run even when the draft and attachments are empty", async () => {

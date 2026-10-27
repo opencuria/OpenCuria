@@ -11,17 +11,24 @@ The native-control reference is `t3code/apps/mobile/` in the workspace. OpenCuri
 | Chat editor | Native multiline UITextView | Native multiline EditText |
 | Composer surface | Native liquid glass where supported | Material Surface |
 | Attachment and message menus | UIMenu | Android PopupMenu |
-| Model, engine and effort selection | SwiftUI menu Picker | Material exposed dropdown |
+| Model, effort and agent selection | SwiftUI sheet with detents and List rows | Material 3 ModalBottomSheet with list rows |
 | Question options | Standard checkmark selection rows | Material RadioButton/Checkbox rows |
 | Workspace/chat lists | SwiftUI List/Section | Material LazyColumn/ListItem |
-| Navigation | Native adaptive NavigationSplitView | Android DrawerLayout |
+| Navigation | iPhone: native stack with the chat list as root; iPad: adaptive NavigationSplitView | Android DrawerLayout |
 | Modal screens | UIKit page-sheet presentation | Android system modal dialog |
-| Headers | UINavigationBar | Android Toolbar |
+| Chat header | Transparent UINavigationBar with bar button items and UIMenu | Transparent Toolbar with tonal icon buttons and PopupMenu |
+| Modal headers | UINavigationBar | Android Toolbar |
 | Login fields | SwiftUI TextField/SecureField | Material OutlinedTextField |
 
-`@expo/ui` bridges SwiftUI and Jetpack Compose primitives. It is used for native controls, not for bottom-sheet presentation. No Expo bottom sheet, JavaScript sheet gesture, simulated handle or custom drawer animation is used. `@react-native-menu/menu` supplies OS context menus, and `expo-glass-effect` supplies the native iOS composer surface. These dependencies require a new development-client build.
+`@expo/ui` bridges SwiftUI and Jetpack Compose primitives. Its universal `BottomSheet` presents the model sheet as a native SwiftUI sheet (detents, drag indicator) or Material 3 ModalBottomSheet; no JavaScript sheet gesture, simulated handle or custom drawer animation is used. `@react-native-menu/menu` supplies OS context menus, and `expo-glass-effect` supplies the native iOS composer surface. These dependencies require a new development-client build.
 
 Android modal headers use the local `mobile/modules/opencuria-native-ui` Expo module to expose the platform AppCompat Toolbar. Native-stack screens require an activity React root and cannot be embedded inside React Native's Android dialog root. iOS modal headers use SwiftUI NavigationStack/Toolbar.
+
+## Chat chrome
+
+The chat follows the Claude app layout. The header has no title: the leading button opens the chat list, the trailing group holds New chat and an overflow menu (switch workspace, rename and delete chat; the menu title names the workspace on iOS). The transcript scrolls beneath the transparent header; iOS 26 applies a soft scroll-edge blur and liquid-glass bar items, earlier iOS versions blur the bar, and Android fades the content under tonal buttons. Status banners float directly below the header and the transcript pads its first message by their height.
+
+The composer shows the editor on top and one toolbar below it: attachments (`+`), a pill with the model and effort that opens the model sheet, and Send/Stop. The model sheet combines recent models (up to six, with "All models" and search), reasoning effort and agent (engine plus Build/Plan, as in the webapp). An existing chat keeps its engine, so only that engine's modes are offered.
 
 The composer keeps its native text input mounted while it expands for replies, focus, drafts, skills or attachments. Native editing retains selection, dictation, undo, spell checking and IME composition; only explicit mention insertion moves the caret. Attachment/search/send results remain scoped to their owning chat. The keyboard controller manages keyboard avoidance.
 

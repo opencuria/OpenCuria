@@ -48,6 +48,7 @@ import {
   resolveMessageUsage,
 } from "@opencuria/chat-core/harnessUsage";
 import { classifyWorkspaceFile } from "@opencuria/chat-core/workspaceFileRefs";
+import { useChromeTopInset } from "../ui/chromeInset";
 import { NativeMenu } from "../ui/NativeMenu";
 import { useTheme } from "../ui/theme";
 import {
@@ -84,6 +85,8 @@ export interface ChatMessagesProps {
     mime: string;
   }) => void;
   mediaScopeKey?: string | number;
+  /** Extra top padding for host overlays such as status banners. */
+  contentInsetTop?: number;
   testID?: string;
 }
 
@@ -105,9 +108,12 @@ export function ChatMessages({
   onOpenFile,
   onOpenAttachment,
   mediaScopeKey,
+  contentInsetTop = 0,
   testID = "chat-messages",
 }: ChatMessagesProps): React.JSX.Element {
   const { theme } = useTheme();
+  // Messages scroll beneath translucent navigation chrome and host overlays.
+  const topInset = useChromeTopInset() + contentInsetTop;
   const listRef = useRef<LegendListRef>(null);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const visibleMessageIds = useRef(new Set<string>());
@@ -242,7 +248,10 @@ export function ChatMessages({
     return (
       <View
         testID={testID}
-        style={[styles.empty, { backgroundColor: theme.background }]}
+        style={[
+          styles.empty,
+          { backgroundColor: theme.background, paddingTop: topInset },
+        ]}
       >
         <Text style={[styles.emptyTitle, { color: theme.text }]}>
           What can I help with?
@@ -273,21 +282,24 @@ export function ChatMessages({
         showsVerticalScrollIndicator={false}
         contentContainerStyle={[
           styles.listContent,
-          { backgroundColor: theme.background },
+          {
+            backgroundColor: theme.background,
+            paddingTop: styles.listContent.paddingTop + topInset,
+          },
         ]}
         style={{ backgroundColor: theme.background }}
       />
       {showJumpToLatest ? (
-        <View style={styles.jumpButton}>
+        <View
+          style={[
+            styles.jumpButton,
+            { backgroundColor: theme.surfaceMuted, borderColor: theme.border },
+          ]}
+        >
           <IconButton
             icon={<ArrowDown size={20} color={theme.text} />}
             symbol="arrow.down"
             label="Scroll to latest message"
-            style={{
-              backgroundColor: theme.composer,
-              borderWidth: StyleSheet.hairlineWidth,
-              borderColor: theme.border,
-            }}
             onPress={jumpToLatest}
             testID="chat-scroll-to-latest"
           />
@@ -1768,6 +1780,8 @@ const styles = StyleSheet.create({
     alignSelf: "center",
     bottom: 16,
     borderRadius: 24,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: "hidden",
     elevation: 3,
   },
   runHeader: {

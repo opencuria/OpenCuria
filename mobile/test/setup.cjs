@@ -14,6 +14,7 @@ jest.mock('../src/ui/NativeList', () => require('./native-ui.cjs'))
 jest.mock('../src/ui/selection', () => require('./native-ui.cjs'))
 jest.mock('../src/ui/NativeTextField', () => require('./native-ui.cjs'))
 jest.mock('../src/ui/Drawer', () => require('./native-ui.cjs'))
+jest.mock('../src/ui/NativeSheet', () => require('./native-ui.cjs'))
 jest.mock('@expo/ui/community/segmented-control', () => ({
   SegmentedControl: () => null,
 }))

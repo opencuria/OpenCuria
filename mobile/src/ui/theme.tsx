@@ -14,6 +14,8 @@ export interface OpenCuriaTheme {
   surfaceMuted: string;
   userBubble: string;
   composer: string;
+  /** Translucent fill for secondary controls placed on the composer surface. */
+  controlFill: string;
   disabledAction: string;
   text: string;
   mutedText: string;
@@ -40,6 +42,7 @@ const THEMES: Record<ColorScheme, OpenCuriaTheme> = {
     surfaceMuted: "#F2F2F7",
     userBubble: "#E9E9EB",
     composer: "#FFFFFF",
+    controlFill: "rgba(0, 0, 0, 0.06)",
     disabledAction: "#E7E7E7",
     text: "#0D0D0D",
     mutedText: "#606060",
@@ -64,6 +67,7 @@ const THEMES: Record<ColorScheme, OpenCuriaTheme> = {
     surfaceMuted: "#262626",
     userBubble: "#2C2C2E",
     composer: "#303030",
+    controlFill: "rgba(255, 255, 255, 0.09)",
     disabledAction: "#444444",
     text: "#F5F5F5",
     mutedText: "#B4B4B4",

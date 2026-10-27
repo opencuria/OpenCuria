@@ -2,18 +2,15 @@ import React, { useEffect, useRef } from "react";
 import {
   BackHandler,
   DrawerLayoutAndroid,
+  StyleSheet,
   View,
   useWindowDimensions,
 } from "react-native";
-import {
-  PanelLeft,
-  Settings2,
-  SquarePen,
-  ChevronDown,
-} from "lucide-react-native";
+import { Ellipsis, Menu, MessageCirclePlus } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { DrawerProps } from "./Drawer.types";
 import { Button, IconButton } from "./controls";
+import { NativeMenu } from "./NativeMenu";
 import { NativeScreen } from "./NativeScreen";
 import { useTheme } from "./theme";
 
@@ -35,6 +32,7 @@ export function Drawer(props: DrawerProps): React.JSX.Element {
     });
     return () => handler.remove();
   }, [props.visible, props.onClose]);
+  const chrome = [styles.chrome, { backgroundColor: theme.surfaceMuted }];
   return (
     <DrawerLayoutAndroid
       ref={drawer}
@@ -65,35 +63,38 @@ export function Drawer(props: DrawerProps): React.JSX.Element {
       )}
     >
       <NativeScreen
-        title={props.title}
+        title=""
+        transparentHeader
         left={
-          <IconButton
-            label="Open conversation drawer"
-            icon={<PanelLeft color={theme.primary} size={24} />}
-            onPress={props.onOpen}
-            testID="main-menu"
-          />
+          <View style={chrome}>
+            <IconButton
+              label="Open chats"
+              icon={<Menu color={theme.text} size={22} />}
+              onPress={props.onOpen}
+              testID="main-menu"
+            />
+          </View>
         }
         right={
-          <View style={{ flexDirection: "row" }}>
-            <IconButton
-              label="Choose workspace"
-              icon={<ChevronDown color={theme.primary} size={22} />}
-              onPress={props.onWorkspaces}
-            />
+          <View style={[chrome, styles.group]}>
             <IconButton
               label="New chat"
-              icon={<SquarePen color={theme.primary} size={22} />}
+              icon={<MessageCirclePlus color={theme.text} size={22} />}
               onPress={props.onCreate}
               disabled={!props.canCreate}
               testID="new-chat"
             />
-            <IconButton
-              label="Profile and settings"
-              icon={<Settings2 color={theme.primary} size={22} />}
-              onPress={props.onProfile}
-              testID="profile-menu"
-            />
+            <NativeMenu
+              label="More"
+              actions={props.menuActions}
+              onSelect={props.onMenuAction}
+              style={styles.menu}
+              testID="chat-menu"
+            >
+              <View style={styles.menuIcon}>
+                <Ellipsis color={theme.text} size={22} />
+              </View>
+            </NativeMenu>
           </View>
         }
       >
@@ -102,3 +103,15 @@ export function Drawer(props: DrawerProps): React.JSX.Element {
     </DrawerLayoutAndroid>
   );
 }
+
+const styles = StyleSheet.create({
+  chrome: { borderRadius: 24, overflow: "hidden" },
+  group: { flexDirection: "row" },
+  menu: { width: 48, height: 48 },
+  menuIcon: {
+    width: 48,
+    height: 48,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+});

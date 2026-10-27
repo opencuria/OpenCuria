@@ -58,6 +58,7 @@ import {
   ChatMessages,
   type ComposerAttachment,
 } from "../components";
+import { ModelSheet, type ModelSheetAgent } from "../components/ModelSheet";
 import {
   ChatController,
   type ChatControllerSnapshot,
@@ -72,6 +73,8 @@ import {
 } from "../platform";
 import { Banner, Button, NativeModal, NativeAction } from "../ui/primitives";
 import { Drawer } from "../ui/Drawer";
+import { useChromeTopInset } from "../ui/chromeInset";
+import type { NativeMenuAction } from "../ui/NativeMenu";
 import { WorkspaceSidebar } from "../components/WorkspaceSidebar";
 import { NativeList } from "../ui/NativeList";
 import { SegmentedControl } from "@expo/ui/community/segmented-control";
@@ -179,6 +182,7 @@ export function MainScreen(): React.JSX.Element {
   const [resolving, setResolving] = useState<Set<string>>(new Set());
   const [file, setFile] = useState<OpenedWorkspaceFile | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
+  const [noticeInset, setNoticeInset] = useState(0);
   const generation = useRef(0);
   const overviewGeneration = useRef(0);
   const catalogGeneration = useRef(0);
@@ -605,7 +609,12 @@ export function MainScreen(): React.JSX.Element {
     setModel(nextModel?.id ?? "");
     setEffort(snapEffort(nextModel, config?.effort ?? ""));
   };
-  const selectHarness = (next: HarnessId) => {
+  /** An agent is an engine and mode pair, as in the webapp composer. */
+  const selectAgent = (next: HarnessId, nextMode: HarnessSessionMode) => {
+    if (next === harness) {
+      selectMode(nextMode);
+      return;
+    }
     if (
       chat.activeSessionId ||
       (next !== "native" &&
@@ -614,9 +623,13 @@ export function MainScreen(): React.JSX.Element {
       return;
     selectionDirty.current = false;
     setHarness(next);
+    setMode(nextMode);
+    const config = agentConfigs.find(
+      (item) => item.mode === nextMode || item.agent === nextMode,
+    );
     const defaults = harnessEngineDefaults(next, engines, {
-      model: modeConfig?.model ?? "",
-      effort: modeConfig?.effort ?? "",
+      model: config?.model ?? "",
+      effort: config?.effort ?? "",
     });
     const catalog = catalogForEngine(next);
     const selected =
@@ -1052,6 +1065,61 @@ export function MainScreen(): React.JSX.Element {
   const filteredWorkspaces = visibleWorkspaces.filter((item) =>
     item.name.toLowerCase().includes(search.toLowerCase()),
   );
+  // A chat keeps its engine; only a new chat offers every engine's modes.
+  const agentOptions: ModelSheetAgent[] = harnessEngineChoices(engines)
+    .filter((item) => !chat.activeSessionId || item.id === harness)
+    .flatMap((item) =>
+      (["build", "plan"] as const)
+        .filter((value) => item.modes.includes(value))
+        .map((value) => ({
+          engine: item.id,
+          mode: value,
+          label: `${item.name} ${value === "build" ? "Build" : "Plan"}`,
+          disabled: !item.connected,
+          note: item.connected ? undefined : "Not connected",
+        })),
+    );
+  const activeConversation =
+    conversations.find((row) => row.session_id === chat.activeSessionId) ??
+    null;
+  const chatMenuActions: NativeMenuAction[] = [
+    {
+      id: "workspace",
+      title: "Switch workspace",
+      symbol: "square.stack.3d.up",
+    },
+    ...(chat.activeSession && !activeIsSubtask
+      ? [
+          {
+            id: "rename",
+            title: "Rename chat",
+            symbol: "pencil",
+            disabled: isTransitioning,
+          },
+        ]
+      : []),
+    ...(activeConversation
+      ? [
+          {
+            id: "delete",
+            title: "Delete chat",
+            symbol: "trash",
+            destructive: true,
+            disabled: isTransitioning || actionBusy,
+          },
+        ]
+      : []),
+  ];
+  const chatMenuAction = (id: string) => {
+    if (id === "workspace") {
+      setSearch("");
+      setSheet("workspaces");
+    } else if (id === "rename" && chat.activeSession) {
+      rename(chat.activeSession);
+    } else if (id === "delete" && activeConversation) {
+      sessionMenu(activeConversation);
+    }
+  };
 
   if (!client || !user)
     return (
@@ -1061,540 +1129,484 @@ export function MainScreen(): React.JSX.Element {
     );
 
   return (
-    <Drawer
-      visible={sheet === "drawer"}
-      onOpen={() => setSheet("drawer")}
-      onClose={() =>
-        setSheet((current) => (current === "drawer" ? null : current))
-      }
-      title={workspace?.name ?? "OpenCuria"}
-      profileTitle={profileTitle}
-      onProfile={() => setSheet("profile")}
-      onWorkspaces={() => {
-        setSearch("");
-        setSheet("workspaces");
-      }}
-      onCreate={newChat}
-      canCreate={canStart}
-      navigation={
-        <>
-          {drawerError ? (
-            <Banner
-              tone="error"
-              message={drawerError}
-              onDismiss={() => setDrawerError(null)}
+    <View style={styles.root}>
+      <Drawer
+        visible={sheet === "drawer"}
+        onOpen={() => setSheet("drawer")}
+        onClose={() =>
+          setSheet((current) => (current === "drawer" ? null : current))
+        }
+        title={workspace?.name ?? "OpenCuria"}
+        profileTitle={profileTitle}
+        onProfile={() => setSheet("profile")}
+        onCreate={newChat}
+        canCreate={canStart}
+        menuActions={chatMenuActions}
+        onMenuAction={chatMenuAction}
+        navigation={
+          <>
+            {drawerError ? (
+              <Banner
+                tone="error"
+                message={drawerError}
+                onDismiss={() => setDrawerError(null)}
+              />
+            ) : null}
+            <WorkspaceSidebar
+              workspaces={workspaces}
+              conversations={conversations}
+              activeWorkspaceId={workspaceId}
+              activeSessionId={chat.activeSessionId}
+              scopeKey={`${client.api.baseUrl}:${session?.organizationId ?? ""}`}
+              canCreate={canStart}
+              onCreate={newChat}
+              onWorkspace={chooseWorkspace}
+              onConversation={openConversation}
+              onMarkAllRead={() => {
+                void markAllRead();
+              }}
+              onAllWorkspaces={() => {
+                setSearch("");
+                setSheet("workspaces");
+              }}
+              onConversationAction={(row, action) => {
+                if (action === "rename") rename(row);
+                else if (action === "read") void markConversation(row);
+                else sessionMenu(row);
+              }}
             />
-          ) : null}
-          <WorkspaceSidebar
-            workspaces={workspaces}
-            conversations={conversations}
-            activeWorkspaceId={workspaceId}
-            activeSessionId={chat.activeSessionId}
-            scopeKey={`${client.api.baseUrl}:${session?.organizationId ?? ""}`}
-            canCreate={canStart}
-            onCreate={newChat}
-            onWorkspace={chooseWorkspace}
-            onConversation={openConversation}
-            onMarkAllRead={() => {
-              void markAllRead();
-            }}
-            onAllWorkspaces={() => {
-              setSearch("");
-              setSheet("workspaces");
-            }}
-            onConversationAction={(row, action) => {
-              if (action === "rename") rename(row);
-              else if (action === "read") void markConversation(row);
-              else sessionMenu(row);
-            }}
-          />
-        </>
-      }
-    >
-      <KeyboardAvoidingView
-        automaticOffset
-        style={[
-          styles.root,
-          {
-            backgroundColor: theme.background,
-            paddingBottom: keyboardVisible ? 0 : insets.bottom,
-          },
-        ]}
-        behavior="height"
+          </>
+        }
       >
-        {workspace && !ready ? (
-          <View style={styles.notice}>
-            <Banner
-              tone={workspace.has_active_session ? "warning" : "info"}
-              message={readinessMessage(workspace, isTransitioning)}
-              testID="workspace-status"
-            />
-          </View>
-        ) : null}
-        {workspace && ready && !chat.connected ? (
-          <View style={styles.notice}>
-            <Banner
-              tone="warning"
-              message="Live connection is reconnecting. Chat history remains available; uploads need a live connection."
-              testID="realtime-status"
-            />
-          </View>
-        ) : null}
-        {workspace &&
-        workspace.status === "running" &&
-        !workspace.runner_online ? (
-          <View style={styles.notice}>
-            <Banner
-              tone="warning"
-              message="The workspace runner is offline. History is still available; messages and uploads require a running runner."
-              testID="runner-offline"
-            />
-          </View>
-        ) : null}
-        {error || chat.error ? (
-          <View style={styles.notice}>
-            <Banner
-              tone="error"
-              message={error || chat.error || ""}
-              actionLabel="Retry"
-              onAction={() => {
-                void refresh();
-              }}
-              onDismiss={() => setError(null)}
-              testID="chat-error"
-            />
-          </View>
-        ) : null}
-        {catalogError ? (
-          <View style={styles.notice}>
-            <Banner
-              tone="warning"
-              message={catalogError}
-              actionLabel="Retry"
-              onAction={() => {
-                void loadCatalogs();
-              }}
-              onDismiss={() => setCatalogError(null)}
-              testID="catalog-warning"
-            />
-          </View>
-        ) : null}
-        {loading && !workspaces.length ? (
-          <View style={styles.loading}>
-            <ActivityIndicator color={theme.primary} />
-            <Text style={{ color: theme.mutedText }}>Loading workspaces…</Text>
-          </View>
-        ) : null}
-        {!visibleWorkspaces.length && !loading ? (
-          <View style={styles.noWorkspace}>
-            <View
-              style={[
-                styles.emptyMark,
-                { backgroundColor: theme.surfaceMuted },
-              ]}
-            >
-              <CircleAlert size={24} color={theme.primary} />
-            </View>
-            <Text style={[styles.emptyTitle, { color: theme.text }]}>
-              No workspaces yet
-            </Text>
-            <Text style={[styles.emptyText, { color: theme.mutedText }]}>
-              Create a workspace in OpenCuria on the web, then return here to
-              chat.
-            </Text>
-            <Button
-              title="Refresh"
-              variant="outline"
-              onPress={() => {
-                void refresh();
-              }}
-              busy={refreshing}
-            />
-          </View>
-        ) : null}
-        {activeIsSubtask ? (
-          <View style={styles.notice}>
-            <Banner
-              tone="info"
-              message="This is a read-only subtask conversation. Continue the conversation from its parent chat."
-              testID="subtask-readonly"
-            />
-          </View>
-        ) : null}
-
-        {chat.activeSessionLineage.length > 1 ? (
-          <View
-            style={{
-              flexDirection: "row",
-              flexWrap: "wrap",
-              paddingHorizontal: 18,
-              gap: 4,
-            }}
-          >
-            {chat.activeSessionLineage.map((ancestor, index) => (
-              <NativeAction
-                key={ancestor.id}
-                accessibilityRole="button"
-                accessibilityLabel={`Open parent conversation ${ancestor.title}`}
-                onPress={() => {
-                  if (workspaceId)
-                    requestNavigation(workspaceId, { sessionId: ancestor.id });
-                }}
-                style={{
-                  minHeight: 44,
-                  justifyContent: "center",
-                  paddingHorizontal: 6,
-                }}
-              >
-                <Text style={{ color: theme.primary, fontSize: 13 }}>
-                  {index ? "› " : "‹ "}
-                  {ancestor.title || ancestor.agent_name}
-                </Text>
-              </NativeAction>
-            ))}
-          </View>
-        ) : null}
-
-        <ChatMessages
-          key={contextKey}
-          onDismissNotice={(id) => controller!.dismissNotice(id)}
-          messages={chat.messages}
-          sessions={chat.sessions}
-          todos={chat.todos}
-          busy={chat.busy}
-          disabled={!ready}
-          resolveMedia={resolveMedia}
-          mediaScopeKey={`${contextKey}:${chat.connected}`}
-          onEdit={async (messageId, text) => {
-            await controller!.edit(
-              messageId,
-              text,
-              runOptions(),
-              chat.activeSessionId,
-            );
-          }}
-          onFork={async (messageId) => {
-            await controller?.fork(messageId);
-            setError(null);
-          }}
-          onOpenSubtask={(id) => {
-            setDraft("");
-            setAttachments([]);
-            setSkillIds([]);
-            if (workspaceId) requestNavigation(workspaceId, { sessionId: id });
-          }}
-          onRequestPartDetail={(sessionId, partId) =>
-            controller!.requestPartDetail(sessionId, partId)
-          }
-          onOpenFile={(path) => {
-            void viewFile(path);
-          }}
-          onOpenAttachment={(attachment) => {
-            void viewAttachment(attachment);
-          }}
-          testID="chat-transcript"
-        />
-
-        {workspace ? (
-          <ChatComposer
-            draft={draft}
-            onDraftChange={(value) => setDraft(value)}
-            onSend={send}
-            onStop={async () => {
-              await controller?.abort();
-            }}
+        <KeyboardAvoidingView
+          automaticOffset
+          style={[
+            styles.root,
+            {
+              backgroundColor: theme.background,
+              paddingBottom: keyboardVisible ? 0 : insets.bottom,
+            },
+          ]}
+          behavior="height"
+        >
+          <ChatMessages
+            key={contextKey}
+            onDismissNotice={(id) => controller!.dismissNotice(id)}
+            messages={chat.messages}
+            sessions={chat.sessions}
+            todos={chat.todos}
             busy={chat.busy}
-            expanded={chat.messages.length > 0}
-            disabled={chatDisabled}
-            placeholder={
-              chatDisabled
-                ? !navigationReady
-                  ? "Loading workspace conversations…"
-                  : "Choose an available, running workspace…"
-                : chat.messages.length > 0
-                  ? "Reply to OpenCuria"
-                  : "Ask OpenCuria"
-            }
-            settings={{
-              harness: harnessEngineLabel(harness, engines),
-              mode,
-              model: selectedModel?.name ?? model,
-              effort: effort ? formatEffort(effort) : "",
-            }}
-            onSettings={() => setSheet("settings")}
-            skills={skills.map((item) => ({ id: item.id, name: item.name }))}
-            selectedSkillIds={skillIds}
-            onSelectedSkillIdsChange={setSkillIds}
-            attachments={attachments}
-            onAttachmentsChange={setAttachments}
-            onSearchMentions={searchMentions}
-            onTakePhoto={async () => pickPhoto("camera")}
-            onChoosePhotos={async () => pickPhoto("library")}
-            onChooseFiles={async () => pickDocuments()}
-            contextKey={contextKey}
-            testID="chat-composer"
-          />
-        ) : null}
-
-        <ChatGates
-          permissions={chat.permissions}
-          questions={chat.questions}
-          resolving={chat.permissions.some((item) =>
-            resolving.has(item.request_id),
-          )}
-          submitting={chat.questions.some((item) =>
-            resolving.has(item.request_id),
-          )}
-          onResolvePermission={(id, response) =>
-            gateAction(id, () => controller!.resolvePermission(id, response))
-          }
-          onSubmitQuestion={(id, answers) =>
-            gateAction(id, () => controller!.resolveQuestion(id, answers))
-          }
-          onSkipQuestion={(id) =>
-            gateAction(id, () => controller!.resolveQuestion(id, [], true))
-          }
-        />
-
-        <NativeModal
-          visible={sheet === "workspaces"}
-          onClose={() => setSheet(null)}
-          title="Choose workspace"
-          scrollable={false}
-          testID="workspace-picker-sheet"
-        >
-          <SearchField
-            value={search}
-            onChangeText={setSearch}
-            placeholder="Search workspaces…"
-            label="Search workspaces"
-          />
-          <NativeList
-            sections={[
-              {
-                id: "workspaces",
-                rows: filteredWorkspaces.length
-                  ? filteredWorkspaces.map((item) => ({
-                      id: item.id,
-                      title: item.name,
-                      subtitle: workspaceLabel(
-                        item,
-                        Boolean(
-                          item.active_operation || item.intervention_required,
-                        ),
-                      ),
-                      symbol: "desktopcomputer",
-                      selected: workspaceId === item.id,
-                      busy: Boolean(
-                        item.has_active_session || item.active_operation,
-                      ),
-                      onPress: () => chooseWorkspace(item),
-                    }))
-                  : [{ id: "empty", title: "No workspaces found" }],
-              },
-            ]}
-          />
-        </NativeModal>
-
-        <NativeModal
-          visible={sheet === "profile"}
-          onClose={() => setSheet(null)}
-          title="Profile & settings"
-          testID="profile-sheet"
-        >
-          <View
-            style={[
-              styles.accountCard,
-              { backgroundColor: theme.surfaceMuted },
-            ]}
-          >
-            <View style={[styles.avatar, { backgroundColor: theme.primary }]}>
-              <Text
-                style={{ color: theme.primaryForeground, fontWeight: "700" }}
-              >
-                {profileTitle.slice(0, 1).toUpperCase()}
-              </Text>
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text
-                style={{ color: theme.text, fontSize: 16, fontWeight: "600" }}
-              >
-                {profileTitle}
-              </Text>
-              <Text style={{ color: theme.mutedText, fontSize: 13 }}>
-                {user.email}
-              </Text>
-            </View>
-          </View>
-          <SectionTitle title="ORGANIZATION" />
-          <NativePicker
-            label="Organization"
-            value={session?.organizationId ?? ""}
-            options={organizations.map((org) => ({
-              value: org.id,
-              label: org.name,
-            }))}
-            onChange={(id) => {
-              setSheet(null);
-              void selectOrganization(id);
-            }}
-          />
-          <SectionTitle title="NOTIFICATIONS" />
-          <NotificationSettings />
-          <SectionTitle title="APPEARANCE" />
-          <SegmentedControl
-            values={["System", "Light", "Dark"]}
-            selectedIndex={["system", "light", "dark"].indexOf(themeMode)}
-            appearance={theme.scheme}
-            onChange={({ nativeEvent }) =>
-              setThemeMode(
-                (["system", "light", "dark"] as const)[
-                  nativeEvent.selectedSegmentIndex
-                ]!,
-              )
-            }
-          />
-
-          <Button
-            title="Sign out"
-            variant="danger"
-            symbol="rectangle.portrait.and.arrow.right"
-            onPress={() => {
-              Alert.alert(
-                "Sign out?",
-                "Your secure sign-in token will be removed from this device.",
-                [
-                  { text: "Cancel", style: "cancel" },
-                  {
-                    text: "Sign out",
-                    style: "destructive",
-                    onPress: () => {
-                      setSheet(null);
-                      void signOut();
-                    },
-                  },
-                ],
+            disabled={!ready}
+            resolveMedia={resolveMedia}
+            mediaScopeKey={`${contextKey}:${chat.connected}`}
+            contentInsetTop={noticeInset}
+            onEdit={async (messageId, text) => {
+              await controller!.edit(
+                messageId,
+                text,
+                runOptions(),
+                chat.activeSessionId,
               );
             }}
-            style={{ alignSelf: "stretch", marginTop: 8 }}
-            testID="sign-out"
-          />
-        </NativeModal>
-
-        <NativeModal
-          visible={sheet === "settings"}
-          onClose={() => setSheet(null)}
-          title="Chat settings"
-          testID="model-settings-sheet"
-        >
-          <NativePicker
-            label="Mode"
-            value={mode}
-            onChange={(value) => selectMode(value as HarnessSessionMode)}
-            options={(["build", "plan"] as const).map((item) => ({
-              value: item,
-              label: item === "build" ? "Build" : "Plan",
-              disabled: Boolean(
-                engines.find((engine) => engine.id === harness) &&
-                !engines
-                  .find((engine) => engine.id === harness)
-                  ?.modes.includes(item),
-              ),
-            }))}
-          />
-          <NativePicker
-            label="Engine"
-            value={harness}
-            onChange={(value) => selectHarness(value as HarnessId)}
-            disabled={Boolean(chat.activeSessionId)}
-            options={harnessEngineChoices(engines).map((item) => ({
-              value: item.id,
-              label: item.name,
-              disabled: !item.connected || !item.modes.includes(mode),
-            }))}
-          />
-          {chosenModels.length ? (
-            <NativePicker
-              label="Model"
-              value={model}
-              onChange={selectModel}
-              options={[
-                ...new Set([
-                  ...recentModels.map((row) => row.model),
-                  ...chosenModels.map((item) => item.id),
-                ]),
-              ].flatMap((id) => {
-                const item = chosenModels.find((entry) => entry.id === id);
-                return item ? [{ value: id, label: item.name }] : [];
-              })}
-            />
-          ) : (
-            <Text
-              style={{ color: theme.mutedText }}
-            >{`${harnessEngineLabel(harness, engines)} models unavailable. Check the selected provider account in Settings and retry.`}</Text>
-          )}
-          {selectedModel?.reasoning_efforts.length ? (
-            <NativePicker
-              label="Reasoning effort"
-              value={effort}
-              onChange={(value) => {
-                selectionDirty.current = true;
-                setEffort(value);
-              }}
-              options={selectedModel.reasoning_efforts.map((item) => ({
-                value: item,
-                label: formatEffort(item),
-              }))}
-            />
-          ) : (
-            <Text style={{ color: theme.mutedText }}>
-              This model does not expose reasoning effort settings.
-            </Text>
-          )}
-
-          <Button
-            title="Done"
-            variant="primary"
-            onPress={() => setSheet(null)}
-            style={{ alignSelf: "stretch", marginTop: 8 }}
-          />
-        </NativeModal>
-
-        <NativeModal
-          visible={sheet === "rename"}
-          onClose={() => setSheet(null)}
-          title="Rename conversation"
-          testID="rename-session-sheet"
-        >
-          <NativeTextField
-            label="Conversation name"
-            value={renameText}
-            onChangeText={setRenameText}
-            autoFocus
-          />
-          <Button
-            title="Save name"
-            variant="primary"
-            onPress={() => {
-              void saveRename();
+            onFork={async (messageId) => {
+              await controller?.fork(messageId);
+              setError(null);
             }}
-            disabled={!renameText.trim()}
-            busy={renaming}
-            style={{ alignSelf: "stretch" }}
+            onOpenSubtask={(id) => {
+              setDraft("");
+              setAttachments([]);
+              setSkillIds([]);
+              if (workspaceId)
+                requestNavigation(workspaceId, { sessionId: id });
+            }}
+            onRequestPartDetail={(sessionId, partId) =>
+              controller!.requestPartDetail(sessionId, partId)
+            }
+            onOpenFile={(path) => {
+              void viewFile(path);
+            }}
+            onOpenAttachment={(attachment) => {
+              void viewAttachment(attachment);
+            }}
+            testID="chat-transcript"
           />
-        </NativeModal>
-        <MediaSheet
-          visible={sheet === "media"}
-          file={file}
-          error={fileError}
-          onError={setFileError}
-          onClose={() => {
+
+          {workspace ? (
+            <ChatComposer
+              draft={draft}
+              onDraftChange={(value) => setDraft(value)}
+              onSend={send}
+              onStop={async () => {
+                await controller?.abort();
+              }}
+              busy={chat.busy}
+              disabled={chatDisabled}
+              placeholder={
+                chatDisabled
+                  ? !navigationReady
+                    ? "Loading workspace conversations…"
+                    : "Choose an available, running workspace…"
+                  : chat.messages.length > 0
+                    ? "Reply to OpenCuria"
+                    : "Ask OpenCuria"
+              }
+              settings={{
+                harness: harnessEngineLabel(harness, engines),
+                mode,
+                model: selectedModel?.name ?? model,
+                effort: effort ? formatEffort(effort) : "",
+              }}
+              onSettings={() => setSheet("settings")}
+              skills={skills.map((item) => ({ id: item.id, name: item.name }))}
+              selectedSkillIds={skillIds}
+              onSelectedSkillIdsChange={setSkillIds}
+              attachments={attachments}
+              onAttachmentsChange={setAttachments}
+              onSearchMentions={searchMentions}
+              onTakePhoto={async () => pickPhoto("camera")}
+              onChoosePhotos={async () => pickPhoto("library")}
+              onChooseFiles={async () => pickDocuments()}
+              contextKey={contextKey}
+              testID="chat-composer"
+            />
+          ) : null}
+
+          <ChromeOverlay onHeightChange={setNoticeInset}>
+            {workspace && !ready ? (
+              <View style={styles.notice}>
+                <Banner
+                  tone={workspace.has_active_session ? "warning" : "info"}
+                  message={readinessMessage(workspace, isTransitioning)}
+                  testID="workspace-status"
+                />
+              </View>
+            ) : null}
+            {workspace && ready && !chat.connected ? (
+              <View style={styles.notice}>
+                <Banner
+                  tone="warning"
+                  message="Live connection is reconnecting. Chat history remains available; uploads need a live connection."
+                  testID="realtime-status"
+                />
+              </View>
+            ) : null}
+            {workspace &&
+            workspace.status === "running" &&
+            !workspace.runner_online ? (
+              <View style={styles.notice}>
+                <Banner
+                  tone="warning"
+                  message="The workspace runner is offline. History is still available; messages and uploads require a running runner."
+                  testID="runner-offline"
+                />
+              </View>
+            ) : null}
+            {error || chat.error ? (
+              <View style={styles.notice}>
+                <Banner
+                  tone="error"
+                  message={error || chat.error || ""}
+                  actionLabel="Retry"
+                  onAction={() => {
+                    void refresh();
+                  }}
+                  onDismiss={() => setError(null)}
+                  testID="chat-error"
+                />
+              </View>
+            ) : null}
+            {catalogError ? (
+              <View style={styles.notice}>
+                <Banner
+                  tone="warning"
+                  message={catalogError}
+                  actionLabel="Retry"
+                  onAction={() => {
+                    void loadCatalogs();
+                  }}
+                  onDismiss={() => setCatalogError(null)}
+                  testID="catalog-warning"
+                />
+              </View>
+            ) : null}
+            {loading && !workspaces.length ? (
+              <View style={styles.loading}>
+                <ActivityIndicator color={theme.primary} />
+                <Text style={{ color: theme.mutedText }}>
+                  Loading workspaces…
+                </Text>
+              </View>
+            ) : null}
+            {activeIsSubtask ? (
+              <View style={styles.notice}>
+                <Banner
+                  tone="info"
+                  message="This is a read-only subtask conversation. Continue the conversation from its parent chat."
+                  testID="subtask-readonly"
+                />
+              </View>
+            ) : null}
+
+            {chat.activeSessionLineage.length > 1 ? (
+              <View
+                style={{
+                  flexDirection: "row",
+                  flexWrap: "wrap",
+                  paddingHorizontal: 18,
+                  gap: 4,
+                  backgroundColor: theme.background,
+                }}
+              >
+                {chat.activeSessionLineage.map((ancestor, index) => (
+                  <NativeAction
+                    key={ancestor.id}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Open parent conversation ${ancestor.title}`}
+                    onPress={() => {
+                      if (workspaceId)
+                        requestNavigation(workspaceId, {
+                          sessionId: ancestor.id,
+                        });
+                    }}
+                    style={{
+                      minHeight: 44,
+                      justifyContent: "center",
+                      paddingHorizontal: 6,
+                    }}
+                  >
+                    <Text style={{ color: theme.primary, fontSize: 13 }}>
+                      {index ? "› " : "‹ "}
+                      {ancestor.title || ancestor.agent_name}
+                    </Text>
+                  </NativeAction>
+                ))}
+              </View>
+            ) : null}
+          </ChromeOverlay>
+          {!visibleWorkspaces.length && !loading ? (
+            <View style={styles.noWorkspace}>
+              <View
+                style={[
+                  styles.emptyMark,
+                  { backgroundColor: theme.surfaceMuted },
+                ]}
+              >
+                <CircleAlert size={24} color={theme.primary} />
+              </View>
+              <Text style={[styles.emptyTitle, { color: theme.text }]}>
+                No workspaces yet
+              </Text>
+              <Text style={[styles.emptyText, { color: theme.mutedText }]}>
+                Create a workspace in OpenCuria on the web, then return here to
+                chat.
+              </Text>
+              <Button
+                title="Refresh"
+                variant="outline"
+                onPress={() => {
+                  void refresh();
+                }}
+                busy={refreshing}
+              />
+            </View>
+          ) : null}
+        </KeyboardAvoidingView>
+      </Drawer>
+      <ChatGates
+        permissions={chat.permissions}
+        questions={chat.questions}
+        resolving={chat.permissions.some((item) =>
+          resolving.has(item.request_id),
+        )}
+        submitting={chat.questions.some((item) =>
+          resolving.has(item.request_id),
+        )}
+        onResolvePermission={(id, response) =>
+          gateAction(id, () => controller!.resolvePermission(id, response))
+        }
+        onSubmitQuestion={(id, answers) =>
+          gateAction(id, () => controller!.resolveQuestion(id, answers))
+        }
+        onSkipQuestion={(id) =>
+          gateAction(id, () => controller!.resolveQuestion(id, [], true))
+        }
+      />
+
+      <NativeModal
+        visible={sheet === "workspaces"}
+        onClose={() => setSheet(null)}
+        title="Choose workspace"
+        scrollable={false}
+        testID="workspace-picker-sheet"
+      >
+        <SearchField
+          value={search}
+          onChangeText={setSearch}
+          placeholder="Search workspaces…"
+          label="Search workspaces"
+        />
+        <NativeList
+          sections={[
+            {
+              id: "workspaces",
+              rows: filteredWorkspaces.length
+                ? filteredWorkspaces.map((item) => ({
+                    id: item.id,
+                    title: item.name,
+                    subtitle: workspaceLabel(
+                      item,
+                      Boolean(
+                        item.active_operation || item.intervention_required,
+                      ),
+                    ),
+                    symbol: "desktopcomputer",
+                    selected: workspaceId === item.id,
+                    busy: Boolean(
+                      item.has_active_session || item.active_operation,
+                    ),
+                    onPress: () => chooseWorkspace(item),
+                  }))
+                : [{ id: "empty", title: "No workspaces found" }],
+            },
+          ]}
+        />
+      </NativeModal>
+
+      <NativeModal
+        visible={sheet === "profile"}
+        onClose={() => setSheet(null)}
+        title="Profile & settings"
+        testID="profile-sheet"
+      >
+        <View
+          style={[styles.accountCard, { backgroundColor: theme.surfaceMuted }]}
+        >
+          <View style={[styles.avatar, { backgroundColor: theme.primary }]}>
+            <Text style={{ color: theme.primaryForeground, fontWeight: "700" }}>
+              {profileTitle.slice(0, 1).toUpperCase()}
+            </Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text
+              style={{ color: theme.text, fontSize: 16, fontWeight: "600" }}
+            >
+              {profileTitle}
+            </Text>
+            <Text style={{ color: theme.mutedText, fontSize: 13 }}>
+              {user.email}
+            </Text>
+          </View>
+        </View>
+        <SectionTitle title="ORGANIZATION" />
+        <NativePicker
+          label="Organization"
+          value={session?.organizationId ?? ""}
+          options={organizations.map((org) => ({
+            value: org.id,
+            label: org.name,
+          }))}
+          onChange={(id) => {
             setSheet(null);
-            setFile(null);
+            void selectOrganization(id);
           }}
         />
-      </KeyboardAvoidingView>
-    </Drawer>
+        <SectionTitle title="NOTIFICATIONS" />
+        <NotificationSettings />
+        <SectionTitle title="APPEARANCE" />
+        <SegmentedControl
+          values={["System", "Light", "Dark"]}
+          selectedIndex={["system", "light", "dark"].indexOf(themeMode)}
+          appearance={theme.scheme}
+          onChange={({ nativeEvent }) =>
+            setThemeMode(
+              (["system", "light", "dark"] as const)[
+                nativeEvent.selectedSegmentIndex
+              ]!,
+            )
+          }
+        />
+
+        <Button
+          title="Sign out"
+          variant="danger"
+          symbol="rectangle.portrait.and.arrow.right"
+          onPress={() => {
+            Alert.alert(
+              "Sign out?",
+              "Your secure sign-in token will be removed from this device.",
+              [
+                { text: "Cancel", style: "cancel" },
+                {
+                  text: "Sign out",
+                  style: "destructive",
+                  onPress: () => {
+                    setSheet(null);
+                    void signOut();
+                  },
+                },
+              ],
+            );
+          }}
+          style={{ alignSelf: "stretch", marginTop: 8 }}
+          testID="sign-out"
+        />
+      </NativeModal>
+
+      <ModelSheet
+        visible={sheet === "settings"}
+        onClose={() =>
+          setSheet((current) => (current === "settings" ? null : current))
+        }
+        models={chosenModels}
+        recentModelIds={recentModels.map((row) => row.model)}
+        model={model}
+        effort={effort}
+        agents={agentOptions}
+        engine={harness}
+        mode={mode}
+        unavailableMessage={`${harnessEngineLabel(harness, engines)} models unavailable. Check the provider account in Settings.`}
+        onModelChange={selectModel}
+        onEffortChange={(value) => {
+          selectionDirty.current = true;
+          setEffort(value);
+        }}
+        onAgentChange={selectAgent}
+      />
+
+      <NativeModal
+        visible={sheet === "rename"}
+        onClose={() => setSheet(null)}
+        title="Rename conversation"
+        testID="rename-session-sheet"
+      >
+        <NativeTextField
+          label="Conversation name"
+          value={renameText}
+          onChangeText={setRenameText}
+          autoFocus
+        />
+        <Button
+          title="Save name"
+          variant="primary"
+          onPress={() => {
+            void saveRename();
+          }}
+          disabled={!renameText.trim()}
+          busy={renaming}
+          style={{ alignSelf: "stretch" }}
+        />
+      </NativeModal>
+      <MediaSheet
+        visible={sheet === "media"}
+        file={file}
+        error={fileError}
+        onError={setFileError}
+        onClose={() => {
+          setSheet(null);
+          setFile(null);
+        }}
+      />
+    </View>
   );
 }
 
@@ -1626,6 +1638,28 @@ function readinessMessage(item: Workspace, transitioning: boolean): string {
 }
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
+}
+
+/**
+ * Status banners float just below the translucent header; the transcript pads
+ * its first message by their measured height so nothing stays hidden.
+ */
+function ChromeOverlay({
+  children,
+  onHeightChange,
+}: React.PropsWithChildren<{
+  onHeightChange: (height: number) => void;
+}>): React.JSX.Element {
+  const top = useChromeTopInset();
+  return (
+    <View
+      pointerEvents="box-none"
+      onLayout={(event) => onHeightChange(event.nativeEvent.layout.height)}
+      style={[styles.overlay, { top }]}
+    >
+      {children}
+    </View>
+  );
 }
 
 function SectionTitle({
@@ -1759,10 +1793,9 @@ const styles = StyleSheet.create({
   root: { flex: 1 },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   notice: { paddingHorizontal: 12, paddingTop: 7 },
+  overlay: { position: "absolute", left: 0, right: 0, zIndex: 3 },
   loading: {
-    position: "absolute",
-    zIndex: 2,
-    top: 76,
+    marginTop: 8,
     alignSelf: "center",
     flexDirection: "row",
     alignItems: "center",

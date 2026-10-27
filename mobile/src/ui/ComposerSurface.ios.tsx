@@ -15,7 +15,7 @@ export function ComposerSurface({
         ? { glassEffectStyle: "regular" as const, colorScheme: theme.scheme }
         : {})}
       style={{
-        borderRadius: 26,
+        borderRadius: 28,
         overflow: "hidden",
         padding: 6,
         ...(Component === View ? { backgroundColor: theme.surfaceMuted } : {}),
