@@ -1,27 +1,44 @@
 import React from "react";
-import { View } from "react-native";
+import { StyleSheet, View } from "react-native";
 import { GlassView, isGlassEffectAPIAvailable } from "expo-glass-effect";
 import { useTheme } from "./theme";
 
-/** The same native liquid-glass surface used by t3code's docked editor. */
+const GLASS = isGlassEffectAPIAvailable();
+
+/**
+ * Interactive liquid glass, as on system bars: it reacts to touches and
+ * refracts the transcript scrolling beneath. It is not clipped, so the glass
+ * can flex beyond its bounds; earlier iOS versions use an opaque surface.
+ */
 export function ComposerSurface({
   children,
 }: React.PropsWithChildren): React.JSX.Element {
   const { theme } = useTheme();
-  const Component = isGlassEffectAPIAvailable() ? GlassView : View;
+  if (GLASS)
+    return (
+      <GlassView
+        isInteractive
+        glassEffectStyle="regular"
+        colorScheme={theme.scheme}
+        style={styles.surface}
+      >
+        {children}
+      </GlassView>
+    );
   return (
-    <Component
-      {...(Component === GlassView
-        ? { glassEffectStyle: "regular" as const, colorScheme: theme.scheme }
-        : {})}
-      style={{
-        borderRadius: 28,
-        overflow: "hidden",
-        padding: 6,
-        ...(Component === View ? { backgroundColor: theme.surfaceMuted } : {}),
-      }}
+    <View
+      style={[
+        styles.surface,
+        styles.opaque,
+        { backgroundColor: theme.surfaceMuted },
+      ]}
     >
       {children}
-    </Component>
+    </View>
   );
 }
+
+const styles = StyleSheet.create({
+  surface: { borderRadius: 28, borderCurve: "continuous", padding: 6 },
+  opaque: { overflow: "hidden" },
+});

@@ -1,5 +1,6 @@
 import React from "react";
 import { View } from "react-native";
+import { isLiquidGlassAvailable } from "expo-glass-effect";
 import { Button as SwiftButton, Host, RNHostView } from "@expo/ui/swift-ui";
 import {
   accessibilityLabel,
@@ -20,6 +21,9 @@ import type {
 } from "./controls.types";
 import { controlContentStyle, controlLayout } from "./controlLayout";
 import { useTheme } from "./theme";
+
+/** Floating controls are liquid glass on iOS 26 and bordered before it. */
+const FLOATING_STYLE = isLiquidGlassAvailable() ? "glass" : "bordered";
 
 /** SwiftUI owns highlighting, hit testing, disabled state and button appearance. */
 export function Button({
@@ -94,13 +98,25 @@ export function IconButton({
         testID={testID}
         onPress={() => onPress?.()}
         modifiers={[
-          buttonStyle(tone === "primary" ? "borderedProminent" : "borderless"),
+          buttonStyle(
+            tone === "primary"
+              ? "borderedProminent"
+              : tone === "floating"
+                ? FLOATING_STYLE
+                : "borderless",
+          ),
           buttonBorderShape("circle"),
           labelStyle("iconOnly"),
           controlSize("large"),
           frame({ minWidth: 44, minHeight: 44 }),
           disabled(Boolean(inactive)),
-          tint(tone === "danger" ? theme.danger : theme.primary),
+          tint(
+            tone === "danger"
+              ? theme.danger
+              : tone === "floating"
+                ? theme.text
+                : theme.primary,
+          ),
           accessibilityLabel(label),
           ...(hint ? [accessibilityHint(hint)] : []),
           ...(value?.text ? [accessibilityValue(value.text)] : []),

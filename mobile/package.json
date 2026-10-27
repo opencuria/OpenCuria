@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@expo/ui": "~57.0.26",
-    "@legendapp/list": "3.3.3",
+    "@legendapp/list": "3.7.0",
     "@opencuria/chat-core": "0.0.0",
     "@opencuria/client": "0.0.0",
     "@react-native-menu/menu": "^2.0.0",
@@ -54,7 +54,7 @@
     "react-native": "0.86.3",
     "react-native-enriched-markdown": "1.0.1",
     "react-native-gesture-handler": "~2.32.0",
-    "react-native-keyboard-controller": "1.21.9",
+    "react-native-keyboard-controller": "1.22.9",
     "react-native-reanimated": "4.5.1",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.26.0",

@@ -7,6 +7,7 @@ import {
   TextButton,
   IconButton as ComposeIconButton,
   FilledIconButton,
+  FilledTonalIconButton,
   Host,
   Surface,
   Text,
@@ -91,7 +92,12 @@ export function IconButton({
   testID,
 }: IconButtonProps): React.JSX.Element {
   const { theme } = useTheme();
-  const Component = tone === "primary" ? FilledIconButton : ComposeIconButton;
+  const Component =
+    tone === "primary"
+      ? FilledIconButton
+      : tone === "floating"
+        ? FilledTonalIconButton
+        : ComposeIconButton;
   return (
     <View testID={testID} style={{ width: diameter, height: diameter }}>
       <Host

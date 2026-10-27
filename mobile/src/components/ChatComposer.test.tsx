@@ -182,6 +182,32 @@ describe("ChatComposer", () => {
     });
   });
 
+  it("clears the draft at once and closes the keyboard while a message is sent", async () => {
+    const { KeyboardController } = require("react-native-keyboard-controller");
+    (KeyboardController.dismiss as jest.Mock).mockClear();
+    let finishSend: () => void = () => undefined;
+    const onSend = jest.fn(
+      () => new Promise<void>((resolve) => (finishSend = resolve)),
+    );
+    renderComposer({ onSend });
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "ship it");
+
+    fireEvent.press(screen.getByTestId("chat-composer-send"));
+
+    expect(screen.getByTestId("chat-composer-input").props.value).toBe("");
+    expect(KeyboardController.dismiss).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith({
+      text: "ship it",
+      skillIds: [],
+      attachments: [],
+    });
+    finishSend();
+    await waitFor(() =>
+      expect(screen.getByTestId("chat-composer-send")).toBeTruthy(),
+    );
+    expect(screen.queryByTestId("chat-composer-error")).toBeNull();
+  });
+
   it("clears a confirmed draft without invalidating an in-flight native picker", async () => {
     function Host(): React.JSX.Element {
       const [draft, setDraft] = React.useState("confirmed prompt");
