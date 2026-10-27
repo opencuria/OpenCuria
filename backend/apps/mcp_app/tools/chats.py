@@ -21,6 +21,7 @@ from apps.harness.conversation_service import ConversationService
 from apps.harness.harness_service import get_harness_service
 from apps.harness.schemas import part_to_out, timeline_to_out
 from apps.harness.session_access_service import SessionAccessService
+from apps.harness.session_settings_service import SessionSettingsService
 from apps.runners.enums import WorkspaceStatus
 from apps.runners.services import get_runner_service
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
@@ -756,13 +757,14 @@ async def chat_send(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 
         def configure() -> Any:
             _require_running_workspace(resolve.workspace(ctx, str(workspace.id)))
+            settings_service = SessionSettingsService()
             current = session
             if args.get("mode"):
-                current = service.set_mode(current.id, args["mode"])
+                current = settings_service.set_mode(current.id, args["mode"])
             if args.get("model"):
-                current = service.set_model(current.id, args["model"])
+                current = settings_service.set_model(current.id, args["model"])
             if "reasoning_effort" in args:
-                current = service.set_reasoning_effort(
+                current = settings_service.set_reasoning_effort(
                     current.id, args["reasoning_effort"]
                 )
             return current

@@ -104,7 +104,9 @@ async def test_socket_event_payloads(harness_workspace) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_conversation_changes_emit_for_lifecycle_mutations(harness_workspace) -> None:
+async def test_conversation_changes_emit_for_lifecycle_mutations(
+    harness_workspace,
+) -> None:
     """Synchronous and async mutations notify only the affected workspace."""
     emitted: list[dict[str, Any]] = []
 
@@ -118,7 +120,7 @@ async def test_conversation_changes_emit_for_lifecycle_mutations(harness_workspa
         prompt="Create lifecycle session",
         title="initial title",
     )
-    await sync_to_async(service.update_title)(session.id, "Renamed")
+    await sync_to_async(service.session_settings.update_title)(session.id, "Renamed")
     conversations = ConversationService(events=service.conversation_events)
     await sync_to_async(conversations.mark_session_read)(session.id)
     await sync_to_async(conversations.mark_session_unread)(session.id)
@@ -172,7 +174,9 @@ async def test_mode_change_invalidates_only_root_conversations(
         parent_id=parent.id if is_child else None,
     )
 
-    updated = await sync_to_async(service.set_mode)(session.id, f" {mode.upper()} ")
+    updated = await sync_to_async(service.session_settings.set_mode)(
+        session.id, f" {mode.upper()} "
+    )
     stored = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
     assert updated.mode == stored.mode == mode
     assert updated.agent_name == stored.agent_name == mode
@@ -208,7 +212,7 @@ async def test_invalid_mode_does_not_invalidate_conversations(
     )
 
     with pytest.raises(ValueError, match="Invalid mode"):
-        await sync_to_async(service.set_mode)(session.id, "invalid")
+        await sync_to_async(service.session_settings.set_mode)(session.id, "invalid")
 
     stored = await sync_to_async(HarnessSessionRepository.get_by_id)(session.id)
     assert stored.mode == "build"
@@ -217,7 +221,9 @@ async def test_invalid_mode_does_not_invalidate_conversations(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_conversation_change_emit_failure_is_best_effort(harness_workspace) -> None:
+async def test_conversation_change_emit_failure_is_best_effort(
+    harness_workspace,
+) -> None:
     """A failed socket emit cannot break a synchronous lifecycle mutation."""
     async def _broken_emit(_event: str, _data: dict[str, Any]) -> None:
         raise RuntimeError("socket unavailable")
@@ -228,7 +234,9 @@ async def test_conversation_change_emit_failure_is_best_effort(harness_workspace
         organization_id=harness_workspace.runner.organization_id,
         prompt="Emit failure remains harmless",
     )
-    renamed = await sync_to_async(service.update_title)(session.id, "Still works")
+    renamed = await sync_to_async(service.session_settings.update_title)(
+        session.id, "Still works"
+    )
     assert renamed.title == "Still works"
 
 

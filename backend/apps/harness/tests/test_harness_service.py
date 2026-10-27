@@ -1996,7 +1996,7 @@ def test_create_session_stores_reasoning_effort(harness_workspace) -> None:
         reasoning_effort="high",
     )
     assert session.reasoning_effort == "high"
-    updated = service.set_reasoning_effort(session.id, "low")
+    updated = service.session_settings.set_reasoning_effort(session.id, "low")
     assert updated.reasoning_effort == "low"
 
 
@@ -2165,7 +2165,7 @@ async def test_set_mode_aligns_agent_name(harness_workspace) -> None:
     service, _, _ = _service()
     session = await _db_create_session(harness_workspace)
     assert session.agent_name == "build"
-    updated = await sync_to_async(service.set_mode)(session.id, "plan")
+    updated = await sync_to_async(service.session_settings.set_mode)(session.id, "plan")
     assert updated.mode == "plan"
     assert updated.agent_name == "plan"
 

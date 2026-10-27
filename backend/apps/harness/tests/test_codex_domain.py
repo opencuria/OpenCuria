@@ -130,15 +130,15 @@ def test_create_setters_and_direct_run_reject_provider_switch(codex_setup):
     assert session.created_by_id == data.owner.id
     assert session.model == DEFAULT_CODEX_MODEL
     assert session.reasoning_effort == "high"
-    data.service.set_reasoning_effort(session.id, "ultra")
-    data.service.set_model(session.id, "chatgpt/gpt-6-astra")
+    data.service.session_settings.set_reasoning_effort(session.id, "ultra")
+    data.service.session_settings.set_model(session.id, "chatgpt/gpt-6-astra")
     for invalid in (
         "openrouter/openai/test",
         "openai-compatible/test",
         "chatgpt/invented",
     ):
         with pytest.raises(ValueError):
-            data.service.set_model(session.id, invalid)
+            data.service.session_settings.set_model(session.id, invalid)
     # Direct mutation followed by admission cannot bypass immutable state binding.
     session.model = "openrouter/openai/test"
     with pytest.raises(ValueError, match="provider cannot be changed"):
@@ -146,7 +146,7 @@ def test_create_setters_and_direct_run_reject_provider_switch(codex_setup):
     session.refresh_from_db()
     assert session.model == "chatgpt/gpt-6-astra"
     assert session.reasoning_effort == "ultra"
-    updated = data.service.set_model(session.id, "chatgpt/gpt-6-luna")
+    updated = data.service.session_settings.set_model(session.id, "chatgpt/gpt-6-luna")
     assert updated.reasoning_effort == "high"
     with pytest.raises(ValueError, match="selected provider account"):
         create_session(data, connection_id=data.account.id)

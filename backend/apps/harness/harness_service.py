@@ -71,6 +71,7 @@ from .run_timeline import (
 from .runner import HarnessRunner
 from .session_access_service import SessionAccessService
 from .session_metadata_service import SessionMetadataService, title_from_prompt
+from .session_settings_service import SessionSettingsService
 from .steering import NO_ACTIVE_RUN_CODE, SteerEntry, SteeringChannel
 from .todos.repositories import TodoRepository
 from .todos.service import TodoService
@@ -123,6 +124,9 @@ class HarnessService:
         self.skills = skills or SkillService()
         self._emit = emit
         self.conversation_events = ConversationEvents(emit=self._emit_frontend)
+        self.session_settings = SessionSettingsService(
+            sessions=self.sessions, skills=self.skills, events=self.conversation_events
+        )
         self.interactions = InteractionService(
             sessions=self.sessions,
             permissions=self.permissions,
@@ -617,114 +621,12 @@ class HarnessService:
             raise NotFoundError("HarnessSession", str(session_id))
         return session
 
-    def set_mode(self, session_id: uuid.UUID, mode: str) -> HarnessSession:
-        """Persist a mode change (plan|build) and align primary agent_name."""
-        normalized = (mode or "").strip().lower()
-        if normalized not in ("plan", "build"):
-            raise ValueError(f"Invalid mode '{mode}'; expected plan|build")
-        session = self.get_session(session_id)
-        self.sessions.ensure_interactions_available(session.workspace_id)
-        updated = self.sessions.set_mode(session, normalized)
-        if updated.parent_id is None:
-            self.conversation_events.emit_sync(updated.workspace_id)
-        return updated
-
     @staticmethod
     def _codex_provider_for_session(session) -> str:
         """Read the immutable non-secret provider binding."""
         from .engines.codex.catalog import codex_provider
 
         return codex_provider(session.model, session.engine_state)
-
-    def _validate_codex_session_config(
-        self, session, model, effort, *, user_id=None, account_ids=None
-    ) -> tuple[str, str]:
-        """Validate the candidate without mutating model/provider binding."""
-        from .engines.codex.catalog import codex_provider
-        from .engines.service import EngineCatalogService
-
-        provider = codex_provider(session.model, session.engine_state)
-        return EngineCatalogService().validate_codex_config(
-            session.organization_id,
-            user_id or getattr(session, "created_by_id", None),
-            model,
-            effort,
-            provider=provider,
-            account_ids=account_ids,
-        )
-
-    def set_model(self, session_id: uuid.UUID, model: str) -> HarnessSession:
-        """Persist a model override for subsequent runs."""
-        session = self.get_session(session_id)
-        self.sessions.ensure_interactions_available(session.workspace_id)
-        value = (model or "").strip()
-        if getattr(session, "harness_id", "native") == "claude":
-            from .engines.catalog import normalize_claude_model
-
-            value = normalize_claude_model(value)
-        if getattr(session, "harness_id", "native") == "codex":
-            value, default_effort = self._validate_codex_session_config(
-                session, value, ""
-            )
-            # Model changes within a provider remain possible when the old
-            # model supported an effort (e.g. ultra) that the new one does not.
-            try:
-                self._validate_codex_session_config(
-                    session, value, session.reasoning_effort
-                )
-            except ValueError:
-                session = self.sessions.set_reasoning_effort(session, default_effort)
-        return self.sessions.set_model(session, value)
-
-    def set_reasoning_effort(
-        self, session_id: uuid.UUID, reasoning_effort: str
-    ) -> HarnessSession:
-        """Persist a reasoning-effort override for subsequent runs."""
-        session = self.get_session(session_id)
-        self.sessions.ensure_interactions_available(session.workspace_id)
-        if getattr(session, "harness_id", "native") == "claude":
-            from .engines.catalog import normalize_claude_effort
-
-            effort = normalize_claude_effort(reasoning_effort or None)
-        elif getattr(session, "harness_id", "native") == "codex":
-            _, effort = self._validate_codex_session_config(
-                session, session.model, reasoning_effort
-            )
-        else:
-            effort = normalize_reasoning_effort(reasoning_effort)
-        return self.sessions.set_reasoning_effort(session, effort)
-
-    def update_title(self, session_id: uuid.UUID, title: str) -> HarnessSession:
-        """Rename a session (title only)."""
-        session = self.get_session(session_id)
-        self.sessions.ensure_interactions_available(session.workspace_id)
-        normalized = (title or "").strip()
-        if not normalized:
-            raise ValueError("title must not be empty")
-        updated = self.sessions.set_title(session, normalized)
-        if updated.parent_id is None:
-            self.conversation_events.emit_sync(updated.workspace_id)
-        return updated
-
-    def update_skill_ids(
-        self,
-        session_id: uuid.UUID,
-        skill_ids: list[str],
-        *,
-        user_id: int,
-        organization_id: uuid.UUID,
-    ) -> HarnessSession:
-        """Persist skill selection after validating visibility."""
-        session = self.get_session(session_id)
-        self.sessions.ensure_interactions_available(session.workspace_id)
-        normalized = SkillService.normalize_ids(skill_ids)
-        if normalized:
-            self.skills.resolve_bodies(
-                normalized,
-                user_id=user_id,
-                organization_id=organization_id,
-            )
-        return self.sessions.set_skill_ids(session, normalized)
 
     def _available_session_skill_ids(
         self,
@@ -906,7 +808,7 @@ class HarnessService:
                 normalized_model = normalize_claude_model(normalized_model)
         if getattr(session, "harness_id", "native") == "codex":
             normalized_model, normalized_effort = await sync_to_async(
-                self._validate_codex_session_config
+                self.session_settings.validate_codex_config
             )(
                 session,
                 normalized_model or session.model,
@@ -1106,7 +1008,7 @@ class HarnessService:
         session_model = (session.model or "").strip()
         if getattr(session, "harness_id", "native") == "codex":
             session.model, session.reasoning_effort = (
-                self._validate_codex_session_config(
+                self.session_settings.validate_codex_config(
                     session,
                     session_model,
                     session.reasoning_effort,
@@ -1373,7 +1275,7 @@ class HarnessService:
             if _edit_message_id is not None:
                 session.skill_ids = SkillService.normalize_ids(skill_ids)
             else:
-                session = await sync_to_async(self.update_skill_ids)(
+                session = await sync_to_async(self.session_settings.update_skill_ids)(
                     session.id,
                     skill_ids,
                     user_id=user_id,
@@ -3414,7 +3316,9 @@ class HarnessService:
                     tool="task",
                 )
             try:
-                model, _ = await sync_to_async(self._validate_codex_session_config)(
+                model, _ = await sync_to_async(
+                    self.session_settings.validate_codex_config
+                )(
                     parent,
                     model,
                     "",
@@ -3477,7 +3381,9 @@ class HarnessService:
             assert child is not None
             if override:
                 if codex_parent:
-                    await sync_to_async(self._validate_codex_session_config)(
+                    await sync_to_async(
+                        self.session_settings.validate_codex_config
+                    )(
                         child,
                         override,
                         child.reasoning_effort,

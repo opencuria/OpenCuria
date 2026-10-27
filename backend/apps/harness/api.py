@@ -3,7 +3,7 @@ REST API for harness sessions.
 
 Thin Ninja routers: validate input, resolve organization + owner
 scoping via the runners ``RunnerService`` (``get_workspace_for_user``
-equivalent), delegate to ``HarnessService``, and format responses.
+equivalent), delegate to harness services, and format responses.
 No business logic here.
 
 Fine-grained API key permissions (new keys, never auto-granted to
@@ -72,6 +72,7 @@ from .schemas import (
     timeline_to_out,
 )
 from .session_access_service import SessionAccessService
+from .session_settings_service import SessionSettingsService
 
 harness_router = Router(tags=["harness"])
 
@@ -287,16 +288,17 @@ async def send_harness_message(
             return 403, {"detail": exc.message, "code": "permission_denied"}
         SessionAccessService.require_user_promptable(session.parent_id)
         if not service.is_running(session.id):
+            settings = SessionSettingsService()
             if payload.mode and payload.mode.strip():
-                session = await sync_to_async(service.set_mode)(
+                session = await sync_to_async(settings.set_mode)(
                     session.id, payload.mode
                 )
             if payload.model and payload.model.strip():
-                session = await sync_to_async(service.set_model)(
+                session = await sync_to_async(settings.set_model)(
                     session.id, payload.model
                 )
             if payload.reasoning_effort and payload.reasoning_effort.strip():
-                session = await sync_to_async(service.set_reasoning_effort)(
+                session = await sync_to_async(settings.set_reasoning_effort)(
                     session.id, payload.reasoning_effort
                 )
         await service.start_run(
@@ -519,12 +521,13 @@ async def patch_harness_session(
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
-        service = _resolve_harness_service()
-        session = await sync_to_async(service.get_session)(session_id)
+        session = await sync_to_async(ConversationService().get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         if not (payload.title or "").strip():
             raise ValueError("title must not be empty")
-        updated = await sync_to_async(service.update_title)(session.id, payload.title)
+        updated = await sync_to_async(SessionSettingsService().update_title)(
+            session.id, payload.title
+        )
         return 200, await sync_to_async(session_to_out_with_unread)(
             ConversationService(), updated
         )
@@ -694,7 +697,9 @@ async def set_harness_session_mode(
             raise ConflictError(
                 f"Harness session '{session.id}' already has an active run"
             )
-        updated = await sync_to_async(service.set_mode)(session.id, payload.mode)
+        updated = await sync_to_async(SessionSettingsService().set_mode)(
+            session.id, payload.mode
+        )
         return 200, await sync_to_async(session_to_out_with_unread)(
             ConversationService(), updated
         )
