@@ -1,0 +1,43 @@
+{
+  "starting_commit": "94c77213aba44fbaba542765d59bdf7368657aab",
+  "selected_at_utc": "2026-10-27T02:03:18.990938+00:00",
+  "method": "secrets.randbelow(3), OS randomness, one draw",
+  "top_three": [
+    {
+      "rank": 1,
+      "id": "backend-workspace-plugin-readiness",
+      "evidence": {
+        "plugins": 15,
+        "queries": 19,
+        "p50_ms": 12.891,
+        "p95_ms": 15.627
+      },
+      "assessment": "High confidence; eliminate per-plugin SQL with existing bulk repositories. Frequent MCP workspace inspection/configuration; preserve OAuth and tenant validation."
+    },
+    {
+      "rank": 2,
+      "id": "runner-archive-upload-event-loop",
+      "evidence": {
+        "files": 2000,
+        "compressed_bytes": 223825,
+        "upload_p50_ms": 343.398,
+        "loop_max_delay_p50_ms": 342.465
+      },
+      "assessment": "High confidence; blocks every runner stream during upload conversion. Thread offload with bounded lifetime; retain cancellation and capture fencing."
+    },
+    {
+      "rank": 3,
+      "id": "runner-untracked-git-diff",
+      "evidence": {
+        "files": 50,
+        "guest_commands": 55,
+        "local_p50_ms": 103.904,
+        "p50_with_5ms_simulated_diff_delay": 383.164
+      },
+      "assessment": "High confidence on linear commands; bounded concurrent reads can reduce diff latency, but SSH budgets, cancellation and memory require care."
+    }
+  ],
+  "selected_index": 0,
+  "redraws": [],
+  "selected_id": "backend-workspace-plugin-readiness"
+}

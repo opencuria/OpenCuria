@@ -165,15 +165,15 @@ class PluginMcpServerRepository:
         return PluginMcpServer.objects.filter(plugin_id=plugin_id).order_by("name")
 
     @staticmethod
-    def list_oauth_for_requirement(
-        plugin_id: uuid.UUID, requirement_key: str
+    def list_oauth_for_plugins(
+        plugin_ids: list[uuid.UUID],
     ) -> QuerySet[PluginMcpServer]:
-        """Return OAuth servers mapped to one plugin requirement."""
-        return PluginMcpServer.objects.filter(
-            plugin_id=plugin_id,
-            auth_type="oauth",
-            oauth_requirement_key=requirement_key,
-        ).order_by("name")
+        """Load only OAuth binding fields needed for workspace readiness."""
+        return (
+            PluginMcpServer.objects.filter(plugin_id__in=plugin_ids, auth_type="oauth")
+            .only("plugin_id", "oauth_requirement_key", "url")
+            .order_by("plugin_id", "name")
+        )
 
     @staticmethod
     def list_for_plugins(

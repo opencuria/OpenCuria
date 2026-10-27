@@ -574,13 +574,33 @@ class PluginService:
     def _workspace_required_gaps(
         self,
         *,
-        plugin: Plugin,
+        plugins: list[Plugin],
         credentials: list,
         owner_id: int,
         org_id: uuid.UUID,
-    ) -> list[dict]:
-        """Return required gaps after fail-closed credential ownership checks."""
+    ) -> dict[uuid.UUID, list[dict]]:
+        """Batch dependency reads and apply fail-closed ownership checks once."""
         from apps.credentials.mcp_oauth import oauth_credential_status
+
+        if not plugins:
+            return {}
+        plugins_by_id = {plugin.id: plugin for plugin in plugins}
+        requirements = list(self.requirements.list_for_plugins(list(plugins_by_id)))
+        oauth_plugin_ids = list(
+            {
+                requirement.plugin_id
+                for requirement in requirements
+                if requirement.required
+                and requirement.credential_service.credential_type == "mcp_oauth"
+            }
+        )
+        servers_by_requirement: dict[tuple[uuid.UUID, str], list[PluginMcpServer]] = (
+            defaultdict(list)
+        )
+        for server in self.mcp_servers.list_oauth_for_plugins(oauth_plugin_ids):
+            servers_by_requirement[
+                (server.plugin_id, server.oauth_requirement_key)
+            ].append(server)
 
         valid_by_service: dict[uuid.UUID, list] = {}
         for credential in credentials:
@@ -599,16 +619,17 @@ class PluginService:
                 continue
             valid_by_service.setdefault(credential.service_id, []).append(credential)
 
-        gaps = []
-        requirements = self.requirements.list_for_plugin(plugin.id)
+        gaps: dict[uuid.UUID, list[dict]] = {
+            plugin_id: [] for plugin_id in plugins_by_id
+        }
         for requirement in requirements:
             if not requirement.required:
                 continue
             candidates = valid_by_service.get(requirement.credential_service_id, [])
             ready = bool(candidates)
             if requirement.credential_service.credential_type == "mcp_oauth":
-                servers = self.mcp_servers.list_oauth_for_requirement(
-                    plugin.id, requirement.key
+                servers = servers_by_requirement.get(
+                    (requirement.plugin_id, requirement.key), []
                 )
                 ready = bool(servers) and all(
                     requirement.credential_service.oauth_server_url == server.url
@@ -620,7 +641,8 @@ class PluginService:
                     for server in servers
                 )
             if not ready:
-                gaps.append(
+                plugin = plugins_by_id[requirement.plugin_id]
+                gaps[plugin.id].append(
                     {
                         "plugin_id": str(plugin.id),
                         "plugin_name": plugin.name,
@@ -663,18 +685,14 @@ class PluginService:
                 + ", ".join(str(pid) for pid in unavailable),
                 code="plugin_not_available",
             )
-        gaps = []
-        for plugin_id in desired:
-            if plugin_id not in unavailable:
-                gaps.extend(
-                    self._workspace_required_gaps(
-                        plugin=visible[plugin_id],
-                        credentials=credentials,
-                        owner_id=owner.id,
-                        org_id=org_id,
-                    )
-                )
-        return gaps
+        plugins = [visible[pid] for pid in desired if pid not in unavailable]
+        gaps = self._workspace_required_gaps(
+            plugins=plugins,
+            credentials=credentials,
+            owner_id=owner.id,
+            org_id=org_id,
+        )
+        return [gap for plugin in plugins for gap in gaps[plugin.id]]
 
     def list_workspace_plugins(self, *, workspace, org_id: uuid.UUID) -> list[dict]:
         """List org-enabled plugins with workspace state + credential gaps."""
@@ -688,14 +706,15 @@ class PluginService:
         plugins = [p for p in plugins if p.id in enabled_ids]
         ws_enabled = self.workspace_activations.enabled_plugin_ids(workspace.id)
         attached_credentials = CredentialSvc().list_workspace_credentials(workspace.id)
+        gaps = self._workspace_required_gaps(
+            plugins=plugins,
+            credentials=attached_credentials,
+            owner_id=workspace.created_by_id,
+            org_id=org_id,
+        )
         result = []
         for plugin in plugins:
-            missing = self._workspace_required_gaps(
-                plugin=plugin,
-                credentials=attached_credentials,
-                owner_id=workspace.created_by_id,
-                org_id=org_id,
-            )
+            missing = gaps[plugin.id]
             result.append(
                 {
                     "id": plugin.id,

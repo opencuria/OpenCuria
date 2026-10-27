@@ -1,0 +1,372 @@
+{
+  "order": [
+    "before",
+    "after",
+    "after-repeat",
+    "before-repeat"
+  ],
+  "samples_per_variant": 62,
+  "all_output_hashes_match": true,
+  "results": [
+    {
+      "kind": "ordinary",
+      "plugins": 0,
+      "scope": "list_workspace_plugins",
+      "before": {
+        "query_count": 4,
+        "p50_ms": 2.84,
+        "p95_ms": 3.836,
+        "peak_python_allocated_bytes_median": 81535.0
+      },
+      "after": {
+        "query_count": 4,
+        "p50_ms": 2.812,
+        "p95_ms": 3.285,
+        "peak_python_allocated_bytes_median": 81535.0
+      },
+      "p50_reduction_percent": 1.0
+    },
+    {
+      "kind": "ordinary",
+      "plugins": 0,
+      "scope": "validate_workspace_plugin_selection",
+      "before": {
+        "query_count": 3,
+        "p50_ms": 2.431,
+        "p95_ms": 2.586,
+        "peak_python_allocated_bytes_median": 75224.0
+      },
+      "after": {
+        "query_count": 3,
+        "p50_ms": 2.436,
+        "p95_ms": 2.507,
+        "peak_python_allocated_bytes_median": 75499.0
+      },
+      "p50_reduction_percent": -0.2
+    },
+    {
+      "kind": "ordinary",
+      "plugins": 1,
+      "scope": "list_workspace_plugins",
+      "before": {
+        "query_count": 5,
+        "p50_ms": 3.529,
+        "p95_ms": 3.608,
+        "peak_python_allocated_bytes_median": 81421.0
+      },
+      "after": {
+        "query_count": 5,
+        "p50_ms": 3.992,
+        "p95_ms": 4.192,
+        "peak_python_allocated_bytes_median": 81121.0
+      },
+      "p50_reduction_percent": -13.1
+    },
+    {
+      "kind": "ordinary",
+      "plugins": 1,
+      "scope": "validate_workspace_plugin_selection",
+      "before": {
+        "query_count": 4,
+        "p50_ms": 3.162,
+        "p95_ms": 5.075,
+        "peak_python_allocated_bytes_median": 75265.0
+      },
+      "after": {
+        "query_count": 4,
+        "p50_ms": 3.612,
+        "p95_ms": 4.291,
+        "peak_python_allocated_bytes_median": 75590.0
+      },
+      "p50_reduction_percent": -14.2
+    },
+    {
+      "kind": "ordinary",
+      "plugins": 5,
+      "scope": "list_workspace_plugins",
+      "before": {
+        "query_count": 9,
+        "p50_ms": 6.284,
+        "p95_ms": 6.756,
+        "peak_python_allocated_bytes_median": 86254.0
+      },
+      "after": {
+        "query_count": 5,
+        "p50_ms": 4.299,
+        "p95_ms": 4.509,
+        "peak_python_allocated_bytes_median": 86184.0
+      },
+      "p50_reduction_percent": 31.6
+    },
+    {
+      "kind": "ordinary",
+      "plugins": 5,
+      "scope": "validate_workspace_plugin_selection",
+      "before": {
+        "query_count": 8,
+        "p50_ms": 6.072,
+        "p95_ms": 8.015,
+        "peak_python_allocated_bytes_median": 82326.0
+      },
+      "after": {
+        "query_count": 4,
+        "p50_ms": 3.902,
+        "p95_ms": 3.989,
+        "peak_python_allocated_bytes_median": 80696.0
+      },
+      "p50_reduction_percent": 35.7
+    },
+    {
+      "kind": "ordinary",
+      "plugins": 15,
+      "scope": "list_workspace_plugins",
+      "before": {
+        "query_count": 19,
+        "p50_ms": 13.415,
+        "p95_ms": 18.209,
+        "peak_python_allocated_bytes_median": 114524.0
+      },
+      "after": {
+        "query_count": 5,
+        "p50_ms": 4.944,
+        "p95_ms": 5.42,
+        "peak_python_allocated_bytes_median": 118344.0
+      },
+      "p50_reduction_percent": 63.1
+    },
+    {
+      "kind": "ordinary",
+      "plugins": 15,
+      "scope": "validate_workspace_plugin_selection",
+      "before": {
+        "query_count": 18,
+        "p50_ms": 12.774,
+        "p95_ms": 14.298,
+        "peak_python_allocated_bytes_median": 107395.0
+      },
+      "after": {
+        "query_count": 4,
+        "p50_ms": 4.524,
+        "p95_ms": 5.923,
+        "peak_python_allocated_bytes_median": 112671.0
+      },
+      "p50_reduction_percent": 64.6
+    },
+    {
+      "kind": "ordinary",
+      "plugins": 50,
+      "scope": "list_workspace_plugins",
+      "before": {
+        "query_count": 54,
+        "p50_ms": 36.953,
+        "p95_ms": 41.842,
+        "peak_python_allocated_bytes_median": 202848.0
+      },
+      "after": {
+        "query_count": 5,
+        "p50_ms": 7.128,
+        "p95_ms": 8.509,
+        "peak_python_allocated_bytes_median": 246340.0
+      },
+      "p50_reduction_percent": 80.7
+    },
+    {
+      "kind": "ordinary",
+      "plugins": 50,
+      "scope": "validate_workspace_plugin_selection",
+      "before": {
+        "query_count": 53,
+        "p50_ms": 36.462,
+        "p95_ms": 38.214,
+        "peak_python_allocated_bytes_median": 186901.0
+      },
+      "after": {
+        "query_count": 4,
+        "p50_ms": 7.25,
+        "p95_ms": 10.009,
+        "peak_python_allocated_bytes_median": 244399.0
+      },
+      "p50_reduction_percent": 80.1
+    },
+    {
+      "kind": "oauth",
+      "plugins": 0,
+      "scope": "list_workspace_plugins",
+      "before": {
+        "query_count": 4,
+        "p50_ms": 2.817,
+        "p95_ms": 2.883,
+        "peak_python_allocated_bytes_median": 80346.0
+      },
+      "after": {
+        "query_count": 4,
+        "p50_ms": 2.827,
+        "p95_ms": 3.075,
+        "peak_python_allocated_bytes_median": 80446.0
+      },
+      "p50_reduction_percent": -0.4
+    },
+    {
+      "kind": "oauth",
+      "plugins": 0,
+      "scope": "validate_workspace_plugin_selection",
+      "before": {
+        "query_count": 3,
+        "p50_ms": 2.431,
+        "p95_ms": 2.492,
+        "peak_python_allocated_bytes_median": 75099.0
+      },
+      "after": {
+        "query_count": 3,
+        "p50_ms": 2.454,
+        "p95_ms": 2.872,
+        "peak_python_allocated_bytes_median": 75049.0
+      },
+      "p50_reduction_percent": -0.9
+    },
+    {
+      "kind": "oauth",
+      "plugins": 1,
+      "scope": "list_workspace_plugins",
+      "before": {
+        "query_count": 6,
+        "p50_ms": 4.438,
+        "p95_ms": 4.576,
+        "peak_python_allocated_bytes_median": 81696.0
+      },
+      "after": {
+        "query_count": 6,
+        "p50_ms": 4.388,
+        "p95_ms": 4.954,
+        "peak_python_allocated_bytes_median": 81296.0
+      },
+      "p50_reduction_percent": 1.1
+    },
+    {
+      "kind": "oauth",
+      "plugins": 1,
+      "scope": "validate_workspace_plugin_selection",
+      "before": {
+        "query_count": 5,
+        "p50_ms": 4.157,
+        "p95_ms": 4.607,
+        "peak_python_allocated_bytes_median": 75347.0
+      },
+      "after": {
+        "query_count": 5,
+        "p50_ms": 4.004,
+        "p95_ms": 4.369,
+        "peak_python_allocated_bytes_median": 75497.0
+      },
+      "p50_reduction_percent": 3.7
+    },
+    {
+      "kind": "oauth",
+      "plugins": 5,
+      "scope": "list_workspace_plugins",
+      "before": {
+        "query_count": 14,
+        "p50_ms": 10.849,
+        "p95_ms": 11.549,
+        "peak_python_allocated_bytes_median": 93351.0
+      },
+      "after": {
+        "query_count": 6,
+        "p50_ms": 5.596,
+        "p95_ms": 6.051,
+        "peak_python_allocated_bytes_median": 88030.0
+      },
+      "p50_reduction_percent": 48.4
+    },
+    {
+      "kind": "oauth",
+      "plugins": 5,
+      "scope": "validate_workspace_plugin_selection",
+      "before": {
+        "query_count": 13,
+        "p50_ms": 10.335,
+        "p95_ms": 10.523,
+        "peak_python_allocated_bytes_median": 92216.0
+      },
+      "after": {
+        "query_count": 5,
+        "p50_ms": 5.185,
+        "p95_ms": 7.952,
+        "peak_python_allocated_bytes_median": 86649.0
+      },
+      "p50_reduction_percent": 49.8
+    },
+    {
+      "kind": "oauth",
+      "plugins": 15,
+      "scope": "list_workspace_plugins",
+      "before": {
+        "query_count": 34,
+        "p50_ms": 26.638,
+        "p95_ms": 27.33,
+        "peak_python_allocated_bytes_median": 126059.0
+      },
+      "after": {
+        "query_count": 6,
+        "p50_ms": 8.556,
+        "p95_ms": 9.467,
+        "peak_python_allocated_bytes_median": 138656.0
+      },
+      "p50_reduction_percent": 67.9
+    },
+    {
+      "kind": "oauth",
+      "plugins": 15,
+      "scope": "validate_workspace_plugin_selection",
+      "before": {
+        "query_count": 33,
+        "p50_ms": 26.279,
+        "p95_ms": 27.331,
+        "peak_python_allocated_bytes_median": 120355.0
+      },
+      "after": {
+        "query_count": 5,
+        "p50_ms": 7.983,
+        "p95_ms": 9.46,
+        "peak_python_allocated_bytes_median": 135499.0
+      },
+      "p50_reduction_percent": 69.6
+    },
+    {
+      "kind": "oauth",
+      "plugins": 50,
+      "scope": "list_workspace_plugins",
+      "before": {
+        "query_count": 104,
+        "p50_ms": 82.186,
+        "p95_ms": 87.187,
+        "peak_python_allocated_bytes_median": 234537.0
+      },
+      "after": {
+        "query_count": 6,
+        "p50_ms": 17.369,
+        "p95_ms": 18.025,
+        "peak_python_allocated_bytes_median": 325161.0
+      },
+      "p50_reduction_percent": 78.9
+    },
+    {
+      "kind": "oauth",
+      "plugins": 50,
+      "scope": "validate_workspace_plugin_selection",
+      "before": {
+        "query_count": 103,
+        "p50_ms": 82.129,
+        "p95_ms": 98.3,
+        "peak_python_allocated_bytes_median": 210886.0
+      },
+      "after": {
+        "query_count": 5,
+        "p50_ms": 17.03,
+        "p95_ms": 18.627,
+        "peak_python_allocated_bytes_median": 321831.0
+      },
+      "p50_reduction_percent": 79.3
+    }
+  ]
+}
