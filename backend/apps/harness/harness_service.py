@@ -69,6 +69,7 @@ from .run_timeline import (
     tail_remainder,
 )
 from .runner import HarnessRunner
+from .session_access_service import SessionAccessService
 from .session_metadata_service import SessionMetadataService, title_from_prompt
 from .steering import NO_ACTIVE_RUN_CODE, SteerEntry, SteeringChannel
 from .todos.repositories import TodoRepository
@@ -605,16 +606,6 @@ class HarnessService:
             raise NotFoundError("HarnessSession", str(session_id))
         return session
 
-    def ensure_user_promptable(self, session: HarnessSession) -> None:
-        """Raise when users must not send follow-up prompts to *session*.
-
-        Subagent child sessions (``parent_id`` set) are launched internally
-        and are not a user-addressable chat. ``start_run`` itself stays
-        allowed so the task tool can start the child run.
-        """
-        if session.parent_id is not None:
-            raise ValueError("Cannot send messages to a subagent session")
-
     def get_session_for_workspace(
         self,
         session_id: uuid.UUID,
@@ -823,7 +814,7 @@ class HarnessService:
         await sync_to_async(self.sessions.ensure_interactions_available)(
             session.workspace_id
         )
-        self.ensure_user_promptable(session)
+        SessionAccessService.require_user_promptable(session.parent_id)
         # Fork is read-only (no assertNotBusy, like OpenCode): it must
         # also work while the source session has an active run.
         if message_id is not None:
@@ -887,17 +878,18 @@ class HarnessService:
         await sync_to_async(self.sessions.ensure_interactions_available)(
             session.workspace_id
         )
-        self.ensure_user_promptable(session)
+        SessionAccessService.require_user_promptable(session.parent_id)
         if self.is_running(session.id):
             raise ConflictError(
                 f"Harness session '{session.id}' already has an active run"
             )
-        if getattr(session, "harness_id", "native") != "native":
-            owner_id = getattr(session, "created_by_id", None)
-            if user_id is None or owner_id is None or str(user_id) != str(owner_id):
-                raise AuthenticationError(
-                    "Only the session owner may edit an external conversation"
-                )
+        owner_id = getattr(session, "created_by_id", None)
+        SessionAccessService.require_external_owner(
+            engine_id=getattr(session, "harness_id", "native"),
+            owner_id=owner_id,
+            user_id=user_id,
+            message="Only the session owner may edit an external conversation",
+        )
         await self._ensure_external_attempt_reconciled(session, force=True)
         normalized_mode = None
         normalized_model = None
@@ -1262,16 +1254,11 @@ class HarnessService:
                     "Subagent provider accounts inherit their owner's snapshot"
                 )
             run_user_id = snapshot_owner
-        if engine_id != "native":
-            owner_id = getattr(session, "created_by_id", None)
-            if (
-                run_user_id is None
-                or owner_id is None
-                or str(run_user_id) != str(owner_id)
-            ):
-                raise AuthenticationError(
-                    "Only the session owner may use its external engine connection"
-                )
+        SessionAccessService.require_external_owner(
+            engine_id=engine_id,
+            owner_id=getattr(session, "created_by_id", None),
+            user_id=run_user_id,
+        )
         if engine_id == "codex":
             user_id = run_user_id
         self._remember_run(session)
@@ -1832,7 +1819,7 @@ class HarnessService:
                 (idle, stopping, or already settled).
             ValueError: For empty/oversized prompts and subagent sessions.
         """
-        self.ensure_user_promptable(session)
+        SessionAccessService.require_user_promptable(session.parent_id)
         channel = self._steering_channel(session.id)
         if (
             channel is None

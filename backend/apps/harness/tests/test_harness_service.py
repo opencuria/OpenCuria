@@ -43,6 +43,7 @@ from apps.harness.repositories import (
 )
 from apps.harness.run_events import assistant_run_finished
 from apps.harness.run_timeline import FRONTEND_EVENT_PART, tail_remainder
+from apps.harness.session_access_service import SessionAccessService
 from apps.harness.tests.helpers import parts_for_session
 from apps.harness.tools.truncate import MAX_BYTES
 from common.exceptions import ConflictError
@@ -1869,7 +1870,7 @@ async def test_patch_event_emits_bounded_display(harness_workspace) -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-def test_ensure_user_promptable_rejects_child_session(harness_workspace) -> None:
+def test_session_access_rejects_user_prompts_to_child(harness_workspace) -> None:
     """Users cannot prompt subagent child sessions; root sessions stay open."""
     service, _, _ = _service()
     parent = service.create_session(
@@ -1883,9 +1884,9 @@ def test_ensure_user_promptable_rejects_child_session(harness_workspace) -> None
         prompt="child",
         parent_id=parent.id,
     )
-    service.ensure_user_promptable(parent)
+    SessionAccessService.require_user_promptable(parent.parent_id)
     with pytest.raises(ValueError, match="subagent"):
-        service.ensure_user_promptable(child)
+        SessionAccessService.require_user_promptable(child.parent_id)
 
 
 @pytest.mark.django_db(transaction=True)

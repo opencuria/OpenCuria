@@ -411,3 +411,64 @@ def test_tool_steps_are_named_once_and_repeats_fold():
     )
     assert _tool_label("read", "") == "read"
     assert _collapse_repeats(["a", "a", "b", "a"]) == ["a (×2)", "b", "a"]
+
+
+@pytest.mark.parametrize("engine", ["claude", "codex"])
+@pytest.mark.parametrize("missing_owner", [False, True])
+@pytest.mark.parametrize("tool", ["chat_send", "chat_respond"])
+async def test_external_chat_actions_preserve_owner_denial_contract(
+    world, engine: str, missing_owner: bool, tool: str
+) -> None:
+    """An owned workspace can contain a chat owned by another personal account."""
+
+    def create() -> HarnessSession:
+        owner = (
+            None
+            if missing_owner
+            else User.objects.create_user(
+                email=f"other-chat-owner-{uuid.uuid4()}@example.com"
+            )
+        )
+        return HarnessSession.objects.create(
+            workspace=world.workspace,
+            organization_id=world.org.id,
+            harness_id=engine,
+            created_by=owner,
+        )
+
+    session = await sync_to_async(create)()
+    arguments = (
+        {"prompt": "hello"}
+        if tool == "chat_send"
+        else {"request_id": str(uuid.uuid4()), "permission": "once"}
+    )
+    error = await fails(world.ctx(), tool, chat_id=str(session.id), **arguments)
+
+    assert error == (
+        "Error: Only the user who started this chat can use its external engine "
+        "connection."
+    )
+    assert not await sync_to_async(
+        HarnessMessage.objects.filter(session=session).exists
+    )()
+
+
+async def test_chat_send_to_subagent_preserves_parent_hint(world) -> None:
+    """The MCP error points the caller at the parent without starting a turn."""
+    parent = await sync_to_async(_chat)(world)
+    child = await sync_to_async(HarnessSession.objects.create)(
+        workspace=world.workspace,
+        organization_id=world.org.id,
+        created_by=world.user,
+        parent=parent,
+    )
+
+    error = await fails(world.ctx(), "chat_send", chat_id=str(child.id), prompt="hi")
+
+    assert error == (
+        "Error: This is a subagent chat started by another agent; send messages to "
+        f"its parent chat {parent.id} instead."
+    )
+    assert not await sync_to_async(
+        HarnessMessage.objects.filter(session=child).exists
+    )()

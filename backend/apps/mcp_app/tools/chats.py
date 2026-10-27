@@ -20,9 +20,10 @@ from asgiref.sync import sync_to_async
 from apps.harness.conversation_service import ConversationService
 from apps.harness.harness_service import get_harness_service
 from apps.harness.schemas import part_to_out, timeline_to_out
+from apps.harness.session_access_service import SessionAccessService
 from apps.runners.enums import WorkspaceStatus
 from apps.runners.services import get_runner_service
-from common.exceptions import ConflictError, NotFoundError
+from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .. import resolve
 from ..context import ToolContext
@@ -82,25 +83,6 @@ def _owned_chat(ctx: ToolContext, chat_id: str) -> tuple[Any, Any]:
     except NotFoundError:
         raise not_found from None
     return session, workspace
-
-
-def _require_owner(ctx: ToolContext, session: Any) -> None:
-    """External engines run on their owner's personal account."""
-    if getattr(session, "harness_id", "native") != "native" and str(
-        session.created_by_id
-    ) != str(ctx.user.id):
-        raise ToolError(
-            "Only the user who started this chat can use its external engine "
-            "connection."
-        )
-
-
-def _require_promptable(session: Any) -> None:
-    if session.parent_id is not None:
-        raise ToolError(
-            "This is a subagent chat started by another agent; send messages to "
-            f"its parent chat {session.parent_id} instead."
-        )
 
 
 def _require_running_workspace(workspace: Any) -> None:
@@ -733,8 +715,24 @@ async def chat_send(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 
     def prepare() -> tuple[Any, Any, int, list[str] | None]:
         session, workspace = _owned_chat(ctx, args["chat_id"])
-        _require_promptable(session)
-        _require_owner(ctx, session)
+        try:
+            SessionAccessService.require_user_promptable(session.parent_id)
+        except ValueError:
+            raise ToolError(
+                "This is a subagent chat started by another agent; send messages to "
+                f"its parent chat {session.parent_id} instead."
+            ) from None
+        try:
+            SessionAccessService.require_external_owner(
+                engine_id=getattr(session, "harness_id", "native"),
+                owner_id=session.created_by_id,
+                user_id=ctx.user.id,
+            )
+        except AuthenticationError:
+            raise ToolError(
+                "Only the user who started this chat can use its external engine "
+                "connection."
+            ) from None
         skill_ids = resolve.skill_ids(ctx, args["skills"]) if "skills" in args else None
         count = len(service.list_timeline_messages(session.id))
         return session, workspace, count, skill_ids
@@ -836,7 +834,17 @@ async def chat_respond(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
 
     def locate() -> tuple[Any, dict[str, Any], Any, int]:
         session, _workspace = _owned_chat(ctx, args["chat_id"])
-        _require_owner(ctx, session)
+        try:
+            SessionAccessService.require_external_owner(
+                engine_id=getattr(session, "harness_id", "native"),
+                owner_id=session.created_by_id,
+                user_id=ctx.user.id,
+            )
+        except AuthenticationError:
+            raise ToolError(
+                "Only the user who started this chat can use its external engine "
+                "connection."
+            ) from None
         request_id = str(args["request_id"]).strip()
         pending = {item["request_id"]: item for item in _pending_inputs(session)}
         request = pending.get(request_id)

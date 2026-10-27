@@ -71,6 +71,7 @@ from .schemas import (
     session_to_out_with_unread,
     timeline_to_out,
 )
+from .session_access_service import SessionAccessService
 
 harness_router = Router(tags=["harness"])
 
@@ -110,16 +111,6 @@ def _non_empty(value: str) -> str | None:
     """Return the stripped string or None when blank (edit no-op)."""
     stripped = (value or "").strip()
     return stripped or None
-
-
-def _require_claude_session_owner(session, user_id: object) -> None:
-    """Prevent another workspace collaborator from using personal Claude auth."""
-    if getattr(session, "harness_id", "native") != "native" and str(
-        getattr(session, "created_by_id", "")
-    ) != str(user_id):
-        raise AuthenticationError(
-            "Only the session owner may use its external engine connection"
-        )
 
 
 def _owned_workspace(request: HttpRequest, org_id: uuid.UUID, workspace_id: uuid.UUID):  # type: ignore[no-untyped-def]
@@ -287,10 +278,14 @@ async def send_harness_message(
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         try:
-            _require_claude_session_owner(session, request.user.id)
+            SessionAccessService.require_external_owner(
+                engine_id=getattr(session, "harness_id", "native"),
+                owner_id=getattr(session, "created_by_id", None),
+                user_id=request.user.id,
+            )
         except AuthenticationError as exc:
             return 403, {"detail": exc.message, "code": "permission_denied"}
-        await sync_to_async(service.ensure_user_promptable)(session)
+        SessionAccessService.require_user_promptable(session.parent_id)
         if not service.is_running(session.id):
             if payload.mode and payload.mode.strip():
                 session = await sync_to_async(service.set_mode)(
@@ -357,7 +352,11 @@ async def steer_harness_session(
         service = _resolve_harness_service()
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
-        _require_claude_session_owner(session, request.user.id)
+        SessionAccessService.require_external_owner(
+            engine_id=getattr(session, "harness_id", "native"),
+            owner_id=getattr(session, "created_by_id", None),
+            user_id=request.user.id,
+        )
         entry = await service.steer_run(
             session, payload.prompt, user_id=request.user.id
         )
@@ -391,7 +390,11 @@ async def withdraw_harness_steer(
         service = _resolve_harness_service()
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
-        _require_claude_session_owner(session, request.user.id)
+        SessionAccessService.require_external_owner(
+            engine_id=getattr(session, "harness_id", "native"),
+            owner_id=getattr(session, "created_by_id", None),
+            user_id=request.user.id,
+        )
         entry = await service.withdraw_steer(session, str(steer_id))
         return 200, _steer_to_out(entry)
     except AuthenticationError as exc:
@@ -466,7 +469,11 @@ async def edit_harness_message(
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         try:
-            _require_claude_session_owner(session, request.user.id)
+            SessionAccessService.require_external_owner(
+                engine_id=getattr(session, "harness_id", "native"),
+                owner_id=getattr(session, "created_by_id", None),
+                user_id=request.user.id,
+            )
         except AuthenticationError as exc:
             return 403, {"detail": exc.message, "code": "permission_denied"}
         await service.edit_user_message(
@@ -824,7 +831,11 @@ async def resolve_harness_permission(
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         try:
-            _require_claude_session_owner(session, request.user.id)
+            SessionAccessService.require_external_owner(
+                engine_id=getattr(session, "harness_id", "native"),
+                owner_id=getattr(session, "created_by_id", None),
+                user_id=request.user.id,
+            )
         except AuthenticationError as exc:
             return 403, {"detail": exc.message, "code": "permission_denied"}
         outcome = await service.interactions.resolve_permission(
@@ -869,7 +880,11 @@ async def resolve_harness_question(
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         try:
-            _require_claude_session_owner(session, request.user.id)
+            SessionAccessService.require_external_owner(
+                engine_id=getattr(session, "harness_id", "native"),
+                owner_id=getattr(session, "created_by_id", None),
+                user_id=request.user.id,
+            )
         except AuthenticationError as exc:
             return 403, {"detail": exc.message, "code": "permission_denied"}
         outcome = await service.interactions.resolve_question(

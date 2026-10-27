@@ -11,7 +11,6 @@ from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.test import Client
 
-from apps.harness.api import _require_claude_session_owner
 from apps.harness.engines.codex.auth import resolve_codex_auth
 from apps.harness.engines.codex.catalog import (
     DEFAULT_CODEX_MODEL,
@@ -27,6 +26,7 @@ from apps.harness.models import HarnessSession
 from apps.harness.provider_accounts import ProviderAccountService
 from apps.harness.providers.models_catalog import clear_models_cache
 from apps.harness.repositories import HarnessMessageRepository
+from apps.harness.session_access_service import SessionAccessService
 from apps.organizations.models import Membership
 from apps.scheduled_tasks.services import ScheduledTaskService
 from common.exceptions import AuthenticationError, NotFoundError
@@ -198,7 +198,11 @@ def test_auth_snapshot_acl_explicit_empty_and_secrets(codex_setup):
         resolve_codex_auth(data.org, stranger.id, snapshot, DEFAULT_CODEX_MODEL)
     session = create_session_after_reselect(data)
     with pytest.raises(AuthenticationError):
-        _require_claude_session_owner(session, stranger.id)
+        SessionAccessService.require_external_owner(
+            engine_id=session.harness_id,
+            owner_id=session.created_by_id,
+            user_id=stranger.id,
+        )
 
 
 def create_session_after_reselect(data):
