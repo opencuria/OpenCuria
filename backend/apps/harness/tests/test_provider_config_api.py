@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -13,7 +13,11 @@ from django.test import Client
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.harness.models import ProviderConfig
 from apps.harness.provider_accounts import ProviderAccountService
-from apps.harness.providers.chatgpt_oauth import DeviceFlowStart, OAuthTokens
+from apps.harness.providers.chatgpt_oauth import (
+    DeviceFlowPollResult,
+    DeviceFlowStart,
+    OAuthTokens,
+)
 from apps.organizations.models import Membership, MembershipRole, Organization
 from common.utils import generate_api_token, hash_token
 
@@ -206,58 +210,63 @@ def test_provider_models_use_the_callers_selected_account(provider_setup, monkey
 
 
 @pytest.mark.django_db(transaction=True)
-def test_chatgpt_oauth_start_status_and_cancel(provider_setup):
+def test_chatgpt_oauth_start_status_and_cancel(provider_setup, monkeypatch):
     """OAuth flow IDs survive polling/cancel, and returned account metadata is safe."""
     client = _client(
         user=provider_setup["owner"], org=provider_setup["org"], permissions=PROVIDERS
     )
     base = "/api/v1/provider-config/providers/chatgpt/oauth/"
 
-    with patch(
+    monkeypatch.setattr(
         "apps.harness.providers.chatgpt_oauth.start_device_flow",
-        new_callable=AsyncMock,
-    ) as mock_start:
-        mock_start.return_value = DeviceFlowStart(
-            device_auth_id="auth-1",
-            user_code="ABCD-1234",
-            verification_url="https://auth.openai.com/codex/device",
-            interval=5,
-        )
-        start = client.post(f"{base}start/")
+        AsyncMock(
+            return_value=DeviceFlowStart(
+                "auth-1", "ABCD-1234", "https://auth.openai.com/codex/device", 5
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "apps.harness.providers.chatgpt_oauth.poll_device_flow_once",
+        AsyncMock(
+            side_effect=[
+                DeviceFlowPollResult(status="pending"),
+                DeviceFlowPollResult(
+                    status="complete",
+                    tokens=OAuthTokens(
+                        "access-token", "refresh-token", 9999999999, "acc-42", None
+                    ),
+                ),
+            ]
+        ),
+    )
+    start = client.post(f"{base}start/", data={}, content_type="application/json")
     assert start.status_code == 200, start.content[:500]
     body = start.json()
     assert body["user_code"] == "ABCD-1234"
     assert body["expires_in"] == 600
     flow_id = body["flow_id"]
+    assert client.get(f"{base}status/").status_code == 422
+    assert client.get(f"{base}status/?flow_id=invalid").status_code == 422
+    for payload in ({}, {"flow_id": None}, {"flow_id": "invalid"}):
+        response = client.post(
+            f"{base}cancel/", data=payload, content_type="application/json"
+        )
+        assert response.status_code == 422
 
-    with patch(
-        "apps.harness.providers.chatgpt_oauth.poll_device_flow_once",
-        new_callable=AsyncMock,
-    ) as mock_poll:
-        from apps.harness.providers.chatgpt_oauth import DeviceFlowPollResult
+    read_client = _client(
+        user=provider_setup["owner"], org=provider_setup["org"], permissions=READ
+    )
+    assert read_client.get(f"{base}status/?flow_id={flow_id}").status_code == 403
+    denied_cancel = read_client.post(
+        f"{base}cancel/", data={"flow_id": flow_id}, content_type="application/json"
+    )
+    assert denied_cancel.status_code == 403
 
-        mock_poll.return_value = DeviceFlowPollResult(status="pending")
-        pending = client.get(f"{base}status/?flow_id={flow_id}")
+    pending = client.get(f"{base}status/?flow_id={flow_id}")
     assert pending.status_code == 200
     assert pending.json()["status"] == "pending"
 
-    with patch(
-        "apps.harness.providers.chatgpt_oauth.poll_device_flow_once",
-        new_callable=AsyncMock,
-    ) as mock_poll:
-        from apps.harness.providers.chatgpt_oauth import DeviceFlowPollResult
-
-        mock_poll.return_value = DeviceFlowPollResult(
-            status="complete",
-            tokens=OAuthTokens(
-                access="access-token",
-                refresh="refresh-token",
-                expires=9999999999,
-                account_id="acc-42",
-                residency=None,
-            ),
-        )
-        complete = client.get(f"{base}status/?flow_id={flow_id}")
+    complete = client.get(f"{base}status/?flow_id={flow_id}")
     assert complete.status_code == 200
     assert complete.json() == {"status": "connected", "account_id": "acc-42"}
 
@@ -268,17 +277,9 @@ def test_chatgpt_oauth_start_status_and_cancel(provider_setup):
     assert rows[0]["account_id"] == "acc-42"
     assert "access-token" not in repr(rows)
 
-    with patch(
-        "apps.harness.providers.chatgpt_oauth.start_device_flow",
-        new_callable=AsyncMock,
-    ) as mock_start:
-        mock_start.return_value = DeviceFlowStart(
-            device_auth_id="auth-2",
-            user_code="WXYZ-5678",
-            verification_url="https://auth.openai.com/codex/device",
-            interval=5,
-        )
-        cancel_flow_id = client.post(f"{base}start/").json()["flow_id"]
+    cancel_flow_id = client.post(
+        f"{base}start/", data={}, content_type="application/json"
+    ).json()["flow_id"]
     cancelled = client.post(
         f"{base}cancel/",
         data=json.dumps({"flow_id": cancel_flow_id}),
@@ -287,4 +288,3 @@ def test_chatgpt_oauth_start_status_and_cancel(provider_setup):
     assert cancelled.status_code == 204
     status = client.get(f"{base}status/?flow_id={cancel_flow_id}")
     assert status.json()["status"] == "cancelled"
-    assert client.get(f"{base}status/").json()["code"] == "no_flow"

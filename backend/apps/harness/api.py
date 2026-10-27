@@ -18,7 +18,6 @@ existing keys — see ``APIKeyPermission``)::
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import datetime
 
@@ -1355,7 +1354,7 @@ def select_provider_account(
     },
     summary="Start ChatGPT device OAuth flow",
 )
-async def start_chatgpt_oauth(request: HttpRequest):
+async def start_chatgpt_oauth(request: HttpRequest, payload: ChatGPTOAuthStartIn):
     """Start an isolated durable ChatGPT flow for the current user."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
         return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
@@ -1363,10 +1362,6 @@ async def start_chatgpt_oauth(request: HttpRequest):
     from apps.harness.providers.base import ProviderError
 
     try:
-        body = request.body
-        is_json = (request.content_type or "").lower().startswith("application/json")
-        raw = json.loads(body.decode("utf-8")) if is_json and body.strip() else {}
-        payload = ChatGPTOAuthStartIn(**raw)
         org_id = _get_org_id(request)
         result = await ProviderOAuthService().start(
             organization_id=org_id,
@@ -1380,7 +1375,7 @@ async def start_chatgpt_oauth(request: HttpRequest):
         return 403, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
-    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+    except (ValueError, TypeError) as exc:
         return 400, {"detail": str(exc), "code": "validation_error"}
     except ProviderError:
         return 502, {
@@ -1402,9 +1397,7 @@ async def start_chatgpt_oauth(request: HttpRequest):
     },
     summary="Poll ChatGPT device OAuth status (single attempt)",
 )
-async def poll_chatgpt_oauth_status(
-    request: HttpRequest, flow_id: uuid.UUID | None = None
-):
+async def poll_chatgpt_oauth_status(request: HttpRequest, flow_id: uuid.UUID):
     """Poll one user's flow once; flow IDs are private to their creator."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
         return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
@@ -1428,7 +1421,7 @@ async def poll_chatgpt_oauth_status(
         return 403, {"detail": exc.message, "code": exc.code}
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}
-    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+    except (ValueError, TypeError) as exc:
         return 400, {"detail": str(exc), "code": "validation_error"}
     except ProviderError:
         return 502, {
@@ -1442,27 +1435,24 @@ async def poll_chatgpt_oauth_status(
     response={204: None, 400: dict, 401: dict, 403: dict, 404: dict},
     summary="Cancel one pending ChatGPT OAuth flow",
 )
-async def cancel_chatgpt_oauth(request: HttpRequest):
-    """Cancel one owned flow; no flow ID is accepted only when unambiguous."""
+async def cancel_chatgpt_oauth(request: HttpRequest, payload: ChatGPTOAuthCancelIn):
+    """Cancel the caller's explicitly identified OAuth flow."""
     if not check_api_key_permission(request, APIKeyPermission.HARNESS_PROVIDERS):
         return _perm_denied(APIKeyPermission.HARNESS_PROVIDERS)
     from apps.harness.provider_oauth import ProviderOAuthService
 
     try:
-        body = request.body
-        is_json = (request.content_type or "").lower().startswith("application/json")
-        raw = json.loads(body.decode("utf-8")) if is_json and body.strip() else {}
-        payload = ChatGPTOAuthCancelIn(**raw)
-        raw_id = payload.flow_id
         from asgiref.sync import sync_to_async
 
         cancelled = await sync_to_async(ProviderOAuthService().cancel)(
-            organization_id=_get_org_id(request), user=request.user, flow_id=raw_id
+            organization_id=_get_org_id(request),
+            user=request.user,
+            flow_id=payload.flow_id,
         )
         if not cancelled:
             return 404, {"detail": "No pending OAuth flow", "code": "no_flow"}
         return 204, None
-    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+    except (ValueError, TypeError) as exc:
         return 400, {"detail": str(exc), "code": "validation_error"}
     except AuthenticationError as exc:
         return 403, {"detail": exc.message, "code": exc.code}

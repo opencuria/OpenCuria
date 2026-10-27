@@ -72,6 +72,9 @@ async def test_oauth_flow_ids_are_user_scoped_and_reconnect_reuses_account(oauth
     assert await service.status(
         organization_id=org.id, user=other, flow_id=first["flow_id"]
     ) == {"status": "no_flow"}
+    assert not service.cancel(
+        organization_id=org.id, user=other, flow_id=first["flow_id"]
+    )
 
     tokens = OAuthTokens("access-secret", "refresh-secret", 9999999999, "acct-1", None)
     with patch(

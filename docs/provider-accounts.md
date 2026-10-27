@@ -40,7 +40,9 @@ defaults; credentials and connection metadata belong to the account APIs above.
 Provider-wide and Claude-specific connection CRUD endpoints are
 removed; all providers use the account APIs above.
 
-ChatGPT device flows return a `flow_id`; status/cancel must address that flow.
+ChatGPT device flows start with a JSON object (`{}` for defaults) and return a
+`flow_id`. Status requires that UUID in the `flow_id` query parameter; cancel
+requires a JSON object with `flow_id`. Missing or invalid IDs fail validation.
 Flows are durable, user/org-scoped, expire after ten minutes, and use fenced
 polling claims so concurrent tabs cannot consume each other's authorizations.
 

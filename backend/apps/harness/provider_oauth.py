@@ -90,39 +90,20 @@ class ProviderOAuthService:
             "expires_in": CHATGPT_OAUTH_FLOW_EXPIRES_SECONDS,
         }
 
-    def _get_flow(
-        self,
-        organization_id: uuid.UUID,
-        user_id: int,
-        flow_id: uuid.UUID | str | None,
-    ) -> ProviderOAuthFlow | None:
-        if flow_id is not None:
-            try:
-                parsed_id = uuid.UUID(str(flow_id))
-            except (TypeError, ValueError):
-                return None
-            return ProviderOAuthRepository.get_owned(
-                parsed_id, organization_id, user_id
-            )
-        return ProviderOAuthRepository.get_unambiguous_pending(organization_id, user_id)
-
     async def status(
         self,
         *,
         organization_id: uuid.UUID,
         user: Any,
-        flow_id: uuid.UUID | str | None = None,
+        flow_id: uuid.UUID | str,
     ) -> dict[str, str]:
         """Poll one flow once, never disclosing OAuth tokens to the caller."""
         organization_id, user_id = self.accounts._ids(organization_id, user)
         await sync_to_async(self.accounts._membership)(organization_id, user_id)
-        flow = await sync_to_async(self._get_flow)(organization_id, user_id, flow_id)
+        flow = await sync_to_async(ProviderOAuthRepository.get_owned)(
+            flow_id, organization_id, user_id
+        )
         if flow is None:
-            return {"status": "no_flow"}
-        if flow_id is None and flow.status not in (
-            ProviderOAuthFlow.Status.PENDING,
-            ProviderOAuthFlow.Status.POLLING,
-        ):
             return {"status": "no_flow"}
         if flow.status == ProviderOAuthFlow.Status.CONSUMED:
             return {"status": "connected", "account_id": flow.connected_account_id}
@@ -270,12 +251,9 @@ class ProviderOAuthService:
         *,
         organization_id: uuid.UUID,
         user: Any,
-        flow_id: uuid.UUID | str | None = None,
+        flow_id: uuid.UUID | str,
     ) -> bool:
-        """Cancel only an owned flow, honoring the legacy unambiguous form."""
+        """Cancel the specified flow within the caller's organization and user."""
         organization_id, user_id = self.accounts._ids(organization_id, user)
         self.accounts._membership(organization_id, user_id)
-        flow = self._get_flow(organization_id, user_id, flow_id)
-        if flow is None:
-            return False
-        return ProviderOAuthRepository.cancel(flow.id, organization_id, user_id)
+        return ProviderOAuthRepository.cancel(flow_id, organization_id, user_id)

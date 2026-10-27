@@ -62,29 +62,12 @@ class ProviderOAuthRepository:
 
     @staticmethod
     def get_owned(
-        flow_id: uuid.UUID, organization_id: uuid.UUID, user_id: int
+        flow_id: uuid.UUID | str, organization_id: uuid.UUID, user_id: int
     ) -> ProviderOAuthFlow | None:
         """Find a flow only within the exact user and organization scope."""
         return ProviderOAuthFlow.objects.filter(
             id=flow_id, organization_id=organization_id, user_id=user_id
         ).first()
-
-    @staticmethod
-    def get_unambiguous_pending(
-        organization_id: uuid.UUID, user_id: int
-    ) -> ProviderOAuthFlow | None:
-        """Return a sole in-progress flow for legacy clients, else no flow."""
-        rows = list(
-            ProviderOAuthFlow.objects.filter(
-                organization_id=organization_id,
-                user_id=user_id,
-                status__in=[
-                    ProviderOAuthFlow.Status.PENDING,
-                    ProviderOAuthFlow.Status.POLLING,
-                ],
-            ).order_by("-created_at")[:2]
-        )
-        return rows[0] if len(rows) == 1 else None
 
     @staticmethod
     def labels_in_use(
@@ -194,7 +177,9 @@ class ProviderOAuthRepository:
         )
 
     @staticmethod
-    def cancel(flow_id: uuid.UUID, organization_id: uuid.UUID, user_id: int) -> bool:
+    def cancel(
+        flow_id: uuid.UUID | str, organization_id: uuid.UUID, user_id: int
+    ) -> bool:
         """Cancel only the caller's flow, including a poll in flight."""
         return bool(
             ProviderOAuthFlow.objects.filter(

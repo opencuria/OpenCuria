@@ -374,9 +374,9 @@ class ChatGPTOAuthStartIn(Schema):
 
 
 class ChatGPTOAuthCancelIn(Schema):
-    """Optional pending OAuth flow identifier for cancellation."""
+    """Exact pending OAuth flow identifier for cancellation."""
 
-    flow_id: uuid.UUID | None = None
+    flow_id: uuid.UUID
 
 
 class ChatGPTOAuthStartOut(Schema):

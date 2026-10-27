@@ -129,13 +129,16 @@ describe('harness engine API', () => {
     const post = vi.spyOn(api, 'post').mockResolvedValue({ flow_id: 'flow-id' })
     const originalFetch = globalThis.fetch
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify({ status: 'connected', connection_id: 'target-uuid' }), {
+      new Response(JSON.stringify({ status: 'connected', account_id: 'account-42' }), {
         status: 200,
       }),
     )
     const flow = await startChatGptOAuth({ label: 'Work', shared: true, account_id: 'target-uuid' })
     expect(flow.flow_id).toBe('flow-id')
-    await getChatGptOAuthStatus('flow-id/one')
+    await expect(getChatGptOAuthStatus('flow-id/one')).resolves.toEqual({
+      status: 'connected',
+      account_id: 'account-42',
+    })
     await cancelChatGptOAuth('flow-id/one')
     expect(post).toHaveBeenCalledWith('/provider-config/providers/chatgpt/oauth/start/', {
       label: 'Work',

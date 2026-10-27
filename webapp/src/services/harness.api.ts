@@ -137,7 +137,7 @@ export interface AgentSConfig {
 export type AgentSConfigIn = Partial<AgentSConfig>
 
 export interface ChatGptOAuthStart {
-  flow_id?: string
+  flow_id: string
   user_code: string
   verification_url: string
   interval: number
@@ -147,7 +147,6 @@ export interface ChatGptOAuthStart {
 export interface ChatGptOAuthStatus {
   status: 'pending' | 'connected' | 'expired' | 'denied' | 'cancelled' | 'no_flow'
   account_id?: string
-  connection_id?: string
 }
 
 export interface ChatGptOAuthStartIn {
@@ -456,15 +455,14 @@ export function saveAgentSConfig(data: AgentSConfigIn): Promise<AgentSConfig> {
   return put<AgentSConfig>('/agent-s-config/', data)
 }
 
-export function startChatGptOAuth(payload?: ChatGptOAuthStartIn): Promise<ChatGptOAuthStart> {
+export function startChatGptOAuth(payload: ChatGptOAuthStartIn): Promise<ChatGptOAuthStart> {
   return post<ChatGptOAuthStart>('/provider-config/providers/chatgpt/oauth/start/', payload)
 }
 
-export async function getChatGptOAuthStatus(flowId?: string): Promise<ChatGptOAuthStatus> {
-  const query = flowId ? `?flow_id=${encodeURIComponent(flowId)}` : ''
+export async function getChatGptOAuthStatus(flowId: string): Promise<ChatGptOAuthStatus> {
   const result = await requestWithStatus<ChatGptOAuthStatus>(
     'GET',
-    `/provider-config/providers/chatgpt/oauth/status/${query}`,
+    `/provider-config/providers/chatgpt/oauth/status/?flow_id=${encodeURIComponent(flowId)}`,
   )
   if (result.status === 404) {
     return { status: 'no_flow', account_id: result.data.account_id ?? '' }
@@ -489,10 +487,10 @@ export async function getChatGptOAuthStatus(flowId?: string): Promise<ChatGptOAu
   return result.data
 }
 
-export function cancelChatGptOAuth(flowId?: string): Promise<void> {
+export function cancelChatGptOAuth(flowId: string): Promise<void> {
   return post<void>(
     '/provider-config/providers/chatgpt/oauth/cancel/',
-    flowId ? { flow_id: flowId } : undefined,
+    { flow_id: flowId },
   )
 }
 
