@@ -6,6 +6,7 @@ All business logic related to credential management lives here.
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ from common.utils import decrypt_value, encrypt_value, generate_ssh_keypair
 from .deletion_guards import collect_deletion_blockers
 from .enums import CredentialType
 from .models import Credential, CredentialService
+from .oauth_grant_service import OAuthGrantService
 from .oauth_metadata import (
     registration_fingerprint,
     registration_metadata_safe,
@@ -860,6 +862,9 @@ class CredentialOAuthSvc:
         self.oauth = McpOAuthRepository
         self.activations = OrgCredentialServiceActivationRepository
         self.organizations = OrganizationService()
+        self.grants = OAuthGrantService(
+            repository=self.oauth, organizations=self.organizations
+        )
 
     def resolve_connection_target(
         self,
@@ -964,8 +969,6 @@ class CredentialOAuthSvc:
     ) -> uuid.UUID:
         """Validate and commit callbacks only while authorization rows are locked."""
 
-        from django.db import transaction
-
         from common.utils import decrypt_value
 
         from .mcp_oauth import (
@@ -973,12 +976,13 @@ class CredentialOAuthSvc:
             _consume_callback_state,
             _post_token,
             _token_auth,
+            authorization_grant_payload,
         )
 
         # Commit one-use state consumption independently so failed callbacks
         # cannot replay an authorization code.
         state = _consume_callback_state(raw_state, binding)
-        with transaction.atomic():
+        with self.oauth.grant_transaction():
             if error:
                 raise OAuthError("Authorization was denied")
             if not isinstance(code, str) or not code or len(code) > 8192:
@@ -1021,7 +1025,7 @@ class CredentialOAuthSvc:
                     target is None
                     or target.service_id != state.service_id
                     or target.oauth_server_url != state.credential_server_url_snapshot
-                    or not self.oauth.owner_matches_state(state, target)
+                    or not self.grants.owner_matches_state(state, target)
                     or not self.oauth.service_visible_to_org(
                         target.service_id, state.organization_id
                     )
@@ -1054,9 +1058,13 @@ class CredentialOAuthSvc:
                 auth=auth,
                 post_client_secret=post_secret,
             )
-            from .mcp_oauth import _store_authorization_grant
-
-            return _store_authorization_grant(state, token)
+            payload = authorization_grant_payload(state, token)
+            try:
+                return self.grants.persist(
+                    state=state, encrypted_value=encrypt_value(json.dumps(payload))
+                )
+            except ValueError as exc:
+                raise AuthenticationError(str(exc)) from None
 
     def disconnect(
         self, *, credential_id: uuid.UUID, user, organization_id: uuid.UUID

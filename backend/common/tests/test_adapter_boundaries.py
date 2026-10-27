@@ -55,6 +55,9 @@ import live run orchestration, even through their dependencies.
 OAuth endpoint, registration and grant integrity rules live in
 ``apps.credentials.oauth_metadata``; persistence and protocol workflows never
 import their service consumers, even through function-local imports.
+OAuth grant authorization belongs to OAuthGrantService; repositories never
+call application services, and the grant service delegates transactions and
+model writes to its repository.
 Engine execution contracts live in ``apps.harness.engines.base``; external
 engines and shared tool dispatch never import the native inference loop,
 even through their dependencies.
@@ -1254,12 +1257,20 @@ def test_oauth_persistence_and_protocol_never_import_their_consumers() -> None:
     modules = {_module_name(path): path for path in trees}
     services = "apps.credentials.services"
     workflow = "apps.credentials.mcp_oauth"
+    grants = "apps.credentials.oauth_grant_service"
     boundaries = {
-        "apps.credentials.repositories": {services, workflow},
-        workflow: {services},
+        "apps.credentials.repositories": {
+            services,
+            workflow,
+            grants,
+            "apps.organizations.services",
+        },
+        workflow: {services, grants},
+        grants: {services, workflow},
         "apps.credentials.oauth_metadata": {
             services,
             workflow,
+            grants,
             "apps.credentials.repositories",
         },
     }
@@ -1282,8 +1293,30 @@ def test_oauth_persistence_and_protocol_never_import_their_consumers() -> None:
                     pending.add(imported)
     assert violations == set(), (
         "Share OAuth validation through apps.credentials.oauth_metadata; "
-        "repositories must not import protocol/workflow code and neither may "
-        "import their service consumers:\n" + "\n".join(sorted(violations))
+        "keep grant authorization in OAuthGrantService and keep persistence "
+        "independent of application services and protocol workflows:\n"
+        + "\n".join(sorted(violations))
+    )
+
+
+def test_oauth_grant_service_delegates_transactions_and_model_writes() -> None:
+    """Authorization policy cannot bypass its transaction-scoped repository."""
+    path = APPS_ROOT / "credentials" / "oauth_grant_service.py"
+    tree = ast.parse(path.read_text())
+    violations = sorted(
+        module
+        for module in _imported_modules(path, tree)
+        if module == "django.db" or module.startswith("django.db.")
+    )
+    violations.extend(
+        f"{node.lineno}: {node.attr}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr in {"save", "asave", "delete", "adelete"}
+    )
+    assert violations == [], (
+        "Keep grant transactions and model writes in McpOAuthRepository:\n"
+        + "\n".join(violations)
     )
 
 
