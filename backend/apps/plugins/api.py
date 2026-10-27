@@ -144,25 +144,6 @@ def create_plugin(request: HttpRequest, payload: PluginCreateIn):
         return 400, ErrorOut(detail=str(e), code="validation_error")
 
 
-@plugin_router.get(
-    "/{plugin_id}/",
-    response={200: PluginOut, 403: ErrorOut, 404: ErrorOut},
-    summary="Get a plugin",
-)
-def get_plugin(request: HttpRequest, plugin_id: uuid.UUID):
-    """Return a single visible plugin (foreign org -> 404)."""
-    if not check_api_key_permission(request, APIKeyPermission.PLUGINS_READ):
-        return _perm_denied(APIKeyPermission.PLUGINS_READ)
-    org_id = _get_org_id(request)
-    _get_org_service().require_membership(request.user, org_id)
-
-    try:
-        payload = _get_plugin_service().get_visible(plugin_id, org_id=org_id)
-        return 200, _plugin_to_out(payload)
-    except NotFoundError as e:
-        return 404, ErrorOut(detail=e.message, code=e.code)
-
-
 @plugin_router.patch(
     "/{plugin_id}/",
     response={

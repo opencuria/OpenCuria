@@ -10,9 +10,6 @@ import { del, get, patch, post } from './api'
 export function listPlugins(): Promise<Plugin[]> {
   return get<Plugin[]>('/plugins/')
 }
-export function getPlugin(id: string): Promise<Plugin> {
-  return get<Plugin>(`/plugins/${id}/`)
-}
 export function createPlugin(data: PluginCreateIn): Promise<Plugin> {
   return post<Plugin>('/plugins/', data)
 }

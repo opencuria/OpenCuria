@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
@@ -20,7 +18,6 @@ from apps.plugins.models import (
 )
 from apps.plugins.repositories import OrgPluginActivationRepository
 from apps.plugins.services import PluginService
-from common.exceptions import NotFoundError
 from common.utils import generate_api_token, hash_token
 
 
@@ -81,11 +78,11 @@ def _plugin(
 
 
 def test_catalogue_preserves_visibility_components_and_activation(catalogue) -> None:
-    """List/detail expose the same ordered definitions with org-scoped state."""
+    """The catalogue exposes ordered definitions with org-scoped state."""
     org, foreign, _, services = catalogue
     global_plugin = _plugin(None, 2, services)
     owned = _plugin(org, 1, services)
-    hidden = _plugin(foreign, 0, services)
+    _plugin(foreign, 0, services)
     empty = Plugin.objects.create(
         organization=org, name="Empty", slug="empty", enabled=False, published=False
     )
@@ -126,11 +123,6 @@ def test_catalogue_preserves_visibility_components_and_activation(catalogue) -> 
             False,
             True,
         ]
-        assert row == service.get_visible(row["id"], org_id=org.id)
-    with pytest.raises(NotFoundError):
-        service.get_visible(hidden.id, org_id=org.id)
-    with pytest.raises(NotFoundError):
-        service.get_visible(uuid.uuid4(), org_id=org.id)
 
 
 @pytest.mark.parametrize("count", [1, 12, 50])
@@ -186,7 +178,7 @@ def test_catalogue_refreshes_changed_components_and_activations(catalogue) -> No
     org, _, _, services = catalogue
     plugin = _plugin(org, 0, services)
     service = PluginService()
-    before = service.get_visible(plugin.id, org_id=org.id)
+    before = service.list_visible(org_id=org.id)[0]
     assert before["org_enabled"] is False
 
     PluginSkill.objects.filter(plugin=plugin).update(body="New instructions")

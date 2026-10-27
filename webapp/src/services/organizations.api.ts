@@ -5,10 +5,6 @@
 import type { Organization, OrganizationCreateIn } from '@/types'
 import { get, patch, post } from './api'
 
-export function listOrganizations(): Promise<Organization[]> {
-  return get<Organization[]>('/organizations/')
-}
-
 export function createOrganization(data: OrganizationCreateIn): Promise<Organization> {
   return post<Organization>('/organizations/', data)
 }

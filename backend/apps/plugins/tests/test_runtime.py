@@ -207,7 +207,11 @@ def test_global_notion_oauth_credential_enables_workspace_plugin(org_ctx, owner_
         user=org_ctx["user"],
         active=True,
     )
-    payload = plugin_service.get_visible(plugin.id, org_id=org_ctx["org"].id)
+    payload = next(
+        row
+        for row in plugin_service.list_visible(org_id=org_ctx["org"].id)
+        if row["id"] == plugin.id
+    )
     assert "credential_readiness" not in payload
 
     from apps.runners.services.workspace_configuration import (
@@ -672,7 +676,7 @@ def test_requirement_service_visibility_and_atomicity(
         assert error.value.code == "not_found"
         assert error.value.message == f"CredentialService '{service_id}' not found"
         assert not Plugin.objects.filter(slug="changed").exists()
-        assert service.get_visible(original["id"], org_id=org_ctx["org"].id) == original
+        assert original in service.list_visible(org_id=org_ctx["org"].id)
 
 
 @pytest.mark.django_db

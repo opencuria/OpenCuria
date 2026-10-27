@@ -502,7 +502,7 @@ def test_real_qemu_domain_and_disk_join(runner, user):
     preview = Repo.preview(runner.organization_id, "image", base.id)
     assert not preview["blockers"]
     assert preview["counts"] == {"images": 1, "workspaces": 1}
-    plan = request(runner, user, base, True)
+    request(runner, user, base, True)
     Repo.tick()
     assert Task.objects.get().workspace_id == ws.id
     finish(RunnerService(sio_server=AsyncMock()), runner, Task.objects.get().id)
@@ -575,12 +575,7 @@ def test_rest_contract_and_owner_force_denial(runner, user):
     assert response.status_code == 200
     row = response.json()
     assert row["can_cancel"] and row["phase"] == "waiting_inventory"
-    assert (
-        client.get("/api/v1/image-artifacts/deletions/" + row["id"] + "/").json()[0][
-            "id"
-        ]
-        == row["id"]
-    )
+    assert client.get("/api/v1/image-artifacts/deletions/").json()[0]["id"] == row["id"]
     assert (
         client.post(
             "/api/v1/image-artifacts/deletions/" + row["id"] + "/cancel/"
@@ -592,7 +587,7 @@ def test_rest_contract_and_owner_force_denial(runner, user):
 def test_reconfirmation_new_leaves_preserves_prepared_task(runner, user):
     base = image(runner, user)
     observe(runner, [resource(base)])
-    plan = request(runner, user, base, True)
+    request(runner, user, base, True)
     Repo.tick()
     original = Task.objects.get()
     ws = Workspace.objects.create(

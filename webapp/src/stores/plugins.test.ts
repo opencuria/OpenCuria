@@ -16,7 +16,6 @@ vi.mock('vue-sonner', () => ({
 
 vi.mock('@/services/plugins.api', () => ({
   listPlugins: vi.fn(),
-  getPlugin: vi.fn(),
   createPlugin: vi.fn(),
   updatePlugin: vi.fn(),
   deletePlugin: vi.fn(),

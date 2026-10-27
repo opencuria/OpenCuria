@@ -313,13 +313,6 @@ class PluginService:
         plugins = list(self.plugins.list_visible_to_org(org_id))
         return self._serialize_plugins(plugins, org_id=org_id)
 
-    def get_visible(self, plugin_id: uuid.UUID, *, org_id: uuid.UUID) -> dict:
-        """Return one visible plugin or raise NotFoundError (cross-org 404)."""
-        plugin = self.plugins.get_visible_by_id(plugin_id, org_id)
-        if plugin is None:
-            raise NotFoundError("Plugin", str(plugin_id))
-        return self._serialize_plugins([plugin], org_id=org_id)[0]
-
     def get_visible_model(self, plugin_id: uuid.UUID, *, org_id: uuid.UUID):
         """Return the visible plugin model or raise NotFoundError."""
         plugin = self.plugins.get_visible_by_id(plugin_id, org_id)

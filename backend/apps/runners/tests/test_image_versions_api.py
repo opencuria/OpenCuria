@@ -59,15 +59,13 @@ def test_captured_images_list_versions_and_latest(member, runner, organization):
 
 
 def test_captured_images_are_owner_scoped(member, runner, organization):
-    line, _ = make_line(runner, member)
+    make_line(runner, member)
     other = get_user_model().objects.create_user(email="x@example.com", password="x")
     Membership.objects.create(
         user=other, organization=organization, role=MembershipRole.MEMBER
     )
     auth = headers(other, organization, [APIKeyPermission.IMAGES_READ])
     assert Client().get("/api/v1/captured-images/", **auth).json() == []
-    response = Client().get(f"/api/v1/captured-images/{line.id}/", **auth)
-    assert response.status_code == 404
 
 
 def test_rename_captured_image(member, runner, organization):

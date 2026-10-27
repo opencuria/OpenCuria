@@ -13,7 +13,7 @@ from common.utils import generate_api_token, hash_token
 
 pytestmark = pytest.mark.django_db
 
-ORGANIZATIONS_URL = "/api/v1/organizations/"
+PROFILE_URL = "/api/v1/auth/me/"
 
 
 @pytest.fixture
@@ -42,7 +42,7 @@ def test_rest_accepts_active_key_and_records_last_use(user: User, header: str):
     key, token = _issue_key(user, expires_at=timezone.now() + timedelta(days=1))
     value = f"Bearer {token}" if header == "HTTP_AUTHORIZATION" else token
 
-    response = Client().get(ORGANIZATIONS_URL, **{header: value})
+    response = Client().get(PROFILE_URL, **{header: value})
 
     assert response.status_code == 200
     key.refresh_from_db()
@@ -60,7 +60,7 @@ def test_rest_accepts_active_key_and_records_last_use(user: User, header: str):
 def test_rest_rejects_unusable_key_without_recording_use(user: User, fields: dict):
     key, token = _issue_key(user, **fields)
 
-    response = Client().get(ORGANIZATIONS_URL, HTTP_X_API_KEY=token)
+    response = Client().get(PROFILE_URL, HTTP_X_API_KEY=token)
 
     assert response.status_code == 401
     key.refresh_from_db()
@@ -68,6 +68,6 @@ def test_rest_rejects_unusable_key_without_recording_use(user: User, fields: dic
 
 
 def test_rest_rejects_unknown_key():
-    response = Client().get(ORGANIZATIONS_URL, HTTP_X_API_KEY="kai_unknown")
+    response = Client().get(PROFILE_URL, HTTP_X_API_KEY="kai_unknown")
 
     assert response.status_code == 401

@@ -1591,14 +1591,6 @@ def list_image_deletions(request: HttpRequest):
     return _deletion_response(request, "list")
 
 
-@image_artifact_router.get(
-    "/deletions/{request_id}/",
-    response={200: list[dict], 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
-)
-def image_deletion_status(request: HttpRequest, request_id: uuid.UUID):
-    return _deletion_response(request, "list", request_id)
-
-
 @image_artifact_router.post(
     "/deletions/{request_id}/cancel/",
     response={200: dict, 403: ErrorOut, 404: ErrorOut, 409: ErrorOut},
@@ -1636,26 +1628,6 @@ def list_captured_images(request: HttpRequest):
 
     views = ImageVersionService().list_captured_images(request.user, org_id)
     return 200, [captured_image_to_out(view) for view in views]
-
-
-@captured_image_router.get(
-    "/{captured_image_id}/",
-    response={200: CapturedImageOut, 403: ErrorOut, 404: ErrorOut},
-    summary="Get a captured image with all versions",
-)
-def get_captured_image(request: HttpRequest, captured_image_id: uuid.UUID):
-    if not check_api_key_permission(request, APIKeyPermission.IMAGES_READ):
-        return _perm_denied(APIKeyPermission.IMAGES_READ)
-    org_id = get_organization_id(request)
-    _get_org_service().require_membership(request.user, org_id)
-    from .services.image_versions import ImageVersionService
-
-    versions = ImageVersionService()
-    try:
-        line = versions.owned_captured_image(request.user, org_id, captured_image_id)
-        return 200, captured_image_to_out(versions.captured_image(line))
-    except NotFoundError as exc:
-        return _captured_image_errors(exc)
 
 
 @captured_image_router.patch(

@@ -215,8 +215,8 @@ def test_cross_org_plugin_is_404(client: Client):
     assert created.status_code == 201
     plugin_id = created.json()["id"]
 
-    response = client.get(f"/api/v1/plugins/{plugin_id}/", **ctx_b["headers"])
-    assert response.status_code == 404
+    visible = client.get("/api/v1/plugins/", **ctx_b["headers"])
+    assert plugin_id not in {plugin["id"] for plugin in visible.json()}
 
     response = _patch(
         client, f"/api/v1/plugins/{plugin_id}/", ctx_b["headers"], {"name": "X"}
@@ -380,7 +380,11 @@ def test_plugin_rejects_oauth_endpoint_change(client: Client):
         },
     )
     assert response.status_code == 400
-    refreshed = client.get(f"/api/v1/plugins/{plugin_id}/", **ctx["headers"]).json()
+    refreshed = next(
+        plugin
+        for plugin in client.get("/api/v1/plugins/", **ctx["headers"]).json()
+        if plugin["id"] == plugin_id
+    )
     assert refreshed["mcp_servers"][0]["url"] == service.oauth_server_url
 
 
@@ -446,9 +450,11 @@ def test_builtin_opencuria_plugin_needs_no_setup_and_cannot_be_deleted(
     client: Client,
 ):
     ctx = _ctx()
-    plugin = client.get(f"/api/v1/plugins/{OPENCURIA_PLUGIN_ID}/", **ctx["headers"])
-    assert plugin.status_code == 200
-    payload = plugin.json()
+    payload = next(
+        plugin
+        for plugin in client.get("/api/v1/plugins/", **ctx["headers"]).json()
+        if plugin["id"] == str(OPENCURIA_PLUGIN_ID)
+    )
     assert payload["is_global"] is True
     assert payload["org_enabled"] is False  # explicit opt-in
     assert payload["credential_requirements"] == []
@@ -557,7 +563,11 @@ def test_patch_replaces_components_atomically(client: Client):
         {"mcp_servers": [{"name": "Bad", "transport": "stdio"}]},
     )
     assert bad.status_code == 400
-    current = client.get(f"/api/v1/plugins/{plugin_id}/", **ctx["headers"]).json()
+    current = next(
+        plugin
+        for plugin in client.get("/api/v1/plugins/", **ctx["headers"]).json()
+        if plugin["id"] == plugin_id
+    )
     assert len(current["skills"]) == 2
 
 
@@ -1167,7 +1177,11 @@ def test_service_deactivation_is_independent_of_plugin_activation(client: Client
     )
     assert response.status_code == 200
     assert response.json()["is_active"] is False
-    plugin = client.get(f"/api/v1/plugins/{plugin_id}/", **ctx["headers"]).json()
+    plugin = next(
+        plugin
+        for plugin in client.get("/api/v1/plugins/", **ctx["headers"]).json()
+        if plugin["id"] == plugin_id
+    )
     assert plugin["org_enabled"] is True
 
 

@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-  getPlugin,
   listPlugins,
   createPlugin,
   updatePlugin,
@@ -10,16 +9,11 @@ import {
 import * as api from './api'
 
 describe('plugins api', () => {
-  it('lists and fetches catalog plugins', async () => {
+  it('lists catalog plugins', async () => {
     const getSpy = vi.spyOn(api, 'get').mockResolvedValue([])
     await expect(listPlugins()).resolves.toEqual([])
     expect(getSpy).toHaveBeenCalledWith('/plugins/')
     getSpy.mockRestore()
-
-    const oneSpy = vi.spyOn(api, 'get').mockResolvedValue({ id: 'p-1' })
-    await expect(getPlugin('p-1')).resolves.toEqual({ id: 'p-1' })
-    expect(oneSpy).toHaveBeenCalledWith('/plugins/p-1/')
-    oneSpy.mockRestore()
   })
 
   it('creates/updates/deletes/toggles via the matching endpoints', async () => {

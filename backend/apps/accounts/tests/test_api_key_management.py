@@ -13,13 +13,19 @@ from common.utils import generate_api_token, hash_token
 pytestmark = pytest.mark.django_db
 
 API_KEYS_URL = "/api/v1/auth/api-keys/"
-ORGANIZATIONS_URL = "/api/v1/organizations/"
+ORGANIZATION_ID = "00000000-0000-0000-0000-000000000001"
+ORGANIZATION_URL = f"/api/v1/organizations/{ORGANIZATION_ID}/"
 READ_ONLY = [APIKeyPermission.WORKSPACES_READ.value]
 
 
 @pytest.fixture
 def user() -> User:
-    return User.objects.create_user(email="api-key-owner@example.com")
+    user = User.objects.create_user(email="api-key-owner@example.com")
+    organization = Organization.objects.create(
+        id=ORGANIZATION_ID, name="Key owner organization", slug="key-owner-org"
+    )
+    Membership.objects.create(user=user, organization=organization)
+    return user
 
 
 @pytest.fixture
@@ -62,7 +68,7 @@ def test_restricted_api_key_cannot_issue_full_access_key(
     api_key_headers: dict[str, str],
     permission_fields: dict[str, list[str]],
 ) -> None:
-    assert client.get(ORGANIZATIONS_URL, **api_key_headers).status_code == 403
+    assert client.get(ORGANIZATION_URL, **api_key_headers).status_code == 403
     count = APIKey.objects.count()
 
     response = client.post(
@@ -74,7 +80,7 @@ def test_restricted_api_key_cannot_issue_full_access_key(
 
     assert response.status_code == 401
     assert APIKey.objects.count() == count
-    assert client.get(ORGANIZATIONS_URL, **api_key_headers).status_code == 403
+    assert client.get(ORGANIZATION_URL, **api_key_headers).status_code == 403
 
 
 @pytest.mark.parametrize(
@@ -89,7 +95,7 @@ def test_restricted_api_key_cannot_escalate_its_own_permissions(
     payload: dict[str, list[str]],
 ) -> None:
     key, _ = restricted_key
-    assert client.get(ORGANIZATIONS_URL, **api_key_headers).status_code == 403
+    assert client.get(ORGANIZATION_URL, **api_key_headers).status_code == 403
 
     response = client.patch(
         f"{API_KEYS_URL}{key.id}/",
@@ -101,7 +107,7 @@ def test_restricted_api_key_cannot_escalate_its_own_permissions(
     assert response.status_code == 401
     key.refresh_from_db()
     assert key.permissions == READ_ONLY
-    assert client.get(ORGANIZATIONS_URL, **api_key_headers).status_code == 403
+    assert client.get(ORGANIZATION_URL, **api_key_headers).status_code == 403
 
 
 @pytest.mark.parametrize("permissions", [READ_ONLY, APIKeyPermission.all_values()])
@@ -198,12 +204,12 @@ def test_jwt_user_can_manage_own_api_keys(
     assert "key" not in response.json()
     assert "key_hash" not in response.json()
     key_client = Client(HTTP_X_API_KEY=created["key"])
-    assert key_client.get(ORGANIZATIONS_URL).status_code == 200
+    assert key_client.get(ORGANIZATION_URL).status_code == 200
 
     assert jwt_client.delete(f"{API_KEYS_URL}{key.id}/").status_code == 204
     key.refresh_from_db()
     assert key.is_active is False
-    assert key_client.get(ORGANIZATIONS_URL).status_code == 401
+    assert key_client.get(ORGANIZATION_URL).status_code == 401
 
 
 def test_jwt_user_cannot_manage_another_users_key(
@@ -269,4 +275,4 @@ def test_restricted_api_key_still_reads_workspaces(
 
     assert response.status_code == 200
     assert response.json() == []
-    assert client.get(ORGANIZATIONS_URL, **api_key_headers).status_code == 403
+    assert client.get(ORGANIZATION_URL, **api_key_headers).status_code == 403

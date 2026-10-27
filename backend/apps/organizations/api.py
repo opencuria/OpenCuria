@@ -29,33 +29,6 @@ def _get_service() -> OrganizationService:
     return OrganizationService()
 
 
-@org_router.get(
-    "/",
-    response={200: list[OrganizationOut], 403: dict},
-    summary="List user's organizations",
-)
-def list_organizations(request: HttpRequest):
-    """Return all organizations the current user belongs to."""
-    if not check_api_key_permission(request, APIKeyPermission.ORGANIZATIONS_READ):
-        return 403, {"detail": "API key lacks permission: organizations:read", "code": "permission_denied"}
-    service = _get_service()
-    org_list = service.list_user_organizations(request.user)
-    return [
-        OrganizationOut(
-            id=o["id"],
-            name=o["name"],
-            slug=o["slug"],
-            role=o["role"],
-            workspace_auto_stop_timeout_minutes=o.get(
-                "workspace_auto_stop_timeout_minutes"
-            ),
-            image_versions_to_keep=o.get("image_versions_to_keep", 2),
-            created_at=o["created_at"],
-        )
-        for o in org_list
-    ]
-
-
 @org_router.post(
     "/",
     response={201: OrganizationOut, 403: dict, 409: dict},

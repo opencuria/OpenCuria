@@ -234,25 +234,6 @@ Revoke an API key immediately. Subsequent requests using this key return 401.
 
 ### Organizations
 
-#### `GET /organizations/`
-
-List organizations the authenticated user belongs to.
-
-**Response 200:**
-```json
-[
-  {
-    "id": "uuid",
-    "name": "My Team",
-    "slug": "my-team",
-    "role": "admin",
-    "created_at": "2026-01-01T00:00:00Z"
-  }
-]
-```
-
----
-
 #### `POST /organizations/`
 
 Create a new organization.
@@ -265,7 +246,8 @@ Create a new organization.
 }
 ```
 
-**Response 201:** Organization object (same shape as list item).
+**Response 201:** Organization object (`id`, `name`, `slug`, `role`,
+`workspace_auto_stop_timeout_minutes`, `image_versions_to_keep`, `created_at`).
 
 ---
 
@@ -572,12 +554,6 @@ List the current user's captured images with versions, size and retention.
 
 **Response 200:** Array of captured-image objects (`id`, `name`, `versions`,
 `latest_version`, `total_size_bytes`, `workspace_count`).
-
----
-
-#### `GET /captured-images/{captured_image_id}/` [org]
-
-Get one captured image and all of its versions.
 
 ---
 
