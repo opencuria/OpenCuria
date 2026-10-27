@@ -342,13 +342,21 @@ const qemuLimits = computed(() => {
 })
 
 watch(
-  [() => open.value, runnerId, selectedImageValue],
-  () => {
+  [() => open.value, qemuLimits, selectedImageValue],
+  ([, limits], previous) => {
     if (!open.value || isCapturedClone.value) return
 
-    const limits = qemuLimits.value
-    const clampOrDefault = (value: number, min: number, max: number, fallback: number) => {
-      if (Number.isNaN(value)) return fallback
+    // A value still at the previous defaults was never customized, so it
+    // follows the effective runner's defaults instead of a stale fallback.
+    const previousLimits = previous?.[1] ?? limits
+    const clampOrDefault = (
+      value: number,
+      min: number,
+      max: number,
+      previousDefault: number,
+      fallback: number,
+    ) => {
+      if (Number.isNaN(value) || value === previousDefault) return fallback
       if (value < min || value > max) return fallback
       return value
     }
@@ -358,18 +366,21 @@ watch(
       qemuVcpus.value,
       limits.minVcpus,
       limits.maxVcpus,
+      previousLimits.defaultVcpus,
       limits.defaultVcpus,
     )
     qemuMemoryMb.value = clampOrDefault(
       qemuMemoryMb.value,
       limits.minMemoryMb,
       limits.maxMemoryMb,
+      previousLimits.defaultMemoryMb,
       limits.defaultMemoryMb,
     )
     qemuDiskSizeGb.value = clampOrDefault(
       qemuDiskSizeGb.value,
       limits.minDiskSizeGb,
       limits.maxDiskSizeGb,
+      previousLimits.defaultDiskSizeGb,
       limits.defaultDiskSizeGb,
     )
   },
