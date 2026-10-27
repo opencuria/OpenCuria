@@ -2418,8 +2418,8 @@ class WebSocketInterface(Interface):
                     workdir=data.get("workdir", "/workspace"),
                     env=data.get("env"),
                     name=str(data.get("name", "") or ""),
-                    log_path=data.get("log_path"),
-                    exit_path=data.get("exit_path"),
+                    log_path=data["log_path"],
+                    exit_path=data["exit_path"],
                 )
                 payload = {
                     "workspace_id": str(workspace_id),

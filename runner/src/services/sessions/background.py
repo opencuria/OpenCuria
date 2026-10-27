@@ -119,39 +119,23 @@ class BackgroundProcessManager:
         # workspace/process ids, cleared on restart) — same rationale as
         # the desktop locks: dropping a lock object while a holder waits
         # would hand the next caller a different lock.
-        # Get-or-create uses ``KeyedLockMap``; properties below expose the
-        # lock mapping and guard for manager integrations.
         self._background_start_lock_map: KeyedLockMap[
             tuple[uuid.UUID, str]
         ] = KeyedLockMap()
 
     @staticmethod
-    def _sanitize_background_file_path(value: str | None, suffix: str) -> str | None:
-        """Validate a backend-assigned background log/exit path.
-
-        Returns the path when it lives directly under
-        ``BACKGROUND_PROCESS_DIR`` (prefix ``DIR + "/"``), contains no
-        ``..`` segments, its basename matches
-        ``^[A-Za-z0-9][A-Za-z0-9._-]*$`` and ends with *suffix*
-        (``.log`` / ``.exit``).  Returns ``None`` for anything else so
-        callers fall back to the legacy ``{DIR}/{process_id}`` schema.
-        """
-        if not isinstance(value, str):
-            return None
-        cleaned = value.strip()
-        if not cleaned:
-            return None
+    def _sanitize_background_file_path(value: str, suffix: str) -> str:
+        """Require a log/exit file directly inside the process directory."""
+        cleaned = value.strip() if isinstance(value, str) else ""
         prefix = BACKGROUND_PROCESS_DIR.rstrip("/") + "/"
-        if not cleaned.startswith(prefix):
-            return None
-        remainder = cleaned[len(prefix):]
-        if not remainder or "/" in remainder or ".." in remainder:
-            return None
-        basename = remainder
-        if not basename.endswith(suffix):
-            return None
-        if not _BACKGROUND_PROCESS_ID_RE.match(basename):
-            return None
+        basename = cleaned.removeprefix(prefix)
+        if (
+            not cleaned.startswith(prefix)
+            or ".." in basename
+            or not basename.endswith(suffix)
+            or not _BACKGROUND_PROCESS_ID_RE.fullmatch(basename)
+        ):
+            raise ValueError(f"Invalid background {suffix} path")
         return cleaned
 
     @staticmethod
@@ -253,27 +237,6 @@ class BackgroundProcessManager:
             command=["sh", "-lc", script],
             workdir="/workspace",
         )
-
-    @property
-    def _background_start_locks(
-        self,
-    ) -> dict[tuple[uuid.UUID, str], asyncio.Lock]:
-        """Alias onto the start-lock map's underlying dict (live)."""
-        return self._background_start_lock_map.locks
-
-    @_background_start_locks.setter
-    def _background_start_locks(self, value: dict) -> None:
-        self._background_start_lock_map.locks.clear()
-        self._background_start_lock_map.locks.update(value)
-
-    @property
-    def _background_start_locks_guard(self) -> asyncio.Lock:
-        """Alias onto the start-lock map's guard lock."""
-        return self._background_start_lock_map.guard
-
-    @_background_start_locks_guard.setter
-    def _background_start_locks_guard(self, value: asyncio.Lock) -> None:
-        self._background_start_lock_map.guard = value
 
     async def _background_start_lock(
         self, workspace_id: uuid.UUID, process_id: str
@@ -414,13 +377,13 @@ class BackgroundProcessManager:
                     )
                 )
                 continue
-            log_path = self._sanitize_background_file_path(
-                candidate.get("log_path"), ".log"
-            ) or (f"{BACKGROUND_PROCESS_DIR}/{cleaned_process_id}.log")
-            exit_path = self._sanitize_background_file_path(
-                candidate.get("exit_path"), ".exit"
-            ) or (f"{BACKGROUND_PROCESS_DIR}/{cleaned_process_id}.exit")
             try:
+                log_path = self._sanitize_background_file_path(
+                    candidate.get("log_path"), ".log"
+                )
+                exit_path = self._sanitize_background_file_path(
+                    candidate.get("exit_path"), ".exit"
+                )
                 async with self._background_lock:
                     tracked = self._background_processes.get(
                         workspace_id, {}
@@ -540,8 +503,9 @@ class BackgroundProcessManager:
         workdir: str = "/workspace",
         env: dict[str, str] | None = None,
         name: str = "",
-        log_path: str | None = None,
-        exit_path: str | None = None,
+        *,
+        log_path: str,
+        exit_path: str,
     ) -> dict[str, Any]:
         """Start a detached background process inside a workspace.
 
@@ -552,16 +516,15 @@ class BackgroundProcessManager:
             workdir: Working directory inside the workspace VM/container.
             env: Optional per-process environment overrides.
             name: Optional human-readable process name.
-            log_path: Optional backend-assigned log path. Used only when it
-                passes :meth:`_sanitize_background_file_path` validation;
-                otherwise the legacy ``{DIR}/{process_id}.log`` schema applies.
-            exit_path: Optional backend-assigned exit path (same rule,
-                ``.exit`` suffix).
+            log_path: Backend-assigned log path inside the process directory.
+            exit_path: Backend-assigned exit-code path inside the same directory.
 
         Returns:
             Dict with ``process_id``, ``pid``, ``log_path``, ``exit_path``.
         """
         cleaned_process_id = self._sanitize_process_id(process_id)
+        log_path = self._sanitize_background_file_path(log_path, ".log")
+        exit_path = self._sanitize_background_file_path(exit_path, ".exit")
         if not (command or "").strip():
             raise ValueError("command must not be empty")
         safe_workdir = self._sanitize_exec_workdir(workdir)
@@ -579,16 +542,6 @@ class BackgroundProcessManager:
             if not _BACKGROUND_ENV_KEY_RE.match(str(key)):
                 raise ValueError(f"Invalid env key: {key!r}")
 
-        legacy_log_path = f"{BACKGROUND_PROCESS_DIR}/{cleaned_process_id}.log"
-        legacy_exit_path = f"{BACKGROUND_PROCESS_DIR}/{cleaned_process_id}.exit"
-        resolved_log_path = (
-            self._sanitize_background_file_path(log_path, ".log")
-            or legacy_log_path
-        )
-        resolved_exit_path = (
-            self._sanitize_background_file_path(exit_path, ".exit")
-            or legacy_exit_path
-        )
         # Restart safety: serialised per process_id so two concurrent
         # starts cannot orphan each other's PID (the tracking dict would
         # otherwise keep only the last writer and leak the loser's
@@ -612,8 +565,8 @@ class BackgroundProcessManager:
                 )
             start_shell = self._build_background_start_shell(
                 command.strip(),
-                resolved_log_path,
-                resolved_exit_path,
+                log_path,
+                exit_path,
                 extra_env,
                 self._credential_env_file,
             )
@@ -637,8 +590,8 @@ class BackgroundProcessManager:
                 pid=pid,
                 command=command.strip(),
                 workdir=safe_workdir,
-                log_path=resolved_log_path,
-                exit_path=resolved_exit_path,
+                log_path=log_path,
+                exit_path=exit_path,
                 name=name or "",
             )
             async with self._background_lock:
@@ -654,8 +607,8 @@ class BackgroundProcessManager:
         return {
             "process_id": cleaned_process_id,
             "pid": pid,
-            "log_path": resolved_log_path,
-            "exit_path": resolved_exit_path,
+            "log_path": log_path,
+            "exit_path": exit_path,
         }
 
     async def _background_status_locked(
