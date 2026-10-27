@@ -579,7 +579,7 @@ async def test_plan_permission_then_build_same_thread(runtime):
             await asyncio.sleep(0.02)
     request = PermissionRequest.objects.get(session_id=session.id, status="pending")
     assert not data.accessor.path("/workspace/note.txt").exists()
-    await data.service.resolve_permission(
+    await data.service.interactions.resolve_permission(
         session=session, request_id=request.id, response="once"
     )
     await asyncio.wait_for(task, 35)

@@ -57,7 +57,7 @@ async def test_redacted_actions_keep_secret_specific_always_scope(
     display = "curl --token [redacted] https://example.invalid"
 
     first = asyncio.create_task(
-        service._on_permission(
+        service.interactions.request_permission(
             session,
             assistant,
             tool="bash",
@@ -85,13 +85,13 @@ async def test_redacted_actions_keep_secret_specific_always_scope(
         await asyncio.sleep(0.01)
     assert events[0]["pattern"] == display
     assert actions[0] not in repr(events)
-    await service.resolve_permission(
+    await service.interactions.resolve_permission(
         session=session, request_id=request.id, response="always"
     )
     assert await first == "once"
 
     second = asyncio.create_task(
-        service._on_permission(
+        service.interactions.request_permission(
             session,
             assistant,
             tool="bash",
@@ -114,12 +114,12 @@ async def test_redacted_actions_keep_secret_specific_always_scope(
     assert pending is not None
     assert pending.status == "pending"
     assert not second.done()
-    await service.resolve_permission(
+    await service.interactions.resolve_permission(
         session=session, request_id=pending.id, response="once"
     )
     assert await second == "once"
 
-    matching = await service._on_permission(
+    matching = await service.interactions.request_permission(
         session,
         assistant,
         tool="bash",
@@ -190,7 +190,7 @@ async def test_shared_on_permission_skips_persisted_allowlist(
         pattern="/workspace/docs/*.md",
     )
 
-    assert await service._on_permission(
+    assert await service.interactions.request_permission(
         session,
         assistant,
         tool="read",
@@ -201,7 +201,7 @@ async def test_shared_on_permission_skips_persisted_allowlist(
     assert not PermissionRequest.objects.filter(session_id=session.id).exists()
 
     permissions.evaluator = PermissionEvaluator(global_rules={"read": "deny"})
-    assert not await service._authorize_file_read(
+    assert not await service.interactions.authorize_file_read(
         session, assistant, "/workspace/docs/guide.md"
     )
 
@@ -240,7 +240,7 @@ async def test_always_resolves_only_matching_pending_sibling(harness_workspace) 
         pattern="/workspace/src/allowed.py",
     )
 
-    await service._resolve_sibling_permissions(
+    await service.interactions._resolve_sibling_permissions(
         session=session,
         tool="edit",
         skip_id=uuid.uuid4(),

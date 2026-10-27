@@ -499,7 +499,7 @@ def timeline_to_out(
             else None,
         )
         parts_by_message.setdefault(str(part.message_id), []).append(payload)
-    pending_questions = service.list_pending_questions(
+    pending_questions = service.interactions.list_pending_questions(
         session.id, include_descendants=True
     )
     pending_questions = [
@@ -540,7 +540,7 @@ def timeline_to_out(
             }
             for message in messages
         ],
-        "permissions": service.list_pending_permissions(
+        "permissions": service.interactions.list_pending_permissions(
             session.id, include_descendants=True
         ),
         "questions": pending_questions,

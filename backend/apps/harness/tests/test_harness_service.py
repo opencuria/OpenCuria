@@ -14,10 +14,12 @@ from asgiref.sync import sync_to_async
 from django.core.exceptions import SynchronousOnlyOperation
 
 from apps.harness.harness_service import (
-    FRONTEND_EVENT_PERMISSION,
-    FRONTEND_EVENT_QUESTION,
     FRONTEND_EVENT_STATUS,
     HarnessService,
+)
+from apps.harness.interaction_service import (
+    FRONTEND_EVENT_PERMISSION,
+    FRONTEND_EVENT_QUESTION,
 )
 from apps.harness.models import HarnessSession, QuestionRequest, Todo
 from apps.harness.permissions.evaluator import PermissionEvaluator
@@ -714,7 +716,7 @@ async def test_resolve_permission_child_session_without_sync_orm(
     )
     monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
     try:
-        outcome = await service.resolve_permission(
+        outcome = await service.interactions.resolve_permission(
             session=child,
             request_id=permission.id,
             response="once",
@@ -749,7 +751,7 @@ async def test_resolve_question_child_session_without_sync_orm(
     )
     monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
     try:
-        outcome = await service.resolve_question(
+        outcome = await service.interactions.resolve_question(
             session=child,
             question_id=question.id,
             answers=["blue"],
@@ -2457,7 +2459,7 @@ async def test_always_allow_resolves_only_matching_sibling_asks(
         session_id=session.id, role="assistant"
     )
     first = asyncio.create_task(
-        service._on_permission(
+        service.interactions.request_permission(
             session,
             assistant,
             tool="bash",
@@ -2467,7 +2469,7 @@ async def test_always_allow_resolves_only_matching_sibling_asks(
         )
     )
     second = asyncio.create_task(
-        service._on_permission(
+        service.interactions.request_permission(
             session,
             assistant,
             tool="bash",
@@ -2477,7 +2479,7 @@ async def test_always_allow_resolves_only_matching_sibling_asks(
         )
     )
     third = asyncio.create_task(
-        service._on_permission(
+        service.interactions.request_permission(
             session,
             assistant,
             tool="bash",
@@ -2499,7 +2501,7 @@ async def test_always_allow_resolves_only_matching_sibling_asks(
     assert len(request_ids) >= 3
     monkeypatch.delenv("DJANGO_ALLOW_ASYNC_UNSAFE", raising=False)
     try:
-        await service.resolve_permission(
+        await service.interactions.resolve_permission(
             session=session,
             request_id=uuid.UUID(request_ids[0]),
             response="always",

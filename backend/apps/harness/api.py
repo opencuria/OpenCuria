@@ -827,7 +827,7 @@ async def resolve_harness_permission(
             _require_claude_session_owner(session, request.user.id)
         except AuthenticationError as exc:
             return 403, {"detail": exc.message, "code": "permission_denied"}
-        outcome = await service.resolve_permission(
+        outcome = await service.interactions.resolve_permission(
             session=session,
             request_id=request_id,
             response=payload.response,
@@ -872,7 +872,7 @@ async def resolve_harness_question(
             _require_claude_session_owner(session, request.user.id)
         except AuthenticationError as exc:
             return 403, {"detail": exc.message, "code": "permission_denied"}
-        outcome = await service.resolve_question(
+        outcome = await service.interactions.resolve_question(
             session=session,
             question_id=question_id,
             answers=payload.answers,

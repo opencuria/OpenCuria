@@ -143,8 +143,12 @@ async def execute_external_run(
                 context.get("skill_bodies", []),
                 mcp_snapshot.snapshot.plugin_skills if mcp_snapshot else [],
             ),
-            on_permission=lambda **kw: service._on_permission(session, assistant, **kw),
-            on_question=lambda **kw: service._on_question(session, assistant, **kw),
+            on_permission=lambda **kw: service.interactions.request_permission(
+                session, assistant, **kw
+            ),
+            on_question=lambda **kw: service.interactions.ask_question(
+                session, assistant, **kw
+            ),
             steering=context.get("steering"),
             run_subagent=lambda args, ctx, subtask_id: service._run_subagent_tool(
                 parent=session,
@@ -154,8 +158,10 @@ async def execute_external_run(
                 organization_id=organization_id,
             ),
         )
-        run_options.authorize_file_read = lambda path: service._authorize_file_read(
-            session, assistant, path
+        run_options.authorize_file_read = (
+            lambda path: service.interactions.authorize_file_read(
+                session, assistant, path
+            )
         )
         run_options.reasoning_effort = session.reasoning_effort or (
             "" if engine_id == "codex" else "high"

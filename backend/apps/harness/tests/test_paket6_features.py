@@ -407,7 +407,7 @@ async def test_compaction_child_emit_does_not_leak_to_parent() -> None:
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_resolve_question_via_service(db) -> None:
-    """HarnessService.resolve_question stores answers and completes future."""
+    """InteractionService stores answers and completes the waiting future."""
     from django.contrib.auth import get_user_model
 
     from apps.organizations.models import Membership, MembershipRole, Organization
@@ -450,8 +450,8 @@ async def test_resolve_question_via_service(db) -> None:
         questions=[{"question": "Color?"}],
     )
     future: asyncio.Future[list[Any]] = asyncio.get_running_loop().create_future()
-    service._pending_questions[str(request.id)] = future
-    outcome = await service.resolve_question(
+    service.interactions._pending_questions[str(request.id)] = future
+    outcome = await service.interactions.resolve_question(
         session=session,
         question_id=request.id,
         answers=["blue"],
@@ -490,9 +490,9 @@ async def test_resolve_question_decodes_multi_select_answers(
         ],
     )
     future: asyncio.Future[list[Any]] = asyncio.get_running_loop().create_future()
-    service._pending_questions[str(request.id)] = future
+    service.interactions._pending_questions[str(request.id)] = future
 
-    await service.resolve_question(
+    await service.interactions.resolve_question(
         session=session,
         question_id=request.id,
         answers=["Python\x00Go\x00my own", "Ada"],

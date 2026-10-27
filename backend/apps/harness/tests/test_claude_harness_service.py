@@ -123,7 +123,7 @@ async def test_claude_run_uses_persisted_always_allowlist(harness_workspace):
             break
         await asyncio.sleep(0.01)
     assert request is not None
-    await service.resolve_permission(
+    await service.interactions.resolve_permission(
         session=session, request_id=request.id, response="always"
     )
     first_task = service._tasks.get(str(session.id))
@@ -187,7 +187,7 @@ async def test_claude_run_still_requests_nonmatching_allowlist_action(
     assert request.status == "pending"
     assert request.pattern == "/workspace/src/other.py"
 
-    await service.resolve_permission(
+    await service.interactions.resolve_permission(
         session=session, request_id=request.id, response="once"
     )
     await service._tasks[str(session.id)]

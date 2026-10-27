@@ -166,7 +166,7 @@ async def test_pending_question_cannot_resume_during_capture(harness_workspace):
         active_operation="capturing_image"
     )
     with pytest.raises(ConflictError):
-        await HarnessService().resolve_question(
+        await HarnessService().interactions.resolve_question(
             session=session, question_id=question.id, answers=["yes"]
         )
     question.refresh_from_db()
@@ -189,7 +189,7 @@ async def test_pending_permission_cannot_resume_during_capture(harness_workspace
         active_operation="capturing_image"
     )
     with pytest.raises(ConflictError):
-        await HarnessService().resolve_permission(
+        await HarnessService().interactions.resolve_permission(
             session=session, request_id=request.id, response="always"
         )
     request.refresh_from_db()
@@ -292,7 +292,7 @@ async def test_capture_between_abort_join_and_gate_cleanup_keeps_tree_cleanup(
     root = session_for(harness_workspace)
     _, task = await start(service, root)
     captured = []
-    original_reject = service._reject_pending_user_gates
+    original_reject = service.interactions.reject_pending
     try:
         await checkpoint(provider.grandchild_entered)
         sessions = tree(root)
@@ -324,7 +324,9 @@ async def test_capture_between_abort_join_and_gate_cleanup_keeps_tree_cleanup(
                 )
             await original_reject(session)
 
-        monkeypatch.setattr(service, "_reject_pending_user_gates", reject_after_capture)
+        monkeypatch.setattr(
+            service.interactions, "reject_pending", reject_after_capture
+        )
         await service.abort_run(root.id)
         assert len(captured) == 1
         assert_user_abort(service, sessions)

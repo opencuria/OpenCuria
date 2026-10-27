@@ -554,7 +554,7 @@ async def test_rest_claude_gate_resolution_is_restricted_to_session_owner(
         user_id=data["stranger"].id,
     )
     resolver = AsyncMock()
-    monkeypatch.setattr(data["service"], resolver_name, resolver)
+    monkeypatch.setattr(data["service"].interactions, resolver_name, resolver)
     monkeypatch.setattr(
         harness_api,
         "_owned_workspace",

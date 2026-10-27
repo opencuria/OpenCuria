@@ -12,10 +12,10 @@ from asgiref.sync import sync_to_async
 from apps.harness.conversation_events import FRONTEND_EVENT_CONVERSATIONS_CHANGED
 from apps.harness.conversation_service import ConversationService
 from apps.harness.harness_service import (
-    FRONTEND_EVENT_PERMISSION,
     FRONTEND_EVENT_STATUS,
     HarnessService,
 )
+from apps.harness.interaction_service import FRONTEND_EVENT_PERMISSION
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.service import PermissionService
 from apps.harness.providers.base import (
@@ -365,7 +365,7 @@ async def test_subtask_part_persists_child_session_id(harness_workspace) -> None
 async def test_permission_event_emitted_once_with_request_id(
     harness_workspace,
 ) -> None:
-    """_on_permission emits a single harness.permission_required with request_id."""
+    """Permission requests emit one event containing their request_id."""
     emitted: list[dict[str, Any]] = []
 
     async def _emit(event: str, data: dict[str, Any]) -> None:
@@ -379,7 +379,7 @@ async def test_permission_event_emitted_once_with_request_id(
     )
     assistant = HarnessMessageRepository.create(session_id=session.id, role="assistant")
     permission_task = asyncio.create_task(
-        service._on_permission(
+        service.interactions.request_permission(
             session,
             assistant,
             tool="bash",
@@ -399,7 +399,7 @@ async def test_permission_event_emitted_once_with_request_id(
     assert permission_events[0]["agent_name"] == session.agent_name
     assert permission_events[0]["root_session_id"] == str(session.id)
     assert permission_events[0]["session_id"] == str(session.id)
-    await service.resolve_permission(
+    await service.interactions.resolve_permission(
         session=session,
         request_id=uuid.UUID(permission_events[0]["request_id"]),
         response="once",

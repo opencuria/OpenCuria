@@ -132,7 +132,7 @@ def _pending_inputs(session: Any) -> list[dict[str, Any]]:
     """Questions and permission requests the agent (or a subagent) waits on."""
     service = get_harness_service()
     pending: list[dict[str, Any]] = []
-    for request in service.list_pending_permissions(
+    for request in service.interactions.list_pending_permissions(
         session.id, include_descendants=True
     ):
         pending.append(
@@ -151,7 +151,9 @@ def _pending_inputs(session: Any) -> list[dict[str, Any]]:
                 }
             )
         )
-    for request in service.list_pending_questions(session.id, include_descendants=True):
+    for request in service.interactions.list_pending_questions(
+        session.id, include_descendants=True
+    ):
         pending.append(
             compact(
                 {
@@ -861,7 +863,7 @@ async def chat_respond(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
                 "This is a permission request; pass permission as once, always "
                 "or reject."
             )
-        outcome = await service.resolve_permission(
+        outcome = await service.interactions.resolve_permission(
             session=target, request_id=request_uuid, response=args["permission"]
         )
         resolved = {"type": "permission", "decision": outcome["decision"]}
@@ -870,7 +872,7 @@ async def chat_respond(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
             raise ToolError(
                 "This is a question; pass answers (one per question) or decline=true."
             )
-        outcome = await service.resolve_question(
+        outcome = await service.interactions.resolve_question(
             session=target,
             question_id=request_uuid,
             answers=list(args.get("answers") or []),

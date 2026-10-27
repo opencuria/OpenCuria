@@ -45,6 +45,9 @@ Provider account management never imports its orchestration consumers; account
 validation stays with accounts and revocation wakeups use a leaf event module.
 Provider-history reconstruction is independent of run orchestration; its caller
 supplies persistence ports to ``ProviderHistoryService``.
+Permission and question interactions own pending requests and live waiters in
+``InteractionService``. It uses event and run-status ports, never imports run
+orchestration or tool adapters, and leaves no forwarding API in HarnessService.
 Saved conversation feeds, unread/attention state and notice dismissal belong to
 ``ConversationService``. It and the shared conversation event publisher never
 import live run orchestration, even through their dependencies.
@@ -320,6 +323,72 @@ def test_commit_suggestions_are_independent_of_session_orchestration() -> None:
         "composition without coupling it to HarnessService:\n"
         + "\n".join(sorted(violations))
     )
+
+
+def test_user_interactions_are_independent_of_run_orchestration() -> None:
+    """All engines and adapters share interactions without a reverse dependency."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    modules = {_module_name(path): path for path in trees}
+    interactions = "apps.harness.interaction_service"
+    lifecycle = "apps.harness.harness_service"
+    forbidden = {
+        lifecycle,
+        "apps.harness.runner",
+        "apps.harness.engines.execution",
+        "apps.harness.engines.service_runtime",
+        "apps.harness.tools",
+    }
+    assert interactions in modules
+    assert interactions in _imported_modules(
+        modules[lifecycle], trees[modules[lifecycle]]
+    )
+    pending = {interactions}
+    checked: set[str] = set()
+    violations = set()
+    while pending:
+        module = pending.pop()
+        checked.add(module)
+        path = modules[module]
+        for imported in _imported_modules(path, trees[path]):
+            if any(
+                imported == owner or imported.startswith(f"{owner}.")
+                for owner in forbidden
+            ):
+                violations.add(f"{module} -> {imported}")
+            elif imported in modules and imported not in checked:
+                pending.add(imported)
+    assert violations == set(), (
+        "InteractionService must own user gates independently of run orchestration "
+        "and tool adapters, including through local imports:\n"
+        + "\n".join(sorted(violations))
+    )
+
+    moved_operations = {
+        "list_pending_permissions",
+        "list_pending_questions",
+        "resolve_permission",
+        "resolve_question",
+        "_authorize_file_read",
+        "_on_permission",
+        "_on_question",
+        "_reject_pending_user_gates",
+        "_resolve_sibling_permissions",
+        "_gate_ids",
+        "_reject_tree_gates",
+    }
+    lifecycle_methods = {
+        node.name
+        for node in ast.walk(trees[modules[lifecycle]])
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert moved_operations.isdisjoint(lifecycle_methods), (
+        "Migrate interaction callers directly; do not restore orchestration wrappers"
+    )
+    assert not {
+        node.attr
+        for node in ast.walk(trees[modules[lifecycle]])
+        if isinstance(node, ast.Attribute)
+    } & {"_pending_permissions", "_pending_questions"}
 
 
 def test_session_metadata_is_independent_of_run_orchestration() -> None:
