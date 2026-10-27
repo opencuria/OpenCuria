@@ -3,7 +3,8 @@
 A line is what users see as "one image". Captured images are versioned by
 ``CapturedImage``; definition builds by ``ImageBuildJob`` (definition x runner).
 Every version is a standalone ``ImageInstance`` whose ``generation`` is its
-version number. All ORM access for versions, pins and retention lives here.
+version number. Version, pin and deletion-reservation reads live here;
+retention decisions belong to ``services.image_retention``.
 """
 
 from __future__ import annotations
@@ -26,13 +27,6 @@ DONE_DELETION_PHASES = ["completed", "cancelled"]
 ACTIVE_JOB_STATUSES = {"active"}
 
 
-def _kept_ids(
-    ready_ids: list[uuid.UUID], keep: int, latest: ImageInstance | None
-) -> set[uuid.UUID]:
-    """Apply the retention window to ready ids ordered newest first."""
-    return set(ready_ids[: max(keep, 1)]) | ({latest.id} if latest else set())
-
-
 @dataclass(frozen=True)
 class ImageLine:
     """Identity of a version line; ``kind`` is ``captured`` or ``definition``."""
@@ -51,7 +45,7 @@ class ImageLine:
 
 
 class ImageLineRepository:
-    """Resolve lines, latest versions, pins and retention for both line kinds."""
+    """Read lines, selected versions, pins and reservations for both line kinds."""
 
     @staticmethod
     def line_of(image: ImageInstance | None) -> ImageLine | None:
@@ -150,21 +144,13 @@ class ImageLineRepository:
         return counts
 
     @staticmethod
-    def kept_ids(line: ImageLine, keep: int) -> set[uuid.UUID]:
-        """Latest plus the ``keep`` newest ready versions are always retained."""
-        ready = list(
+    def ready_ids(line: ImageLine, limit: int) -> list[uuid.UUID]:
+        """Read up to ``limit`` ready version ids, newest first."""
+        return list(
             ImageInstance.objects.filter(line.filter, status="ready")
             .order_by("-generation")
-            .values_list("id", flat=True)[: max(keep, 1)]
+            .values_list("id", flat=True)[:limit]
         )
-        latest = ImageLineRepository.latest(line)
-        return _kept_ids(ready, keep, latest)
-
-    @staticmethod
-    def retention_labels(line: ImageLine, keep: int) -> dict[uuid.UUID, str]:
-        """Label ready versions ``latest``, ``kept`` or ``expires_when_unused``."""
-        latest = ImageLineRepository.latest_many([line])
-        return ImageLineRepository.retention_labels_many({line: keep}, latest)[line]
 
     @staticmethod
     def _version_filter(lines: list[ImageLine]) -> Q:
@@ -174,17 +160,16 @@ class ImageLineRepository:
         ) | Q(build_job_id__in=[line.id for line in lines if line.kind == "definition"])
 
     @staticmethod
-    def retention_labels_many(
-        keep_by_line: dict[ImageLine, int],
-        latest_by_line: dict[ImageLine, ImageInstance | None],
-    ) -> dict[ImageLine, dict[uuid.UUID, str]]:
-        """Label all requested lines with one ordered read of ready version ids."""
+    def ready_ids_many(
+        lines: list[ImageLine],
+    ) -> dict[tuple[str, uuid.UUID], list[uuid.UUID]]:
+        """Read ready ids grouped by line identity with one ordered query."""
         ready: dict[tuple[str, uuid.UUID], list[uuid.UUID]] = {
-            (line.kind, line.id): [] for line in keep_by_line
+            (line.kind, line.id): [] for line in lines
         }
         rows = (
             ImageInstance.objects.filter(
-                ImageLineRepository._version_filter(list(keep_by_line)), status="ready"
+                ImageLineRepository._version_filter(lines), status="ready"
             )
             .order_by("-generation")
             .values_list("id", "captured_image_id", "build_job_id")
@@ -192,41 +177,18 @@ class ImageLineRepository:
         for image_id, captured_id, build_id in rows:
             key = ("captured", captured_id) if captured_id else ("definition", build_id)
             ready[key].append(image_id)
-        result = {}
-        for line, keep in keep_by_line.items():
-            ready_ids = ready[(line.kind, line.id)]
-            latest = latest_by_line[line]
-            kept = _kept_ids(ready_ids, keep, latest)
-            result[line] = {
-                image_id: (
-                    "latest"
-                    if latest and image_id == latest.id
-                    else "kept"
-                    if image_id in kept
-                    else "expires_when_unused"
-                )
-                for image_id in ready_ids
-            }
-        return result
+        return ready
 
     @staticmethod
-    def retention_candidates(line: ImageLine, keep: int) -> list[ImageInstance]:
-        """Ready versions outside the retained window that nothing depends on."""
-        kept = ImageLineRepository.kept_ids(line, keep)
-        expired = list(
+    def ready_versions_excluding(
+        line: ImageLine, excluded_ids: set[uuid.UUID]
+    ) -> list[ImageInstance]:
+        """Read ready versions other than the supplied ids."""
+        return list(
             ImageInstance.objects.filter(line.filter, status="ready").exclude(
-                pk__in=kept
+                pk__in=excluded_ids
             )
         )
-        if not expired:
-            return []
-        pinned = ImageLineRepository.pin_counts(i.id for i in expired)
-        reserved = ImageLineRepository.reserved_image_ids()
-        return [
-            image
-            for image in expired
-            if not pinned.get(image.id) and str(image.id) not in reserved
-        ]
 
     @staticmethod
     def reserved_image_ids(

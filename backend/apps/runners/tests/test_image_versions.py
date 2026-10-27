@@ -22,8 +22,8 @@ from apps.runners.models import (
 )
 from apps.runners.recreate_repository import RecreateRepository
 from apps.runners.repositories import ImageGenerationRepository
-from apps.runners.retention_repository import RetentionRepository
 from apps.runners.services.deletion import DeletionService
+from apps.runners.services.image_retention import ImageRetentionService
 from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_capture_pipeline import result
 from apps.runners.tests.test_services import service as service
@@ -350,7 +350,7 @@ def test_retention_keeps_latest_and_newest_and_waits_for_pins(runner, user):
         runner, user, ("ready", "ready", "ready", "ready", "failed")
     )
     ws = qemu_workspace(runner, user, v1)
-    assert RetentionRepository.tick() == [str(v2.id)]
+    assert ImageRetentionService.tick() == [str(v2.id)]
     v2.refresh_from_db()
     assert v2.status == "pending_deletion"
     v1.refresh_from_db()
@@ -358,13 +358,13 @@ def test_retention_keeps_latest_and_newest_and_waits_for_pins(runner, user):
     org = runner.organization
     org.image_versions_to_keep = 1
     org.save(update_fields=["image_versions_to_keep"])
-    assert RetentionRepository.tick() == [str(v3.id)]
+    assert ImageRetentionService.tick() == [str(v3.id)]
     ws.status = WorkspaceStatus.DELETED
     ws.save(update_fields=["status"])
-    assert RetentionRepository.tick() == [str(v1.id)]
+    assert ImageRetentionService.tick() == [str(v1.id)]
     v4.refresh_from_db()
     assert v4.status == "ready"
-    assert RetentionRepository.tick() == []
+    assert ImageRetentionService.tick() == []
 
 
 def test_retention_labels_describe_every_ready_version(runner, user):
@@ -373,7 +373,7 @@ def test_retention_labels_describe_every_ready_version(runner, user):
 
     line = ImageLineRepository.line_of(v1)
     assert isinstance(line, ImageLine)
-    assert ImageLineRepository.retention_labels(line, 2) == {
+    assert ImageRetentionService.retention_labels(line, 2) == {
         v3.id: "latest",
         v2.id: "kept",
         v1.id: "expires_when_unused",
@@ -396,7 +396,7 @@ def test_definition_generations_follow_the_same_retention(runner, user):
     org = runner.organization
     org.image_versions_to_keep = 1
     org.save(update_fields=["image_versions_to_keep"])
-    assert sorted(RetentionRepository.tick()) == sorted(str(i.id) for i in built[:2])
+    assert sorted(ImageRetentionService.tick()) == sorted(str(i.id) for i in built[:2])
     job.refresh_from_db()
     assert job.current_generation_id == built[2].id
 
@@ -425,7 +425,7 @@ def test_line_is_finalized_once_every_version_is_gone(runner, user):
     CapturedImage.objects.filter(pk=line.id).update(status="pending_deletion")
     v1.status = "deleted"
     v1.save(update_fields=["status"])
-    RetentionRepository.tick()
+    ImageRetentionService.tick()
     line.refresh_from_db()
     assert line.status == "deleted"
 
@@ -435,12 +435,12 @@ def test_raising_keep_does_not_restore_deleted_versions(runner, user):
     org = runner.organization
     org.image_versions_to_keep = 1
     org.save(update_fields=["image_versions_to_keep"])
-    assert RetentionRepository.tick() == [str(v1.id)]
+    assert ImageRetentionService.tick() == [str(v1.id)]
     v1.status = "deleted"
     v1.save(update_fields=["status"])
     org.image_versions_to_keep = 5
     org.save(update_fields=["image_versions_to_keep"])
-    assert RetentionRepository.tick() == []
+    assert ImageRetentionService.tick() == []
     v1.refresh_from_db()
     assert v1.status == "deleted"
 

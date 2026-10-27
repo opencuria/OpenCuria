@@ -5,6 +5,7 @@ from asgiref.sync import sync_to_async
 
 from ..deletion_repository import DeletionRepository
 from ..operations import OperationRepository
+from .image_retention import ImageRetentionService
 
 logger = structlog.get_logger(__name__)
 
@@ -41,9 +42,7 @@ class RecoveryService:
                         {"workspace_id": workspace_id, "error": result["diagnostic"]},
                         workspace_id,
                     )
-        from ..retention_repository import RetentionRepository
-
-        await sync_to_async(RetentionRepository.tick)()
+        await sync_to_async(ImageRetentionService.tick)()
         from ..inventory_repository import InventoryRepository
 
         refreshes = await sync_to_async(InventoryRepository.refresh_candidates)()

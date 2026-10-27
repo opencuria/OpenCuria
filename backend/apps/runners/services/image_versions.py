@@ -9,7 +9,7 @@ from common.exceptions import ConflictError, NotFoundError
 
 from ..image_lines import ImageLine, ImageLineRepository
 from ..models import CapturedImage, ImageInstance
-from ..retention_repository import RetentionRepository
+from .image_retention import ImageRetentionService
 
 
 @dataclass
@@ -73,7 +73,7 @@ class ImageVersionService:
                 lines.setdefault(line, []).append(image)
         usage = self.lines.pinning_workspace_refs(i.id for i in images)
         keep_by_org = {
-            org_id: RetentionRepository.keep_for(org_id)
+            org_id: ImageRetentionService.keep_for(org_id)
             for org_id in {
                 members[0].runner.organization_id
                 for members in lines.values()
@@ -81,7 +81,7 @@ class ImageVersionService:
             }
         }
         latest_by_line = self.lines.latest_many(list(lines))
-        labels_by_line = self.lines.retention_labels_many(
+        labels_by_line = ImageRetentionService.retention_labels_many(
             {
                 line: keep_by_org[members[0].runner.organization_id]
                 for line, members in lines.items()

@@ -857,6 +857,33 @@ def test_inventory_persistence_never_imports_inspection_workflows() -> None:
     )
 
 
+def test_retention_persistence_never_imports_workflows() -> None:
+    """Retention inputs stay independent of scheduling and deletion consumers."""
+    trees = {path: ast.parse(path.read_text()) for path in _source_files()}
+    modules = {_module_name(path): path for path in trees}
+    forbidden = {"apps.runners.services", "apps.runners.deletion_repository"}
+    pending = {"apps.runners.retention_repository", "apps.runners.image_lines"}
+    checked: set[str] = set()
+    violations = set()
+    while pending:
+        module = pending.pop()
+        checked.add(module)
+        path = modules[module]
+        for imported in _imported_modules(path, trees[path]):
+            if any(
+                imported == owner or imported.startswith(f"{owner}.")
+                for owner in forbidden
+            ):
+                violations.add(f"{module} -> {imported}")
+            elif imported in modules and imported not in checked:
+                pending.add(imported)
+    assert violations == set(), (
+        "Keep retention decisions and recovery in ImageRetentionService; "
+        "input repositories must not import their consumers, even transitively "
+        "or inside functions:\n" + "\n".join(sorted(violations))
+    )
+
+
 def test_storage_inspection_queries_only_through_repositories() -> None:
     """Storage services may read loaded records but never issue ORM queries."""
     services = ("storage", "inventory_inspection")

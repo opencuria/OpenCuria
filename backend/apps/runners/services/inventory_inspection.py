@@ -17,7 +17,7 @@ from ..activity_repository import ActivityRepository
 from ..image_lines import ImageLineRepository
 from ..inventory_repository import SIZES, InventoryRepository
 from ..models import Runner
-from ..retention_repository import RetentionRepository
+from .image_retention import ImageRetentionService
 
 
 class InventoryInspectionService:
@@ -130,7 +130,7 @@ class InventoryInspectionService:
                     workspace_bytes[ws_key] = workspace_bytes.get(ws_key, 0) + (
                         resource["allocated_bytes"] or 0
                     )
-        keep = RetentionRepository.keep_for(runner.organization_id)
+        keep = ImageRetentionService.keep_for(runner.organization_id)
         version_facts: dict[str, dict] = {}
         result["generations"] = []
         for image in data.images:
@@ -139,7 +139,7 @@ class InventoryInspectionService:
                 latest_version = ImageLineRepository.latest(line)
                 version_facts[str(line)] = {
                     "latest": latest_version.id if latest_version else None,
-                    "labels": ImageLineRepository.retention_labels(line, keep),
+                    "labels": ImageRetentionService.retention_labels(line, keep),
                 }
             facts = version_facts.get(str(line), {}) if line else {}
             image_resources = [

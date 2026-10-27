@@ -1,32 +1,27 @@
-"""Organization image-version retention for captured and definition lines.
-
-Per line, the latest version plus the ``image_versions_to_keep`` newest ready
-versions are kept. Every other ready version is handed to the deletion
-coordinator (deferred) as soon as no workspace is based on it. Versions that
-are still in use stay ready, so resetting those workspaces keeps working.
-"""
+"""Materialized image-retention inputs and the runner serialization boundary."""
 
 from __future__ import annotations
 
-import structlog
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 from django.db import transaction
 
-from common.exceptions import ConflictError, NotFoundError
+from apps.organizations.models import Organization
 
-from .image_lines import ImageLine, ImageLineRepository
+from .image_lines import DONE_DELETION_PHASES, ImageLine
 from .locking import lock_runner
-from .models import CapturedImage, ImageBuildJob
-
-logger = structlog.get_logger(__name__)
+from .models import CapturedImage, ImageBuildJob, ImageDeletionRequest, ImageInstance
 
 INACTIVE_JOB_STATUSES = ["pending_deletion", "deleting", "deleted", "delete_failed"]
 
 
 class RetentionRepository:
-    """Apply retention and finalize captured lines whose versions are all gone."""
+    """Read retention inputs; workflow and deletion decisions live in the service."""
 
     @staticmethod
-    def lines() -> list[tuple[ImageLine, object]]:
+    def lines() -> list[tuple[ImageLine, uuid.UUID]]:
         """All live lines with their organization id."""
         result = []
         for line in CapturedImage.objects.filter(status="active").only(
@@ -56,95 +51,52 @@ class RetentionRepository:
         return result
 
     @staticmethod
-    def keep_for(org_id) -> int:
-        """Configured retention of an organization (at least one version)."""
-        from apps.organizations.models import Organization
-
-        keep = (
+    def configured_keep(org_id: uuid.UUID) -> int | None:
+        """Read the stored retention setting without applying policy defaults."""
+        return (
             Organization.objects.filter(pk=org_id)
             .values_list("image_versions_to_keep", flat=True)
             .first()
         )
-        return max(int(keep or 1), 1)
 
     @staticmethod
-    def apply(line: ImageLine, org_id) -> list[str]:
-        """Request deferred deletion of expired, unused versions of one line."""
-        from .deletion_repository import DeletionRepository
-
-        requested = []
-        keep = RetentionRepository.keep_for(org_id)
+    @contextmanager
+    def lock_line(runner_id: uuid.UUID) -> Iterator[None]:
+        """Keep selection and retirement atomic with capture and workspace pins."""
         with transaction.atomic():
-            # Same lock as creation, recreate and capture: pins cannot appear
-            # between selecting a candidate and retiring it.
-            lock_runner(line.runner_id)
-            for image in ImageLineRepository.retention_candidates(line, keep):
-                try:
-                    DeletionRepository.request(
-                        org_id, None, "image", image.id, mode="deferred"
-                    )
-                except (ConflictError, NotFoundError):
-                    continue
-                requested.append(str(image.id))
-        if requested:
-            logger.info(
-                "image_versions_expired",
-                line_kind=line.kind,
-                line_id=str(line.id),
-                image_ids=requested,
-            )
-        return requested
+            lock_runner(runner_id)
+            yield
 
     @staticmethod
-    def tick() -> list[str]:
-        """Apply retention to every line; one bad line never blocks the others."""
-        requested: list[str] = []
-        for line, org_id in RetentionRepository.lines():
-            try:
-                requested += RetentionRepository.apply(line, org_id)
-            except Exception:
-                logger.exception(
-                    "image_retention_failed", line_kind=line.kind, line_id=str(line.id)
-                )
-        for line in CapturedImage.objects.filter(status="pending_deletion"):
-            try:
-                requested += RetentionRepository.heal(line)
-            except Exception:
-                logger.exception("image_line_heal_failed", line_id=str(line.id))
-        for line_id in CapturedImage.objects.filter(
-            status__in=["active", "pending_deletion"]
-        ).values_list("id", flat=True):
-            ImageLineRepository.finalize_captured(line_id)
-        return requested
+    def pending_lines() -> list[CapturedImage]:
+        """Load captured lines pending deletion for orphan recovery."""
+        return list(CapturedImage.objects.filter(status="pending_deletion"))
 
     @staticmethod
-    def heal(line: CapturedImage) -> list[str]:
-        """A line being deleted always converges: orphaned versions get a request."""
-        from .deletion_repository import DONE, DeletionRepository
-        from .models import ImageDeletionRequest, ImageInstance
+    def finalizable_line_ids() -> list[uuid.UUID]:
+        """Read line ids whose remaining versions may have disappeared."""
+        return list(
+            CapturedImage.objects.filter(
+                status__in=["active", "pending_deletion"]
+            ).values_list("id", flat=True)
+        )
 
-        if (
+    @staticmethod
+    def has_line_deletion(line_id: uuid.UUID) -> bool:
+        """Read whether a live request already owns deletion of the whole line."""
+        return (
             ImageDeletionRequest.objects.filter(
-                target_type="captured_image", target_id=line.id
+                target_type="captured_image", target_id=line_id
             )
-            .exclude(phase__in=DONE)
+            .exclude(phase__in=DONE_DELETION_PHASES)
             .exists()
-        ):
-            return []
-        requested = []
-        with transaction.atomic():
-            lock_runner(line.runner_id)
-            reserved = ImageLineRepository.reserved_image_ids()
-            for image in ImageInstance.objects.filter(captured_image=line).exclude(
+        )
+
+    @staticmethod
+    def recoverable_versions(line_id: uuid.UUID) -> list[ImageInstance]:
+        """Load versions outside deleted, deleting and in-flight capture states."""
+        return list(
+            ImageInstance.objects.filter(captured_image_id=line_id).exclude(
                 status__in=["deleted", "deleting", "capturing"]
-            ):
-                if str(image.id) in reserved:
-                    continue
-                try:
-                    DeletionRepository.request(
-                        line.organization_id, None, "image", image.id, mode="deferred"
-                    )
-                except (ConflictError, NotFoundError):
-                    continue
-                requested.append(str(image.id))
-        return requested
+            )
+        )

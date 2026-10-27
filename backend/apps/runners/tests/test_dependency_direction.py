@@ -10,6 +10,8 @@ Lifecycle result policy belongs to its service; journal persistence never
 imports that service or its transport consumers.
 Operator disposition policy also belongs to its service; its repository never
 imports any application's services, including through function-local imports.
+Image retention policy and scheduling live in their service, while repositories
+own the transaction and runner lock shared by selection and retirement.
 """
 
 from __future__ import annotations
@@ -251,5 +253,34 @@ def test_disposition_service_delegates_transactions_and_writes() -> None:
             violations.append(f"{path.name}:{node.lineno} calls {node.attr}")
     assert violations == [], (
         "Keep transactions, model writes and locking behind DispositionRepository:\n"
+        + "\n".join(violations)
+    )
+
+
+def test_image_retention_service_delegates_transactions_and_writes() -> None:
+    """Retention policy cannot bypass the runner lock or write models directly."""
+    path = RUNNERS_DIR / "services" / "image_retention.py"
+    violations = []
+    for node in ast.walk(ast.parse(path.read_text())):
+        modules = []
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            modules = [node.module or "", *(alias.name for alias in node.names)]
+        for module in modules:
+            if module.startswith("django.db") or module.split(".")[-1] in {
+                "locking",
+                "transaction",
+            }:
+                violations.append(f"{path.name}:{node.lineno} imports {module}")
+        if isinstance(node, ast.Attribute) and node.attr in {
+            "save",
+            "asave",
+            "delete",
+            "adelete",
+        }:
+            violations.append(f"{path.name}:{node.lineno} calls {node.attr}")
+    assert violations == [], (
+        "Keep ORM writes, transactions and locking behind retention repositories:\n"
         + "\n".join(violations)
     )

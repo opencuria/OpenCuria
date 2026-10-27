@@ -107,7 +107,7 @@ def test_repository_inputs_project_without_lazy_orm_queries(
     """Once repository ports return, even related display fields are in memory."""
     from apps.runners.activity_repository import ActivityRepository
     from apps.runners.image_lines import ImageLineRepository
-    from apps.runners.retention_repository import RetentionRepository
+    from apps.runners.services.image_retention import ImageRetentionService
 
     definition = ImageDefinition.objects.create(
         name="Build line", organization=runner.organization
@@ -152,9 +152,9 @@ def test_repository_inputs_project_without_lazy_orm_queries(
     )
     data = InventoryRepository.load_inspection(runner)
     monkeypatch.setattr(InventoryRepository, "load_inspection", lambda _: data)
-    monkeypatch.setattr(RetentionRepository, "keep_for", lambda _: 1)
+    monkeypatch.setattr(ImageRetentionService, "keep_for", lambda _: 1)
     monkeypatch.setattr(ImageLineRepository, "latest", lambda _: None)
-    monkeypatch.setattr(ImageLineRepository, "retention_labels", lambda *_: {})
+    monkeypatch.setattr(ImageRetentionService, "retention_labels", lambda *_: {})
     monkeypatch.setattr(
         ActivityRepository,
         "records",

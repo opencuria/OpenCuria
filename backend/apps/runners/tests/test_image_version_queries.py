@@ -18,6 +18,7 @@ from apps.runners.models import (
     ImageDefinition,
     ImageInstance,
 )
+from apps.runners.services.image_retention import ImageRetentionService
 from apps.runners.services.image_versions import ImageVersionService
 from apps.runners.tests.test_image_generations import finish, request
 from apps.runners.tests.test_image_versions import make_line, qemu_workspace
@@ -168,7 +169,7 @@ def test_bulk_latest_preserves_definition_selection(
     assert latest[line] == (older if available else None)
     assert latest[missing] is None
     assert ImageLineRepository.latest(line) == latest[line]
-    labels = ImageLineRepository.retention_labels(line, 1)
+    labels = ImageRetentionService.retention_labels(line, 1)
     assert labels[newer.id] == "kept"
     if selected_status == "ready":
         assert labels[older.id] == ("latest" if available else "expires_when_unused")
@@ -200,7 +201,7 @@ def test_bulk_facts_group_by_identity_across_line_names(runner, user) -> None:
     original = ImageLine("captured", line.id, line.name, runner.id)
     renamed = ImageLine("captured", line.id, "Renamed", runner.id)
     latest = ImageLineRepository.latest_many([original, renamed])
-    labels = ImageLineRepository.retention_labels_many(
+    labels = ImageRetentionService.retention_labels_many(
         {original: 1, renamed: 1}, latest
     )
     assert latest[original] == latest[renamed] == versions[1]
