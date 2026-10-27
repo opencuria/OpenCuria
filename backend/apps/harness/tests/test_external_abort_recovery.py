@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from django.utils import timezone
 
+from apps.harness.engines.repositories import HarnessEngineRepository
 from apps.harness.engines.run_repository import HarnessRunRepository
 from apps.harness.engines.runs import HarnessRunService, RunOwnership
 from apps.harness.harness_service import HarnessService
@@ -25,8 +26,11 @@ def detached_child(
 ) -> tuple[HarnessSession, HarnessSession, HarnessMessage, RunOwnership]:
     """Build a settled parent with an external child missing from the task map."""
     parent, _, parent_owner = _make_attempt(workspace, harness_id=engine_id)
-    assert HarnessRunRepository.complete_if_owner(
-        parent_owner.run_id, parent_owner.owner_token, status="interrupted"
+    assert HarnessEngineRepository.finalize_owned_turn(
+        parent_owner.run_id,
+        parent_owner.owner_token,
+        status="interrupted",
+        finish="aborted",
     )
     child, assistant, owner = _make_attempt(workspace, harness_id=engine_id)
     child.parent_id = parent.id

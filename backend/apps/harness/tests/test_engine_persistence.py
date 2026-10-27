@@ -45,7 +45,7 @@ def test_claude_catalog_is_separate_and_constrained() -> None:
 
 
 @pytest.mark.django_db
-def test_engine_state_and_transcript_are_ordered_encrypted_and_idempotent(
+def test_transcript_batches_are_ordered_encrypted_and_idempotent(
     harness_workspace,
 ) -> None:
     session = HarnessSessionRepository.create(
@@ -55,41 +55,26 @@ def test_engine_state_and_transcript_are_ordered_encrypted_and_idempotent(
     )
     session.harness_id = "claude"
     session.save(update_fields=["harness_id"])
-    HarnessEngineRepository.set_session_engine_state(
-        session.id,
-        external_session_id="sdk-session-123",
-        engine_state={"cwd": "/workspace", "resume_token": "not-secret"},
-    )
     entry = {
         "type": "assistant",
         "message": {"content": [{"type": "text", "text": "hello"}]},
         "uuid": "entry-1",
     }
-    first = HarnessEngineRepository.append_transcript_entry(
+    first, second = HarnessEngineRepository.append_transcript_entries(
         session.id,
         external_session_id="sdk-session-123",
         subpath="main",
-        entry=entry,
+        entries=[entry, {"type": "result", "uuid": "entry-2"}],
     )
-    duplicate = HarnessEngineRepository.append_transcript_entry(
+    (duplicate,) = HarnessEngineRepository.append_transcript_entries(
         session.id,
         external_session_id="sdk-session-123",
         subpath="main",
-        entry=entry,
-    )
-    second = HarnessEngineRepository.append_transcript_entry(
-        session.id,
-        external_session_id="sdk-session-123",
-        subpath="main",
-        entry={"type": "result", "uuid": "entry-2"},
+        entries=[entry],
     )
 
     session.refresh_from_db()
     assert session.external_session_id == "sdk-session-123"
-    assert session.engine_state == {
-        "cwd": "/workspace",
-        "resume_token": "not-secret",
-    }
     assert first.id == duplicate.id
     assert first.position == 0
     assert second.position == 1
@@ -151,16 +136,16 @@ def test_repo_validates_external_session_id_and_subpath(harness_workspace) -> No
         organization_id=harness_workspace.runner.organization_id,
     )
     with pytest.raises(ValueError, match="external_session_id"):
-        HarnessEngineRepository.append_transcript_entry(
+        HarnessEngineRepository.append_transcript_entries(
             session.id,
             external_session_id="",
             subpath="",
-            entry={"type": "message"},
+            entries=[{"type": "message"}],
         )
     with pytest.raises(ValueError, match="subpath"):
-        HarnessEngineRepository.append_transcript_entry(
+        HarnessEngineRepository.append_transcript_entries(
             session.id,
             external_session_id="external",
             subpath="x" * 256,
-            entry={"type": "message"},
+            entries=[{"type": "message"}],
         )

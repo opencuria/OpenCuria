@@ -1742,14 +1742,16 @@ class HarnessService:
                 try:
                     await durable_owner.stop_heartbeat()
                     await durable_owner.begin_close()
-                    await durable_owner.finish(
+                    await durable_owner.finalize_turn(
                         status=(
                             HarnessRunStatus.INTERRUPTED
                             if user_abort
                             else HarnessRunStatus.ERROR
                         ),
-                        error="Run admission failed",
-                        cleanup_confirmed=True,
+                        finish="aborted" if user_abort else "error",
+                        error=(
+                            "aborted by user" if user_abort else "Run admission failed"
+                        ),
                     )
                 except Exception:
                     log.warning("harness_run_attempt_finalize_failed", session_id=key)
