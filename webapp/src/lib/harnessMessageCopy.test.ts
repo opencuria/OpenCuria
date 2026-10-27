@@ -44,13 +44,11 @@ describe('getMessageCopyText', () => {
     expect(getMessageCopyText(message)).toBe('**Keep** the `markdown`.\n')
   })
 
-  it('copies only the final answer after work and repeated Agent-S sequences', () => {
+  it('copies only the final answer after interleaved tools and reasoning', () => {
     const message = makeMessage([
       makePart('early', 'text', 'Earlier response'),
-      makePart('agent-1', 'agent', 'private plan'),
       makePart('work-1', 'tool', 'private tool output'),
       makePart('middle', 'text', 'intermediate note'),
-      makePart('agent-2', 'agent', 'another private plan'),
       makePart('work-2', 'reasoning', 'private reasoning'),
       makePart('final-1', 'text', 'Final '),
       makePart('final-2', 'text', 'answer'),

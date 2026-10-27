@@ -91,16 +91,15 @@ describe('HarnessMessageView copy controls', () => {
     const wrapper = mountView(
       message('assistant', [
         part('t1', 'text', 'Earlier'),
-        part('agent', 'agent', 'private plan'),
+        part('reasoning', 'reasoning', 'private reasoning'),
         part('tool', 'tool', 'private tool output'),
         part('final', 'text', 'Final answer'),
       ]),
     )
     expect(wrapper.get('[data-testid="answer-copy"]').text()).toBe('Final answer')
-    expect(wrapper.get('[data-testid="harness-agent-step-action"]').text()).toBe('private plan')
     expect(wrapper.find('[data-testid="harness-worked-for"]').exists()).toBe(true)
     expect(wrapper.get('[data-testid="answer-copy"]').text()).not.toContain('private tool output')
-    expect(wrapper.get('[data-testid="answer-copy"]').text()).not.toContain('private plan')
+    expect(wrapper.get('[data-testid="answer-copy"]').text()).not.toContain('private reasoning')
   })
 
   it('hides assistant copy while streaming, with no final prose, or when final prose is empty', () => {

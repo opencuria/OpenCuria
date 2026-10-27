@@ -5,8 +5,7 @@ import { BookText, CornerDownRight } from '@lucide/vue'
 import type { HarnessMessage } from '@/types/harness'
 import { buildMessageBlocks, type MessageRenderBlock, type RenderBlock } from '@/lib/harnessBlocks'
 import { getMessageCopyText } from '@/lib/harnessMessageCopy'
-import { hasRunningToolOrSubtask } from '@/lib/harnessSubtaskActivity'
-import { buildAgentStepViews, hasRunningAgentSequence } from '@/lib/harnessAgentSteps'
+import { hasRunningStep, hasRunningToolOrSubtask } from '@/lib/harnessSubtaskActivity'
 import { formatMessageHoverLine } from '@/lib/harnessUsage'
 import { loadProviderModelsCached } from '@/lib/providerCatalog'
 import { formatHarnessModelEffort, type ProviderModel } from '@/lib/harnessModels'
@@ -14,7 +13,6 @@ import { elapsedMs, formatElapsed } from '@/lib/formatElapsed'
 import { useSkillStore } from '@/stores/skills'
 import HarnessUserBubble from './HarnessUserBubble.vue'
 import HarnessMessageEditCard from './HarnessMessageEditCard.vue'
-import HarnessAgentStep from './HarnessAgentStep.vue'
 import HarnessThinking from './HarnessThinking.vue'
 import HarnessBlockList from './HarnessBlockList.vue'
 import HarnessWorkedFor from './HarnessWorkedFor.vue'
@@ -76,7 +74,6 @@ const visibleEntries = computed(() => {
   }
   return entries
 })
-const visibleBlockIndexes = computed(() => new Set(visibleEntries.value.map(({ index }) => index)))
 
 function previousBlockPage(): void {
   blockPage.value = Math.max(0, blockPage.value - 1)
@@ -138,26 +135,6 @@ const elapsedLabel = computed(() => {
   return ms == null ? '' : formatElapsed(ms)
 })
 
-const agentViews = computed(() =>
-  buildAgentStepViews(props.message.parts, {
-    streaming: props.streaming === true,
-    // Only the final (non-streaming) message outcome may turn the last
-    // step into `Failed`; while streaming no stale error may leak in.
-    ...(props.streaming === true
-      ? {}
-      : { finish: props.message.finish, messageError: props.message.error }),
-  }),
-)
-
-function agentViewFor(partId: string): (typeof agentViews.value)[number] | undefined {
-  return agentViews.value.find((view) => view.part.id === partId)
-}
-
-function isAgentBlockConnected(index: number): boolean {
-  const next = blocks.value[index + 1]
-  return visibleBlockIndexes.value.has(index + 1) && next?.kind === 'agent'
-}
-
 const lastBlockIsText = computed(() => {
   // Streaming cursor belongs on the trailing answer text. After idle the
   // final text lives outside the card; while streaming the flat timeline
@@ -178,9 +155,7 @@ const streamingCursor = computed(() => {
   if (last?.kind === 'workedFor') {
     const inner = last.blocks.length - 1
     // While streaming the flat timeline ends in text; after idle wraps it
-    // the cursor stays on that same trailing text inside the card. When
-    // agent plans split the timeline the cursor belongs on the trailing
-    // top-level text instead (inner stays null).
+    // the cursor stays on that same trailing text inside the card.
     const innerLast = last.blocks[inner]
     if (innerLast?.kind === 'text') return { topIndex: lastIndex, innerIndex: inner }
     return null
@@ -188,12 +163,12 @@ const streamingCursor = computed(() => {
   return { topIndex: lastIndex, innerIndex: null as number | null }
 })
 
-/** Thinking only in idle gaps: busy turn, no live tool/subtask or agent step. */
+/** Thinking only between model steps, tools and subtasks. */
 const showThinking = computed(
   () =>
     props.streaming === true &&
     !hasRunningToolOrSubtask(props.message.parts) &&
-    !hasRunningAgentSequence(props.message.parts),
+    !hasRunningStep(props.message.parts),
 )
 
 const catalog = ref<ProviderModel[]>(props.models ?? [])
@@ -240,9 +215,6 @@ function blockKey(block: MessageRenderBlock, index: number): string {
   }
   if (block.kind === 'compaction') {
     return `compaction-${block.part.id}`
-  }
-  if (block.kind === 'agent') {
-    return `agent-${block.part.id}`
   }
   return `${block.kind}-${block.part.id}`
 }
@@ -377,21 +349,6 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
                 @open-subtask="emit('openSubtask', $event)"
               />
             </HarnessWorkedFor>
-          </div>
-          <div
-            v-else-if="entry.block.kind === 'agent'"
-            data-block-kind="agent"
-            :data-part-id="entry.block.part.id"
-            :class="isAgentBlockConnected(entry.index) ? 'mb-0.5' : ''"
-          >
-            <HarnessAgentStep
-              :step="agentViewFor(entry.block.part.id)?.step ?? null"
-              :part="entry.block.part"
-              :status="agentViewFor(entry.block.part.id)?.status ?? 'completed'"
-              :live="agentViewFor(entry.block.part.id)?.live ?? false"
-              :legacy="agentViewFor(entry.block.part.id)?.legacy ?? true"
-              :connected="isAgentBlockConnected(entry.index)"
-            />
           </div>
           <HarnessBlockList
             v-else

@@ -20,7 +20,6 @@ export type HarnessPartType =
   | "step-finish"
   | "subtask"
   | "patch"
-  | "agent"
   | "compaction"
   | "steer";
 
@@ -72,7 +71,6 @@ export interface HarnessPartDisplay {
   preview?: HarnessDiffPreviewLine[];
   additions?: number;
   deletions?: number;
-  agent_meta?: Partial<HarnessAgentMeta>;
   question_rows?: HarnessQuestionPreviewRow[];
   subtask_id?: string;
   child_session_id?: string;
@@ -278,17 +276,6 @@ export interface HarnessConversation {
 
 // --- Socket event payloads (M6 `HarnessService` emit shapes) ----------------
 
-/** Safe Agent-S plan summary (`agent_meta` on `agent` parts / live deltas). */
-export interface HarnessAgentMeta {
-  verification: string;
-  analysis: string;
-  next_action: string;
-  /** Human-readable one-line summary (e.g. `click "Save"`, `type`). */
-  action: string;
-  /** Bare `agent.<method>` name (e.g. `click`), empty when unknown. */
-  action_kind: string;
-}
-
 /** Delta map inside `harness.part_updated` (exactly one key per emit). */
 export interface HarnessPartDelta {
   text?: string;
@@ -303,10 +290,6 @@ export interface HarnessPartDelta {
   title?: string;
   call_id?: string;
   patch?: string;
-  /** Bounded Agent-S plan summary; full plans load through part details. */
-  agent?: string;
-  /** Safe plan summary riding the live `agent` event (untrusted transport). */
-  agent_meta?: Partial<HarnessAgentMeta>;
   compaction?: boolean;
   /** Delivered steer text (a user message injected into the running turn). */
   steer?: string;

@@ -1,6 +1,6 @@
 /**
  * Subagent timeline helpers: type labels, child-tool activity, and
- * whether a parent message still has live tool/subtask work.
+ * whether a message still has live model steps or tool/subtask work.
  */
 
 import type { HarnessMessage, HarnessPart, HarnessSession } from "./harness";
@@ -86,6 +86,29 @@ export function collectDescendantSessionIds(
     }
   }
   return ids;
+}
+
+/**
+ * True while a model step has started but its finish marker has not arrived.
+ */
+export function hasRunningStep(parts: HarnessPart[]): boolean {
+  const active = new Set<number>();
+  const finished = new Set<number>();
+  for (const part of parts) {
+    const step = part.meta?.["step"] ?? part.display?.step;
+    if (typeof step !== "number" || !Number.isFinite(step)) continue;
+    if (part.type === "step-finish") finished.add(step);
+    else if (
+      part.type === "step-start" ||
+      (part.type === "reasoning" && part.state === "running")
+    ) {
+      active.add(step);
+    }
+  }
+  for (const step of active) {
+    if (!finished.has(step)) return true;
+  }
+  return false;
 }
 
 /**

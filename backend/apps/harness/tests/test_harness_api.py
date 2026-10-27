@@ -610,15 +610,6 @@ def test_timeline_omits_heavy_details_and_part_detail_fetches_them(
             ]
         },
     )
-    plan = "PRIVATE-AGENT-PLAN-" * 1000
-    agent = HarnessPartRepository.create(
-        message_id=message.id,
-        type="agent",
-        state="completed",
-        title="Agent plan",
-        output=plan,
-        meta={"agent_meta": {"analysis": "safe summary"}},
-    )
     client = _client(
         user=harness_setup["owner"], org=harness_setup["org"], permissions=READ
     )
@@ -626,7 +617,7 @@ def test_timeline_omits_heavy_details_and_part_detail_fetches_them(
     timeline = client.get(f"/api/v1/harness/sessions/{session.id}/timeline")
     assert timeline.status_code == 200, timeline.content[:500]
     timeline_json = json.dumps(timeline.json())
-    for private in (arguments, output, attachment, plan):
+    for private in (arguments, output, attachment):
         assert private not in timeline_json
     tool_timeline = next(
         part
@@ -646,12 +637,6 @@ def test_timeline_omits_heavy_details_and_part_detail_fetches_them(
     assert detail_json["input"]["arguments"] == arguments
     assert detail_json["output"] == output
     assert detail_json["meta"]["attachments"][0]["url"].endswith(attachment)
-
-    agent_detail = client.get(
-        f"/api/v1/harness/sessions/{session.id}/parts/{agent.id}"
-    )
-    assert agent_detail.status_code == 200
-    assert agent_detail.json()["output"] == plan
 
 
 @pytest.mark.django_db(transaction=True)

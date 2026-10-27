@@ -1048,15 +1048,6 @@ function BlockView({
         onOpenAttachment={onOpenAttachment}
       />
     );
-  if (block.kind === "agent")
-    return (
-      <ProcessRow
-        part={block.part}
-        label="Agent plan"
-        icon={<Sparkles size={16} color={theme.primary} />}
-        onRequestPartDetail={onRequestPartDetail}
-      />
-    );
   if (block.kind === "compaction")
     return (
       <ProcessRow

@@ -1068,35 +1068,6 @@ def save_org_subagent_config(request: HttpRequest, payload: SubagentConfigIn):
 
 
 @harness_router.get(
-    "/agent-s-config/",
-    response={410: dict, 403: dict, 404: dict},
-    operation_id="retired_agent_s_config_get",
-    deprecated=True,
-)
-@harness_router.put(
-    "/agent-s-config/",
-    response={410: dict, 403: dict, 404: dict},
-    operation_id="retired_agent_s_config_put",
-    deprecated=True,
-)
-def retired_agent_s_config(request: HttpRequest):
-    """Explain the retired API without silently discarding obsolete settings."""
-    permission = (
-        APIKeyPermission.HARNESS_READ
-        if request.method == "GET"
-        else APIKeyPermission.HARNESS_RUN
-    )
-    if not check_api_key_permission(request, permission):
-        return _perm_denied(permission)
-    org_id = _get_org_id(request)
-    OrganizationService().require_membership(request.user, org_id)
-    return 410, {
-        "detail": "Agent-S was replaced by Computer Use. Use /computer-use-config/.",
-        "code": "agent_s_retired",
-    }
-
-
-@harness_router.get(
     "/computer-use-config/",
     response={200: ComputerUseConfigOut, 401: dict, 403: dict, 404: dict},
     summary="Get the org-wide computer-use runtime config",

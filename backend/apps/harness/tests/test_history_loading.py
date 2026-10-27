@@ -328,8 +328,7 @@ def test_history_replay_keeps_text_tools_and_steers_in_position_order(
     _part(second, 1, type="text", output="before")
     _part(second, 3, type="tool", state="running", call_id="running", output="omit")
     _part(second, 6, type="tool", state="completed", output="missing call id")
-    _part(second, 7, type="agent", output="omit agent plan")
-    _part(second, 8, type="subtask", output="omit subtask")
+    _part(second, 7, type="subtask", output="omit subtask")
     HarnessMessage.objects.filter(id=first.id).update(
         created_at=timezone.now() + timedelta(days=1)
     )

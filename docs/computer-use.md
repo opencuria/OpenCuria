@@ -64,11 +64,9 @@ lock; reobserve after intervening manual interaction.
 `GET/PUT /api/v1/computer-use-config/` exposes partial updates of `max_steps`
 (1–1,000, specialist only), `screenshot_max_dimension` (320–7,680) and
 `enable_recording` (default false). Unknown/obsolete fields are rejected.
-`/agent-s-config/` returns 410 with the replacement endpoint. The migration
-renames the org configuration, retains these useful values, removes Agent-S
+The migration renames the org configuration, retains these values, removes Agent-S
 fields and activates the new plugin for workspaces with prior computer-use use
 or org configuration. Other workspaces opt in through plugin selection.
-Historical Agent-S timeline rendering remains supported.
 
 Recording starts on the first operational desktop call. Confirmed MP4 paths
 are appended to the chat on success, error or interruption, after recording

@@ -147,7 +147,7 @@ describe("current harness streaming contract", () => {
     });
   });
 
-  it("uses compact patch and agent projections and loads details separately", () => {
+  it("uses compact patch projections and loads details separately", () => {
     const messages: HarnessMessage[] = [];
     const patch = {
       path: "a.ts",
@@ -157,39 +157,11 @@ describe("current harness streaming contract", () => {
       patch: "a.ts",
       display: patch,
     });
-    const agent = { analysis: "Save the file", action_kind: "click" };
-    stream(
-      messages,
-      "agent-1",
-      {
-        agent: "Save the file",
-        display: { summary: "Save the file" },
-        agent_meta: { ...agent, exec_code: "hidden" } as typeof agent,
-      },
-      3,
-    );
-    stream(
-      messages,
-      "agent-1",
-      {
-        agent: "Save the file",
-        display: { summary: "Save the file" },
-        agent_meta: agent,
-      },
-      3,
-    );
     expect(assistant.content).toBe("");
     expect(assistant.parts).toEqual([
       expect.objectContaining({
         id: "patch-1",
         display: patch,
-        output: "",
-        detail_loaded: false,
-      }),
-      expect.objectContaining({
-        id: "agent-1",
-        display: { summary: "Save the file", step: 3, agent_meta: agent },
-        meta: { step: 3, agent_meta: agent },
         output: "",
         detail_loaded: false,
       }),

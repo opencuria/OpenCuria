@@ -167,24 +167,6 @@ function toStepNumber(value: unknown): number | undefined {
   return value;
 }
 
-/** Normalize a defensive agent_meta map (unknown keys are dropped). */
-function sanitizeAgentMeta(value: unknown): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (!value || typeof value !== "object") return out;
-  const source = value as Record<string, unknown>;
-  for (const key of [
-    "verification",
-    "analysis",
-    "next_action",
-    "action",
-    "action_kind",
-  ]) {
-    const entry = source[key];
-    if (typeof entry === "string" && entry) out[key] = entry.slice(0, 240);
-  }
-  return out;
-}
-
 /** Cost/tokens meta keys forwarded on step-finish parts. */
 const STEP_FINISH_META_KEYS = ["cost", "tokens", "step"] as const;
 
@@ -239,8 +221,7 @@ export function applyPartDeltaImmutable(
  * to the latest turn). Parts are identified by persisted `part_id`;
  * tool starts carry explicit pending/running states, and completions carry
  * compact display projections. Full tool details load through REST.
- * `step_start`/`step_finish` create step marker parts; `agent` deltas
- * create (or idempotently update) the Agent-S plan part.
+ * `step_start`/`step_finish` create step marker parts.
  */
 export function applyPartDelta(
   messages: HarnessMessage[],
@@ -375,60 +356,6 @@ export function applyPartDelta(
       output: "",
       meta,
     });
-  }
-
-  if (delta.agent !== undefined) {
-    closeRunningStreams(message);
-    // Agent-S plan event: create (or idempotently update) the completed
-    // plan part. Never touches the assistant `content` (plans are cards,
-    // not the final answer). The idle REST fetch reconciles afterwards;
-    // no per-event refetch is scheduled here.
-    const step = toStepNumber(opts.step);
-    const agentMeta = sanitizeAgentMeta(delta.agent_meta);
-    const safeSummary = String(
-      delta.display?.summary ??
-        agentMeta.analysis ??
-        agentMeta.next_action ??
-        "Agent plan",
-    ).slice(0, 240);
-    const display = {
-      ...delta.display,
-      summary: safeSummary,
-      ...(step !== undefined ? { step } : {}),
-      agent_meta: agentMeta,
-    };
-    const existing = findPart(message, partId);
-    if (existing) {
-      existing.type = "agent";
-      existing.state = "completed";
-      existing.title = "Agent plan";
-      existing.output = "";
-      existing.display = display;
-      existing.detail_loaded = false;
-      existing.meta = {
-        ...existing.meta,
-        ...(step !== undefined ? { step } : {}),
-        ...(Object.keys(agentMeta).length > 0 ? { agent_meta: agentMeta } : {}),
-      };
-    } else {
-      message.parts.push({
-        id: partId,
-        message_id: message.id,
-        session_id: sessionId,
-        type: "agent",
-        state: "completed",
-        title: "Agent plan",
-        output: "",
-        display,
-        detail_loaded: false,
-        meta: {
-          ...(step !== undefined ? { step } : {}),
-          ...(Object.keys(agentMeta).length > 0
-            ? { agent_meta: agentMeta }
-            : {}),
-        },
-      });
-    }
   }
 
   if (delta.patch !== undefined) {
@@ -685,15 +612,6 @@ function mergeAssistantParts(
             tool: liveSame.input["tool"],
           };
         }
-      }
-      if (
-        serverPart.meta?.["agent_meta"] == null &&
-        liveSame.meta?.["agent_meta"] != null
-      ) {
-        serverPart.meta = {
-          ...serverPart.meta,
-          agent_meta: liveSame.meta["agent_meta"],
-        };
       }
       // A lightweight timeline refresh must not discard details fetched while
       // the same session was idle.

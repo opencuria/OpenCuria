@@ -243,8 +243,6 @@ def _activity_entry(part: dict[str, Any], detail: str) -> Any:
     elif kind == "subtask":
         label = f"subagent {display.get('agent') or ''}: {display.get('summary') or ''}"
         state = display.get("status") or state
-    elif kind == "agent":
-        label = f"computer use: {display.get('summary') or part.get('title') or ''}"
     elif kind == "compaction":
         label = "conversation context was compacted"
     elif kind == "reasoning":

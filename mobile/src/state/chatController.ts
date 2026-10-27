@@ -1573,9 +1573,7 @@ export class ChatController {
         !(lightweight.state === "error" && lightweight.output === "Tool failed")
       )
         lightweight.output = "";
-      lightweight.meta = lightweight.display?.agent_meta
-        ? { agent_meta: lightweight.display.agent_meta }
-        : {};
+      lightweight.meta = {};
       lightweight.detail_loaded = false;
       const message = this.messagesBySession
         .get(removed.sessionId)

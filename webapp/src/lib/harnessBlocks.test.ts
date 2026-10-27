@@ -4,7 +4,6 @@ import type { HarnessPart, HarnessPartType } from '@/types/harness'
 import {
   buildRenderBlocks,
   countWorkItems,
-  isAgentPart,
   isCardPart,
   isPendingQuestionPart,
   isQuestionToolPart,
@@ -209,44 +208,6 @@ describe('buildRenderBlocks', () => {
     const blocks = buildRenderBlocks(parts)
     expect(blocks.map((block) => block.kind)).toEqual(['single'])
     expect(blocks[0]).toMatchObject({ kind: 'single', part: { id: 'task-1' } })
-  })
-
-  it('renders agent plan steps as their own timeline blocks', () => {
-    const parts = [
-      makePart('tool', { id: 'tool-1', tool: 'read', title: 'Read a.ts' }),
-      makePart('agent', { id: 'agent-1', title: 'Agent plan', output: 'plan one' }),
-      makePart('agent', { id: 'agent-2', title: 'Agent plan', output: 'plan two' }),
-    ]
-
-    const blocks = buildRenderBlocks(parts)
-
-    expect(blocks.map((block) => block.kind)).toEqual(['single', 'agent', 'agent'])
-    expect(blocks[1]).toMatchObject({ kind: 'agent', part: { id: 'agent-1' } })
-    expect(blocks[2]).toMatchObject({ kind: 'agent', part: { id: 'agent-2' } })
-  })
-
-  it('keeps agent steps out of tool groups', () => {
-    const parts = [
-      makePart('tool', { id: 'tool-1', tool: 'read' }),
-      makePart('tool', { id: 'tool-2', tool: 'grep' }),
-      makePart('agent', { id: 'agent-1', output: 'plan' }),
-      makePart('tool', { id: 'tool-3', tool: 'list' }),
-      makePart('tool', { id: 'tool-4', tool: 'read' }),
-    ]
-
-    const blocks = buildRenderBlocks(parts)
-    expect(blocks.map((block) => block.kind)).toEqual(['group', 'agent', 'group'])
-  })
-
-  it('keeps reasoning chronological around agent steps', () => {
-    const parts = [
-      makePart('reasoning', { id: 'r1', output: 'thinking' }),
-      makePart('agent', { id: 'agent-1', output: 'plan' }),
-      makePart('reasoning', { id: 'r2', output: 'more thinking' }),
-    ]
-
-    const blocks = buildRenderBlocks(parts)
-    expect(blocks.map((block) => block.kind)).toEqual(['single', 'agent', 'single'])
   })
 
   it('renders compaction as its own block kind', () => {
@@ -553,52 +514,6 @@ describe('wrapFinishedWork', () => {
     expect(shell.blocks.map((block) => block.kind)).toEqual(['single', 'compaction', 'single'])
   })
 
-  it('keeps leading agent plans outside while interleaved plans stay chronological outside', () => {
-    const leading = wrapFinishedWork(
-      buildRenderBlocks([
-        makePart('agent', { id: 'agent-0', output: 'plan zero' }),
-        makePart('text', { id: 't1', output: 'Hello' }),
-        makePart('tool', { id: 'tool-1', tool: 'read' }),
-        makePart('text', { id: 't2', output: 'Done' }),
-      ]),
-    )
-    expect(leading.map((block) => block.kind)).toEqual(['agent', 'workedFor', 'text'])
-    const leadingShell = leading[1]
-    if (leadingShell?.kind !== 'workedFor') throw new Error('expected workedFor')
-    expect(leadingShell.blocks.map((block) => block.kind)).toEqual(['text', 'single'])
-
-    // Agent-S plans are the computer-use timeline: an interleaved plan
-    // stays a visible step and each response slice keeps one chronological
-    // card instead of hoisting tools above the plan.
-    const interleaved = wrapFinishedWork(
-      buildRenderBlocks([
-        makePart('tool', { id: 'tool-1', tool: 'read' }),
-        makePart('agent', { id: 'agent-1', output: 'plan' }),
-        makePart('tool', { id: 'tool-2', tool: 'grep' }),
-      ]),
-    )
-    expect(interleaved.map((block) => block.kind)).toEqual(['workedFor', 'agent', 'workedFor'])
-    const first = interleaved[0]
-    const second = interleaved[2]
-    if (first?.kind !== 'workedFor' || second?.kind !== 'workedFor') {
-      throw new Error('expected workedFor shells')
-    }
-    expect(first.blocks.map((block) => block.kind)).toEqual(['single'])
-    expect(second.blocks.map((block) => block.kind)).toEqual(['single'])
-  })
-
-  it('does not wrap an agent-only timeline', () => {
-    const parts = [
-      makePart('agent', { id: 'agent-1', output: 'plan one' }),
-      makePart('agent', { id: 'agent-2', output: 'plan two' }),
-    ]
-
-    expect(wrapFinishedWork(buildRenderBlocks(parts)).map((block) => block.kind)).toEqual([
-      'agent',
-      'agent',
-    ])
-  })
-
   it('does not wrap a text-only message', () => {
     const parts = [makePart('text', { id: 't1', output: 'Hello' })]
     expect(wrapFinishedWork(buildRenderBlocks(parts)).map((block) => block.kind)).toEqual(['text'])
@@ -606,17 +521,14 @@ describe('wrapFinishedWork', () => {
 })
 
 describe('work item helpers', () => {
-  it('identifies groupable tools, card parts, and agent steps', () => {
+  it('identifies groupable tools and card parts', () => {
     expect(isWorkItem(makePart('tool'))).toBe(true)
     expect(isWorkItem(makePart('tool', { state: 'error' }))).toBe(false)
     expect(isWorkItem(makePart('reasoning'))).toBe(false)
     expect(isWorkItem(makePart('text'))).toBe(false)
     expect(isCardPart(makePart('subtask'))).toBe(true)
     expect(isCardPart(makePart('patch'))).toBe(true)
-    expect(isCardPart(makePart('agent'))).toBe(false)
     expect(isCardPart(makePart('tool'))).toBe(false)
-    expect(isAgentPart(makePart('agent'))).toBe(true)
-    expect(isAgentPart(makePart('tool'))).toBe(false)
   })
 
   it('counts only groupable tool parts', () => {
@@ -688,22 +600,15 @@ describe('steer blocks', () => {
     expect(wrapped.map((block) => block.kind)).toEqual(['text', 'steer', 'text'])
   })
 
-  it('keeps leading and trailing steers outside next to agent plans', () => {
+  it('keeps leading and trailing steers outside tool work', () => {
     const wrapped = wrapFinishedWork(
       buildRenderBlocks([
         makePart('steer', { id: 'steer-0', output: 'first' }),
         makePart('tool', { id: 'tool-1', tool: 'read' }),
-        makePart('agent', { id: 'agent-1', output: 'plan' }),
         makePart('tool', { id: 'tool-2', tool: 'grep' }),
         makePart('steer', { id: 'steer-1', output: 'last' }),
       ]),
     )
-    expect(wrapped.map((block) => block.kind)).toEqual([
-      'steer',
-      'workedFor',
-      'agent',
-      'workedFor',
-      'steer',
-    ])
+    expect(wrapped.map((block) => block.kind)).toEqual(['steer', 'workedFor', 'steer'])
   })
 })

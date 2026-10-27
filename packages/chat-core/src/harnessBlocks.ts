@@ -12,11 +12,9 @@
  * tool/subagent and its result/patch — tools are never hoisted above
  * intervening text, and only trailing text after the last tool stays
  * outside. Compaction dividers move inside to honor chronology unless
- * they lead the turn before any response. Agent-S plans are the
- * computer-use timeline and always stay visible outside; each response
- * slice between plans keeps its own chronological card. Delivered steers
- * (user messages sent into the running turn) behave like plans: they stay
- * visible outside and split the timeline into separate slices.
+ * they lead the turn before any response. Delivered steers (user messages
+ * sent into the running turn) stay visible outside and split the timeline
+ * into separate slices.
  */
 
 import type { HarnessPart, HarnessPartType } from "./harness";
@@ -25,7 +23,6 @@ import { resolveToolName } from "./toolDisplay";
 
 const GROUPABLE_TYPES = new Set<HarnessPartType>(["tool"]);
 const CARD_TYPES = new Set<HarnessPartType>(["subtask", "patch"]);
-const AGENT_TYPES = new Set<HarnessPartType>(["agent"]);
 const SKIP_TYPES = new Set<HarnessPartType>(["step-start", "step-finish"]);
 const PATCHED_FILE_TOOLS = new Set(["edit", "write"]);
 const QUESTION_TOOLS = new Set(["question", "ask_user"]);
@@ -64,16 +61,10 @@ export function isCardPart(part: HarnessPart): boolean {
   return CARD_TYPES.has(part.type);
 }
 
-/** Agent-S plan steps render as their own timeline blocks. */
-export function isAgentPart(part: HarnessPart): boolean {
-  return AGENT_TYPES.has(part.type);
-}
-
 export type TextRenderBlock = { kind: "text"; part: HarnessPart };
 export type SingleRenderBlock = { kind: "single"; part: HarnessPart };
 export type GroupRenderBlock = { kind: "group"; parts: HarnessPart[] };
 export type CardRenderBlock = { kind: "card"; part: HarnessPart };
-export type AgentRenderBlock = { kind: "agent"; part: HarnessPart };
 export type CompactionRenderBlock = { kind: "compaction"; part: HarnessPart };
 export type SteerRenderBlock = { kind: "steer"; part: HarnessPart };
 export type WorkedForRenderBlock = { kind: "workedFor"; blocks: RenderBlock[] };
@@ -83,7 +74,6 @@ export type RenderBlock =
   | SingleRenderBlock
   | GroupRenderBlock
   | CardRenderBlock
-  | AgentRenderBlock
   | CompactionRenderBlock
   | SteerRenderBlock;
 
@@ -174,13 +164,6 @@ export function buildRenderBlocks(parts: HarnessPart[]): RenderBlock[] {
       blocks.push({ kind: "compaction", part });
       continue;
     }
-    if (part.type === "agent") {
-      // Agent-S plan steps break tool runs so consecutive steps stay a
-      // visible vertical sequence instead of merging into Worked groups.
-      flushRun();
-      blocks.push({ kind: "agent", part });
-      continue;
-    }
     if (part.type === "steer") {
       // A user message sent while the agent ran: breaks tool runs so the
       // work before and after it never merges into one group.
@@ -207,7 +190,7 @@ export function buildRenderBlocks(parts: HarnessPart[]): RenderBlock[] {
 
 /** Blocks that always stay visible outside "Worked for" and split its slices. */
 function isTimelineAnchor(block: RenderBlock): boolean {
-  return block.kind === "agent" || block.kind === "steer";
+  return block.kind === "steer";
 }
 
 function isOuterWorkBlock(block: RenderBlock): boolean {
@@ -223,22 +206,20 @@ function isOuterWorkBlock(block: RenderBlock): boolean {
  * first response block through the last work block, preserving strict
  * chronological order (never hoist tools above intervening text).
  *
- * - No work → no card (text-only, agent-only, compaction-only stay flat).
+ * - No work → no card (text-only, compaction-only stay flat).
  * - Each card spans blocks[firstResponse .. lastWork] where firstResponse
  *   is the first text/work response block and lastWork is the final
  *   single/group/card (tool, reasoning, error, subtask/patch/question
  *   card). Inner text/compaction between response blocks stays inside in
  *   order; a leading compaction divider before any response stays outside.
- * - Agent-S plans are the computer-use timeline and delivered steers are
- *   the user's own messages: both always stay visible outside, so the
- *   timeline splits at each of them and every response slice keeps its own
- *   chronological card. Only trailing blocks after the last work
+ * - Delivered steers are the user's own messages and always stay visible
+ *   outside. Each response slice keeps its own chronological card. Only
+ *   trailing blocks after the last work
  *   (typically the final answer text) stay outside after the card.
  */
 export function wrapFinishedWork(blocks: RenderBlock[]): MessageRenderBlock[] {
-  // Agent-S plans (computer-use timeline) and delivered steers (user
-  // messages) always stay visible outside the collapsed card. Split the
-  // flat timeline at each of them and wrap every response slice (first
+  // Delivered steers (user messages) stay visible outside the collapsed
+  // card. Split the flat timeline at each and wrap every response slice (first
   // response .. last work) separately so tools never hoist above
   // intervening blocks, anchors never hide inside the card, and order stays
   // strictly chronological. Compaction dividers between response blocks

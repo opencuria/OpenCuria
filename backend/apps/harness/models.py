@@ -605,7 +605,6 @@ class HarnessPartType(models.TextChoices):
     STEP_FINISH = "step-finish", "Step finish"
     SUBTASK = "subtask", "Subtask"
     PATCH = "patch", "Patch"
-    AGENT = "agent", "Agent"
     COMPACTION = "compaction", "Compaction"
     STEER = "steer", "Steer"
 

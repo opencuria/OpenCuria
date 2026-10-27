@@ -81,11 +81,6 @@ describe("immutable streaming", () => {
     ["step start", "step", { step_start: 2 }],
     ["step finish", "finish", { step_finish: 2, cost: 0.1 }],
     [
-      "agent",
-      "agent",
-      { agent: "plan", agent_meta: { analysis: "Next action" } },
-    ],
-    [
       "patch",
       "patch",
       { patch: "Updated file", display: { summary: "Patch" } },

@@ -10,7 +10,6 @@ export * from "./chatUploads";
 export * from "./harnessModels";
 export * from "./harnessBlocks";
 export * from "./harnessSubtaskActivity";
-export * from "./harnessAgentSteps";
 export * from "./harnessMessageCopy";
 export * from "./harnessQuestion";
 export * from "./harnessUsage";

@@ -259,7 +259,7 @@ export const useHarnessStore = defineStore('harness', () => {
           'detail_loaded' in raw &&
           raw.detail_loaded === true &&
           'type' in raw &&
-          ['tool', 'reasoning', 'agent', 'patch', 'compaction'].includes(String(raw.type))
+          ['tool', 'reasoning', 'patch', 'compaction'].includes(String(raw.type))
         const effectiveMultiplier = isDetailedPart ? multiplier * 2 : multiplier
         const additionalMultiplier = effectiveMultiplier - previousMultiplier
         visited.set(raw, effectiveMultiplier)
@@ -438,10 +438,7 @@ export const useHarnessStore = defineStore('harness', () => {
   // --- Actions ---
 
   function rememberPartDetail(sessionId: string, part: HarnessPart): void {
-    if (
-      !part.detail_loaded ||
-      !['tool', 'reasoning', 'agent', 'patch', 'compaction'].includes(part.type)
-    )
+    if (!part.detail_loaded || !['tool', 'reasoning', 'patch', 'compaction'].includes(part.type))
       return
     const key = `${sessionId}:${part.id}`
     detailCache.delete(key)
@@ -462,7 +459,7 @@ export const useHarnessStore = defineStore('harness', () => {
       if (stored?.detail_loaded && !pinnedDetailKeys.has(`${evicted.session_id}:${evicted.id}`)) {
         stored.input = stored.type === 'tool' ? { tool: stored.tool ?? '' } : {}
         if (!(stored.state === 'error' && stored.output === 'Tool failed')) stored.output = ''
-        stored.meta = stored.display?.agent_meta ? { agent_meta: stored.display.agent_meta } : {}
+        stored.meta = {}
         stored.detail_loaded = false
       }
     }
@@ -499,7 +496,6 @@ export const useHarnessStore = defineStore('harness', () => {
         if (!(stored.state === 'error' && stored.output === 'Tool failed')) stored.output = ''
         const lightweightMeta: Record<string, unknown> = {}
         if (typeof stored.meta?.['step'] === 'number') lightweightMeta.step = stored.meta['step']
-        if (stored.display?.agent_meta) lightweightMeta.agent_meta = stored.display.agent_meta
         stored.meta = lightweightMeta
         stored.detail_loaded = false
       }

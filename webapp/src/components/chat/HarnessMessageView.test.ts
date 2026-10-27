@@ -86,92 +86,70 @@ describe('HarnessMessageView', () => {
     expect(wrapper.find('[data-part-id="response-80"] .animate-pulse').exists()).toBe(true)
   })
 
-  it('paginates 1000 Agent-S blocks while preserving page order and bounds mounted cards', async () => {
-    const parts = Array.from({ length: 1000 }, (_, index) =>
+  it('paginates blocks while preserving order and bounds mounted rows', async () => {
+    const parts = Array.from({ length: 161 }, (_, index) =>
       makePart({
-        id: `agent-${index}`,
-        type: 'agent',
-        title: 'Agent plan',
-        output: `plan ${index}`,
-        meta: { agent_meta: { action: 'click', action_kind: 'click' } },
+        id: `steer-${index}`,
+        type: 'steer',
+        output: `Instruction ${index}`,
       }),
     )
     const wrapper = mount(HarnessMessageView, {
       props: { message: makeAssistant(parts) },
-      global: {
-        stubs: {
-          HarnessAgentStep: {
-            props: ['part'],
-            template: '<span data-testid="harness-agent-step" :data-part-id="part.id" />',
-          },
-        },
-      },
     })
 
-    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 1 of 13')
-    expect(wrapper.findAll('[data-testid="harness-agent-step"]')).toHaveLength(80)
-    expect(wrapper.find('[data-part-id="agent-79"]').exists()).toBe(true)
-    expect(wrapper.find('[data-part-id="agent-80"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 1 of 3')
+    expect(wrapper.findAll('[data-block-kind="steer"]')).toHaveLength(80)
+    expect(wrapper.find('[data-part-id="steer-79"]').exists()).toBe(true)
+    expect(wrapper.find('[data-part-id="steer-80"]').exists()).toBe(false)
 
-    for (let index = 0; index < 6; index += 1) {
-      await wrapper.get('[data-testid="harness-page-next"]').trigger('click')
-    }
-    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 7 of 13')
-    expect(wrapper.findAll('[data-testid="harness-agent-step"]')).toHaveLength(80)
-    expect(wrapper.find('[data-part-id="agent-480"]').exists()).toBe(true)
-    expect(wrapper.find('[data-part-id="agent-560"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="harness-page-next"]').trigger('click')
+    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 2 of 3')
+    expect(wrapper.findAll('[data-block-kind="steer"]')).toHaveLength(80)
+    expect(wrapper.find('[data-part-id="steer-80"]').exists()).toBe(true)
+    expect(wrapper.find('[data-part-id="steer-160"]').exists()).toBe(false)
 
-    while (!wrapper.get('[data-testid="harness-page-next"]').element.hasAttribute('disabled')) {
-      await wrapper.get('[data-testid="harness-page-next"]').trigger('click')
-    }
-    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 13 of 13')
-    expect(wrapper.findAll('[data-testid="harness-agent-step"]')).toHaveLength(40)
-    expect(wrapper.find('[data-part-id="agent-960"]').exists()).toBe(true)
-    expect(wrapper.find('[data-part-id="agent-999"]').exists()).toBe(true)
-    expect(wrapper.find('[data-part-id="agent-959"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="harness-page-next"]').trigger('click')
+    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 3 of 3')
+    expect(wrapper.findAll('[data-block-kind="steer"]')).toHaveLength(1)
+    expect(wrapper.find('[data-part-id="steer-160"]').exists()).toBe(true)
+    expect(wrapper.find('[data-part-id="steer-159"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="harness-page-next"]').element.hasAttribute('disabled')).toBe(
+      true,
+    )
   })
 
   it('keeps live trailing text and cursor visible without losing the reader page on deltas', async () => {
-    const agents = Array.from({ length: 1000 }, (_, index) =>
+    const steers = Array.from({ length: 161 }, (_, index) =>
       makePart({
-        id: `agent-${index}`,
-        type: 'agent',
-        title: 'Agent plan',
-        output: `plan ${index}`,
-        meta: { agent_meta: { action: 'click', action_kind: 'click' } },
+        id: `steer-${index}`,
+        type: 'steer',
+        output: `Instruction ${index}`,
       }),
     )
-    const initial = [...agents, makePart({ id: 'live-text-1', type: 'text', output: 'Answer' })]
+    const initial = [...steers, makePart({ id: 'live-text-1', type: 'text', output: 'Answer' })]
     const wrapper = mount(HarnessMessageView, {
       props: { message: makeAssistant(initial, { completed_at: null }), streaming: true },
-      global: {
-        stubs: {
-          HarnessAgentStep: {
-            props: ['part'],
-            template: '<span data-testid="harness-agent-step" :data-part-id="part.id" />',
-          },
-        },
-      },
     })
 
-    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 13 of 13')
+    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 3 of 3')
     expect(wrapper.find('[data-part-id="live-text-1"] .animate-pulse').exists()).toBe(true)
     await wrapper.get('[data-testid="harness-page-previous"]').trigger('click')
-    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 12 of 13')
-    expect(wrapper.findAll('[data-testid="harness-agent-step"]')).toHaveLength(79)
+    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 2 of 3')
+    expect(wrapper.findAll('[data-block-kind="steer"]')).toHaveLength(79)
     expect(wrapper.find('[data-part-id="live-text-1"] .animate-pulse').exists()).toBe(true)
 
-    const firstVisibleAgent = wrapper.get('[data-part-id="agent-880"]').element
+    const firstVisibleSteer = wrapper.get('[data-part-id="steer-80"]').element
     const updated = [
       ...initial,
       makePart({ id: 'live-text-2', type: 'text', output: ' still live' }),
     ]
     await wrapper.setProps({ message: makeAssistant(updated, { completed_at: null }) })
 
-    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 12 of 13')
-    expect(wrapper.get('[data-part-id="agent-880"]').element).toBe(firstVisibleAgent)
+    expect(wrapper.get('[data-testid="harness-page-status"]').text()).toContain('Page 2 of 3')
+    expect(wrapper.get('[data-part-id="steer-80"]').element).toBe(firstVisibleSteer)
     expect(wrapper.find('[data-part-id="live-text-2"] .animate-pulse').exists()).toBe(true)
-    expect(wrapper.findAll('[data-testid="harness-agent-step"]')).toHaveLength(79)
+    expect(wrapper.findAll('[data-block-kind="steer"]')).toHaveLength(79)
     expect(wrapper.findAll('[data-block-kind]').length).toBeLessThanOrEqual(80)
   })
 
@@ -304,6 +282,29 @@ describe('HarnessMessageView', () => {
 
     expect(wrapper.find('[data-testid="harness-thinking"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('Read index.ts')
+  })
+
+  it('shows Thinking between streamed model steps', async () => {
+    const start = makePart({ id: 'start', type: 'step-start', meta: { step: 1 } })
+    const reasoning = makePart({
+      id: 'reasoning',
+      type: 'reasoning',
+      state: 'running',
+      output: 'Checking',
+      meta: { step: 1 },
+    })
+    const wrapper = mount(HarnessMessageView, {
+      props: { streaming: true, message: makeAssistant([start, reasoning]) },
+    })
+    expect(wrapper.find('[data-testid="harness-thinking"]').exists()).toBe(false)
+
+    const finish = makePart({ id: 'finish', type: 'step-finish', display: { step: 1 } })
+    await wrapper.setProps({ message: makeAssistant([start, reasoning, finish]) })
+    expect(wrapper.find('[data-testid="harness-thinking"]').exists()).toBe(true)
+
+    const next = makePart({ id: 'next', type: 'step-start', meta: { step: 2 } })
+    await wrapper.setProps({ message: makeAssistant([start, reasoning, finish, next]) })
+    expect(wrapper.find('[data-testid="harness-thinking"]').exists()).toBe(false)
   })
 
   it('hides Thinking while any of several tools is still running', () => {
@@ -554,289 +555,6 @@ describe('HarnessMessageView', () => {
     expect(wrapper.find('[data-block-kind="step"]').exists()).toBe(false)
   })
 
-  it('renders agent steps as a connected timeline, not a raw code block', () => {
-    const wrapper = mount(HarnessMessageView, {
-      props: {
-        message: makeAssistant([
-          makePart({
-            id: 'start-1',
-            type: 'step-start',
-            title: 'Step 1',
-            meta: { step: 1 },
-          }),
-          makePart({
-            id: 'agent-1',
-            type: 'agent',
-            title: 'Agent plan',
-            output: 'plan one',
-            meta: {
-              step: 1,
-              agent_meta: {
-                verification: 'previous ok',
-                analysis: 'login form',
-                next_action: 'click submit',
-                action: 'click "Submit"',
-                action_kind: 'click',
-              },
-            },
-          }),
-          makePart({
-            id: 'start-2',
-            type: 'step-start',
-            title: 'Step 2',
-            meta: { step: 2 },
-          }),
-          makePart({
-            id: 'agent-2',
-            type: 'agent',
-            title: 'Agent plan',
-            output: 'plan two',
-            meta: {
-              step: 2,
-              agent_meta: {
-                analysis: 'second screen',
-                next_action: 'type hello',
-                action: 'type',
-                action_kind: 'type',
-              },
-            },
-          }),
-        ]),
-      },
-    })
-
-    const kinds = wrapper
-      .findAll('[data-block-kind]')
-      .map((node) => node.attributes('data-block-kind'))
-    expect(kinds).toEqual(['agent', 'agent'])
-    const steps = wrapper.findAll('[data-testid="harness-agent-step"]')
-    expect(steps).toHaveLength(2)
-    expect(steps[0]!.text()).toContain('Step 1')
-    expect(steps[0]!.text()).toContain('Click "Submit"')
-    expect(steps[1]!.text()).toContain('Step 2')
-    expect(wrapper.text()).not.toContain('Step 1 finished')
-    // Details stay collapsed: no raw monospace block up front.
-    expect(wrapper.find('pre').exists()).toBe(false)
-    expect(steps[0]!.attributes('data-status')).toBe('completed')
-    expect(steps[1]!.attributes('data-part-id')).toBe('agent-2')
-    const rails = wrapper.findAll('[data-testid="harness-agent-step-rail"]')
-    expect(rails).toHaveLength(1)
-    expect(rails[0]!.attributes('data-connected')).toBe('true')
-  })
-
-  it('does not connect the timeline rail across an interleaved text block', () => {
-    const wrapper = mount(HarnessMessageView, {
-      props: {
-        message: makeAssistant([
-          makePart({
-            id: 'start-1',
-            type: 'step-start',
-            title: 'Step 1',
-            meta: { step: 1 },
-          }),
-          makePart({
-            id: 'agent-1',
-            type: 'agent',
-            title: 'Agent plan',
-            output: 'plan one',
-            meta: { step: 1, agent_meta: { action: 'click', action_kind: 'click' } },
-          }),
-          makePart({ id: 't-gap', type: 'text', output: 'a note between steps' }),
-          makePart({
-            id: 'start-2',
-            type: 'step-start',
-            title: 'Step 2',
-            meta: { step: 2 },
-          }),
-          makePart({
-            id: 'agent-2',
-            type: 'agent',
-            title: 'Agent plan',
-            output: 'plan two',
-            meta: { step: 2, agent_meta: { action: 'type', action_kind: 'type' } },
-          }),
-        ]),
-      },
-    })
-
-    const kinds = wrapper
-      .findAll('[data-block-kind]')
-      .map((node) => node.attributes('data-block-kind'))
-    expect(kinds).toEqual(['agent', 'text', 'agent'])
-    // Neither rail bridges the text gap: the first step is not connected to
-    // the second, and the last step has no trailing rail at all.
-    expect(wrapper.findAll('[data-testid="harness-agent-step-rail"]')).toHaveLength(0)
-  })
-
-  it('marks the last agent step failed on a final run-level error', () => {
-    const parts = [
-      makePart({
-        id: 'start-1',
-        type: 'step-start',
-        title: 'Step 1',
-        meta: { step: 1 },
-      }),
-      makePart({
-        id: 'agent-1',
-        type: 'agent',
-        title: 'Agent plan',
-        output: 'plan one',
-        meta: { step: 1, agent_meta: { action: 'click', action_kind: 'click' } },
-      }),
-      makePart({
-        id: 'finish-1',
-        type: 'step-finish',
-        title: 'Step 1 finished',
-        meta: { step: 1 },
-      }),
-      makePart({
-        id: 'start-2',
-        type: 'step-start',
-        title: 'Step 2',
-        meta: { step: 2 },
-      }),
-      makePart({
-        id: 'agent-2',
-        type: 'agent',
-        title: 'Agent plan',
-        output: 'plan two',
-        meta: { step: 2, agent_meta: { action: 'type', action_kind: 'type' } },
-      }),
-      makePart({
-        id: 'finish-2',
-        type: 'step-finish',
-        title: 'Step 2 finished',
-        meta: { step: 2 },
-      }),
-    ]
-    const message = makeAssistant(parts)
-    message.finish = 'error'
-    message.error = 'action failed'
-    const wrapper = mount(HarnessMessageView, { props: { message } })
-
-    const statuses = wrapper.findAll('[data-testid="harness-agent-step-status"]')
-    expect(statuses).toHaveLength(2)
-    expect(statuses[0]!.text()).toBe('Completed')
-    expect(statuses[1]!.text()).toBe('Failed')
-  })
-
-  it('keeps reasoning chronological and derives the step status from markers', () => {
-    const wrapper = mount(HarnessMessageView, {
-      props: {
-        streaming: true,
-        message: makeAssistant([
-          makePart({
-            id: 'start-1',
-            type: 'step-start',
-            title: 'Step 1',
-            meta: { step: 1 },
-          }),
-          makePart({
-            id: 'r1',
-            type: 'reasoning',
-            title: '',
-            output: 'checking the screen',
-            meta: { step: 1 },
-          }),
-          makePart({
-            id: 'agent-1',
-            type: 'agent',
-            title: 'Agent plan',
-            output: 'plan one',
-            meta: { step: 1, agent_meta: { action: 'click', action_kind: 'click' } },
-          }),
-        ]),
-      },
-    })
-
-    const kinds = wrapper
-      .findAll('[data-block-kind]')
-      .map((node) => node.attributes('data-block-kind'))
-    expect(kinds).toEqual(['single', 'agent'])
-    expect(wrapper.text()).toContain('Thought')
-    expect(wrapper.text()).toContain('checking the screen')
-    expect(wrapper.get('[data-testid="harness-agent-step-status"]').text()).toBe('In progress')
-    // The step is still active: no extra generic Thinking row after the plan.
-    expect(wrapper.find('[data-testid="harness-thinking"]').exists()).toBe(false)
-  })
-
-  it('hides Thinking while a later step sequence is still running', () => {
-    const wrapper = mount(HarnessMessageView, {
-      props: {
-        streaming: true,
-        message: makeAssistant([
-          makePart({
-            id: 'start-1',
-            type: 'step-start',
-            title: 'Step 1',
-            meta: { step: 1 },
-          }),
-          makePart({
-            id: 'agent-1',
-            type: 'agent',
-            title: 'Agent plan',
-            output: 'plan one',
-            meta: { step: 1 },
-          }),
-          makePart({
-            id: 'finish-1',
-            type: 'step-finish',
-            title: 'Step 1 finished',
-            meta: { step: 1 },
-          }),
-          makePart({
-            id: 'start-2',
-            type: 'step-start',
-            title: 'Step 2',
-            meta: { step: 2 },
-          }),
-          makePart({
-            id: 'agent-2',
-            type: 'agent',
-            title: 'Agent plan',
-            output: 'plan two',
-            meta: { step: 2 },
-          }),
-          makePart({
-            id: 'r2',
-            type: 'reasoning',
-            state: 'running',
-            title: '',
-            output: 'working on step two',
-            meta: { step: 2 },
-          }),
-        ]),
-      },
-    })
-
-    const statuses = wrapper.findAll('[data-testid="harness-agent-step-status"]')
-    expect(statuses).toHaveLength(2)
-    expect(statuses[0]!.text()).toBe('Completed')
-    expect(statuses[1]!.text()).toBe('In progress')
-    expect(wrapper.find('[data-testid="harness-thinking"]').exists()).toBe(false)
-  })
-
-  it('falls back to raw plan text for legacy agent payloads', () => {
-    const wrapper = mount(HarnessMessageView, {
-      props: {
-        message: makeAssistant([
-          makePart({
-            id: 'agent-legacy',
-            type: 'agent',
-            title: 'Agent plan',
-            output: 'older free-form plan',
-          }),
-        ]),
-      },
-    })
-
-    expect(wrapper.find('[data-testid="harness-agent-step"]').exists()).toBe(true)
-    expect(wrapper.get('[data-testid="harness-agent-step-action"]').text()).toBe(
-      'older free-form plan',
-    )
-    expect(wrapper.find('pre').exists()).toBe(false)
-  })
-
   it('puts usage in the same footer as the answer actions', () => {
     const wrapper = mount(HarnessMessageView, {
       props: {
@@ -1047,37 +765,6 @@ describe('HarnessMessageView', () => {
     expect(rows).toHaveLength(1)
     await rows[0]!.trigger('click')
     expect(wrapper.emitted('openSubtask')).toEqual([['child-a']])
-  })
-
-  it('keeps Agent-S plans chronological around tool work after idle', async () => {
-    const wrapper = mount(HarnessMessageView, {
-      props: {
-        message: makeAssistant([
-          makePart({ id: 'agent-0', type: 'agent', title: 'Agent plan', output: 'plan zero' }),
-          makePart({ id: 't1', type: 'text', output: 'Starting' }),
-          makePart({ id: 'tool-1', type: 'tool', tool: 'read', title: 'Read a.ts' }),
-          makePart({ id: 'agent-1', type: 'agent', title: 'Agent plan', output: 'plan one' }),
-          makePart({ id: 'tool-2', type: 'tool', tool: 'grep', title: 'Grep foo' }),
-          makePart({ id: 't2', type: 'text', output: 'Done' }),
-        ]),
-      },
-    })
-
-    // Agent-S plans are the computer-use timeline: both stay visible
-    // outside while each response slice keeps one chronological card.
-    expect(
-      wrapper.findAll('[data-block-kind]').map((node) => node.attributes('data-block-kind')),
-    ).toEqual(['agent', 'workedFor', 'agent', 'workedFor', 'text'])
-    expect(wrapper.findAll('[data-testid="harness-agent-step"]')).toHaveLength(2)
-    await expandWorkedFor(wrapper)
-    const cards = wrapper.findAll('[data-block-kind="workedFor"]')
-    expect(cards).toHaveLength(2)
-    const first = cards[0]!
-      .findAll('[data-block-kind]')
-      .map((node) => node.attributes('data-block-kind'))
-    expect(first).toEqual(['text', 'single'])
-    const text = cards[0]!.text()
-    expect(text.indexOf('Starting')).toBeLessThan(text.indexOf('Read a.ts'))
   })
 
   it('keeps a leading compaction divider outside while interleaved compaction stays chronological inside', async () => {

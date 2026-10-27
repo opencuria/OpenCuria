@@ -16,7 +16,6 @@ from typing import Any
 
 from asgiref.sync import sync_to_async
 
-from .computer_use.legacy_events import parse_plan_meta
 from .models import HarnessMessage, HarnessPart, HarnessSession
 from .providers.base import Usage
 from .repositories import HarnessMessageRepository, HarnessPartRepository
@@ -367,53 +366,6 @@ class RunTimeline:
                 },
                 workspace_id,
             )
-        elif etype == "agent":
-            # Agent-S plan observability (child-visible chain-of-thought
-            # plan, never the final assistant answer). Persisted as an
-            # ``agent`` card part so the frontend renders it; the child
-            # run's assistant message keeps only the final status text.
-            # The full plan stays in ``output`` for explicit part-detail
-            # fetches; only bounded safe summaries in ``display.agent_meta``
-            # and ``display.summary`` reach the live socket. Raw ``exec_code``
-            # and materialized coordinates are never persisted.
-            delta = event.get("delta", {}) or {}
-            plan = str(delta.get("plan", "") or "")
-            if plan:
-                # Always re-parse server-side from the plan: an
-                # event-supplied ``agent_meta`` is only a transport
-                # optimization and never trusted (it could carry
-                # ``exec_code`` or other unexpected keys).
-                agent_meta = parse_plan_meta(plan)
-                await self.close_stream_parts(session)
-                part = await sync_to_async(self.parts.create)(
-                    message_id=assistant.id,
-                    type="agent",
-                    state="completed",
-                    title="Agent plan",
-                    output=plan,
-                    meta={
-                        "step": event.get("step"),
-                        "agent_meta": agent_meta,
-                    },
-                )
-                safe_agent_meta = dict(part.display.get("agent_meta", {}))
-                safe_summary = _socket_text(part.display.get("summary", ""), limit=240)
-                await self._emit(
-                    FRONTEND_EVENT_PART,
-                    {
-                        "workspace_id": workspace_id,
-                        "session_id": session_id,
-                        "message_id": message_id,
-                        "delta": {
-                            "agent": safe_summary,
-                            "agent_meta": safe_agent_meta,
-                            "display": dict(part.display or {}),
-                        },
-                        "step": event.get("step"),
-                        "part_id": str(part.id),
-                    },
-                    workspace_id,
-                )
         elif etype == "subtask_started":
             # A non-text part opens: close any running text/reasoning stream
             # first so nothing merges across the boundary (text/tool/text

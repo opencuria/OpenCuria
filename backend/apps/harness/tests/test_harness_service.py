@@ -1608,7 +1608,7 @@ async def test_tool_completed_event_persists_attachments_in_meta(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_large_tool_payloads_and_agent_plan_are_not_emitted(
+async def test_large_tool_payloads_are_not_emitted(
     harness_workspace,
 ) -> None:
     """Live deltas stay small while the persisted part retains full detail."""
@@ -1667,27 +1667,15 @@ async def test_large_tool_payloads_and_agent_plan_are_not_emitted(
         },
     )
 
-    plan = (
-        "(Previous action verification)\nVerified.\n"
-        "(Screenshot Analysis)\nAGENT-PLAN-SECRET-" + "P" * 10_000 + "\n"
-        "(Next Action)\nContinue safely.\n"
-        "(Grounded Action)\n```python\nagent.wait()\n```"
-    )
-    await service._on_runner_event(
-        session, assistant, {"type": "agent", "delta": {"plan": plan}, "step": 2}
-    )
-
     stored = HarnessPartRepository.list_for_message(assistant.id)
     tool_part = next(part for part in stored if part.type == "tool")
-    agent_part = next(part for part in stored if part.type == "agent")
     assert tool_part.input["arguments"] == arguments
     assert tool_part.output == output
     assert tool_part.meta["attachments"][0]["url"].endswith(attachment_data)
-    assert agent_part.output == plan
 
     socket_json = json.dumps(events)
     assert len(socket_json) < 20_000
-    for private in (secret, attachment_data, output, plan):
+    for private in (secret, attachment_data, output):
         assert private not in socket_json
     tool_deltas = [
         item["delta"]
@@ -1707,19 +1695,6 @@ async def test_large_tool_payloads_and_agent_plan_are_not_emitted(
     assert all(
         "output" not in delta and "attachments" not in delta for delta in tool_deltas
     )
-    agent_delta = next(
-        item["delta"]
-        for item in events
-        if item.get("event") == FRONTEND_EVENT_PART
-        and "agent" in item.get("delta", {})
-    )
-    assert agent_delta["agent"] == agent_part.display["summary"]
-    assert agent_delta["display"] == agent_part.display
-    assert len(agent_delta["agent"]) <= 240
-    assert agent_delta["agent"] != plan
-    assert "agent.wait()" not in socket_json
-    assert "exec_code" not in socket_json
-    assert len(json.dumps(agent_delta)) < 4000
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2240,44 +2215,6 @@ async def _db_create_child_session(harness_workspace, parent: HarnessSession):
         model="fake-model",
         parent_id=parent.id,
     )
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_agent_and_reasoning_events_persist_parts(harness_workspace) -> None:
-    """Agent-S plan/reasoning events persist agent/reasoning parts (content empty)."""
-    service, _, _ = _service()
-    session = await _db_create_session(harness_workspace)
-    assistant = await sync_to_async(HarnessMessageRepository.create)(
-        session_id=session.id, role="assistant", content=""
-    )
-    service._runs[str(session.id)] = {
-        "session_id": str(session.id),
-        "message_id": str(assistant.id),
-        "tool_parts": {},
-        "subtask_parts": {},
-    }
-    await service._on_runner_event(
-        session,
-        assistant,
-        {"type": "agent", "delta": {"plan": "click save"}, "step": 1},
-    )
-    await service._on_runner_event(
-        session,
-        assistant,
-        {"type": "part_updated", "delta": {"reasoning": "looks good"}, "step": 1},
-    )
-    parts = parts_for_session(session.id)
-    agent_parts = [part for part in parts if part.type == "agent"]
-    reasoning_parts = [part for part in parts if part.type == "reasoning"]
-    assert len(agent_parts) == 1
-    assert agent_parts[0].output == "click save"
-    assert agent_parts[0].meta.get("step") == 1
-    assert agent_parts[0].meta.get("agent_meta", {}).get("action") == ""
-    assert len(reasoning_parts) == 1
-    assert reasoning_parts[0].output == "looks good"
-    assert reasoning_parts[0].meta.get("step") == 1
-    assistant.refresh_from_db()
-    assert assistant.content == ""
 
 
 @pytest.mark.django_db(transaction=True)
@@ -2824,192 +2761,6 @@ async def test_reasoning_without_step_still_persists(harness_workspace) -> None:
     ]
     assert len(forwarded) == 1
     assert forwarded[0].get("step") is None
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_agent_event_persists_meta_and_forwards_agent_meta(
-    harness_workspace,
-) -> None:
-    """agent events persist step+agent_meta and forward delta.agent_meta."""
-    service, _, events = _service()
-    session = await _db_create_session(harness_workspace)
-    assistant = await sync_to_async(HarnessMessageRepository.create)(
-        session_id=session.id, role="assistant", content=""
-    )
-    service._runs[str(session.id)] = {
-        "session_id": str(session.id),
-        "message_id": str(assistant.id),
-        "tool_parts": {},
-        "step_parts": {},
-        "subtask_parts": {},
-    }
-    plan = (
-        "(Previous action verification)\nIt worked.\n\n"
-        "(Screenshot Analysis)\nDesktop shown.\n\n"
-        "(Next Action)\nClick save.\n\n"
-        "(Grounded Action)\n```python\n"
-        'agent.click("The save button in the dialog")\n'
-        "```"
-    )
-    await service._on_runner_event(
-        session, assistant, {"type": "agent", "delta": {"plan": plan}, "step": 3}
-    )
-    parts = parts_for_session(session.id)
-    agent_parts = [p for p in parts if p.type == "agent"]
-    assert len(agent_parts) == 1
-    assert agent_parts[0].output == plan
-    assert agent_parts[0].meta.get("step") == 3
-    persisted_meta = agent_parts[0].meta.get("agent_meta", {})
-    assert persisted_meta["action_kind"] == "click"
-    assert persisted_meta["action"] == 'click "The save button in the dialog"'
-    assert "exec_code" not in str(persisted_meta)
-    forwarded = [
-        item
-        for item in events
-        if item.get("event") == FRONTEND_EVENT_PART
-        and "agent" in (item.get("delta") or {})
-    ]
-    assert len(forwarded) == 1
-    expected_agent_meta = {
-        "verification": "It worked.",
-        "analysis": "Desktop shown.",
-        "next_action": "Click save.",
-        "action": 'click "The save button in the dialog"',
-        "action_kind": "click",
-    }
-    agent_part = agent_parts[0]
-    assert forwarded[0] == {
-        "event": FRONTEND_EVENT_PART,
-        "workspace_id": str(session.workspace_id),
-        "session_id": str(session.id),
-        "message_id": str(assistant.id),
-        "delta": {
-            "agent": "Desktop shown.",
-            "agent_meta": expected_agent_meta,
-            "display": {
-                "summary": "Desktop shown.",
-                "agent_meta": expected_agent_meta,
-                "step": 3,
-            },
-        },
-        "step": 3,
-        "part_id": str(agent_part.id),
-        "part_position": agent_part.position,
-    }
-    assert forwarded[0]["delta"]["display"] == agent_part.display
-    assert plan not in str(forwarded[0])
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_agent_event_ignores_injected_agent_meta(harness_workspace) -> None:
-    """Injected delta.agent_meta (e.g. exec_code) is never persisted/forwarded."""
-    service, _, events = _service()
-    session = await _db_create_session(harness_workspace)
-    assistant = await sync_to_async(HarnessMessageRepository.create)(
-        session_id=session.id, role="assistant", content=""
-    )
-    service._runs[str(session.id)] = {
-        "session_id": str(session.id),
-        "message_id": str(assistant.id),
-        "tool_parts": {},
-        "step_parts": {},
-        "subtask_parts": {},
-    }
-    plan = (
-        "(Previous action verification)\nIt worked.\n\n"
-        "(Screenshot Analysis)\nDesktop shown.\n\n"
-        "(Next Action)\nClick save.\n\n"
-        "(Grounded Action)\n```python\n"
-        'agent.click("The save button in the dialog")\n'
-        "```"
-    )
-    await service._on_runner_event(
-        session,
-        assistant,
-        {
-            "type": "agent",
-            "delta": {
-                "plan": plan,
-                "agent_meta": {
-                    "exec_code": 'agent.click("The save button")',
-                    "action": "pwned",
-                    "action_kind": "pwned",
-                    "extra": "evil",
-                },
-            },
-            "step": 4,
-        },
-    )
-    parts = parts_for_session(session.id)
-    agent_parts = [p for p in parts if p.type == "agent"]
-    assert len(agent_parts) == 1
-    persisted_meta = agent_parts[0].meta.get("agent_meta", {})
-    assert persisted_meta["action"] == 'click "The save button in the dialog"'
-    assert persisted_meta["action_kind"] == "click"
-    assert set(persisted_meta) == {
-        "verification",
-        "analysis",
-        "next_action",
-        "action",
-        "action_kind",
-    }
-    assert "exec_code" not in str(persisted_meta)
-    forwarded = [
-        item
-        for item in events
-        if item.get("event") == FRONTEND_EVENT_PART
-        and "agent" in (item.get("delta") or {})
-    ]
-    assert len(forwarded) == 1
-    assert forwarded[0]["delta"]["agent_meta"] == persisted_meta
-    assert forwarded[0]["delta"]["agent"] == "Desktop shown."
-    assert plan not in str(forwarded[0])
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_agent_event_type_action_redacts_secret(harness_workspace) -> None:
-    """A type() plan with a secret persists/forwards no typed text."""
-    service, _, events = _service()
-    session = await _db_create_session(harness_workspace)
-    assistant = await sync_to_async(HarnessMessageRepository.create)(
-        session_id=session.id, role="assistant", content=""
-    )
-    service._runs[str(session.id)] = {
-        "session_id": str(session.id),
-        "message_id": str(assistant.id),
-        "tool_parts": {},
-        "step_parts": {},
-        "subtask_parts": {},
-    }
-    secret = "S3cr3t-P@ssw0rt-123"
-    plan = (
-        "(Previous action verification)\nIt worked.\n\n"
-        "(Screenshot Analysis)\nA password field is focused.\n\n"
-        "(Next Action)\nType the password.\n\n"
-        "(Grounded Action)\n```python\n"
-        f'agent.type("Password field", "{secret}")\n'
-        "```"
-    )
-    await service._on_runner_event(
-        session, assistant, {"type": "agent", "delta": {"plan": plan}, "step": 5}
-    )
-    parts = parts_for_session(session.id)
-    agent_parts = [p for p in parts if p.type == "agent"]
-    assert len(agent_parts) == 1
-    persisted_meta = agent_parts[0].meta.get("agent_meta", {})
-    assert persisted_meta["action"] == "type"
-    assert persisted_meta["action_kind"] == "type"
-    assert secret not in str(persisted_meta)
-    forwarded = [
-        item
-        for item in events
-        if item.get("event") == FRONTEND_EVENT_PART
-        and "agent" in (item.get("delta") or {})
-    ]
-    assert len(forwarded) == 1
-    assert forwarded[0]["delta"]["agent_meta"] == persisted_meta
-    assert forwarded[0]["delta"]["agent"] == "A password field is focused."
-    assert secret not in str(forwarded[0])
 
 
 # ---------------------------------------------------------------------------

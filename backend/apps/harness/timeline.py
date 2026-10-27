@@ -254,28 +254,6 @@ def build_part_display(
             step=meta.get("step"),
             tool=_short(meta.get("tool") or "", 100),
         )
-    elif part_type == "agent":
-        agent_meta = meta.get("agent_meta", {})
-        safe_meta = {
-            key: _short(agent_meta.get(key), 240)
-            for key in (
-                "verification",
-                "analysis",
-                "next_action",
-                "action",
-                "action_kind",
-            )
-            if isinstance(agent_meta, dict) and agent_meta.get(key)
-        }
-        display.update(
-            summary=(
-                safe_meta.get("analysis")
-                or safe_meta.get("next_action")
-                or _short(title, 240)
-            ),
-            agent_meta=safe_meta,
-            step=meta.get("step"),
-        )
     elif part_type in ("step-start", "step-finish"):
         display.update(
             step=meta.get("step"),
@@ -349,7 +327,7 @@ def timeline_part_payload(
             title=str(getattr(part, "title", "") or ""),
             call_id=str(getattr(part, "call_id", "") or ""),
         )
-    omitted_detail = part_type in {"tool", "patch", "agent", "reasoning", "compaction"}
+    omitted_detail = part_type in {"tool", "patch", "reasoning", "compaction"}
     payload: dict[str, Any] = {
         "id": getattr(part, "id"),
         "message_id": getattr(part, "message_id"),

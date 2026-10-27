@@ -60,7 +60,7 @@ describe("busy snapshot reconciliation", () => {
     },
   );
 
-  it.each(["text", "reasoning", "agent", "step-start", "step-finish"] as const)(
+  it.each(["text", "reasoning", "step-start", "step-finish"] as const)(
     "keeps distinct %s IDs even when their content and step match",
     (type) => {
       const shared = { type, output: "same content", meta: { step: 1 } };
@@ -78,26 +78,30 @@ describe("busy snapshot reconciliation", () => {
 
   it("keeps live-only parts in server position order and merges live metadata", () => {
     const live = message([
-      part("agent-1", {
-        type: "agent",
+      part("reasoning-1", {
+        type: "reasoning",
         position: 1,
-        meta: { step: 1, agent_meta: { action: "click" } },
+        meta: { step: 1, tokens: { total_tokens: 3 } },
       }),
       part("tool-1", { type: "tool", position: 0 }),
     ]);
     const snapshot = message([
-      part("agent-1", { type: "agent", position: 1, meta: { step: 1 } }),
+      part("reasoning-1", {
+        type: "reasoning",
+        position: 1,
+        meta: { step: 1 },
+      }),
     ]);
 
     const [merged] = mergeBusyFetchedMessages([live], [snapshot]);
 
     expect(merged?.parts.map((entry) => entry.id)).toEqual([
       "tool-1",
-      "agent-1",
+      "reasoning-1",
     ]);
     expect(merged?.parts[1]?.meta).toEqual({
       step: 1,
-      agent_meta: { action: "click" },
+      tokens: { total_tokens: 3 },
     });
   });
 

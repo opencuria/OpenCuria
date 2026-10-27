@@ -35,7 +35,7 @@ def computer_use_setup(db):
     user_model = get_user_model()
     org = Organization.objects.create(
         name=f"ComputerUse {uuid.uuid4().hex[:6]}",
-        slug=f"agent-s-{uuid.uuid4().hex[:10]}",
+        slug=f"computer-use-{uuid.uuid4().hex[:10]}",
     )
     owner = user_model.objects.create_user(
         email=f"as-owner-{uuid.uuid4().hex[:6]}@example.com", password="secret"
@@ -111,8 +111,8 @@ def test_api_permissions_and_tenant_boundary(computer_use_setup):
     assert stranger.get(URL).status_code == 404
 
 
-def test_retired_api_and_strict_partial_payload(computer_use_setup):
-    """Retired fields are explicit errors and never create configuration rows."""
+def test_strict_partial_payload(computer_use_setup):
+    """Invalid fields never create configuration rows."""
     fixture = computer_use_setup
     client = _client(
         user=fixture["owner"],
@@ -121,13 +121,6 @@ def test_retired_api_and_strict_partial_payload(computer_use_setup):
             APIKeyPermission.HARNESS_READ.value,
             APIKeyPermission.HARNESS_RUN.value,
         ],
-    )
-    assert client.get("/api/v1/agent-s-config/").status_code == 410
-    assert (
-        client.put(
-            "/api/v1/agent-s-config/", data="{}", content_type="application/json"
-        ).status_code
-        == 410
     )
     for payload in ({"grounding_model": "obsolete"}, {"enable_recording": "false"}):
         assert (
