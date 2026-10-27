@@ -23,6 +23,8 @@ from .workspace_helpers import KeyedLockMap
 
 logger = structlog.get_logger(__name__)
 
+_UNTRACKED_DIFF_CONCURRENCY = 4
+
 
 class GitService:
     """Owns git orchestration for workspace repositories.
@@ -45,6 +47,9 @@ class GitService:
         self._get_runtime = get_runtime
         # Never evict locks: queued waiters must share the same lock object.
         self._git_lock_map: KeyedLockMap = KeyedLockMap()
+        # Share the budget across repos/workspaces served by this executor.
+        # Leave SSH channel capacity for terminals and other file operations.
+        self._untracked_diff_slots = asyncio.Semaphore(_UNTRACKED_DIFF_CONCURRENCY)
 
     # ── Git operations (dumb-executor git service) ──────────────────────
 
@@ -852,12 +857,25 @@ class GitService:
                         separate_patch=any(item.get("conflict") for item in changes),
                     )
                 )
-            for rel in untracked:
-                combined.append(
-                    await self._git_untracked_entry(
-                        runtime, instance_id, repo_root, env, rel
-                    )
+            for start in range(0, len(untracked), _UNTRACKED_DIFF_CONCURRENCY):
+                # Bound task creation as well as active SSH calls. Drain this
+                # batch before releasing the repo lock, including on failure;
+                # gather propagates caller cancellation to every child.
+                entries = await asyncio.gather(
+                    *(
+                        self._git_untracked_entry(
+                            runtime, instance_id, repo_root, env, rel
+                        )
+                        for rel in untracked[
+                            start : start + _UNTRACKED_DIFF_CONCURRENCY
+                        ]
+                    ),
+                    return_exceptions=True,
                 )
+                for entry in entries:
+                    if isinstance(entry, BaseException):
+                        raise entry
+                    combined.append(entry)
             combined.sort(key=lambda item: item["new_path"])
             unstaged_entries = combined
 
@@ -926,14 +944,15 @@ class GitService:
         """Render an untracked path as an added-file diff entry."""
         rel_validated = git_ops.normalize_relative_path(rel)
         timeout = git_ops.GIT_READ_TIMEOUT_S
-        exit_code, output = await self._git_exec(
-            runtime, instance_id,
-            ["git", "diff", "--no-index", "--no-color", "--no-ext-diff",
-             "--src-prefix=a/", "--dst-prefix=b/",
-             f"--unified={git_ops.GIT_DIFF_CONTEXT_LINES}",
-             "--patch", "--", "/dev/null", rel_validated],
-            workdir=repo_root, env=env, timeout=timeout,
-        )
+        async with self._untracked_diff_slots:
+            exit_code, output = await self._git_exec(
+                runtime, instance_id,
+                ["git", "diff", "--no-index", "--no-color", "--no-ext-diff",
+                 "--src-prefix=a/", "--dst-prefix=b/",
+                 f"--unified={git_ops.GIT_DIFF_CONTEXT_LINES}",
+                 "--patch", "--", "/dev/null", rel_validated],
+                workdir=repo_root, env=env, timeout=timeout,
+            )
         # --no-index exits 1 when a diff exists; that is the happy path.
         if exit_code not in {0, 1}:
             # Fall back to a capped direct read when diff fails (e.g. the

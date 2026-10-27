@@ -1,0 +1,291 @@
+{
+  "benchmark": "full runner working_diff with real local Git",
+  "baseline_ref": "d119b79",
+  "samples": 21,
+  "warmups": 3,
+  "notes": [
+    "One staged and one tracked unstaged file; untracked 4 KiB text/binary.",
+    "JSON serialization included; allocation probe measured separately.",
+    "Baseline/current alternate in seeded shuffled pairs on one repository.",
+    "Guest path/security probes are emulated; no QEMU/network claims."
+  ],
+  "results": [
+    {
+      "untracked_files": 1,
+      "simulated_delay_ms_per_call": 0,
+      "response_bytes": 13042,
+      "response_sha256": "a0976f7544bf85adc77ce07136ab83f54a00128e352b130be3043de303141b51",
+      "baseline": {
+        "p50_ms": 22.288,
+        "p95_ms": 31.272,
+        "runtime_calls": [
+          8
+        ],
+        "peak_concurrent_untracked_diffs": [
+          1
+        ],
+        "peak_python_bytes_separate_probe": 95579
+      },
+      "optimized": {
+        "p50_ms": 19.846,
+        "p95_ms": 32.85,
+        "runtime_calls": [
+          8
+        ],
+        "peak_concurrent_untracked_diffs": [
+          1
+        ],
+        "peak_python_bytes_separate_probe": 111151
+      }
+    },
+    {
+      "untracked_files": 1,
+      "simulated_delay_ms_per_call": 5,
+      "response_bytes": 13042,
+      "response_sha256": "a0976f7544bf85adc77ce07136ab83f54a00128e352b130be3043de303141b51",
+      "baseline": {
+        "p50_ms": 80.989,
+        "p95_ms": 90.649,
+        "runtime_calls": [
+          8
+        ],
+        "peak_concurrent_untracked_diffs": [
+          1
+        ],
+        "peak_python_bytes_separate_probe": 95435
+      },
+      "optimized": {
+        "p50_ms": 58.601,
+        "p95_ms": 91.183,
+        "runtime_calls": [
+          8
+        ],
+        "peak_concurrent_untracked_diffs": [
+          1
+        ],
+        "peak_python_bytes_separate_probe": 111162
+      }
+    },
+    {
+      "untracked_files": 1,
+      "simulated_delay_ms_per_call": 20,
+      "response_bytes": 13042,
+      "response_sha256": "a0976f7544bf85adc77ce07136ab83f54a00128e352b130be3043de303141b51",
+      "baseline": {
+        "p50_ms": 209.252,
+        "p95_ms": 214.309,
+        "runtime_calls": [
+          8
+        ],
+        "peak_concurrent_untracked_diffs": [
+          1
+        ],
+        "peak_python_bytes_separate_probe": 95494
+      },
+      "optimized": {
+        "p50_ms": 210.556,
+        "p95_ms": 223.16,
+        "runtime_calls": [
+          8
+        ],
+        "peak_concurrent_untracked_diffs": [
+          1
+        ],
+        "peak_python_bytes_separate_probe": 111162
+      }
+    },
+    {
+      "untracked_files": 20,
+      "simulated_delay_ms_per_call": 0,
+      "response_bytes": 223145,
+      "response_sha256": "7468dc42fed46471b3dadabcaaf371c5293124708cefcec33823ece25dc7ea67",
+      "baseline": {
+        "p50_ms": 54.433,
+        "p95_ms": 64.13,
+        "runtime_calls": [
+          27
+        ],
+        "peak_concurrent_untracked_diffs": [
+          1
+        ],
+        "peak_python_bytes_separate_probe": 1630268
+      },
+      "optimized": {
+        "p50_ms": 36.985,
+        "p95_ms": 41.691,
+        "runtime_calls": [
+          27
+        ],
+        "peak_concurrent_untracked_diffs": [
+          4
+        ],
+        "peak_python_bytes_separate_probe": 1649891
+      }
+    },
+    {
+      "untracked_files": 20,
+      "simulated_delay_ms_per_call": 5,
+      "response_bytes": 223145,
+      "response_sha256": "7468dc42fed46471b3dadabcaaf371c5293124708cefcec33823ece25dc7ea67",
+      "baseline": {
+        "p50_ms": 360.378,
+        "p95_ms": 391.089,
+        "runtime_calls": [
+          27
+        ],
+        "peak_concurrent_untracked_diffs": [
+          1
+        ],
+        "peak_python_bytes_separate_probe": 1629999
+      },
+      "optimized": {
+        "p50_ms": 200.757,
+        "p95_ms": 219.184,
+        "runtime_calls": [
+          27
+        ],
+        "peak_concurrent_untracked_diffs": [
+          4
+        ],
+        "peak_python_bytes_separate_probe": 1649556
+      }
+    },
+    {
+      "untracked_files": 20,
+      "simulated_delay_ms_per_call": 20,
+      "response_bytes": 223145,
+      "response_sha256": "7468dc42fed46471b3dadabcaaf371c5293124708cefcec33823ece25dc7ea67",
+      "baseline": {
+        "p50_ms": 771.545,
+        "p95_ms": 801.755,
+        "runtime_calls": [
+          27
+        ],
+        "peak_concurrent_untracked_diffs": [
+          1
+        ],
+        "peak_python_bytes_separate_probe": 1629780
+      },
+      "optimized": {
+        "p50_ms": 387.692,
+        "p95_ms": 411.348,
+        "runtime_calls": [
+          27
+        ],
+        "peak_concurrent_untracked_diffs": [
+          4
+        ],
+        "peak_python_bytes_separate_probe": 1650007
+      }
+    },
+    {
+      "untracked_files": 100,
+      "simulated_delay_ms_per_call": 0,
+      "response_bytes": 1112937,
+      "response_sha256": "e57a78f1023e314d18be82df69d63a68fdf4c3d7e58a55d9ab4c79d813625a76",
+      "baseline": {
+        "p50_ms": 224.957,
+        "p95_ms": 289.973,
+        "runtime_calls": [
+          107
+        ],
+        "peak_concurrent_untracked_diffs": [
+          1
+        ],
+        "peak_python_bytes_separate_probe": 8130688
+      },
+      "optimized": {
+        "p50_ms": 151.392,
+        "p95_ms": 196.512,
+        "runtime_calls": [
+          107
+        ],
+        "peak_concurrent_untracked_diffs": [
+          4
+        ],
+        "peak_python_bytes_separate_probe": 8148961
+      }
+    },
+    {
+      "untracked_files": 100,
+      "simulated_delay_ms_per_call": 5,
+      "response_bytes": 1112937,
+      "response_sha256": "e57a78f1023e314d18be82df69d63a68fdf4c3d7e58a55d9ab4c79d813625a76",
+      "baseline": {
+        "p50_ms": 1405.632,
+        "p95_ms": 1544.645,
+        "runtime_calls": [
+          107
+        ],
+        "peak_concurrent_untracked_diffs": [
+          1
+        ],
+        "peak_python_bytes_separate_probe": 8130115
+      },
+      "optimized": {
+        "p50_ms": 538.362,
+        "p95_ms": 674.849,
+        "runtime_calls": [
+          107
+        ],
+        "peak_concurrent_untracked_diffs": [
+          4
+        ],
+        "peak_python_bytes_separate_probe": 8148391
+      }
+    },
+    {
+      "untracked_files": 100,
+      "simulated_delay_ms_per_call": 20,
+      "response_bytes": 1112937,
+      "response_sha256": "e57a78f1023e314d18be82df69d63a68fdf4c3d7e58a55d9ab4c79d813625a76",
+      "baseline": {
+        "p50_ms": 2968.834,
+        "p95_ms": 3238.57,
+        "runtime_calls": [
+          107
+        ],
+        "peak_concurrent_untracked_diffs": [
+          1
+        ],
+        "peak_python_bytes_separate_probe": 8129289
+      },
+      "optimized": {
+        "p50_ms": 1175.244,
+        "p95_ms": 1285.444,
+        "runtime_calls": [
+          107
+        ],
+        "peak_concurrent_untracked_diffs": [
+          4
+        ],
+        "peak_python_bytes_separate_probe": 8148040
+      }
+    }
+  ],
+  "selection": {
+    "selection": "secrets.randbelow(3), uniform",
+    "shortlist": [
+      {
+        "rank": 1,
+        "candidate": "backend workspace-list N+1 metadata queries",
+        "evidence": "1/10/50 workspaces: 14/77/357 SQL queries; 16.399/77.234/316.590 ms p50",
+        "risk": "medium; batch service-owned metadata, reuse image-line repository"
+      },
+      {
+        "rank": 2,
+        "candidate": "runner sequential untracked Git diffs",
+        "evidence": "1/20 untracked files: 6/25 runtime calls; 7.539/40.528 ms local elapsed",
+        "risk": "medium; bounded concurrency or guest batching must preserve errors and ordering"
+      },
+      {
+        "rank": 3,
+        "candidate": "backend duplicate media reads",
+        "evidence": "1 MiB PNG: 2 accessor RPCs, 2 MiB transferred for one attachment",
+        "risk": "low; reuse complete bounded read while retaining large-media rereads and limits"
+      }
+    ],
+    "selected_index": 1,
+    "selected": "runner sequential untracked Git diffs"
+  }
+}
