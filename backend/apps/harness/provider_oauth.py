@@ -8,6 +8,7 @@ from typing import Any
 from asgiref.sync import sync_to_async
 from django.db import transaction
 
+from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, NotFoundError
 
 from .provider_accounts import ProviderAccountService
@@ -22,6 +23,7 @@ class ProviderOAuthService:
 
     def __init__(self, accounts: ProviderAccountService | None = None) -> None:
         self.accounts = accounts or ProviderAccountService()
+        self.organizations = OrganizationService()
 
     async def start(
         self,
@@ -34,8 +36,8 @@ class ProviderOAuthService:
     ) -> dict[str, Any]:
         """Start an isolated flow after validating the exact target account."""
         organization_id, user_id = self.accounts._ids(organization_id, user)
-        membership = await sync_to_async(self.accounts._membership)(
-            organization_id, user_id
+        membership = await sync_to_async(self.organizations.require_active_membership)(
+            user_id, organization_id
         )
         target = None
         if account_id is not None:
@@ -62,8 +64,8 @@ class ProviderOAuthService:
         from .providers.chatgpt_oauth import start_device_flow
 
         flow_result = await start_device_flow()
-        membership = await sync_to_async(self.accounts._membership)(
-            organization_id, user_id
+        membership = await sync_to_async(self.organizations.require_active_membership)(
+            user_id, organization_id
         )
         if requested_shared and membership.role != "admin":
             raise AuthenticationError("Only org admins can share provider accounts")
@@ -99,7 +101,9 @@ class ProviderOAuthService:
     ) -> dict[str, str]:
         """Poll one flow once, never disclosing OAuth tokens to the caller."""
         organization_id, user_id = self.accounts._ids(organization_id, user)
-        await sync_to_async(self.accounts._membership)(organization_id, user_id)
+        await sync_to_async(self.organizations.require_active_membership)(
+            user_id, organization_id
+        )
         flow = await sync_to_async(ProviderOAuthRepository.get_owned)(
             flow_id, organization_id, user_id
         )
@@ -116,8 +120,8 @@ class ProviderOAuthService:
             return {"status": flow.status}
 
         # Revalidate target access and the sharing role before every poll.
-        membership = await sync_to_async(self.accounts._membership)(
-            organization_id, user_id
+        membership = await sync_to_async(self.organizations.require_active_membership)(
+            user_id, organization_id
         )
         if flow.target_account_id is not None:
             target = await sync_to_async(self.accounts.get_account)(
@@ -213,7 +217,9 @@ class ProviderOAuthService:
             )
             if flow is None:
                 return False
-            membership = self.accounts._membership(organization_id, int(user.id))
+            membership = self.organizations.require_active_membership(
+                int(user.id), organization_id
+            )
             if flow.shared and membership.role != "admin":
                 raise AuthenticationError("Only org admins can share provider accounts")
             if flow.target_account_id is not None:
@@ -255,5 +261,5 @@ class ProviderOAuthService:
     ) -> bool:
         """Cancel the specified flow within the caller's organization and user."""
         organization_id, user_id = self.accounts._ids(organization_id, user)
-        self.accounts._membership(organization_id, user_id)
+        self.organizations.require_active_membership(user_id, organization_id)
         return ProviderOAuthRepository.cancel(flow_id, organization_id, user_id)

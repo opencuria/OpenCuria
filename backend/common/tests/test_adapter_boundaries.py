@@ -29,10 +29,11 @@ never query the ORM either: model managers and instance reloads appear only
 in ``models`` and ``repositories`` modules. Password/JWT authentication and
 SSO provisioning share the accounts user repository; profile writes and
 password checks (which can save upgraded hashes) stay there as well.
-Credential repositories are private to their context; consumers resolve
-catalog entries and workspace attachments through credential services.
-Adapters select credentials by ID and never resolve (decrypt) them; the
-service that applies a selection resolves it.
+Credential and organization repositories are private to their contexts;
+consumers resolve catalog entries and workspace attachments through credential
+services and check organizations and active memberships through
+``OrganizationService``. Adapters select credentials by ID and never resolve
+(decrypt) them; the service that applies a selection resolves it.
 Harness persistence never imports tool adapters; todo records and their storage
 port live in ``apps.harness.todos.domain`` and tools call its todo service.
 Provider wire adapters share context-error classification within ``providers``;
@@ -94,6 +95,18 @@ FOUNDATION_DEPENDENCIES = {
 
 #: Bounded contexts that other apps may reach only through their ``services``.
 SERVICE_ONLY_CONTEXTS = {"apps.skills"}
+
+#: Bounded contexts whose repositories are private, with the service to use.
+PRIVATE_REPOSITORY_CONTEXTS = {
+    "apps.credentials": (
+        "resolve catalog entries and workspace attachments through "
+        "apps.credentials.services"
+    ),
+    "apps.organizations": (
+        "check organizations and active memberships through "
+        "apps.organizations.services.OrganizationService"
+    ),
+}
 
 #: Apps whose non-persistence modules reach the ORM only through repositories.
 REPOSITORY_ONLY_APPS = {
@@ -1147,27 +1160,29 @@ def test_service_only_contexts_are_reached_through_their_services():
     )
 
 
-def test_credential_repositories_are_private_to_their_context() -> None:
-    """Plugin definitions and runtime reads use the credential service boundary."""
+def test_context_repositories_are_private_to_their_context() -> None:
+    """Consumers use the owning context's service, never its repositories."""
     trees = {path: ast.parse(path.read_text()) for path in _source_files()}
-    credentials = APPS_ROOT / "credentials"
-    repositories = {
-        module
-        for module in _repository_modules(trees)
-        if module.startswith("apps.credentials.")
-    }
-    assert "apps.credentials.repositories" in repositories
-    violations = sorted(
-        f"{_module_name(path)} -> {module}"
-        for path, tree in trees.items()
-        if not path.is_relative_to(credentials)
-        for module in _imported_modules(path, tree)
-        if any(module == repo or module.startswith(f"{repo}.") for repo in repositories)
-    )
+    repository_modules = _repository_modules(trees)
+    violations = []
+    for context, boundary in PRIVATE_REPOSITORY_CONTEXTS.items():
+        owner = APPS_ROOT / context.split(".")[1]
+        repositories = {
+            module for module in repository_modules if module.startswith(f"{context}.")
+        }
+        assert f"{context}.repositories" in repositories
+        violations.extend(
+            f"{_module_name(path)} -> {module}: {boundary}"
+            for path, tree in trees.items()
+            if not path.is_relative_to(owner)
+            for module in _imported_modules(path, tree)
+            if any(
+                module == repo or module.startswith(f"{repo}.") for repo in repositories
+            )
+        )
     assert violations == [], (
-        "Resolve credential catalog entries and workspace attachments through "
-        "apps.credentials.services; credential repositories are private:\n"
-        + "\n".join(violations)
+        "Repositories are private to their bounded context; call its service "
+        "instead:\n" + "\n".join(sorted(violations))
     )
 
 

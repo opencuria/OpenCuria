@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
-from apps.organizations.repositories import MembershipRepository
+from apps.organizations.services import OrganizationService
 
 from ...exceptions import WorkspaceNotFoundError
 
@@ -87,7 +87,7 @@ class WorkspaceAccessMixin:
         workspace = self.workspaces.get_by_id(workspace_uuid)
         if workspace is None:
             return None
-        membership = MembershipRepository.get_for_user_and_org(
+        membership = OrganizationService().get_membership(
             member_id, workspace.runner.organization_id
         )
         if membership is None:

@@ -12,7 +12,7 @@ from typing import Any
 
 import structlog
 
-from apps.organizations.repositories import OrganizationRepository
+from apps.organizations.services import OrganizationService
 from common.exceptions import NotFoundError
 
 from .agent_s.config import AgentSRunConfig
@@ -52,6 +52,7 @@ class AgentConfigService:
         repository: type[AgentConfigRepository] | None = None,
     ) -> None:
         self.repository = repository or AgentConfigRepository
+        self.organizations = OrganizationService()
 
     def list_configs(self, org_id: uuid.UUID) -> list[dict[str, Any]]:
         """Return one row per configurable agent with stored values or defaults."""
@@ -94,9 +95,7 @@ class AgentConfigService:
         self, org_id: uuid.UUID, items: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         """Validate and upsert per-agent configs, then return the list view."""
-        org = OrganizationRepository.get_by_id(org_id)
-        if org is None:
-            raise NotFoundError("Organization", str(org_id))
+        org = self.organizations.require_organization(org_id)
         for item in items:
             agent = str(item.get("agent") or "").strip().lower()
             if agent not in CONFIGURABLE_AGENTS:
@@ -141,6 +140,7 @@ class SubagentConfigService:
         self, repository: type[SubagentConfigRepository] | None = None
     ) -> None:
         self.repository = repository or SubagentConfigRepository
+        self.organizations = OrganizationService()
 
     def get_or_default(self, org_id: uuid.UUID) -> dict[str, int]:
         """Return the configured depth or defaults without creating a row."""
@@ -153,8 +153,7 @@ class SubagentConfigService:
             raise ValueError(
                 f"max_depth must be an integer in 1..{MAX_SUBAGENT_DEPTH}"
             )
-        if OrganizationRepository.get_by_id(org_id) is None:
-            raise NotFoundError("Organization", str(org_id))
+        self.organizations.require_organization(org_id)
         row = self.repository.upsert(org_id, max_depth)
         return {"max_depth": row.max_depth}
 
@@ -183,6 +182,7 @@ class AgentSConfigService:
         repository: type[AgentSConfigRepository] | None = None,
     ) -> None:
         self.repository = repository or AgentSConfigRepository
+        self.organizations = OrganizationService()
 
     def _defaults_row(self, org_id: uuid.UUID) -> dict[str, Any]:
         """Return the default Agent-S config view for an org."""
@@ -292,8 +292,7 @@ class AgentSConfigService:
         keys (``organization_id``/timestamps) are ignored. Validation is
         atomic: invalid values raise before any row is created/updated.
         """
-        if OrganizationRepository.get_by_id(org_id) is None:
-            raise NotFoundError("Organization", str(org_id))
+        self.organizations.require_organization(org_id)
         allowed = set(self.DEFAULTS)
         current = self.get_or_default(org_id)
         incoming = {

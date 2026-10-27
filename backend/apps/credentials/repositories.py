@@ -10,6 +10,7 @@ from django.db.models import F, Q, QuerySet, Value
 from django.db.models.functions import Concat
 from django.utils import timezone
 
+from apps.organizations.services import OrganizationService
 from common.exceptions import ConflictError
 
 from .models import (
@@ -765,14 +766,12 @@ class McpOAuthRepository:
     @staticmethod
     def persist_authorization_grant(*, state, encrypted_value: str) -> uuid.UUID:
         """Atomically recheck service/registration/owner state and persist grant."""
-        from apps.organizations.repositories import MembershipRepository
-
         with transaction.atomic():
             service = McpOAuthRepository.get_service(state.service_id, lock=True)
             registration = McpOAuthRepository.get_registration(
                 state.registration_id, lock=True
             )
-            membership = MembershipRepository.get_for_user_and_org(
+            membership = OrganizationService().get_active_membership(
                 state.user_id, state.organization_id, lock=True
             )
 
@@ -780,7 +779,6 @@ class McpOAuthRepository:
                 service is None
                 or registration is None
                 or membership is None
-                or not membership.user.is_active
                 or (state.organization_credential and membership.role != "admin")
                 or service.credential_type != "mcp_oauth"
                 or service.oauth_server_url != state.server_url

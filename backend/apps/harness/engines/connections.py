@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 
-from apps.organizations.repositories import MembershipRepository
+from apps.organizations.services import OrganizationService
 from common.exceptions import NotFoundError
 
 from ..provider_accounts import ProviderAccountService
@@ -41,6 +41,7 @@ class EngineConnectionService:
 
     def __init__(self, accounts: ProviderAccountService | None = None) -> None:
         self.accounts = accounts or ProviderAccountService()
+        self.organizations = OrganizationService()
 
     @staticmethod
     def _ids(organization_id: uuid.UUID, user_id: object) -> tuple[uuid.UUID, int]:
@@ -56,11 +57,9 @@ class EngineConnectionService:
             raise ValueError("auth_type must be api_token or subscription_token")
         return value
 
-    @staticmethod
-    def _assert_member(organization_id: uuid.UUID, user_id: object) -> None:
+    def _assert_member(self, organization_id: uuid.UUID, user_id: object) -> None:
         """Require active organization membership."""
-        membership = MembershipRepository.get_for_user_and_org(user_id, organization_id)
-        if membership is None or not membership.user.is_active:
+        if self.organizations.get_active_membership(user_id, organization_id) is None:
             raise NotFoundError("Organization", str(organization_id))
 
     def _active_account(self, organization_id: uuid.UUID, user_id: int):

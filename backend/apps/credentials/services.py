@@ -14,6 +14,7 @@ from pathlib import PurePosixPath
 import structlog
 from django.utils.text import slugify
 
+from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.utils import decrypt_value, encrypt_value, generate_ssh_keypair
 
@@ -858,6 +859,7 @@ class CredentialOAuthSvc:
         self.services = CredentialServiceRepository
         self.oauth = McpOAuthRepository
         self.activations = OrgCredentialServiceActivationRepository
+        self.organizations = OrganizationService()
 
     def resolve_connection_target(
         self,
@@ -923,22 +925,13 @@ class CredentialOAuthSvc:
         name: str = "",
     ) -> tuple[str, str, str]:
         """Start fresh authorization or reconnect one explicitly selected row."""
-        from apps.organizations.repositories import (
-            MembershipRepository,
-            OrganizationRepository,
-        )
-
         from .mcp_oauth import start_flow, validate_browser_request_origin
 
-        organization = OrganizationRepository.get_by_id(organization_id)
-        if organization is None:
-            raise NotFoundError("Organization", str(organization_id))
+        organization = self.organizations.require_organization(organization_id)
         if credential_id is None:
-            membership = MembershipRepository.get_for_user_and_org(
+            membership = self.organizations.require_active_membership(
                 user.id, organization.id
             )
-            if membership is None or not membership.user.is_active:
-                raise AuthenticationError("Active organization membership required")
         service, credential = self.resolve_connection_target(
             user=user,
             organization_id=organization.id,
@@ -947,14 +940,10 @@ class CredentialOAuthSvc:
         )
         if credential is not None:
             organization_credential = credential.user_id is None
-            membership = MembershipRepository.get_for_user_and_org(
+            membership = self.organizations.require_active_membership(
                 user.id, organization.id
             )
-            if membership is None or not membership.user.is_active:
-                raise AuthenticationError("Active organization membership required")
-        if organization_credential and (
-            membership is None or membership.role != "admin"
-        ):
+        if organization_credential and membership.role != "admin":
             raise AuthenticationError(
                 "Admin role required for organization credentials"
             )
@@ -977,7 +966,6 @@ class CredentialOAuthSvc:
 
         from django.db import transaction
 
-        from apps.organizations.repositories import MembershipRepository
         from common.utils import decrypt_value
 
         from .mcp_oauth import (
@@ -998,7 +986,7 @@ class CredentialOAuthSvc:
 
             service = self.oauth.get_service(state.service_id, lock=True)
             registration = self.oauth.get_registration(state.registration_id, lock=True)
-            membership = MembershipRepository.get_for_user_and_org(
+            membership = self.organizations.get_active_membership(
                 state.user_id, state.organization_id, lock=True
             )
             target = (
@@ -1006,10 +994,8 @@ class CredentialOAuthSvc:
                 if state.reconnect_existing and state.credential_id
                 else None
             )
-            if (
-                membership is None
-                or not membership.user.is_active
-                or (state.organization_credential and membership.role != "admin")
+            if membership is None or (
+                state.organization_credential and membership.role != "admin"
             ):
                 raise AuthenticationError("OAuth authorization is no longer permitted")
             if (
@@ -1095,25 +1081,6 @@ class CredentialOAuthSvc:
         if not disconnect_credential(credential_id):
             raise NotFoundError("Credential", str(credential_id))
 
-    @staticmethod
-    def _user_is_authorized(state) -> bool:
-        """Require active membership and current admin role for shared grants."""
-        from apps.organizations.repositories import MembershipRepository
-
-        membership = MembershipRepository.get_for_user_and_org(
-            state.user_id, state.organization_id
-        )
-        return bool(
-            membership
-            and membership.user.is_active
-            and (not state.organization_credential or membership.role == "admin")
-        )
-
-    @staticmethod
-    def _is_admin(user_id: int, organization_id: uuid.UUID) -> bool:
-        from apps.organizations.repositories import MembershipRepository
-
-        membership = MembershipRepository.get_for_user_and_org(user_id, organization_id)
-        return bool(
-            membership and membership.user.is_active and membership.role == "admin"
-        )
+    def _is_admin(self, user_id: int, organization_id: uuid.UUID) -> bool:
+        membership = self.organizations.get_active_membership(user_id, organization_id)
+        return bool(membership and membership.role == "admin")

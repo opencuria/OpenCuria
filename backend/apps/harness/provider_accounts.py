@@ -8,7 +8,7 @@ from typing import Any
 from django.db import transaction
 
 from apps.credentials.services import CredentialSvc
-from apps.organizations.repositories import MembershipRepository
+from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, NotFoundError
 
 from .enums import ProviderType
@@ -64,21 +64,13 @@ class ProviderAccountService:
     def __init__(self, repository: type[ProviderAccountRepository] | None = None):
         self.repository = repository or ProviderAccountRepository
         self.secret_service = CredentialSvc()
+        self.organizations = OrganizationService()
 
     @staticmethod
     def _ids(organization_id: Any, user: Any) -> tuple[uuid.UUID, int]:
         return getattr(organization_id, "id", organization_id), getattr(
             user, "id", user
         )
-
-    @staticmethod
-    def _membership(organization_id: uuid.UUID, user_id: int, *, lock: bool = False):
-        membership = MembershipRepository.get_for_user_and_org(
-            user_id, organization_id, lock=lock
-        )
-        if membership is None or not membership.user.is_active:
-            raise AuthenticationError("Active organization membership required")
-        return membership
 
     @staticmethod
     def _provider(provider: str) -> str:
@@ -131,7 +123,9 @@ class ProviderAccountService:
         if account is None:
             raise NotFoundError("ProviderAccount", str(account_id))
         if manage:
-            membership = self._membership(organization_id, user_id)
+            membership = self.organizations.require_active_membership(
+                user_id, organization_id
+            )
             if account.user_id is None and membership.role != "admin":
                 raise AuthenticationError(
                     "Only org admins can manage shared provider accounts"
@@ -149,7 +143,7 @@ class ProviderAccountService:
         manage: bool = False,
     ) -> ProviderConnection:
         """Get a visible account, optionally verifying mutation permissions."""
-        self._membership(organization_id, user_id)
+        self.organizations.require_active_membership(user_id, organization_id)
         return self._visible_account(
             organization_id, user_id, account_id, manage=manage
         )
@@ -161,7 +155,9 @@ class ProviderAccountService:
         provider_filter = self._provider(provider) if provider is not None else None
         with transaction.atomic():
             self._lock_fence()
-            membership = self._membership(organization_id, user_id, lock=True)
+            membership = self.organizations.require_active_membership(
+                user_id, organization_id, lock=True
+            )
             accounts = self.repository.list_visible(organization_id, user_id)
             selected = self._selected_accounts_locked(
                 organization_id, user_id, accounts
@@ -236,7 +232,9 @@ class ProviderAccountService:
 
         with transaction.atomic():
             self._lock_fence()
-            membership = self._membership(organization_id, user_id, lock=True)
+            membership = self.organizations.require_active_membership(
+                user_id, organization_id, lock=True
+            )
             existing = (
                 self.repository.get_visible(
                     organization_id, user_id, parsed_id, lock=True
@@ -482,7 +480,9 @@ class ProviderAccountService:
         parsed_id = self._parse_account_id(account_id)
         with transaction.atomic():
             self._lock_fence()
-            membership = self._membership(organization_id, user_id, lock=True)
+            membership = self.organizations.require_active_membership(
+                user_id, organization_id, lock=True
+            )
             account = self.repository.get_visible(
                 organization_id, user_id, parsed_id, lock=True
             )
@@ -519,7 +519,9 @@ class ProviderAccountService:
         )
         with transaction.atomic():
             self._lock_fence()
-            self._membership(organization_id, user_id, lock=True)
+            self.organizations.require_active_membership(
+                user_id, organization_id, lock=True
+            )
             if selected_id is not None:
                 account = self.repository.get_visible(
                     organization_id, user_id, selected_id, lock=True
@@ -536,7 +538,9 @@ class ProviderAccountService:
         """Return selected accounts, initializing only absent selection rows."""
         with transaction.atomic():
             self._lock_fence()
-            self._membership(organization_id, user_id, lock=True)
+            self.organizations.require_active_membership(
+                user_id, organization_id, lock=True
+            )
             return self._selected_accounts_locked(
                 organization_id,
                 user_id,
