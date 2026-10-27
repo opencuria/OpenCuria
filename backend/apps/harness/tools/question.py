@@ -10,6 +10,23 @@ from pydantic import BaseModel, Field
 
 from .base import Tool, ToolContext, ToolError, ToolResult
 
+#: Wire separator web and mobile clients use to join multi-select labels.
+MULTI_SELECT_SEPARATOR = "\x00"
+
+
+def normalize_question_answers(answers: list[Any]) -> list[Any]:
+    """Decode NUL-joined multi-select answers into ``", "``-joined labels.
+
+    NUL cannot be stored in PostgreSQL JSON/text columns and is meaningless
+    to the model, so answers are decoded before they are persisted or resumed.
+    """
+    return [
+        ", ".join(part for part in answer.split(MULTI_SELECT_SEPARATOR) if part)
+        if isinstance(answer, str)
+        else answer
+        for answer in answers
+    ]
+
 
 class QuestionOption(BaseModel):
     """One selectable option for a structured question."""

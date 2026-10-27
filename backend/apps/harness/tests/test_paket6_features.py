@@ -463,6 +463,46 @@ async def test_resolve_question_via_service(db) -> None:
     assert stored.answers == ["blue"]
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_resolve_question_decodes_multi_select_answers(
+    harness_workspace,
+) -> None:
+    """NUL-joined multi-select answers are stored and resumed as readable text.
+
+    PostgreSQL rejects NUL in JSON, so the raw wire value made answering fail.
+    """
+    from asgiref.sync import sync_to_async
+
+    service = HarnessService()
+    session = await sync_to_async(service.create_session)(
+        workspace_id=harness_workspace.id,
+        organization_id=harness_workspace.runner.organization_id,
+        prompt="hi",
+    )
+    request = await sync_to_async(QuestionRequestRepository.create)(
+        organization_id=session.organization_id,
+        session_id=session.id,
+        workspace_id=harness_workspace.id,
+        questions=[
+            {"question": "Languages?", "multiple": True},
+            {"question": "Name?"},
+        ],
+    )
+    future: asyncio.Future[list[Any]] = asyncio.get_running_loop().create_future()
+    service._pending_questions[str(request.id)] = future
+
+    await service.resolve_question(
+        session=session,
+        question_id=request.id,
+        answers=["Python\x00Go\x00my own", "Ada"],
+    )
+
+    assert future.result() == ["Python, Go, my own", "Ada"]
+    stored = await sync_to_async(QuestionRequest.objects.get)(id=request.id)
+    assert stored.answers == ["Python, Go, my own", "Ada"]
+
+
 @pytest.mark.django_db
 def test_question_request_model_persists() -> None:
     """QuestionRequest rows store questions and answers."""

@@ -74,6 +74,7 @@ from .session_metadata_service import SessionMetadataService, title_from_prompt
 from .steering import NO_ACTIVE_RUN_CODE, SteerEntry, SteeringChannel
 from .todos.repositories import TodoRepository
 from .todos.service import TodoService
+from .tools.question import normalize_question_answers
 from .tools.subagents import TaskArgs, validate_subagent_delegation
 from .tools.todos import TodoWriteTool
 
@@ -2351,9 +2352,10 @@ class HarnessService:
             session.workspace_id
         )
         status = "rejected" if reject else "answered"
+        answers = normalize_question_answers(list(answers or []))
         await sync_to_async(QuestionRequestRepository.resolve)(
             record,
-            answers=list(answers or []),
+            answers=answers,
             status=status,
         )
         future = self._pending_questions.pop(str(question_id), None)
@@ -2362,7 +2364,7 @@ class HarnessService:
             if reject:
                 future.set_exception(ValueError("Question rejected by user"))
             else:
-                future.set_result(list(answers or []))
+                future.set_result(answers)
             resumed = True
         if resumed:
             log.info(
