@@ -1,5 +1,6 @@
 import pytest
 
+from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessSessionStatus
 from apps.harness.repositories import HarnessSessionRepository
 from apps.runners.enums import WorkspaceOperation
@@ -17,9 +18,7 @@ def test_scheduled_run_admission_rejects_active_workspace_lifecycle_operation(
     workspace.active_operation = WorkspaceOperation.STOPPING
     workspace.save(update_fields=["active_operation"])
 
-    reserved = HarnessSessionRepository.reserve_workspace_run(
-        session.id, scheduled=True
-    )
+    reserved = HarnessService().reserve_run(session, scheduled=True)
     assert not reserved
     session.refresh_from_db()
     assert session.status == HarnessSessionStatus.IDLE
@@ -33,6 +32,6 @@ def test_scheduled_run_admission_accepts_idle_running_workspace(harness_workspac
         organization_id=workspace.runner.organization_id,
     )
 
-    assert HarnessSessionRepository.reserve_workspace_run(session.id, scheduled=True)
+    assert HarnessService().reserve_run(session, scheduled=True)
     session.refresh_from_db()
     assert session.status == HarnessSessionStatus.BUSY

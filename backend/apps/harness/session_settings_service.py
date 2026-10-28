@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import uuid
 
+from apps.runners.services.workspace_admission import WorkspaceAdmissionService
 from apps.skills.services import SkillService
 from common.exceptions import NotFoundError
 
@@ -29,18 +30,20 @@ class SessionSettingsService:
         sessions: type[HarnessSessionRepository] | None = None,
         skills: SkillService | None = None,
         events: ConversationEvents | None = None,
+        workspace_admission: WorkspaceAdmissionService | None = None,
     ) -> None:
-        """Inject persistence, skill visibility and conversation notifications."""
+        """Inject persistence, skills, notifications and the workspace fence."""
         self.sessions = sessions or HarnessSessionRepository
         self.skills = skills or SkillService()
         self.events = events or ConversationEvents()
+        self.workspace_admission = workspace_admission or WorkspaceAdmissionService()
 
     def _editable_session(self, session_id: uuid.UUID) -> HarnessSession:
         """Load current persisted state and enforce the workspace interaction fence."""
         session = self.sessions.get_by_id(session_id)
         if session is None:
             raise NotFoundError("HarnessSession", str(session_id))
-        self.sessions.ensure_interactions_available(session.workspace_id)
+        self.workspace_admission.ensure_interactions_available(session.workspace_id)
         return session
 
     def set_mode(self, session_id: uuid.UUID, mode: str) -> HarnessSession:

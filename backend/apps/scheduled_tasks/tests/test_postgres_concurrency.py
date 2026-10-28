@@ -13,6 +13,7 @@ import pytest
 from django.db import connection, connections
 
 from apps.accounts.models import User
+from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessSession
 from apps.harness.repositories import HarnessSessionRepository
 from apps.organizations.models import Organization
@@ -154,12 +155,8 @@ def test_concurrent_scheduled_roots_reserve_workspace_once(
 
     (pid_a, reserved_a), (pid_b, reserved_b) = _run_concurrently(
         (
-            lambda: HarnessSessionRepository.reserve_workspace_run(
-                session_a.id, scheduled=True
-            ),
-            lambda: HarnessSessionRepository.reserve_workspace_run(
-                session_b.id, scheduled=True
-            ),
+            lambda: HarnessService().reserve_run(session_a, scheduled=True),
+            lambda: HarnessService().reserve_run(session_b, scheduled=True),
         )
     )
 
@@ -191,9 +188,7 @@ def test_auto_stop_and_scheduled_admission_serialize_on_workspace(
                 expected_timeout_minutes=timeout,
                 has_busy_agent=HarnessSessionRepository.has_busy_for_workspace,
             ),
-            lambda: HarnessSessionRepository.reserve_workspace_run(
-                session.id, scheduled=True
-            ),
+            lambda: HarnessService().reserve_run(session, scheduled=True),
         )
     )
 
@@ -219,14 +214,10 @@ def test_manual_reservation_is_allowed_after_scheduled_and_blocks_later_schedule
     manual_session = _create_root_session(workspace, organization)
 
     scheduled_pid, scheduled_reserved = _run_in_thread(
-        lambda: HarnessSessionRepository.reserve_workspace_run(
-            scheduled_session.id, scheduled=True
-        )
+        lambda: HarnessService().reserve_run(scheduled_session, scheduled=True)
     )
     manual_pid, manual_reserved = _run_in_thread(
-        lambda: HarnessSessionRepository.reserve_workspace_run(
-            manual_session.id, scheduled=False
-        )
+        lambda: HarnessService().reserve_run(manual_session, scheduled=False)
     )
 
     assert scheduled_pid != manual_pid
@@ -243,14 +234,10 @@ def test_manual_reservation_is_allowed_after_scheduled_and_blocks_later_schedule
     manual_first = _create_root_session(manual_first_workspace, organization)
     scheduled_second = _create_root_session(manual_first_workspace, organization)
     manual_first_pid, manual_first_reserved = _run_in_thread(
-        lambda: HarnessSessionRepository.reserve_workspace_run(
-            manual_first.id, scheduled=False
-        )
+        lambda: HarnessService().reserve_run(manual_first, scheduled=False)
     )
     scheduled_second_pid, scheduled_second_reserved = _run_in_thread(
-        lambda: HarnessSessionRepository.reserve_workspace_run(
-            scheduled_second.id, scheduled=True
-        )
+        lambda: HarnessService().reserve_run(scheduled_second, scheduled=True)
     )
 
     assert manual_first_pid != scheduled_second_pid

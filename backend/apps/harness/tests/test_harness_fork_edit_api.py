@@ -599,7 +599,7 @@ def test_edit_admission_failure_preserves_existing_state(
         "updated_at",
     )
     before_options = tuple(getattr(session, field) for field in option_fields)
-    original_reserve = HarnessSessionRepository.reserve_workspace_run
+    original_reserve = HarnessSessionRepository.reserve_run
 
     def reserve(session_id, **kwargs):
         # Exercise the real DB admission fences after initial API authorization.
@@ -614,7 +614,7 @@ def test_edit_admission_failure_preserves_existing_state(
             ).delete()
         return admitted
 
-    monkeypatch.setattr(HarnessSessionRepository, "reserve_workspace_run", reserve)
+    monkeypatch.setattr(HarnessSessionRepository, "reserve_run", reserve)
     if failure == "history":
 
         async def fail_history(*args, **kwargs):

@@ -32,12 +32,10 @@ def test_capture_blocks_all_run_reservations(harness_workspace, child, scheduled
         active_operation="capturing_image"
     )
     if scheduled:
-        assert not HarnessSessionRepository.reserve_workspace_run(
-            session.id, scheduled=True
-        )
+        assert not HarnessService().reserve_run(session, scheduled=True)
     else:
         with pytest.raises(ConflictError, match="capturing image"):
-            HarnessSessionRepository.reserve_workspace_run(session.id)
+            HarnessService().reserve_run(session)
     session.refresh_from_db()
     assert session.status == "idle"
 
@@ -48,7 +46,7 @@ def test_manual_roots_and_children_remain_concurrent(harness_workspace):
     child = session_for(harness_workspace, parent=root)
     second = session_for(harness_workspace)
     for session in (root, child, second):
-        assert HarnessSessionRepository.reserve_workspace_run(session.id)
+        assert HarnessService().reserve_run(session)
 
 
 @pytest.mark.django_db
@@ -117,9 +115,9 @@ async def test_accessor_factory_and_live_emit_recheck_fence(harness_workspace):
 @pytest.mark.django_db
 def test_reservation_uses_runner_then_workspace_lock(harness_workspace, monkeypatch):
     """A fence claimed at the shared runner boundary cannot be bypassed."""
-    from apps.runners import locking
+    from apps.runners import workspace_admission_repository
 
-    original_lock = locking.lock_runner
+    original_lock = workspace_admission_repository.lock_runner
     session = session_for(harness_workspace)
 
     def capture_at_lock(runner_id):
@@ -129,9 +127,9 @@ def test_reservation_uses_runner_then_workspace_lock(harness_workspace, monkeypa
         )
         return runner
 
-    monkeypatch.setattr(locking, "lock_runner", capture_at_lock)
+    monkeypatch.setattr(workspace_admission_repository, "lock_runner", capture_at_lock)
     with pytest.raises(ConflictError):
-        HarnessSessionRepository.reserve_workspace_run(session.id)
+        HarnessService().reserve_run(session)
     assert HarnessSession.objects.get(id=session.id).status == "idle"
 
 
@@ -149,7 +147,7 @@ def test_unresolved_fence_blocks_reservation(harness_workspace, scheduled):
     )
     Workspace.objects.filter(id=harness_workspace.id).update(current_task=task)
     with pytest.raises(ConflictError, match="unresolved"):
-        HarnessSessionRepository.reserve_workspace_run(session.id, scheduled=scheduled)
+        HarnessService().reserve_run(session, scheduled=scheduled)
     assert HarnessSession.objects.get(id=session.id).status == "idle"
 
 

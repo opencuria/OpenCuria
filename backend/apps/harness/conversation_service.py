@@ -9,8 +9,10 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable
 from datetime import datetime
+from functools import partial
 from typing import Any
 
+from apps.runners.services.workspace_admission import WorkspaceAdmissionService
 from common.exceptions import NotFoundError
 
 from .conversation_events import ConversationEvents
@@ -34,6 +36,7 @@ class ConversationService:
         permission_requests: type[PermissionRequestRepository] | None = None,
         questions: type[QuestionRequestRepository] | None = None,
         events: ConversationEvents | None = None,
+        workspace_admission: WorkspaceAdmissionService | None = None,
     ) -> None:
         """Inject persistence and notifications without depending on execution."""
         self.sessions = sessions or HarnessSessionRepository
@@ -41,6 +44,7 @@ class ConversationService:
         self.permission_requests = permission_requests or PermissionRequestRepository
         self.questions = questions or QuestionRequestRepository
         self.events = events or ConversationEvents()
+        self.workspace_admission = workspace_admission or WorkspaceAdmissionService()
 
     def get_session(self, session_id: uuid.UUID) -> HarnessSession:
         """Return a saved session or raise NotFoundError."""
@@ -128,11 +132,15 @@ class ConversationService:
         keep the chat. Returns whether the chat was deleted; the caller
         publishes the feed change through its conversation events.
         """
-        return self.sessions.delete_unstarted_root(
-            session_id,
-            workspace_id=workspace_id,
-            organization_id=organization_id,
-            release=release,
+        return self.workspace_admission.run_locked(
+            workspace_id,
+            partial(
+                self.sessions.delete_unstarted_root,
+                session_id,
+                workspace_id=workspace_id,
+                organization_id=organization_id,
+                release=release,
+            ),
         )
 
     def unread_for_sessions(

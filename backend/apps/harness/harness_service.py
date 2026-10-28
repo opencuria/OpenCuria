@@ -24,6 +24,7 @@ import asyncio
 import contextvars
 import uuid
 from collections.abc import Awaitable, Callable
+from functools import partial
 from typing import Any
 
 import anyio
@@ -32,6 +33,7 @@ from asgiref.sync import ThreadSensitiveContext, sync_to_async
 
 from apps.runners.services import get_runner_service
 from apps.runners.services.infra import realtime
+from apps.runners.services.workspace_admission import WorkspaceAdmissionService
 from apps.skills.services import SkillService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
@@ -99,6 +101,7 @@ class HarnessService:
         todos: type[TodoRepository] | None = None,
         permissions: PermissionService | None = None,
         skills: SkillService | None = None,
+        workspace_admission: WorkspaceAdmissionService | None = None,
         emit: EmitFn | None = None,
         runner_factory: Callable[..., HarnessRunner] | None = None,
         provider_factory: Callable[[uuid.UUID], ProviderAdapter] | None = None,
@@ -122,13 +125,18 @@ class HarnessService:
         self.todos = todos or TodoRepository
         self.permissions = permissions or PermissionService()
         self.skills = skills or SkillService()
+        self.workspace_admission = workspace_admission or WorkspaceAdmissionService()
         self._emit = emit
         self.conversation_events = ConversationEvents(emit=self._emit_frontend)
         self.session_settings = SessionSettingsService(
-            sessions=self.sessions, skills=self.skills, events=self.conversation_events
+            sessions=self.sessions,
+            skills=self.skills,
+            events=self.conversation_events,
+            workspace_admission=self.workspace_admission,
         )
         self.interactions = InteractionService(
             sessions=self.sessions,
+            workspace_admission=self.workspace_admission,
             permissions=self.permissions,
             emit=self._emit_frontend,
             is_running=self.is_running,
@@ -436,7 +444,7 @@ class HarnessService:
         connection_id: uuid.UUID | str | None = None,
     ) -> HarnessSession:
         """Create a session row (prompt persisted on run start)."""
-        self.sessions.ensure_interactions_available(workspace_id)
+        self.workspace_admission.ensure_interactions_available(workspace_id)
         if parent_id is not None:
             parent_session = self.get_session(parent_id)
             harness_id = getattr(parent_session, "harness_id", "native") or "native"
@@ -648,7 +656,7 @@ class HarnessService:
     async def delete_session(self, session_id: uuid.UUID) -> None:
         """Delete a session only after external process ownership is settled."""
         session = await sync_to_async(self.get_session)(session_id)
-        await sync_to_async(self.sessions.ensure_interactions_available)(
+        await sync_to_async(self.workspace_admission.ensure_interactions_available)(
             session.workspace_id
         )
         if (
@@ -711,7 +719,7 @@ class HarnessService:
         if include_message and message_id is None:
             raise ValueError("message_id is required when include_message is true")
         session = await sync_to_async(self.get_session)(session_id)
-        await sync_to_async(self.sessions.ensure_interactions_available)(
+        await sync_to_async(self.workspace_admission.ensure_interactions_available)(
             session.workspace_id
         )
         SessionAccessService.require_user_promptable(session.parent_id)
@@ -776,7 +784,7 @@ class HarnessService:
         if not prompt or not prompt.strip():
             raise ValueError("prompt must not be empty")
         session = await sync_to_async(self.get_session)(session_id)
-        await sync_to_async(self.sessions.ensure_interactions_available)(
+        await sync_to_async(self.workspace_admission.ensure_interactions_available)(
             session.workspace_id
         )
         SessionAccessService.require_user_promptable(session.parent_id)
@@ -1097,6 +1105,18 @@ class HarnessService:
         task = self._tasks.get(key) or self._admissions.get(key)
         return task is not None and not task.done()
 
+    def reserve_run(self, session: HarnessSession, *, scheduled: bool = False) -> bool:
+        """Mark *session* busy under the workspace admission locks and fence (sync).
+
+        Manual roots and children stay concurrent; a scheduled launch requires
+        an idle running workspace without another busy root.
+        """
+        return self.workspace_admission.admit_run(
+            session.workspace_id,
+            scheduled=scheduled,
+            reserve=partial(self.sessions.reserve_run, session.id, scheduled=scheduled),
+        )
+
     async def start_run(
         self,
         session: HarnessSession,
@@ -1148,7 +1168,7 @@ class HarnessService:
         if self._user_abort_requested(session):
             self._forget_run(str(session.id))
             raise asyncio.CancelledError()
-        await sync_to_async(self.sessions.ensure_interactions_available)(
+        await sync_to_async(self.workspace_admission.ensure_interactions_available)(
             session.workspace_id
         )
         key = str(session.id)
@@ -1288,9 +1308,7 @@ class HarnessService:
         else:
             provider_id, _ = parse_model_ref(resolved_model)
             resolved_provider = provider_id
-        admitted = await sync_to_async(self.sessions.reserve_workspace_run)(
-            session.id, scheduled=scheduled
-        )
+        admitted = await sync_to_async(self.reserve_run)(session, scheduled=scheduled)
         if not admitted:
             detail = (
                 "Another chat is already active in this workspace"
@@ -1667,7 +1685,7 @@ class HarnessService:
     async def abort_run(self, session_id: uuid.UUID) -> HarnessSession:
         """Cancel the active run tree, reject pending user gates, and mark aborted."""
         session = await sync_to_async(self.get_session)(session_id)
-        await sync_to_async(self.sessions.ensure_interactions_available)(
+        await sync_to_async(self.workspace_admission.ensure_interactions_available)(
             session.workspace_id
         )
         # Stop means stop: queued steers must not survive as a follow-up run.

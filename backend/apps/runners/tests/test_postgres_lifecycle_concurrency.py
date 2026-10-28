@@ -235,8 +235,8 @@ def test_cancel_and_build_completion_reconcile_under_runner_lock(runner, user):
 @pytest.mark.parametrize("launch", ["manual", "scheduled", "child"])
 def test_capture_allocation_vs_harness_admission(runner, workspace, launch):
     """Capture and every harness admission contend on real PostgreSQL locks."""
+    from apps.harness.harness_service import HarnessService
     from apps.harness.models import HarnessSession
-    from apps.harness.repositories import HarnessSessionRepository
     from apps.runners.capture_repository import CaptureRepository as Capture
     from apps.runners.models import CaptureRequest
 
@@ -263,8 +263,8 @@ def test_capture_allocation_vs_harness_admission(runner, workspace, launch):
 
     def admit():
         try:
-            return HarnessSessionRepository.reserve_workspace_run(
-                session.id, scheduled=launch == "scheduled"
+            return HarnessService().reserve_run(
+                session, scheduled=launch == "scheduled"
             )
         except ConflictError:
             return False

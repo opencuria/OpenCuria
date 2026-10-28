@@ -6,7 +6,6 @@ import pytest
 from django.contrib.auth import get_user_model
 
 from apps.harness.models import HarnessSession
-from apps.harness.repositories import HarnessSessionRepository
 from apps.organizations.models import Membership, MembershipRole
 from apps.runners.capture_repository import CaptureRepository
 from apps.runners.deletion_repository import DeletionRepository
@@ -24,6 +23,7 @@ from apps.runners.recreate_repository import RecreateRepository
 from apps.runners.repositories import ImageGenerationRepository
 from apps.runners.services.deletion import DeletionService
 from apps.runners.services.image_retention import ImageRetentionService
+from apps.runners.services.workspace_admission import WorkspaceAdmissionService
 from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_capture_pipeline import result
 from apps.runners.tests.test_services import service as service
@@ -165,7 +165,7 @@ def test_reset_keeps_identity_and_reprovisions_same_version(service, runner, use
     ws.refresh_from_db()
     assert ws.active_operation == "resetting"
     with pytest.raises(ConflictError):
-        HarnessSessionRepository.ensure_interactions_available(ws.id)
+        WorkspaceAdmissionService().ensure_interactions_available(ws.id)
     assert drive(service, runner, request, "workspace:removed", result="deleted") == []
     ws.refresh_from_db()
     request.refresh_from_db()

@@ -15,6 +15,7 @@ from typing import Any
 import structlog
 from asgiref.sync import sync_to_async
 
+from apps.runners.services.workspace_admission import WorkspaceAdmissionService
 from common.exceptions import NotFoundError
 
 from .agents.definitions import get_agent
@@ -62,9 +63,11 @@ class InteractionService:
         sessions: type[HarnessSessionRepository] | None = None,
         questions: type[QuestionRequestRepository] | None = None,
         permissions: PermissionService | None = None,
+        workspace_admission: WorkspaceAdmissionService | None = None,
     ) -> None:
-        """Compose persistence and the caller's event and run-status ports."""
+        """Compose persistence, the workspace fence and the caller's ports."""
         self.sessions = sessions or HarnessSessionRepository
+        self.workspace_admission = workspace_admission or WorkspaceAdmissionService()
         self.questions = questions or QuestionRequestRepository
         self.permissions = permissions or PermissionService()
         self._emit = emit
@@ -161,7 +164,7 @@ class InteractionService:
             raise NotFoundError("PermissionRequest", str(request_id))
         if str(record.session_id) != str(session.id):
             raise NotFoundError("PermissionRequest", str(request_id))
-        await sync_to_async(self.sessions.ensure_interactions_available)(
+        await sync_to_async(self.workspace_admission.ensure_interactions_available)(
             session.workspace_id
         )
         result = await sync_to_async(self.permissions.resolve)(request_id, response)
@@ -202,7 +205,7 @@ class InteractionService:
             raise NotFoundError("QuestionRequest", str(question_id))
         if str(record.session_id) != str(session.id):
             raise NotFoundError("QuestionRequest", str(question_id))
-        await sync_to_async(self.sessions.ensure_interactions_available)(
+        await sync_to_async(self.workspace_admission.ensure_interactions_available)(
             session.workspace_id
         )
         status = "rejected" if reject else "answered"

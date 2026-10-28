@@ -28,7 +28,9 @@ async def test_external_session_rejects_nonowner_before_writing(
     )
     sessions = Mock(get_by_id=Mock(return_value=session))
     messages = Mock()
-    service = HarnessService(sessions=sessions, messages=messages)
+    service = HarnessService(
+        sessions=sessions, messages=messages, workspace_admission=Mock()
+    )
     expected = (
         "Only the session owner may use its external engine connection"
         if action == "start"

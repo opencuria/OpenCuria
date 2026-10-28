@@ -250,15 +250,13 @@ async def test_manual_chat_can_start_while_scheduled_run_is_active(
             yield Delta(text="finished", usage=Usage(1, 1, 2))
 
     reservations: list[tuple[uuid.UUID, bool]] = []
-    original_reserve = HarnessSessionRepository.reserve_workspace_run
+    original_reserve = HarnessSessionRepository.reserve_run
 
     def record_reservation(session_id: uuid.UUID, *, scheduled: bool = False) -> bool:
         reservations.append((session_id, scheduled))
         return original_reserve(session_id, scheduled=scheduled)
 
-    monkeypatch.setattr(
-        HarnessSessionRepository, "reserve_workspace_run", record_reservation
-    )
+    monkeypatch.setattr(HarnessSessionRepository, "reserve_run", record_reservation)
     service, _, _ = _service(provider=SlowProvider([]))
     scheduled_session = await _db_create_session(harness_workspace)
     manual_session = await _db_create_session(harness_workspace)

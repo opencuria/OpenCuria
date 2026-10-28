@@ -12,6 +12,8 @@ Operator disposition policy also belongs to its service; its repository never
 imports any application's services, including through function-local imports.
 Image retention policy and scheduling live in their service, while repositories
 own the transaction and runner lock shared by selection and retirement.
+Dependents never import runners models or runner locks: workspace fences and
+run admission are reached through ``WorkspaceAdmissionService``.
 """
 
 from __future__ import annotations
@@ -20,7 +22,9 @@ import ast
 from pathlib import Path
 
 RUNNERS_DIR = Path(__file__).resolve().parents[1]
+APPS_DIR = RUNNERS_DIR.parent
 FORBIDDEN_APPS = {"harness", "scheduled_tasks", "mcp_app"}
+RUNNER_PERSISTENCE = {"apps.runners.models", "apps.runners.locking"}
 ORM_QUERY_ATTRIBUTES = {
     "objects",
     "_default_manager",
@@ -110,6 +114,66 @@ def test_guard_detects_function_local_imports_and_registry_lookups():
     nodes = list(ast.walk(ast.parse(source)))
     assert set().union(*map(_imported_apps, nodes)) == FORBIDDEN_APPS
     assert [app for app in map(_registry_lookup_app, nodes) if app] == ["harness"]
+
+
+def _dependent_modules() -> list[Path]:
+    """Return every non-test, non-migration module outside the runners app."""
+    return [
+        path
+        for path in sorted(APPS_DIR.rglob("*.py"))
+        if path.relative_to(APPS_DIR).parts[0] != "runners"
+        and not {"tests", "migrations"} & set(path.relative_to(APPS_DIR).parts)
+    ]
+
+
+def _runner_persistence_imports(node: ast.AST) -> set[str]:
+    """Return runners model or locking modules referenced by an import node."""
+    if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+        modules = {node.module, *(f"{node.module}.{a.name}" for a in node.names)}
+    elif isinstance(node, ast.Import):
+        modules = {alias.name for alias in node.names}
+    else:
+        return set()
+    return {
+        module
+        for module in modules
+        for target in RUNNER_PERSISTENCE
+        if module == target or module.startswith(f"{target}.")
+    }
+
+
+def test_dependents_never_touch_runner_tables_or_locks() -> None:
+    """Other apps reach workspace lifecycle state through runners services."""
+    violations = []
+    for path in _dependent_modules():
+        relative = path.relative_to(APPS_DIR).as_posix()
+        for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+            for module in sorted(_runner_persistence_imports(node)):
+                violations.append(f"{relative}:{node.lineno} imports {module}")
+            if _registry_lookup_app(node) == "runners":
+                violations.append(f"{relative}:{node.lineno} looks up runners models")
+    assert violations == [], (
+        "Use runners services (e.g. WorkspaceAdmissionService for interaction "
+        "fences and run admission) instead of runners models or locks:\n"
+        + "\n".join(violations)
+    )
+
+
+def test_persistence_guard_detects_function_local_and_package_imports() -> None:
+    source = (
+        "def f():\n"
+        "    from apps.runners.models import Workspace\n"
+        "    from apps.runners import locking\n"
+        "    import apps.runners.models\n"
+        "    from apps.runners.services import get_runner_service\n"
+        "    from apps.runners.enums import WorkspaceStatus\n"
+    )
+    found = set().union(*map(_runner_persistence_imports, ast.walk(ast.parse(source))))
+    assert found == {
+        "apps.runners.models",
+        "apps.runners.models.Workspace",
+        "apps.runners.locking",
+    }
 
 
 def _orm_query_accesses(source: str) -> list[tuple[int, str]]:
