@@ -1,0 +1,48 @@
+{
+  "results": [
+    {
+      "p50_ms": 27.875,
+      "p95_ms": 52.705,
+      "peak_python_bytes_separate_probe": 287423,
+      "response_sha256": "3c767c02069eca1346088257ad423b2f9df1af2dcca8d4858ab794c722944246",
+      "runtime_calls": [
+        13
+      ],
+      "samples_ms": [
+        23.653,
+        25.361,
+        24.164,
+        24.499,
+        27.875,
+        32.838,
+        38.914,
+        50.305,
+        52.705
+      ],
+      "simulated_delay_ms_per_call": 0.0
+    },
+    {
+      "p50_ms": 140.562,
+      "p95_ms": 151.384,
+      "peak_python_bytes_separate_probe": 283425,
+      "response_sha256": "3c767c02069eca1346088257ad423b2f9df1af2dcca8d4858ab794c722944246",
+      "runtime_calls": [
+        13
+      ],
+      "samples_ms": [
+        126.035,
+        151.384,
+        146.855,
+        102.422,
+        88.357,
+        141.537,
+        140.562,
+        137.899,
+        141.02
+      ],
+      "simulated_delay_ms_per_call": 5.0
+    }
+  ],
+  "samples": 9,
+  "warmups": 2
+}

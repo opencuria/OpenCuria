@@ -1,0 +1,171 @@
+{
+  "benchmark": "authenticated captured-image REST, disposable file-backed SQLite",
+  "samples": 9,
+  "warmups": 2,
+  "versions_per_image": 5,
+  "workspace_pins_per_image": 1,
+  "results": [
+    {
+      "images": 0,
+      "versions": 0,
+      "list": {
+        "queries": 5,
+        "sql_execute_ms": 3.107,
+        "p50_ms": 8.428,
+        "p95_ms": 124.891,
+        "peak_python_allocated_bytes": 166446,
+        "response_bytes": 2,
+        "response_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "samples_ms": [
+          124.891,
+          8.656,
+          8.344,
+          8.064,
+          10.87,
+          8.428,
+          8.806,
+          8.187,
+          8.33
+        ]
+      }
+    },
+    {
+      "images": 1,
+      "versions": 5,
+      "list": {
+        "queries": 11,
+        "sql_execute_ms": 3.552,
+        "p50_ms": 14.523,
+        "p95_ms": 14.898,
+        "peak_python_allocated_bytes": 178688,
+        "response_bytes": 1223,
+        "response_sha256": "396bb40c3a3d726eb80d051c905dc2abeefa8c0c9c31e45b463d2e05f4fdde73",
+        "samples_ms": [
+          14.578,
+          14.523,
+          13.722,
+          14.711,
+          14.174,
+          14.634,
+          14.898,
+          13.328,
+          14.135
+        ]
+      },
+      "detail": {
+        "queries": 11,
+        "sql_execute_ms": 5.984,
+        "p50_ms": 13.962,
+        "p95_ms": 14.878,
+        "peak_python_allocated_bytes": 186118,
+        "response_bytes": 1221,
+        "response_sha256": "0ea4c8d055cf766be18b4eb533f81e894f9c4bf6cd014640ab07ff110d54582b",
+        "samples_ms": [
+          14.053,
+          13.514,
+          14.012,
+          13.609,
+          14.766,
+          14.878,
+          13.792,
+          13.811,
+          13.962
+        ]
+      }
+    },
+    {
+      "images": 10,
+      "versions": 50,
+      "list": {
+        "queries": 47,
+        "sql_execute_ms": 6.472,
+        "p50_ms": 46.748,
+        "p95_ms": 52.91,
+        "peak_python_allocated_bytes": 378005,
+        "response_bytes": 12230,
+        "response_sha256": "bd6dc9d400285f3a668e245cb540c762beb70519e656aaec7f5398a9a246a7bd",
+        "samples_ms": [
+          45.327,
+          46.748,
+          44.952,
+          45.847,
+          46.42,
+          51.938,
+          50.5,
+          52.91,
+          52.029
+        ]
+      },
+      "detail": {
+        "queries": 11,
+        "sql_execute_ms": 3.908,
+        "p50_ms": 15.021,
+        "p95_ms": 16.336,
+        "peak_python_allocated_bytes": 183436,
+        "response_bytes": 1221,
+        "response_sha256": "0ea4c8d055cf766be18b4eb533f81e894f9c4bf6cd014640ab07ff110d54582b",
+        "samples_ms": [
+          15.021,
+          15.11,
+          16.336,
+          14.66,
+          15.529,
+          14.934,
+          15.529,
+          14.951,
+          14.538
+        ]
+      }
+    },
+    {
+      "images": 30,
+      "versions": 150,
+      "list": {
+        "queries": 127,
+        "sql_execute_ms": 16.032,
+        "p50_ms": 124.546,
+        "p95_ms": 155.197,
+        "peak_python_allocated_bytes": 891765,
+        "response_bytes": 36690,
+        "response_sha256": "3d7d65565ef14557d537e43f48e13bb56c75ddf8bff8330e870bf169fa53383e",
+        "samples_ms": [
+          121.643,
+          121.912,
+          120.493,
+          123.383,
+          124.546,
+          128.842,
+          140.575,
+          142.164,
+          155.197
+        ]
+      },
+      "detail": {
+        "queries": 11,
+        "sql_execute_ms": 5.446,
+        "p50_ms": 18.753,
+        "p95_ms": 21.767,
+        "peak_python_allocated_bytes": 183661,
+        "response_bytes": 1221,
+        "response_sha256": "0ea4c8d055cf766be18b4eb533f81e894f9c4bf6cd014640ab07ff110d54582b",
+        "samples_ms": [
+          19.101,
+          18.894,
+          20.928,
+          18.753,
+          21.767,
+          17.632,
+          18.398,
+          17.471,
+          18.418
+        ]
+      }
+    }
+  ],
+  "notes": [
+    "Complete Django requests, including middleware and JSON serialization.",
+    "SQL and allocation tracing run separately from latency samples.",
+    "Allocation peaks are not RSS; SQL timing excludes fetching and ORM work.",
+    "No runner, external services, production data or network latency."
+  ]
+}

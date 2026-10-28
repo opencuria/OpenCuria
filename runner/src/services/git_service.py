@@ -16,6 +16,7 @@ from typing import Any
 import structlog
 
 from .. import git as git_ops
+from ..git_snapshot import parse_snapshot_reads, snapshot_read_argv
 from ..models import WorkspaceInfo
 from ..runtime.base import RuntimeBackend
 from .capture_fence import CaptureFence, live_interaction
@@ -90,8 +91,9 @@ class GitService:
         git and its askpass child — without ever appearing in argv, URLs
         or logs.  User-controlled git arguments stay separate argv
         elements behind ``exec "$@"`` and are never shell-interpreted.
-        Only non-git probes (``realpath``/``find``/``test``/``rm``) run
-        unwrapped.  Raises :class:`GitError` with code ``missing_git``
+        The fixed snapshot batch sources the same credential prefix once;
+        non-git probes (``realpath``/``find``/``test``/``rm``) run unwrapped.
+        Raises :class:`GitError` with code ``missing_git``
         when the git binary is absent.
         """
         if argv[:1] == ["git"]:
@@ -110,6 +112,20 @@ class GitService:
             )
         except asyncio.TimeoutError as exc:
             raise git_ops.GitError("timeout", "Git operation timed out") from exc
+        output = output if isinstance(output, str) else str(output)
+        self._check_git_binary(argv, exit_code, output)
+        if check_git and exit_code != 0 and "not a git repository" in output.lower():
+            raise git_ops.GitError(
+                "not_a_repo",
+                "Path is not inside a git repository",
+                exit_code=exit_code,
+                stderr=output,
+            )
+        return exit_code, output
+
+    @staticmethod
+    def _check_git_binary(argv: list[str], exit_code: int, output: str) -> None:
+        """Preserve missing-binary errors for individual and batched Git reads."""
         # Missing-binary detection is deliberately narrow: only a nonzero
         # exit of 126/127 *plus* a binary marker counts as missing_git.
         # Plain "not found" text from successful (exit 0) or exit-1 git
@@ -142,14 +158,6 @@ class GitService:
                     exit_code=exit_code,
                     stderr=output,
                 )
-        if check_git and exit_code != 0 and "not a git repository" in lowered:
-            raise git_ops.GitError(
-                "not_a_repo",
-                "Path is not inside a git repository",
-                exit_code=exit_code,
-                stderr=output,
-            )
-        return exit_code, output if isinstance(output, str) else str(output)
 
     async def _git_realpath_contained(
         self,
@@ -432,23 +440,28 @@ class GitService:
     ) -> dict[str, Any]:
         """Build the snapshot dict for one repository root (no history)."""
         timeout = git_ops.GIT_READ_TIMEOUT_S
-
-        exit_code, status_out = await self._git_exec(
-            runtime,
-            instance_id,
-            ["git", "status", "--porcelain=v2", "--branch",
-             "--untracked-files=all", "-z"],
-            workdir=repo_root,
-            env=env,
-            timeout=timeout,
+        marker = uuid.uuid4().hex
+        exit_code, output = await self._git_exec(
+            runtime, instance_id, snapshot_read_argv(marker),
+            workdir=repo_root, env=env, timeout=timeout,
         )
         if exit_code != 0:
             raise git_ops.GitError(
-                "git_failed",
-                "git status failed",
-                exit_code=exit_code,
-                stderr=status_out,
+                "git_failed", "Git snapshot read failed",
+                exit_code=exit_code, stderr=output,
             )
+        reads = parse_snapshot_reads(output, marker)
+        for code, text in reads:
+            self._check_git_binary(["git"], code, text)
+        exit_code, status_out = reads[0]
+        if exit_code != 0:
+            raise git_ops.GitError(
+                "git_failed", "git status failed",
+                exit_code=exit_code, stderr=status_out,
+            )
+        (exit_code_r, refs_out), (exit_code_m, remotes_out), (
+            exit_code_d, default_out
+        ) = reads[1:]
         changes, branch_header = git_ops.changes_from_status_v2(status_out)
 
         if branch_header.get("oid") is None:
@@ -464,21 +477,6 @@ class GitService:
                 branch_header["oid"] = head_out.strip().splitlines()[0].strip()
 
         # Branch list with upstream tracking + remote refs.
-        us = git_ops._GIT_US
-        rs = git_ops._GIT_RS
-        ref_format = (
-            f"%(refname){us}%(refname:short){us}%(objectname){us}"
-            f"%(objecttype){us}%(upstream:short){us}%(upstream:track){us}%(HEAD)"
-        )
-        exit_code_r, refs_out = await self._git_exec(
-            runtime,
-            instance_id,
-            ["git", "for-each-ref", f"--format={ref_format}{rs}",
-             "refs/heads", "refs/remotes", "refs/tags"],
-            workdir=repo_root,
-            env=env,
-            timeout=timeout,
-        )
         branches: list[dict[str, Any]] = []
         remote_refs: list[dict[str, Any]] = []
         if exit_code_r == 0:
@@ -499,28 +497,12 @@ class GitService:
                 remote_refs.append({"name": item["name"], "tip_hash": item["tip_hash"]})
             remote_refs.sort(key=lambda item: item["name"])
 
-        exit_code_m, remotes_out = await self._git_exec(
-            runtime,
-            instance_id,
-            ["git", "remote"],
-            workdir=repo_root,
-            env=env,
-            timeout=timeout,
-        )
         remotes: list[str] = []
         if exit_code_m == 0:
             remotes = sorted(
                 line.strip() for line in remotes_out.splitlines() if line.strip()
             )
 
-        exit_code_d, default_out = await self._git_exec(
-            runtime,
-            instance_id,
-            ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
-            workdir=repo_root,
-            env=env,
-            timeout=timeout,
-        )
         default_remote: str | None = None
         if exit_code_d == 0 and default_out.strip():
             default_remote = default_out.strip().splitlines()[0].strip() or None

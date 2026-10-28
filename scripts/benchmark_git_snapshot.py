@@ -11,21 +11,30 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gc
 import hashlib
 import json
 import math
 import os
 import statistics
+import subprocess
 import sys
 import tempfile
 import time
 import tracemalloc
+import types
 import uuid
 from pathlib import Path
 from typing import Any
 
 
-async def measure(delay_ms: float, samples: int, warmups: int) -> dict[str, Any]:
+async def measure(
+    delay_ms: float,
+    samples: int,
+    warmups: int,
+    untracked_files: int,
+    baseline_type: type | None = None,
+) -> dict[str, Any]:
     """Time the public snapshot operation, including validation and history."""
     from src.models import WorkspaceInfo
     from src.services.git_service import GitService
@@ -67,7 +76,9 @@ async def measure(delay_ms: float, samples: int, warmups: int) -> dict[str, Any]
         await asyncio.to_thread(_make_repo, str(repository))
         # Representative staged, unstaged and untracked content, plus history.
         (repository / "README.md").write_text("# unstaged change\n")
-        (repository / "untracked.txt").write_text("new file\n")
+        for index in range(untracked_files):
+            name = "untracked.txt" if index == 0 else f"untracked-{index:04}.txt"
+            (repository / name).write_text("new file\n")
         (repository / "staged.txt").write_text("staged change\n")
         process = await asyncio.create_subprocess_exec(
             "git", "-C", str(repository), "add", "staged.txt"
@@ -79,9 +90,14 @@ async def measure(delay_ms: float, samples: int, warmups: int) -> dict[str, Any]
         info = WorkspaceInfo(
             workspace_id=workspace_id, instance_id="instance-1", status="running"
         )
-        service = GitService(lambda _: info, lambda _: runtime)
+        services = {"after": GitService(lambda _: info, lambda _: runtime)}
+        if baseline_type is not None:
+            services = {
+                "before": baseline_type(lambda _: info, lambda _: runtime),
+                **services,
+            }
 
-        async def snapshot() -> dict[str, Any]:
+        async def snapshot(service: Any) -> dict[str, Any]:
             result = await service.execute_git_operation(
                 workspace_id, "repo_snapshot", "/workspace/repo", {}
             )
@@ -89,38 +105,51 @@ async def measure(delay_ms: float, samples: int, warmups: int) -> dict[str, Any]
                 raise RuntimeError(f"Snapshot failed: {result}")
             return result
 
-        durations: list[float] = []
-        counts: list[int] = []
+        durations: dict[str, list[float]] = {name: [] for name in services}
+        counts: dict[str, set[int]] = {name: set() for name in services}
         digest: str | None = None
         for iteration in range(warmups + samples):
+            order = list(services)
+            if iteration % 2:
+                order.reverse()
+            for name in order:
+                runtime.calls.clear()
+                start = time.perf_counter()
+                result = await snapshot(services[name])
+                elapsed = (time.perf_counter() - start) * 1000
+                current = hashlib.sha256(
+                    json.dumps(result, sort_keys=True).encode()
+                ).hexdigest()
+                if digest is not None and current != digest:
+                    raise RuntimeError(
+                        "Snapshot response changed between versions/samples"
+                    )
+                digest = current
+                if iteration >= warmups:
+                    durations[name].append(elapsed)
+                    counts[name].add(len(runtime.calls))
+        metrics = {}
+        for name, service in services.items():
             runtime.calls.clear()
-            start = time.perf_counter()
-            result = await snapshot()
-            elapsed = (time.perf_counter() - start) * 1000
-            current = hashlib.sha256(
-                json.dumps(result, sort_keys=True).encode()
-            ).hexdigest()
-            if digest is not None and current != digest:
-                raise RuntimeError("Snapshot response changed between samples")
-            digest = current
-            if iteration >= warmups:
-                durations.append(elapsed)
-                counts.append(len(runtime.calls))
-        runtime.calls.clear()
-        tracemalloc.start()
-        try:
-            await snapshot()
-            _, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
+            gc.collect()
+            tracemalloc.start()
+            try:
+                await snapshot(service)
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            values = durations[name]
+            metrics[name] = {
+                "p50_ms": round(statistics.median(values), 3),
+                "p95_ms": round(sorted(values)[math.ceil(samples * 0.95) - 1], 3),
+                "runtime_calls": sorted(counts[name]),
+                "peak_python_bytes_separate_probe": peak,
+                "response_sha256": digest,
+                "samples_ms": [round(duration, 3) for duration in values],
+            }
         return {
             "simulated_delay_ms_per_call": delay_ms,
-            "p50_ms": round(statistics.median(durations), 3),
-            "p95_ms": round(sorted(durations)[math.ceil(samples * 0.95) - 1], 3),
-            "runtime_calls": sorted(set(counts)),
-            "peak_python_bytes_separate_probe": peak,
-            "response_sha256": digest,
-            "samples_ms": [round(duration, 3) for duration in durations],
+            **(metrics if baseline_type is not None else metrics["after"]),
         }
 
 
@@ -132,11 +161,18 @@ def main() -> None:
     )
     parser.add_argument("--samples", type=int, default=31)
     parser.add_argument("--warmups", type=int, default=3)
+    parser.add_argument("--untracked-files", type=int, default=1)
     parser.add_argument("--delay-ms", type=float, nargs="+", default=[0, 5, 20])
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--baseline-ref",
+        help="Alternate GitService from this revision with current code",
+    )
     args = parser.parse_args()
     if args.samples < 1 or args.warmups < 0:
         parser.error("samples must be positive and warmups nonnegative")
+    if args.untracked_files < 0:
+        parser.error("untracked-files must be nonnegative")
     if any(not math.isfinite(delay) or delay < 0 for delay in args.delay_ms):
         parser.error("delay-ms must be finite and nonnegative")
     sys.path.insert(0, str(args.repo.resolve(strict=True) / "runner"))
@@ -155,14 +191,33 @@ def main() -> None:
         TZ="UTC",
     )
 
+    baseline_type = None
+    if args.baseline_ref:
+        source = subprocess.run(
+            ["git", "show", f"{args.baseline_ref}:runner/src/services/git_service.py"],
+            cwd=args.repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        module = types.ModuleType("src.services._git_service_baseline")
+        module.__package__ = "src.services"
+        exec(compile(source, "<baseline GitService>", "exec"), module.__dict__)
+        baseline_type = module.GitService
+
     async def run() -> list[dict[str, Any]]:
         return [
-            await measure(delay, args.samples, args.warmups) for delay in args.delay_ms
+            await measure(
+                delay, args.samples, args.warmups, args.untracked_files, baseline_type
+            )
+            for delay in args.delay_ms
         ]
 
     result = {
         "samples": args.samples,
         "warmups": args.warmups,
+        "untracked_files": args.untracked_files,
+        "baseline_ref": args.baseline_ref,
         "results": asyncio.run(run()),
     }
     encoded = json.dumps(result, indent=2, sort_keys=True) + "\n"

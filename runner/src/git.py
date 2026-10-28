@@ -494,9 +494,10 @@ GIT_PERSISTENT_ENV_FILE = "/root/.opencuria-env.sh"
 #: ``exec "$@"``.  The conditional ``[ -f ... ]`` guard is required:
 #: POSIX ``sh`` (dash) aborts a non-interactive ``. <missing>`` with exit 2,
 #: which would break every git call in workspaces without credentials.
-_GIT_EXEC_WRAPPER_SCRIPT = (
-    'if [ -f /root/.opencuria-env.sh ]; then . /root/.opencuria-env.sh; fi; exec "$@"'
+GIT_SOURCE_ENV_SCRIPT = (
+    'if [ -f /root/.opencuria-env.sh ]; then . /root/.opencuria-env.sh; fi; '
 )
+_GIT_EXEC_WRAPPER_SCRIPT = GIT_SOURCE_ENV_SCRIPT + 'exec "$@"'
 _GIT_EXEC_WRAPPER_NAME = "opencuria-git-exec"
 
 

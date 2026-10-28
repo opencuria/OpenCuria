@@ -1,0 +1,10 @@
+{
+  "baseline": "997f56e",
+  "timestamp": "2026-10-28T02:02:55.104647+00:00",
+  "top_three": [
+    "backend_workspace_presentation",
+    "runner_git_snapshot_roundtrips",
+    "runner_large_file_read_parsing"
+  ],
+  "selected": "runner_git_snapshot_roundtrips"
+}

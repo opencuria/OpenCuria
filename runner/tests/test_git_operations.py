@@ -242,6 +242,13 @@ class FakeGitRuntime:
             # Execute the actual fixed script; only map its path argument.
             mapped = [*probe_argv[:4], self._resolve_cwd(probe_argv[4])]
             return await asyncio.to_thread(_run_git, mapped, cwd)
+        if probe_argv[:2] == ["sh", "-c"] and probe_argv[3:4] == [
+            "opencuria-git-snapshot"
+        ]:
+            # Run the production batch, without sourcing host credentials.
+            mapped = list(probe_argv)
+            mapped[2] = mapped[2].removeprefix(git_ops.GIT_SOURCE_ENV_SCRIPT)
+            return await asyncio.to_thread(_run_git, mapped, cwd)
         if probe_argv[:1] == ["rm"]:
             return 0, ""
         if probe_argv[:1] == ["find"]:
@@ -405,6 +412,8 @@ def _had_data_command(
     """Return True when a status/diff/mutation argv ran after *after*."""
     for call in runtime.calls[after:]:
         inner = _inner_argv(call)
+        if "status" in verbs and inner[3:4] == ["opencuria-git-snapshot"]:
+            return True
         if inner[:1] == ["git"] and len(inner) > 1 and inner[1] in verbs:
             return True
     return False
@@ -2224,7 +2233,7 @@ class GitSnapshotTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(raised.exception.exit_code, 129)
             service.git._git_exec.assert_awaited_once()
             command = service.git._git_exec.call_args.args[2]
-            self.assertEqual(command[:3], ["git", "status", "--porcelain=v2"])
+            self.assertEqual(command[3], "opencuria-git-snapshot")
 
     async def test_repo_snapshot_needs_repo_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -67,9 +67,14 @@ async def test_marker_combinations_in_one_probe(
     assert len(runtime.calls) == 3
 
 
-async def test_complete_snapshot_exec_budget(tmp_path: Path) -> None:
-    """Public snapshots include validation, refs, history and stash in 13 calls."""
+@pytest.mark.parametrize("untracked_count", [0, 50, 500])
+async def test_complete_snapshot_exec_budget(
+    tmp_path: Path, untracked_count: int
+) -> None:
+    """Public snapshots include validation, refs, history and stash in 10 calls."""
     await asyncio.to_thread(_make_repo, str(tmp_path / "repo"))
+    for index in range(untracked_count):
+        (tmp_path / "repo" / f"untracked-{index:04}.txt").touch()
     runtime = FakeGitRuntime(str(tmp_path))
     service, workspace_id = _service(runtime)
 
@@ -80,7 +85,8 @@ async def test_complete_snapshot_exec_budget(tmp_path: Path) -> None:
     assert result["ok"], result
     assert result["snapshot"]["merge_state"] == NEUTRAL
     assert result["snapshot"]["commits"]
-    assert len(runtime.calls) == 13
+    assert len(result["snapshot"]["changes"]) == untracked_count
+    assert len(runtime.calls) == 10
 
 
 async def test_worktree_uses_its_own_markers(tmp_path: Path) -> None:
