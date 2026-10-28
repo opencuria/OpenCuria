@@ -247,14 +247,6 @@ class ProviderConfigService:
             raise NotFoundError("ProviderConfig", str(organization_id))
         return config
 
-    def delete_config(self, organization_id: uuid.UUID) -> None:
-        """Delete the provider config for an organization."""
-        deleted = self.repository.delete_by_org(organization_id)
-        if deleted == 0:
-            raise NotFoundError("ProviderConfig", str(organization_id))
-        clear_models_cache(str(organization_id))
-        log.info("provider_config_deleted", organization_id=str(organization_id))
-
     def build_resolver(
         self,
         organization_id: uuid.UUID,

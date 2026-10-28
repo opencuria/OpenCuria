@@ -138,12 +138,7 @@ def test_saving_defaults_does_not_mutate_or_delete_provider_accounts(provider_se
     assert accounts.get_credentials(account)["api_key"] == "sk-account-secret"
     assert ProviderConfig.objects.filter(organization=org).exists()
 
-    deleted_defaults = client.delete(ORG_URL)
-    assert deleted_defaults.status_code == 204
-    account.refresh_from_db()
-    assert account.config == original_config
-    assert accounts.get_credentials(account)["api_key"] == "sk-account-secret"
-    assert not ProviderConfig.objects.filter(organization=org).exists()
+    assert client.delete(ORG_URL).status_code == 405
 
 
 @pytest.mark.django_db(transaction=True)

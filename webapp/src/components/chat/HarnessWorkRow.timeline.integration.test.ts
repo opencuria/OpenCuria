@@ -5,7 +5,8 @@ import { createPinia, setActivePinia } from 'pinia'
 import HarnessWorkRow from './HarnessWorkRow.vue'
 import { pinHarnessPartDetailKey, requestHarnessPartDetailKey } from '@/lib/harnessPartDetail'
 import { useHarnessStore } from '@/stores/harness'
-import { getHarnessPart, listHarnessParts, type HarnessPartsResponse } from '@/services/harness.api'
+import type { HarnessTimeline } from '@opencuria/client'
+import { getHarnessPart, listHarnessParts } from '@/services/harness.api'
 import type { HarnessPart, HarnessSession } from '@/types/harness'
 
 vi.mock('@/services/harness.api', async () => {
@@ -72,7 +73,7 @@ describe('timeline detail hydration integration', () => {
           ],
         },
       ],
-    } as unknown as HarnessPartsResponse
+    } as unknown as HarnessTimeline
     partsMock.mockResolvedValueOnce(timeline)
     detailMock.mockResolvedValueOnce({
       id: 'finished-tool',

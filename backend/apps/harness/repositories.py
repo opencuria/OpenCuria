@@ -100,12 +100,6 @@ class ProviderConfigRepository:
         config.save(update_fields=update_fields)
         return config
 
-    @staticmethod
-    def delete_by_org(org_id: uuid.UUID) -> int:
-        """Delete the provider config for an organization."""
-        count, _ = ProviderConfig.objects.filter(organization_id=org_id).delete()
-        return count
-
 
 class AgentConfigRepository:
     """Data access for AgentConfig records."""

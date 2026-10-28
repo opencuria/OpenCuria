@@ -211,9 +211,7 @@ export function MainScreen(): React.JSX.Element {
     chat.activeSessionId ? (chat.activeSession?.model ?? "") : undefined,
   );
   const selectedModel = resolveCatalogModel(modelsForEngine, model);
-  const modeConfig = agentConfigs.find(
-    (item) => item.mode === mode || item.agent === mode,
-  );
+  const modeConfig = agentConfigs.find((item) => item.agent === mode);
   const contextKey = `${client?.api.baseUrl ?? ""}:${session?.organizationId ?? ""}:${workspaceId ?? ""}:${chat.activeSessionId ?? "new"}`;
   const activeIsSubtask = Boolean(chat.activeSession?.parent_id);
   const navigationReady = Boolean(
@@ -594,9 +592,7 @@ export function MainScreen(): React.JSX.Element {
   const selectMode = (next: HarnessSessionMode) => {
     setMode(next);
     if (harness !== "native" || selectionDirty.current) return;
-    const config = agentConfigs.find(
-      (item) => item.mode === next || item.agent === next,
-    );
+    const config = agentConfigs.find((item) => item.agent === next);
     const nextModel =
       modelsForEngine.find((item) => item.id === config?.model) ??
       modelsForEngine[0];
@@ -618,9 +614,7 @@ export function MainScreen(): React.JSX.Element {
     selectionDirty.current = false;
     setHarness(next);
     setMode(nextMode);
-    const config = agentConfigs.find(
-      (item) => item.mode === nextMode || item.agent === nextMode,
-    );
+    const config = agentConfigs.find((item) => item.agent === nextMode);
     const defaults = harnessEngineDefaults(next, engines, {
       model: config?.model ?? "",
       effort: config?.effort ?? "",

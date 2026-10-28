@@ -16,7 +16,6 @@ vi.mock('@/services/harness.api', async () => {
     getProviderConfig: vi.fn(),
     getSubagentConfig: vi.fn(async () => ({ max_depth: 2 })),
     saveProviderConfig: vi.fn(),
-    deleteProviderConfig: vi.fn(),
   }
 })
 
@@ -40,6 +39,7 @@ vi.mock('@/services/organizations.api', () => ({
 }))
 
 vi.mock('@/services/api', () => ({
+  getApiClient: () => ({ requestWithCredentials: vi.fn(async () => []) }),
   get: vi.fn(async () => []),
   post: vi.fn(async () => ({})),
   patch: vi.fn(async () => ({})),

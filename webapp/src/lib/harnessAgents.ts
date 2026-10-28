@@ -2,21 +2,11 @@
  * Agent-config types and helpers for the agent settings surface.
  */
 
+import type { AgentConfig, AgentMode, EffortStrategy } from '@opencuria/client'
+
 export type AgentConfigId = 'build' | 'plan' | 'general' | 'explore' | 'computeruse'
 
-export type AgentMode = 'primary' | 'subagent'
-
-export type EffortStrategy = 'fixed' | 'inherit' | 'lowest' | 'medium' | 'highest'
-
-export interface AgentConfig {
-  agent: string
-  mode: AgentMode
-  description: string
-  model: string
-  effort: string
-  inherit_model: boolean
-  effort_strategy: EffortStrategy
-}
+export type { AgentConfig, AgentMode, EffortStrategy } from '@opencuria/client'
 
 export const CONFIGURABLE_AGENTS: AgentConfigId[] = [
   'build',
@@ -59,8 +49,7 @@ export function agentDisplayName(agent: string): string {
 
 /** True when the mode (or config) describes a subagent. */
 export function isSubagent(modeOrConfig: AgentMode | string | AgentConfig): boolean {
-  const mode =
-    typeof modeOrConfig === 'string' ? modeOrConfig : (modeOrConfig.mode ?? '')
+  const mode = typeof modeOrConfig === 'string' ? modeOrConfig : (modeOrConfig.mode ?? '')
   return mode === 'subagent'
 }
 

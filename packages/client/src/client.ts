@@ -1,4 +1,5 @@
 import { ApiClient, type ApiClientOptions, type FetchLike } from "./api";
+import { createHarnessApi } from "./harness";
 import {
   RealtimeClient,
   type RealtimeOptions,
@@ -9,35 +10,14 @@ import type {
   MobileDevice,
   MobileDeviceRegistration,
   PushCapabilities,
-  AgentConfig,
-  AgentConfigInput,
   AuthUser,
   HarnessConversation,
-  HarnessEngine,
-  HarnessPermissionRequest,
-  HarnessQuestionRequest,
-  HarnessSession,
-  HarnessSteer,
-  HarnessTimeline,
-  ProviderModel,
-  ProviderConfig,
-  ProviderConfigInput,
-  RecentModelUsage,
   Skill,
   SkillCreateInput,
   SkillUpdateInput,
   TokenPair,
   Workspace,
 } from "./types";
-import type {
-  HarnessForkIn,
-  HarnessMessageEditIn,
-  HarnessMessageIn,
-  HarnessPermissionResponse,
-  HarnessSessionCreateIn,
-  HarnessSessionMode,
-  HarnessSessionPatchIn,
-} from "@opencuria/chat-core/harness";
 
 export interface CreateClientOptions {
   apiBaseUrl: string;
@@ -103,108 +83,7 @@ export interface OpenCuriaClient {
   conversations: {
     list(signal?: AbortSignal): Promise<HarnessConversation[]>;
   };
-  harness: {
-    listSessions(
-      workspaceId: string,
-      signal?: AbortSignal,
-    ): Promise<HarnessSession[]>;
-    createSession(
-      workspaceId: string,
-      input: HarnessSessionCreateIn,
-      signal?: AbortSignal,
-    ): Promise<HarnessSession>;
-    send(
-      sessionId: string,
-      input: HarnessMessageIn | string,
-      signal?: AbortSignal,
-    ): Promise<HarnessSession>;
-    timeline(sessionId: string, signal?: AbortSignal): Promise<HarnessTimeline>;
-    getPart(
-      sessionId: string,
-      partId: string,
-      signal?: AbortSignal,
-    ): Promise<unknown>;
-    abort(sessionId: string, signal?: AbortSignal): Promise<HarnessSession>;
-    edit(
-      sessionId: string,
-      messageId: string,
-      input: HarnessMessageEditIn,
-      signal?: AbortSignal,
-    ): Promise<HarnessSession>;
-    fork(
-      sessionId: string,
-      input?: HarnessForkIn,
-      signal?: AbortSignal,
-    ): Promise<HarnessSession>;
-    rename(
-      sessionId: string,
-      title: string,
-      signal?: AbortSignal,
-    ): Promise<HarnessSession>;
-    patchSession(
-      sessionId: string,
-      input: HarnessSessionPatchIn,
-      signal?: AbortSignal,
-    ): Promise<HarnessSession>;
-    deleteSession(sessionId: string, signal?: AbortSignal): Promise<void>;
-    markRead(sessionId: string, signal?: AbortSignal): Promise<void>;
-    markUnread(sessionId: string, signal?: AbortSignal): Promise<void>;
-    steer(
-      sessionId: string,
-      prompt: string,
-      signal?: AbortSignal,
-    ): Promise<HarnessSteer>;
-    withdraw(
-      sessionId: string,
-      steerId: string,
-      signal?: AbortSignal,
-    ): Promise<HarnessSteer>;
-    dismissNotice(
-      sessionId: string,
-      messageId: string,
-      signal?: AbortSignal,
-    ): Promise<void>;
-    resolvePermission(
-      sessionId: string,
-      request: HarnessPermissionRequest,
-      response: HarnessPermissionResponse,
-      signal?: AbortSignal,
-    ): Promise<unknown>;
-    resolveQuestion(
-      sessionId: string,
-      requestId: string,
-      answers: string[],
-      reject?: boolean,
-      signal?: AbortSignal,
-    ): Promise<unknown>;
-    setMode(
-      sessionId: string,
-      mode: HarnessSessionMode,
-      signal?: AbortSignal,
-    ): Promise<HarnessSession>;
-    listEngines(signal?: AbortSignal): Promise<HarnessEngine[]>;
-    listEngineModels(
-      engineId: string,
-      signal?: AbortSignal,
-    ): Promise<ProviderModel[]>;
-    listAgentConfigs(signal?: AbortSignal): Promise<AgentConfig[]>;
-    saveAgentConfigs(
-      configs: AgentConfigInput[],
-      signal?: AbortSignal,
-    ): Promise<AgentConfig[]>;
-    listRecentModels(signal?: AbortSignal): Promise<RecentModelUsage[]>;
-    saveRecentModel(
-      model: string,
-      effort?: string,
-      signal?: AbortSignal,
-    ): Promise<RecentModelUsage>;
-    getDefaultConfig(signal?: AbortSignal): Promise<ProviderConfig>;
-    saveDefaultConfig(
-      config: ProviderConfigInput,
-      signal?: AbortSignal,
-    ): Promise<ProviderConfig>;
-    deleteDefaultConfig(signal?: AbortSignal): Promise<void>;
-  };
+  harness: ReturnType<typeof createHarnessApi>;
   skills: {
     list(signal?: AbortSignal): Promise<Skill[]>;
     create(data: SkillCreateInput, signal?: AbortSignal): Promise<Skill>;
@@ -258,6 +137,7 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
     createRequestId: options.createFileRequestId,
   };
   const realtime = new RealtimeClient(realtimeOptions);
+  const harness = createHarnessApi(() => api);
 
   return {
     api,
@@ -337,164 +217,9 @@ export function createClient(options: CreateClientOptions): OpenCuriaClient {
         ),
     },
     conversations: {
-      list: (signal) =>
-        api.get<HarnessConversation[]>("/harness/conversations/", signal),
+      list: harness.listConversations,
     },
-    harness: {
-      listSessions: (workspaceId, signal) =>
-        api.get<HarnessSession[]>(
-          `/workspaces/${segment(workspaceId)}/harness/sessions/`,
-          signal,
-        ),
-      createSession: (workspaceId, input, signal) => {
-        const body: HarnessSessionCreateIn = {
-          prompt: input.prompt,
-          agent_name: input.agent_name ?? "build",
-          mode: input.mode ?? "build",
-          model: input.model ?? "",
-          reasoning_effort: input.reasoning_effort ?? "",
-          skill_ids: input.skill_ids ?? [],
-          harness_id: input.harness_id ?? "native",
-        };
-        return api.post<HarnessSession>(
-          `/workspaces/${segment(workspaceId)}/harness/sessions/`,
-          body,
-          signal,
-        );
-      },
-      send: (sessionId, input, signal) =>
-        api.post<HarnessSession>(
-          `/harness/sessions/${segment(sessionId)}/message`,
-          typeof input === "string" ? { prompt: input } : input,
-          signal,
-        ),
-      timeline: (sessionId, signal) =>
-        api.get<HarnessTimeline>(
-          `/harness/sessions/${segment(sessionId)}/timeline`,
-          signal,
-        ),
-      getPart: (sessionId, partId, signal) =>
-        api.get(
-          `/harness/sessions/${segment(sessionId)}/parts/${segment(partId)}`,
-          signal,
-        ),
-      abort: (sessionId, signal) =>
-        api.post<HarnessSession>(
-          `/harness/sessions/${segment(sessionId)}/abort`,
-          undefined,
-          signal,
-        ),
-      edit: (sessionId, messageId, input, signal) =>
-        api.post<HarnessSession>(
-          `/harness/sessions/${segment(sessionId)}/messages/${segment(messageId)}/edit`,
-          input,
-          signal,
-        ),
-      fork: (sessionId, input = {}, signal) =>
-        api.post<HarnessSession>(
-          `/harness/sessions/${segment(sessionId)}/fork`,
-          input,
-          signal,
-        ),
-      rename: (sessionId, title, signal) =>
-        api.patch<HarnessSession>(
-          `/harness/sessions/${segment(sessionId)}`,
-          { title },
-          signal,
-        ),
-      patchSession: (sessionId, input, signal) =>
-        api.patch<HarnessSession>(
-          `/harness/sessions/${segment(sessionId)}`,
-          input,
-          signal,
-        ),
-      deleteSession: (sessionId, signal) =>
-        api.delete<void>(`/harness/sessions/${segment(sessionId)}`, signal),
-      markRead: (sessionId, signal) =>
-        api.post<void>(
-          `/harness/sessions/${segment(sessionId)}/read`,
-          undefined,
-          signal,
-        ),
-      markUnread: (sessionId, signal) =>
-        api.post<void>(
-          `/harness/sessions/${segment(sessionId)}/unread`,
-          undefined,
-          signal,
-        ),
-      steer: (sessionId, prompt, signal) =>
-        api.post<HarnessSteer>(
-          `/harness/sessions/${segment(sessionId)}/steer`,
-          { prompt },
-          signal,
-        ),
-      withdraw: (sessionId, steerId, signal) =>
-        api.delete<HarnessSteer>(
-          `/harness/sessions/${segment(sessionId)}/steer/${segment(steerId)}`,
-          signal,
-        ),
-      dismissNotice: (sessionId, messageId, signal) =>
-        api.post<void>(
-          `/harness/sessions/${segment(sessionId)}/messages/${segment(messageId)}/notice-dismiss`,
-          undefined,
-          signal,
-        ),
-      resolvePermission: (sessionId, request, response, signal) =>
-        api.post(
-          `/harness/sessions/${segment(sessionId)}/permissions/${segment(request.request_id)}`,
-          { response },
-          signal,
-        ),
-      resolveQuestion: (
-        sessionId,
-        requestId,
-        answers,
-        reject = false,
-        signal,
-      ) =>
-        api.post(
-          `/harness/sessions/${segment(sessionId)}/questions/${segment(requestId)}`,
-          { answers, reject },
-          signal,
-        ),
-      setMode: (sessionId, mode, signal) =>
-        api.patch<HarnessSession>(
-          `/harness/sessions/${segment(sessionId)}/mode`,
-          { mode },
-          signal,
-        ),
-      listEngines: (signal) =>
-        api.get<HarnessEngine[]>("/harness/engines/", signal),
-      listEngineModels: (engineId, signal) =>
-        api.get<ProviderModel[]>(
-          `/harness/engines/${encodeURIComponent(engineId)}/models/`,
-          signal,
-        ),
-      listAgentConfigs: (signal) =>
-        api.get<AgentConfig[]>("/agent-configs/", signal),
-      saveAgentConfigs: (configs, signal) =>
-        api.request<AgentConfig[]>(
-          "PUT",
-          "/agent-configs/",
-          { configs },
-          signal,
-        ),
-      listRecentModels: (signal) =>
-        api.get<RecentModelUsage[]>("/recent-models/", signal),
-      saveRecentModel: (model, effort = "", signal) =>
-        api.request<RecentModelUsage>(
-          "PUT",
-          "/recent-models/",
-          { model, effort },
-          signal,
-        ),
-      getDefaultConfig: (signal) =>
-        api.get<ProviderConfig>("/provider-config/", signal),
-      saveDefaultConfig: (config, signal) =>
-        api.request<ProviderConfig>("PUT", "/provider-config/", config, signal),
-      deleteDefaultConfig: (signal) =>
-        api.request<void>("DELETE", "/provider-config/", undefined, signal),
-    },
+    harness,
     skills: {
       list: (signal) => api.get<Skill[]>("/skills/", signal),
       create: (data, signal) => api.post<Skill>("/skills/", data, signal),

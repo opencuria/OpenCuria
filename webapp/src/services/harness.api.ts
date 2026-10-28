@@ -1,53 +1,46 @@
-/**
- * Harness REST API service (M7, additive).
- *
- * Wraps the M6 backend contracts in `backend/apps/harness/api.py`:
- * session list/create, follow-up message, abort, message parts, todos,
- * and permission resolution (`once|always|reject`).
- */
+/** Shared chat API bindings and web settings endpoints. */
 
-import type {
-  HarnessConversation,
-  HarnessForkIn,
-  HarnessPart,
-  HarnessMessage,
-  HarnessMessageEditIn,
-  HarnessMessageIn,
-  HarnessPermissionRequest,
-  HarnessPermissionResponse,
-  HarnessQuestionRequest,
-  HarnessSession,
-  HarnessSessionCreateIn,
-  HarnessSessionMode,
-  HarnessSessionPatchIn,
-  HarnessSteer,
-  HarnessId,
-  HarnessTodo,
-} from '@/types/harness'
-import type { ProviderId, ProviderModel } from '@/lib/harnessModels'
-import type { AgentConfig as LibAgentConfig } from '@/lib/harnessAgents'
-import { ApiRequestError, get, post, put, del, patch, requestWithStatus } from './api'
+import { createHarnessApi } from '@opencuria/client/harness'
+import type { ProviderId } from '@/lib/harnessModels'
+import { ApiRequestError, get, getApiClient, post, put, del, requestWithStatus } from './api'
 
-export type AgentConfig = LibAgentConfig
+export type {
+  AgentConfig,
+  AgentConfigInput as AgentConfigIn,
+  ProviderConfig as HarnessProviderConfig,
+  RecentModelUsage,
+} from '@opencuria/client'
 
-export interface AgentConfigIn {
-  agent: string
-  description?: string
-  model?: string
-  effort?: string
-  inherit_model?: boolean
-  effort_strategy?: string
-}
-
-export interface HarnessProviderConfig {
-  small_model: string
-  small_effort: string
-}
-
-export interface HarnessProviderConfigIn {
-  small_model?: string
-  small_effort?: string
-}
+export const {
+  listConversations: listHarnessConversations,
+  listSessions: listHarnessSessions,
+  createSession: createHarnessSession,
+  send: sendHarnessMessage,
+  timeline: listHarnessParts,
+  getPart: getHarnessPart,
+  listTodos: listHarnessTodos,
+  abort: abortHarnessSession,
+  edit: editHarnessMessage,
+  fork: forkHarnessSession,
+  patchSession: patchHarnessSession,
+  deleteSession: deleteHarnessSession,
+  markRead: markHarnessSessionRead,
+  markUnread: markHarnessSessionUnread,
+  steer: steerHarnessSession,
+  withdraw: withdrawHarnessSteer,
+  dismissNotice: dismissHarnessNotice,
+  resolvePermission: resolveHarnessPermission,
+  resolveQuestion: resolveHarnessQuestion,
+  setMode: setSessionMode,
+  listEngines: listHarnessEngines,
+  listEngineModels,
+  listAgentConfigs,
+  saveAgentConfigs,
+  listRecentModels,
+  saveRecentModel,
+  getDefaultConfig: getProviderConfig,
+  saveDefaultConfig: saveProviderConfig,
+} = createHarnessApi(() => getApiClient())
 
 export const HARNESS_ENGINE_CONNECTION_CHANGED_EVENT = 'harness:engine-connection-changed'
 /** Shared model-catalog and engine-availability refresh signal. */
@@ -96,10 +89,6 @@ export function notifyProviderAccountsChanged(): void {
   window.dispatchEvent(new Event(PROVIDER_ACCOUNTS_CHANGED_EVENT))
 }
 
-export type HarnessEngine = import('@opencuria/chat-core/harnessModels').HarnessEngine
-
-export type HarnessEngineOut = HarnessEngine
-
 /** Org-wide Computer Use execution limits and optional desktop recording. */
 export interface ComputerUseConfig {
   max_steps: number
@@ -126,230 +115,6 @@ export interface ChatGptOAuthStartIn {
   label?: string
   shared?: boolean
   account_id?: string
-}
-
-export type HarnessSessionOut = HarnessSession
-
-export interface HarnessPartsResponse {
-  session: HarnessSession
-  messages: HarnessMessage[]
-  permissions?: HarnessPermissionRequest[]
-  questions?: HarnessQuestionRequest[]
-  /** Queued (not yet delivered) steers, FIFO. Absent on older backends. */
-  steers?: HarnessSteer[]
-}
-
-export interface HarnessPermissionOut {
-  request_id: string
-  decision: string
-  remember: string
-}
-
-export function listHarnessEngines(): Promise<HarnessEngine[]> {
-  return get<HarnessEngine[]>('/harness/engines/')
-}
-
-export function listEngineModels(engineId: string): Promise<ProviderModel[]> {
-  return get<ProviderModel[]>(`/harness/engines/${encodeURIComponent(engineId)}/models/`)
-}
-
-export function listHarnessSessions(workspaceId: string): Promise<HarnessSession[]> {
-  return get<HarnessSession[]>(`/workspaces/${workspaceId}/harness/sessions/`)
-}
-
-export function createHarnessSession(
-  workspaceId: string,
-  data: HarnessSessionCreateIn,
-): Promise<HarnessSession> {
-  const payload: HarnessSessionCreateIn = {
-    prompt: data.prompt,
-    agent_name: data.agent_name ?? 'build',
-    mode: data.mode ?? 'build',
-    model: data.model ?? '',
-    reasoning_effort: data.reasoning_effort ?? '',
-    skill_ids: data.skill_ids ?? [],
-    harness_id: data.harness_id ?? 'native',
-  }
-  return post<HarnessSession>(`/workspaces/${workspaceId}/harness/sessions/`, payload)
-}
-
-export function sendHarnessMessage(
-  sessionId: string,
-  data: HarnessMessageIn | string,
-): Promise<HarnessSession> {
-  const body =
-    typeof data === 'string'
-      ? { prompt: data }
-      : {
-          prompt: data.prompt,
-          mode: data.mode ?? '',
-          model: data.model ?? '',
-          reasoning_effort: data.reasoning_effort ?? '',
-          skill_ids: data.skill_ids ?? [],
-        }
-  return post<HarnessSession>(`/harness/sessions/${sessionId}/message`, body)
-}
-
-/**
- * Fork a harness session (read-only, works while busy).
- * Mirrors `POST /harness/sessions/{id}/fork` (201 Session).
- */
-export function forkHarnessSession(
-  sessionId: string,
-  data: HarnessForkIn = {},
-): Promise<HarnessSession> {
-  const body: HarnessForkIn = {}
-  if (data.message_id) body.message_id = data.message_id
-  if (data.include_message !== undefined) body.include_message = data.include_message
-  return post<HarnessSession>(`/harness/sessions/${sessionId}/fork`, body)
-}
-
-/**
- * Edit a user message and rerun the session from there.
- * Mirrors `POST /harness/sessions/{id}/messages/{messageId}/edit` (202 Session).
- */
-export function editHarnessMessage(
-  sessionId: string,
-  messageId: string,
-  data: HarnessMessageEditIn,
-): Promise<HarnessSession> {
-  return post<HarnessSession>(`/harness/sessions/${sessionId}/messages/${messageId}/edit`, {
-    prompt: data.prompt,
-    mode: data.mode ?? '',
-    model: data.model ?? '',
-    reasoning_effort: data.reasoning_effort ?? '',
-    skill_ids: data.skill_ids ?? [],
-  })
-}
-
-/**
- * Dismiss the stopped/failed notice of one message (persistent, per message).
- * Mirrors `POST /harness/sessions/{id}/messages/{messageId}/notice-dismiss` (204).
- */
-export function dismissHarnessNotice(sessionId: string, messageId: string): Promise<void> {
-  return post<void>(`/harness/sessions/${sessionId}/messages/${messageId}/notice-dismiss`)
-}
-
-export function patchHarnessSession(
-  sessionId: string,
-  data: HarnessSessionPatchIn,
-): Promise<HarnessSession> {
-  return patch<HarnessSession>(`/harness/sessions/${sessionId}`, data)
-}
-
-export function deleteHarnessSession(sessionId: string): Promise<void> {
-  return del<void>(`/harness/sessions/${sessionId}`)
-}
-
-export function setSessionMode(
-  sessionId: string,
-  mode: HarnessSessionMode,
-): Promise<HarnessSession> {
-  return patch<HarnessSession>(`/harness/sessions/${sessionId}/mode`, { mode })
-}
-
-export function abortHarnessSession(sessionId: string): Promise<HarnessSession> {
-  return post<HarnessSession>(`/harness/sessions/${sessionId}/abort`)
-}
-
-/**
- * Queue a message for the running turn of a session ("steering").
- * Mirrors `POST /harness/sessions/{id}/steer` (202 queued entry); a run that
- * already ended answers 409 `no_active_run`.
- */
-export function steerHarnessSession(sessionId: string, prompt: string): Promise<HarnessSteer> {
-  return post<HarnessSteer>(`/harness/sessions/${sessionId}/steer`, { prompt })
-}
-
-/**
- * Withdraw a queued steer before it is delivered; returns the withdrawn entry.
- * Mirrors `DELETE /harness/sessions/{id}/steer/{steerId}` (404 `steer_not_found`
- * when it was already delivered).
- */
-export function withdrawHarnessSteer(sessionId: string, steerId: string): Promise<HarnessSteer> {
-  return del<HarnessSteer>(`/harness/sessions/${sessionId}/steer/${steerId}`)
-}
-
-/** Load the all-messages, lightweight timeline envelope. */
-export function listHarnessParts(sessionId: string): Promise<HarnessPartsResponse> {
-  return get<HarnessPartsResponse>(`/harness/sessions/${sessionId}/timeline`)
-}
-
-/** Load heavyweight fields for one timeline part after its row is expanded. */
-export function getHarnessPart(sessionId: string, partId: string): Promise<HarnessPart> {
-  return get<HarnessPart>(`/harness/sessions/${sessionId}/parts/${partId}`)
-}
-
-export function listHarnessTodos(sessionId: string): Promise<HarnessTodo[]> {
-  return get<HarnessTodo[]>(`/harness/sessions/${sessionId}/todos`)
-}
-
-export function resolveHarnessPermission(
-  sessionId: string,
-  request: HarnessPermissionRequest,
-  response: HarnessPermissionResponse,
-): Promise<HarnessPermissionOut> {
-  return post<HarnessPermissionOut>(
-    `/harness/sessions/${sessionId}/permissions/${request.request_id}`,
-    { response },
-  )
-}
-
-export function resolveHarnessQuestion(
-  sessionId: string,
-  requestId: string,
-  answers: string[],
-  reject = false,
-): Promise<{ request_id: string; status: string }> {
-  return post<{ request_id: string; status: string }>(
-    `/harness/sessions/${sessionId}/questions/${requestId}`,
-    { answers, reject },
-  )
-}
-
-export interface RecentModelUsage {
-  model: string
-  effort: string
-  last_used_at: string
-}
-
-/**
- * List the user's recently used composer models (newest first, capped
- * server-side). Mirrors `GET /recent-models/`.
- */
-export function listRecentModels(): Promise<RecentModelUsage[]> {
-  return get<RecentModelUsage[]>('/recent-models/')
-}
-
-/**
- * Record one model usage after a successful send (fire-and-forget).
- * Mirrors `PUT /recent-models/`.
- */
-export function saveRecentModel(model: string, effort = ''): Promise<RecentModelUsage> {
-  return put<RecentModelUsage>('/recent-models/', { model, effort })
-}
-
-export function listAgentConfigs(): Promise<AgentConfig[]> {
-  return get<AgentConfig[]>('/agent-configs/')
-}
-
-export function saveAgentConfigs(configs: AgentConfigIn[]): Promise<AgentConfig[]> {
-  return put<AgentConfig[]>('/agent-configs/', { configs })
-}
-
-export function getProviderConfig(): Promise<HarnessProviderConfig> {
-  return get<HarnessProviderConfig>('/provider-config/')
-}
-
-export function saveProviderConfig(data: HarnessProviderConfigIn): Promise<HarnessProviderConfig> {
-  return put<HarnessProviderConfig>('/provider-config/', {
-    small_model: data.small_model ?? '',
-    small_effort: data.small_effort ?? '',
-  })
-}
-
-export function deleteProviderConfig(): Promise<void> {
-  return del<void>('/provider-config/')
 }
 
 /** List accounts visible in the current user's active organization context. */
@@ -461,20 +226,5 @@ export async function getChatGptOAuthStatus(flowId: string): Promise<ChatGptOAut
 }
 
 export function cancelChatGptOAuth(flowId: string): Promise<void> {
-  return post<void>(
-    '/provider-config/providers/chatgpt/oauth/cancel/',
-    { flow_id: flowId },
-  )
-}
-
-export function listHarnessConversations(): Promise<HarnessConversation[]> {
-  return get<HarnessConversation[]>('/harness/conversations/')
-}
-
-export function markHarnessSessionRead(sessionId: string): Promise<void> {
-  return post<void>(`/harness/sessions/${sessionId}/read`)
-}
-
-export function markHarnessSessionUnread(sessionId: string): Promise<void> {
-  return post<void>(`/harness/sessions/${sessionId}/unread`)
+  return post<void>('/provider-config/providers/chatgpt/oauth/cancel/', { flow_id: flowId })
 }

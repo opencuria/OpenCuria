@@ -111,14 +111,22 @@ export interface SkillUpdateInput {
 
 export type { HarnessEngine } from "@opencuria/chat-core/harnessModels";
 
+export type AgentMode = "primary" | "subagent";
+export type EffortStrategy =
+  | "fixed"
+  | "inherit"
+  | "lowest"
+  | "medium"
+  | "highest";
+
 export interface AgentConfig {
   agent: string;
-  mode?: string;
-  description?: string;
+  mode: AgentMode;
+  description: string;
   model: string;
   effort: string;
   inherit_model: boolean;
-  effort_strategy: string;
+  effort_strategy: EffortStrategy;
 }
 
 export interface AgentConfigInput {

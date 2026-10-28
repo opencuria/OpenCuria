@@ -1164,28 +1164,6 @@ def save_org_provider_config(request: HttpRequest, payload: ProviderConfigIn):
         return 400, {"detail": str(exc), "code": "validation_error"}
 
 
-@harness_router.delete(
-    "/provider-config/",
-    response={204: None, 401: dict, 403: dict, 404: dict},
-    summary="Delete the org-wide provider config",
-)
-def delete_org_provider_config(request: HttpRequest):
-    """Delete the org provider config."""
-    if not check_api_key_permission(request, APIKeyPermission.HARNESS_RUN):
-        return _perm_denied(APIKeyPermission.HARNESS_RUN)
-    try:
-        org_id = _get_org_id(request)
-        OrganizationService().require_membership(request.user, org_id)
-        from apps.harness.services import ProviderConfigService
-
-        ProviderConfigService().delete_config(org_id)
-        return 204, None
-    except AuthenticationError as exc:
-        return 401, {"detail": exc.message, "code": exc.code}
-    except NotFoundError as exc:
-        return 404, {"detail": exc.message, "code": exc.code}
-
-
 @harness_router.get(
     "/provider-config/accounts/",
     response={200: list[ProviderAccountOut], 401: dict, 403: dict, 404: dict},

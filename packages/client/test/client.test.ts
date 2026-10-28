@@ -445,6 +445,49 @@ describe("REST endpoint wrappers", () => {
   });
 });
 
+describe("shared harness actions", () => {
+  it("keeps engine selection, inclusive forks and lazy part details on one client", async () => {
+    const fetch = vi
+      .fn()
+      .mockImplementation(async () => jsonResponse({ id: "answer" }));
+    const client = clientOptions().create(fetch);
+    const signal = new AbortController().signal;
+    const input = {
+      prompt: "hello",
+      harness_id: "codex" as const,
+      model: "chatgpt/gpt-6.1-sol",
+      reasoning_effort: "ultra",
+    };
+    await client.harness.createSession("workspace/id", input, signal);
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://api.example/api/v1/workspaces/workspace%2Fid/harness/sessions/",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(input),
+        credentials: "omit",
+        signal,
+      }),
+    );
+    await client.harness.fork("session/id", {
+      message_id: "answer",
+      include_message: true,
+    });
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://api.example/api/v1/harness/sessions/session%2Fid/fork",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ message_id: "answer", include_message: true }),
+      }),
+    );
+    await expect(
+      client.harness.getPart("session/id", "part/id"),
+    ).resolves.toEqual({ id: "answer" });
+    expect(fetch.mock.lastCall?.[0]).toBe(
+      "https://api.example/api/v1/harness/sessions/session%2Fid/parts/part%2Fid",
+    );
+  });
+});
+
 describe("realtime and file transfers", () => {
   it("does not double bind listeners on repeated connect and reconnects after auth refusal", async () => {
     const sockets: MockSocket[] = [];
