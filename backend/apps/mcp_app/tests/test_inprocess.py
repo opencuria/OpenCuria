@@ -6,13 +6,11 @@ import dataclasses
 import json
 import uuid
 from importlib import import_module
-from types import SimpleNamespace
 
 import pytest
 from asgiref.sync import sync_to_async
 from django.apps import apps as django_apps
 
-from apps.harness.harness_service import HarnessService
 from apps.harness.mcp_client.runtime import McpRuntime
 from apps.harness.tools.base import ToolRegistry
 from apps.mcp_app.context import ContextError
@@ -22,6 +20,9 @@ from apps.organizations.models import Membership
 from apps.plugins.models import OrgPluginActivation, WorkspacePluginActivation
 from apps.plugins.runtime_snapshot import PreparedPluginRuntime
 from apps.plugins.services import OPENCURIA_PLUGIN_ID
+from apps.runners.services.workspace_plugin_runtime import (
+    WorkspacePluginRuntimeService,
+)
 
 from .conftest import World
 
@@ -41,8 +42,7 @@ def _enable_plugin(world: World) -> None:
 
 def _prepare_run(world: World) -> PreparedPluginRuntime:
     """Build the plugin runtime exactly like a harness run does."""
-    session = SimpleNamespace(workspace_id=world.workspace.id)
-    return HarnessService._prepare_mcp_snapshot_for_run(session, world.org.id)
+    return WorkspacePluginRuntimeService().prepare(world.workspace.id, world.org.id)
 
 
 async def test_agent_acts_as_workspace_owner(world):

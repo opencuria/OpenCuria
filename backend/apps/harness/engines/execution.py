@@ -96,8 +96,8 @@ async def execute_external_run(
             raise RuntimeError(f"{label} engine requires a workspace accessor")
         accessor = await service._accessor_factory(str(session.workspace_id))
         # The same credential snapshot is fail-closed for native and SDK tools.
-        mcp_snapshot = await sync_to_async(service._prepare_mcp_snapshot_for_run)(
-            session, organization_id
+        mcp_snapshot = await sync_to_async(service.plugin_runtime.prepare)(
+            session.workspace_id, organization_id
         )
         tools = service._tools_for_session(key, session.agent_name or session.mode)
         from ..services import ComputerUseConfigService

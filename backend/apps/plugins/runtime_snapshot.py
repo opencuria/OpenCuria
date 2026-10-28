@@ -123,7 +123,7 @@ class PreparedPluginRuntime:
     """A snapshot plus its resolved credentials for one harness run.
 
     Built exactly once per harness run by
-    :meth:`HarnessService._prepare_mcp_snapshot_for_run` (sync ORM
+    :func:`apps.plugins.runtime.prepare_workspace_runtime` (sync ORM
     context) and consumed by :meth:`McpRuntime.setup` without a second
     ORM/decrypt round. The ``plaintexts`` map (``plugin_id ->
     {requirement key: secret}``) is ``repr=False`` so secrets never

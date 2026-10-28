@@ -34,6 +34,9 @@ from asgiref.sync import ThreadSensitiveContext, sync_to_async
 from apps.runners.services import get_runner_service
 from apps.runners.services.infra import realtime
 from apps.runners.services.workspace_admission import WorkspaceAdmissionService
+from apps.runners.services.workspace_plugin_runtime import (
+    WorkspacePluginRuntimeService,
+)
 from apps.skills.services import SkillService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
@@ -102,6 +105,7 @@ class HarnessService:
         permissions: PermissionService | None = None,
         skills: SkillService | None = None,
         workspace_admission: WorkspaceAdmissionService | None = None,
+        plugin_runtime: WorkspacePluginRuntimeService | None = None,
         emit: EmitFn | None = None,
         runner_factory: Callable[..., HarnessRunner] | None = None,
         provider_factory: Callable[[uuid.UUID], ProviderAdapter] | None = None,
@@ -126,6 +130,7 @@ class HarnessService:
         self.permissions = permissions or PermissionService()
         self.skills = skills or SkillService()
         self.workspace_admission = workspace_admission or WorkspaceAdmissionService()
+        self.plugin_runtime = plugin_runtime or WorkspacePluginRuntimeService()
         self._emit = emit
         self.conversation_events = ConversationEvents(emit=self._emit_frontend)
         self.session_settings = SessionSettingsService(
@@ -2192,8 +2197,8 @@ class HarnessService:
             mcp_snapshot = None
             agent_key = (session.agent_name or "").strip().lower()
             if agent_key not in {"title", "summary", "compaction"}:
-                mcp_snapshot = await sync_to_async(self._prepare_mcp_snapshot_for_run)(
-                    session, organization_id
+                mcp_snapshot = await sync_to_async(self.plugin_runtime.prepare)(
+                    session.workspace_id, organization_id
                 )
             model_resolver = None
             small_model = ""
@@ -2970,49 +2975,6 @@ class HarnessService:
                 )
         if cancelled:
             raise asyncio.CancelledError()
-
-    @staticmethod
-    def _run_workspace(workspace_id):  # type: ignore[no-untyped-def]
-        """Return the Workspace row for MCP snapshot resolution.
-
-        Uses the repository (loaded ``runner`` relation + prefetched
-        credentials) so the runtime layer never issues ORM queries.
-        """
-        from apps.runners.repositories import WorkspaceRepository
-
-        return WorkspaceRepository.get_by_id(workspace_id)
-
-    @staticmethod
-    def _prepare_mcp_snapshot_for_run(session, organization_id):  # type: ignore[no-untyped-def]
-        """Build the effective plugin snapshot + resolve credentials once.
-
-        Runs in the sync ORM context (called via ``sync_to_async``):
-        credential gaps raise here before any provider call. Always
-        returns a :class:`PreparedPluginRuntime` (possibly empty) so the
-        run path never issues a second workspace query. ``setup`` reuses
-        the snapshot + decrypted requirement map without another
-        ORM/decrypt round.
-        """
-        from apps.plugins import runtime as plugin_runtime
-        from apps.plugins.runtime_snapshot import PreparedPluginRuntime
-
-        workspace = HarnessService._run_workspace(session.workspace_id)
-        snapshot = plugin_runtime.build_workspace_plugin_snapshot(
-            workspace=workspace, org_id=organization_id
-        )
-        if not snapshot.plugins:
-            return PreparedPluginRuntime(snapshot=snapshot)
-        resolved = plugin_runtime.resolve_runtime_credentials(
-            snapshot, workspace=workspace
-        )
-        oauth_credentials = plugin_runtime.resolve_runtime_oauth_credentials(
-            snapshot, workspace=workspace
-        )
-        return PreparedPluginRuntime(
-            snapshot=snapshot,
-            plaintexts=dict(resolved or {}),
-            oauth_credentials=oauth_credentials,
-        )
 
     async def _on_runner_event(
         self,

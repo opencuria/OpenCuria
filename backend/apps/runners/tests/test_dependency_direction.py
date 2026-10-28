@@ -12,8 +12,9 @@ Operator disposition policy also belongs to its service; its repository never
 imports any application's services, including through function-local imports.
 Image retention policy and scheduling live in their service, while repositories
 own the transaction and runner lock shared by selection and retirement.
-Dependents never import runners models or runner locks: workspace fences and
-run admission are reached through ``WorkspaceAdmissionService``.
+Dependents never import runners models, repositories or runner locks: workspace
+fences and run admission are reached through ``WorkspaceAdmissionService`` and
+a workspace's plugin runtime through ``WorkspacePluginRuntimeService``.
 """
 
 from __future__ import annotations
@@ -126,8 +127,27 @@ def _dependent_modules() -> list[Path]:
     ]
 
 
-def _runner_persistence_imports(node: ast.AST) -> set[str]:
-    """Return runners model or locking modules referenced by an import node."""
+def _runner_module_name(path: Path) -> str:
+    """Return the dotted module name of a runners source file."""
+    parts = path.relative_to(APPS_DIR.parent).with_suffix("").parts
+    return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+
+
+def _runner_persistence_modules() -> set[str]:
+    """Return runners models, locks and every module defining a repository."""
+    repositories = {
+        _runner_module_name(path)
+        for path in _runner_modules()
+        if any(
+            isinstance(node, ast.ClassDef) and node.name.endswith("Repository")
+            for node in ast.parse(path.read_text()).body
+        )
+    }
+    return RUNNER_PERSISTENCE | repositories
+
+
+def _runner_persistence_imports(node: ast.AST, persistence: set[str]) -> set[str]:
+    """Return runners persistence modules referenced by an import node."""
     if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
         modules = {node.module, *(f"{node.module}.{a.name}" for a in node.names)}
     elif isinstance(node, ast.Import):
@@ -137,42 +157,61 @@ def _runner_persistence_imports(node: ast.AST) -> set[str]:
     return {
         module
         for module in modules
-        for target in RUNNER_PERSISTENCE
+        for target in persistence
         if module == target or module.startswith(f"{target}.")
     }
 
 
-def test_dependents_never_touch_runner_tables_or_locks() -> None:
-    """Other apps reach workspace lifecycle state through runners services."""
+def test_dependents_never_touch_runner_persistence_or_locks() -> None:
+    """Other apps reach workspace state through runners services."""
+    persistence = _runner_persistence_modules()
     violations = []
     for path in _dependent_modules():
         relative = path.relative_to(APPS_DIR).as_posix()
         for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
-            for module in sorted(_runner_persistence_imports(node)):
+            for module in sorted(_runner_persistence_imports(node, persistence)):
                 violations.append(f"{relative}:{node.lineno} imports {module}")
             if _registry_lookup_app(node) == "runners":
                 violations.append(f"{relative}:{node.lineno} looks up runners models")
     assert violations == [], (
         "Use runners services (e.g. WorkspaceAdmissionService for interaction "
-        "fences and run admission) instead of runners models or locks:\n"
+        "fences and run admission, WorkspacePluginRuntimeService for a run's "
+        "plugins) instead of runners models, repositories or locks:\n"
         + "\n".join(violations)
     )
 
 
 def test_persistence_guard_detects_function_local_and_package_imports() -> None:
+    persistence = _runner_persistence_modules()
+    assert {
+        "apps.runners.repositories",
+        "apps.runners.workspace_admission_repository",
+        "apps.runners.operations",
+    } <= persistence
+    assert not any(module.startswith("apps.runners.services") for module in persistence)
     source = (
         "def f():\n"
         "    from apps.runners.models import Workspace\n"
         "    from apps.runners import locking\n"
         "    import apps.runners.models\n"
+        "    from apps.runners.repositories import WorkspaceRepository\n"
+        "    from apps.runners import workspace_admission_repository\n"
         "    from apps.runners.services import get_runner_service\n"
         "    from apps.runners.enums import WorkspaceStatus\n"
     )
-    found = set().union(*map(_runner_persistence_imports, ast.walk(ast.parse(source))))
+    found = set().union(
+        *(
+            _runner_persistence_imports(node, persistence)
+            for node in ast.walk(ast.parse(source))
+        )
+    )
     assert found == {
         "apps.runners.models",
         "apps.runners.models.Workspace",
         "apps.runners.locking",
+        "apps.runners.repositories",
+        "apps.runners.repositories.WorkspaceRepository",
+        "apps.runners.workspace_admission_repository",
     }
 
 

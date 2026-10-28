@@ -342,15 +342,14 @@ async def test_child_mcp_startup_deadline_does_not_cancel_healthy_parent(
     async def accessor_factory(workspace_id):
         return next(accessors)
 
-    def snapshot(session, organization_id):
-        return (
-            prepared_servers("first", "bad")
-            if session.agent_name == "general"
-            else prepared_servers()
-        )
+    # The parent prepares its run before delegating to the "general" child.
+    prepared = [prepared_servers(), prepared_servers("first", "bad")]
+
+    def snapshot(workspace_id, organization_id):
+        return prepared.pop(0)
 
     service._accessor_factory = accessor_factory
-    monkeypatch.setattr(service, "_prepare_mcp_snapshot_for_run", snapshot)
+    monkeypatch.setattr(service.plugin_runtime, "prepare", snapshot)
     assistant, task = await start(service, parent)
     await checkpoint(child_accessor.processes["bad"].reached)
     await finish(task)
@@ -690,8 +689,8 @@ async def test_real_client_session_scope_cancel_persists_before_async_teardown(
     monkeypatch.setattr(accessor.processes["first"], "aclose", close_stream)
     monkeypatch.setattr(service.metadata, "generate_title", no_title)
     monkeypatch.setattr(
-        service,
-        "_prepare_mcp_snapshot_for_run",
+        service.plugin_runtime,
+        "prepare",
         lambda *args: prepared_servers("first"),
     )
     service._accessor_factory = accessor_factory

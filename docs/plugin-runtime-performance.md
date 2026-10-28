@@ -38,7 +38,7 @@ plugin IDs and consumes each group while building the existing snapshot
 dataclasses. Consuming groups releases ORM rows as projection proceeds.
 
 For a nonempty effective set, snapshot queries change from `3 + 3N` to **6**.
-Complete `HarnessService._prepare_mcp_snapshot_for_run` preparation, including
+Complete `WorkspacePluginRuntimeService.prepare` preparation, including
 workspace reads and both credential-resolution passes, changes from `8 + 3N`
 to **11** for the benchmark's attached ordinary credential. Empty visible
 sets still use one snapshot query; visible but inactive sets use three.

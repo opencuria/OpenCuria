@@ -38,6 +38,7 @@ from .runtime_snapshot import (
     PluginRequirementSnapshot,
     PluginResourcesSnapshot,
     PluginSkillSnapshot,
+    PreparedPluginRuntime,
     WorkspacePluginSnapshot,
 )
 
@@ -58,10 +59,10 @@ def _workspace_org_id(workspace) -> uuid.UUID | None:
     """Return the workspace org id from the loaded relation (no queries).
 
     The caller must pass a workspace with ``runner`` (and
-    ``runner.organization_id``) already loaded — e.g. via
-    :meth:`WorkspaceRepository.get_by_id`, which select-relateds the
-    runner. A missing relation fails closed (``None``) instead of
-    issuing a lazy ORM query from the runtime layer.
+    ``runner.organization_id``) already loaded — the workspace context
+    loads it that way before calling :func:`prepare_workspace_runtime`.
+    A missing relation fails closed (``None``) instead of issuing a lazy
+    ORM query from the runtime layer.
     """
     runner = getattr(workspace, "runner", None)
     return getattr(runner, "organization_id", None)
@@ -457,3 +458,23 @@ def resolve_runtime_credentials(
         len(snapshot.plugins),
     )
     return resolved
+
+
+def prepare_workspace_runtime(*, workspace, org_id: uuid.UUID) -> PreparedPluginRuntime:
+    """Build the effective snapshot and resolve its credentials exactly once.
+
+    Credential gaps raise :class:`PluginCredentialConfigError` here, before
+    any provider call. Always returns a :class:`PreparedPluginRuntime`
+    (possibly empty), so MCP setup reuses the snapshot and decrypted
+    requirement map without another ORM/decrypt round.
+    """
+    snapshot = build_workspace_plugin_snapshot(workspace=workspace, org_id=org_id)
+    if not snapshot.plugins:
+        return PreparedPluginRuntime(snapshot=snapshot)
+    return PreparedPluginRuntime(
+        snapshot=snapshot,
+        plaintexts=resolve_runtime_credentials(snapshot, workspace=workspace),
+        oauth_credentials=resolve_runtime_oauth_credentials(
+            snapshot, workspace=workspace
+        ),
+    )

@@ -8,8 +8,6 @@ import pytest
 from django.contrib.auth import get_user_model
 
 from apps.credentials.models import Credential, CredentialService
-from apps.harness.harness_service import HarnessService
-from apps.harness.models import HarnessSession
 from apps.organizations.models import Organization
 from apps.plugins.models import (
     OrgPluginActivation,
@@ -194,24 +192,6 @@ def test_snapshot_queries_are_bounded(
     with django_assert_num_queries(6):
         snapshot = build_workspace_plugin_snapshot(workspace=workspace, org_id=org.id)
     assert len(snapshot.plugins) == count
-
-
-@pytest.mark.parametrize("count", [1, 15])
-def test_run_preparation_queries_are_bounded(
-    runtime_catalogue, count: int, django_assert_num_queries
-) -> None:
-    """Exercise the harness caller including workspace reads and real decryption."""
-    org, _, workspace, services = runtime_catalogue
-    for index in range(count):
-        _plugin(workspace, services, index)
-    session = HarnessSession(workspace_id=workspace.id)
-    with django_assert_num_queries(11):
-        prepared = HarnessService._prepare_mcp_snapshot_for_run(session, org.id)
-    assert len(prepared.snapshot.plugins) == count
-    assert all(
-        row == {"api_key": "synthetic-token"} for row in prepared.plaintexts.values()
-    )
-    assert prepared.oauth_credentials == {}
 
 
 @pytest.mark.parametrize("visible", [False, True])

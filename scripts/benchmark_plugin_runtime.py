@@ -22,7 +22,6 @@ import uuid
 from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 
@@ -77,7 +76,6 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     from django.core.management import call_command
 
     from apps.credentials.models import Credential, CredentialService
-    from apps.harness.harness_service import HarnessService
     from apps.organizations.models import Organization
     from apps.plugins.models import (
         OrgPluginActivation,
@@ -89,6 +87,9 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     )
     from apps.plugins.runtime import build_workspace_plugin_snapshot
     from apps.runners.models import Runner, Workspace
+    from apps.runners.services.workspace_plugin_runtime import (
+        WorkspacePluginRuntimeService,
+    )
     from common.utils import encrypt_value
 
     call_command("migrate", verbosity=0)
@@ -117,13 +118,12 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             encrypted_value=encrypt_value("synthetic-runtime-token"),
         )
     )
-    session = SimpleNamespace(workspace_id=workspace.id)
 
     def snapshot() -> Any:
         return build_workspace_plugin_snapshot(workspace=workspace, org_id=org.id)
 
     def prepare() -> Any:
-        prepared = HarnessService._prepare_mcp_snapshot_for_run(session, org.id)
+        prepared = WorkspacePluginRuntimeService().prepare(workspace.id, org.id)
         if len(prepared.plaintexts) != len(prepared.snapshot.plugins):
             raise RuntimeError("Prepared credentials do not match effective plugins")
         return prepared.snapshot

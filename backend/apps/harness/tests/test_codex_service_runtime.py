@@ -272,7 +272,7 @@ async def runtime(harness_workspace, tmp_path, monkeypatch):
 
     monkeypatch.setattr(HarnessService, "_tools_for_session", registered_mcp_tools)
     # Empty, already-resolved plugin snapshot; real McpRuntime still executes.
-    service._prepare_mcp_snapshot_for_run = lambda *_: PreparedPluginRuntime(
+    service.plugin_runtime.prepare = lambda *_: PreparedPluginRuntime(
         snapshot=WorkspacePluginSnapshot(
             workspace_id=harness_workspace.id,
             organization_id=harness_workspace.runner.organization_id,
@@ -386,7 +386,7 @@ def cold_service(data):
     data.service = HarnessService(
         emit=data.service._emit, accessor_factory=data.service._accessor_factory
     )
-    data.service._prepare_mcp_snapshot_for_run = lambda *_: PreparedPluginRuntime(
+    data.service.plugin_runtime.prepare = lambda *_: PreparedPluginRuntime(
         snapshot=WorkspacePluginSnapshot(
             workspace_id=data.workspace.id,
             organization_id=data.workspace.runner.organization_id,
