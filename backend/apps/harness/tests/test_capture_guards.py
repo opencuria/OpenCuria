@@ -77,7 +77,10 @@ async def test_async_session_mutations_blocked(harness_workspace, action):
         active_operation="capturing_image"
     )
     with pytest.raises(ConflictError):
-        await getattr(HarnessService(), action)(session.id)
+        service = (
+            ConversationService() if action == "fork_session" else HarnessService()
+        )
+        await getattr(service, action)(session.id)
 
 
 @pytest.mark.django_db

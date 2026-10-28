@@ -422,7 +422,7 @@ async def fork_harness_session(
     org_service = OrganizationService()
     await sync_to_async(org_service.require_membership)(request.user, org_id)
     try:
-        service = _resolve_harness_service()
+        service = ConversationService()
         session = await sync_to_async(service.get_session)(session_id)
         await sync_to_async(_owned_workspace)(request, org_id, session.workspace_id)
         forked = await service.fork_session(
@@ -430,9 +430,7 @@ async def fork_harness_session(
             payload.message_id,
             include_message=payload.include_message,
         )
-        out = await sync_to_async(session_to_out_with_unread)(
-            ConversationService(), forked
-        )
+        out = await sync_to_async(session_to_out_with_unread)(service, forked)
         return 201, out
     except NotFoundError as exc:
         return 404, {"detail": exc.message, "code": exc.code}

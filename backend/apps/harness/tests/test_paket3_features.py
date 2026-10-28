@@ -12,6 +12,7 @@ from django.test import Client
 
 import apps.harness.api as harness_api
 from apps.accounts.models import APIKey, APIKeyPermission
+from apps.harness.conversation_service import ConversationService
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessSession
 from apps.harness.permissions.evaluator import PermissionEvaluator
@@ -367,7 +368,7 @@ async def test_fork_copies_per_message_skill_ids(paket3_setup, fake_harness_serv
     source = HarnessMessageRepository.list_for_session(session.id)
     assert [row.role for row in source] == ["user", "assistant"]
     await fake_harness_service.abort_run(session.id)
-    forked = await fake_harness_service.fork_session(session.id)
+    forked = await ConversationService().fork_session(session.id)
     copied = HarnessMessageRepository.list_for_session(forked.id)
     assert [row.role for row in copied] == ["user", "assistant"]
     assert list(copied[0].skill_ids or []) == [skill_id]

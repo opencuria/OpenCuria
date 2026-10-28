@@ -11,6 +11,7 @@ from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.test import Client
 
+from apps.harness.conversation_service import ConversationService
 from apps.harness.engines.codex.auth import resolve_codex_auth
 from apps.harness.engines.codex.catalog import (
     DEFAULT_CODEX_MODEL,
@@ -251,7 +252,7 @@ async def test_fork_and_binding_preserve_provider_and_nonsecret_state(codex_setu
     root = await sync_to_async(create_session)(data)
     root.engine_state["protocol_version"] = "test"
     await sync_to_async(root.save)()
-    fork = await data.service.fork_session(root.id)
+    fork = await ConversationService().fork_session(root.id)
     assert fork.harness_id == "codex"
     assert fork.external_session_id == ""
     assert fork.engine_state == {"provider_id": "chatgpt"}

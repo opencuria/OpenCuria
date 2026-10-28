@@ -124,7 +124,7 @@ async def test_conversation_changes_emit_for_lifecycle_mutations(
     conversations = ConversationService(events=service.conversation_events)
     await sync_to_async(conversations.mark_session_read)(session.id)
     await sync_to_async(conversations.mark_session_unread)(session.id)
-    forked = await service.fork_session(session.id)
+    forked = await conversations.fork_session(session.id)
     await service.delete_session(session.id)
 
     changed = [

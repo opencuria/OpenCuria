@@ -600,7 +600,7 @@ def test_provider_history_is_independent_of_run_orchestration() -> None:
 
 
 def test_saved_session_state_is_independent_of_run_orchestration() -> None:
-    """Saved-state queries, navigation and settings must not load agent execution."""
+    """Saved-state queries, forks and settings must not load agent execution."""
     trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     modules = {_module_name(path): path for path in trees}
     lifecycle = "apps.harness.harness_service"
@@ -638,6 +638,8 @@ def test_saved_session_state_is_independent_of_run_orchestration() -> None:
     )
 
     moved_operations = {
+        "fork_session",
+        "_forked_title",
         "list_conversations",
         "mark_session_read",
         "mark_session_unread",

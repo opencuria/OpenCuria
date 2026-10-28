@@ -703,69 +703,6 @@ class HarnessService:
             return True
         raise ConflictError("Harness session already has an active run")
 
-    async def fork_session(
-        self,
-        session_id: uuid.UUID,
-        message_id: uuid.UUID | None = None,
-        *,
-        include_message: bool = False,
-    ) -> HarnessSession:
-        """Fork a root session, copying messages before *message_id*.
-
-        By default, *message_id* is excluded; set *include_message* to copy it
-        too. Including a message requires a message ID. No file rollback or
-        snapshot is performed here.
-        """
-        if include_message and message_id is None:
-            raise ValueError("message_id is required when include_message is true")
-        session = await sync_to_async(self.get_session)(session_id)
-        await sync_to_async(self.workspace_admission.ensure_interactions_available)(
-            session.workspace_id
-        )
-        SessionAccessService.require_user_promptable(session.parent_id)
-        # Fork is read-only (no assertNotBusy, like OpenCode): it must
-        # also work while the source session has an active run.
-        if message_id is not None:
-            ids = await sync_to_async(self.messages.list_ids_for_session)(session.id)
-            if message_id not in ids:
-                raise ValueError(f"Message '{message_id}' not in session")
-        title = _forked_title(session.title or "")
-        fork_kwargs: dict[str, Any] = {
-            "workspace_id": session.workspace_id,
-            "organization_id": session.organization_id,
-            "title": title,
-            "mode": session.mode,
-            "agent_name": session.agent_name,
-            "model": session.model or "",
-            "reasoning_effort": session.reasoning_effort or "",
-            "skill_ids": list(session.skill_ids or []),
-        }
-        if getattr(session, "harness_id", "native") != "native":
-            fork_kwargs.update(
-                harness_id=session.harness_id,
-                created_by_id=getattr(session, "created_by_id", None),
-                external_session_id="",
-                engine_state=(
-                    {"provider_id": self._codex_provider_for_session(session)}
-                    if session.harness_id == "codex"
-                    else {}
-                ),
-            )
-        forked = await sync_to_async(self.sessions.create_fork)(**fork_kwargs)
-        await sync_to_async(self.messages.copy_prefix)(
-            session.id,
-            forked.id,
-            message_id,
-            include_message=include_message,
-        )
-        log.info(
-            "harness_session_forked",
-            session_id=str(session.id),
-            fork_id=str(forked.id),
-        )
-        await self.conversation_events.emit(forked.workspace_id)
-        return forked
-
     async def edit_user_message(
         self,
         session_id: uuid.UUID,
@@ -3618,17 +3555,6 @@ class HarnessService:
                 tool="task",
             )
         return child
-
-
-def _forked_title(title: str) -> str:
-    """Return the fork title (inspired by OpenCode ``getForkedTitle``)."""
-    import re
-
-    match = re.match(r"^(.+) \(fork #(\d+)\)$", (title or "").strip())
-    if match:
-        base = match.group(1)
-        return f"{base} (fork #{int(match.group(2)) + 1})"
-    return f"{(title or '').strip()} (fork #1)"
 
 
 _default_harness_service: HarnessService | None = None

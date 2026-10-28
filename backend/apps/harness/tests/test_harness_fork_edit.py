@@ -16,7 +16,8 @@ from typing import Any
 import pytest
 from asgiref.sync import sync_to_async
 
-from apps.harness.harness_service import HarnessService, _forked_title
+from apps.harness.conversation_service import ConversationService, _forked_title
+from apps.harness.harness_service import HarnessService
 from apps.harness.models import Todo
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.models import PermissionRequest
@@ -149,7 +150,7 @@ async def test_fork_copies_prefix_exclusive_with_new_ids(harness_workspace) -> N
     assert [m.role for m in stored] == ["user", "assistant", "user", "assistant"]
     cutoff = next(m for m in stored if m.content == "second")
 
-    forked = await service.fork_session(session.id, cutoff.id)
+    forked = await ConversationService().fork_session(session.id, cutoff.id)
 
     assert forked.id != session.id
     assert forked.parent_id is None
@@ -194,7 +195,7 @@ async def test_fork_copies_parts_and_clears_child_session_id(
     anchor = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="user", content="anchor"
     )
-    forked = await service.fork_session(session.id, anchor.id)
+    forked = await ConversationService().fork_session(session.id, anchor.id)
     forked_parts = parts_for_session(forked.id)
     assert any(p.type == "text" for p in forked_parts)
     subtask = [p for p in forked_parts if p.type == "subtask"]
@@ -211,7 +212,6 @@ async def test_fork_includes_early_and_last_assistant_with_parts(
     harness_workspace,
 ) -> None:
     """Inclusive forks keep the selected answer and its parts without mutation."""
-    service, _, _ = _service()
     session = await _db_create_session(harness_workspace)
     first_user = await sync_to_async(HarnessMessageRepository.create)(
         session_id=session.id, role="user", content="first"
@@ -247,7 +247,7 @@ async def test_fork_includes_early_and_last_assistant_with_parts(
         (part.id, part.message_id, part.output, part.position) for part in source_parts
     ]
 
-    early_fork = await service.fork_session(
+    early_fork = await ConversationService().fork_session(
         session.id, first_answer.id, include_message=True
     )
     early_messages = HarnessMessageRepository.list_for_session(early_fork.id)
@@ -258,7 +258,7 @@ async def test_fork_includes_early_and_last_assistant_with_parts(
     assert early_parts[0].message_id == early_messages[-1].id
     assert early_parts[0].id != first_part.id
 
-    last_fork = await service.fork_session(
+    last_fork = await ConversationService().fork_session(
         session.id, last_answer.id, include_message=True
     )
     last_messages = HarnessMessageRepository.list_for_session(last_fork.id)
@@ -291,10 +291,9 @@ async def test_fork_includes_early_and_last_assistant_with_parts(
 @pytest.mark.django_db(transaction=True)
 async def test_fork_include_message_requires_message_id(harness_workspace) -> None:
     """Inclusive fork mode requires a cutoff message ID."""
-    service, _, _ = _service()
     session = await _db_create_session(harness_workspace)
     with pytest.raises(ValueError, match="message_id is required"):
-        await service.fork_session(session.id, include_message=True)
+        await ConversationService().fork_session(session.id, include_message=True)
 
 
 @pytest.mark.django_db(transaction=True)
@@ -305,7 +304,7 @@ async def test_fork_full_copy_without_message_id(harness_workspace) -> None:
     org_id = harness_workspace.runner.organization_id
     await _run_two_turns(service, session, org_id, harness_workspace.id)
 
-    forked = await service.fork_session(session.id)
+    forked = await ConversationService().fork_session(session.id)
     assert len(HarnessMessageRepository.list_for_session(forked.id)) == 4
 
 
@@ -329,23 +328,22 @@ async def test_fork_title_increment_and_fresh_usage(harness_workspace) -> None:
         completion_tokens=5,
         total_tokens=15,
     )
-    first = await service.fork_session(session.id)
+    first = await ConversationService().fork_session(session.id)
     first.refresh_from_db()
     assert first.title == "svc (fork #1)"
     assert first.cost == 0.0
     assert dict(first.tokens or {}) == {}
 
     session.refresh_from_db()
-    second = await service.fork_session(session.id)
+    second = await ConversationService().fork_session(session.id)
     assert second.title == "svc (fork #1)"
-    nested = await service.fork_session(first.id)
+    nested = await ConversationService().fork_session(first.id)
     assert nested.title == "svc (fork #2)"
 
 
 @pytest.mark.django_db(transaction=True)
 async def test_fork_does_not_copy_todos_and_gates(harness_workspace) -> None:
     """Todos and session gates are scoped per session; forks start empty."""
-    service, _, _ = _service()
     session = await _db_create_session(harness_workspace)
     org_id = harness_workspace.runner.organization_id
     await sync_to_async(Todo.objects.create)(
@@ -366,7 +364,7 @@ async def test_fork_does_not_copy_todos_and_gates(harness_workspace) -> None:
         questions=[{"question": "Continue?"}],
     )
 
-    forked = await service.fork_session(session.id)
+    forked = await ConversationService().fork_session(session.id)
     assert TodoRepository.list_for_session(forked.id) == []
     assert len(TodoRepository.list_for_session(session.id)) == 1
     pending = await sync_to_async(PermissionRequestRepository.list_pending_for_session)(
@@ -405,7 +403,7 @@ async def test_fork_remaps_compaction_tail_start_id(harness_workspace) -> None:
         session_id=session.id, role="user", content="anchor"
     )
 
-    forked = await service.fork_session(session.id, anchor.id)
+    forked = await ConversationService().fork_session(session.id, anchor.id)
     forked_parts = [
         p
         for p in parts_for_session(forked.id)
@@ -449,12 +447,12 @@ async def test_fork_drops_compaction_tail_start_id_outside_prefix(
         meta={"tail_start_id": str(outside.id)},
     )
 
-    forked = await service.fork_session(session.id, anchor.id)
+    forked = await ConversationService().fork_session(session.id, anchor.id)
     # Prefix before the very first message is empty.
     assert HarnessMessageRepository.list_for_session(forked.id) == []
     assert parts_for_session(forked.id) == []
 
-    full = await service.fork_session(session.id)
+    full = await ConversationService().fork_session(session.id)
     compactions = [
         p
         for p in parts_for_session(full.id)
@@ -490,7 +488,7 @@ async def test_fork_works_while_source_is_busy(harness_workspace) -> None:
     await asyncio.wait_for(started.wait(), timeout=5)
     assert service.is_running(session.id)
     try:
-        forked = await service.fork_session(session.id)
+        forked = await ConversationService().fork_session(session.id)
     finally:
         gate.set()
         await service._tasks[str(session.id)]
@@ -500,7 +498,6 @@ async def test_fork_works_while_source_is_busy(harness_workspace) -> None:
 @pytest.mark.django_db(transaction=True)
 async def test_fork_child_session_raises(harness_workspace) -> None:
     """Forking a subagent child session is rejected like prompting it."""
-    service, _, _ = _service()
     parent = await _db_create_session(harness_workspace)
     child = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
@@ -512,20 +509,19 @@ async def test_fork_child_session_raises(harness_workspace) -> None:
         parent_id=parent.id,
     )
     with pytest.raises(ValueError, match="subagent"):
-        await service.fork_session(child.id)
+        await ConversationService().fork_session(child.id)
 
 
 @pytest.mark.django_db(transaction=True)
 async def test_fork_unknown_message_id_raises(harness_workspace) -> None:
     """Forking at a message from another session raises ValueError."""
-    service, _, _ = _service()
     session = await _db_create_session(harness_workspace)
     other = await _db_create_session(harness_workspace)
     orphan = await sync_to_async(HarnessMessageRepository.create)(
         session_id=other.id, role="user", content="elsewhere"
     )
     with pytest.raises(ValueError, match="not in session"):
-        await service.fork_session(session.id, orphan.id)
+        await ConversationService().fork_session(session.id, orphan.id)
 
 
 # -- edit ------------------------------------------------------------------
@@ -1244,7 +1240,6 @@ async def test_repository_delete_from_returns_deleted_ids(harness_workspace) -> 
 @pytest.mark.django_db(transaction=True)
 async def test_fork_preserves_session_config(harness_workspace) -> None:
     """Forks inherit mode/agent/model/effort/skill ids of the source."""
-    service, _, _ = _service()
     session = await _db_create_session(harness_workspace)
     await sync_to_async(HarnessSessionRepository.set_mode)(session, "plan")
     await sync_to_async(HarnessSessionRepository.set_model)(session, "m-1")
@@ -1253,7 +1248,7 @@ async def test_fork_preserves_session_config(harness_workspace) -> None:
     await sync_to_async(HarnessSessionRepository.set_skill_ids)(session, [skill_id])
     session.refresh_from_db()
 
-    forked = await service.fork_session(session.id)
+    forked = await ConversationService().fork_session(session.id)
     assert forked.mode == "plan"
     assert forked.agent_name == "plan"
     assert forked.model == "m-1"

@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from apps.harness.conversation_service import ConversationService
 from apps.harness.engines.claude.errors import ClaudeTranscriptError
 from apps.harness.engines.connections import AuthConfiguration
 from apps.harness.engines.run_repository import HarnessRunRepository
@@ -883,7 +884,7 @@ async def test_claude_fork_and_edit_never_resume_stale_cli_suffix(
     original_external_id = session.external_session_id
     assert original_external_id
 
-    forked = await service.fork_session(session.id)
+    forked = await ConversationService().fork_session(session.id)
     forked.refresh_from_db()
     assert forked.harness_id == "claude"
     assert forked.created_by_id == session.created_by_id

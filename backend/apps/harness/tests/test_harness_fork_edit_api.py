@@ -96,7 +96,7 @@ async def _drop_emit(event: str, data: dict) -> None:
 
 @pytest.fixture
 def fake_fork_service(monkeypatch):
-    """Route fork/edit API calls through a fake-provider service."""
+    """Seed fork sources and route edit calls through a fake-provider service."""
     fake = FakeProvider()
     service = HarnessService(
         permissions=PermissionService(
@@ -167,6 +167,51 @@ def _seed_one_turn(service, setup) -> object:  # type: ignore[no-untyped-def]
 
 
 # -- fork ------------------------------------------------------------------
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("exists", [False, True], ids=["missing", "saved"])
+def test_fork_never_resolves_live_execution(
+    fork_edit_setup: dict, monkeypatch: pytest.MonkeyPatch, exists: bool
+) -> None:
+    """Fork lookup and copying work without constructing agent orchestration."""
+    session_id = uuid.uuid4()
+    if exists:
+        session = HarnessSessionRepository.create(
+            workspace_id=fork_edit_setup["owned"].id,
+            organization_id=fork_edit_setup["org"].id,
+            title="Saved conversation",
+        )
+        session_id = session.id
+        HarnessMessageRepository.create(
+            session_id=session_id, role="user", content="saved prompt"
+        )
+
+    def unexpected_execution() -> None:
+        pytest.fail("Forking saved history must not resolve agent execution")
+
+    monkeypatch.setattr(harness_api, "_resolve_harness_service", unexpected_execution)
+    client = _client(
+        user=fork_edit_setup["owner"], org=fork_edit_setup["org"], permissions=RUN
+    )
+    response = client.post(
+        f"/api/v1/harness/sessions/{session_id}/fork",
+        data=json.dumps({}),
+        content_type="application/json",
+    )
+
+    if exists:
+        assert response.status_code == 201, response.content[:500]
+        assert response.json()["title"] == "Saved conversation (fork #1)"
+        assert response.json()["status"] == "idle"
+        copied = HarnessMessageRepository.list_for_session(response.json()["id"])
+        assert [message.content for message in copied] == ["saved prompt"]
+    else:
+        assert response.status_code == 404, response.content[:500]
+        assert response.json() == {
+            "detail": f"HarnessSession '{session_id}' not found",
+            "code": "not_found",
+        }
 
 
 @pytest.mark.django_db(transaction=True)
