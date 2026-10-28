@@ -639,13 +639,8 @@ class ImageDefinitionDuplicateIn(Schema):
 # Git schemas (productive git integration, whitelisted RPC)
 # ---------------------------------------------------------------------------
 
-#: Whitelisted git operations (mirrors GIT_OPERATIONS in runner/src/git.py).
+#: Git mutations accepted by POST /git/operation/; reads have GET endpoints.
 GitOperation = Literal[
-    "list_repos",
-    "repo_snapshot",
-    "repo_history",
-    "working_diff",
-    "commit_details",
     "stage",
     "unstage",
     "discard",
@@ -672,10 +667,8 @@ GitOperation = Literal[
 _HASH_RE = re.compile(r"^[0-9a-fA-F]{4,64}$")
 
 
-def _validate_repo_path(value: str | None) -> str | None:
+def _validate_repo_path(value: str) -> str:
     """Basic backend check for absolute repo paths (runner re-validates)."""
-    if value is None:
-        return None
     cleaned = value.strip()
     if not cleaned:
         raise ValueError("repo_path must be a non-empty string")
@@ -743,7 +736,7 @@ def validate_commit_hash(value: str) -> str:
 
 
 class GitRepoQuery(Schema):
-    """Query params for GET /git/repo (per-repo snapshot)."""
+    """Validated repository path shared by Git reads and mutations."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -752,27 +745,15 @@ class GitRepoQuery(Schema):
     @field_validator("repo_path")
     @classmethod
     def _check_repo_path(cls, value: str) -> str:
-        result = _validate_repo_path(value)
-        assert result is not None
-        return result
+        return _validate_repo_path(value)
 
 
-class GitHistoryQuery(Schema):
+class GitHistoryQuery(GitRepoQuery):
     """Query params for GET /git/history (paged per-repo commit history)."""
 
-    model_config = ConfigDict(extra="forbid")
-
-    repo_path: str = Field(..., max_length=512)
     history_limit: int = Field(default=50, ge=1, le=500)
     history_skip: int = Field(default=0, ge=0)
     branch: str | None = Field(default=None, max_length=255)
-
-    @field_validator("repo_path")
-    @classmethod
-    def _check_repo_path(cls, value: str) -> str:
-        result = _validate_repo_path(value)
-        assert result is not None
-        return result
 
     @field_validator("branch")
     @classmethod
@@ -782,52 +763,18 @@ class GitHistoryQuery(Schema):
         return _validate_branch(value)
 
 
-class GitDiffQuery(Schema):
-    """Query params for GET /git/diff (working-tree diff for one repo)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    repo_path: str = Field(..., max_length=512)
-
-    @field_validator("repo_path")
-    @classmethod
-    def _check_repo_path(cls, value: str) -> str:
-        result = _validate_repo_path(value)
-        assert result is not None
-        return result
-
-
-class GitCommitQuery(Schema):
-    """Query params for GET /git/commits/{hash} (commit details)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    repo_path: str = Field(..., max_length=512)
-
-    @field_validator("repo_path")
-    @classmethod
-    def _check_repo_path(cls, value: str) -> str:
-        result = _validate_repo_path(value)
-        assert result is not None
-        return result
-
-
-class GitOperationIn(Schema):
-    """Typed generic git operation request for POST /git/operation/.
+class GitOperationIn(GitRepoQuery):
+    """Typed Git mutation request for POST /git/operation/.
 
     ``operation`` is a strict whitelist literal; all other fields are
     explicit and individually length-capped. Unknown keys are rejected
     (``extra='forbid'``). In particular there is no ``args`` dict and no
-    ``env`` field — the service builds the runner payload field-by-field.
-    Commit identity (``author_*``) is never accepted from the client; the
-    API layer injects it server-side from ``request.user``. The webapp
+    ``env`` field. Commit identity (``author_*``) is never accepted from
+    the client; the service injects it from ``request.user``. The webapp
     sends a plain ``message`` (no ``message_b64`` public API).
     """
 
-    model_config = ConfigDict(extra="forbid")
-
     operation: GitOperation
-    repo_path: str | None = Field(default=None, max_length=512)
     paths: list[str] | None = Field(default=None, max_length=256)
     message: str | None = Field(default=None, max_length=10000)
     branch: str | None = Field(default=None, max_length=255)
@@ -841,14 +788,7 @@ class GitOperationIn(Schema):
     local_name: str | None = Field(default=None, max_length=255)
     checkout: bool | None = None
     set_upstream: bool | None = None
-    history_limit: int | None = Field(default=None, ge=1, le=500)
-    history_skip: int | None = Field(default=None, ge=0)
     stash: str | None = Field(default=None, max_length=32)
-
-    @field_validator("repo_path")
-    @classmethod
-    def _check_repo_path(cls, value: str | None) -> str | None:
-        return _validate_repo_path(value)
 
     @field_validator("paths")
     @classmethod
@@ -921,15 +861,10 @@ class GitOperationIn(Schema):
     def _check_operation_fields(self) -> GitOperationIn:
         """Require the fields each operation needs (fail fast, 422)."""
         op = self.operation
-        needs_repo = op not in {"list_repos"}
-        if needs_repo and not self.repo_path:
-            raise ValueError(f"repo_path is required for operation {op!r}")
         if op in {"stage", "unstage", "discard"} and not self.paths:
             raise ValueError(f"paths is required for operation {op!r}")
         if op == "commit" and not (self.message or "").strip():
             raise ValueError("message is required for commit")
-        if op == "commit_details" and not (self.commit or "").strip():
-            raise ValueError("commit is required for commit_details")
         if op == "checkout_branch" and not (self.branch or "").strip():
             raise ValueError("branch is required for checkout_branch")
         if op == "checkout_commit" and not (self.commit or "").strip():

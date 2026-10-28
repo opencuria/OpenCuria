@@ -9,7 +9,7 @@
  * - GET `/workspaces/{id}/git/history/?repo_path=..&history_limit=..&history_skip=..&branch=..`
  * - GET `/workspaces/{id}/git/diff/?repo_path=..`
  * - GET `/workspaces/{id}/git/commits/{hash}/?repo_path=..`
- * - POST `/workspaces/{id}/git/operation/` (typed fields only)
+ * - POST `/workspaces/{id}/git/operation/` (typed mutations only)
  * - POST `/workspaces/{id}/git/commit-message/` (small-model commit subject)
  *
  * All calls go through `services/api` (`get`/`post`) so JWT refresh,
@@ -215,15 +215,10 @@ export interface RawGitConflictPayload {
 }
 
 // ---------------------------------------------------------------------------
-// Typed operation request (POST /git/operation/)
+// Typed mutation request (POST /git/operation/)
 // ---------------------------------------------------------------------------
 
 export type GitOperationName =
-  | 'list_repos'
-  | 'repo_snapshot'
-  | 'repo_history'
-  | 'working_diff'
-  | 'commit_details'
   | 'stage'
   | 'unstage'
   | 'discard'
@@ -248,8 +243,8 @@ export type GitOperationName =
 
 export interface GitOperationRequest {
   operation: GitOperationName
-  /** Absolute repo path under /workspace. Omitted for `list_repos`. */
-  repo_path?: string | null
+  /** Absolute repo path under /workspace. */
+  repo_path: string
   paths?: string[]
   message?: string
   branch?: string
@@ -265,8 +260,6 @@ export interface GitOperationRequest {
   local_name?: string
   checkout?: boolean
   set_upstream?: boolean
-  history_limit?: number
-  history_skip?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -329,44 +322,13 @@ export function getGitCommitDetails(
   )
 }
 
-function stripUndefined(body: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(body)) {
-    if (value !== undefined) out[key] = value
-  }
-  return out
-}
-
-export function buildGitOperationBody(payload: GitOperationRequest): Record<string, unknown> {
-  return stripUndefined({
-    operation: payload.operation,
-    repo_path: payload.repo_path ?? undefined,
-    paths: payload.paths,
-    message: payload.message,
-    branch: payload.branch,
-    commit: payload.commit,
-    stash: payload.stash,
-    target: payload.target,
-    new_branch: payload.new_branch,
-    old_branch: payload.old_branch,
-    start_point: payload.start_point,
-    remote: payload.remote,
-    remote_ref: payload.remote_ref,
-    local_name: payload.local_name,
-    checkout: payload.checkout,
-    set_upstream: payload.set_upstream,
-    history_limit: payload.history_limit,
-    history_skip: payload.history_skip,
-  })
-}
-
 export function runGitOperation(
   workspaceId: string,
   payload: GitOperationRequest,
 ): Promise<RawGitOperationSuccess> {
   return post<RawGitOperationSuccess>(
     `/workspaces/${encodeURIComponent(workspaceId)}/git/operation/`,
-    buildGitOperationBody(payload),
+    payload,
   )
 }
 

@@ -104,90 +104,52 @@ def _all_git_perms() -> list[str]:
 
 
 @pytest.mark.django_db
-def test_git_repos_happy_lists_repos(client: Client, monkeypatch):
-    """GET repos/ returns 200 and dispatches list_repos without repo_path."""
-    user, org, runner, workspace = _make_context()
+@pytest.mark.parametrize(
+    ("path", "operation", "args", "result"),
+    [
+        (
+            "repos/",
+            "list_repos",
+            {},
+            {"repos": [{"id": "r1", "name": "repo", "path": "/workspace/repo"}]},
+        ),
+        ("repo/", "repo_snapshot", {}, {"snapshot": {"path": "/workspace/repo"}}),
+        (
+            "history/",
+            "repo_history",
+            {"history_limit": 50, "history_skip": 0},
+            {"commits": [], "has_more": False},
+        ),
+        ("diff/", "working_diff", {}, {"diff": {"staged": []}}),
+        (
+            "commits/ABC123/",
+            "commit_details",
+            {"commit": "abc123"},
+            {"details": {"hash": "abc123"}},
+        ),
+    ],
+)
+def test_git_reads_use_get_endpoints(
+    client: Client, monkeypatch, path: str, operation: str, args: dict, result: dict
+):
+    """Each app read endpoint forwards validated args and preserves the result."""
+    user, org, _, workspace = _make_context()
     token = _create_api_key(user=user, permissions=_read_perms())
-    runner_result = {
-        "ok": True,
-        "operation": "list_repos",
-        "repos": [{"id": "r1", "name": "repo", "path": "/workspace/repo"}],
-    }
+    runner_result = {"ok": True, **result}
     fake = _install_fake(monkeypatch, run_return=runner_result)
+    query = {} if operation == "list_repos" else {"repo_path": "/workspace/repo"}
 
     response = client.get(
-        f"/api/v1/workspaces/{workspace.id}/git/repos/",
+        f"/api/v1/workspaces/{workspace.id}/git/{path}",
+        query,
         **_auth_headers(token, str(org.id)),
     )
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["ok"] is True
-    assert body["repos"] == [{"id": "r1", "name": "repo", "path": "/workspace/repo"}]
-    fake.run_git_operation.assert_awaited_once()
-    call = fake.run_git_operation.call_args
-    assert str(call.args[0]) == str(workspace.id)
-    assert call.args[1] == "list_repos"
-    assert call.kwargs["args"] == {}
-    assert "repo_path" not in call.kwargs
-
-
-@pytest.mark.django_db
-def test_git_repo_happy_forwards_repo_path(client: Client, monkeypatch):
-    """GET repo/ forwards the validated repo path to repo_snapshot."""
-    user, org, runner, workspace = _make_context()
-    token = _create_api_key(user=user, permissions=_read_perms())
-    runner_result = {
-        "ok": True,
-        "operation": "repo_snapshot",
-        "snapshot": {"path": "/workspace/repo"},
-    }
-    fake = _install_fake(monkeypatch, run_return=runner_result)
-
-    response = client.get(
-        f"/api/v1/workspaces/{workspace.id}/git/repo/",
-        {"repo_path": "/workspace/repo"},
-        **_auth_headers(token, str(org.id)),
+    assert response.json() == runner_result
+    fake.run_git_operation.assert_awaited_once_with(
+        workspace.id, operation, **query, args=args
     )
-
-    assert response.status_code == 200
-    assert response.json()["snapshot"] == {"path": "/workspace/repo"}
-    call = fake.run_git_operation.call_args
-    assert call.args[1] == "repo_snapshot"
-    assert call.kwargs["repo_path"] == "/workspace/repo"
-    assert call.kwargs["args"] == {}
-
-
-@pytest.mark.django_db
-def test_git_history_happy_passes_paging(client: Client, monkeypatch):
-    """GET history/ returns 200 and forwards repo path plus paging args."""
-    user, org, runner, workspace = _make_context()
-    token = _create_api_key(user=user, permissions=_read_perms())
-    runner_result = {
-        "ok": True,
-        "operation": "repo_history",
-        "repo_path": "/workspace/repo",
-        "commits": [],
-        "has_more": False,
-    }
-    fake = _install_fake(monkeypatch, run_return=runner_result)
-
-    response = client.get(
-        f"/api/v1/workspaces/{workspace.id}/git/history/",
-        {"repo_path": "/workspace/repo"},
-        **_auth_headers(token, str(org.id)),
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["ok"] is True
-    assert body["commits"] == []
-    fake.run_git_operation.assert_awaited_once()
-    call = fake.run_git_operation.call_args
-    assert str(call.args[0]) == str(workspace.id)
-    assert call.args[1] == "repo_history"
-    assert call.kwargs["repo_path"] == "/workspace/repo"
-    assert call.kwargs["args"] == {"history_limit": 50, "history_skip": 0}
 
 
 @pytest.mark.django_db
@@ -219,50 +181,6 @@ def test_git_history_paging_and_branch_forwarded(client: Client, monkeypatch):
         "history_skip": 10,
         "branch": "main",
     }
-
-
-@pytest.mark.django_db
-def test_git_diff_happy_forwards_repo_path(client: Client, monkeypatch):
-    """GET diff forwards the validated repo path to working_diff."""
-    user, org, runner, workspace = _make_context()
-    token = _create_api_key(user=user, permissions=_read_perms())
-    runner_result = {"ok": True, "operation": "working_diff", "diff": {"staged": []}}
-    fake = _install_fake(monkeypatch, run_return=runner_result)
-
-    response = client.get(
-        f"/api/v1/workspaces/{workspace.id}/git/diff/",
-        {"repo_path": "/workspace/repo"},
-        **_auth_headers(token, str(org.id)),
-    )
-
-    assert response.status_code == 200
-    assert response.json()["diff"] == {"staged": []}
-    call = fake.run_git_operation.call_args
-    assert call.args[1] == "working_diff"
-    assert call.kwargs["repo_path"] == "/workspace/repo"
-    assert call.kwargs["args"] == {}
-
-
-@pytest.mark.django_db
-def test_git_commit_details_happy_forwards_hash(client: Client, monkeypatch):
-    """GET commit details forwards normalized hash and repo path."""
-    user, org, runner, workspace = _make_context()
-    token = _create_api_key(user=user, permissions=_read_perms())
-    runner_result = {"ok": True, "operation": "commit_details", "details": {"hash": "abc123"}}
-    fake = _install_fake(monkeypatch, run_return=runner_result)
-
-    response = client.get(
-        f"/api/v1/workspaces/{workspace.id}/git/commits/ABC123/",
-        {"repo_path": "/workspace/repo"},
-        **_auth_headers(token, str(org.id)),
-    )
-
-    assert response.status_code == 200
-    assert response.json()["details"] == {"hash": "abc123"}
-    call = fake.run_git_operation.call_args
-    assert call.args[1] == "commit_details"
-    assert call.kwargs["repo_path"] == "/workspace/repo"
-    assert call.kwargs["args"] == {"commit": "abc123"}
 
 
 @pytest.mark.django_db
@@ -316,64 +234,28 @@ def test_git_write_only_key_allows_mutation_but_blocks_read(
 
 
 @pytest.mark.django_db
-def test_git_post_list_repos_read_perm_routing(client: Client, monkeypatch):
-    """POST list_repos is a read op: git_read succeeds, git_write alone 403."""
-    user, org, runner, workspace = _make_context()
-    read_token = _create_api_key(user=user, permissions=_read_perms())
-    write_token = _create_api_key(user=user, permissions=_write_perms())
-    fake = _install_fake(monkeypatch, run_return={"ok": True, "repos": []})
-    assert fake is not None
+@pytest.mark.parametrize(
+    "operation",
+    ["list_repos", "repo_snapshot", "repo_history", "working_diff", "commit_details"],
+)
+def test_git_post_rejects_read_operations(client: Client, monkeypatch, operation: str):
+    """The mutation endpoint exposes no alternative route for Git reads."""
+    user, org, _, workspace = _make_context()
+    token = _create_api_key(user=user, permissions=_all_git_perms())
+    fake = _install_fake(monkeypatch, run_return={"ok": True})
 
-    ok = client.post(
+    response = client.post(
         f"/api/v1/workspaces/{workspace.id}/git/operation/",
-        data=json.dumps({"operation": "list_repos"}),
+        data=json.dumps(
+            {"operation": operation, "repo_path": "/workspace/repo", "commit": "abc123"}
+        ),
         content_type="application/json",
-        **_auth_headers(read_token, str(org.id)),
+        **_auth_headers(token, str(org.id)),
     )
-    assert ok.status_code == 200
 
-    denied = client.post(
-        f"/api/v1/workspaces/{workspace.id}/git/operation/",
-        data=json.dumps({"operation": "list_repos"}),
-        content_type="application/json",
-        **_auth_headers(write_token, str(org.id)),
-    )
-    assert denied.status_code == 403
-
-
-@pytest.mark.django_db
-def test_git_post_repo_snapshot_and_history_read_perm_routing(
-    client: Client, monkeypatch
-):
-    """POST repo_snapshot/repo_history are read ops (git_read only)."""
-    user, org, runner, workspace = _make_context()
-    read_token = _create_api_key(user=user, permissions=_read_perms())
-    write_token = _create_api_key(user=user, permissions=_write_perms())
-    _install_fake(monkeypatch, run_return={"ok": True, "snapshot": {}})
-
-    for payload in (
-        {"operation": "repo_snapshot", "repo_path": "/workspace/repo"},
-        {
-            "operation": "repo_history",
-            "repo_path": "/workspace/repo",
-            "history_limit": 10,
-        },
-    ):
-        ok = client.post(
-            f"/api/v1/workspaces/{workspace.id}/git/operation/",
-            data=json.dumps(payload),
-            content_type="application/json",
-            **_auth_headers(read_token, str(org.id)),
-        )
-        assert ok.status_code == 200
-
-        denied = client.post(
-            f"/api/v1/workspaces/{workspace.id}/git/operation/",
-            data=json.dumps(payload),
-            content_type="application/json",
-            **_auth_headers(write_token, str(org.id)),
-        )
-        assert denied.status_code == 403
+    assert response.status_code == 422
+    assert any(issue["loc"][-1] == "operation" for issue in response.json()["detail"])
+    fake.run_git_operation.assert_not_awaited()
 
 
 @pytest.mark.django_db
@@ -444,8 +326,27 @@ def test_git_checkout_remote_branch_forwards_local_name(
 
 
 @pytest.mark.django_db
-def test_git_stage_happy_forwards_typed_args(client: Client, monkeypatch):
-    """POST stage forwards repo_path plus typed paths."""
+@pytest.mark.parametrize(
+    ("operation", "input_args", "expected_args"),
+    [
+        ("stage", {"paths": ["a.txt"], "message": None}, {"paths": ["a.txt"]}),
+        (
+            "create_branch",
+            {"branch": " feature ", "start_point": "main", "checkout": False},
+            {"branch": "feature", "start_point": "main", "checkout": False},
+        ),
+        (
+            "push",
+            {"remote": " origin ", "set_upstream": False},
+            {"remote": "origin", "set_upstream": False},
+        ),
+        ("stash_pop", {"stash": "stash@{0}"}, {"stash": "stash@{0}"}),
+    ],
+)
+def test_git_mutations_forward_validated_args(
+    client: Client, monkeypatch, operation: str, input_args: dict, expected_args: dict
+):
+    """Forward normalized fields, preserving false flags and excluding nulls."""
     user, org, runner, workspace = _make_context()
     token = _create_api_key(user=user, permissions=_all_git_perms())
     fake = _install_fake(
@@ -455,7 +356,7 @@ def test_git_stage_happy_forwards_typed_args(client: Client, monkeypatch):
     response = client.post(
         f"/api/v1/workspaces/{workspace.id}/git/operation/",
         data=json.dumps(
-            {"operation": "stage", "repo_path": "/workspace/repo", "paths": ["a.txt"]}
+            {"operation": operation, "repo_path": "/workspace/repo", **input_args}
         ),
         content_type="application/json",
         **_auth_headers(token, str(org.id)),
@@ -463,10 +364,13 @@ def test_git_stage_happy_forwards_typed_args(client: Client, monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
-    call = fake.run_git_operation.call_args
-    assert call.args[1] == "stage"
-    assert call.kwargs["repo_path"] == "/workspace/repo"
-    assert call.kwargs["args"] == {"paths": ["a.txt"]}
+    fake.run_git_operation.assert_awaited_once_with(
+        workspace.id,
+        operation,
+        repo_path="/workspace/repo",
+        args=expected_args,
+        user=user,
+    )
 
 
 @pytest.mark.django_db
@@ -509,6 +413,8 @@ def test_git_commit_happy_uses_authenticated_user(client: Client, monkeypatch):
         {"message_b64": "aGVsbG8="},
         {"unknown_field": "x"},
         {"hash": "abc123"},
+        {"history_limit": 10},
+        {"history_skip": 0},
     ],
 )
 def test_git_commit_rejects_forbidden_fields_422(
@@ -562,11 +468,11 @@ def test_git_commit_rejects_forbidden_fields_422(
         },
         {"operation": "commit", "repo_path": "/workspace/repo"},
         {"operation": "stage", "repo_path": "/workspace/repo"},
+        {"operation": "stage", "paths": ["a.txt"]},
+        {"operation": "stage", "repo_path": None, "paths": ["a.txt"]},
         {"operation": "rm_rf_everything", "repo_path": "/workspace/repo"},
         {"operation": "snapshot"},
         {"operation": "snapshot", "repo_path": "/workspace/repo"},
-        {"operation": "repo_snapshot"},
-        {"operation": "repo_history", "history_limit": 10},
         {
             "operation": "checkout_remote_branch",
             "repo_path": "/workspace/repo",
@@ -575,11 +481,6 @@ def test_git_commit_rejects_forbidden_fields_422(
             "operation": "checkout_remote_branch",
             "repo_path": "/workspace/repo",
             "remote_ref": "",
-        },
-        {
-            "operation": "repo_history",
-            "repo_path": "/workspace/repo",
-            "history_limit": 0,
         },
     ],
 )

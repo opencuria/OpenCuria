@@ -56,8 +56,6 @@ from .schemas import (
     DesktopStopOut,
     DesktopTakeControlOut,
     DesktopViewerIntentIn,
-    GitCommitQuery,
-    GitDiffQuery,
     GitHistoryQuery,
     GitOperationIn,
     GitRepoQuery,
@@ -1199,11 +1197,6 @@ async def delete_process(
 # Git router — /api/v1/workspaces/{workspace_id}/git/ (productive integration)
 # ===========================================================================
 
-#: Read-only git operations served by the GET endpoints / typed operation.
-_GIT_READ_OPS = frozenset(
-    {"list_repos", "repo_snapshot", "repo_history", "working_diff", "commit_details"}
-)
-
 
 def _git_result_to_response(result: dict):
     """Map a runner git result dict to (status, payload) for Ninja.
@@ -1228,50 +1221,6 @@ def _git_result_to_response(result: dict):
     if code == "timeout" or "timeout" in code:
         return 504, result
     return 400, result
-
-
-def _git_operation_args(payload: GitOperationIn) -> dict:
-    """Build the service args dict field-by-field from the typed schema.
-
-    Never passes an ``args`` dict through — only explicitly known
-    fields per operation reach the runner. Commit identity is injected
-    server-side by the service from ``request.user``.
-    """
-    data = payload.model_dump(exclude_unset=True)
-    args: dict = {}
-    if data.get("paths") is not None:
-        args["paths"] = list(data["paths"])
-    if data.get("message") is not None:
-        args["message"] = data["message"]
-    if data.get("branch") is not None:
-        args["branch"] = data["branch"]
-    if data.get("commit") is not None:
-        args["commit"] = data["commit"]
-    if data.get("stash") is not None:
-        args["stash"] = data["stash"]
-    if data.get("target") is not None:
-        args["target"] = data["target"]
-    if data.get("new_branch") is not None:
-        args["new_branch"] = data["new_branch"]
-    if data.get("old_branch") not in (None, ""):
-        args["old_branch"] = data["old_branch"]
-    if data.get("start_point") is not None:
-        args["start_point"] = data["start_point"]
-    if data.get("remote") is not None:
-        args["remote"] = data["remote"]
-    if data.get("remote_ref") is not None:
-        args["remote_ref"] = data["remote_ref"]
-    if data.get("local_name") is not None:
-        args["local_name"] = data["local_name"]
-    if data.get("checkout") is not None:
-        args["checkout"] = bool(data["checkout"])
-    if data.get("set_upstream") is not None:
-        args["set_upstream"] = bool(data["set_upstream"])
-    if data.get("history_limit") is not None:
-        args["history_limit"] = data["history_limit"]
-    if data.get("history_skip") is not None:
-        args["history_skip"] = data["history_skip"]
-    return args
 
 
 #: Shared response map for the git endpoints. Runner payloads (success
@@ -1423,7 +1372,7 @@ async def git_diff(
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
         return _perm_denied(APIKeyPermission.WORKSPACES_GIT_READ)
     try:
-        query = GitDiffQuery(repo_path=repo_path)
+        query = GitRepoQuery(repo_path=repo_path)
     except Exception as exc:
         return 400, ErrorOut(detail=str(exc), code="validation_error")
     org_id = get_organization_id(request)
@@ -1458,7 +1407,7 @@ async def git_commit_details(
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
         return _perm_denied(APIKeyPermission.WORKSPACES_GIT_READ)
     try:
-        query = GitCommitQuery(repo_path=repo_path)
+        query = GitRepoQuery(repo_path=repo_path)
     except Exception as exc:
         return 400, ErrorOut(detail=str(exc), code="validation_error")
     try:
@@ -1485,28 +1434,20 @@ async def git_commit_details(
 @git_router.post(
     "/{workspace_id}/git/operation/",
     response=_GIT_RESPONSES,
-    summary="Run a typed git operation",
+    summary="Run a typed Git mutation",
 )
 async def git_operation(
     request: HttpRequest,
     workspace_id: uuid.UUID,
     payload: GitOperationIn,
 ):
-    """Run one whitelisted git operation (typed fields only, no free args).
+    """Run one Git mutation with ``workspaces:git_write`` permission.
 
-    Read operations (``list_repos``/``repo_snapshot``/``repo_history``/
-    ``working_diff``/``commit_details``) require ``workspaces:git_read``; all mutations require
-    ``workspaces:git_write``. Commit identity for ``commit`` is filled
-    server-side from the authenticated account — the schema accepts no
-    ``author_*`` fields.
+    Commit identity comes from the authenticated account; the schema
+    accepts only declared mutation fields, never ``author_*`` or free args.
     """
-    permission = (
-        APIKeyPermission.WORKSPACES_GIT_READ
-        if str(payload.operation) in _GIT_READ_OPS
-        else APIKeyPermission.WORKSPACES_GIT_WRITE
-    )
-    if not check_api_key_permission(request, permission):
-        return _perm_denied(permission)
+    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_WRITE):
+        return _perm_denied(APIKeyPermission.WORKSPACES_GIT_WRITE)
     org_id = get_organization_id(request)
     await _require_org_membership_async(request, org_id)
 
@@ -1517,7 +1458,11 @@ async def git_operation(
             workspace_id,
             str(payload.operation),
             repo_path=payload.repo_path,
-            args=_git_operation_args(payload),
+            args=payload.model_dump(
+                exclude={"operation", "repo_path"},
+                exclude_unset=True,
+                exclude_none=True,
+            ),
             user=request.user,
         )
         return _git_result_to_response(result)

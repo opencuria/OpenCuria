@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiRequestError, get, post } from './api'
 import {
-  buildGitOperationBody,
   conflictSnapshotOf,
   getGitCommitDetails,
   getGitHistory,
@@ -106,7 +105,7 @@ describe('git.api', () => {
     expect(url).toContain('repo_path=%2Fworkspace%2Frepo')
   })
 
-  it('posts typed operation bodies without undefined fields', async () => {
+  it('posts typed mutations for a repository', async () => {
     postMock.mockResolvedValue({ ok: true, snapshot: makeSnapshot() })
     await runGitOperation('ws-1', {
       operation: 'stage',
@@ -117,24 +116,6 @@ describe('git.api', () => {
       operation: 'stage',
       repo_path: '/workspace/repo',
       paths: ['a.txt'],
-    })
-  })
-
-  it('builds create_branch bodies with start_point and checkout flags', () => {
-    expect(
-      buildGitOperationBody({
-        operation: 'create_branch',
-        repo_path: '/workspace/repo',
-        branch: 'feature/x',
-        start_point: 'main',
-        checkout: true,
-      }),
-    ).toEqual({
-      operation: 'create_branch',
-      repo_path: '/workspace/repo',
-      branch: 'feature/x',
-      start_point: 'main',
-      checkout: true,
     })
   })
 
@@ -151,17 +132,6 @@ describe('git.api', () => {
       repo_path: '/workspace/repo',
       remote_ref: 'origin/feature/x',
       local_name: 'feature/x',
-    })
-    expect(
-      buildGitOperationBody({
-        operation: 'checkout_remote_branch',
-        repo_path: '/workspace/repo',
-        remote_ref: 'origin/feature/x',
-      }),
-    ).toEqual({
-      operation: 'checkout_remote_branch',
-      repo_path: '/workspace/repo',
-      remote_ref: 'origin/feature/x',
     })
   })
 

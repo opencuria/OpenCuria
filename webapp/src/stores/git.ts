@@ -1231,7 +1231,7 @@ export const useGitStore = defineStore('git', () => {
    */
   async function runOperation(
     label: string,
-    build: (repo: GitRepo) => GitOperationRequest,
+    build: (repo: GitRepo) => Omit<GitOperationRequest, 'repo_path'>,
     callbacks?: OperationCallbacks,
     options?: { silent?: boolean },
   ): Promise<boolean> {
@@ -1244,7 +1244,7 @@ export const useGitStore = defineStore('git', () => {
       return false
     }
     const repoPath = repo.path
-    let payload: GitOperationRequest
+    let payload: Omit<GitOperationRequest, 'repo_path'>
     try {
       payload = build(repo)
     } catch (e: unknown) {
