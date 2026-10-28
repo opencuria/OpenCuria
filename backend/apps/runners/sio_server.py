@@ -531,17 +531,15 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         await service.handle_desktop_started(
             task_id=data.get("task_id"),
             workspace_id=data["workspace_id"],
-            port=data.get("port", 6901),
-            guest_ip=data.get("guest_ip", ""),
+            port=data["port"],
+            guest_ip=data["guest_ip"],
             runner_id=runner_id,
-            viewer=(bool(data["viewer"]) if "viewer" in data else None),
-            computer_use=(
-                bool(data["computer_use"]) if "computer_use" in data else None
-            ),
-            mcp=data.get("mcp", data.get("mcp_active")),
-            holder_count=data.get("holder_count"),
-            generation=data.get("generation"),
-            epoch=data.get("epoch"),
+            viewer=data["viewer"],
+            computer_use=data["computer_use"],
+            mcp=data["mcp"],
+            holder_count=data["holder_count"],
+            generation=data["generation"],
+            epoch=data["epoch"],
         )
 
     @sio.on("desktop:process")
@@ -553,17 +551,15 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         service = get_runner_service()
         await service.handle_desktop_process(
             workspace_id=data["workspace_id"],
-            port=data.get("port", 6901),
-            guest_ip=data.get("guest_ip", ""),
+            port=data["port"],
+            guest_ip=data["guest_ip"],
             runner_id=runner_id,
-            viewer=(bool(data["viewer"]) if "viewer" in data else None),
-            computer_use=(
-                bool(data["computer_use"]) if "computer_use" in data else None
-            ),
-            mcp=data.get("mcp", data.get("mcp_active")),
-            holder_count=data.get("holder_count"),
-            generation=data.get("generation"),
-            epoch=data.get("epoch"),
+            viewer=data["viewer"],
+            computer_use=data["computer_use"],
+            mcp=data["mcp"],
+            holder_count=data["holder_count"],
+            generation=data["generation"],
+            epoch=data["epoch"],
         )
 
     @sio.on("desktop:stopped")
@@ -577,8 +573,8 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             task_id=data.get("task_id"),
             workspace_id=data["workspace_id"],
             runner_id=runner_id,
-            generation=data.get("generation"),
-            epoch=data.get("epoch"),
+            generation=data["generation"],
+            epoch=data["epoch"],
         )
 
     @sio.on("desktop:viewer_released")
@@ -592,16 +588,12 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             task_id=data["task_id"],
             workspace_id=data["workspace_id"],
             runner_id=runner_id,
-            computer_use_active=(
-                bool(data["computer_use_active"])
-                if "computer_use_active" in data
-                else None
-            ),
-            viewer_held=data.get("viewer_held", data.get("viewer")),
-            mcp=data.get("mcp", data.get("mcp_active")),
-            holder_count=data.get("holder_count"),
-            generation=data.get("generation"),
-            epoch=data.get("epoch"),
+            computer_use_active=data["computer_use"],
+            viewer_held=data["viewer"],
+            mcp=data["mcp"],
+            holder_count=data["holder_count"],
+            generation=data["generation"],
+            epoch=data["epoch"],
         )
 
     @sio.on("desktop:proxy_ws_frame")

@@ -696,15 +696,7 @@ class WebSocketInterface(Interface):
                                 "desktop:process",
                                 {
                                     "workspace_id": workspace["workspace_id"],
-                                    "port": desktop["port"],
-                                    "guest_ip": desktop["guest_ip"],
-                                    "viewer": bool(desktop.get("viewer")),
-                                    "computer_use": bool(desktop.get("computer_use")),
-                                    "mcp": bool(desktop.get("mcp")),
-                                    "mcp_active": bool(desktop.get("mcp_active")),
-                                    "holder_count": desktop.get("holder_count", 0),
-                                    "generation": desktop.get("generation"),
-                                    "epoch": desktop.get("epoch", self._desktop_epoch),
+                                    **desktop,
                                 },
                             )
                     await self._operations.replay()

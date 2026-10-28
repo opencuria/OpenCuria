@@ -660,23 +660,16 @@ class InteractiveSessionsMixin:
         workspace_id: str,
         port: int,
         guest_ip: str,
-        runner_id: str | None = None,
+        runner_id: str,
         *,
-        viewer: bool | None = None,
-        computer_use: bool | None = None,
-        mcp: bool | None = None,
-        holder_count: int | None = None,
-        generation: int | None = None,
-        epoch: str | None = None,
+        viewer: bool,
+        computer_use: bool,
+        mcp: bool,
+        holder_count: int,
+        generation: int,
+        epoch: str,
     ) -> None:
         """Handle desktop:started after a viewer lease is acquired."""
-        current = self.get_desktop_info(workspace_id) or {}
-        epoch, generation = self._inherit_current_desktop_version(
-            workspace_id,
-            runner_id=runner_id,
-            epoch=epoch,
-            generation=generation,
-        )
         if self._desktop_state_is_stale(
             workspace_id,
             epoch=epoch,
@@ -691,25 +684,17 @@ class InteractiveSessionsMixin:
             if task and not self._validate_task_runner(task, runner_id):
                 return
 
-        current = self.get_desktop_info(workspace_id) or {}
         recorded = self._record_active_desktop(
             workspace_id,
             {
-                **current,
-                **{
-                    key: value
-                    for key, value in {
-                        "mcp": mcp,
-                        "holder_count": holder_count,
-                        "generation": generation,
-                        "epoch": epoch,
-                    }.items()
-                    if value is not None
-                },
+                "mcp": mcp,
+                "holder_count": holder_count,
+                "generation": generation,
+                "epoch": epoch,
                 "port": port,
                 "guest_ip": guest_ip,
-                "viewer": True if viewer is None else viewer,
-                **({"computer_use": computer_use} if computer_use is not None else {}),
+                "viewer": viewer,
+                "computer_use": computer_use,
             },
             runner_id=runner_id,
         )
@@ -748,14 +733,14 @@ class InteractiveSessionsMixin:
         workspace_id: str,
         port: int,
         guest_ip: str,
-        runner_id: str | None = None,
+        runner_id: str,
         *,
-        viewer: bool | None = None,
-        computer_use: bool | None = None,
-        mcp: bool | None = None,
-        holder_count: int | None = None,
-        generation: int | None = None,
-        epoch: str | None = None,
+        viewer: bool,
+        computer_use: bool,
+        mcp: bool,
+        holder_count: int,
+        generation: int,
+        epoch: str,
     ) -> None:
         """Record live desktop process routing without a viewer acquire.
 
@@ -768,12 +753,6 @@ class InteractiveSessionsMixin:
         """
         if not await self._desktop_event_owned_by_runner(workspace_id, runner_id):
             return
-        epoch, generation = self._inherit_current_desktop_version(
-            workspace_id,
-            runner_id=runner_id,
-            epoch=epoch,
-            generation=generation,
-        )
         if self._desktop_state_is_stale(
             workspace_id,
             epoch=epoch,
@@ -782,25 +761,17 @@ class InteractiveSessionsMixin:
         ):
             return
 
-        current = self.get_desktop_info(workspace_id) or {}
         recorded = self._record_active_desktop(
             workspace_id,
             {
-                **current,
-                **{
-                    key: value
-                    for key, value in {
-                        "mcp": mcp,
-                        "holder_count": holder_count,
-                        "generation": generation,
-                        "epoch": epoch,
-                    }.items()
-                    if value is not None
-                },
+                "mcp": mcp,
+                "holder_count": holder_count,
+                "generation": generation,
+                "epoch": epoch,
                 "port": port,
                 "guest_ip": guest_ip,
-                **({"viewer": viewer} if viewer is not None else {}),
-                **({"computer_use": computer_use} if computer_use is not None else {}),
+                "viewer": viewer,
+                "computer_use": computer_use,
             },
             runner_id=runner_id,
         )
@@ -828,14 +799,14 @@ class InteractiveSessionsMixin:
         self,
         task_id: str,
         workspace_id: str,
-        runner_id: str | None = None,
+        runner_id: str,
         *,
-        computer_use_active: bool | None = None,
-        viewer_held: bool | None = None,
-        mcp: bool | None = None,
-        holder_count: int | None = None,
-        generation: int | None = None,
-        epoch: str | None = None,
+        computer_use_active: bool,
+        viewer_held: bool,
+        mcp: bool,
+        holder_count: int,
+        generation: int,
+        epoch: str,
     ) -> None:
         """Handle viewer lease release while the desktop process stays up.
 
@@ -845,12 +816,6 @@ class InteractiveSessionsMixin:
         """
         if not await self._desktop_event_owned_by_runner(workspace_id, runner_id):
             return
-        epoch, generation = self._inherit_current_desktop_version(
-            workspace_id,
-            runner_id=runner_id,
-            epoch=epoch,
-            generation=generation,
-        )
         if self._desktop_state_is_stale(
             workspace_id,
             epoch=epoch,
@@ -865,12 +830,6 @@ class InteractiveSessionsMixin:
                 return
             await sync_to_async(self.tasks.complete)(task)
 
-        epoch, generation = self._inherit_current_desktop_version(
-            workspace_id,
-            runner_id=runner_id,
-            epoch=epoch,
-            generation=generation,
-        )
         if self._desktop_state_is_stale(
             workspace_id,
             epoch=epoch,
@@ -882,24 +841,14 @@ class InteractiveSessionsMixin:
         current = self._active_desktops.get(workspace_id)
         if current is not None:
             updated = dict(current)
-            if viewer_held is not None:
-                updated["viewer"] = viewer_held
-            elif holder_count is None:
-                updated["viewer"] = False
             updated.update(
-                {
-                    key: value
-                    for key, value in {
-                        "mcp": mcp,
-                        "holder_count": holder_count,
-                        "generation": generation,
-                        "epoch": epoch,
-                    }.items()
-                    if value is not None
-                }
+                viewer=viewer_held,
+                computer_use=computer_use_active,
+                mcp=mcp,
+                holder_count=holder_count,
+                generation=generation,
+                epoch=epoch,
             )
-            if computer_use_active is not None:
-                updated["computer_use"] = computer_use_active
             if not self._record_active_desktop(
                 workspace_id,
                 updated,
@@ -931,10 +880,10 @@ class InteractiveSessionsMixin:
         self,
         task_id: str | None,
         workspace_id: str,
-        runner_id: str | None = None,
+        runner_id: str,
         *,
-        generation: int | None = None,
-        epoch: str | None = None,
+        generation: int,
+        epoch: str,
     ) -> None:
         """Handle desktop:stopped event from a runner.
 
@@ -989,24 +938,11 @@ class InteractiveSessionsMixin:
         ):
             return
 
-        current = self.get_desktop_info(workspace_id) or {}
-        stopped_epoch = epoch or current.get("epoch")
-        stopped_generation = (
-            generation if generation is not None else current.get("generation")
-        )
-        if self._desktop_state_is_stale(
-            workspace_id,
-            epoch=stopped_epoch,
-            generation=stopped_generation,
-            runner_id=runner_id,
-            active=False,
-        ):
-            return
         self._remember_desktop_state(
             workspace_id,
-            epoch=stopped_epoch,
-            generation=stopped_generation,
-            runner_id=runner_id or self._desktop_workspace_runner.get(workspace_id),
+            epoch=epoch,
+            generation=generation,
+            runner_id=runner_id,
             active=False,
         )
         self._active_desktops.pop(workspace_id, None)

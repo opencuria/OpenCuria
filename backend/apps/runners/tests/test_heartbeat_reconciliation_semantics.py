@@ -39,6 +39,16 @@ def test_credential_resolution_failure_does_not_skip_process_or_desktop_reconcil
         "auto_stop_inactive_workspaces",
         AsyncMock(return_value=[]),
     )
+    desktop = {
+        "port": 6901,
+        "guest_ip": "10.0.0.1",
+        "viewer": True,
+        "computer_use": False,
+        "mcp": False,
+        "holder_count": 1,
+        "generation": 1,
+        "epoch": "epoch",
+    }
 
     service.handle_heartbeat(
         runner,
@@ -54,7 +64,10 @@ def test_credential_resolution_failure_does_not_skip_process_or_desktop_reconcil
                         "pid": 1234,
                     }
                 ],
-                "desktop": {"port": 6901, "guest_ip": "10.0.0.1"},
+                "desktop": desktop,
+                "desktop_epoch": "epoch",
+                "desktop_generation": 1,
+                "desktop_session_tracked": True,
             }
         ],
     )
@@ -63,8 +76,11 @@ def test_credential_resolution_failure_does_not_skip_process_or_desktop_reconcil
     assert process.status == ProcessStatus.EXITED
     desktop_sync.assert_called_once_with(
         str(workspace.id),
-        {"port": 6901, "guest_ip": "10.0.0.1"},
+        desktop,
         runner_id=str(runner.id),
+        desktop_epoch="epoch",
+        desktop_generation=1,
+        desktop_session_tracked=True,
     )
 
 
