@@ -17,6 +17,7 @@ from src.chunking import (
 )
 from src.config import RunnerSettings
 from src.interfaces.websocket import WebSocketInterface
+from src.services.file_download import FILE_DOWNLOAD_TOO_LARGE
 
 _SMALL_JSON = 64 * 1024
 _HALF_MIB_JSON = 512 * 1024
@@ -380,7 +381,7 @@ async def test_harness_write_cancel_is_scoped_to_workspace_and_transfer_kind() -
 
 
 class _OversizeProbeRuntime:
-    """Fake runtime whose size probe reports 200MB; records every command."""
+    """Fake runtime whose guest size precheck rejects an oversized file."""
 
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
@@ -389,10 +390,8 @@ class _OversizeProbeRuntime:
         self.calls.append(list(command))
         if command[:2] == ["realpath", "-m"]:
             return 0, command[2] + "\n"
-        if command[:2] == ["test", "-d"]:
-            return 1, ""
         if command[:2] == ["sh", "-c"]:
-            return 0, "200000000\n"
+            return FILE_DOWNLOAD_TOO_LARGE, ""
         raise AssertionError(f"unexpected command: {command!r}")
 
 

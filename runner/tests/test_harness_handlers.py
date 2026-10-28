@@ -1104,8 +1104,8 @@ class HarnessServiceQuoteInjectionTests(unittest.IsolatedAsyncioTestCase):
                 if command[:2] == ["realpath", "-m"]:
                     return 0, command[2] + "\n"
                 captured.append(command)
-                if command[:2] == ["test", "-d"]:
-                    return 0, ""
+                if command[3] == "opencuria-file-download":
+                    return 0, "directory\n"
                 return 0, "3\nQUJD"
 
         service.registry._runtime = DirRuntime()
@@ -1118,7 +1118,7 @@ class HarnessServiceQuoteInjectionTests(unittest.IsolatedAsyncioTestCase):
         evil = "/workspace/x'; touch /tmp/pwned; echo '"
         result = await service.files.download_file(workspace_id, evil)
         self.assertTrue(result["content"])
-        argv = next(c for c in captured if c[:2] == ["sh", "-c"])
+        argv = next(c for c in captured if c[3] == "opencuria-directory-download")
         self.assertEqual(argv[-3:-1], evil.rsplit("/", 1))
 
 

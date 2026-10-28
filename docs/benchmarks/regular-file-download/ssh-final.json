@@ -1,0 +1,79 @@
+{
+  "baseline": "ea8ebfdda9ea87cc237ff18ea7eb1bc4b6c6c4e8",
+  "transport": "persistent-loopback-ssh",
+  "method": "Real FileManager/containment/shell/stat/base64/parsing; 3 warmups, seeded interleaved pairs; exact payload equality; no QEMU or remote network.",
+  "cases": [
+    {
+      "bytes_per_file": 0,
+      "concurrency": 1,
+      "samples": 41,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "before": {
+        "p50_ms": 23.364,
+        "p95_ms": 28.746,
+        "guest_exec_calls": 4,
+        "peak_python_bytes": 296794
+      },
+      "after": {
+        "p50_ms": 13.611,
+        "p95_ms": 19.542,
+        "guest_exec_calls": 2,
+        "peak_python_bytes": 283797
+      }
+    },
+    {
+      "bytes_per_file": 65536,
+      "concurrency": 1,
+      "samples": 41,
+      "sha256": "7daca2095d0438260fa849183dfc67faa459fdf4936e1bc91eec6b281b27e4c2",
+      "before": {
+        "p50_ms": 26.069,
+        "p95_ms": 32.551,
+        "guest_exec_calls": 4,
+        "peak_python_bytes": 362645
+      },
+      "after": {
+        "p50_ms": 15.791,
+        "p95_ms": 19.987,
+        "guest_exec_calls": 2,
+        "peak_python_bytes": 316756
+      }
+    },
+    {
+      "bytes_per_file": 5242880,
+      "concurrency": 1,
+      "samples": 41,
+      "sha256": "2e7cab6314e9614b6f2da12630661c3038e5592025f6534ba5823c3b340a1cb6",
+      "before": {
+        "p50_ms": 61.655,
+        "p95_ms": 70.803,
+        "guest_exec_calls": 4,
+        "peak_python_bytes": 14210238
+      },
+      "after": {
+        "p50_ms": 53.391,
+        "p95_ms": 59.381,
+        "guest_exec_calls": 2,
+        "peak_python_bytes": 14197298
+      }
+    },
+    {
+      "bytes_per_file": 65536,
+      "concurrency": 4,
+      "samples": 41,
+      "sha256": "7daca2095d0438260fa849183dfc67faa459fdf4936e1bc91eec6b281b27e4c2",
+      "before": {
+        "p50_ms": 48.404,
+        "p95_ms": 53.099,
+        "guest_exec_calls": 16,
+        "peak_python_bytes": 807390
+      },
+      "after": {
+        "p50_ms": 28.139,
+        "p95_ms": 32.316,
+        "guest_exec_calls": 8,
+        "peak_python_bytes": 645213
+      }
+    }
+  ]
+}

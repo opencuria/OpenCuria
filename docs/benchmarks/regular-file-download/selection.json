@@ -1,0 +1,23 @@
+{
+  "baseline_ref": "ea8ebfdda9ea87cc237ff18ea7eb1bc4b6c6c4e8",
+  "timestamp": "2026-10-28T10:02:53.078410+00:00",
+  "method": "secrets.choice using OS randomness",
+  "top_three": [
+    {
+      "rank": 1,
+      "id": "runner-large-file-read-parsing",
+      "evidence": "5 MiB read p50 46.503 ms, including 17.297 ms payload split/join; 25 MiB read p50 245.379 ms, including 103.305 ms parsing. Frequent image/media/read path, large transient allocation; localized change with wire-format tests."
+    },
+    {
+      "rank": 2,
+      "id": "backend-message-edit-history-reads",
+      "evidence": "Two real ORM discovery reads load 25 MiB for 200 messages: p50 21.811 ms, p95 26.298 ms. User-visible edit admission, session-scoped projections possible; moderate admission/ordering risk."
+    },
+    {
+      "rank": 3,
+      "id": "runner-regular-file-download-roundtrips",
+      "evidence": "Four sequential guest commands per download, 64 KiB local p50 6.925 ms before SSH. Lower frequency, strong remote-latency opportunity; security/size/error semantics require care."
+    }
+  ],
+  "selected": "runner-regular-file-download-roundtrips"
+}

@@ -1,0 +1,8 @@
+{
+  "candidate": "backend edit full-history discovery",
+  "messages": 200,
+  "content_bytes": 26214400,
+  "queries": 2,
+  "p50_ms": 21.811038999658194,
+  "p95_ms": 26.298341999790864
+}

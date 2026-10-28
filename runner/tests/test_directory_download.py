@@ -265,7 +265,7 @@ async def test_invalid_archive_header_is_an_error(output: str) -> None:
     runtime = AsyncMock()
     runtime.exec_command_wait.side_effect = [
         (0, "/workspace/project\n"),
-        (0, ""),
+        (0, "directory\n"),
         (0, output),
     ]
     manager, workspace_id = _manager(runtime)

@@ -22,6 +22,7 @@ from ..models import WorkspaceInfo
 from ..runtime.base import RuntimeBackend
 from .capture_fence import CaptureFence, live_interaction
 from .directory_archive import DIRECTORY_ARCHIVE_TOO_LARGE, directory_archive_command
+from .file_download import FILE_DOWNLOAD_TOO_LARGE, file_download_command
 from .workspace_helpers import sanitize_filename as _sanitize_filename
 from .workspace_helpers import sanitize_path as _sanitize_path
 
@@ -530,13 +531,14 @@ class FileManager:
             runtime, info.instance_id, safe_path
         )
 
-        # Check if it's a directory
-        exit_code, _ = await runtime.exec_command_wait(
+        # Probe directories or download regular files in one guest exec. Keep
+        # containment separate so symlink escapes fail before any file is read.
+        exit_code, output = await runtime.exec_command_wait(
             info.instance_id,
-            command=["test", "-d", safe_path],
+            command=file_download_command(safe_path, FILE_DOWNLOAD_MAX_SIZE),
             workdir="/workspace",
         )
-        is_dir = exit_code == 0
+        is_dir = exit_code == 0 and output == "directory\n"
 
         if is_dir:
             exit_code, output = await runtime.exec_command_wait(
@@ -544,58 +546,30 @@ class FileManager:
                 command=directory_archive_command(safe_path, FILE_DOWNLOAD_MAX_SIZE),
                 workdir="/workspace",
             )
-            if exit_code == DIRECTORY_ARCHIVE_TOO_LARGE:
-                raise ValueError(
-                    "Download exceeds maximum size of "
-                    f"{FILE_DOWNLOAD_MAX_SIZE} bytes"
-                )
-            if exit_code != 0:
-                raise RuntimeError(f"Failed to download: {output}")
-            size_output, separator, output = output.partition("\n")
-            try:
-                raw_size = int(size_output)
-                if not separator or raw_size < 0:
-                    raise ValueError("Missing archive size")
-            except ValueError as exc:
-                raise RuntimeError(
-                    f"Failed to download: invalid size {size_output!r}"
-                ) from exc
-            if raw_size > FILE_DOWNLOAD_MAX_SIZE:
-                raise ValueError(
-                    "Download exceeds maximum size of "
-                    f"{FILE_DOWNLOAD_MAX_SIZE} bytes"
-                )
             filename = os.path.basename(safe_path) + ".tar.gz"
         else:
-            qpath = shlex.quote(safe_path)
-            shell_cmd = f"test -f {qpath} || exit 1; " f"stat -c '%s' {qpath}"
-            exit_code, size_output = await runtime.exec_command_wait(
-                info.instance_id,
-                command=["sh", "-c", shell_cmd],
-                workdir="/workspace",
-            )
-            if exit_code != 0:
-                raise RuntimeError(f"Failed to download: {size_output}")
-            try:
-                raw_size = int(size_output.strip().split()[-1])
-            except (ValueError, IndexError) as exc:
-                raise RuntimeError(
-                    f"Failed to download: invalid size {size_output!r}"
-                ) from exc
-            if raw_size > FILE_DOWNLOAD_MAX_SIZE:
-                raise ValueError(
-                    "Download exceeds maximum size of "
-                    f"{FILE_DOWNLOAD_MAX_SIZE} bytes"
-                )
-            exit_code, output = await runtime.exec_command_wait(
-                info.instance_id,
-                command=["base64", safe_path],
-                workdir="/workspace",
-            )
             filename = os.path.basename(safe_path)
 
+        if exit_code in (FILE_DOWNLOAD_TOO_LARGE, DIRECTORY_ARCHIVE_TOO_LARGE):
+            raise ValueError(
+                f"Download exceeds maximum size of {FILE_DOWNLOAD_MAX_SIZE} bytes"
+            )
         if exit_code != 0:
             raise RuntimeError(f"Failed to download: {output}")
+
+        size_output, separator, output = output.partition("\n")
+        try:
+            raw_size = int(size_output)
+            if not separator or raw_size < 0:
+                raise ValueError("Missing download size")
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Failed to download: invalid size {size_output!r}"
+            ) from exc
+        if raw_size > FILE_DOWNLOAD_MAX_SIZE:
+            raise ValueError(
+                f"Download exceeds maximum size of {FILE_DOWNLOAD_MAX_SIZE} bytes"
+            )
 
         return {
             "content": output.strip(),
