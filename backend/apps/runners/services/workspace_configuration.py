@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import uuid
+from typing import TYPE_CHECKING, Any
 
-from django.db import transaction
-
+from apps.credentials.services import CredentialSvc
 from apps.plugins.services import PluginSelectionError, PluginService
 from apps.runners.enums import TaskType
-from common.exceptions import NotFoundError
+from common.exceptions import ConflictError, NotFoundError
+from common.utils import generate_uuid
 
-from ..locking import lock_runner
-from ..models import Task, Workspace
-from ..repositories import (
-    TaskRepository,
-    WorkspaceProcessRepository,
-    WorkspaceRepository,
-)
+from ..repositories import TaskRepository, WorkspaceRepository
+from ..workspace_configuration_repository import WorkspaceConfigurationRepository
+
+if TYPE_CHECKING:
+    from ..models import Task, Workspace
 
 
 class WorkspaceConfigurationService:
@@ -25,14 +24,15 @@ class WorkspaceConfigurationService:
     def __init__(self) -> None:
         self.workspaces = WorkspaceRepository
         self.tasks = TaskRepository
+        self.repository = WorkspaceConfigurationRepository
         self.plugins = PluginService()
 
     def create(
         self,
         *,
         workspace_fields: dict,
-        runner,
-        user,
+        runner: Any,
+        user: Any,
         organization_id: uuid.UUID,
         credentials: list,
         plugin_ids: list[uuid.UUID],
@@ -42,13 +42,11 @@ class WorkspaceConfigurationService:
         task_type: TaskType = TaskType.CREATE_WORKSPACE,
     ) -> tuple[Workspace, Task]:
         """Create workspace, selections, task, and initial state atomically."""
-        with transaction.atomic():
-            lock_runner(runner.id)
-            from ..repositories import ImageGenerationRepository
-
-            selected = workspace_fields.get("base_image_instance")
+        selected = workspace_fields.get("base_image_instance")
+        with self.repository.creating(
+            runner.id, selected.id if selected is not None else None
+        ) as selected:
             if selected is not None:
-                selected = ImageGenerationRepository.validate_selection(selected.id)
                 if selected.captured_image_id and (
                     user is None or selected.created_by_id != user.id
                 ):
@@ -67,18 +65,6 @@ class WorkspaceConfigurationService:
                 raise PluginSelectionError(
                     "Missing required credentials for selected plugins", gaps
                 )
-            workspace = self.workspaces.create(**workspace_fields)
-            if selected is not None:
-                WorkspaceProcessRepository.restore_definitions(
-                    workspace, selected.process_definitions, created_by=user
-                )
-            self.workspaces.set_credentials(workspace, credentials)
-            if credentials_present:
-                self.workspaces.update_credentials_present(workspace, True)
-                workspace = self.workspaces.get_by_id(workspace.id)
-            self.plugins.workspace_activations.replace_for_workspace(
-                workspace, list(dict.fromkeys(plugin_ids)), enabled_by=user
-            )
             if (
                 credentials_present
                 and not credentials
@@ -88,20 +74,23 @@ class WorkspaceConfigurationService:
                     **operation_payload,
                     "_unreproducible_credentials": True,
                 }
-            task = self.tasks.create(
-                task_id=task_id,
+            return self.repository.initialize(
+                workspace_fields=workspace_fields,
                 runner=runner,
+                user=user,
+                credentials=credentials,
+                plugin_ids=plugin_ids,
+                task_id=task_id,
                 task_type=task_type,
-                workspace=workspace,
                 operation_payload=operation_payload,
+                credentials_present=credentials_present,
             )
-            return self.workspaces.get_by_id(workspace.id), task
 
     def update(
         self,
         *,
         workspace_id: uuid.UUID,
-        user,
+        user: Any,
         organization_id: uuid.UUID,
         credentials: list | None,
         plugin_ids: list[uuid.UUID] | None,
@@ -110,15 +99,7 @@ class WorkspaceConfigurationService:
         desktop_values: tuple | None = None,
     ) -> Workspace:
         """Validate and replace final associations/name under a workspace lock."""
-        with transaction.atomic():
-            existing = self.workspaces.get_by_id(workspace_id)
-            if existing is None:
-                raise NotFoundError("Workspace", str(workspace_id))
-            runner_id = existing.runner_id
-            lock_runner(runner_id)
-            workspace = self.workspaces.get_by_id(workspace_id, lock=True)
-            if workspace is None:
-                raise NotFoundError("Workspace", str(workspace_id))
+        with self.repository.updating(workspace_id) as workspace:
             if (
                 workspace.created_by_id != user.id
                 or workspace.runner.organization_id != organization_id
@@ -127,8 +108,6 @@ class WorkspaceConfigurationService:
             # The capture parent keeps its hold between child tasks, when
             # current_task_id has already been cleared. Recheck both under lock.
             if workspace.active_operation or workspace.current_task_id:
-                from common.exceptions import ConflictError
-
                 raise ConflictError("Workspace lifecycle outcome unresolved")
             current_credentials = self.workspaces.list_attached_credentials(
                 workspace.id
@@ -138,9 +117,7 @@ class WorkspaceConfigurationService:
                 owner=workspace.created_by,
                 org_id=organization_id,
             )
-            current_plugins = list(
-                self.plugins.workspace_activations.enabled_plugin_ids(workspace.id)
-            )
+            current_plugins = list(self.plugins.workspace_plugin_ids(workspace.id))
             final_plugins = current_plugins if plugin_ids is None else plugin_ids
             gaps = self.plugins.validate_workspace_plugin_selection(
                 plugin_ids=final_plugins,
@@ -163,8 +140,6 @@ class WorkspaceConfigurationService:
                 desktop_values=desktop_values,
             )
             if qemu_values is not None and workspace.status == "running":
-                from common.utils import generate_uuid
-
                 workspace._lifecycle_task = self.tasks.create(
                     task_id=generate_uuid(),
                     runner=workspace.runner,
@@ -173,7 +148,7 @@ class WorkspaceConfigurationService:
                 )
             return workspace
 
-    def credential_deletion_blockers(self, credential) -> list[dict]:
+    def credential_deletion_blockers(self, credential: Any) -> list[dict]:
         """Return effective plugin requirements that still need *credential*.
 
         Covers every workspace with the credential attached, each evaluated
@@ -195,11 +170,9 @@ class WorkspaceConfigurationService:
 
     @staticmethod
     def _resolve_final_credentials(
-        credentials: list, *, owner, org_id: uuid.UUID
+        credentials: list, *, owner: Any, org_id: uuid.UUID
     ) -> list:
         """Revalidate owner, service boundaries, OAuth bindings and uniqueness."""
-        from apps.credentials.services import CredentialSvc
-
         return (
             CredentialSvc()
             .resolve_credentials(

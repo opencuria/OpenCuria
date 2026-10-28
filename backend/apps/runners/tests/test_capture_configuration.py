@@ -9,8 +9,9 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from apps.credentials.services import CredentialSvc, ResolvedCredentials
+from apps.runners import workspace_configuration_repository
 from apps.runners.enums import WorkspaceStatus
-from apps.runners.services import RunnerService, workspace_configuration
+from apps.runners.services import RunnerService
 from apps.runners.services.workspace_configuration import WorkspaceConfigurationService
 from common.exceptions import ConflictError, NotFoundError
 
@@ -23,7 +24,7 @@ def test_configuration_rechecks_capture_hold_after_stale_preflight(
     service = WorkspaceConfigurationService()
     stale = service.workspaces.get_by_id(workspace.id)
     assert not stale.active_operation and not stale.current_task_id
-    original_lock = workspace_configuration.lock_runner
+    original_lock = workspace_configuration_repository.lock_runner
 
     def acquire_capture_before_lock(runner_id):
         # Deterministically admit capture after the unlocked read, then observe
@@ -34,7 +35,7 @@ def test_configuration_rechecks_capture_hold_after_stale_preflight(
         return original_lock(runner_id)
 
     monkeypatch.setattr(
-        workspace_configuration, "lock_runner", acquire_capture_before_lock
+        workspace_configuration_repository, "lock_runner", acquire_capture_before_lock
     )
     resolve = Mock()
     monkeypatch.setattr(service, "_resolve_final_credentials", resolve)

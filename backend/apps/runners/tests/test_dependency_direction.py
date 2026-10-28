@@ -12,6 +12,8 @@ Operator disposition policy also belongs to its service; its repository never
 imports any application's services, including through function-local imports.
 Image retention policy and scheduling live in their service, while repositories
 own the transaction and runner lock shared by selection and retirement.
+Workspace configuration policy runs inside repository-owned creation/update
+scopes; services never open ORM transactions or acquire runner locks themselves.
 Dependents never import runners models, repositories or runner locks: workspace
 fences and run admission are reached through ``WorkspaceAdmissionService`` and
 a workspace's plugin runtime through ``WorkspacePluginRuntimeService``.
@@ -386,4 +388,53 @@ def test_image_retention_service_delegates_transactions_and_writes() -> None:
     assert violations == [], (
         "Keep ORM writes, transactions and locking behind retention repositories:\n"
         + "\n".join(violations)
+    )
+
+
+def test_workspace_configuration_service_delegates_transactions_and_writes() -> None:
+    """Configuration policy cannot bypass its atomic persistence boundary."""
+    path = RUNNERS_DIR / "services" / "workspace_configuration.py"
+    violations = []
+    for node in ast.walk(ast.parse(path.read_text())):
+        modules = []
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            modules = [module, *(f"{module}.{alias.name}" for alias in node.names)]
+        for module in modules:
+            if module.split(".")[0] == "django" or "locking" in module.split("."):
+                violations.append(f"{path.name}:{node.lineno} imports {module}")
+        if isinstance(node, ast.Attribute) and node.attr in {
+            "save",
+            "asave",
+            "delete",
+            "adelete",
+            "workspace_activations",
+        }:
+            violations.append(f"{path.name}:{node.lineno} accesses {node.attr}")
+    assert violations == [], (
+        "Keep configuration transactions, runner locks and direct model writes "
+        "in repositories; access plugin selections through PluginService:\n"
+        + "\n".join(violations)
+    )
+
+
+def test_workspace_configuration_repository_never_imports_services() -> None:
+    """Transaction scopes must not own credential, plugin or workspace policy."""
+    path = RUNNERS_DIR / "workspace_configuration_repository.py"
+    violations = []
+    for node in ast.walk(ast.parse(path.read_text())):
+        modules = []
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            modules = [module, *(f"{module}.{alias.name}" for alias in node.names)]
+        for module in modules:
+            if {"service", "services"} & set(module.split(".")):
+                violations.append(f"{path.name}:{node.lineno} imports {module}")
+    assert violations == [], (
+        "Keep configuration authorization and selection policy in services; "
+        "repositories only load, lock and persist:\n" + "\n".join(violations)
     )
