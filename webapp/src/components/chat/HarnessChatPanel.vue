@@ -547,7 +547,18 @@ function syncSessionQuery(sessionId: string | null): void {
 
 watch(
   () => route.query.session,
-  () => {
+  async (sessionId, _previous, onCleanup) => {
+    if (typeof sessionId !== 'string' || !sessionId) return
+    let cancelled = false
+    onCleanup(() => {
+      cancelled = true
+    })
+    const workspaceId = props.workspaceId
+    // Sidebar conversations can be newer than this workspace's session list.
+    if (!harness.sessions.some((session) => session.id === sessionId)) {
+      await harness.fetchSessions(workspaceId)
+    }
+    if (cancelled || props.workspaceId !== workspaceId) return
     applySessionQuery()
   },
   { immediate: true },
