@@ -714,6 +714,12 @@ export const useHarnessStore = defineStore('harness', () => {
         const auth = useAuthStore()
         const identity = { userId: auth.user?.id, organizationId: auth.activeOrganizationId }
         const steerRevision = steerRevisions.get(sessionId) ?? 0
+        // A gate a socket event adds while the request is in flight is newer
+        // than the response, so only gates known now may be settled by it.
+        const knownGateIds = new Set([
+          ...Object.keys(pendingPermissions.value),
+          ...Object.keys(pendingQuestions.value),
+        ])
         try {
           const response = await listHarnessParts(sessionId)
           if (partGenerations.get(sessionId) !== generation) return
@@ -773,27 +779,34 @@ export const useHarnessStore = defineStore('harness', () => {
               part.message_id = message.id
             }
           }
+          // Pending gates are listed for this session and all descendants, so
+          // the response also settles subagent gates resolved while offline.
+          const scope = new Set(collectDescendantSessionIds(sessionId, sessions.value))
+          const settled = (id: string, request: { session_id: string } | undefined) =>
+            knownGateIds.has(id) && !!request && scope.has(request.session_id)
           const nextPermissions = { ...pendingPermissions.value }
           for (const id of Object.keys(nextPermissions)) {
-            if (nextPermissions[id]?.session_id === sessionId) delete nextPermissions[id]
+            if (settled(id, nextPermissions[id])) delete nextPermissions[id]
           }
           for (const request of response.permissions ?? []) {
             nextPermissions[request.request_id] = { ...request, status: 'pending' }
           }
           pendingPermissions.value = nextPermissions
-          pruneQuestionInputCaches(
-            identity,
-            { workspace_id: response.session.workspace_id, session_id: sessionId },
-            (response.questions ?? []).map((request) => request.request_id),
-          )
           const nextQuestions = { ...pendingQuestions.value }
           for (const id of Object.keys(nextQuestions)) {
-            if (nextQuestions[id]?.session_id === sessionId) delete nextQuestions[id]
+            if (settled(id, nextQuestions[id])) delete nextQuestions[id]
           }
           for (const request of response.questions ?? []) {
             nextQuestions[request.request_id] = { ...request, status: 'pending' }
           }
           pendingQuestions.value = nextQuestions
+          for (const scopedSessionId of scope) {
+            pruneQuestionInputCaches(
+              identity,
+              { workspace_id: response.session.workspace_id, session_id: scopedSessionId },
+              Object.keys(nextQuestions),
+            )
+          }
           // A socket snapshot that landed while this request was in flight is
           // newer than the response; an absent field (older backend) is no news.
           if (response.steers && (steerRevisions.get(sessionId) ?? 0) === steerRevision) {

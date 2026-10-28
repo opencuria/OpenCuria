@@ -135,6 +135,60 @@ describe('harness store pending gate hydration', () => {
     expect(store.pendingPermissions['other-perm']?.session_id).toBe('session-2')
   })
 
+  it('settles descendant gates the parent timeline no longer lists', async () => {
+    const auth = useAuthStore()
+    auth.user = user
+    auth.activeOrganizationId = 'org-1'
+    const store = useHarnessStore()
+    store.sessions = [
+      makeSession({ status: 'idle' }),
+      makeSession({ id: 'child-1', parent_id: 'session-1', status: 'idle' }),
+      makeSession({ id: 'session-2', parent_id: null }),
+    ]
+    store.setActiveSession('session-1')
+    store.handlePermissionRequired(
+      makePermission({ request_id: 'child-perm', session_id: 'child-1' }),
+    )
+    store.handleQuestionRequired(makeQuestion({ request_id: 'child-q', session_id: 'child-1' }))
+    store.handlePermissionRequired(
+      makePermission({ request_id: 'other-perm', session_id: 'session-2' }),
+    )
+    const childDraftKey = questionKey({ request_id: 'child-q', session_id: 'child-1' })
+    saveQuestionInputCache(childDraftKey, draft)
+    // Stopped elsewhere while the socket was down: the root's authoritative
+    // timeline (which covers descendants) no longer lists the subagent gates.
+    listPartsMock.mockResolvedValueOnce({
+      session: makeSession({ status: 'idle' }),
+      messages: [],
+      permissions: [],
+      questions: [],
+    })
+
+    await store.fetchParts('session-1')
+
+    expect(store.activePermissionRequests).toEqual([])
+    expect(store.activeQuestionRequests).toEqual([])
+    expect(loadQuestionInputCache(childDraftKey, 1)).toBeNull()
+    expect(store.pendingPermissions['other-perm']?.session_id).toBe('session-2')
+  })
+
+  it('keeps a descendant gate that arrives while the timeline request is in flight', async () => {
+    const store = useHarnessStore()
+    store.sessions = [makeSession(), makeSession({ id: 'child-1', parent_id: 'session-1' })]
+    store.setActiveSession('session-1')
+    let respond!: (value: Awaited<ReturnType<typeof listHarnessParts>>) => void
+    listPartsMock.mockReturnValueOnce(new Promise((resolve) => (respond = resolve)))
+
+    const fetching = store.fetchParts('session-1', false)
+    store.handlePermissionRequired(
+      makePermission({ request_id: 'fresh-perm', session_id: 'child-1' }),
+    )
+    respond({ session: makeSession(), messages: [], permissions: [], questions: [] })
+    await fetching
+
+    expect(store.activePermissionRequests.map((row) => row.request_id)).toEqual(['fresh-perm'])
+  })
+
   it('surfaces descendant permission and question gates on the parent session', () => {
     const store = useHarnessStore()
     store.sessions = [
