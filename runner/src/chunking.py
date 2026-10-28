@@ -9,12 +9,10 @@ from __future__ import annotations
 
 import re
 
-#: Base64 characters per chunk event. Well under Daphne's default 1 MiB
-#: inbound cap (oversize frames were dropped as disconnects) including
-#: JSON framing, and a multiple of 4 so concatenated chunks stay valid
-#: base64 without re-padding. Must stay in sync with the backend copy in
+#: Base64 characters per chunk event, a multiple of 4 so concatenated chunks
+#: stay valid without re-padding. Must stay in sync with the backend copy in
 #: ``backend/apps/harness/access/runner_accessor.py`` (``HARNESS_CHUNK_B64_SIZE``)
-#: and the webapp copy in ``webapp/src/lib/fileChunks.ts``
+#: and the shared client constant in ``packages/chat-core/src/fileChunks.ts``
 #: (``FILE_CHUNK_B64_SIZE``).
 CHUNK_B64_SIZE = 256 * 1024
 

@@ -703,7 +703,7 @@ async def test_abort_rejects_pending_permission_and_question(
 async def test_resolve_permission_child_session_without_sync_orm(
     harness_workspace, monkeypatch
 ) -> None:
-    """Child-session permission resolve must wrap get_root_id for Daphne."""
+    """Child-session permission resolve must keep ORM calls off the event loop."""
     service, _, events = _service()
     parent = await _db_create_session(harness_workspace)
     child = await _db_create_child_session(harness_workspace, parent)
@@ -740,7 +740,7 @@ async def test_resolve_permission_child_session_without_sync_orm(
 async def test_resolve_question_child_session_without_sync_orm(
     harness_workspace, monkeypatch
 ) -> None:
-    """Child-session question resolve must wrap get_root_id for Daphne."""
+    """Child-session question resolve must keep ORM calls off the event loop."""
     service, _, events = _service()
     parent = await _db_create_session(harness_workspace)
     child = await _db_create_child_session(harness_workspace, parent)
@@ -775,7 +775,7 @@ async def test_resolve_question_child_session_without_sync_orm(
 async def test_abort_run_child_session_pending_gates_without_sync_orm(
     harness_workspace, monkeypatch
 ) -> None:
-    """Aborting a child with pending gates must wrap get_root_id for Daphne."""
+    """Aborting a child with pending gates must keep ORM calls off the event loop."""
     service, _, events = _service()
     parent = await _db_create_session(harness_workspace)
     child = await _db_create_child_session(harness_workspace, parent)
@@ -938,7 +938,7 @@ async def test_fail_open_parts_preserves_partial_tool_output(
 async def test_abort_run_does_not_call_orm_from_async_context(
     harness_workspace, monkeypatch
 ) -> None:
-    """Idle abort must wrap session lookup so Daphne does not 500."""
+    """Idle abort must keep the session lookup off the event loop."""
     service, _, _ = _service()
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
@@ -1266,7 +1266,7 @@ async def test_execute_run_todowrite_without_sync_orm(
 async def test_execute_run_with_skills_without_sync_orm(
     harness_workspace, monkeypatch
 ) -> None:
-    """start_run must wrap skill-body ORM so Daphne does not 500."""
+    """start_run must keep skill-body ORM calls off the event loop."""
     from apps.skills.models import Skill
 
     org_id = harness_workspace.runner.organization_id

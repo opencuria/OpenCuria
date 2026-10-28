@@ -44,12 +44,8 @@ def get_sio_server() -> socketio.AsyncServer:
             cors_allowed_origins=cors_origins,
             logger=False,
             engineio_logger=False,
-            # Keep the 200 MiB engine.io HTTP buffer for monolithic control
-            # traffic (computer-use PNG screenshots, video). Chunking keeps
-            # file transfers under Daphne's ~1 MiB default, but screenshots
-            # are still a single WebSocket frame. Align
-            # DAPHNE_WEBSOCKET_MAX_MESSAGE/FRAME_SIZE (settings) and the
-            # daphne CLI flags in entrypoint.sh at the same 200 MiB value.
+            # Screenshots and video can occupy a single frame. Match Uvicorn's
+            # --ws-max-size in entrypoint.sh; file transfers are chunked.
             max_http_buffer_size=200 * 1024 * 1024,
             # The runner answers server->client events with Socket.IO
             # ACKs (``sio.call``); without an active Engine.IO monitor

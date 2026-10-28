@@ -38,10 +38,3 @@ DATABASES = {
 
 # CORS — allow all origins in development
 CORS_ALLOW_ALL_ORIGINS = True
-
-# In-memory channel layer for development
-CHANNEL_LAYERS = {
-    "default": {
-        "BACKEND": "channels.layers.InMemoryChannelLayer",
-    }
-}

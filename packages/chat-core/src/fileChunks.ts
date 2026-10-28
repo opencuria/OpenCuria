@@ -11,7 +11,7 @@
  * `HARNESS_CHUNK_B64_SIZE`) copies.
  */
 
-/** Base64 characters per chunk event — far below Daphne's default 1 MiB inbound cap. */
+/** Base64 characters per chunk event. */
 export const FILE_CHUNK_B64_SIZE = 256 * 1024;
 
 /**

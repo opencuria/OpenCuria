@@ -34,7 +34,7 @@ from .base import Interface
 
 logger = structlog.get_logger(__name__)
 
-# Align with backend Socket.IO / Daphne 200 MiB caps. Passed to aiohttp
+# Align with backend Socket.IO / Uvicorn 200 MiB caps. Passed to aiohttp
 # ws_connect as max_msg_size (Engine.IO clients have no
 # max_http_buffer_size). aiohttp's 4 MiB default would drop inbound
 # workspace file payloads.
@@ -87,7 +87,7 @@ class WebSocketInterface(Interface):
             logger=False,
             # Engine.IO clients do not take max_http_buffer_size (server
             # only). aiohttp's ws_connect default max_msg_size is 4 MiB;
-            # raise it to match backend Socket.IO / Daphne 200 MiB caps
+            # raise it to match backend Socket.IO / Uvicorn 200 MiB caps
             # so inbound workspace file payloads are not dropped.
             websocket_extra_options={
                 "max_msg_size": SOCKETIO_MAX_HTTP_BUFFER_SIZE,
@@ -810,10 +810,8 @@ class WebSocketInterface(Interface):
             logger.error("websocket_connect_error", data=data)
 
         # -- helper: chunked file transport --------------------------------------
-        # Daphne's default inbound message/frame cap is 1 MiB (oversize
-        # frames were dropped as disconnects), which used to break large
-        # files:read/download/harness reads. Payloads above CHUNK_B64_SIZE ride as ordered N×256 KiB base64
-        # chunk events plus a small metadata-only final result
+        # Payloads above CHUNK_B64_SIZE use ordered 256 KiB base64 chunks
+        # plus a small metadata-only final result
         # (``chunked=True``, ``total_chunks=N``, empty content).
         #
         # Upload reassembly uses bounded per-transfer dict state (keyed by a
@@ -3309,12 +3307,6 @@ class WebSocketInterface(Interface):
     async def start(self) -> None:
         """Connect to the backend and block until disconnected."""
         headers = {"Authorization": f"Bearer {self._settings.api_token}"}
-        # Daphne never forwards WebSocket handshake headers into
-        # python-engine.io's environ, so the backend cannot see
-        # ``Authorization`` on a websocket-only connect. The token
-        # additionally travels in the Socket.IO auth payload (inside
-        # the WS frames — never in URLs/logs); the header above is
-        # kept for proxies/backends that forward handshake headers.
         url = self._settings.backend_url
         auth = {"token": self._settings.api_token} if self._settings.api_token else None
 

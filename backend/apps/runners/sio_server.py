@@ -181,18 +181,9 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
         """
         service = get_runner_service()
 
-        # Extract token from the Authorization header. Under Daphne,
-        # WebSocket handshake headers never reach engine.io's environ,
-        # so a websocket-only connect carries the token in the
-        # Socket.IO auth payload instead (inside the WS frames, never
-        # in URLs/logs). The header path still wins when present
-        # (proxies/backends that forward handshake headers).
+        # Accept the Authorization header or Socket.IO auth payload.
         token = _extract_bearer_token(environ)
         if not token and isinstance(auth, dict):
-            # WebSocket-only connect under Daphne: handshake headers
-            # never reach engine.io's environ, so the runner passes
-            # the token via the Socket.IO auth payload (never via URL;
-            # the payload travels inside the WS frames, not in logs).
             candidate = str(auth.get("token") or "").strip()
             if candidate:
                 token = candidate
@@ -803,13 +794,7 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
 
 
 def _extract_bearer_token(environ: dict) -> str | None:
-    """
-    Extract the Bearer token from the ASGI/WSGI environ.
-
-    Only the standard ``Authorization: Bearer <token>`` HTTP header is
-    accepted here; see :func:`_extract_query_token` for the documented
-    opt-in query fallback (runner WebSocket upgrades under Daphne).
-    """
+    """Extract the Bearer token from the Authorization header."""
     auth_header = environ.get("HTTP_AUTHORIZATION", "")
     if auth_header.startswith("Bearer "):
         return auth_header[7:]

@@ -82,11 +82,8 @@ DEFAULT_TIMEOUT = 60.0
 
 #: Base64 characters per chunk event on the harness file channel. Mirrors the
 #: runner constant (``runner/src/chunking.py`` ``CHUNK_B64_SIZE``) and the
-#: webapp copy (``webapp/src/lib/fileChunks.ts`` ``FILE_CHUNK_B64_SIZE``):
-#: 256 KiB base64 per event stays far below Daphne's default 1 MiB
-#: inbound message/frame cap (which dropped oversize frames as
-#: disconnects). Engine.IO keeps its separate 200 MiB HTTP buffer for
-#: pre-existing monolithic non-chunk events.
+#: shared client constant (``packages/chat-core/src/fileChunks.ts``
+#: ``FILE_CHUNK_B64_SIZE``).
 HARNESS_CHUNK_B64_SIZE = 256 * 1024
 
 #: Max buffered base64 chars for one chunked harness read. 100 MiB of raw
