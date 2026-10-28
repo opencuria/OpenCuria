@@ -59,6 +59,11 @@ class QemuRuntimeCloudInitTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(iso.stat().st_mode & 0o777, 0o644)
                 self.assertIn(f"{ip}/30", seeds[-1][1])
                 self.assertIn(f"via: {gateway}", seeds[-1][1])
+                self.assertIn(
+                    f"nameservers:\n      addresses:\n        - {gateway}", seeds[-1][1]
+                )
+                self.assertNotIn("8.8.8.8", seeds[-1][1])
+                self.assertNotIn("1.1.1.1", seeds[-1][1])
 
         identities = [
             metadata.splitlines()[0].split(": ", 1)[1] for metadata, _ in seeds

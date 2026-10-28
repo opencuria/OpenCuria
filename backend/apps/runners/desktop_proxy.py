@@ -46,6 +46,11 @@ _COOKIE_MAX_AGE = 3600  # 1 hour
 # wraps ``setInterval`` before the client bundle runs.
 _KASM_IDLE_GUARD_SCRIPT = (
     b"<script data-opencuria-kasm-idle-guard>"
+    # The viewer uses our WebSocket proxy exclusively. KasmVNC 1.3.3 otherwise
+    # creates a WebRTC peer with a hardcoded public Google STUN server on connect.
+    # Disable that optional transport in this document before its bundle loads.
+    b"window.RTCPeerConnection=undefined;"
+    b"window.webkitRTCPeerConnection=undefined;"
     b"(function(){"
     b"var n=window.setInterval.bind(window);"
     b"window.setInterval=function(handler,timeout){"
@@ -105,6 +110,7 @@ def build_vnc_redirect_url(
             "autoconnect": "true",
             "resize": "scale",
             "reconnect": "false",
+            "enable_webrtc": "false",
             "clipboard_up": "true",
             "clipboard_down": "true",
             # OpenCuria owns trusted copy/paste, not Kasm's background reads.
@@ -117,7 +123,7 @@ def build_vnc_redirect_url(
 
 
 def inject_kasm_idle_guard(html: bytes) -> bytes:
-    """Insert the idle-timer guard so it runs before KasmVNC scripts."""
+    """Enforce WebSocket-only transport and guard the iframe's idle timer."""
     if b"data-opencuria-kasm-idle-guard" in html:
         return html
     lower = html.lower()

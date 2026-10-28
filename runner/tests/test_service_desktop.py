@@ -138,6 +138,7 @@ class WorkspaceServiceDesktopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/tmp/.X11-unix/X1", command)
         self.assertIn("/dev/tcp/127.0.0.1/6901", command)
         self.assertIn(".xstartup-started", command)
+        self.assertIn("-PublicIP 127.0.0.1", command)
         self.assertEqual(command.count("/root/.vnc/xstartup >>"), 1)
         marker_clear = command.index("rm -f /root/.vnc/.xstartup-started")
         xvnc_launch = command.index("/usr/bin/Xvnc :1")

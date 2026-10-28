@@ -168,6 +168,7 @@ Recommended setup flow:
    ```bash
    sudo install -d -m 755 \
      /var/lib/opencuria/images \
+     /var/lib/opencuria/base-images \
      /var/lib/opencuria/disks \
      /var/lib/opencuria/snapshots
    ```

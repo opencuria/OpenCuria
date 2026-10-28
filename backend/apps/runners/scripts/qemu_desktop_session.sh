@@ -110,6 +110,8 @@ network:
   protocol: http
   interface: 0.0.0.0
   websocket_port: 6901
+  udp:
+    public_ip: 127.0.0.1
   ssl:
     require_ssl: false
     pem_certificate:
@@ -586,6 +588,7 @@ GEOMETRY="${OPENCURIA_DESKTOP_GEOMETRY:-1920x1080}"
     -SecurityTypes None \
     -disableBasicAuth \
     -websocketPort 6901 \
+    -PublicIP 127.0.0.1 \
     -httpd /usr/share/kasmvnc/www \
     -interface 0.0.0.0 \
     -AlwaysShared \

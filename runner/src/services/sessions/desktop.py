@@ -893,6 +893,7 @@ class DesktopManager:
             f"/usr/bin/Xvnc :1 -geometry {geometry} -depth 24 "
             "-rfbport 5901 -SecurityTypes None -disableBasicAuth "
             "-websocketPort 6901 -httpd /usr/share/kasmvnc/www "
+            "-PublicIP 127.0.0.1 "
             "-interface 0.0.0.0 -AlwaysShared -AcceptKeyEvents "
             "-AcceptPointerEvents -SendCutText -AcceptCutText "
             "-AcceptSetDesktopSize=0 "

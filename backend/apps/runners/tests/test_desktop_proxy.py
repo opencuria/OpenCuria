@@ -299,6 +299,7 @@ async def test_proxy_root_redirects_with_local_scale_not_remote_resize(
     assert redirect_query["clipboard_up"] == ["true"]
     assert redirect_query["clipboard_down"] == ["true"]
     assert redirect_query["clipboard_seamless"] == ["false"]
+    assert redirect_query["enable_webrtc"] == ["false"]
     assert "reconnect=false" in location
     assert f"path=ws%2Fdesktop%2F{workspace_id}%2F%3Ftoken%3Dtest-token" in location
     assert f"path=ws/desktop/{workspace_id}/?token=" not in location
@@ -557,6 +558,15 @@ def test_kasm_idle_guard_handles_only_last_active_exception():
     assert b"msg.indexOf('lastActiveAt')!==-1" in patched
     assert b"window.UI" not in patched
     assert b"throw err" in patched
+
+
+def test_viewer_disables_public_stun_transport_before_loading_kasm():
+    original = b'<html><head><script src="dist/main.bundle.js"></script></head></html>'
+    patched = inject_kasm_idle_guard(original)
+    assert patched.index(b"window.RTCPeerConnection=undefined;") < patched.index(
+        b'<script src="dist/main.bundle.js"'
+    )
+    assert b"window.webkitRTCPeerConnection=undefined;" in patched
 
 
 def test_inject_kasm_idle_guard_inserts_after_doctype_without_head():

@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from common.exceptions import ConflictError
 
+from .image_assignment_repository import ImageAssignmentRepository
 from .locking import lock_runner
 from .models import LifecycleCommand, Runner, Task, Workspace
 from .workspace_operation_repository import (
@@ -257,6 +258,16 @@ class OperationRepository:
             lock_runner(task.runner_id)
             if task.workspace_id:
                 Workspace.objects.select_for_update().get(pk=task.workspace_id)
+            from .models import ImageBuildJob, ImageInstance
+
+            jobs = list(
+                ImageBuildJob.objects.select_for_update().filter(build_task=task)
+            )
+            list(
+                ImageInstance.objects.select_for_update().filter(
+                    Q(creating_task=task) | Q(deleting_task=task)
+                )
+            )
             Task.objects.select_for_update().get(pk=task.id)
             Task.objects.filter(
                 pk=task.id, status__in=["pending", "in_progress"]
@@ -270,14 +281,14 @@ class OperationRepository:
                 "create_workspace_from_image_artifact",
             }:
                 Workspace.objects.filter(current_task=task).update(status="failed")
-            from .models import ImageInstance
-
             ImageInstance.objects.filter(
                 creating_task=task, status__in=["creating", "building", "capturing"]
             ).update(status="failed")
             ImageInstance.objects.filter(deleting_task=task, status="deleting").update(
                 status="delete_failed", delete_last_error=reason
             )
+            for job in jobs:
+                ImageAssignmentRepository.reconcile(job)
 
     @staticmethod
     def validate_result(runner_id: str, data: dict) -> bool:

@@ -113,6 +113,20 @@ class OperationResultRepository:
         ImageInstance.objects.filter(deleting_task=task, status="delete_failed").update(
             status="deleting"
         )
+        # Intervention already cleared pending. Restore it only when this is
+        # still the latest requested build; an older result cannot take ownership.
+        for job in ImageBuildJob.objects.select_for_update().filter(build_task=task):
+            image = ImageInstance.objects.filter(
+                build_job=job, creating_task=task
+            ).first()
+            if image is None:
+                continue
+            job.pending_generation = image
+            fields = ["pending_generation", "updated_at"]
+            if not job.current_generation_id and job.status == "failed":
+                job.status = "pending"
+                fields.append("status")
+            job.save(update_fields=fields)
 
     def mark_received(self) -> None:
         """Record receipt before invoking the type-specific lifecycle callback."""

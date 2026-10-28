@@ -28,6 +28,7 @@ from .enums import (
     WorkspaceOperation,
     WorkspaceStatus,
 )
+from .image_assignment_repository import ImageAssignmentRepository
 from .locking import lock_runner
 from .models import (
     CapturedImage,
@@ -1508,8 +1509,9 @@ class ImageDefinitionRepository:
     @staticmethod
     def activate(definition_id: uuid.UUID) -> None:
         """Re-activate only when no durable deletion request still owns retirement."""
-        from .models import ImageDeletionRequest
         from common.exceptions import ConflictError
+
+        from .models import ImageDeletionRequest
 
         if (
             ImageDeletionRequest.objects.filter(
@@ -1851,46 +1853,8 @@ class ImageGenerationRepository:
 
     @staticmethod
     def reconcile_assignment(job: ImageBuildJob) -> None:
-        """Apply the latest requested result under runner/assignment locks.
-
-        Retirement can defer promotion beyond task completion. The durable
-        build_task correlation, not pending or successful history, selects it.
-        """
-        image = (
-            (
-                ImageInstance.objects.select_for_update()
-                .filter(build_job=job, creating_task_id=job.build_task_id)
-                .first()
-            )
-            if job.build_task_id
-            else None
-        )
-        if image is None:
-            return
-        task = Task.objects.select_for_update().get(pk=job.build_task_id)
-        if task.status not in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
-            return
-        if job.pending_generation_id == image.id:
-            job.pending_generation = None
-        if job.status not in {
-            "pending_deletion",
-            "deleting",
-            "deleted",
-            "delete_failed",
-        }:
-            if task.status == TaskStatus.COMPLETED and image.status == "ready":
-                job.current_generation = image
-                job.built_at = task.completed_at
-                if job.status != "deactivated":
-                    job.status = "active"
-            elif (
-                task.status == TaskStatus.FAILED
-                and image.status == "failed"
-                and not job.current_generation_id
-                and job.status != "deactivated"
-            ):
-                job.status = "failed"
-        job.save()
+        """Apply the shared task-bound assignment projection."""
+        ImageAssignmentRepository.reconcile(job)
 
     @staticmethod
     def validate_selection(image_id: uuid.UUID) -> ImageInstance:

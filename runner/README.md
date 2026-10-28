@@ -36,6 +36,29 @@ QEMU images are built from image definitions and build jobs in the app. The
 backend generates the init script; the runner builds the QCOW2 image from an
 Ubuntu cloud image.
 
+Cloud images are cached in `RUNNER_QEMU_IMAGE_CACHE_DIR`. Definition builds are
+published to `/var/lib/opencuria/base-images`, the path used by the control
+plane. Both publication directories (builds and snapshots) are validated and
+included in storage inventory; no cache-directory override is needed.
+
+Image builds provision separate VMs concurrently. Subnet allocation, publication
+and removal still serialize against storage scans, while guest provisioning and
+SSH readiness do not hold the shared storage lock. libvirt assigns unique bridge
+names, including when older interrupted build VMs still exist.
+
+New guests use their network gateway's [libvirt DNS resolver][libvirt-dns], which
+forwards via the host's resolver configuration. This also works with host-local
+resolvers such as systemd-resolved; no public DNS fallback is installed. Existing
+guests retain their seed configuration until reset or recreation.
+
+Desktop transport uses the authenticated WebSocket proxy. The runner passes
+[`-PublicIP 127.0.0.1`][kasm-public-ip] to Xvnc even for existing images, disabling
+automatic public IP discovery. The proxied viewer disables WebRTC before the client loads
+so it does not contact public STUN servers. Restart the desktop after updating.
+
+[libvirt-dns]: https://libvirt.org/formatnetwork.html#addressing
+[kasm-public-ip]: https://kasmweb.com/kasmvnc/docs/master/man/Xvnc.html
+
 Built and captured images use `.manifest.json` publication markers. Inventory
 only classifies images with verified manifests as ready; cloning requires a
 manifest. Unpublished disks remain visible with their physical dependencies

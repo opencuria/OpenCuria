@@ -44,7 +44,7 @@ from .managed_process import (
     managed_argv,
     managed_isolated_argv,
 )
-from .storage import sha256_digest, storage_mutation
+from .storage import drain_cancellation, sha256_digest, storage_mutation
 from .stream_wrapper import shell_quote_argv, stream_wrapper_argv
 
 logger = structlog.get_logger(__name__)
@@ -59,6 +59,9 @@ _SSH_CLOSE_TIMEOUT = 2.0
 # Guest filesystem whose usage is reported with the VM metrics.
 _GUEST_DISK_PATH = "/workspace"
 _GUEST_DISK_USAGE_TIMEOUT = 5.0
+
+# Publication path sent by the control plane; distinct from cloud-image cache.
+_BUILD_IMAGE_DIR = Path("/var/lib/opencuria/base-images")
 
 
 def _parse_df_usage(output: str) -> dict[str, int]:
@@ -151,8 +154,7 @@ ethernets:
         via: {gateway}
     nameservers:
       addresses:
-        - 8.8.8.8
-        - 1.1.1.1
+        - {gateway}
 """
 
 
@@ -568,15 +570,6 @@ class QemuRuntime(RuntimeBackend):
         """Libvirt network name for this workspace's isolated network."""
         return f"opencuria-ws-{instance_id}"
 
-    def _workspace_bridge_name(self, instance_id: str) -> str:
-        """Linux bridge interface name (max 15 chars) for the workspace network.
-
-        Format: ``kai`` + first 9 hex chars of the instance UUID (dashes removed).
-        Total length: 3 + 9 = 12 characters — safely under the 15-char limit.
-        """
-        hex_id = instance_id.replace("-", "")
-        return f"kai{hex_id[:9]}"
-
     def _get_existing_workspace_gateways(self) -> set[str]:
         """Return gateway IPs of all active opencuria workspace networks."""
         conn = self._libvirt_conn()
@@ -702,16 +695,16 @@ class QemuRuntime(RuntimeBackend):
         def _create() -> tuple[str, str]:
             gateway, vm_ip, netmask = self._pick_workspace_subnet()
             net_name = self._workspace_network_name(instance_id)
-            bridge_name = self._workspace_bridge_name(instance_id)
             net_xml = f"""\
 <network>
   <name>{net_name}</name>
-  <bridge name='{bridge_name}' stp='on' delay='0'/>
+  <bridge stp='on' delay='0'/>
   <forward mode='nat'>
     <nat>
       <port start='1024' end='65535'/>
     </nat>
   </forward>
+  <dns enable='yes' forwardPlainNames='yes'/>
   <ip address='{gateway}' netmask='{netmask}'/>
 </network>"""
             conn = self._libvirt_conn()
@@ -738,17 +731,15 @@ class QemuRuntime(RuntimeBackend):
             conn = self._libvirt_conn()
             try:
                 net = conn.networkLookupByName(net_name)
-            except libvirt.libvirtError:
-                return  # already gone
-            try:
-                if net.isActive():
-                    net.destroy()
-            except libvirt.libvirtError:
-                pass
-            try:
-                net.undefine()
-            except libvirt.libvirtError:
-                pass
+            except libvirt.libvirtError as exc:
+                if exc.get_error_code() == libvirt.VIR_ERR_NO_NETWORK:
+                    return
+                raise
+            if net.isActive():
+                net.destroy()
+            net.undefine()
+            if any(net.name() == net_name for net in conn.listAllNetworks(0)):
+                raise RuntimeError("Network removal could not be verified")
 
         await asyncio.to_thread(_destroy)
         logger.info("vm_network_destroyed", instance_id=instance_id, network=net_name)
@@ -1335,6 +1326,9 @@ class QemuRuntime(RuntimeBackend):
         iso = self._cloud_init_iso_path(instance_id)
         if iso.exists():
             iso.unlink()
+        seed_directory = self._disk_dir / f"{instance_id}-cloud-init"
+        if seed_directory.exists():
+            shutil.rmtree(seed_directory)
 
         # Remove persisted host key and in-memory cache entry
         key_file = self._host_key_file(instance_id)
@@ -1928,6 +1922,42 @@ class QemuRuntime(RuntimeBackend):
         await process.wait()
 
     @storage_mutation
+    async def _prepare_build_instance(self, instance_id: str, base_image: Path) -> Path:
+        """Allocate subnet, disk and domain atomically against storage scans."""
+        gateway, vm_ip = await self._create_workspace_network(instance_id)
+        disk = await self._create_overlay_disk(
+            instance_id,
+            disk_size_gb=self._settings.qemu_disk_size_gb,
+            base_image=str(base_image),
+        )
+        cloud_init_iso = await self._create_cloud_init_iso(
+            instance_id, vm_ip=vm_ip, gateway=gateway
+        )
+        domain_xml = _domain_xml(
+            name=self._domain_name(instance_id),
+            vcpus=self._settings.qemu_vcpus,
+            memory_mb=self._settings.qemu_memory_mb,
+            disk_path=str(disk),
+            cloud_init_iso=str(cloud_init_iso),
+            network=self._workspace_network_name(instance_id),
+        )
+
+        def define_and_start() -> None:
+            domain = self._libvirt_conn().defineXML(domain_xml)
+            domain.create()
+
+        await asyncio.to_thread(define_and_start)
+        return disk
+
+    @storage_mutation
+    async def _finalize_build_image(
+        self, instance_id: str, disk: Path, target: Path, manifest: dict
+    ) -> None:
+        """Stop and publish without allowing a scan or deletion between effects."""
+        await self.stop_workspace(instance_id)
+        await self._publish_image(disk, target, manifest)
+
+    @drain_cancellation
     async def build_image(
         self,
         *,
@@ -1939,11 +1969,21 @@ class QemuRuntime(RuntimeBackend):
         progress_callback=None,
     ) -> dict[str, str]:
         """Build a reusable QCOW2 base image by provisioning a temporary VM."""
-        base_image = self._resolve_build_base_image(base_distro)
-        instance_id = f"image-build-{uuid.uuid4()}"
         target_path = self._managed_image_path(image_path)
         if not operation_id or not image_instance_id:
             raise RuntimeError("Build requires operation and image identity")
+        # Downloads and qemu-img validation must not block heartbeat delivery.
+        # Serialize cache publication per distro, not the guest provisioning.
+        if not hasattr(self, "_base_image_locks"):
+            self._base_image_locks: dict[str, asyncio.Lock] = {}
+        cache_lock = self._base_image_locks.setdefault(
+            base_distro.strip().lower(), asyncio.Lock()
+        )
+        async with cache_lock:
+            base_image = await asyncio.to_thread(
+                self._resolve_build_base_image, base_distro
+            )
+        instance_id = f"image-build-{uuid.uuid4()}"
         self._ensure_host_directory(
             target_path.parent,
             writable_hint=(
@@ -1955,32 +1995,7 @@ class QemuRuntime(RuntimeBackend):
             await progress_callback(f"Using base image {base_image.name}")
 
         try:
-            gateway, vm_ip = await self._create_workspace_network(instance_id)
-            disk = await self._create_overlay_disk(
-                instance_id,
-                disk_size_gb=self._settings.qemu_disk_size_gb,
-                base_image=str(base_image),
-            )
-            cloud_init_iso = await self._create_cloud_init_iso(
-                instance_id,
-                vm_ip=vm_ip,
-                gateway=gateway,
-            )
-            domain_xml = _domain_xml(
-                name=self._domain_name(instance_id),
-                vcpus=self._settings.qemu_vcpus,
-                memory_mb=self._settings.qemu_memory_mb,
-                disk_path=str(disk),
-                cloud_init_iso=str(cloud_init_iso),
-                network=self._workspace_network_name(instance_id),
-            )
-
-            def _define_and_start() -> None:
-                conn = self._libvirt_conn()
-                dom = conn.defineXML(domain_xml)
-                dom.create()
-
-            await asyncio.to_thread(_define_and_start)
+            disk = await self._prepare_build_instance(instance_id, base_image)
             await self._wait_for_ssh(instance_id)
 
             if progress_callback is not None:
@@ -2003,9 +2018,8 @@ class QemuRuntime(RuntimeBackend):
                 progress_callback,
             )
 
-            await self.stop_workspace(instance_id)
-
-            await self._publish_image(
+            await self._finalize_build_image(
+                instance_id,
                 disk,
                 target_path,
                 {
@@ -2028,18 +2042,22 @@ class QemuRuntime(RuntimeBackend):
 
     # ── Image artifact operations ─────────────────────────────────────
 
+    def _managed_image_roots(self) -> list[Path]:
+        """Return publication and cache roots shared by validation and inventory."""
+        cache_dir = getattr(
+            getattr(self, "_settings", None),
+            "qemu_image_cache_dir",
+            self._snapshot_dir.parent / "images",
+        )
+        return [
+            self._snapshot_dir,
+            Path(cache_dir),
+            getattr(self, "_build_image_dir", _BUILD_IMAGE_DIR),
+        ]
+
     def _managed_image_path(self, reference: str) -> Path:
         """Reject traversal and symlink components, including nonexistent targets."""
-        roots = [
-            self._snapshot_dir,
-            Path(
-                getattr(
-                    getattr(self, "_settings", None),
-                    "qemu_image_cache_dir",
-                    self._snapshot_dir.parent / "images",
-                )
-            ),
-        ]
+        roots = self._managed_image_roots()
         path = Path(reference)
         if not path.is_absolute():
             import re
@@ -2215,17 +2233,7 @@ class QemuRuntime(RuntimeBackend):
         scan = RuntimeInventory()
         paths: set[Path] = set()
         workspace_disks: dict[str, set[str]] = {}
-        roots = [
-            self._disk_dir,
-            self._snapshot_dir,
-            Path(
-                getattr(
-                    getattr(self, "_settings", None),
-                    "qemu_image_cache_dir",
-                    self._snapshot_dir.parent / "images",
-                )
-            ),
-        ]
+        roots = [self._disk_dir, *self._managed_image_roots()]
         filesystem_ids: set[str] = set()
 
         def inspect_filesystem(path: Path, filesystem_id: str) -> None:
@@ -2248,6 +2256,10 @@ class QemuRuntime(RuntimeBackend):
 
         try:
             for root in roots:
+                # Build storage is created on first publication, not at runner boot.
+                if root == getattr(self, "_build_image_dir", _BUILD_IMAGE_DIR):
+                    if not root.exists():
+                        continue
                 inspect_filesystem(root, str(root.stat().st_dev))
                 for directory, _, files in os.walk(
                     root, onerror=lambda e: scan.errors.append("Directory unreadable")

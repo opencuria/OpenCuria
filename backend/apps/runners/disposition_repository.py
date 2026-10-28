@@ -12,9 +12,11 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from .image_assignment_repository import ImageAssignmentRepository
 from .locking import lock_runner
 from .models import (
     CaptureRequest,
+    ImageBuildJob,
     ImageInstance,
     LifecycleCommand,
     Runner,
@@ -111,6 +113,17 @@ class DispositionRepository:
                 workspace = Workspace.objects.select_for_update().get(
                     pk=state.workspace_id
                 )
+            list(
+                ImageBuildJob.objects.select_for_update().filter(
+                    build_task_id=state.operation_id
+                )
+            )
+            list(
+                ImageInstance.objects.select_for_update().filter(
+                    Q(creating_task_id=state.operation_id)
+                    | Q(deleting_task_id=state.operation_id)
+                )
+            )
             task = Task.objects.select_for_update().get(pk=state.operation_id)
             command = LifecycleCommand.objects.select_for_update().get(pk=task.id)
             task.runner = runner
@@ -152,6 +165,8 @@ class DispositionRepository:
         ).exclude(status__in=["ready", "deleted", "pending_deletion"]).update(
             status="failed", updated_at=timezone.now()
         )
+        for job in ImageBuildJob.objects.select_for_update().filter(build_task=task):
+            ImageAssignmentRepository.reconcile(job)
 
     def has_recreate_request(self) -> bool:
         """Read whether the locked child belongs to a workspace reset."""

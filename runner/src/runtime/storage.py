@@ -3,10 +3,41 @@
 import asyncio
 import contextvars
 import hashlib
+from collections.abc import Callable, Coroutine
 from functools import wraps
-from typing import BinaryIO
+from typing import Any, BinaryIO, ParamSpec, TypeVar
 
 _owner = contextvars.ContextVar("storage_owner", default=None)
+_Params = ParamSpec("_Params")
+_Result = TypeVar("_Result")
+
+
+async def _await_drained(task: asyncio.Task[_Result]) -> _Result:
+    """Keep ownership until an issued effect settles, even after cancellation."""
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
+def drain_cancellation(
+    method: Callable[_Params, Coroutine[Any, Any, _Result]],
+) -> Callable[_Params, Coroutine[Any, Any, _Result]]:
+    """Drain a long operation without holding the shared storage lock."""
+
+    @wraps(method)
+    async def wrapped(*args: _Params.args, **kwargs: _Params.kwargs) -> _Result:
+        return await _await_drained(asyncio.create_task(method(*args, **kwargs)))
+
+    return wrapped
 
 
 def sha256_digest(stream: BinaryIO) -> str:
@@ -35,11 +66,6 @@ def storage_mutation(method):
                 finally:
                     _owner.reset(token)
 
-        task = asyncio.create_task(run())
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
-            raise
+        return await _await_drained(asyncio.create_task(run()))
 
     return wrapped

@@ -37,6 +37,7 @@ def runtime(tmp_path):
     r = object.__new__(QemuRuntime)
     r._snapshot_dir = tmp_path / "snapshots"
     r._disk_dir = tmp_path / "disks"
+    r._build_image_dir = tmp_path / "base-images"
     images = tmp_path / "images"
     for directory in (r._snapshot_dir, r._disk_dir, images):
         directory.mkdir()
@@ -198,9 +199,13 @@ async def test_mutation_cancellation_drains_thread_and_holds_lock():
     await asyncio.to_thread(entered.wait)
     first.cancel()
     second = asyncio.create_task(r.change())
-    await asyncio.sleep(0.02)
-    assert not first.done() and not second.done()
-    release.set()
+    try:
+        await asyncio.sleep(0.02)
+        first.cancel()
+        await asyncio.sleep(0.02)
+        assert not first.done() and not second.done()
+    finally:
+        release.set()
     with pytest.raises(asyncio.CancelledError):
         await first
     await second
