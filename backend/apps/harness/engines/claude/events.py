@@ -3,7 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, NamedTuple
+from typing import Any
+
+from claude_agent_sdk import (
+    ResultMessage,
+    StreamEvent,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
+from claude_agent_sdk.types import ContentBlock
 
 from ...providers.base import Usage
 
@@ -28,80 +39,13 @@ class StepState:
     reasoning: list[str] = field(default_factory=list)
 
 
-class SdkMessageTypes(NamedTuple):
-    """SDK message classes used for result and task lifecycle dispatch."""
-
-    assistant: type
-    result: type
-    stream: type
-    user: type
-    system: type
-    task_notification: type
-    task_progress: type
-    task_started: type
-
-
 class ClaudeEventNormalizer:
     """Stateless conversion from Claude SDK payloads to harness primitives."""
 
-    @staticmethod
-    def message_types() -> SdkMessageTypes:
-        """Load the pinned SDK's message classes lazily."""
-        try:
-            from claude_agent_sdk import (
-                AssistantMessage,
-                ResultMessage,
-                StreamEvent,
-                SystemMessage,
-                TaskNotificationMessage,
-                TaskProgressMessage,
-                TaskStartedMessage,
-                UserMessage,
-            )
-        except ImportError as exc:
-            raise RuntimeError("claude-agent-sdk is not installed") from exc
-        return SdkMessageTypes(
-            AssistantMessage,
-            ResultMessage,
-            StreamEvent,
-            UserMessage,
-            SystemMessage,
-            TaskNotificationMessage,
-            TaskProgressMessage,
-            TaskStartedMessage,
-        )
-
-    @staticmethod
-    def stream_event(message: Any) -> dict[str, Any]:
-        """Return a raw SDK stream event from a parsed message or fixture."""
-        raw = (
-            message.get("event")
-            if isinstance(message, dict)
-            else getattr(message, "event", None)
-        )
-        return raw if isinstance(raw, dict) else {}
-
-    @staticmethod
-    def stream_parent(message: Any) -> str:
-        """Return the root/child scope attached to an SDK stream event."""
-        parent = (
-            message.get("parent_tool_use_id")
-            if isinstance(message, dict)
-            else getattr(message, "parent_tool_use_id", None)
-        )
-        return str(parent or "")
-
     @classmethod
-    def stream_message_id(cls, message: Any) -> str:
-        """Read the Anthropic API message ID from ``message_start``."""
-        raw = cls.stream_event(message)
-        api_message = raw.get("message")
-        return str(api_message.get("id") or "") if isinstance(api_message, dict) else ""
-
-    @classmethod
-    def stream_usage(cls, message: Any) -> tuple[str, Usage] | None:
+    def stream_usage(cls, message: StreamEvent) -> tuple[str, Usage] | None:
         """Read an API message usage snapshot from stream boundaries."""
-        raw = cls.stream_event(message)
+        raw = message.event
         if raw.get("type") == "message_start":
             api_message = raw.get("message")
             usage = api_message.get("usage") if isinstance(api_message, dict) else None
@@ -124,32 +68,25 @@ class ClaudeEventNormalizer:
         if not isinstance(raw, dict):
             return None
 
-        def count(*keys: str) -> int:
-            for key in keys:
-                if key in raw:
-                    try:
-                        return int(raw.get(key) or 0)
-                    except (TypeError, ValueError):
-                        return 0
-            return 0
+        def count(key: str) -> int:
+            try:
+                return int(raw.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0
 
         prompt = (
-            count("input_tokens", "inputTokens")
-            + count("cache_read_input_tokens", "cacheReadInputTokens")
-            + count("cache_creation_input_tokens", "cacheCreationInputTokens")
+            count("input_tokens")
+            + count("cache_read_input_tokens")
+            + count("cache_creation_input_tokens")
         )
-        completion = count("output_tokens", "outputTokens")
+        completion = count("output_tokens")
         if not any(
             key in raw
             for key in (
                 "input_tokens",
-                "inputTokens",
                 "cache_read_input_tokens",
-                "cacheReadInputTokens",
                 "cache_creation_input_tokens",
-                "cacheCreationInputTokens",
                 "output_tokens",
-                "outputTokens",
             )
         ):
             return None
@@ -160,19 +97,9 @@ class ClaudeEventNormalizer:
         )
 
     @staticmethod
-    def stream_fallback_id(message: Any) -> str:
-        """Return a fixture-only fallback when API message_start is absent."""
-        value = (
-            message.get("uuid")
-            if isinstance(message, dict)
-            else getattr(message, "uuid", None)
-        )
-        return str(value or "")
-
-    @classmethod
-    def stream_block_start(cls, message: Any) -> tuple[int, str, str, str] | None:
+    def stream_block_start(message: StreamEvent) -> tuple[int, str, str, str] | None:
         """Return content-block index, type, tool name and tool-use ID."""
-        raw = cls.stream_event(message)
+        raw = message.event
         if raw.get("type") != "content_block_start":
             return None
         try:
@@ -188,10 +115,10 @@ class ClaudeEventNormalizer:
             str(block.get("id") or ""),
         )
 
-    @classmethod
-    def stream_block_stop(cls, message: Any) -> int | None:
+    @staticmethod
+    def stream_block_stop(message: StreamEvent) -> int | None:
         """Return the index of a completed content block, if present."""
-        raw = cls.stream_event(message)
+        raw = message.event
         if raw.get("type") != "content_block_stop":
             return None
         try:
@@ -200,22 +127,9 @@ class ClaudeEventNormalizer:
             return 0
 
     @staticmethod
-    def assistant_message_id(message: Any) -> str:
-        """Read the Anthropic API message ID from an assistant completion."""
-        if isinstance(message, dict):
-            raw_message = message.get("message")
-            message_id = (
-                raw_message.get("id") if isinstance(raw_message, dict) else None
-            )
-            return str(message_id or message.get("uuid") or "")
-        return str(
-            getattr(message, "message_id", None) or getattr(message, "uuid", None) or ""
-        )
-
-    @classmethod
-    def partial_delta(cls, message: Any) -> tuple[str, int, str, str, str, str] | None:
-        """Return parent/index/slot/field/text and fallback ID for a delta."""
-        raw = cls.stream_event(message)
+    def partial_delta(message: StreamEvent) -> tuple[int, str, str, str] | None:
+        """Return index, slot, field and text for a content delta."""
+        raw = message.event
         if raw.get("type") != "content_block_delta":
             return None
         delta = raw.get("delta")
@@ -236,105 +150,35 @@ class ClaudeEventNormalizer:
             index = int(raw.get("index", 0))
         except (TypeError, ValueError):
             index = 0
-        return (
-            cls.stream_parent(message),
-            index,
-            slot,
-            field_name,
-            text,
-            cls.stream_fallback_id(message),
-        )
+        return index, slot, field_name, text
 
     @staticmethod
-    def assistant_blocks(message: Any) -> tuple[str, list[Any]]:
-        """Return parent tool-use ID and assistant content blocks."""
-        parent = getattr(message, "parent_tool_use_id", None)
-        blocks = getattr(message, "content", None)
-        if isinstance(message, dict):
-            parent = message.get("parent_tool_use_id")
-            raw_message = message.get("message")
-            blocks = (
-                raw_message.get("content", message.get("content"))
-                if isinstance(raw_message, dict)
-                else message.get("content")
-            )
-        return str(parent or ""), blocks if isinstance(blocks, list) else []
-
-    @staticmethod
-    def user_tool_results(message: Any) -> list[tuple[str, Any, bool]]:
+    def user_tool_results(message: UserMessage) -> list[tuple[str, Any, bool]]:
         """Extract only tool-result blocks from SDK user messages."""
-        content = getattr(message, "content", None)
-        if isinstance(message, dict):
-            raw = message.get("message")
-            content = (
-                raw.get("content") if isinstance(raw, dict) else message.get("content")
-            )
-        if not isinstance(content, list):
+        if not isinstance(message.content, list):
             return []
-        results: list[tuple[str, Any, bool]] = []
-        for block in content:
-            if ClaudeEventNormalizer.block_type(block) != "tool_result":
-                continue
-            if isinstance(block, dict):
-                call_id, value, error = (
-                    block.get("tool_use_id"),
-                    block.get("content"),
-                    block.get("is_error"),
-                )
-            else:
-                call_id = getattr(block, "tool_use_id", None)
-                value = getattr(block, "content", None)
-                error = getattr(block, "is_error", None)
-            if call_id:
-                results.append((str(call_id), value, bool(error)))
-        return results
+        return [
+            (block.tool_use_id, block.content, bool(block.is_error))
+            for block in message.content
+            if isinstance(block, ToolResultBlock) and block.tool_use_id
+        ]
 
     @staticmethod
-    def block_type(block: Any) -> str:
-        """Return a content-block discriminator for SDK objects and fixtures."""
-        if isinstance(block, dict):
-            return str(block.get("type") or "")
+    def block_type(block: ContentBlock) -> str:
+        """Return a content-block discriminator for a parsed SDK block."""
         return {
-            "TextBlock": "text",
-            "ThinkingBlock": "thinking",
-            "ToolUseBlock": "tool_use",
-            "ToolResultBlock": "tool_result",
-        }.get(type(block).__name__, "")
+            TextBlock: "text",
+            ThinkingBlock: "thinking",
+            ToolUseBlock: "tool_use",
+            ToolResultBlock: "tool_result",
+        }.get(type(block), "")
 
     @staticmethod
-    def content_text(block: Any) -> str:
-        """Read text/thinking content from an SDK block or raw fixture."""
-        if isinstance(block, dict):
-            return str(block.get("text") or block.get("thinking") or "")
-        return str(
-            getattr(block, "text", None) or getattr(block, "thinking", None) or ""
-        )
-
-    @classmethod
-    def assistant_deltas(
-        cls, message: Any, streamed: dict[tuple[int, str], str]
-    ) -> tuple[str, list[tuple[int, str, str, str]]]:
-        """Return final content not already emitted by partial deltas."""
-        parent, blocks = cls.assistant_blocks(message)
-        deltas: list[tuple[int, str, str, str]] = []
-        for index, block in enumerate(blocks):
-            kind = cls.block_type(block)
-            if kind not in {"text", "thinking"}:
-                continue
-            full = cls.content_text(block)
-            if not full:
-                continue
-            slot = "text" if kind == "text" else "thinking"
-            field_name = "text" if kind == "text" else "reasoning"
-            previous = streamed.get((index, slot), "")
-            remainder = (
-                full[len(previous) :]
-                if previous and full.startswith(previous)
-                else full
-            )
-            if remainder:
-                deltas.append((index, slot, field_name, remainder))
-        return parent, deltas
+    def content_text(block: ContentBlock) -> str:
+        """Read text or thinking content from a parsed SDK block."""
+        if isinstance(block, TextBlock):
+            return block.text
+        return block.thinking if isinstance(block, ThinkingBlock) else ""
 
     @staticmethod
     def tool_output(value: Any) -> str:
@@ -381,23 +225,14 @@ class ClaudeEventNormalizer:
         return str(value)
 
     @staticmethod
-    def result_usage(result: Any) -> Usage:
+    def result_usage(result: ResultMessage) -> Usage:
         """Map one SDK result's per-run tokens and reported cost to the common type."""
-        if isinstance(result, dict):
-            raw = result.get("usage")
-            cost = result.get("total_cost_usd", result.get("totalCostUSD", 0.0))
-            model_usage = result.get("model_usage", result.get("modelUsage"))
-        else:
-            raw = getattr(result, "usage", None)
-            cost = getattr(result, "total_cost_usd", 0.0)
-            model_usage = getattr(result, "model_usage", None)
-        if not isinstance(model_usage, dict):
-            model_usage = getattr(result, "modelUsage", None)
-        raw = raw if isinstance(raw, dict) else {}
+        cost = result.total_cost_usd
+        model_usage = result.model_usage
         # ``usage`` covers this run only. ``modelUsage`` is restored by the CLI on
         # ``--resume`` and spans the whole conversation, so summing it would count
         # earlier turns again and inflate the last step_finish (the context size).
-        per_run = ClaudeEventNormalizer.message_usage(raw)
+        per_run = ClaudeEventNormalizer.message_usage(result.usage)
         if per_run is not None:
             return Usage(
                 prompt_tokens=per_run.prompt_tokens,
@@ -428,4 +263,4 @@ class ClaudeEventNormalizer:
         )
 
 
-__all__ = ["ClaudeEventNormalizer", "SdkMessageTypes", "StepState"]
+__all__ = ["ClaudeEventNormalizer", "StepState"]

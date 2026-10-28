@@ -14,6 +14,7 @@ from typing import Any
 
 import structlog
 from asgiref.sync import sync_to_async
+from claude_agent_sdk import AssistantMessage, StreamEvent
 
 from common import stream_diagnostics
 
@@ -1084,17 +1085,22 @@ class ClaudeEngine:
             parent_tool_use_id=parent or None,
         )
 
-    async def _emit_partial(self, message: Any) -> None:
+    async def _emit_partial(self, message: StreamEvent) -> None:
         """Normalize stream boundaries and emit safe partial text/tool events."""
-        raw = ClaudeEventNormalizer.stream_event(message)
+        raw = message.event
         if not raw:
             return
-        parent = ClaudeEventNormalizer.stream_parent(message)
+        parent = message.parent_tool_use_id or ""
         state = self._step_states.setdefault(parent, StepState())
         event_type = str(raw.get("type") or "")
 
         if event_type == "message_start":
-            api_message_id = ClaudeEventNormalizer.stream_message_id(message)
+            api_message = raw.get("message")
+            api_message_id = (
+                str(api_message.get("id") or "")
+                if isinstance(api_message, dict)
+                else ""
+            )
             if api_message_id and api_message_id != state.current_message_id:
                 await self._flush_stream_redactors(parent=parent)
                 state = await self._begin_message_turn(parent, api_message_id)
@@ -1119,20 +1125,11 @@ class ClaudeEngine:
                 )
 
         if event_type == "content_block_start":
-            message_id = (
-                state.current_message_id
-                or ClaudeEventNormalizer.stream_fallback_id(message)
-            )
-            if message_id and message_id != state.current_message_id:
-                state = await self._begin_message_turn(parent, message_id)
             block = ClaudeEventNormalizer.stream_block_start(message)
             if block is None:
                 return
             index, kind, tool_name, call_id = block
-            message_id = (
-                state.current_message_id
-                or ClaudeEventNormalizer.stream_fallback_id(message)
-            )
+            message_id = state.current_message_id
             if message_id:
                 state.block_types[(message_id, index)] = kind
                 order = state.block_order.setdefault(message_id, [])
@@ -1148,10 +1145,7 @@ class ClaudeEngine:
             index = ClaudeEventNormalizer.stream_block_stop(message)
             if index is None:
                 return
-            message_id = (
-                state.current_message_id
-                or ClaudeEventNormalizer.stream_fallback_id(message)
-            )
+            message_id = state.current_message_id
             kind = state.block_types.get((message_id, index), "")
             if kind in {"text", "thinking"}:
                 field_name = "text" if kind == "text" else "reasoning"
@@ -1169,13 +1163,10 @@ class ClaudeEngine:
         parsed = ClaudeEventNormalizer.partial_delta(message)
         if parsed is None:
             return
-        parent, index, slot, field_name, text, fallback_id = parsed
+        index, slot, field_name, text = parsed
         if not text:
             return
-        message_id = state.current_message_id or fallback_id
-        if not message_id:
-            # SDK stream UUID is message-unique; session_id is not.
-            message_id = str(getattr(message, "uuid", "") or "")
+        message_id = state.current_message_id
         if not message_id:
             return
         if not state.started:
@@ -1208,11 +1199,11 @@ class ClaudeEngine:
             parent=parent, state=state, field_name=field_name, text=emitted
         )
 
-    async def _emit_assistant(self, message: Any) -> None:
+    async def _emit_assistant(self, message: AssistantMessage) -> None:
         """Emit only content not already streamed for this API message."""
-        parent, blocks = ClaudeEventNormalizer.assistant_blocks(message)
+        parent, blocks = message.parent_tool_use_id or "", message.content
         state = self._step_states.setdefault(parent, StepState())
-        message_id = ClaudeEventNormalizer.assistant_message_id(message)
+        message_id = message.message_id or message.uuid or ""
         if message_id and message_id in state.completed_messages:
             return
         if message_id:
@@ -1220,18 +1211,7 @@ class ClaudeEngine:
         elif not state.started:
             await self._start_new_step(parent or None)
         state.current_message_id = message_id or state.current_message_id
-        raw_usage = getattr(message, "usage", None)
-        self._record_message_usage(state, message_id, raw_usage)
-        stream_state = {
-            (index, slot): value
-            for (api_id, index, slot), value in state.streamed.items()
-            if api_id == message_id
-        }
-        _, deltas = ClaudeEventNormalizer.assistant_deltas(message, stream_state)
-        delta_by_block = {
-            (index, slot): (field_name, text)
-            for index, slot, field_name, text in deltas
-        }
+        self._record_message_usage(state, message_id, message.usage)
         blocks_by_index = {index: block for index, block in enumerate(blocks)}
         ordered_blocks = state.block_order.get(message_id, [])
         if ordered_blocks:
@@ -1294,31 +1274,15 @@ class ClaudeEngine:
                         field_name=field_name,
                         text=full_safe,
                     )
-            elif redactor is not None:
-                await self._flush_stream_redactor(key)
-                text = delta_by_block.get((index, slot), (field_name, full_text))[1]
-                if text:
+            else:
+                if redactor is not None:
+                    await self._flush_stream_redactor(key)
+                if not accumulated or not full_text.startswith(accumulated):
                     await self._emit_stream_text(
                         parent=parent,
                         state=state,
                         field_name=field_name,
-                        text=redact_text(text, self._event_secrets()),
-                    )
-            elif not accumulated:
-                await self._emit_stream_text(
-                    parent=parent,
-                    state=state,
-                    field_name=field_name,
-                    text=redact_text(full_text, self._event_secrets()),
-                )
-            elif not full_text.startswith(accumulated):
-                text = delta_by_block.get((index, slot), (field_name, full_text))[1]
-                if text:
-                    await self._emit_stream_text(
-                        parent=parent,
-                        state=state,
-                        field_name=field_name,
-                        text=redact_text(text, self._event_secrets()),
+                        text=redact_text(full_text, self._event_secrets()),
                     )
             state.streamed[streamed_key] = full_text
             if message_id:

@@ -6,12 +6,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from claude_agent_sdk import ResultMessage
 from claude_agent_sdk._internal.message_parser import parse_message
 
 from apps.harness.engines.claude.engine import ClaudeEngine
 from apps.harness.engines.claude.events import (
     ClaudeEventNormalizer,
-    SdkMessageTypes,
     StepState,
 )
 from apps.harness.providers.base import Usage
@@ -37,101 +37,24 @@ async def engine_events() -> tuple[ClaudeEngine, list[dict[str, Any]]]:
     return engine, events
 
 
-@pytest.mark.asyncio
-async def test_stream_event_then_final_message_dedupes_prefix(engine_events) -> None:
-    engine, events = engine_events
-    partial = SimpleNamespace(
-        parent_tool_use_id=None,
-        session_id="session-1",
-        uuid="message-1",
-        event={
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "text_delta", "text": "Hel"},
-        },
-    )
-    await engine._emit_partial(partial)
-    assistant = SimpleNamespace(
-        parent_tool_use_id=None,
-        session_id="session-1",
-        uuid="message-1",
-        content=[{"type": "text", "text": "Hello"}],
-    )
-    await engine._emit_assistant(assistant)
-    text = [
-        event["delta"].get("text")
-        for event in events
-        if event.get("type") == "part_updated"
-    ]
-    assert text == ["Hel", "lo"]
-    assert [event["type"] for event in events].count("step_start") == 1
-    await engine._emit_assistant(
-        SimpleNamespace(
-            parent_tool_use_id=None,
-            session_id="session-1",
-            uuid="message-2",
-            content=[{"type": "text", "text": "Next message."}],
-        )
-    )
-    text = [
-        event["delta"].get("text")
-        for event in events
-        if event.get("type") == "part_updated"
-    ]
-    assert text == ["Hel", "lo", "Next message."]
-
-
-@pytest.mark.asyncio
-async def test_reasoning_delta_maps_to_reasoning_and_tools_are_not_text(
-    engine_events,
-) -> None:
-    engine, events = engine_events
-    await engine._emit_partial(
-        SimpleNamespace(
-            parent_tool_use_id=None,
-            session_id="session-1",
-            uuid="message-1",
-            event={
-                "type": "content_block_delta",
-                "index": 1,
-                "delta": {"type": "thinking_delta", "thinking": "Consider"},
-            },
-        )
-    )
-    await engine._emit_partial(
-        SimpleNamespace(
-            parent_tool_use_id=None,
-            session_id="session-1",
-            uuid="message-1",
-            event={
-                "type": "content_block_delta",
-                "index": 2,
-                "delta": {"type": "input_json_delta", "partial_json": "{}"},
-            },
-        )
-    )
-    part_events = [event for event in events if event.get("type") == "part_updated"]
-    assert part_events == [
-        {"type": "part_updated", "step": 1, "delta": {"reasoning": "Consider"}}
-    ]
-
-
 def test_user_tool_result_normalizer_preserves_error_flag_and_call_id() -> None:
     results = ClaudeEventNormalizer.user_tool_results(
-        {
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": "tool-7",
-                        "content": [{"type": "text", "text": "denied"}],
-                        "is_error": True,
-                    }
-                ],
-            },
-        }
+        parse_message(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tool-7",
+                            "content": [{"type": "text", "text": "denied"}],
+                            "is_error": True,
+                        }
+                    ],
+                },
+            }
+        )
     )
     assert results == [("tool-7", [{"type": "text", "text": "denied"}], True)]
 
@@ -250,6 +173,37 @@ def _assistant_message(
             },
         }
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slot", ["text", "thinking"])
+@pytest.mark.parametrize("final_text", ["Hello", "Other"])
+async def test_final_sdk_blocks_reconcile_partial_text(
+    engine_events, slot: str, final_text: str
+) -> None:
+    engine, events = engine_events
+    await engine._emit_partial(
+        _stream_event({"type": "message_start", "message": {"id": "api-prefix"}})
+    )
+    for delta in (
+        {"type": f"{slot}_delta", slot: "Hel"},
+        {"type": "input_json_delta", "partial_json": "{}"},
+    ):
+        await engine._emit_partial(
+            _stream_event({"type": "content_block_delta", "index": 0, "delta": delta})
+        )
+    final = _assistant_message(
+        "api-prefix", [{"type": slot, slot: final_text, "signature": "sig"}]
+    )
+    await engine._emit_assistant(final)
+    await engine._emit_assistant(final)
+
+    field = "text" if slot == "text" else "reasoning"
+    assert [event["delta"] for event in events if event["type"] == "part_updated"] == [
+        {field: "Hel"},
+        {field: "lo" if final_text == "Hello" else "Other"},
+    ]
+    assert [event["type"] for event in events].count("step_start") == 1
 
 
 @pytest.mark.asyncio
@@ -598,86 +552,82 @@ async def test_task_started_keeps_only_strictly_canonical_child_identity(
 
 
 @pytest.mark.asyncio
-async def test_stream_usage_and_max_turns_result_are_attributed_once() -> None:
-    from apps.harness.engines.claude.message_projector import ClaudeMessageProjector
-
-    class ResultMessage:
-        pass
-
-    types = SdkMessageTypes(
-        assistant=type("Assistant", (), {}),
-        result=ResultMessage,
-        stream=type("Stream", (), {}),
-        user=type("User", (), {}),
-        system=type("System", (), {}),
-        task_notification=type("TaskNotification", (), {}),
-        task_progress=type("TaskProgress", (), {}),
-        task_started=type("TaskStarted", (), {}),
+async def test_max_turns_result_preserves_partial_answer_and_usage(
+    engine_events,
+) -> None:
+    engine, _events = engine_events
+    message = ResultMessage(
+        subtype="error_max_turns",
+        duration_ms=0,
+        duration_api_ms=0,
+        is_error=True,
+        num_turns=1,
+        session_id="session",
+        errors=["turn limit reached"],
+        result="partial result",
+        usage={"input_tokens": 4, "output_tokens": 2},
     )
-    original = ClaudeEventNormalizer.message_types
-    ClaudeEventNormalizer.message_types = staticmethod(lambda: types)
-    try:
-
-        class EngineStub:
-            on_binding = None
-
-            @staticmethod
-            def _safe_error_text(text: str) -> str:
-                return text
-
-        projector = ClaudeMessageProjector(EngineStub(), cli_version="", sdk_version="")
-        message = ResultMessage()
-        message.subtype = "error_max_turns"
-        message.is_error = True
-        message.errors = ["turn limit reached"]
-        message.result = "partial result"
-        message.session_id = "session"
-        message.usage = {
-            "input_tokens": 4,
-            "output_tokens": 2,
-        }
-        message.model_usage = None
-        outcome = await projector.handle_message(message)
-        assert outcome is not None
-        assert outcome[1] == "partial result"
-        assert outcome[2] == Usage(prompt_tokens=4, completion_tokens=2, total_tokens=6)
-    finally:
-        ClaudeEventNormalizer.message_types = original
+    outcome = await engine._message_projector.handle_message(message)
+    assert outcome is not None
+    assert outcome[1] == "partial result"
+    assert outcome[2] == Usage(prompt_tokens=4, completion_tokens=2, total_tokens=6)
 
 
 def test_result_usage_ignores_resumed_cumulative_model_usage() -> None:
     # After ``--resume`` the CLI restores ``modelUsage`` for the whole
     # conversation while ``usage`` still covers only the current run.
-    result = {
-        "usage": {
-            "input_tokens": 10,
-            "cache_read_input_tokens": 1000,
-            "cache_creation_input_tokens": 5,
-            "output_tokens": 5,
-        },
-        "modelUsage": {
-            "claude-sonnet-4-5": {
-                "inputTokens": 30,
-                "cacheReadInputTokens": 3000,
-                "cacheCreationInputTokens": 15,
-                "outputTokens": 15,
-            }
-        },
-        "total_cost_usd": 0.5,
-    }
+    result = parse_message(
+        {
+            "type": "result",
+            "subtype": "success",
+            "duration_ms": 0,
+            "duration_api_ms": 0,
+            "is_error": False,
+            "num_turns": 1,
+            "session_id": "session",
+            "usage": {
+                "input_tokens": 10,
+                "cache_read_input_tokens": 1000,
+                "cache_creation_input_tokens": 5,
+                "output_tokens": 5,
+            },
+            "modelUsage": {
+                "claude-sonnet-4-5": {
+                    "inputTokens": 30,
+                    "cacheReadInputTokens": 3000,
+                    "cacheCreationInputTokens": 15,
+                    "outputTokens": 15,
+                }
+            },
+            "total_cost_usd": 0.5,
+        }
+    )
     assert ClaudeEventNormalizer.result_usage(result) == Usage(
         prompt_tokens=1015, completion_tokens=5, total_tokens=1020, cost=0.5
     )
 
 
 def test_result_usage_falls_back_to_model_usage_without_run_usage() -> None:
-    result = {
-        "usage": {},
-        "modelUsage": {
-            "a": {"inputTokens": 3, "cacheReadInputTokens": 4, "outputTokens": 2},
-            "b": {"inputTokens": 1, "cacheCreationInputTokens": 1, "outputTokens": 1},
-        },
-    }
+    result = parse_message(
+        {
+            "type": "result",
+            "subtype": "success",
+            "duration_ms": 0,
+            "duration_api_ms": 0,
+            "is_error": False,
+            "num_turns": 1,
+            "session_id": "session",
+            "usage": {},
+            "modelUsage": {
+                "a": {"inputTokens": 3, "cacheReadInputTokens": 4, "outputTokens": 2},
+                "b": {
+                    "inputTokens": 1,
+                    "cacheCreationInputTokens": 1,
+                    "outputTokens": 1,
+                },
+            },
+        }
+    )
     assert ClaudeEventNormalizer.result_usage(result) == Usage(
         prompt_tokens=9, completion_tokens=3, total_tokens=12
     )

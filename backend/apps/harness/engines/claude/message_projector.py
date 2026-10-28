@@ -5,6 +5,17 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from claude_agent_sdk import (
+    AssistantMessage,
+    ResultMessage,
+    StreamEvent,
+    SystemMessage,
+    TaskNotificationMessage,
+    TaskProgressMessage,
+    TaskStartedMessage,
+    UserMessage,
+)
+from claude_agent_sdk.types import Message
 
 from ...agents.definitions import canonical_subagent_type
 from ...providers.base import Usage
@@ -34,20 +45,21 @@ class ClaudeMessageProjector:
         self.cli_version = cli_version
         self.sdk_version = sdk_version
 
-    async def handle_message(self, message: Any) -> tuple[Any, str, Usage] | None:
+    async def handle_message(
+        self, message: Message
+    ) -> tuple[ResultMessage, str, Usage] | None:
         """Dispatch SDK messages to stream, task, and session projections."""
         engine = self.engine
-        types = ClaudeEventNormalizer.message_types()
-        if isinstance(message, types.stream):
+        if isinstance(message, StreamEvent):
             await engine._emit_partial(message)
             return None
-        if isinstance(message, types.assistant):
+        if isinstance(message, AssistantMessage):
             await engine._emit_assistant(message)
             return None
-        if isinstance(message, types.user):
+        if isinstance(message, UserMessage):
             await self.handle_user_tool_results(message)
             return None
-        if isinstance(message, types.task_started):
+        if isinstance(message, TaskStartedMessage):
             data = message.data if isinstance(message.data, dict) else {}
             await self.start_subtask(
                 str(message.task_id or ""),
@@ -56,13 +68,13 @@ class ClaudeMessageProjector:
                 task_type=str(message.task_type or data.get("task_type") or ""),
             )
             return None
-        if isinstance(message, types.task_progress):
+        if isinstance(message, TaskProgressMessage):
             await self.handle_task_progress(message)
             return None
-        if isinstance(message, types.task_notification):
+        if isinstance(message, TaskNotificationMessage):
             await self.handle_task_notification(message)
             return None
-        if isinstance(message, types.system):
+        if isinstance(message, SystemMessage):
             if message.subtype in {"init", "session_start", "session_started"}:
                 data = message.data if isinstance(message.data, dict) else {}
                 session_id = str(data.get("session_id") or "")
@@ -70,7 +82,7 @@ class ClaudeMessageProjector:
                     await self.bind_external_session(session_id)
             await self.handle_task_updated(message)
             return None
-        if isinstance(message, types.result):
+        if isinstance(message, ResultMessage):
             if message.session_id:
                 await self.bind_external_session(str(message.session_id))
             usage = ClaudeEventNormalizer.result_usage(message)
@@ -178,7 +190,7 @@ class ClaudeMessageProjector:
             }
         )
 
-    async def handle_user_tool_results(self, message: Any) -> None:
+    async def handle_user_tool_results(self, message: UserMessage) -> None:
         """Finalize tool calls from SDK tool-result messages if hooks lagged."""
         engine = self.engine
         tool_results = ClaudeEventNormalizer.user_tool_results(message)
