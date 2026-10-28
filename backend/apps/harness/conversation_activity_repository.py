@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from django.db.models import F
+from django.db.models import F, OuterRef, Subquery
 
 from .models import HarnessMessage, HarnessSession, QuestionRequest
 from .permissions.models import PermissionRequest
@@ -53,19 +53,24 @@ class ConversationActivityRepository:
         )
 
     @staticmethod
-    def session_parent(
-        session_id: uuid.UUID,
-    ) -> tuple[uuid.UUID, uuid.UUID | None] | None:
-        """Load one ancestry link; missing sessions have no link."""
-        return (
-            HarnessSession.objects.filter(id=session_id)
+    def session_parents(
+        session_ids: set[uuid.UUID],
+    ) -> dict[uuid.UUID, uuid.UUID | None]:
+        """Load one ancestry frontier, omitting missing sessions."""
+        return dict(
+            HarnessSession.objects.filter(id__in=session_ids)
+            .order_by()
             .values_list("id", "parent_id")
-            .first()
         )
 
     @staticmethod
     def busy_roots(org_id: uuid.UUID, user_id: int) -> list[HarnessSession]:
-        """Load busy roots in workspaces currently owned by the given user."""
+        """Load owned busy roots with their latest assistant completion time."""
+        latest = (
+            HarnessMessage.objects.filter(session_id=OuterRef("pk"), role="assistant")
+            .order_by("-position")
+            .values("completed_at")[:1]
+        )
         return list(
             HarnessSession.objects.select_related("workspace")
             .filter(
@@ -75,6 +80,7 @@ class ConversationActivityRepository:
                 parent__isnull=True,
                 status="busy",
             )
+            .annotate(latest_assistant_completed_at=Subquery(latest))
             .order_by("-updated_at")
         )
 

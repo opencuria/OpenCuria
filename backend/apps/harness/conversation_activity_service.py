@@ -69,17 +69,43 @@ class ConversationActivityService:
 
     def root_id(self, session_id: uuid.UUID) -> uuid.UUID | None:
         """Resolve a child to its root without a depth cap; reject broken cycles."""
+        return self._root_ids({session_id})[session_id]
+
+    def _root_ids(
+        self, session_ids: set[uuid.UUID]
+    ) -> dict[uuid.UUID, uuid.UUID | None]:
+        """Read shared ancestors once per call, one query per tree level."""
+        parents: dict[uuid.UUID, uuid.UUID | None] = {}
         seen: set[uuid.UUID] = set()
-        while session_id not in seen:
-            seen.add(session_id)
-            row = self.repo.session_parent(session_id)
-            if row is None:
-                return None
-            current_id, parent_id = row
-            if parent_id is None:
-                return current_id
-            session_id = parent_id
-        return None
+        pending = session_ids
+        while pending:
+            rows = self.repo.session_parents(pending)
+            parents.update(rows)
+            seen.update(pending)
+            pending = {
+                parent
+                for parent in rows.values()
+                if parent is not None and parent not in seen
+            }
+
+        resolved: dict[uuid.UUID, uuid.UUID | None] = {}
+        for session_id in session_ids:
+            current = session_id
+            path: set[uuid.UUID] = set()
+            while current not in resolved:
+                if current in path or current not in parents:
+                    root = None
+                    break
+                path.add(current)
+                parent = parents[current]
+                if parent is None:
+                    root = current
+                    break
+                current = parent
+            else:
+                root = resolved[current]
+            resolved.update((ancestor, root) for ancestor in path)
+        return {session_id: resolved.get(session_id) for session_id in session_ids}
 
     def active_rows(
         self, org_id: uuid.UUID, user_id: int
@@ -89,22 +115,18 @@ class ConversationActivityService:
         if not sessions:
             return []
         workspace_ids = [session.workspace_id for session in sessions]
-        permission_roots = {
-            self.root_id(session_id)
-            for session_id in self.repo.pending_session_ids(
-                org_id, workspace_ids, permissions=True
-            )
-        }
-        question_roots = {
-            self.root_id(session_id)
-            for session_id in self.repo.pending_session_ids(
-                org_id, workspace_ids, permissions=False
-            )
-        }
+        permission_ids = set(
+            self.repo.pending_session_ids(org_id, workspace_ids, permissions=True)
+        )
+        question_ids = set(
+            self.repo.pending_session_ids(org_id, workspace_ids, permissions=False)
+        )
+        roots = self._root_ids(permission_ids | question_ids)
+        permission_roots = {roots[session_id] for session_id in permission_ids}
+        question_roots = {roots[session_id] for session_id in question_ids}
         result = []
         for session in sessions:
-            latest = self.repo.latest_assistant(session.id)
-            if latest and latest.completed_at is not None:
+            if session.latest_assistant_completed_at is not None:
                 continue
             phase = "running"
             if session.id in permission_roots:
