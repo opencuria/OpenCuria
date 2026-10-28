@@ -7,7 +7,11 @@ import {
   waitFor,
   within,
 } from "@testing-library/react-native";
-import type { ProviderModel, Workspace } from "@opencuria/client";
+import type {
+  HarnessConversation,
+  ProviderModel,
+  Workspace,
+} from "@opencuria/client";
 import { ThemeProvider } from "../ui/theme";
 import { MainScreen } from "./MainScreen";
 import { useSession } from "./SessionContext";
@@ -386,6 +390,50 @@ it("keeps the composer ready while a message is on its way", async () => {
     "Ask OpenCuria|ready",
   );
   await act(async () => accept({ mode: "build" }));
+  tree.unmount();
+});
+
+it.each([
+  ["the current workspace", "workspace-a", false],
+  ["another workspace", "workspace-b", false],
+  ["the inbox", "workspace-b", true],
+])("opens an existing chat from %s and closes the sidebar", async (_, workspaceId, unread) => {
+  const client = mockClient();
+  client.workspaces.list.mockResolvedValue([
+    runningWorkspace,
+    { ...runningWorkspace, id: "workspace-b", name: "Other workspace" },
+  ]);
+  client.conversations.list.mockResolvedValue([
+    {
+      session_id: "existing-chat",
+      workspace_id: workspaceId,
+      workspace_name: "Workspace",
+      title: "Existing chat",
+      status: "idle",
+      unread,
+      needs_attention: false,
+      updated_at: "2026-01-01T00:00:00Z",
+      last_message_at: "2026-01-01T00:00:00Z",
+    } as HarnessConversation,
+  ]);
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() => expect(mockController.newChat).toHaveBeenCalled());
+  fireEvent.press(screen.getByTestId("main-menu"));
+  fireEvent.press(
+    screen.getByTestId(`${unread ? "inbox-" : ""}existing-chat`),
+  );
+  await waitFor(() =>
+    expect(mockController.openWorkspace).toHaveBeenCalledWith(
+      workspaceId,
+      "existing-chat",
+    ),
+  );
+  expect(screen.queryByTestId("existing-chat")).toBeNull();
   tree.unmount();
 });
 
