@@ -17,7 +17,6 @@ import {
 } from '@/lib/composerSheets'
 import { resolveSessionUsedTokens } from '@/lib/sessionContextUsage'
 import { COMPOSER_MORPH_MS, consumeComposerTransition } from '@/lib/composerTransition'
-import { buildChildSessionIdMap } from '@/lib/harnessSubtaskActivity'
 import { getDroppedFiles, isFileDrag } from '@/lib/chatUpload'
 import HarnessChatContainer from '@/components/chat/HarnessChatContainer.vue'
 import HarnessChatInput from '@/components/chat/HarnessChatInput.vue'
@@ -78,10 +77,6 @@ const streamingMessageId = computed(() => {
 
 /** Skeleton only for the true initial workspace load (never over chat). */
 const chatLoading = computed(() => harness.loading && harness.activeMessages.length === 0)
-
-const childSessionIds = computed<Record<string, string>>(() =>
-  buildChildSessionIdMap(harness.sessions, harness.messagesBySession),
-)
 
 const activeRequests = computed(() => harness.activePermissionRequests)
 const activeQuestions = computed(() => harness.activeQuestionRequests)
@@ -772,7 +767,6 @@ async function handleForkMessage(messageId: string): Promise<void> {
       :messages="harness.activeMessages"
       :loading="chatLoading"
       :streaming-message-id="streamingMessageId"
-      :child-session-ids="childSessionIds"
       :summary="activeSession?.status === 'idle' ? activeSession.summary : ''"
       :disabled="messageActionsDisabled"
       :busy="sessionBusy"

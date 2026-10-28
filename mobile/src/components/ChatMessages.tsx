@@ -179,20 +179,10 @@ export function ChatMessages({
   const handleRequestPartDetail = useLatestHandler(onRequestPartDetail);
   const handleOpenFile = useLatestHandler(onOpenFile);
   const handleOpenAttachment = useLatestHandler(onOpenAttachment);
-  // Snapshots clone every session on each streamed token; rows only need to
-  // re-render when the session tree they resolve subtasks against changes.
-  const sessionTreeKey = sessions
-    .map(
-      (session) =>
-        `${session.id}\u0001${session.parent_id ?? ""}\u0001${session.title}`,
-    )
-    .join("\u0002");
-  const rowSessions = useMemo(() => sessions, [sessionTreeKey]);
   const renderItem = useCallback(
     ({ item }: { item: HarnessMessage }) => (
       <MessageRow
         message={item}
-        sessions={rowSessions}
         mediaVisible={visibleMessageIds.current.has(item.id)}
         mediaScopeKey={mediaScopeKey ?? item.session_id}
         disabled={disabled || busy}
@@ -226,7 +216,6 @@ export function ChatMessages({
       handleOpenSubtask,
       handleRequestPartDetail,
       resolveMedia,
-      rowSessions,
       streamingMessageId,
       visibleMessageIdsState,
       mediaScopeKey,
@@ -495,7 +484,6 @@ interface MessageRowProps extends Omit<
   "messages" | "sessions" | "todos" | "busy" | "streamingMessageId" | "testID"
 > {
   message: HarnessMessage;
-  sessions: HarnessSession[];
   streaming: boolean;
   mediaVisible: boolean;
   mediaScopeKey?: string | number;
@@ -503,7 +491,6 @@ interface MessageRowProps extends Omit<
 
 const MessageRow = memo(function MessageRow({
   message,
-  sessions,
   streaming,
   disabled,
   resolveMedia,
@@ -706,7 +693,6 @@ const MessageRow = memo(function MessageRow({
                 key={blockKey(block, index)}
                 block={block}
                 streaming={streaming}
-                sessions={sessions}
                 mediaVisible={mediaVisible}
                 mediaScopeKey={mediaScopeKey}
                 resolveMedia={resolveMedia}
@@ -962,7 +948,6 @@ interface BlockProps extends Pick<
 > {
   block: MessageRenderBlock;
   streaming: boolean;
-  sessions: HarnessSession[];
   mediaVisible: boolean;
   mediaScopeKey?: string | number;
 }
@@ -970,7 +955,6 @@ interface BlockProps extends Pick<
 function BlockView({
   block,
   streaming,
-  sessions,
   resolveMedia,
   onOpenFile,
   onOpenSubtask,
@@ -1018,7 +1002,6 @@ function BlockView({
       <WorkedForBlock
         block={block}
         streaming={streaming}
-        sessions={sessions}
         mediaVisible={mediaVisible}
         mediaScopeKey={mediaScopeKey}
         resolveMedia={resolveMedia}
@@ -1062,7 +1045,6 @@ function BlockView({
       return (
         <SubtaskCard
           part={block.part}
-          sessions={sessions}
           onOpenSubtask={onOpenSubtask}
         />
       );
@@ -1096,7 +1078,6 @@ interface WorkedForProps extends Pick<
 > {
   block: Extract<MessageRenderBlock, { kind: "workedFor" }>;
   streaming: boolean;
-  sessions: HarnessSession[];
   mediaVisible: boolean;
   mediaScopeKey?: string | number;
 }
@@ -1145,7 +1126,6 @@ function WorkedForBlock(props: WorkedForProps): React.JSX.Element {
               key={blockKey(inner, index)}
               block={inner}
               streaming={props.streaming}
-              sessions={props.sessions}
               resolveMedia={props.resolveMedia}
               onOpenFile={props.onOpenFile}
               onOpenSubtask={props.onOpenSubtask}
@@ -1676,15 +1656,13 @@ function ToolAttachmentCard({
 
 function SubtaskCard({
   part,
-  sessions,
   onOpenSubtask,
 }: {
   part: HarnessPart;
-  sessions: HarnessSession[];
   onOpenSubtask?: ChatMessagesProps["onOpenSubtask"];
 }): React.JSX.Element {
   const { theme } = useTheme();
-  const child = resolveChildSessionId(part, sessions) ?? "";
+  const child = resolveChildSessionId(part) ?? "";
   const agent = String(part.meta?.agent ?? part.display?.agent ?? "Agent");
   return (
     <NativeAction

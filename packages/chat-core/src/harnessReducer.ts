@@ -442,7 +442,7 @@ export function applyPartDelta(
   }
   // Text deltas mutate their existing part in place. Sorting/replacing the
   // array on every chunk needlessly invalidates consumers that derive maps
-  // from part membership and IDs (for example, subtask lookup maps).
+  // from part membership and IDs.
   if (message.parts.length !== initialPartCount || partPositionChanged) {
     const sortedParts = sortHarnessParts(message.parts);
     if (sortedParts.some((part, index) => part !== message.parts[index])) {

@@ -7,7 +7,6 @@ import { useHarnessStore } from '@/stores/harness'
 import {
   formatSubagentType,
   subtaskActivityLabel,
-  buildChildSessionIdMap,
   resolveChildSessionId,
 } from '@/lib/harnessSubtaskActivity'
 import { formatHarnessModelEffort, type ProviderModel } from '@/lib/harnessModels'
@@ -16,7 +15,6 @@ import HarnessDesktopMini from './HarnessDesktopMini.vue'
 
 const props = defineProps<{
   part: HarnessPart
-  childSessionId?: string | null
   models?: ProviderModel[]
 }>()
 
@@ -26,19 +24,7 @@ const emit = defineEmits<{
 
 const harness = useHarnessStore()
 
-/** The child session id links parent/child (backend `parent` FK). */
-const childId = computed(() => {
-  const subtaskId = String(props.part.meta?.['subtask_id'] ?? '')
-  // The panel passes its shared map entry. Rebuilding the map per card would
-  // rescan every loaded transcript on each streamed part of any subagent.
-  const known = props.childSessionId
-    ? {
-        [props.part.id]: props.childSessionId,
-        ...(subtaskId ? { [subtaskId]: props.childSessionId } : {}),
-      }
-    : buildChildSessionIdMap(harness.sessions, harness.messagesBySession)
-  return resolveChildSessionId(props.part, harness.sessions, known)
-})
+const childId = computed(() => resolveChildSessionId(props.part))
 
 const catalog = ref<ProviderModel[]>(props.models ?? [])
 

@@ -23,7 +23,6 @@ import { HARNESS_PAGE_SIZE, lastHarnessPage, shouldResetHarnessPage } from '@/li
 const props = defineProps<{
   message: HarnessMessage
   streaming?: boolean
-  childSessionIds?: Record<string, string>
   models?: ProviderModel[]
   /** Brief user-goal recap, shown quietly under the final answer. */
   summary?: string
@@ -343,7 +342,6 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
                     streamingCursor.innerIndex !== null,
                   )
                 "
-                :child-session-ids="childSessionIds"
                 :models="models ?? catalog"
                 :streaming="streaming"
                 @open-subtask="emit('openSubtask', $event)"
@@ -360,7 +358,6 @@ function asRenderBlocks(block: MessageRenderBlock): RenderBlock[] {
                 streamingCursor.innerIndex === null,
               )
             "
-            :child-session-ids="childSessionIds"
             :models="models ?? catalog"
             :streaming="streaming"
             @open-subtask="emit('openSubtask', $event)"

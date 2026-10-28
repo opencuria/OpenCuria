@@ -275,6 +275,53 @@ describe("ChatMessages", () => {
     expect(onRequestPartDetail).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["child", undefined])(
+    "uses only the explicit subtask chat link: %s",
+    (childId) => {
+      const onOpenSubtask = jest.fn();
+      render(
+        <ThemeProvider>
+          <ChatMessages
+            messages={[
+              message([
+                {
+                  ...part("subtask", "subtask", "", 0),
+                  title: "Find renderer",
+                  display: { child_session_id: childId },
+                },
+              ]),
+            ]}
+            sessions={[
+              {
+                id: "child",
+                workspace_id: "workspace-1",
+                parent_id: "s1",
+                title: "Find renderer",
+                mode: "build",
+                agent_name: "explore",
+                model: "m",
+                status: "idle",
+                cost: 0,
+                tokens: {},
+              },
+            ]}
+            onOpenSubtask={onOpenSubtask}
+          />
+        </ThemeProvider>,
+      );
+      fireEvent.press(screen.getByRole("button", { name: /Expand work details/ }));
+      const row = screen.getByTestId("chat-subtask-subtask");
+      if (childId) {
+        fireEvent.press(row);
+        expect(onOpenSubtask).toHaveBeenCalledWith(childId);
+      } else {
+        expect(row).toBeDisabled();
+        fireEvent.press(row);
+        expect(onOpenSubtask).not.toHaveBeenCalled();
+      }
+    },
+  );
+
   it("renders delivered steer blocks in the native user bubble pattern", () => {
     const transcript = message([
       part("text-before", "text", "Working on it", 0),

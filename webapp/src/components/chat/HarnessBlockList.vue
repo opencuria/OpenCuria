@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import type { HarnessPart } from '@/types/harness'
 import type { RenderBlock } from '@/lib/harnessBlocks'
 import type { ProviderModel } from '@/lib/harnessModels'
 import HarnessMarkdown from './HarnessMarkdown.vue'
@@ -19,22 +18,12 @@ const props = defineProps<{
   blocks: RenderBlock[]
   showStreamingCursor?: boolean
   streaming?: boolean
-  childSessionIds?: Record<string, string>
   models?: ProviderModel[]
 }>()
 
 const emit = defineEmits<{
   openSubtask: [childSessionId: string]
 }>()
-
-function childIdFor(part: HarnessPart): string | null {
-  const fromMeta = part.meta?.['child_session_id']
-  if (typeof fromMeta === 'string' && fromMeta) return fromMeta
-  const fromMap =
-    props.childSessionIds?.[String(part.meta?.['subtask_id'] ?? '')] ??
-    props.childSessionIds?.[part.id]
-  return fromMap ?? null
-}
 
 const page = ref(props.showStreamingCursor ? lastHarnessPage(props.blocks.length) : 0)
 const visibleEntries = computed(() => {
@@ -139,7 +128,6 @@ function blockKey(block: RenderBlock, index: number): string {
         <HarnessSubtaskCard
           v-if="entry.block.part.type === 'subtask'"
           :part="entry.block.part"
-          :child-session-id="childIdFor(entry.block.part)"
           :models="models"
           @open-subtask="emit('openSubtask', $event)"
         />

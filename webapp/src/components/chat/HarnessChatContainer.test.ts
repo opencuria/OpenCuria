@@ -18,7 +18,7 @@ function makeMessage(overrides: Partial<HarnessMessage> = {}): HarnessMessage {
 
 const HarnessMessageViewStub = {
   name: 'HarnessMessageView',
-  props: ['message', 'streaming', 'childSessionIds'],
+  props: ['message', 'streaming'],
   template:
     '<div :data-message-id="message.id" :data-streaming="streaming ? \'1\' : \'0\'">{{ message.content }}</div>',
 }
@@ -485,7 +485,7 @@ describe('HarnessChatContainer', () => {
   it('passes the summary only to the final assistant answer', () => {
     const SummaryStub = {
       name: 'HarnessMessageView',
-      props: ['message', 'streaming', 'childSessionIds', 'summary'],
+      props: ['message', 'streaming', 'summary'],
       template: '<div :data-message-id="message.id" :data-summary="summary">{{ message.content }}</div>',
     }
     const messages = [

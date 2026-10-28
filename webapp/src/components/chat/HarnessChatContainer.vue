@@ -11,7 +11,6 @@ const props = defineProps<{
   messages: HarnessMessage[]
   loading?: boolean
   streamingMessageId?: string | null
-  childSessionIds?: Record<string, string>
   /** State + next step of the finished run; shown under the last answer. */
   summary?: string
   disabled?: boolean
@@ -433,7 +432,6 @@ watch(
           :data-message-id="entry.message.id"
           :message="entry.message"
           :streaming="entry.message.id === resolvedStreamingId"
-          :child-session-ids="childSessionIds"
           :summary="entry.message.id === lastMessageId ? summary : ''"
           :disabled="disabled"
           :busy="busy"
