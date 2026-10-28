@@ -169,6 +169,50 @@ async function openRoot(controller: ChatController): Promise<void> {
 }
 
 describe("ChatController", () => {
+  it("creates a separate chat while keeping the previous session running", async () => {
+    const root = session("root", { status: "busy" });
+    const { client } = makeClient([root]);
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    await controller.newChat("workspace-a");
+    expect(controller.getSnapshot().activeSessionId).toBeNull();
+    expect(controller.getSnapshot().busy).toBe(false);
+
+    const created = await controller.send("another task", { model: "model-v2" });
+    expect(client.harness.createSession).toHaveBeenCalledWith(
+      "workspace-a",
+      expect.objectContaining({ prompt: "another task", model: "model-v2" }),
+    );
+    expect(controller.getSnapshot().activeSessionId).toBe(created.id);
+    expect(controller.getSnapshot().sessions).toEqual(
+      expect.arrayContaining([root, created]),
+    );
+    expect(client.harness.send).not.toHaveBeenCalled();
+    expect(client.harness.abort).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("preserves the running chat when creating another chat is forbidden", async () => {
+    const root = session("root", { status: "busy" });
+    const { client } = makeClient([root]);
+    const controller = new ChatController(client);
+    await openRoot(controller);
+    await controller.newChat("workspace-a");
+    const forbidden = Object.assign(new Error("Forbidden"), { status: 403 });
+    vi.mocked(client.harness.createSession).mockRejectedValueOnce(forbidden);
+
+    await expect(controller.send("another task")).rejects.toBe(forbidden);
+    expect(controller.getSnapshot()).toMatchObject({
+      activeSessionId: null,
+      sessions: [root],
+      messages: [],
+      busy: false,
+      error: "Forbidden",
+    });
+    expect(client.harness.abort).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
   it("resumes Codex and permits same-provider send/edit while rejecting engine or provider changes", async () => {
     const root = session("root", {
       harness_id: "codex",

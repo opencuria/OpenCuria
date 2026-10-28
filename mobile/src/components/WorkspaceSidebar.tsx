@@ -601,9 +601,7 @@ function WorkspaceHeader({
       ? ""
       : "Offline";
   const startable = Boolean(
-    workspace &&
-    isWorkspaceReadyForChat(workspace, operating) &&
-    !workspace.has_active_session,
+    workspace && isWorkspaceReadyForChat(workspace, operating),
   );
   const Chevron = expanded ? ChevronDown : ChevronRight;
   return (

@@ -199,10 +199,6 @@ export function MainScreen(): React.JSX.Element {
   const ready = Boolean(
     workspace && isWorkspaceReadyForChat(workspace, isTransitioning),
   );
-  const currentBusy = Boolean(chat.activeSession?.status === "busy");
-  const workspaceInUse = Boolean(workspace?.has_active_session);
-  const occupiedElsewhere = workspaceInUse && !currentBusy;
-  const canStart = ready && !workspaceInUse;
   const catalogForEngine = (id: HarnessId) =>
     id === "native" ? models : (engineModels[id] ?? []);
   const modelsForEngine = harnessSessionModels(
@@ -222,13 +218,7 @@ export function MainScreen(): React.JSX.Element {
     !chat.loading,
   );
   /** The chat cannot take a message, as opposed to one being on its way. */
-  const chatUnavailable =
-    !navigationReady ||
-    !ready ||
-    activeIsSubtask ||
-    (!chat.activeSessionId && !canStart) ||
-    occupiedElsewhere ||
-    (!currentBusy && chat.sessions.some((item) => item.status === "busy"));
+  const chatUnavailable = !navigationReady || !ready || activeIsSubtask;
   const runOptions = () => ({
     harnessId: harness,
     mode,
@@ -329,7 +319,7 @@ export function MainScreen(): React.JSX.Element {
                     selectedWorkspace.active_operation ||
                     selectedWorkspace.intervention_required,
                   ),
-                ) && !selectedWorkspace.has_active_session,
+                ),
             });
           } else {
             navigationRevision.current += 1;
@@ -683,23 +673,6 @@ export function MainScreen(): React.JSX.Element {
         throw new Error(
           "Choose an available, running workspace before sending a message.",
         );
-      if (!chat.activeSessionId && !canStart)
-        throw new Error(
-          workspaceInUse
-            ? "This workspace is already running a task. Wait for it to finish before starting a new chat."
-            : "This workspace is unavailable for a new chat.",
-        );
-      if (
-        chat.activeSessionId &&
-        (occupiedElsewhere ||
-          chat.sessions.some(
-            (item) =>
-              item.status === "busy" && item.id !== chat.activeSessionId,
-          ))
-      )
-        throw new Error(
-          "Another conversation is running in this workspace. Wait for it to finish.",
-        );
       if (files.length && !client.realtime.isConnected)
         throw new Error(
           "Connect to the workspace before uploading attachments.",
@@ -758,10 +731,6 @@ export function MainScreen(): React.JSX.Element {
       ready,
       activeIsSubtask,
       chat.activeSessionId,
-      chat.sessions,
-      canStart,
-      workspaceInUse,
-      occupiedElsewhere,
       harness,
       mode,
       model,
@@ -875,12 +844,12 @@ export function MainScreen(): React.JSX.Element {
       Boolean(chosen.active_operation || chosen.intervention_required),
     );
     requestNavigation(chosen.id, {
-      newChat: isReady && !chosen.has_active_session,
+      newChat: isReady,
     });
   };
 
   const newChat = () => {
-    if (!workspace || !canStart) return;
+    if (!workspace || !ready) return;
     setDraft("");
     setAttachments([]);
     setSkillIds([]);
@@ -1129,7 +1098,7 @@ export function MainScreen(): React.JSX.Element {
         }
         title={workspace?.name ?? "OpenCuria"}
         onCreate={newChat}
-        canCreate={canStart}
+        canCreate={ready}
         menuActions={chatMenuActions}
         onMenuAction={chatMenuAction}
         navigation={
@@ -1139,7 +1108,7 @@ export function MainScreen(): React.JSX.Element {
             activeWorkspaceId={workspaceId}
             activeSessionId={chat.activeSessionId}
             scopeKey={`${client.api.baseUrl}:${session?.organizationId ?? ""}`}
-            canCreate={canStart}
+            canCreate={ready}
             onCreate={newChat}
             onWorkspace={chooseWorkspace}
             onConversation={openConversation}
@@ -1606,8 +1575,6 @@ function workspaceLabel(
   return item.status.replaceAll("_", " ");
 }
 function readinessMessage(item: Workspace, transitioning: boolean): string {
-  if (item.has_active_session)
-    return "This workspace is already running a task. Conversation history is available, but wait for the run to finish before starting another chat.";
   if (item.intervention_required)
     return "This workspace needs attention before it can accept messages.";
   if (transitioning)

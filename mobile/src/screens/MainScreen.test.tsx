@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react-native";
 import type {
   HarnessConversation,
+  HarnessSession,
   ProviderModel,
   Workspace,
 } from "@opencuria/client";
@@ -291,6 +292,7 @@ beforeEach(() => {
       workspaceId,
       activeSessionId: null,
       activeSession: null,
+      busy: false,
     };
     listeners.forEach((listener) => listener());
   });
@@ -390,6 +392,143 @@ it("keeps the composer ready while a message is on its way", async () => {
     "Ask OpenCuria|ready",
   );
   await act(async () => accept({ mode: "build" }));
+  tree.unmount();
+});
+
+const busySession = {
+  id: "running-chat",
+  workspace_id: runningWorkspace.id,
+  title: "Running chat",
+  harness_id: "native",
+  model: nativeModel.id,
+  mode: "build",
+  status: "busy",
+  skill_ids: [],
+} as HarnessSession;
+
+it.each(["header", "sidebar", "workspace"])(
+  "starts and sends a new chat from the %s while another chat is running",
+  async (entry) => {
+    const client = mockClient();
+    client.workspaces.list.mockResolvedValue([
+      { ...runningWorkspace, has_active_session: true },
+    ]);
+    mockUseSession.mockReturnValue(sessionValue(client) as never);
+    const tree = render(
+      <ThemeProvider>
+        <MainScreen />
+      </ThemeProvider>,
+    );
+    await waitFor(() =>
+      expect(mockController.newChat).toHaveBeenCalledWith(runningWorkspace.id),
+    );
+    await act(async () => {
+      snapshot = {
+        ...snapshot,
+        sessions: [busySession] as never[],
+        activeSessionId: busySession.id,
+        activeSession: busySession as never,
+        busy: true,
+      };
+      listeners.forEach((listener) => listener());
+    });
+    mockController.newChat.mockClear();
+
+    if (entry === "header") {
+      expect(screen.getByTestId("new-chat")).toBeEnabled();
+      fireEvent.press(screen.getByTestId("new-chat"));
+    } else {
+      fireEvent.press(screen.getByTestId("main-menu"));
+      const button =
+        entry === "sidebar"
+          ? screen.getByTestId("drawer-new-chat")
+          : screen.getByRole("button", {
+              name: `New chat in ${runningWorkspace.name}`,
+            });
+      expect(button).toBeEnabled();
+      fireEvent.press(button);
+    }
+    await waitFor(() => expect(mockController.newChat).toHaveBeenCalledTimes(1));
+    expect(snapshot.activeSessionId).toBeNull();
+    expect(snapshot.sessions).toEqual([busySession]);
+    expect(screen.queryByTestId("drawer-new-chat")).toBeNull();
+    expect(screen.getByTestId("composer-state")).toHaveTextContent(
+      "Ask OpenCuria|ready",
+    );
+    fireEvent.press(screen.getByTestId("test-send"));
+    await waitFor(() => expect(mockController.send).toHaveBeenCalled());
+    expect(mockController.abort).not.toHaveBeenCalled();
+    tree.unmount();
+  },
+);
+
+it.each([false, true])(
+  "continues an idle chat while a different chat is busy (workspace busy flag: %s)",
+  async (hasActiveSession) => {
+    const client = mockClient();
+    client.workspaces.list.mockResolvedValue([
+      { ...runningWorkspace, has_active_session: hasActiveSession },
+    ]);
+    mockUseSession.mockReturnValue(sessionValue(client) as never);
+    const tree = render(
+      <ThemeProvider>
+        <MainScreen />
+      </ThemeProvider>,
+    );
+    await waitFor(() => expect(mockController.newChat).toHaveBeenCalled());
+    const idleSession = { ...busySession, id: "idle-chat", status: "idle" };
+    await act(async () => {
+      snapshot = {
+        ...snapshot,
+        sessions: [busySession, idleSession] as never[],
+        activeSessionId: idleSession.id,
+        activeSession: idleSession as never,
+      };
+      listeners.forEach((listener) => listener());
+    });
+    expect(screen.getByTestId("composer-state")).toHaveTextContent(
+      "Ask OpenCuria|ready",
+    );
+    fireEvent.press(screen.getByTestId("test-send"));
+    await waitFor(() => expect(mockController.send).toHaveBeenCalled());
+    tree.unmount();
+  },
+);
+
+it.each([
+  { status: "stopped" as const },
+  { runner_online: false },
+  { active_operation: "capturing_image" },
+  { intervention_required: true },
+])("keeps an unavailable workspace blocked with %o", async (unavailable) => {
+  const client = mockClient();
+  client.workspaces.list.mockResolvedValue([
+    { ...runningWorkspace, has_active_session: true, ...unavailable },
+  ]);
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() => expect(mockController.openWorkspace).toHaveBeenCalled());
+  await act(async () => {
+    snapshot = { ...snapshot, workspaceId: runningWorkspace.id };
+    listeners.forEach((listener) => listener());
+  });
+  expect(mockController.newChat).not.toHaveBeenCalled();
+  expect(screen.getByTestId("new-chat")).toBeDisabled();
+  expect(screen.getByTestId("composer-state")).toHaveTextContent(/\|disabled$/);
+  expect(
+    screen.queryByText(/wait for the run to finish before starting another chat/i),
+  ).toBeNull();
+  fireEvent.press(screen.getByTestId("main-menu"));
+  expect(screen.getByTestId("drawer-new-chat")).toBeDisabled();
+  const workspaceButton = screen.queryByRole("button", {
+    name: `New chat in ${runningWorkspace.name}`,
+  });
+  if (workspaceButton) expect(workspaceButton).toBeDisabled();
+  expect(mockController.send).not.toHaveBeenCalled();
   tree.unmount();
 });
 
