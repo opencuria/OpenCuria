@@ -106,8 +106,6 @@ def test_new_workspace_from_captured_image_uses_latest(
         calls.append(kwargs["image_artifact_id"])
         return workspace, SimpleNamespace(id=workspace.id)
 
-    monkeypatch.setattr("apps.runners.api._workspace_plugin_ids", lambda workspace: [])
-
     monkeypatch.setattr(
         get_runner_service(), "create_workspace_from_image_artifact", create
     )

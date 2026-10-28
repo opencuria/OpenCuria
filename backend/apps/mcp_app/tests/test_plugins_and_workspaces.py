@@ -13,7 +13,7 @@ from apps.credentials.models import CredentialService, OrgCredentialServiceActiv
 from apps.credentials.services import CredentialSvc
 from apps.plugins.models import Plugin
 from apps.runners.enums import WorkspaceStatus
-from apps.runners.models import Workspace
+from apps.runners.models import ImageDefinition, ImageInstance, Workspace
 from apps.runners.services import get_runner_service
 from apps.runners.services.domains.workspace_lifecycle import (
     WorkspaceLifecycleMixin,
@@ -155,6 +155,35 @@ async def test_workspace_list_get_and_rename(world):
     assert "Pass at least one field" in await fails(
         ctx, "workspace_update", workspace="billing"
     )
+
+
+@pytest.mark.parametrize("recipe_name", ["Recipe name", ""])
+async def test_workspace_summary_preserves_image_name_and_live_presence(
+    world, recipe_name: str
+) -> None:
+    """MCP uses the recipe/image name and current runner state for discovery."""
+    from apps.mcp_app.tools.workspaces import _summary
+
+    def describe() -> dict:
+        definition = ImageDefinition.objects.create(name=recipe_name)
+        image = ImageInstance.objects.create(
+            is_legacy=True,
+            runner=world.runner,
+            origin_type="definition_build",
+            origin_definition=definition,
+            name="Build name",
+            status="ready",
+        )
+        world.workspace.base_image_instance = image
+        # MCP historically reads the runner state even if an annotation differs.
+        world.workspace.runner_is_online = False
+        return _summary(world.workspace)
+
+    data = await sync_to_async(describe)()
+
+    assert data["image"] == (recipe_name or "Build name")
+    assert data["runner_online"] is True
+    assert "base_image_name" not in data
 
 
 async def test_power_tools_are_idempotent_and_delete_dispatches(world, monkeypatch):

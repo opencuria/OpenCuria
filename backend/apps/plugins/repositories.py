@@ -361,12 +361,17 @@ class WorkspacePluginActivationRepository:
     """Data access for WorkspacePluginActivation records."""
 
     @staticmethod
-    def enabled_plugin_ids(workspace_id: uuid.UUID) -> set[uuid.UUID]:
-        return set(
+    def list_plugin_ids(workspace_id: uuid.UUID) -> list[uuid.UUID]:
+        """Return persisted selections in activation order, newest first."""
+        return list(
             WorkspacePluginActivation.objects.filter(
                 workspace_id=workspace_id
             ).values_list("plugin_id", flat=True)
         )
+
+    @staticmethod
+    def enabled_plugin_ids(workspace_id: uuid.UUID) -> set[uuid.UUID]:
+        return set(WorkspacePluginActivationRepository.list_plugin_ids(workspace_id))
 
     @staticmethod
     def list_for_workspace(

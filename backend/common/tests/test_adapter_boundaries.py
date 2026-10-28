@@ -132,6 +132,25 @@ REPOSITORY_ONLY_APPS = {
 #: Model manager and instance-reload attributes that issue queries.
 ORM_QUERY_ATTRIBUTES = {"objects", "_default_manager", "refresh_from_db"}
 
+#: Queryset operations also expose ORM through related managers on loaded models.
+ADAPTER_QUERY_ATTRIBUTES = ORM_QUERY_ATTRIBUTES | {
+    "all",
+    "filter",
+    "exclude",
+    "select_related",
+    "prefetch_related",
+    "select_for_update",
+    "order_by",
+    "values_list",
+    "exists",
+    "aexists",
+    "annotate",
+    "aggregate",
+    "bulk_create",
+    "bulk_update",
+    "raw",
+}
+
 #: ``CredentialSvc`` methods that decrypt credential secrets.
 CREDENTIAL_RESOLUTION_CALLS = {"resolve_credentials", "resolve_workspace_credentials"}
 
@@ -968,7 +987,7 @@ def test_adapters_never_query_the_orm():
         for path in adapters
         for node in ast.walk(trees[path])
         if isinstance(node, ast.Attribute)
-        and node.attr in {"objects", "_default_manager"}
+        and node.attr in ADAPTER_QUERY_ATTRIBUTES
     )
     assert violations == [], (
         "Move ORM access into the app's repositories and call it through its "

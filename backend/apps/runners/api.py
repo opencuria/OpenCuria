@@ -15,8 +15,6 @@ Split into separate routers to avoid URL path conflicts:
 from __future__ import annotations
 
 import uuid
-from dataclasses import asdict
-from datetime import timedelta
 
 from asgiref.sync import sync_to_async
 from django.core.exceptions import ObjectDoesNotExist, SynchronousOnlyOperation
@@ -26,13 +24,13 @@ from socketio.exceptions import TimeoutError as SocketIOTimeoutError
 
 from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
+from apps.credentials.services import CredentialSvc
 from apps.organizations.services import OrganizationService
+from apps.plugins.services import PluginService
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from common.request_context import get_organization_id
 from common.schemas import ErrorOut
 
-from .disk_usage import WorkspaceDiskUsage
-from .enums import WorkspaceStatus
 from .exceptions import (
     AdminRoleRequiredError,
     ImageRecipeNotFoundError,
@@ -81,7 +79,6 @@ from .schemas import (
     TerminalStartOut,
     WorkspaceCreateIn,
     WorkspaceCreateOut,
-    WorkspaceDiskUsageOut,
     WorkspaceFromImageArtifactIn,
     WorkspaceFromImageArtifactOut,
     WorkspaceOut,
@@ -93,6 +90,7 @@ from .schemas import (
 )
 from .services import get_runner_service
 from .services.image_definitions import ImageDefinitionService
+from .services.workspace_reads import WorkspaceReadService
 from .storage_schemas import RunnerStorageOut
 
 
@@ -101,116 +99,6 @@ def _perm_denied(permission: APIKeyPermission):
     return 403, ErrorOut(
         detail=f"API key lacks permission: {permission.value}",
         code="permission_denied",
-    )
-
-
-def _workspace_credential_ids(workspace) -> list[uuid.UUID]:
-    """Return ordinary credential IDs for API display."""
-    return [
-        credential.id
-        for credential in workspace.credentials.all().select_related("service")
-        if credential.service.credential_type != "provider_secret"
-    ]
-
-
-def _workspace_plugin_ids(workspace) -> list[uuid.UUID]:
-    """Return persisted workspace plugin selections."""
-    return list(workspace.plugin_activations.values_list("plugin_id", flat=True))
-
-
-def _workspace_base_image_name(workspace) -> str | None:
-    """Return a user-facing base image name for a workspace when available."""
-    image = getattr(workspace, "base_image_instance", None)
-    if image is None:
-        return None
-    origin_definition = getattr(image, "origin_definition", None)
-    if origin_definition and getattr(origin_definition, "name", ""):
-        return origin_definition.name
-    if getattr(image, "name", ""):
-        return image.name
-    return None
-
-
-def _workspace_to_out(workspace) -> WorkspaceOut:
-    """Map workspace metadata and hide internal provider account credentials."""
-    from .services.image_versions import ImageVersionService
-
-    versions = ImageVersionService()
-    # Determine runner online status — prefer cached attribute injected by the
-    # queryset annotation, fall back to FK traversal.
-    runner_online: bool = False
-    if hasattr(workspace, "runner_is_online"):
-        runner_online = bool(workspace.runner_is_online)
-    elif hasattr(workspace, "runner") and workspace.runner is not None:
-        from .enums import RunnerStatus as RS
-
-        runner_online = workspace.runner.status == RS.ONLINE
-
-    auto_stop_timeout_minutes = None
-    auto_stop_at = None
-    if (
-        hasattr(workspace, "runner")
-        and workspace.runner is not None
-        and getattr(workspace.runner, "organization", None) is not None
-    ):
-        auto_stop_timeout_minutes = (
-            workspace.runner.organization.workspace_auto_stop_timeout_minutes
-        )
-    if (
-        auto_stop_timeout_minutes
-        and workspace.status == WorkspaceStatus.RUNNING
-        and workspace.last_activity_at is not None
-    ):
-        auto_stop_at = workspace.last_activity_at + timedelta(
-            minutes=auto_stop_timeout_minutes
-        )
-
-    disk_usage = WorkspaceDiskUsage.from_workspace(workspace)
-
-    return WorkspaceOut(
-        id=workspace.id,
-        runner_id=workspace.runner_id,
-        status=workspace.status,
-        active_operation=workspace.active_operation,
-        intervention_required=workspace.intervention_required,
-        lifecycle_diagnostic=workspace.lifecycle_diagnostic,
-        name=workspace.name,
-        qemu_vcpus=workspace.qemu_vcpus,
-        qemu_memory_mb=workspace.qemu_memory_mb,
-        qemu_disk_size_gb=workspace.qemu_disk_size_gb,
-        disk_usage=(
-            WorkspaceDiskUsageOut(**asdict(disk_usage)) if disk_usage else None
-        ),
-        desktop_width=workspace.desktop_width,
-        desktop_height=workspace.desktop_height,
-        created_by_id=workspace.created_by_id,
-        last_activity_at=workspace.last_activity_at,
-        auto_stop_timeout_minutes=auto_stop_timeout_minutes,
-        auto_stop_at=auto_stop_at,
-        delete_requested_at=getattr(workspace, "delete_requested_at", None),
-        delete_started_at=getattr(workspace, "delete_started_at", None),
-        delete_confirmed_at=getattr(workspace, "delete_confirmed_at", None),
-        delete_last_error=getattr(workspace, "delete_last_error", "") or "",
-        delete_attempt_count=getattr(workspace, "delete_attempt_count", 0) or 0,
-        created_at=workspace.created_at,
-        updated_at=workspace.updated_at,
-        has_active_session=bool(
-            getattr(workspace, "has_active_harness_session", False)
-        ),
-        runner_online=runner_online,
-        credential_ids=_workspace_credential_ids(workspace),
-        plugin_ids=list(
-            workspace.plugin_activations.values_list("plugin_id", flat=True)
-        ),
-        credentials_present=bool(getattr(workspace, "credentials_present", False)),
-        base_image_name=_workspace_base_image_name(workspace),
-        base_image=versions.version_ref(
-            getattr(workspace, "base_image_instance", None)
-        ),
-        pending_base_image=versions.version_ref(
-            getattr(workspace, "pending_base_image_instance", None)
-        ),
-        repos=list(getattr(workspace, "repos", None) or []),
     )
 
 
@@ -458,7 +346,8 @@ def list_workspaces(request: HttpRequest, runner_id: uuid.UUID | None = None):
         organization_id=org_id,
         user=request.user,
     )
-    return 200, [_workspace_to_out(workspace) for workspace in workspaces]
+    reads = WorkspaceReadService()
+    return 200, [WorkspaceOut(**reads.describe(workspace)) for workspace in workspaces]
 
 
 @workspace_router.post(
@@ -503,7 +392,9 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
             organization_id=org_id,
             plugin_ids=payload.plugin_ids,
         )
-        plugin_ids = await sync_to_async(_workspace_plugin_ids)(workspace)
+        plugin_ids = await sync_to_async(PluginService().list_workspace_plugin_ids)(
+            workspace.id
+        )
         return 202, WorkspaceCreateOut(
             workspace_id=workspace.id,
             task_id=task.id,
@@ -535,7 +426,7 @@ def get_workspace(request: HttpRequest, workspace_id: uuid.UUID):
     org_service.require_membership(request.user, org_id)
     try:
         workspace = _get_owned_workspace(request, org_id, workspace_id)
-        return 200, _workspace_to_out(workspace)
+        return 200, WorkspaceOut(**WorkspaceReadService().describe(workspace))
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
 
@@ -845,8 +736,12 @@ async def update_workspace(
             user=request.user,
             organization_id=org_id,
         )
-        persisted_plugin_ids = await sync_to_async(_workspace_plugin_ids)(workspace)
-        credential_ids = await sync_to_async(_workspace_credential_ids)(workspace)
+        persisted_plugin_ids = await sync_to_async(
+            PluginService().list_workspace_plugin_ids
+        )(workspace.id)
+        credential_ids = await sync_to_async(CredentialSvc().workspace_credential_ids)(
+            workspace.id
+        )
         return 200, WorkspaceUpdateOut(
             id=workspace.id,
             name=workspace.name,
@@ -1640,7 +1535,9 @@ async def create_workspace_from_captured_image(
             workspace_id=workspace.id,
             task_id=task.id,
             status=workspace.status,
-            plugin_ids=await sync_to_async(_workspace_plugin_ids)(workspace),
+            plugin_ids=await sync_to_async(PluginService().list_workspace_plugin_ids)(
+                workspace.id
+            ),
         )
     except (NotFoundError, ConflictError) as exc:
         return _captured_image_errors(exc)

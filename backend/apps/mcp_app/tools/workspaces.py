@@ -16,6 +16,7 @@ from apps.runners.enums import RunnerStatus, WorkspaceStatus
 from apps.runners.services import get_runner_service
 from apps.runners.services.image_definitions import ImageDefinitionService
 from apps.runners.services.image_versions import ImageVersionService
+from apps.runners.services.workspace_reads import WorkspaceReadService
 from apps.scheduled_tasks.services import ScheduledTaskService
 
 from .. import resolve
@@ -66,15 +67,6 @@ RESOURCES = {
 # ---------------------------------------------------------------------------
 
 
-def _image_name(workspace: Any) -> str | None:
-    """Return the user-facing name of the image a workspace is based on."""
-    image = getattr(workspace, "base_image_instance", None)
-    if image is None:
-        return None
-    definition = getattr(image, "origin_definition", None)
-    return getattr(definition, "name", "") or getattr(image, "name", "") or None
-
-
 def _image_ref(workspace: Any) -> dict[str, Any] | None:
     """Image name, version and whether a newer version exists."""
     ref = ImageVersionService().version_ref(workspace.base_image_instance)
@@ -89,13 +81,9 @@ def _image_ref(workspace: Any) -> dict[str, Any] | None:
     )
 
 
-def _runner_online(workspace: Any) -> bool:
-    runner = getattr(workspace, "runner", None)
-    return runner is not None and runner.status == RunnerStatus.ONLINE
-
-
 def _summary(workspace: Any) -> dict[str, Any]:
     """Compact list entry for a workspace."""
+    summary = WorkspaceReadService().summary(workspace)
     return compact(
         {
             "workspace_id": workspace.id,
@@ -105,8 +93,8 @@ def _summary(workspace: Any) -> dict[str, Any]:
             "agent_running": bool(
                 getattr(workspace, "has_active_harness_session", False)
             ),
-            "runner_online": _runner_online(workspace),
-            "image": _image_name(workspace),
+            "runner_online": summary["runner_online"],
+            "image": summary["base_image_name"],
             "needs_intervention": workspace.intervention_required or None,
             "last_activity_at": workspace.last_activity_at,
         }
