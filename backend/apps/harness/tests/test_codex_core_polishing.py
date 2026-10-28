@@ -411,19 +411,6 @@ async def test_explore_never_exposes_duplicate_managed_bash() -> None:
     assert "not authorized" in str(result)
 
 
-def test_claude_compatibility_modules_keep_monkeypatch_seams(monkeypatch) -> None:
-    """Legacy imports share module identity with extracted helper implementations."""
-    from apps.harness.engines.claude import context, security
-    from apps.harness.engines.shared import media as shared_media
-    from apps.harness.engines.shared import security as shared_security
-
-    assert context is shared_media
-    assert security is shared_security
-    monkeypatch.setattr(context, "MAX_USER_CONTENT_BYTES", 10)
-    with pytest.raises(ValueError, match="input limit"):
-        shared_media.checked_content([{"type": "text", "text": "x" * 11}])
-
-
 @pytest.mark.asyncio
 async def test_large_checkpoint_restore_respects_runner_write_cap(tmp_path) -> None:
     """A valid >10 MiB serialized checkpoint restores through bounded file RPCs."""

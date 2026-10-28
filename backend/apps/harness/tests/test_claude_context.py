@@ -9,8 +9,8 @@ from typing import Any
 import pytest
 
 from apps.harness.access.file_types import FileContent
-from apps.harness.engines.claude import context
-from apps.harness.engines.claude.context import (
+from apps.harness.engines.shared import media
+from apps.harness.engines.shared.media import (
     MAX_CLAUDE_TOOL_ARGUMENT_BYTES,
     MAX_USER_CONTENT_BYTES,
     MediaAuthorizationError,
@@ -176,7 +176,7 @@ async def test_repeated_media_is_read_once_and_count_limit_preflights() -> None:
         await build_user_content(
             " ".join(
                 "@file:/workspace/a.png"
-                for _ in range(context.MAX_USER_IMAGE_BLOCKS + 1)
+                for _ in range(media.MAX_USER_IMAGE_BLOCKS + 1)
             ),
             accessor=accessor,
         )
@@ -185,7 +185,7 @@ async def test_repeated_media_is_read_once_and_count_limit_preflights() -> None:
 
 @pytest.mark.asyncio
 async def test_oversized_explicit_media_fails_without_returning_partial_payload() -> None:
-    limit = context.MAX_CLAUDE_IMAGE_BASE64_CHARS * 3 // 4
+    limit = media.MAX_CLAUDE_IMAGE_BASE64_CHARS * 3 // 4
     accessor = MediaAccessor(
         {"/workspace/too-large.png": b"\x89PNG\r\n\x1a\n" + b"x" * limit}
     )
@@ -235,7 +235,7 @@ async def test_media_aggregate_limit_includes_inline_history_before_any_read() -
             role="user",
             content=[
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}}
-                for _ in range(context.MAX_USER_IMAGE_BLOCKS)
+                for _ in range(media.MAX_USER_IMAGE_BLOCKS)
             ],
         )
     ]

@@ -209,13 +209,11 @@ class ClaudeRuntimeState:
         *,
         accessor: WorkspaceAccessor,
         auth_env: dict[str, str],
-        session_store: Any | None,
         root: str,
         sdk_version: str,
     ) -> None:
         self.accessor = accessor
         self.auth_env = auth_env
-        self.session_store = session_store
         self.root = root.rstrip("/")
         self.sdk_version = sdk_version
 
@@ -368,12 +366,6 @@ class ClaudeRuntimeState:
             raise ValueError("Claude external session id must be a UUID") from None
 
     @staticmethod
-    def claude_system_prompt(system: str, mode: str) -> str:
-        """Compose OpenCuria run context to append to native Claude Code."""
-        del mode
-        return system.strip()
-
-    @staticmethod
     def sdk_system_prompt() -> dict[str, Any]:
         """Retain Claude Code's native preset while SDK applies its options."""
         return {"type": "preset", "preset": "claude_code", "snapshot": False}
@@ -392,8 +384,6 @@ class ClaudeRuntimeState:
         self,
         *,
         binary: str,
-        config_dir: str,
-        mcp_path: str,
         prompt_path: str,
         model: str,
         effort: str,
@@ -406,7 +396,6 @@ class ClaudeRuntimeState:
         settings_path: str | None = None,
     ) -> list[str]:
         """Build bounded CLI arguments while preserving the SDK's session mode."""
-        del mcp_path
         session_id = (
             self.valid_external_session_id(external_session_id)
             if external_session_id

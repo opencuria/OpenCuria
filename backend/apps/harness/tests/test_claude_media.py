@@ -16,7 +16,6 @@ from pydantic import BaseModel
 
 from apps.harness.access.file_types import FileContent
 from apps.harness.agents.definitions import get_agent
-from apps.harness.engines.claude.context import build_user_content, data_url_block
 from apps.harness.engines.claude.engine import ClaudeEngine
 from apps.harness.engines.claude.events import StepState
 from apps.harness.engines.claude.materializer import decode_pdf_attachment
@@ -25,6 +24,7 @@ from apps.harness.engines.claude.message_projection import (
     MAX_NATIVE_FILE_SNAPSHOT_BYTES,
     NativeFileChangeTracker,
 )
+from apps.harness.engines.shared.media import build_user_content, data_url_block
 from apps.harness.providers.base import LLMMessage
 from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
@@ -488,7 +488,7 @@ async def test_mcp_image_result_uses_sdk_image_block_and_pdf_stages_privately(
 
     engine.accessor = _ReadyAccessor(tmp_path)
     engine.accessor.files.update(accessor.files)
-    engine._ensure_managed_dir = lambda _path: asyncio.sleep(0)
+    engine._runtime_state.ensure_managed_dir = lambda _path: asyncio.sleep(0)
     engine._native_file_change_tracker = NativeFileChangeTracker(engine.accessor)
 
     class _Context:

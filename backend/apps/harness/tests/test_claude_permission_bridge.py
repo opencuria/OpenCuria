@@ -859,7 +859,7 @@ async def test_subagent_stop_waits_for_terminal_task_notification(
     assert "child-task" in engine._stopped_subagents
     assert not [event for event in events if event["type"] == "subtask_finished"]
 
-    await engine._handle_task_notification(
+    await engine._message_projector.handle_task_notification(
         type(
             "TaskNotification",
             (),
@@ -1273,7 +1273,7 @@ async def test_unknown_subagent_hook_type_never_uses_requested_general(
     await bridge.hooks(engine)["SubagentStart"][0].hooks[0](
         {"agent_id": "unknown-child", "agent_type": agent_type}, "parent-call", None
     )
-    await engine._handle_message(
+    await engine._message_projector.handle_message(
         parse_message(
             {
                 "type": "system",

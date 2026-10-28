@@ -8,9 +8,9 @@ import structlog
 
 from ...agents.definitions import canonical_subagent_type
 from ...providers.base import Usage
+from ..shared.security import redact_text
 from .events import ClaudeEventNormalizer, StepState
 from .runtime_state import CLI_TOTAL_COST_KEY
-from .security import redact_text
 
 if TYPE_CHECKING:
     from .engine import ClaudeEngine
@@ -45,7 +45,7 @@ class ClaudeMessageProjector:
             await engine._emit_assistant(message)
             return None
         if isinstance(message, types.user):
-            await engine._handle_user_tool_results(message)
+            await self.handle_user_tool_results(message)
             return None
         if isinstance(message, types.task_started):
             data = message.data if isinstance(message.data, dict) else {}
@@ -57,22 +57,22 @@ class ClaudeMessageProjector:
             )
             return None
         if isinstance(message, types.task_progress):
-            await engine._handle_task_progress(message)
+            await self.handle_task_progress(message)
             return None
         if isinstance(message, types.task_notification):
-            await engine._handle_task_notification(message)
+            await self.handle_task_notification(message)
             return None
         if isinstance(message, types.system):
             if message.subtype in {"init", "session_start", "session_started"}:
                 data = message.data if isinstance(message.data, dict) else {}
                 session_id = str(data.get("session_id") or "")
                 if session_id:
-                    await engine._bind_external_session(session_id)
-            await engine._handle_task_updated(message)
+                    await self.bind_external_session(session_id)
+            await self.handle_task_updated(message)
             return None
         if isinstance(message, types.result):
             if message.session_id:
-                await engine._bind_external_session(str(message.session_id))
+                await self.bind_external_session(str(message.session_id))
             usage = ClaudeEventNormalizer.result_usage(message)
             if message.is_error and message.subtype != "error_max_turns":
                 errors = list(message.errors or [])
@@ -187,7 +187,9 @@ class ClaudeMessageProjector:
             if state is None:
                 continue
             result = engine._tool_results.pop(call_id, None)
-            output = engine._tool_output(result.output if result is not None else value)
+            output = ClaudeEventNormalizer.tool_output(
+                result.output if result is not None else value
+            )
             if is_error or result is not None and result.metadata.get("is_error"):
                 await engine._finish_tool_error(
                     call_id,
@@ -243,7 +245,7 @@ class ClaudeMessageProjector:
             if message.status in {"stopped", "killed"}
             else "error"
         )
-        await engine._finish_sdk_subtask(task, tool, status, str(message.summary or ""))
+        await self.finish_sdk_subtask(task, tool, status, str(message.summary or ""))
 
     async def handle_task_updated(self, message: Any) -> None:
         """Project authoritative task updates and mirrored-session failures."""
@@ -278,9 +280,9 @@ class ClaudeMessageProjector:
         if task in engine._finished_subtasks:
             previous = engine._subtask_terminal_status.get(task, "")
             if status == "aborted" and previous != "aborted":
-                await engine._revise_subtask_terminal_status(task, tool, status)
+                await self.revise_subtask_terminal_status(task, tool, status)
             return
-        await engine._finish_sdk_subtask(
+        await self.finish_sdk_subtask(
             task,
             tool,
             status,
@@ -351,7 +353,7 @@ class ClaudeMessageProjector:
         if not engine.on_binding:
             return
         try:
-            external_id = engine._valid_external_session_id(external_id)
+            external_id = engine._runtime_state.valid_external_session_id(external_id)
         except ValueError:
             return
         if external_id in engine._bound_session_ids:

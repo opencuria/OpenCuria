@@ -154,7 +154,7 @@ async def test_subtask_terminal_status_mapping(
     engine._subtask_by_tool["parent-call"] = "task-1"
     engine._agent_kind["task-1"] = "general"
     if subtype == "task_notification":
-        await engine._handle_task_notification(
+        await engine._message_projector.handle_task_notification(
             SimpleNamespace(
                 task_id="task-1",
                 tool_use_id="parent-call",
@@ -163,7 +163,7 @@ async def test_subtask_terminal_status_mapping(
             )
         )
     else:
-        await engine._handle_task_updated(
+        await engine._message_projector.handle_task_updated(
             SimpleNamespace(
                 subtype="task_updated",
                 data={
@@ -184,7 +184,7 @@ async def test_task_notification_and_later_task_update_are_idempotent(
 ) -> None:
     engine, events = engine_events
     engine._subtask_by_tool["parent-call"] = "task-1"
-    await engine._handle_task_notification(
+    await engine._message_projector.handle_task_notification(
         SimpleNamespace(
             task_id="task-1",
             tool_use_id="parent-call",
@@ -192,7 +192,7 @@ async def test_task_notification_and_later_task_update_are_idempotent(
             summary="stopped",
         )
     )
-    await engine._handle_task_updated(
+    await engine._message_projector.handle_task_updated(
         SimpleNamespace(
             subtype="task_updated",
             data={
@@ -619,8 +619,7 @@ async def test_stream_usage_and_max_turns_result_are_attributed_once() -> None:
     try:
 
         class EngineStub:
-            async def _bind_external_session(self, _sid: str) -> None:
-                pass
+            on_binding = None
 
             @staticmethod
             def _safe_error_text(text: str) -> str:
@@ -740,14 +739,14 @@ async def test_binding_carries_cost_baseline_into_replaced_engine_state() -> Non
         engine_state={"cli_total_cost_usd": 2.5},
         on_binding=on_binding,
     )
-    await engine._bind_external_session(session_id)
+    await engine._message_projector.bind_external_session(session_id)
     assert bound[0]["cli_total_cost_usd"] == 2.5
 
     bound.clear()
     fresh = ClaudeEngine(
         tools=ToolRegistry(), accessor=FakeAccessor(), on_binding=on_binding
     )
-    await fresh._bind_external_session(session_id)
+    await fresh._message_projector.bind_external_session(session_id)
     assert "cli_total_cost_usd" not in bound[0]
 
 
@@ -1041,20 +1040,20 @@ async def test_non_agent_tools_never_become_subtasks(
         "event_arguments": {"subagent_type": "general"},
         "step": 1,
     }
-    await engine._handle_message(
+    await engine._message_projector.handle_message(
         _task_message("task_started", task_type=task_type, description="shell job")
     )
-    await engine._handle_message(
+    await engine._message_projector.handle_message(
         _task_message(
             "task_progress", description="running", usage={}, last_tool_name="Bash"
         )
     )
-    await engine._handle_message(
+    await engine._message_projector.handle_message(
         _task_message(
             "task_notification", status="completed", summary="done", output_file=""
         )
     )
-    await engine._handle_message(
+    await engine._message_projector.handle_message(
         _task_message("task_updated", patch={"status": "killed"})
     )
     assert events == []
@@ -1080,7 +1079,7 @@ async def test_task_started_missing_tool_id_only_consumes_unique_agent_call(
             "event_arguments": {"subagent_type": "explore"},
             "step": 1,
         }
-    await engine._handle_message(
+    await engine._message_projector.handle_message(
         _task_message(
             "task_started", tool_use_id=None, task_type=task_type, description="job"
         )
@@ -1131,7 +1130,7 @@ async def test_verified_subagent_lifecycle_is_idempotent_after_parent_completes(
         )
 
     async def message() -> None:
-        await engine._handle_message(
+        await engine._message_projector.handle_message(
             _task_message(
                 "task_started", task_type="local_agent", description="inspect"
             )
@@ -1142,7 +1141,7 @@ async def test_verified_subagent_lifecycle_is_idempotent_after_parent_completes(
     await engine._finish_tool_completed("parent-call", "backgrounded", parent_id=None)
     await message()
     assert bridge.scope(engine, {"agent_id": "child-task"})[1].name == "explore"
-    await engine._handle_message(
+    await engine._message_projector.handle_message(
         _task_message(
             "task_progress",
             tool_use_id=None,
@@ -1152,7 +1151,7 @@ async def test_verified_subagent_lifecycle_is_idempotent_after_parent_completes(
         )
     )
     # An unrelated task must not settle the known agent merely by sharing a tool ID.
-    await engine._handle_message(
+    await engine._message_projector.handle_message(
         _task_message(
             "task_notification",
             task_id="unregistered",
@@ -1161,7 +1160,7 @@ async def test_verified_subagent_lifecycle_is_idempotent_after_parent_completes(
             output_file="",
         )
     )
-    await engine._handle_message(
+    await engine._message_projector.handle_message(
         _task_message(
             "task_notification",
             tool_use_id=None,
@@ -1171,10 +1170,10 @@ async def test_verified_subagent_lifecycle_is_idempotent_after_parent_completes(
         )
     )
     # Identity must survive normal cleanup for a later authoritative abort.
-    await engine._handle_message(
+    await engine._message_projector.handle_message(
         _task_message("task_updated", tool_use_id=None, patch={"status": "killed"})
     )
-    await engine._handle_message(
+    await engine._message_projector.handle_message(
         _task_message("task_updated", patch={"status": "killed"})
     )
     await message()
@@ -1212,7 +1211,7 @@ async def test_unknown_hook_identity_cannot_fall_back_to_requested_general(
     await engine._message_projector.start_subtask(
         "child-task", "parent-call", "inspect", agent_type=agent_type
     )
-    await engine._handle_message(
+    await engine._message_projector.handle_message(
         _task_message("task_started", task_type="local_agent", description="inspect")
     )
     assert events == []
@@ -1229,13 +1228,13 @@ async def test_subtask_cleanup_preserves_streamed_summary_and_is_idempotent(
         "step": 1,
         "event_arguments": {"subagent_type": "explore"},
     }
-    await engine._handle_message(
+    await engine._message_projector.handle_message(
         _task_message("task_started", task_type="local_agent", description="inspect")
     )
     engine._child_text["parent-call"] = "streamed child answer"
     await engine._finish_subtask_from_tool("parent-call", "", "error")
     await engine._finish_subtask_from_tool("parent-call", "", "error")
-    await engine._handle_message(
+    await engine._message_projector.handle_message(
         _task_message("task_updated", tool_use_id=None, patch={"status": "killed"})
     )
     finishes = [event for event in events if event["type"] == "subtask_finished"]

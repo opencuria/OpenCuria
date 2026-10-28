@@ -13,6 +13,7 @@ import pytest
 
 from apps.harness.agents.definitions import get_agent
 from apps.harness.engines.claude.engine import ClaudeEngine
+from apps.harness.engines.claude.runtime_state import ClaudeRuntimeState
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.prompts.opencuria import opencuria_context
 from apps.harness.tests.conftest import TINY_PNG
@@ -694,15 +695,15 @@ async def test_real_cli_max_steps_uses_turn_limit_and_records_tool_completion(
     """A max-turn terminal returns a partial result after the tool call."""
     _require_pinned_cli()
     original_run = ClaudeEngine.run
-    original_build_command = ClaudeEngine._build_command
+    original_build_command = ClaudeRuntimeState.build_command
     commands: list[list[str]] = []
 
-    def capture_command(self: ClaudeEngine, **kwargs: Any) -> list[str]:
+    def capture_command(self: ClaudeRuntimeState, **kwargs: Any) -> list[str]:
         command = original_build_command(self, **kwargs)
         commands.append(command)
         return command
 
-    monkeypatch.setattr(ClaudeEngine, "_build_command", capture_command)
+    monkeypatch.setattr(ClaudeRuntimeState, "build_command", capture_command)
 
     async def run_with_one_step(
         self: ClaudeEngine,

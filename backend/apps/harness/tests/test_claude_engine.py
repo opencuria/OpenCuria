@@ -452,10 +452,8 @@ def test_oversized_transcript_retains_explicit_recovery_contract(monkeypatch) ->
 def test_cli_argv_is_explicit_bounded_and_resume_is_uuid() -> None:
     engine = ClaudeEngine(tools=default_tool_registry(), accessor=object())
     sid = str(uuid.uuid4())
-    argv = engine._build_command(
+    argv = engine._runtime_state.build_command(
         binary="/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
-        config_dir="/workspace/.opencuria/harness/claude/abc/config",
-        mcp_path="/unused",
         prompt_path="/workspace/.opencuria/harness/claude/abc/prompt.md",
         model="claude-sonnet-4-5",
         effort="high",
@@ -486,10 +484,8 @@ def test_cli_argv_is_explicit_bounded_and_resume_is_uuid() -> None:
 def test_cli_argv_fresh_run_mirrors_session_without_forcing_resume() -> None:
     engine = ClaudeEngine(tools=ToolRegistry(), accessor=object())
     session_id = str(uuid.uuid4())
-    argv = engine._build_command(
+    argv = engine._runtime_state.build_command(
         binary="/opt/opencuria/runtimes/claude-agent/2.1.310/claude",
-        config_dir="/workspace/.opencuria/harness/claude/abc/config",
-        mcp_path="",
         prompt_path="/workspace/.opencuria/harness/claude/abc/system-prompt.md",
         model="sonnet",
         effort="high",
@@ -537,18 +533,6 @@ async def test_run_rejects_oversized_skills_before_managed_processes() -> None:
         await engine.run("prompt", "build", "sonnet", opts=options)
 
     assert accessor.open_process_calls == []
-
-
-def test_environment_rejects_blocked_auth_names_and_never_has_home_path(
-    engine: ClaudeEngine,
-) -> None:
-    engine.auth_env = {"ANTHROPIC_API_KEY": "fixture-only-token"}
-    env = engine._cli_environment("/workspace/.opencuria/harness/claude/s/config")
-    assert env["ANTHROPIC_API_KEY"] == "fixture-only-token"
-    assert "HOME" not in env and "PATH" not in env
-    engine.auth_env = {"HOME": "/tmp"}
-    with pytest.raises(ValueError, match="blocked"):
-        engine._cli_environment("/workspace/.opencuria/harness/claude/s/config")
 
 
 def test_unknown_native_and_mcp_tools_fail_closed() -> None:

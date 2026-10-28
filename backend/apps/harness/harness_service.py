@@ -2564,7 +2564,7 @@ class HarnessService:
     @staticmethod
     def _redact_claude_error(error: object, auth: Any | None) -> str:
         """Redact the resolved per-run secret before logging SDK failures."""
-        from .engines.claude.security import redact_text
+        from .engines.shared.security import redact_text
 
         value = str(error or "Claude run failed")
         token = str(getattr(auth, "token", "") or "")

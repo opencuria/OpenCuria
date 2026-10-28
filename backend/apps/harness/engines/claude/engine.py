@@ -37,7 +37,8 @@ from ..catalog import (
     normalize_claude_effort,
     resolve_claude_sdk_model,
 )
-from .context import build_user_content
+from ..shared.media import build_user_content
+from ..shared.security import StreamingRedactor, redact_text, redact_value
 from .errors import ClaudeTranscriptError
 from .events import ClaudeEventNormalizer, StepState
 from .mcp_bridge import mcp_attachment_content, sanitize_mcp_attachments
@@ -51,7 +52,6 @@ from .runtime_state import (
     ClaudeRuntimeState,
     validate_claude_skills,
 )
-from .security import StreamingRedactor, redact_text, redact_value
 from .transport import ClaudeWorkspaceTransport
 
 log = structlog.get_logger(__name__)
@@ -127,7 +127,6 @@ class ClaudeEngine:
         self._runtime_state = ClaudeRuntimeState(
             accessor=accessor,
             auth_env=self.auth_env,
-            session_store=session_store,
             root=MANAGED_STATE_PREFIX.rstrip("/"),
             sdk_version=SDK_VERSION,
         )
@@ -212,11 +211,6 @@ class ClaudeEngine:
             return f"{slug or 'session'}-{digest}"
 
     @staticmethod
-    def _valid_external_session_id(value: str) -> str:
-        """Require Claude external transcript identifiers to be UUIDs."""
-        return ClaudeRuntimeState.valid_external_session_id(value)
-
-    @staticmethod
     def _sdk_version() -> str:
         """Return the installed SDK version, rejecting a mismatched runtime."""
         try:
@@ -255,14 +249,6 @@ class ClaudeEngine:
             raise RuntimeError("Runner returned an invalid Claude Code runtime path")
         return path
 
-    async def _ensure_managed_dir(self, path: str) -> None:
-        """Create a managed directory and reject symlinked path components."""
-        await self._runtime_state.ensure_managed_dir(path)
-
-    async def _write_managed_file(self, path: str, payload: bytes) -> None:
-        """Write an engine-generated config or prompt file with private mode."""
-        await self._runtime_state.write_managed_file(path, payload)
-
     async def _restore_transcript(
         self, *, external_id: str, cwd: str, config_dir: str
     ) -> None:
@@ -286,8 +272,10 @@ class ClaudeEngine:
             raise ValueError("Claude session store returned invalid transcript entries")
         transcript = self._jsonl_bytes(entries)
         project_dir = f"{config_dir}/projects/{project_key}"
-        await self._ensure_managed_dir(project_dir)
-        await self._write_managed_file(f"{project_dir}/{external_id}.jsonl", transcript)
+        await self._runtime_state.ensure_managed_dir(project_dir)
+        await self._runtime_state.write_managed_file(
+            f"{project_dir}/{external_id}.jsonl", transcript
+        )
         if not _store_implements(self.session_store, "list_subkeys"):
             return
         subpaths = await self.session_store.list_subkeys(key)
@@ -317,9 +305,9 @@ class ClaudeEngine:
                 raise ClaudeTranscriptError("exceeds the restore limit")
             relative_dir, basename = subpath.rsplit("/", 1)
             remote_dir = f"{session_dir}/{relative_dir}"
-            await self._ensure_managed_dir(remote_dir)
+            await self._runtime_state.ensure_managed_dir(remote_dir)
             if transcript_entries:
-                await self._write_managed_file(
+                await self._runtime_state.write_managed_file(
                     f"{remote_dir}/{basename}.jsonl", sub_transcript
                 )
             if metadata:
@@ -332,7 +320,7 @@ class ClaudeEngine:
                 total += len(raw)
                 if total > MAX_RESTORED_TRANSCRIPT_BYTES:
                     raise ClaudeTranscriptError("exceeds the restore limit")
-                await self._write_managed_file(
+                await self._runtime_state.write_managed_file(
                     f"{remote_dir}/{basename}.meta.json", raw
                 )
 
@@ -367,21 +355,6 @@ class ClaudeEngine:
             and all(part not in {"", ".", ".."} for part in parts)
             and all(re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", part) for part in parts)
         )
-
-    def _cli_environment(self, config_dir: str) -> dict[str, str]:
-        self._runtime_state.auth_env = self.auth_env
-        return self._runtime_state.cli_environment(config_dir)
-
-    @staticmethod
-    def _mcp_cli_config() -> dict[str, Any]:
-        """Return the sole SDK server descriptor permitted by this engine."""
-        return ClaudeRuntimeState.mcp_cli_config()
-
-    async def _write_skills_plugin(
-        self, path: str, skills: list[str]
-    ) -> dict[str, str]:
-        """Write selected skill bodies as a private, session-scoped Claude plugin."""
-        return await self._runtime_state.write_skills_plugin(path, skills)
 
     def _schemas(
         self, agent: AgentDefinition, mode: str, depth: int, max_depth: int
@@ -439,11 +412,6 @@ class ClaudeEngine:
                 schema = {**schema, "name": original}
             result.append(dict(schema))
         return result
-
-    @staticmethod
-    def _claude_system_prompt(system: str, mode: str) -> str:
-        """Compose OpenCuria run context to append to native Claude Code."""
-        return ClaudeRuntimeState.claude_system_prompt(system, mode)
 
     def _prompt_tools(self, schemas: list[dict[str, Any]]) -> list[ToolSchema]:
         """Describe only OpenCuria MCP tools; native contracts belong to the CLI."""
@@ -549,7 +517,7 @@ class ClaudeEngine:
             or path == self._managed_root
         ):
             raise ValueError("Claude attachment directory escaped its run root")
-        await self._ensure_managed_dir(path)
+        await self._runtime_state.ensure_managed_dir(path)
 
     def _mcp_handler(
         self, wire_name: str, name: str
@@ -719,49 +687,6 @@ class ClaudeEngine:
                 model="inherit",
             )
         return definitions
-
-    @staticmethod
-    def _sdk_system_prompt() -> dict[str, Any]:
-        """Retain Claude Code's native preset while SDK applies its options."""
-        return ClaudeRuntimeState.sdk_system_prompt()
-
-    @staticmethod
-    def _settings(mode: str) -> dict[str, Any]:
-        """Configure native features without bypassing permission hooks."""
-        return ClaudeRuntimeState.settings(mode)
-
-    def _build_command(
-        self,
-        *,
-        binary: str,
-        config_dir: str,
-        mcp_path: str,
-        prompt_path: str,
-        model: str,
-        effort: str,
-        permission_mode: str,
-        native_tools: list[str],
-        external_session_id: str,
-        fresh_session_id: str,
-        has_session_store: bool,
-        plugin_dir: str | None = None,
-        settings_path: str | None = None,
-    ) -> list[str]:
-        return self._runtime_state.build_command(
-            binary=binary,
-            config_dir=config_dir,
-            mcp_path=mcp_path,
-            prompt_path=prompt_path,
-            model=model,
-            effort=effort,
-            permission_mode=permission_mode,
-            native_tools=native_tools,
-            external_session_id=external_session_id,
-            fresh_session_id=fresh_session_id,
-            has_session_store=has_session_store,
-            plugin_dir=plugin_dir,
-            settings_path=settings_path,
-        )
 
     def _permission_hooks(self) -> dict[str, list[Any]]:
         """Delegate SDK permission callbacks to the policy bridge."""
@@ -981,7 +906,9 @@ class ClaudeEngine:
     ) -> None:
         task_id = self._subtask_by_tool.get(call_id, "")
         if task_id:
-            await self._finish_sdk_subtask(task_id, call_id, status, output)
+            await self._message_projector.finish_sdk_subtask(
+                task_id, call_id, status, output
+            )
 
     async def _prompt_with_history(self, prompt: str) -> str | list[dict[str, Any]]:
         """Hydrate current prompt and non-resumed history into Claude blocks."""
@@ -1412,44 +1339,6 @@ class ClaudeEngine:
         return await self._bridge.can_use_tool(self, source_name, arguments, context)
 
     @staticmethod
-    def _result_usage(result):
-        """Compatibility facade for consumers of the former engine helper."""
-        return ClaudeEventNormalizer.result_usage(result)
-
-    @staticmethod
-    def _tool_output(value):
-        """Compatibility facade for SDK-native tool-output normalization."""
-        return ClaudeEventNormalizer.tool_output(value)
-
-    async def _handle_message(self, message: Any) -> tuple[Any, str, Usage] | None:
-        return await self._message_projector.handle_message(message)
-
-    async def _handle_user_tool_results(self, message: Any) -> None:
-        await self._message_projector.handle_user_tool_results(message)
-
-    async def _handle_task_progress(self, message: Any) -> None:
-        await self._message_projector.handle_task_progress(message)
-
-    async def _handle_task_notification(self, message: Any) -> None:
-        await self._message_projector.handle_task_notification(message)
-
-    async def _handle_task_updated(self, message: Any) -> None:
-        await self._message_projector.handle_task_updated(message)
-
-    async def _finish_sdk_subtask(
-        self, task: str, tool: str, status: str, summary: str
-    ) -> None:
-        await self._message_projector.finish_sdk_subtask(task, tool, status, summary)
-
-    async def _revise_subtask_terminal_status(
-        self, task: str, tool: str, status: str
-    ) -> None:
-        await self._message_projector.revise_subtask_terminal_status(task, tool, status)
-
-    async def _bind_external_session(self, external_id: str) -> None:
-        await self._message_projector.bind_external_session(external_id)
-
-    @staticmethod
     def _stored_cost_baseline(engine_state: dict[str, Any] | None) -> float:
         """Read the persisted cumulative CLI cost; ignore malformed values."""
         value = (engine_state or {}).get(CLI_TOTAL_COST_KEY)
@@ -1551,7 +1440,7 @@ class ClaudeEngine:
             engine=self,
         )
         transcript = (
-            self._valid_external_session_id(self.external_session_id)
+            self._runtime_state.valid_external_session_id(self.external_session_id)
             if self.external_session_id
             else ""
         )
@@ -1566,8 +1455,8 @@ class ClaudeEngine:
                 :16
             ]
             config += f"/resume-{resume_key}"
-        await self._ensure_managed_dir(config)
-        await self._ensure_managed_dir(root)
+        await self._runtime_state.ensure_managed_dir(config)
+        await self._runtime_state.ensure_managed_dir(root)
         self._sdk_version()
         binary = await self._ensure_cli()
         await self._restore_transcript(
@@ -1575,7 +1464,7 @@ class ClaudeEngine:
         )
         schemas = self._schemas(agent, mode, depth, max_depth)
         sdk_schemas = self._bridge_schemas_for_sdk(schemas)
-        skill_names = await self._write_skills_plugin(root, skills)
+        skill_names = await self._runtime_state.write_skills_plugin(root, skills)
         self._managed_skill_names = set(skill_names)
         if agent.name == "explore":
             self._managed_skill_names.clear()
@@ -1585,15 +1474,15 @@ class ClaudeEngine:
             raise ValueError(
                 "Composed Claude system prompt exceeds the managed size limit"
             )
-        await self._write_managed_file(prompt_file, system.encode())
+        await self._runtime_state.write_managed_file(prompt_file, system.encode())
         effort = normalize_claude_effort(
             getattr(options, "reasoning_effort", "")
             or getattr(options, "claude_effort", "")
             or self._default_effort
         )
-        settings = self._settings(mode)
+        settings = self._runtime_state.settings(mode)
         settings_path = f"{root}/settings.json"
-        await self._write_managed_file(
+        await self._runtime_state.write_managed_file(
             settings_path, json.dumps(settings, separators=(",", ":")).encode()
         )
         # The SDK's mirror batcher requires paths under /workspace even though
@@ -1601,10 +1490,8 @@ class ClaudeEngine:
         # transports. Set the mirrored CLI config root explicitly there.
         if not transcript:
             transcript = str(uuid.uuid4())
-        argv = self._build_command(
+        argv = self._runtime_state.build_command(
             binary=binary,
-            config_dir=config,
-            mcp_path="",
             prompt_path=prompt_file,
             model=self._model,
             effort=effort,
@@ -1647,7 +1534,8 @@ class ClaudeEngine:
             max_depth=max_depth,
             selected_skills=list(self._managed_skill_names),
         )
-        mirror_env = self._cli_environment(config)
+        self._runtime_state.auth_env = self.auth_env
+        mirror_env = self._runtime_state.cli_environment(config)
         max_turns = options.max_steps or agent.steps
         if max_turns is not None:
             argv.extend(["--max-turns", str(max_turns)])
@@ -1672,7 +1560,7 @@ class ClaudeEngine:
             effort=effort,
             max_turns=max_turns,
             permission_mode="plan" if mode == "plan" else "default",
-            system_prompt=self._sdk_system_prompt(),
+            system_prompt=self._runtime_state.sdk_system_prompt(),
             tools=native_cli_tools,
             agents=await self._agent_definitions(),
             skills=(
@@ -1701,7 +1589,7 @@ class ClaudeEngine:
                 self.accessor,
                 argv,
                 cwd=self._cwd,
-                env=self._cli_environment(config),
+                env=self._runtime_state.cli_environment(config),
                 owner=lease.owner,
             )
             client = ClaudeSDKClient(options=sdk_options, transport=transport)
@@ -1749,14 +1637,14 @@ class ClaudeEngine:
             usage = Usage()
             try:
                 async for message in client.receive_messages():
-                    outcome = await self._handle_message(message)
+                    outcome = await self._message_projector.handle_message(message)
                     if outcome is not None:
                         terminal, output, usage = outcome
                         if steering is not None:
                             # The turn is over: later steers become a follow-up
                             # run and the SDK may close the CLI's stdin.
                             steering.end_feed()
-                        await self._bind_external_session(
+                        await self._message_projector.bind_external_session(
                             str(terminal.session_id or "")
                         )
             except ResultError as exc:
@@ -1991,7 +1879,9 @@ class ClaudeEngine:
             if state.get("source_tool") in {"Task", "Agent"}:
                 task_id = self._subtask_by_tool.get(call_id, "")
                 if task_id:
-                    await self._finish_sdk_subtask(task_id, call_id, "error", reason)
+                    await self._message_projector.finish_sdk_subtask(
+                        task_id, call_id, "error", reason
+                    )
                 else:
                     await self._finish_subtask_from_tool(call_id, reason, "error")
 

@@ -78,7 +78,6 @@ def _runtime(root: Path) -> ClaudeRuntimeState:
     return ClaudeRuntimeState(
         accessor=_LocalAccessor(),  # type: ignore[arg-type]
         auth_env={"ANTHROPIC_API_KEY": "not-a-real-secret"},
-        session_store=None,
         root=str(root),
         sdk_version="test",
     )
@@ -93,7 +92,6 @@ async def test_managed_write_is_atomic_private_and_does_not_follow_file_symlink(
     state = ClaudeRuntimeState(
         accessor=accessor,  # type: ignore[arg-type]
         auth_env={"ANTHROPIC_API_KEY": "not-a-real-secret"},
-        session_store=None,
         root=str(root),
         sdk_version="test",
     )
@@ -260,9 +258,15 @@ def test_sdk_preset_is_live_for_resume_updates() -> None:
     }
 
 
-def test_cli_environment_disables_unscoped_fork_subagents(tmp_path: Path) -> None:
-    """CLI 2.1.302+ must not enable parent-tool-inheriting forks by default."""
+def test_cli_environment_limits_credentials_and_disables_unscoped_forks(
+    tmp_path: Path,
+) -> None:
+    """Keep scoped credentials and children inside the managed CLI environment."""
     state = _runtime(tmp_path / "managed")
     environment = state.cli_environment(str(tmp_path / "managed/session/config"))
     assert environment["CLAUDE_CODE_FORK_SUBAGENT"] == "0"
     assert environment["ANTHROPIC_API_KEY"] == "not-a-real-secret"
+    assert "HOME" not in environment and "PATH" not in environment
+    state.auth_env = {"HOME": "/tmp"}
+    with pytest.raises(ValueError, match="blocked"):
+        state.cli_environment(str(tmp_path / "managed/session/config"))

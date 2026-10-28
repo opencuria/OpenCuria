@@ -9,7 +9,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from ...tools.files import MAX_MEDIA_INGEST_BYTES, SUPPORTED_IMAGE_MIMES
-from .context import MAX_CLAUDE_IMAGE_BASE64_CHARS
+from ..shared.media import MAX_CLAUDE_IMAGE_BASE64_CHARS
 from .materializer import stage_pdf_attachments
 
 MAX_MCP_ATTACHMENT_COUNT = 8

@@ -427,7 +427,7 @@ class FakeClaudeEngine:
         assert decision["hookSpecificOutput"]["permissionDecision"] == "allow"
 
         async def handle(raw_message: dict[str, Any]) -> None:
-            await engine._handle_message(parse_message(raw_message))
+            await engine._message_projector.handle_message(parse_message(raw_message))
 
         await handle(
             {

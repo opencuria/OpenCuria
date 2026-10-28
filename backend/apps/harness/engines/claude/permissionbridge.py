@@ -12,8 +12,9 @@ from ...permissions.evaluator import ASK, DENY, PermissionEvaluator
 from ...permissions.scopes import is_permission_scope, permission_scope
 from ...tools.base import ToolRegistry
 from ..base import RunOptions
+from ..shared.security import redact_action, redact_arguments, redact_title
 from ..shared.shellpolicy import shell_command_is_explore_safe
-from .events import StepState
+from .events import ClaudeEventNormalizer, StepState
 from .policy import (
     NATIVE_TOOL_KEYS,
     combine_decisions,
@@ -21,7 +22,6 @@ from .policy import (
     registry_tool_identity,
     tool_identity,
 )
-from .security import redact_action, redact_arguments, redact_title
 
 
 class PermissionBridge:
@@ -455,7 +455,7 @@ class PermissionBridge:
                 return {}
             engine._pending_task_tool_ids.discard(call_id)
             result = engine._tool_results.pop(call_id, None)
-            output = engine._tool_output(
+            output = ClaudeEventNormalizer.tool_output(
                 result.output if result is not None else hook_input.get("tool_response")
             )
             self.discard_mcp_call(call_id)
