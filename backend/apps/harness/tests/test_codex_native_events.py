@@ -14,6 +14,7 @@ from apps.harness.agents.definitions import get_agent
 from apps.harness.engines.base import RunOptions
 from apps.harness.engines.codex.configuration import runtime_settings
 from apps.harness.engines.codex.engine import CodexEngine
+from apps.harness.engines.codex.media import image_attachments
 from apps.harness.engines.codex.session_store import (
     capture,
     home_for,
@@ -217,10 +218,20 @@ async def test_image_generation_enriches_prompt_and_uses_authorized_no_follow_me
     assert "not-for-json-output" not in json.dumps(events)
     assert "A green icon" in events[-2]["arguments"]
     engine.invoker.evaluator = PermissionEvaluator(global_rules={"read": "deny"})
-    assert await engine.projector.image_attachments(item) == []
+    assert (
+        await image_attachments(
+            item, accessor=engine.accessor, authorize_read=engine._authorize_read
+        )
+        == []
+    )
     assert len(reads) == 1
     item["savedPath"] = "/etc/private.png"
-    assert await engine.projector.image_attachments(item) == []
+    assert (
+        await image_attachments(
+            item, accessor=engine.accessor, authorize_read=engine._authorize_read
+        )
+        == []
+    )
 
 
 @pytest.mark.asyncio
@@ -336,14 +347,18 @@ async def test_native_child_dynamic_tools_use_child_policy_and_timeline():
 async def test_inline_generated_image_is_bounded_and_not_a_remote_url():
     engine = CodexEngine(tools=default_tool_registry(), accessor=None, auth=auth())
     encoded = base64.b64encode(TINY_PNG).decode()
-    result = await engine.projector.image_attachments(
-        {"type": "imageGeneration", "result": encoded}
+    result = await image_attachments(
+        {"type": "imageGeneration", "result": encoded},
+        accessor=engine.accessor,
+        authorize_read=engine._authorize_read,
     )
     assert result[0]["url"] == "data:image/png;base64," + encoded
     for value in ("https://example.com/image.png", "invalid base64", "x" * 8000001):
         assert (
-            await engine.projector.image_attachments(
-                {"type": "imageGeneration", "result": value}
+            await image_attachments(
+                {"type": "imageGeneration", "result": value},
+                accessor=engine.accessor,
+                authorize_read=engine._authorize_read,
             )
             == []
         )

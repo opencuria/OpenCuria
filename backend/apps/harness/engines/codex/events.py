@@ -2,16 +2,9 @@
 
 from __future__ import annotations
 
-import base64
 import json
-from typing import TYPE_CHECKING, Any
-
-from ...access.base import sanitize_harness_path
-from ...access.file_types import guess_mime_type
-from ..shared.media import _read_media_no_follow, data_url_block
-
-if TYPE_CHECKING:
-    from .engine import CodexEngine
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 MAX_OUTPUT = 100_000
 NON_TOOL_ITEMS = {
@@ -120,26 +113,30 @@ def presentation(item: dict[str, Any]) -> tuple[str, str, dict[str, Any], str]:
 
 
 class CodexEventProjector:
-    """Balance native calls and project native child threads into existing subtasks."""
+    """Project native calls and child threads without engine or workspace access.
 
-    def __init__(self, engine: CodexEngine) -> None:
-        self.engine = engine
+    The engine supplies live run inputs, event delivery and checked attachments.
+    Projection owns only display mapping, buffering and balanced event lifecycles.
+    """
+
+    def __init__(
+        self,
+        *,
+        emit: Callable[[dict[str, Any], str | None], Awaitable[None]],
+        model: Callable[[], str],
+        is_managed_tool: Callable[[str], bool],
+        image_attachments: Callable[[dict[str, Any]], Awaitable[list[dict[str, Any]]]],
+    ) -> None:
+        """Bind narrow ports; query run inputs when their events arrive."""
+        self._emit = emit
+        self._model = model
+        self._is_managed_tool = is_managed_tool
+        self._image_attachments = image_attachments
         self.calls: dict[str, tuple[str, str | None]] = {}
         self.finished: set[str] = set()
         self.children: dict[str, dict[str, Any]] = {}
         self.early: list[dict[str, Any]] = []
         self.child_text: dict[str, str] = {}
-
-    async def send(self, event: dict[str, Any], parent: str | None = None) -> None:
-        """Redact child events through the same boundary as parent events."""
-        if parent and self.engine.on_child_event:
-            from ..shared.security import redact_value
-
-            await self.engine.on_child_event(
-                parent, redact_value(event, self.engine.secret_values)
-            )
-        elif not parent:
-            await self.engine._send(event)
 
     async def item(
         self, item: dict[str, Any], *, completed: bool, parent: str | None = None
@@ -161,7 +158,7 @@ class CodexEventProjector:
             return
         if not key or kind in NON_TOOL_ITEMS:
             return
-        if kind == "dynamicToolCall" and item.get("tool") in self.engine.allowed:
+        if kind == "dynamicToolCall" and self._is_managed_tool(item.get("tool")):
             return  # The managed dispatcher already owns this lifecycle.
         if len(self.calls) >= 4096:
             raise ValueError("Codex native tool count limit reached")
@@ -177,8 +174,8 @@ class CodexEventProjector:
                 "title": title,
                 "arguments": json.dumps(args, ensure_ascii=False),
             }
-            await self.send({"type": "tool_queued", **event}, parent)
-            await self.send({"type": "tool_started", **event}, parent)
+            await self._emit({"type": "tool_queued", **event}, parent)
+            await self._emit({"type": "tool_started", **event}, parent)
         if kind == "collabAgentToolCall":
             await self.collaboration(item)
         if not completed:
@@ -186,7 +183,7 @@ class CodexEventProjector:
         self.finished.add(key)
         # Native image prompts/paths often arrive only on completion. Enrich
         # the existing call's input before its terminal result is persisted.
-        await self.send(
+        await self._emit(
             {
                 "type": "tool_queued",
                 "step": 1,
@@ -203,8 +200,8 @@ class CodexEventProjector:
             or bool(item.get("error") or item.get("failure"))
             or item.get("success") is False
         )
-        attachments = await self.image_attachments(item) if not failed else []
-        await self.send(
+        attachments = await self._image_attachments(item) if not failed else []
+        await self._emit(
             {
                 "type": "tool_error" if failed else "tool_completed",
                 "step": 1,
@@ -217,7 +214,7 @@ class CodexEventProjector:
         )
         if kind == "fileChange":
             for change in item.get("changes", []):
-                await self.send(
+                await self._emit(
                     {
                         "type": "patch",
                         "step": 1,
@@ -229,62 +226,6 @@ class CodexEventProjector:
                     parent,
                 )
 
-    async def image_attachments(self, item: dict[str, Any]) -> list[dict[str, Any]]:
-        """Hydrate only bounded, authorized no-follow workspace images."""
-        if item.get("type") not in {"imageGeneration", "imageView"}:
-            return []
-        raw_path = item.get("savedPath") or item.get("path")
-        if not raw_path:
-            encoded = item.get("result")
-            if not isinstance(encoded, str) or not encoded or len(encoded) > 8_000_000:
-                return []
-            url = (
-                encoded
-                if encoded.startswith("data:")
-                else "data:image/png;base64," + encoded
-            )
-            try:
-                block = data_url_block(url)
-            except ValueError:
-                return []
-            if block.get("type") != "image":
-                return []
-            return [
-                {
-                    "type": "file",
-                    "mime": block["source"]["media_type"],
-                    "url": url,
-                    "filename": "generated.png",
-                }
-            ]
-        if not self.engine.accessor:
-            return []
-        try:
-            path = sanitize_harness_path(raw_path)
-            if not path.startswith("/workspace/"):
-                return []
-            if not await self.engine._authorize_read(path):
-                return []
-            stored = await _read_media_no_follow(
-                self.engine.accessor, path, max_size=6_000_000
-            )
-            mime = guess_mime_type(path)
-            if stored.truncated or len(stored.content) > 6_000_000:
-                return []
-            if mime not in {"image/png", "image/jpeg", "image/gif", "image/webp"}:
-                return []
-            return [
-                {
-                    "type": "file",
-                    "mime": mime,
-                    "filename": path.rsplit("/", 1)[-1],
-                    "url": f"data:{mime};base64,"
-                    + base64.b64encode(stored.content).decode(),
-                }
-            ]
-        except Exception:
-            return []  # A missing preview must not fail an already executed tool.
-
     async def collaboration(self, item: dict[str, Any]) -> None:
         """Use native child IDs, not OpenCuria delegation or fabricated runs."""
         states = item.get("agentsStates") or {}
@@ -293,12 +234,13 @@ class CodexEventProjector:
             child = self.children.get(thread)
             if child is None:
                 native_model = str(item.get("model") or "")
-                provider = self.engine.model.split("/", 1)[0]
+                parent_model = self._model()
+                provider = parent_model.split("/", 1)[0]
                 model = (
                     provider + "/" + native_model.removeprefix("~")
                     if native_model
                     and not native_model.startswith(("chatgpt/", "openrouter/"))
-                    else native_model or self.engine.model
+                    else native_model or parent_model
                 )
                 child = self.children[thread] = {
                     "subtask_id": thread,
@@ -309,7 +251,7 @@ class CodexEventProjector:
                     "reasoning_effort": item.get("reasoningEffort") or "",
                     "finished": False,
                 }
-                await self.engine._send({"type": "subtask_started", **child})
+                await self._emit({"type": "subtask_started", **child}, None)
                 pending, self.early = self.early, []
                 for event in pending:
                     if event.get("params", {}).get("threadId") == thread:
@@ -339,13 +281,14 @@ class CodexEventProjector:
         child = self.children.get(thread)
         if child and not child["finished"]:
             child["finished"] = True
-            await self.engine._send(
+            await self._emit(
                 {
                     **child,
                     "type": "subtask_finished",
                     "status": status,
                     "summary": summary[:MAX_OUTPUT],
-                }
+                },
+                None,
             )
 
     async def child_notification(self, message: dict[str, Any]) -> None:
@@ -373,7 +316,7 @@ class CodexEventProjector:
             # same child. Open a new projected activity without replaying text.
             child["finished"] = False
             child["subtask_id"] = f"{thread}:{params.get('turnId', '')}"
-            await self.engine._send({"type": "subtask_started", **child})
+            await self._emit({"type": "subtask_started", **child}, None)
         child["turn_id"] = params.get("turnId") or (params.get("turn") or {}).get("id")
         parent = child["parent_tool_use_id"]
         if method == "turn/completed":
@@ -406,7 +349,7 @@ class CodexEventProjector:
             text = str(item.get("text") or "\n".join(item.get("summary") or []))
             self.child_text[key] = text[:MAX_OUTPUT]
             field = "text" if item["type"] == "agentMessage" else "reasoning"
-            await self.send(
+            await self._emit(
                 {
                     "type": "part_updated",
                     "step": 1,
@@ -421,7 +364,7 @@ class CodexEventProjector:
         """Close abandoned native tools and subtasks on all exit paths."""
         for key, (tool, parent) in self.calls.items():
             if key not in self.finished:
-                await self.send(
+                await self._emit(
                     {
                         "type": "tool_error",
                         "step": 1,

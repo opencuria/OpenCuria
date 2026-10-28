@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import replace
+from functools import partial
 from typing import Any, TypeVar
 
 from ...access.base import WorkspaceAccessor, sanitize_exec_workdir
@@ -26,7 +27,7 @@ from .catalog import CODEX_VERSION, codex_provider
 from .configuration import _toml, runtime_argv, runtime_settings
 from .errors import CodexRecoveryError
 from .events import CodexEventProjector
-from .media import user_input
+from .media import image_attachments, user_input
 from .protocol import CodexProtocol, CodexProtocolError, CodexRPCError
 from .session_store import (
     CodexSessionStore,
@@ -91,7 +92,7 @@ class CodexEngine:
         self.session_store = session_store
         self.on_binding, self.on_owner = on_binding, on_owner
         self.on_child_event = on_child_event
-        self.projector = CodexEventProjector(self)
+        self.projector = self._create_projector()
         self._child_scope: ContextVar[str | None] = ContextVar(
             "codex_child", default=None
         )
@@ -111,13 +112,27 @@ class CodexEngine:
             tools, accessor, self._send, evaluator, secrets=lambda: self.secret_values
         )
 
-    async def _send(self, event: dict[str, Any]) -> None:
-        """Project all persisted/visible engine events through current secrets."""
+    def _create_projector(self) -> CodexEventProjector:
+        """Wire event projection without exposing the engine or workspace to it."""
+        return CodexEventProjector(
+            emit=self._send,
+            model=lambda: self.model,
+            is_managed_tool=lambda name: name in self.allowed,
+            image_attachments=partial(
+                image_attachments,
+                accessor=self.accessor,
+                authorize_read=self._authorize_read,
+            ),
+        )
+
+    async def _send(self, event: dict[str, Any], parent: str | None = None) -> None:
+        """Redact events and route projected children or the managed tool scope."""
         safe = redact_value(event, self.secret_values)
-        parent = self._child_scope.get()
-        if parent and self.on_child_event:
-            await self.on_child_event(parent, safe)
-        elif self.emit:
+        child = parent or self._child_scope.get()
+        if child and self.on_child_event:
+            await self.on_child_event(child, safe)
+        elif not parent and self.emit:
+            # Only an implicit managed scope may fall back to the root sink.
             await self.emit(safe)
 
     async def _bind(self, **state: Any) -> None:
@@ -377,7 +392,7 @@ class CodexEngine:
         self.items = {}
         self.streamed = {}
         self.redactors = {}
-        self.projector = CodexEventProjector(self)
+        self.projector = self._create_projector()
         self.usage = Usage()
         self.total_text_bytes = 0
         try:

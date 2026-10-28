@@ -6,14 +6,17 @@ import asyncio
 import base64
 import json
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from ...access.base import WorkspaceAccessor
+from ...access.base import WorkspaceAccessor, sanitize_harness_path
+from ...access.file_types import guess_mime_type
 from ..base import RunOptions
 from ..shared.media import (
     MAX_CLAUDE_DOCUMENT_BYTES,
     MAX_USER_CONTENT_BYTES,
+    _read_media_no_follow,
     build_user_content,
     content_blocks,
     data_url_block,
@@ -138,3 +141,63 @@ async def dynamic_content(
 ) -> list[dict[str, Any]]:
     """Convert inline tool results without fetching arbitrary file or HTTP URLs."""
     return await convert(content_blocks(content), dynamic=True)
+
+
+async def image_attachments(
+    item: dict[str, Any],
+    *,
+    accessor: WorkspaceAccessor | None,
+    authorize_read: Callable[[str], Awaitable[bool]],
+) -> list[dict[str, Any]]:
+    """Hydrate only bounded, authorized no-follow workspace images."""
+    if item.get("type") not in {"imageGeneration", "imageView"}:
+        return []
+    raw_path = item.get("savedPath") or item.get("path")
+    if not raw_path:
+        encoded = item.get("result")
+        if not isinstance(encoded, str) or not encoded or len(encoded) > 8_000_000:
+            return []
+        url = (
+            encoded
+            if encoded.startswith("data:")
+            else "data:image/png;base64," + encoded
+        )
+        try:
+            block = data_url_block(url)
+        except ValueError:
+            return []
+        if block.get("type") != "image":
+            return []
+        return [
+            {
+                "type": "file",
+                "mime": block["source"]["media_type"],
+                "url": url,
+                "filename": "generated.png",
+            }
+        ]
+    if not accessor:
+        return []
+    try:
+        path = sanitize_harness_path(raw_path)
+        if not path.startswith("/workspace/"):
+            return []
+        if not await authorize_read(path):
+            return []
+        stored = await _read_media_no_follow(accessor, path, max_size=6_000_000)
+        mime = guess_mime_type(path)
+        if stored.truncated or len(stored.content) > 6_000_000:
+            return []
+        if mime not in {"image/png", "image/jpeg", "image/gif", "image/webp"}:
+            return []
+        return [
+            {
+                "type": "file",
+                "mime": mime,
+                "filename": path.rsplit("/", 1)[-1],
+                "url": f"data:{mime};base64,"
+                + base64.b64encode(stored.content).decode(),
+            }
+        ]
+    except Exception:
+        return []  # A missing preview must not fail an already executed tool.
