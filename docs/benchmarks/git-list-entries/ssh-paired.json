@@ -1,0 +1,56 @@
+{
+  "baseline": "922f3e2",
+  "transport": "persistent-loopback-ssh",
+  "scope": "list-entry phase after discovery",
+  "method": "3 warmups; seeded shuffled pairs on identical repos; exact result equality; separate tracemalloc probe; no artificial delay or QEMU",
+  "cases": [
+    {
+      "repos": 1,
+      "samples": 41,
+      "before": {
+        "p50_ms": 15.31,
+        "p95_ms": 24.342,
+        "guest_exec_calls": 2,
+        "peak_python_bytes": 284067
+      },
+      "after": {
+        "p50_ms": 10.352,
+        "p95_ms": 14.275,
+        "guest_exec_calls": 1,
+        "peak_python_bytes": 277823
+      }
+    },
+    {
+      "repos": 5,
+      "samples": 41,
+      "before": {
+        "p50_ms": 56.375,
+        "p95_ms": 68.943,
+        "guest_exec_calls": 10,
+        "peak_python_bytes": 341031
+      },
+      "after": {
+        "p50_ms": 37.064,
+        "p95_ms": 46.931,
+        "guest_exec_calls": 5,
+        "peak_python_bytes": 311005
+      }
+    },
+    {
+      "repos": 15,
+      "samples": 41,
+      "before": {
+        "p50_ms": 161.87,
+        "p95_ms": 381.772,
+        "guest_exec_calls": 30,
+        "peak_python_bytes": 397652
+      },
+      "after": {
+        "p50_ms": 107.427,
+        "p95_ms": 219.217,
+        "guest_exec_calls": 15,
+        "peak_python_bytes": 391272
+      }
+    }
+  ]
+}

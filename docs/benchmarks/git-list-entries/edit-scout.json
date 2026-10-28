@@ -1,0 +1,7 @@
+{
+  "messages": 200,
+  "content_bytes_per_discovery": 52428800,
+  "queries": 2,
+  "p50_ms": 51.037,
+  "p95_ms": 51.387
+}

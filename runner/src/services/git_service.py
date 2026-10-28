@@ -16,7 +16,7 @@ from typing import Any
 import structlog
 
 from .. import git as git_ops
-from ..git_snapshot import parse_snapshot_reads, snapshot_read_argv
+from ..git_reads import head_read_argv, parse_git_reads, snapshot_read_argv
 from ..models import WorkspaceInfo
 from ..runtime.base import RuntimeBackend
 from .capture_fence import CaptureFence, live_interaction
@@ -91,7 +91,7 @@ class GitService:
         git and its askpass child — without ever appearing in argv, URLs
         or logs.  User-controlled git arguments stay separate argv
         elements behind ``exec "$@"`` and are never shell-interpreted.
-        The fixed snapshot batch sources the same credential prefix once;
+        Fixed metadata batches source the same credential prefix once;
         non-git probes (``realpath``/``find``/``test``/``rm``) run unwrapped.
         Raises :class:`GitError` with code ``missing_git``
         when the git binary is absent.
@@ -387,34 +387,36 @@ class GitService:
     ) -> dict[str, Any]:
         """Build a lightweight list entry for one repository root.
 
-        Only ``rev-parse --abbrev-ref HEAD`` + ``rev-parse HEAD`` (no
-        status, no log, no for-each-ref).  Detached HEAD (abbrev ``HEAD``)
+        Batch ``rev-parse --abbrev-ref HEAD`` + ``rev-parse HEAD`` into one
+        guest exec (no status, log or for-each-ref). Detached HEAD (abbrev ``HEAD``)
         and unborn repos (no ``HEAD`` commit) map to
         ``current_branch=None``; unborn additionally maps to
         ``head_hash=None``.
         """
         timeout = git_ops.GIT_READ_TIMEOUT_S
-        exit_code_b, abbrev_out = await self._git_exec(
+        marker = uuid.uuid4().hex
+        exit_code, output = await self._git_exec(
             runtime,
             instance_id,
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            head_read_argv(marker),
             workdir=repo_root,
             env=env,
             timeout=timeout,
         )
+        if exit_code != 0:
+            raise git_ops.GitError(
+                "git_failed", "Git HEAD read failed",
+                exit_code=exit_code, stderr=output,
+            )
+        reads = parse_git_reads(output, marker, count=2)
+        for code, text in reads:
+            self._check_git_binary(["git"], code, text)
+        (exit_code_b, abbrev_out), (exit_code_h, head_out) = reads
         current_branch: str | None = None
         if exit_code_b == 0 and abbrev_out.strip():
             head_name = abbrev_out.strip().splitlines()[0].strip()
             # Detached HEAD reports literally "HEAD".
             current_branch = None if head_name in {"", "HEAD"} else head_name
-        exit_code_h, head_out = await self._git_exec(
-            runtime,
-            instance_id,
-            ["git", "rev-parse", "HEAD"],
-            workdir=repo_root,
-            env=env,
-            timeout=timeout,
-        )
         head_hash: str | None = None
         if exit_code_h == 0 and head_out.strip():
             head_hash = head_out.strip().splitlines()[0].strip() or None
@@ -450,7 +452,7 @@ class GitService:
                 "git_failed", "Git snapshot read failed",
                 exit_code=exit_code, stderr=output,
             )
-        reads = parse_snapshot_reads(output, marker)
+        reads = parse_git_reads(output, marker, count=4, stop_on_first_error=True)
         for code, text in reads:
             self._check_git_binary(["git"], code, text)
         exit_code, status_out = reads[0]

@@ -1,0 +1,33 @@
+[
+  {
+    "operation": "read_file",
+    "size": 65536,
+    "p50_ms": 7.89,
+    "p95_ms": 9.999
+  },
+  {
+    "operation": "read_file",
+    "size": 5242880,
+    "p50_ms": 48.111,
+    "p95_ms": 61.758
+  },
+  {
+    "operation": "read_file",
+    "size": 26214400,
+    "p50_ms": 217.989,
+    "p95_ms": 245.792
+  },
+  {
+    "operation": "write_file_content",
+    "size": 65536,
+    "guest_calls": 3,
+    "latency": {
+      "p50_ms": 5.635,
+      "p95_ms": 6.109
+    },
+    "chmod_only": {
+      "p50_ms": 1.281,
+      "p95_ms": 1.559
+    }
+  }
+]

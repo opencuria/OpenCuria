@@ -242,9 +242,9 @@ class FakeGitRuntime:
             # Execute the actual fixed script; only map its path argument.
             mapped = [*probe_argv[:4], self._resolve_cwd(probe_argv[4])]
             return await asyncio.to_thread(_run_git, mapped, cwd)
-        if probe_argv[:2] == ["sh", "-c"] and probe_argv[3:4] == [
-            "opencuria-git-snapshot"
-        ]:
+        if probe_argv[:2] == ["sh", "-c"] and probe_argv[3:4] in (
+            ["opencuria-git-snapshot"], ["opencuria-git-head"]
+        ):
             # Run the production batch, without sourcing host credentials.
             mapped = list(probe_argv)
             mapped[2] = mapped[2].removeprefix(git_ops.GIT_SOURCE_ENV_SCRIPT)

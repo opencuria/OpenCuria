@@ -1,0 +1,56 @@
+{
+  "baseline": "922f3e2",
+  "transport": "persistent-loopback-ssh",
+  "scope": "complete list_repos",
+  "method": "3 warmups; seeded shuffled pairs on identical repos; exact result equality; separate tracemalloc probe; no artificial delay or QEMU",
+  "cases": [
+    {
+      "repos": 1,
+      "samples": 41,
+      "before": {
+        "p50_ms": 41.644,
+        "p95_ms": 52.476,
+        "guest_exec_calls": 8,
+        "peak_python_bytes": 328932
+      },
+      "after": {
+        "p50_ms": 37.711,
+        "p95_ms": 50.629,
+        "guest_exec_calls": 7,
+        "peak_python_bytes": 323148
+      }
+    },
+    {
+      "repos": 5,
+      "samples": 41,
+      "before": {
+        "p50_ms": 149.325,
+        "p95_ms": 189.263,
+        "guest_exec_calls": 28,
+        "peak_python_bytes": 390800
+      },
+      "after": {
+        "p50_ms": 130.605,
+        "p95_ms": 172.792,
+        "guest_exec_calls": 23,
+        "peak_python_bytes": 390326
+      }
+    },
+    {
+      "repos": 15,
+      "samples": 41,
+      "before": {
+        "p50_ms": 477.565,
+        "p95_ms": 990.096,
+        "guest_exec_calls": 78,
+        "peak_python_bytes": 446624
+      },
+      "after": {
+        "p50_ms": 501.073,
+        "p95_ms": 898.311,
+        "guest_exec_calls": 63,
+        "peak_python_bytes": 458724
+      }
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "baseline_ref": "922f3e2",
+  "time": "2026-10-28T14:05:09.853182+00:00",
+  "method": "secrets.choice(top_three), OS randomness, one draw",
+  "candidates": [
+    {
+      "rank": 1,
+      "id": "runner-file-read-parsing",
+      "evidence": "Real read_file calls: 5 MiB p50 48.111 ms / p95 61.758; 25 MiB p50 217.989 / p95 245.792. Isolated existing parser costs 14.725 / 93.611 ms p50 respectively. Frequent file/media path; localized constant-allocation parsing possible; preserve metadata, content and error contracts."
+    },
+    {
+      "rank": 2,
+      "id": "backend-message-edit-discovery",
+      "evidence": "Validation and admission each load all HarnessMessage columns, but consume only role/id. Disposable SQLite: 200 messages, 50 MiB total body materialization, 2 reads p50 51.037 ms / p95 51.387. User-visible edit admission; moderate session-scope/order/concurrency risk."
+    },
+    {
+      "rank": 3,
+      "id": "runner-git-list-entry-roundtrips",
+      "evidence": "Real local Git scout: 5 repositories produce 28 runtime calls, including 10 HEAD/branch commands; p50 43.428 ms / p95 53.681. Batch only the two fixed metadata reads; strong remote round-trip gain but lower frequency and framing/error tests needed."
+    },
+    {
+      "rank": 4,
+      "id": "mobile-snapshot-metadata-cloning",
+      "evidence": "ChatController.buildSnapshot clones/freezes sessions, todos, lineage and gates on every publish including text deltas. Message parts already structurally shared. Device profiling required; larger ownership/invalidation scope."
+    },
+    {
+      "rank": 5,
+      "id": "web-markdown-document-reparse",
+      "evidence": "HarnessMarkdown parses/sanitizes/reconstructs complete growing document. Already coalesced at 50 ms; incremental parsing risks reference-link correctness. Browser profiling required."
+    },
+    {
+      "rank": 6,
+      "id": "shared-descendant-traversal",
+      "evidence": "collectDescendantSessionIds scans all sessions repeatedly until ancestry resolves, used by both clients. Typical shallow trees may be cheap; replacement must preserve event ordering."
+    },
+    {
+      "rank": 7,
+      "id": "runner-file-write-chmod-roundtrip",
+      "evidence": "Real 64 KiB writes p50 5.635 ms including chmod-only p50 1.281 ms. Moving mode into tar alone would change umask semantics, so risk outweighs the narrower benefit."
+    }
+  ],
+  "top_three": [
+    "runner-file-read-parsing",
+    "backend-message-edit-discovery",
+    "runner-git-list-entry-roundtrips"
+  ],
+  "selected": "runner-git-list-entry-roundtrips"
+}

@@ -49,7 +49,7 @@ def _service(runtime: FakeGitRuntime) -> tuple[GitService, uuid.UUID]:
 
 @pytest.mark.parametrize("repo_count", [1, 5, 15])
 async def test_discovery_guest_exec_budget(tmp_path: Path, repo_count: int) -> None:
-    """Each ordinary repo needs five execs, not eight, including its summary."""
+    """Each ordinary repo needs four execs, including its batched HEAD read."""
     for index in range(repo_count):
         await asyncio.to_thread(_make_repo, str(tmp_path / f"repo-{index:02d}"))
     runtime = FakeGitRuntime(str(tmp_path))
@@ -61,7 +61,7 @@ async def test_discovery_guest_exec_budget(tmp_path: Path, repo_count: int) -> N
     assert [row["path"] for row in result["repos"]] == [
         f"/workspace/repo-{index:02d}" for index in range(repo_count)
     ]
-    assert len(runtime.calls) == 5 * repo_count + 3
+    assert len(runtime.calls) == 4 * repo_count + 3
     for call in runtime.calls:
         argv = _inner_argv(call)
         if argv[:1] == ["git"]:
@@ -231,7 +231,7 @@ async def test_workspace_root_listed_once(tmp_path: Path, has_commit: bool) -> N
     assert result["repos"][0]["path"] == "/workspace"
     assert result["repos"][0]["current_branch"] == ("main" if has_commit else None)
     assert bool(result["repos"][0]["head_hash"]) is has_commit
-    assert len(runtime.calls) == 6
+    assert len(runtime.calls) == 5
 
 
 async def test_discovery_rechecks_metadata_after_change(tmp_path: Path) -> None:

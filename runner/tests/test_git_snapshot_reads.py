@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from src import git as git_ops
-from src.git_snapshot import parse_snapshot_reads, snapshot_read_argv
+from src.git_reads import parse_git_reads, snapshot_read_argv
 from src.models import WorkspaceInfo
 from src.services.git_service import GitService
 
@@ -89,7 +89,9 @@ def test_actual_batch_matches_separate_commands_byte_for_byte(tmp_path: Path) ->
         _run(["git", "symbolic-ref", "refs/remotes/origin/HEAD"], tmp_path),
     ]
     assert code == 0
-    assert parse_snapshot_reads(output, MARKER) == expected
+    assert (
+        parse_git_reads(output, MARKER, count=4, stop_on_first_error=True) == expected
+    )
     assert not (tmp_path / "INJECTED").exists()
 
 
@@ -98,7 +100,7 @@ def test_failed_status_stops_actual_batch(tmp_path: Path) -> None:
     argv = snapshot_read_argv(MARKER)
     argv[2] = argv[2].removeprefix(git_ops.GIT_SOURCE_ENV_SCRIPT)
     code, output = _run(argv, tmp_path)
-    reads = parse_snapshot_reads(output, MARKER)
+    reads = parse_git_reads(output, MARKER, count=4, stop_on_first_error=True)
     assert code == 0
     assert len(reads) == 1
     assert reads[0][0] == 128
@@ -124,7 +126,7 @@ def test_credentials_sourced_and_marker_stays_literal(tmp_path: Path) -> None:
         argv, tmp_path, {**os.environ, "PATH": str(tmp_path) + os.pathsep + os.defpath}
     )
     assert code == 0
-    assert parse_snapshot_reads(output, marker) == [
+    assert parse_git_reads(output, marker, count=4, stop_on_first_error=True) == [
         (code, "synthetic-credential") for code in (0, 7, 0, 0)
     ]
     assert "synthetic-credential" not in str(argv)
@@ -151,7 +153,7 @@ def test_credentials_sourced_and_marker_stays_literal(tmp_path: Path) -> None:
 def test_malformed_output_fails_closed(output: str) -> None:
     """Do not accept truncation, extra frames or an injected boundary."""
     with pytest.raises(git_ops.GitError, match="Invalid Git snapshot"):
-        parse_snapshot_reads(output, MARKER)
+        parse_git_reads(output, MARKER, count=4, stop_on_first_error=True)
 
 
 @pytest.mark.parametrize("failed_read", [1, 2, 3])

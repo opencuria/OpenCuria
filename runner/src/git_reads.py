@@ -1,8 +1,30 @@
-"""Framed metadata reads for one Git snapshot, without guest temporary files."""
+"""Framed Git metadata reads, without guest temporary files."""
 
 from __future__ import annotations
 
 from . import git as git_ops
+
+_READ_FUNCTION = r"""
+oc_git_marker=$1
+oc_git_read() {
+    if "$@" 2>&1; then oc_git_code=0; else oc_git_code=$?; fi
+    printf '\000%s:%s\000' "$oc_git_marker" "$oc_git_code"
+    return "$oc_git_code"
+}
+"""
+
+
+def head_read_argv(marker: str) -> list[str]:
+    """Read branch and HEAD together, retaining each command's exit status."""
+    script = (
+        git_ops.GIT_SOURCE_ENV_SCRIPT
+        + _READ_FUNCTION
+        + r"""
+oc_git_read command git rev-parse --abbrev-ref HEAD || :
+oc_git_read command git rev-parse HEAD || :
+"""
+    )
+    return ["sh", "-c", script, "opencuria-git-head", marker]
 
 
 def snapshot_read_argv(marker: str) -> list[str]:
@@ -21,13 +43,8 @@ def snapshot_read_argv(marker: str) -> list[str]:
     )
     script = (
         git_ops.GIT_SOURCE_ENV_SCRIPT
+        + _READ_FUNCTION
         + r"""
-oc_git_marker=$1
-oc_git_read() {
-    if "$@" 2>&1; then oc_git_code=0; else oc_git_code=$?; fi
-    printf '\000%s:%s\000' "$oc_git_marker" "$oc_git_code"
-    return "$oc_git_code"
-}
 oc_git_read command git status --porcelain=v2 --branch \
     --untracked-files=all -z || exit 0
 oc_git_read command git for-each-ref --format="$2" \
@@ -39,12 +56,18 @@ oc_git_read command git symbolic-ref refs/remotes/origin/HEAD || :
     return ["sh", "-c", script, "opencuria-git-snapshot", marker, ref_format]
 
 
-def parse_snapshot_reads(output: str, marker: str) -> list[tuple[int, str]]:
-    """Return exact command outputs/statuses, rejecting partial/ambiguous frames."""
+def parse_git_reads(
+    output: str, marker: str, *, count: int, stop_on_first_error: bool = False
+) -> list[tuple[int, str]]:
+    """Return exact outputs/statuses, rejecting partial or ambiguous frames.
+
+    Snapshot batches may stop after their primary read fails. HEAD batches
+    always execute both optional reads, including when the branch read fails.
+    """
     boundary = f"\0{marker}:"
     results: list[tuple[int, str]] = []
     cursor = 0
-    while len(results) < 4:
+    while len(results) < count:
         end = output.find(boundary, cursor)
         status_end = output.find("\0", end + len(boundary)) if end >= 0 else -1
         if end < 0 or status_end < 0:
@@ -59,9 +82,9 @@ def parse_snapshot_reads(output: str, marker: str) -> list[tuple[int, str]]:
             break
         results.append((int(status), output[cursor:end]))
         cursor = status_end + 1
-        if len(results) == 1 and results[0][0] != 0:
+        if stop_on_first_error and len(results) == 1 and results[0][0] != 0:
             break
-    expected = 1 if results and results[0][0] != 0 else 4
+    expected = 1 if stop_on_first_error and results and results[0][0] != 0 else count
     if len(results) != expected or cursor != len(output):
         raise git_ops.GitError("git_failed", "Invalid Git snapshot read response")
     return results

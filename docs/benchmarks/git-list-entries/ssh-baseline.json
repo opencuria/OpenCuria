@@ -1,0 +1,40 @@
+{
+  "baseline": "922f3e2",
+  "transport": "persistent-loopback-ssh",
+  "scope": "list-entry phase after discovery",
+  "method": "3 warmups; seeded shuffled pairs on identical repos; exact result equality; separate tracemalloc probe; no artificial delay or QEMU",
+  "cases": [
+    {
+      "repos": 1,
+      "samples": 11,
+      "before": {
+        "p50_ms": 15.696,
+        "p95_ms": 20.462,
+        "guest_exec_calls": 2,
+        "peak_python_bytes": 283996
+      },
+      "after": {
+        "p50_ms": 16.437,
+        "p95_ms": 19.838,
+        "guest_exec_calls": 2,
+        "peak_python_bytes": 283996
+      }
+    },
+    {
+      "repos": 5,
+      "samples": 11,
+      "before": {
+        "p50_ms": 70.853,
+        "p95_ms": 160.998,
+        "guest_exec_calls": 10,
+        "peak_python_bytes": 341415
+      },
+      "after": {
+        "p50_ms": 70.378,
+        "p95_ms": 194.248,
+        "guest_exec_calls": 10,
+        "peak_python_bytes": 341043
+      }
+    }
+  ]
+}

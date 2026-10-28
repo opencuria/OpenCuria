@@ -1,0 +1,56 @@
+{
+  "baseline": "922f3e2",
+  "transport": "local-git-test-runtime",
+  "scope": "complete list_repos",
+  "method": "3 warmups; seeded shuffled pairs on identical repos; exact result equality; separate tracemalloc probe; no artificial delay or QEMU",
+  "cases": [
+    {
+      "repos": 1,
+      "samples": 41,
+      "before": {
+        "p50_ms": 7.08,
+        "p95_ms": 9.341,
+        "guest_exec_calls": 8,
+        "peak_python_bytes": 80044
+      },
+      "after": {
+        "p50_ms": 7.693,
+        "p95_ms": 9.456,
+        "guest_exec_calls": 7,
+        "peak_python_bytes": 79767
+      }
+    },
+    {
+      "repos": 5,
+      "samples": 41,
+      "before": {
+        "p50_ms": 35.012,
+        "p95_ms": 60.06,
+        "guest_exec_calls": 28,
+        "peak_python_bytes": 97400
+      },
+      "after": {
+        "p50_ms": 35.59,
+        "p95_ms": 58.208,
+        "guest_exec_calls": 23,
+        "peak_python_bytes": 99757
+      }
+    },
+    {
+      "repos": 15,
+      "samples": 41,
+      "before": {
+        "p50_ms": 104.72,
+        "p95_ms": 360.084,
+        "guest_exec_calls": 78,
+        "peak_python_bytes": 136667
+      },
+      "after": {
+        "p50_ms": 110.554,
+        "p95_ms": 327.508,
+        "guest_exec_calls": 63,
+        "peak_python_bytes": 132031
+      }
+    }
+  ]
+}

@@ -1,0 +1,116 @@
+{
+  "benchmark": "runner GitService list_repos via existing FakeGitRuntime",
+  "checkout": "/workspace/OpenCuria",
+  "notes": [
+    "Real local Git fixtures; test fake maps /workspace and runs local Git subprocesses.",
+    "No network, provider, external service, or user Git config is used.",
+    "Delay is simulated asyncio sleep, not QEMU/SSH latency.",
+    "No alternate subprocess runtime: find/realpath are emulated by FakeGitRuntime.",
+    "Digest covers canonical response JSON; raw response and command text are omitted.",
+    "Runtime counts are outside timing; optional allocation tracing is a separate probe."
+  ],
+  "results": [
+    {
+      "fixture_head_oids": [
+        "f81119afc9e328fa5b3edbf63ea82fe9e768556c"
+      ],
+      "injected_delay_ms_per_runtime_call": 0.0,
+      "peak_python_allocated_bytes_separate_probe": null,
+      "repos": 1,
+      "response_sha256": "e9e0c8261a04d129f80b4a159668cfbf1bcd376b4286b2644b359af4dd5b926e",
+      "runtime_call_categories": {
+        "auth/probe-shell": 1,
+        "find discovery": 1,
+        "git list-entry HEAD/branch": 2,
+        "git root verification": 2,
+        "realpath containment": 2
+      },
+      "runtime_calls_per_sample": [
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8
+      ],
+      "timing_ms": {
+        "max": 12.467,
+        "min": 6.946,
+        "p50": 9.867,
+        "p95_nearest_rank": 12.467,
+        "samples": [
+          6.946,
+          7.642,
+          8.181,
+          8.423,
+          8.664,
+          9.867,
+          11.301,
+          12.467,
+          12.325,
+          12.143,
+          11.518
+        ]
+      }
+    },
+    {
+      "fixture_head_oids": [
+        "f81119afc9e328fa5b3edbf63ea82fe9e768556c",
+        "f81119afc9e328fa5b3edbf63ea82fe9e768556c",
+        "f81119afc9e328fa5b3edbf63ea82fe9e768556c",
+        "f81119afc9e328fa5b3edbf63ea82fe9e768556c",
+        "f81119afc9e328fa5b3edbf63ea82fe9e768556c"
+      ],
+      "injected_delay_ms_per_runtime_call": 0.0,
+      "peak_python_allocated_bytes_separate_probe": null,
+      "repos": 5,
+      "response_sha256": "cc41953eb59ff30a2cd3cb5df83b0f5250e16059a63bbd37e71b6a6bb40ed383",
+      "runtime_call_categories": {
+        "auth/probe-shell": 1,
+        "find discovery": 1,
+        "git list-entry HEAD/branch": 10,
+        "git root verification": 6,
+        "realpath containment": 10
+      },
+      "runtime_calls_per_sample": [
+        28,
+        28,
+        28,
+        28,
+        28,
+        28,
+        28,
+        28,
+        28,
+        28,
+        28
+      ],
+      "timing_ms": {
+        "max": 53.681,
+        "min": 23.892,
+        "p50": 43.428,
+        "p95_nearest_rank": 53.681,
+        "samples": [
+          43.428,
+          45.961,
+          49.778,
+          43.863,
+          48.967,
+          53.681,
+          27.977,
+          24.258,
+          24.22,
+          23.892,
+          29.422
+        ]
+      }
+    }
+  ],
+  "samples": 11,
+  "warmups": 2
+}
