@@ -18,18 +18,40 @@ test('exposes bounded JS/reset and internal lifecycle schemas', async t => {
   const client = await runtime(t);
   const result = await client.listTools();
   assert.deepEqual(result.tools.map(tool => tool.name), ['js', 'js_reset', 'turn_ended']);
-  assert.equal(result.tools[0].annotations.readOnlyHint, false);
-  assert.equal(result.tools[2]._meta['opencuria/internal'], true);
+  assert.equal(result.tools[0].annotations, undefined);
+  assert.deepEqual(result.tools[2]._meta.ui.visibility, []);
 });
 
 test('retains lexical state and top-level await, then resets bindings', async t => {
   const client = await runtime(t);
   const a = await client.callTool({ name: 'js', arguments: { code: 'var counter = await Promise.resolve(40); nodeRepl.write(counter);' } });
-  assert.equal(a.isError, undefined);
+  assert.equal(a.isError, false);
   assert.equal(text(a), '40');
   assert.equal(text(await client.callTool({ name: 'js', arguments: { code: 'counter += 2; nodeRepl.write(counter);' } })), '42');
   await client.callTool({ name: 'js_reset', arguments: {} });
   assert.equal(text(await client.callTool({ name: 'js', arguments: { code: 'nodeRepl.write(typeof counter);' } })), 'undefined');
+});
+
+test('reference text channels and console formatting remain stable without the reference installation', async t => {
+  const client = await runtime(t);
+  const result = await client.callTool({ name: 'js', arguments: { code: 'nodeRepl.write("a", "first"); nodeRepl.write("b", "second"); nodeRepl.write("c", "first"); console.log("hello", 2); console.warn("last");' } });
+  assert.equal(result.isError, false);
+  assert.deepEqual(result.content, [
+    { type: 'text', text: 'ac' }, { type: 'text', text: 'b' },
+    { type: 'text', text: 'hello 2\nlast' },
+  ]);
+  assert.equal(typeof result._meta['codex/nodeReplExecutionDurationMs'], 'number');
+  assert.equal(result.structuredContent, undefined);
+});
+
+test('reference image blocks keep their MIME, detail hint and text channel', async t => {
+  const client = await runtime(t);
+  const data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
+  const result = await client.callTool({ name: 'js', arguments: { code: `nodeRepl.write('before'); await nodeRepl.emitImage('data:image/png;base64,${data}'); nodeRepl.write('after');` } });
+  assert.deepEqual(result.content, [
+    { type: 'text', text: 'beforeafter' },
+    { type: 'image', mimeType: 'image/png', data, _meta: { 'codex/imageDetail': 'original' } },
+  ]);
 });
 
 test('syntax errors preserve bindings; infinite code is terminated and reset', async t => {
@@ -48,15 +70,15 @@ test('lifecycle fences a turn and cannot be redirected to another turn', async t
   const bad = await client.callTool({ name: 'turn_ended', arguments: { session_id: 'other', turn_id: 'test-turn', hook_event_name: 'Stop' } });
   assert.equal(bad.isError, true);
   const good = await client.callTool({ name: 'turn_ended', arguments: { session_id: 'test-session', turn_id: 'test-turn', hook_event_name: 'Stop' } });
-  assert.equal(good.isError, undefined);
+  assert.equal(good.isError, false);
   const late = await client.callTool({ name: 'js', arguments: { code: 'nodeRepl.write(42)' } });
   assert.equal(late.isError, true);
-  assert.match(text(late), /TURN_ENDED/);
+  assert.match(text(late), /ended turn/);
 });
 
 test('shipped artifact manifest matches the current source build', async () => {
   const { readFile } = await import('node:fs/promises');
-  const shipped = JSON.parse(await readFile(new URL('../../../runner/src/runtime/assets/computer-use-0.1.0.json', import.meta.url), 'utf8'));
+  const shipped = JSON.parse(await readFile(new URL('../../../runner/src/runtime/assets/computer-use-0.2.0.json', import.meta.url), 'utf8'));
   const built = JSON.parse(await readFile(new URL('../dist/manifest.json', import.meta.url), 'utf8'));
   assert.deepEqual(shipped.manifest, built, 'Rebuild and pack the Computer Use artifact after source changes.');
 });

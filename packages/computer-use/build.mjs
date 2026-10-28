@@ -44,4 +44,5 @@ const files = {};
 for (const name of ['server.js', 'worker.js', 'linux.py', 'NOTICES.txt']) {
   files[name] = createHash('sha256').update(await readFile(path.join(output, name))).digest('hex');
 }
-await writeFile(path.join(output, 'manifest.json'), JSON.stringify({ version: '0.1.0', protocol_version: 1, files }, null, 2) + '\n');
+const { version } = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
+await writeFile(path.join(output, 'manifest.json'), JSON.stringify({ version, protocol_version: 1, files }, null, 2) + '\n');

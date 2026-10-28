@@ -166,7 +166,7 @@ class LocalAccessor:
         assert set(env) <= {"CODEX_HOME", "OPENCURIA_CODEX_API_KEY"}
         assert kwargs["owner"]["lease_id"]
         self.opened.append(argv)
-        home = self.path(env["CODEX_HOME"])
+        home = self.path(env.get("CODEX_HOME", "/workspace/home/.codex"))
         process = await asyncio.create_subprocess_exec(
             *argv,
             cwd=self.path(cwd),
@@ -232,6 +232,8 @@ async def fixture_run(
     skills=(),
     namespace=None,
     response_item=None,
+    registry=None,
+    code_mode_only=False,
 ):
     if not PINNED.exists():
         pytest.skip("Pinned Codex binary unavailable; set OPENCURIA_TEST_CODEX_BINARY")
@@ -306,7 +308,7 @@ async def fixture_run(
     app.router.add_post("/v1/responses", responses)
 
     async def models(_):
-        if code is not None:
+        if code is not None or code_mode_only:
             # Match models such as GPT-6.1-Sol that require code mode even when
             # the optional feature is disabled in the managed configuration.
             return web.json_response(
@@ -330,7 +332,7 @@ async def fixture_run(
                             "supports_parallel_tool_calls": True,
                             "context_window": 32000,
                             "experimental_supported_tools": [],
-                            "input_modalities": ["text"],
+                            "input_modalities": ["text", "image"],
                         }
                     ]
                 }
@@ -381,7 +383,7 @@ async def fixture_run(
     )
     try:
         engine = CodexEngine(
-            tools=extension_registry(),
+            tools=registry or extension_registry(),
             accessor=accessor,
             auth=auth,
             emit=emit,

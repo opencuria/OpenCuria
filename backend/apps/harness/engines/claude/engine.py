@@ -30,7 +30,7 @@ from ...prompts.composer import ComposedPrompt
 from ...prompts.opencuria import opencuria_context
 from ...providers.base import ToolSchema, Usage
 from ...todos.service import TodoService
-from ...tools.base import ToolContext, ToolRegistry, ToolResult
+from ...tools.base import ToolContext, ToolError, ToolRegistry, ToolResult
 from ..base import RunOptions, RunResult
 from ..catalog import (
     CLAUDE_AGENT_SDK_VERSION,
@@ -38,7 +38,7 @@ from ..catalog import (
     normalize_claude_effort,
     resolve_claude_sdk_model,
 )
-from ..shared.media import build_user_content
+from ..shared.media import build_user_content, mcp_content_blocks
 from ..shared.security import StreamingRedactor, redact_text, redact_value
 from .errors import ClaudeTranscriptError
 from .events import ClaudeEventNormalizer, StepState
@@ -598,12 +598,18 @@ class ClaudeEngine:
                     parent_id=state.get("parent_tool_use_id"),
                 )
                 raise
-            except Exception:
+            except Exception as exc:
                 message = "OpenCuria tool execution failed"
+                if isinstance(exc, ToolError) and exc.content is not None:
+                    message = str(exc)
                 result = ToolResult(output=message, metadata={"is_error": True})
                 self._tool_results[call_id] = result
                 return {
-                    "content": [{"type": "text", "text": message}],
+                    "content": (
+                        mcp_content_blocks(exc.content)
+                        if isinstance(exc, ToolError) and exc.content is not None
+                        else [{"type": "text", "text": message}]
+                    ),
                     "is_error": True,
                 }
             self._tool_results[call_id] = result
@@ -615,6 +621,11 @@ class ClaudeEngine:
                     "is_error": True,
                 }
             content = []
+            if result.content is not None and not result.truncated:
+                return {
+                    "content": mcp_content_blocks(result.content),
+                    "is_error": False,
+                }
             if result.output:
                 content.append({"type": "text", "text": result.output})
             try:

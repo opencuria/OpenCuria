@@ -30,8 +30,15 @@ log = structlog.get_logger(__name__)
 class ToolError(Exception):
     """Raised when a tool cannot fulfill a validly dispatched call."""
 
-    def __init__(self, message: str, *, tool: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        tool: str = "",
+        content: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.tool = tool
+        self.content = content
         super().__init__(message)
 
 
@@ -85,6 +92,8 @@ class ToolResult:
     truncated: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
     attachments: list[dict[str, Any]] = field(default_factory=list)
+    # Checked provider content preserves MCP block boundaries and ordering.
+    content: list[dict[str, Any]] | None = None
 
 
 BeforeHook = Callable[[str, BaseModel, ToolContext], Awaitable[None]]
@@ -93,6 +102,8 @@ AfterHook = Callable[[str, BaseModel, ToolContext, ToolResult], Awaitable[None]]
 
 class Tool(abc.ABC):
     """Abstract base class for all harness tools."""
+
+    omit_tools_from: tuple[str, ...] = ()
 
     name: str = ""
     description: str = ""

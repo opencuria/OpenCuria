@@ -270,6 +270,38 @@ def checked_content(blocks: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
     return blocks
 
 
+def mcp_content_blocks(content: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Preserve checked text/image ordering when returning managed MCP results."""
+    canonical = []
+    for item in content:
+        if item.get("type") == "inputText":
+            canonical.append({"type": "text", "text": item["text"]})
+        elif item.get("type") == "inputImage":
+            canonical.append(
+                {"type": "image_url", "image_url": {"url": item["imageUrl"]}}
+            )
+        else:
+            canonical.append(item)
+    blocks = content_blocks(canonical)
+    checked_content(blocks)
+    result = []
+    for block in blocks:
+        if block["type"] == "text":
+            result.append(block)
+        elif block["type"] == "image":
+            result.append(
+                {
+                    "type": "image",
+                    "mimeType": block["source"]["media_type"],
+                    "data": block["source"]["data"],
+                    "_meta": {"codex/imageDetail": "original"},
+                }
+            )
+        else:
+            raise ValueError("Inline MCP results support text and images")
+    return result or [{"type": "text", "text": ""}]
+
+
 def _code_mask(text: str) -> list[bool]:
     """Mark fenced and inline code so code examples never trigger file reads."""
     mask = [False] * len(text)
@@ -663,4 +695,5 @@ __all__ = [
     "checked_content",
     "content_blocks",
     "data_url_block",
+    "mcp_content_blocks",
 ]

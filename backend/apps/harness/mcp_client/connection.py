@@ -147,6 +147,7 @@ class DiscoveredMcpTool:
     description: str
     input_schema: dict[str, Any]
     title: str
+    annotations: dict[str, Any] | None = None
 
 
 class McpTool(Tool):
@@ -166,6 +167,7 @@ class McpTool(Tool):
         input_schema: dict[str, Any],
         connection: McpServerConnection,
         title_text: str,
+        annotations: dict[str, Any] | None = None,
     ) -> None:
         self.name = namespaced_name
         self.description = description or f"MCP tool {original_name}"
@@ -174,8 +176,18 @@ class McpTool(Tool):
         self.truncate_direction = "head"
         self.original_name = original_name
         self.input_schema = dict(input_schema or {"type": "object"})
+        self.annotations = annotations
         self._connection = connection
         self._title_text = title_text
+        self.omit_tools_from = tuple(
+            getattr(connection, "tool_policy", {}).get("omit_tools_from", [])
+        )
+        self.native_mcp_server = (
+            "opencuria_"
+            + getattr(connection, "plugin_slug", "managed").replace("-", "_")
+            + "_"
+            + getattr(connection, "server_slug", "tools").replace("-", "_")
+        )
         self.execution_tool = original_name in getattr(
             connection, "tool_policy", {}
         ).get("execution_tools", [])
@@ -321,19 +333,33 @@ def normalize_call_result(result: types.CallToolResult) -> ToolResult:
             if getattr(block, "type", "") == "text"
         ]
         message = "\n".join(texts).strip() or "MCP tool reported an error"
-        raise ToolError(message[:2000], tool="")
+        private_meta = getattr(result, "meta", None) or {}
+        content = (
+            [{"type": "text", "text": message[:4000]}]
+            if "codex/nodeReplExecutionDurationMs" in private_meta
+            else None
+        )
+        raise ToolError(message[:2000], tool="", content=content)
     texts: list[str] = []
     attachments: list[dict[str, str]] = []
+    content: list[dict[str, Any]] = []
     for block in result.content or []:
         block_type = getattr(block, "type", "")
         if block_type == "text":
             texts.append(getattr(block, "text", "") or "")
+            content.append({"type": "text", "text": block.text})
         elif block_type == "image":
             mime = str(getattr(block, "mimeType", "") or "").lower()
             data = str(getattr(block, "data", "") or "")
             descriptor, attachment = _decode_image_block(mime, data, len(attachments))
             if attachment:
                 attachments.append(attachment)
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": attachment["url"]},
+                    }
+                )
             if descriptor:
                 texts.append(descriptor)
         elif block_type == "resource_link":
@@ -363,7 +389,9 @@ def normalize_call_result(result: types.CallToolResult) -> ToolResult:
         ):
             texts.append(rendered)
     output = "\n".join(part for part in texts if part).strip()
-    if not output:
+    private_meta = getattr(result, "meta", None) or {}
+    is_computer_use = "codex/nodeReplExecutionDurationMs" in private_meta
+    if not output and not is_computer_use:
         output = "[MCP tool returned no text output]"
     metadata = {"attachments": attachments} if attachments else {}
     computer_use = (
@@ -379,6 +407,7 @@ def normalize_call_result(result: types.CallToolResult) -> ToolResult:
         output=output,
         metadata=metadata,
         attachments=attachments,
+        content=content if is_computer_use else None,
     )
 
 
@@ -815,6 +844,11 @@ class McpServerConnection:
                     title=build_mcp_tool_title(
                         self.plugin_name, self.server_name, tool.name
                     ),
+                    annotations=(
+                        tool.annotations.model_dump(exclude_none=True)
+                        if tool.annotations is not None
+                        else None
+                    ),
                 )
             )
         self.tools = discovered
@@ -933,6 +967,13 @@ class McpServerConnection:
             if self._closed or self._session is None or not self.healthy:
                 raise ToolError("MCP connection is closed", tool=self.desc)
             timeout = float(self.request_timeout_seconds or 60.0)
+            requested_timeout = (args or {}).get("timeout_ms")
+            if (
+                self.tool_policy.get("desktop_kind") == "computeruse"
+                and isinstance(requested_timeout, int)
+                and 0 < requested_timeout <= 2_147_483_647
+            ):
+                timeout = max(timeout, requested_timeout / 1000 + 15)
             owns_input = False
             try:
                 try:

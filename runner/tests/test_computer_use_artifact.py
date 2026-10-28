@@ -13,7 +13,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from src.runtime import computer_use_artifact as package
 from src.runtime.artifacts import ArtifactProvisionError, RuntimeArtifactManager
 
@@ -89,10 +88,14 @@ async def test_real_manager_guest_install_cache_and_tampering(tmp_path):
 
     manager._download = download
     workspace = uuid.uuid4()
-    result = await manager.ensure_runtime_artifact(workspace, "computer-use", "0.1.0")
+    result = await manager.ensure_runtime_artifact(
+        workspace, "computer-use", package.VERSION
+    )
     assert Path(result["path"]).is_file()
     assert (
-        await manager.ensure_runtime_artifact(workspace, "computer-use", "0.1.0")
+        await manager.ensure_runtime_artifact(
+            workspace, "computer-use", package.VERSION
+        )
         == result
     )
     assert guest.uploads == 1
@@ -100,7 +103,9 @@ async def test_real_manager_guest_install_cache_and_tampering(tmp_path):
     server.chmod(0o644)
     server.write_text("changed")
     with pytest.raises(ArtifactProvisionError):
-        await manager.ensure_runtime_artifact(workspace, "computer-use", "0.1.0")
+        await manager.ensure_runtime_artifact(
+            workspace, "computer-use", package.VERSION
+        )
     # pytest can remove immutable installed trees after the verification test.
     for path in tmp_path.rglob("*"):
         if path.is_dir():

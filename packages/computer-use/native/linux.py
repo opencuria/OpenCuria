@@ -12,9 +12,11 @@ import base64
 import fcntl
 import io
 import json
+import math
 import os
 import signal
 import sys
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -22,7 +24,6 @@ from typing import Any
 import structlog
 from PIL import Image
 from Xlib import XK, X, display, error, protocol
-from Xlib.ext import xtest
 
 MAX_LINE = 128 * 1024
 MAX_TEXT = 64 * 1024
@@ -67,6 +68,9 @@ class LinuxDriver:
         self.held_buttons: set[int] = set()
         self.lock_fd: int | None = None
         self.execution_id = ""
+        self.settle_at = 0.0
+        self.next_element = 0
+        self.element_ids: dict[tuple[int, int], int] = {}
         self.generation = int(os.environ.get("OPENCURIA_CUA_GENERATION", "0"))
         self.max_dimension = min(
             7680, max(320, int(os.environ.get("OPENCURIA_CUA_MAX_DIMENSION", "2400")))
@@ -131,7 +135,7 @@ class LinuxDriver:
         return {
             "id": window.id,
             "title": str(title)[:1024],
-            "app": "/".join(window.get_wm_class() or ()),
+            "app": (window.get_wm_class() or (f"x11:{window.id}",))[-1],
             "pid": int(pid[0]) if pid is not None and len(pid) else None,
             "x": x,
             "y": y,
@@ -161,19 +165,78 @@ class LinuxDriver:
         candidates = (
             [self.connection.create_resource_object("window", int(i)) for i in listed]
             if listed is not None
-            else self.root.query_tree().children
+            else []
         )
+        for window in self.root.query_tree().children:
+            attributes = window.get_attributes()
+            if window.get_wm_class() or attributes.override_redirect:
+                candidates.append(window)
         result = []
+        seen = set()
         for window in candidates:
             try:
+                if window.id in seen:
+                    continue
+                seen.add(window.id)
                 if window.get_attributes().map_state != X.IsViewable:
                     continue
                 metadata = self._metadata(window)
-                if metadata["width"] > 1 and metadata["height"] > 1:
+                if metadata["width"] > 0 and metadata["height"] > 0:
                     result.append(metadata)
             except error.XError:
                 continue
-        return result[:200]
+        return sorted(result, key=lambda item: (item["app"], item["id"]))[:200]
+
+    def _public_window(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        """Project driver identity fields out of the agent-visible inventory."""
+        window = self.connection.create_resource_object("window", metadata["id"])
+        states = self._property(window, "_NET_WM_STATE")
+        modal = self.connection.intern_atom("_NET_WM_STATE_MODAL")
+        types = self._property(window, "_NET_WM_WINDOW_TYPE")
+        window_type = (
+            self.connection.get_atom_name(int(types[0]))
+            .removeprefix("_NET_WM_WINDOW_TYPE_")
+            .lower()
+            if types is not None and len(types)
+            else "normal"
+        )
+        result = {key: value for key, value in metadata.items() if key != "pid"}
+        if not result["title"]:
+            result.pop("title")
+        result.update(
+            modal=bool(states is not None and modal in states), window_type=window_type
+        )
+        return result
+
+    def _apps(self, windows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Include installed launchable apps, with their matching open windows."""
+        from gi.repository import Gio
+
+        apps = []
+        for desktop in Gio.AppInfo.get_all():
+            if (
+                desktop.get_nodisplay()
+                or desktop.get_is_hidden()
+                or desktop.get_boolean("Terminal")
+            ):
+                continue
+            name = desktop.get_name()
+            app_id = desktop.get_id()
+            classes = {
+                name.casefold(),
+                app_id.removesuffix(".desktop").casefold(),
+                (desktop.get_startup_wm_class() or "").casefold(),
+            }
+            running = [w for w in windows if w["app"].casefold() in classes]
+            apps.append(
+                {
+                    "id": app_id,
+                    "displayName": name,
+                    "isRunning": bool(running),
+                    "windows": running,
+                }
+            )
+        return sorted(apps, key=lambda app: (app["displayName"].casefold(), app["id"]))
 
     def _bound(self, args: dict[str, Any]) -> BoundWindow:
         while self.connection.pending_events():
@@ -260,71 +323,223 @@ class LinuxDriver:
         bound.snapshot_id = uuid.uuid4().hex
         try:
             root = self._ax_root(metadata)
-        except Exception:
+        except Exception:  # noqa: BLE001 - unavailable AX must retain X11 observations
             root = None
-        if root is None:
-            return "x11", (
-                f"Accessibility source: x11 "
-                f"(limited window metadata; use a screenshot)\n"
-                f"Window {metadata['id']}: {metadata['title']} ({metadata['app']})"
-            )
-        lines = ["Accessibility source: at_spi"]
-        size = len(lines[0])
 
-        def visit(node: Any, depth: int) -> None:
-            nonlocal size
-            if (
-                depth > MAX_DEPTH
-                or len(bound.elements) >= MAX_NODES
-                or size >= MAX_TEXT - 2048
-            ):
-                return
+        def identifier(key: int) -> int:
+            native_key = (bound.window.id, key)
+            if native_key not in self.element_ids:
+                self.element_ids[native_key] = self.next_element
+                self.next_element += 1
+            return self.element_ids[native_key]
+
+        if root is None:
+            index = identifier(0)
+            name = metadata.get("title", "")
+            return "x11", f"Accessibility source: x11\n{index} window {name}".rstrip()
+
+        count = 0
+
+        def collect(node: Any, depth: int) -> dict[str, Any] | None:
+            nonlocal count
+            if depth > MAX_DEPTH or count >= MAX_NODES:
+                return None
             try:
-                identifier = len(bound.elements) + 1
                 states = node.get_state_set()
                 if states.contains(self.atspi.StateType.DEFUNCT):
-                    return
+                    return None
+                count += 1
+                index = identifier(hash(node))
                 role = node.get_role_name() or "unknown"
-                original_name = str(node.get_name() or "")
-                bound.elements[identifier] = (node, role, original_name)
-                name = original_name.replace("\n", " ")[:512]
-                line = f"{'  ' * depth}{identifier} {role} {name}"
-                if states.contains(self.atspi.StateType.FOCUSED):
-                    line += " [focused]"
-                if states.contains(self.atspi.StateType.EDITABLE):
-                    line += " [editable]"
-                if not states.contains(self.atspi.StateType.SENSITIVE):
-                    line += " [disabled]"
-                text_iface = node.get_text_iface()
-                if text_iface and role != "password text":
-                    value = self.atspi.Text.get_text(
-                        node, 0, min(512, self.atspi.Text.get_character_count(node))
+                name = str(node.get_name() or "")
+                bound.elements[index] = (node, role, name)
+                flags = [
+                    flag.lower()
+                    for flag in (
+                        "FOCUSED",
+                        "SELECTED",
+                        "EXPANDED",
+                        "INDETERMINATE",
+                        "CHECKED",
+                        "CHECKABLE",
+                        "EDITABLE",
+                        "FOCUSABLE",
                     )
-                    if value:
-                        line += f" Value: {json.dumps(value, ensure_ascii=False)}"
+                    if states.contains(getattr(self.atspi.StateType, flag))
+                ]
+                info = []
+                for title, value in [
+                    (None, name),
+                    ("Description", node.get_description()),
+                ]:
+                    if (
+                        value
+                        and str(value).strip()
+                        and value not in [v for _, v in info]
+                    ):
+                        info.append((title, str(value)))
+                if role != "password text" and node.get_text_iface():
+                    value = self.atspi.Text.get_text(
+                        node, 0, min(16000, self.atspi.Text.get_character_count(node))
+                    )
+                    if value and value not in [v for _, v in info]:
+                        info.append(("Value", value))
                 action = node.get_action_iface()
-                if action:
-                    actions = [
+                actions = (
+                    [
                         action.get_action_name(i)
                         for i in range(min(action.get_n_actions(), 10))
                     ]
-                    line += f" Actions: {actions}"
-                lines.append(line)
-                size += len(line.encode("utf-8"))
+                    if action
+                    else []
+                )
+                children = []
                 for i in range(min(node.get_child_count(), MAX_NODES)):
                     child = node.get_child_at_index(i)
                     if child:
-                        visit(child, depth + 1)
-            except Exception:
-                return
+                        item = collect(child, depth + 1)
+                        if item:
+                            children.append(item)
+                return {
+                    "id": index,
+                    "role": role,
+                    "info": info,
+                    "flags": flags,
+                    "enabled": states.contains(self.atspi.StateType.ENABLED),
+                    "actions": actions,
+                    "children": children,
+                }
+            except Exception:  # noqa: BLE001 - one stale node must not hide the window
+                return None
 
-        visit(root, 0)
-        if len(bound.elements) >= MAX_NODES or size >= MAX_TEXT - 2048:
+        containers = {"group", "panel", "filler", "section", "generic"}
+        texts = {"text", "static", "label"}
+        interactive_roles = {
+            "push button",
+            "button",
+            "toggle button",
+            "check box",
+            "radio button",
+            "entry",
+            "password text",
+            "link",
+            "menu item",
+            "combo box",
+            "slider",
+            "spin button",
+            "scroll bar",
+            "scroll pane",
+            "viewport",
+        }
+
+        def interactive(node: dict[str, Any]) -> bool:
+            return bool(
+                node["flags"]
+                or node["role"] in interactive_roles
+                or any(
+                    a.lower()
+                    not in {
+                        "dodefault",
+                        "clickancestor",
+                        "showcontextmenu",
+                        "scrolltovisible",
+                    }
+                    for a in node["actions"]
+                )
+            )
+
+        def compact(node: dict[str, Any]) -> dict[str, Any] | None:
+            children = [compact(child) for child in node["children"]]
+            node["children"] = [child for child in children if child is not None]
+            named = bool(node["info"] or node["role"] in {"image", "icon"})
+            active = interactive(node)
+            if not (named or node["children"] or active):
+                return None
+            if not active and not named and node["role"] in containers:
+                if len(node["children"]) == 1:
+                    return node["children"][0]
+                node["children"] = [
+                    sub
+                    for child in node["children"]
+                    for sub in (
+                        child["children"]
+                        if child["role"] == node["role"]
+                        and not interactive(child)
+                        and not child["info"]
+                        else [child]
+                    )
+                ]
+            return node
+
+        tree = collect(root, 0)
+        tree = compact(tree) if tree else None
+        lines = ["Accessibility source: at_spi"]
+
+        def render(node: dict[str, Any], depth: int) -> None:
+            role = node["role"]
+            role = (
+                "container" if role in containers else "text" if role in texts else role
+            )
+            if role == "menu item":
+                role = ""
+            flags = [
+                f
+                for f in ("focused", "selected", "expanded", "indeterminate")
+                if f in node["flags"]
+            ]
+            if "checked" in node["flags"]:
+                flags.append("checked")
+            elif "checkable" in node["flags"] and "indeterminate" not in flags:
+                flags.append("unchecked")
+            if "editable" in node["flags"]:
+                flags.append("settable")
+            if not node["enabled"] and role not in {"container", "text"}:
+                flags.append("disabled")
+            info = list(node["info"])
+            secondary = [
+                action
+                for i, action in enumerate(node["actions"])
+                if not (
+                    i == 0
+                    and action.lower()
+                    in {"press", "click", "dodefault", "clickancestor"}
+                )
+                and action.lower() != "showcontextmenu"
+            ]
+            if secondary:
+                info.append(("Secondary Actions", ", ".join(secondary)))
+            info.sort(key=lambda item: len(item[1]) > 100 or "\n" in item[1])
+            text = ", ".join(
+                value
+                if title is None or len(info) == 1 and title != "Secondary Actions"
+                else f"{title}: {value}"
+                for title, value in info
+            )
+            line = (
+                " ".join(
+                    p
+                    for p in [
+                        role,
+                        f"({', '.join(flags)})" if flags else "",
+                        text,
+                    ]
+                    if p
+                )
+                .replace("\r", "\\r")
+                .replace("\n", "\\n")
+                .replace("\t", "\\t")
+            )
+            lines.append("\t" * depth + f"{node['id']} {line}")
+            for child in node["children"]:
+                render(child, depth + 1)
+
+        if tree:
+            render(tree, 0)
+        if count >= MAX_NODES:
             lines.append("[Accessibility tree truncated; inspect a smaller target]")
-        return "at_spi", "\n".join(lines)
+        return "at_spi", "\n".join(lines)[:MAX_TEXT]
 
     def _capture(self, bound: BoundWindow) -> dict[str, Any]:
-        self._require_focus(bound)
         x, y, width, height = self._geometry(bound.window)
         screen = self.root.get_geometry()
         if x < 0 or y < 0 or x + width > screen.width or y + height > screen.height:
@@ -332,7 +547,7 @@ class LinuxDriver:
                 "WINDOW_OFF_SCREEN",
                 "Move the entire window onto the desktop before capturing it",
             )
-        raw = self.root.get_image(x, y, width, height, X.ZPixmap, 0xFFFFFFFF)
+        raw = bound.window.get_image(0, 0, width, height, X.ZPixmap, 0xFFFFFFFF)
         image = Image.frombytes("RGB", (width, height), raw.data, "raw", "BGRX")
         image.thumbnail(
             (self.max_dimension, self.max_dimension), Image.Resampling.LANCZOS
@@ -361,31 +576,25 @@ class LinuxDriver:
     def _point(
         self, bound: BoundWindow, args: dict[str, Any], key: str = "coordinates"
     ) -> tuple[int, int]:
-        self._require_focus(bound)
-        if args.get("screenshotId") != bound.screenshot_id or not bound.screenshot_id:
-            raise DriverError(
-                "STALE_SCREENSHOT",
-                "Capture a fresh window screenshot before using coordinates",
-            )
         geometry = self._geometry(bound.window)
-        if geometry != bound.geometry:
-            raise DriverError(
-                "STALE_SCREENSHOT",
-                "The window moved or resized; capture a fresh screenshot",
-            )
         point = args.get(key)
         if not isinstance(point, list) or len(point) != 2:
             raise DriverError("INVALID_ARGUMENT", "Coordinates require [x,y]")
-        if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in point):
+        if any(
+            isinstance(v, bool)
+            or not isinstance(v, (int, float))
+            or not math.isfinite(v)
+            for v in point
+        ):
             raise DriverError("INVALID_ARGUMENT", "Coordinates must be finite numbers")
-        width, height = bound.image_size
+        width, height = geometry[2:]
         if not 0 <= point[0] < width or not 0 <= point[1] < height:
             raise DriverError(
                 "INVALID_ARGUMENT", "Coordinates are outside the observed screenshot"
             )
         return (
-            geometry[0] + round(point[0] * geometry[2] / width),
-            geometry[1] + round(point[1] * geometry[3] / height),
+            geometry[0] + round(point[0]),
+            geometry[1] + round(point[1]),
         )
 
     def _keycodes(self, chord: str) -> list[int]:
@@ -397,6 +606,12 @@ class LinuxDriver:
             "Meta": "Super_L",
             "Enter": "Return",
             "Esc": "Escape",
+            "ctrl": "Control_L",
+            "control": "Control_L",
+            "alt": "Alt_L",
+            "shift": "Shift_L",
+            "super": "Super_L",
+            "meta": "Super_L",
         }
         if not isinstance(chord, str) or not chord or len(chord) > 100:
             raise DriverError("INVALID_ARGUMENT", "A bounded X11 key chord is required")
@@ -410,22 +625,143 @@ class LinuxDriver:
             result.append(code)
         return result
 
-    async def _press(self, chord: str) -> None:
+    def _send_key(
+        self, bound: BoundWindow, code: int, pressed: bool, state: int
+    ) -> None:
+        """Route a key directly to the bound window without stealing focus."""
+        event = protocol.event.KeyPress if pressed else protocol.event.KeyRelease
+        bound.window.send_event(
+            event(
+                time=int(time.monotonic() * 1000) & 0xFFFFFFFF,
+                root=self.root,
+                window=bound.window,
+                child=X.NONE,
+                root_x=0,
+                root_y=0,
+                event_x=0,
+                event_y=0,
+                state=state,
+                detail=code,
+                same_screen=1,
+            ),
+            propagate=False,
+            event_mask=0,
+        )
+        self.connection.sync()
+
+    def _modifier(self, code: int) -> int:
+        """Resolve modifier masks from the server's active keyboard map."""
+        for index, codes in enumerate(self.connection.get_modifier_mapping()):
+            if code in codes:
+                return 1 << index
+        return 0
+
+    def _send_pointer(
+        self,
+        bound: BoundWindow,
+        x: int,
+        y: int,
+        kind: str,
+        button: int = 0,
+        state: int = 0,
+    ) -> None:
+        """Deliver window-relative pointer events without moving the desktop mouse."""
+        target = bound.window
+        origin_x, origin_y, _, _ = self._geometry(target)
+        event = {
+            "press": protocol.event.ButtonPress,
+            "release": protocol.event.ButtonRelease,
+            "motion": protocol.event.MotionNotify,
+        }[kind]
+        if kind == "motion":
+            target.send_event(
+                protocol.event.EnterNotify(
+                    time=int(time.monotonic() * 1000) & 0xFFFFFFFF,
+                    root=self.root,
+                    window=target,
+                    child=X.NONE,
+                    root_x=x,
+                    root_y=y,
+                    event_x=x - origin_x,
+                    event_y=y - origin_y,
+                    state=state,
+                    mode=X.NotifyNormal,
+                    detail=X.NotifyNonlinear,
+                    flags=1,
+                ),
+                propagate=False,
+                event_mask=0,
+            )
+        target.send_event(
+            event(
+                time=int(time.monotonic() * 1000) & 0xFFFFFFFF,
+                root=self.root,
+                window=target,
+                child=X.NONE,
+                root_x=x,
+                root_y=y,
+                event_x=x - origin_x,
+                event_y=y - origin_y,
+                state=state,
+                detail=button,
+                same_screen=1,
+            ),
+            propagate=False,
+            event_mask=0,
+        )
+        self.connection.sync()
+
+    async def _click(
+        self,
+        bound: BoundWindow,
+        x: int,
+        y: int,
+        button: int,
+        count: int = 1,
+        duration_ms: int = 0,
+        key: str | None = None,
+    ) -> None:
+        """Release modifier chords and held buttons even when a click is cancelled."""
+        codes = self._keycodes(key) if key else []
+        for _ in range(count):
+            state = 0
+            try:
+                for code in codes:
+                    self._send_key(bound, code, True, state)
+                    state |= self._modifier(code)
+                self._send_pointer(bound, x, y, "motion", state=state)
+                self._send_pointer(bound, x, y, "press", button, state)
+                await asyncio.sleep(duration_ms / 1000)
+            finally:
+                self._send_pointer(
+                    bound, x, y, "release", button, state | (1 << (7 + button))
+                )
+                for code in reversed(codes):
+                    self._send_key(bound, code, False, state)
+                    state &= ~self._modifier(code)
+
+    async def _press(
+        self, bound: BoundWindow, chord: str, duration_ms: int = 25
+    ) -> None:
+        codes = self._keycodes(chord)
+        state = 0
         try:
-            for code in self._keycodes(chord):
+            for code in codes:
                 self.held_keys.add(code)
-                xtest.fake_input(self.connection, X.KeyPress, code)
-            self.connection.sync()
-            await asyncio.sleep(0.025)
+                self._send_key(bound, code, True, state)
+                state |= self._modifier(code)
+                await asyncio.sleep(0.033)
+            await asyncio.sleep(duration_ms / 1000)
         finally:
-            self.cleanup_keys()
+            for code in reversed(codes):
+                self._send_key(bound, code, False, state)
+                state &= ~self._modifier(code)
+                self.held_keys.discard(code)
+                await asyncio.sleep(0.033)
 
     def cleanup_keys(self) -> None:
         """Release only input pressed by this helper, including interrupted drags."""
-        for code in reversed(tuple(self.held_keys)):
-            xtest.fake_input(self.connection, X.KeyRelease, code)
-        for button in tuple(self.held_buttons):
-            xtest.fake_input(self.connection, X.ButtonRelease, button)
+        # XSendEvent does not change the server's global key/button state.
         self.held_keys.clear()
         self.held_buttons.clear()
         self.connection.sync()
@@ -467,23 +803,36 @@ class LinuxDriver:
             raise DriverError(
                 "EXECUTION_ENDED", "Native operation requires an active execution"
             )
+        await asyncio.sleep(max(0, self.settle_at - time.monotonic()))
+        if op == "launch_app":
+            from gi.repository import Gio
+
+            name = args.get("app")
+            if not isinstance(name, str) or not name:
+                raise DriverError("INVALID_ARGUMENT", "An app inventory ID is required")
+            app = (
+                Gio.DesktopAppInfo.new_from_filename(name)
+                if name.startswith("/")
+                else Gio.DesktopAppInfo.new(name)
+            )
+            if app is None:
+                raise DriverError(
+                    "APP_UNAVAILABLE", f"Application {name} is unavailable"
+                )
+            app.launch([], None)
+            self.settle_at = time.monotonic() + 0.1
+            return {}
         if op in {"windows", "apps", "inventory"}:
-            windows = self._list_windows()
+            windows = [self._public_window(window) for window in self._list_windows()]
             if op == "windows":
                 return {"items": windows}
-            apps: dict[str, dict[str, Any]] = {}
-            for window in windows:
-                name = window["app"] or window["title"]
-                apps.setdefault(name, {"id": name, "name": name, "windows": []})[
-                    "windows"
-                ].append(window)
+            apps = self._apps(windows)
             return (
-                {"items": list(apps.values())}
+                {"items": apps}
                 if op == "apps"
                 else {
-                    "apps": list(apps.values()),
+                    "apps": apps,
                     "browsers": [],
-                    "generation": self.generation,
                 }
             )
         if op == "bind":
@@ -494,13 +843,13 @@ class LinuxDriver:
                 )
             window = self.connection.create_resource_object("window", identifier)
             window.change_attributes(event_mask=X.StructureNotifyMask)
-            bound = BoundWindow(window=window)
+            bound = self.windows.get(identifier) or BoundWindow(window=window)
             self.windows[identifier] = bound
             return {"identity": bound.identity}
         bound = self._bound(args)
         if op == "state":
             result: dict[str, Any] = {}
-            if args.get("text"):
+            if args.get("text") or args.get("image"):
                 source, text = self._tree(bound)
                 result.update(state=text, source=source, snapshotId=bound.snapshot_id)
             if args.get("image"):
@@ -522,11 +871,10 @@ class LinuxDriver:
             self._require_focus(bound)
             return {}
         if op == "press_key":
-            self._require_focus(bound)
-            await self._press(args.get("key", ""))
+            await self._press(bound, args.get("key", ""), args.get("durationMs", 25))
         elif op in {"click", "secondary"} and args.get("elementId") is not None:
             if op == "click" and (
-                args.get("mouseButton", "left") != "left"
+                args.get("mouseButton", "left") not in {"left", "right", "l", "r"}
                 or args.get("clickCount", 1) != 1
             ):
                 raise DriverError(
@@ -536,11 +884,20 @@ class LinuxDriver:
             node = self._element(bound, args)
             action = node.get_action_iface()
             name = args.get("action") if op == "secondary" else "click"
-            if action:
+            if op == "click" and args.get("mouseButton") in {"right", "r"}:
+                component = node.get_component_iface()
+                rectangle = component.get_extents(self.atspi.CoordType.SCREEN)
+                await self._click(
+                    bound,
+                    rectangle.x + rectangle.width // 2,
+                    rectangle.y + rectangle.height // 2,
+                    3,
+                )
+            elif action:
                 for i in range(action.get_n_actions()):
                     action_name = action.get_action_name(i)
                     if action_name == name or (
-                        op == "click" and action_name in {"press", "activate"}
+                        op == "click" and action_name == "press"
                     ):
                         if not action.do_action(i):
                             raise DriverError(
@@ -548,10 +905,20 @@ class LinuxDriver:
                             )
                         break
                 else:
-                    raise DriverError(
-                        "UNSUPPORTED_ACTION",
-                        "Requested action is not in the observed element's action list",
-                    )
+                    if op == "click":
+                        component = node.get_component_iface()
+                        rectangle = component.get_extents(self.atspi.CoordType.SCREEN)
+                        await self._click(
+                            bound,
+                            rectangle.x + rectangle.width // 2,
+                            rectangle.y + rectangle.height // 2,
+                            1,
+                        )
+                    else:
+                        raise DriverError(
+                            "UNSUPPORTED_ACTION",
+                            "Requested action is not in the observed element's action list",
+                        )
             else:
                 raise DriverError(
                     "UNSUPPORTED_ACTION",
@@ -587,7 +954,6 @@ class LinuxDriver:
                     raise DriverError("ACTION_FAILED", "Text insertion was rejected")
                 self.atspi.Text.set_caret_offset(node, position + len(text))
             else:
-                self._require_focus(bound)
                 clipboard = await asyncio.create_subprocess_exec(
                     "xclip",
                     "-selection",
@@ -607,7 +973,7 @@ class LinuxDriver:
                             "CLIPBOARD_UNAVAILABLE",
                             "Clipboard helper exited before paste",
                         )
-                    await self._press("Control_L+v")
+                    await self._press(bound, "Control_L+v")
                     # GTK requests TARGETS and UTF8_STRING separately. A one-request
                     # clipboard owner exits too early and silently pastes nothing.
                     await asyncio.sleep(0.2)
@@ -619,27 +985,34 @@ class LinuxDriver:
                     except TimeoutError:
                         clipboard.kill()
                         await clipboard.wait()
+        elif op == "type_characters":
+            text = args.get("text")
+            if not isinstance(text, str) or len(text.encode()) > 16000:
+                raise DriverError("INVALID_ARGUMENT", "Printable text is required")
+            for character in text:
+                keysym = ord(character)
+                mapped = self.connection.keysym_to_keycodes(keysym)
+                if not mapped:
+                    raise DriverError("UNSUPPORTED_KEY", f"No key for {character}")
+                code, index = mapped[0]
+                state = X.ShiftMask if index % 2 else 0
+                self._send_key(bound, code, True, state)
+                self._send_key(bound, code, False, state)
+            self.settle_at = time.monotonic() + 0.1
+            return {"charactersSent": len(text)}
         elif op == "click":
             x, y = self._point(bound, args)
-            button = {"left": 1, "middle": 2, "right": 3}.get(
+            button = {"left": 1, "middle": 2, "right": 3, "l": 1, "m": 2, "r": 3}.get(
                 args.get("mouseButton", "left")
             )
             count = args.get("clickCount", 1)
-            if button is None or count not in {1, 2}:
+            if button is None or not isinstance(count, int) or not 1 <= count <= 100:
                 raise DriverError(
                     "INVALID_ARGUMENT", "Unsupported mouse button or click count"
                 )
-            xtest.fake_input(self.connection, X.MotionNotify, x=x, y=y)
-            try:
-                for _ in range(count):
-                    self.held_buttons.add(button)
-                    xtest.fake_input(self.connection, X.ButtonPress, button)
-                    xtest.fake_input(self.connection, X.ButtonRelease, button)
-                    self.held_buttons.discard(button)
-                    self.connection.sync()
-                    await asyncio.sleep(0.03)
-            finally:
-                self.cleanup_keys()
+            await self._click(
+                bound, x, y, button, count, args.get("durationMs", 0), args.get("key")
+            )
         elif op == "scroll":
             if args.get("elementId") is not None:
                 node = self._element(bound, args)
@@ -648,7 +1021,6 @@ class LinuxDriver:
                     raise DriverError(
                         "UNSUPPORTED_ACTION", "Element has no visible scroll target"
                     )
-                self._require_focus(bound)
                 rectangle = component.get_extents(self.atspi.CoordType.SCREEN)
                 x, y = (
                     rectangle.x + rectangle.width // 2,
@@ -656,50 +1028,51 @@ class LinuxDriver:
                 )
             else:
                 x, y = self._point(bound, args)
-            button = {"up": 4, "down": 5, "left": 6, "right": 7}.get(
-                args.get("direction")
-            )
+            button = {
+                "up": 4,
+                "down": 5,
+                "left": 6,
+                "right": 7,
+                "u": 4,
+                "d": 5,
+                "l": 6,
+                "r": 7,
+            }.get(args.get("direction"))
             pixels = args.get("pixels", 300)
             if (
                 button is None
-                or not isinstance(pixels, int)
+                or not isinstance(pixels, (int, float))
                 or isinstance(pixels, bool)
-                or not 1 <= pixels <= 5000
+                or not math.isfinite(pixels)
+                or not 1 <= pixels <= 2**53 - 1
             ):
                 raise DriverError(
                     "INVALID_ARGUMENT", "Scroll requires a direction and 1..5000 pixels"
                 )
-            xtest.fake_input(self.connection, X.MotionNotify, x=x, y=y)
-            for _ in range(min(100, max(1, pixels // 40))):
-                xtest.fake_input(self.connection, X.ButtonPress, button)
-                xtest.fake_input(self.connection, X.ButtonRelease, button)
-            self.connection.sync()
+            for _ in range(min(1000, max(1, int(pixels // 40)))):
+                await self._click(bound, x, y, button)
         elif op == "drag":
             start = self._point(bound, args, "from")
             end = self._point(bound, args, "to")
             try:
-                xtest.fake_input(
-                    self.connection, X.MotionNotify, x=start[0], y=start[1]
-                )
-                self.held_buttons.add(1)
-                xtest.fake_input(self.connection, X.ButtonPress, 1)
+                self._send_pointer(bound, *start, "motion")
+                self._send_pointer(bound, *start, "press", 1)
                 for step in range(1, 21):
-                    xtest.fake_input(
-                        self.connection,
-                        X.MotionNotify,
-                        x=round(start[0] + (end[0] - start[0]) * step / 20),
-                        y=round(start[1] + (end[1] - start[1]) * step / 20),
+                    self._send_pointer(
+                        bound,
+                        round(start[0] + (end[0] - start[0]) * step / 20),
+                        round(start[1] + (end[1] - start[1]) * step / 20),
+                        "motion",
+                        state=X.Button1Mask,
                     )
-                    self.connection.sync()
                     await asyncio.sleep(0.01)
             finally:
-                self.cleanup_keys()
+                self._send_pointer(bound, *end, "release", 1, X.Button1Mask)
         else:
             raise DriverError(
                 "UNKNOWN_OPERATION", "Unsupported native desktop operation"
             )
-        bound.screenshot_id = ""
-        await asyncio.sleep(0.1)
+        self.settle_at = max(self.settle_at, time.monotonic() + 0.1)
         return {}
 
 
@@ -730,7 +1103,7 @@ async def main() -> None:
                 identifier = request["id"]
                 result = await driver.dispatch(request["op"], request.get("args") or {})
                 reply = {"id": identifier, "ok": True, "output": result}
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - bound native protocol failures
                 reply = {
                     "id": identifier,
                     "ok": False,
@@ -740,7 +1113,7 @@ async def main() -> None:
                 }
             protocol_output.write(json.dumps(reply, ensure_ascii=False) + "\n")
             protocol_output.flush()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - keep native diagnostics on stderr
         log.error("computer_use_driver_failed", error_type=type(exc).__name__)
     finally:
         if driver is not None:

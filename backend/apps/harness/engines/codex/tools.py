@@ -256,3 +256,13 @@ class ManagedToolInvoker(AuthorizedToolDispatcher):
                 "contentItems": [{"type": "inputText", "text": str(exc)}],
             }
         return {"contentItems": content, "success": outcome.result is not None}
+
+    async def invoke_mcp(self, params: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        """Expose checked dynamic content as native MCP without string conversion."""
+        from ..shared.media import mcp_content_blocks
+
+        response = await self.invoke(params, **kwargs)
+        return {
+            "content": mcp_content_blocks(response["contentItems"]),
+            "isError": not response["success"],
+        }

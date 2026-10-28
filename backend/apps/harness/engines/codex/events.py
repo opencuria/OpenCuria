@@ -160,6 +160,10 @@ class CodexEventProjector:
             return
         if kind == "dynamicToolCall" and self._is_managed_tool(item.get("tool")):
             return  # The managed dispatcher already owns this lifecycle.
+        if kind == "mcpToolCall" and self._is_managed_tool(
+            f"mcp__{item.get('server')}__{item.get('tool')}"
+        ):
+            return
         if len(self.calls) >= 4096:
             raise ValueError("Codex native tool count limit reached")
         tool, title, args, output = presentation(item)

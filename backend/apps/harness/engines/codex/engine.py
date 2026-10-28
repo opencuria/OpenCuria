@@ -27,6 +27,7 @@ from .catalog import CODEX_VERSION, codex_provider
 from .configuration import _toml, runtime_argv, runtime_settings
 from .errors import CodexRecoveryError
 from .events import CodexEventProjector
+from .mcp_bridge import ManagedMcpBridge
 from .media import image_attachments, user_input
 from .protocol import CodexProtocol, CodexProtocolError, CodexRPCError
 from .session_store import (
@@ -105,6 +106,7 @@ class CodexEngine:
         self.terminal = asyncio.Event()
         self.turn_ready = asyncio.Event()
         self.allowed = set()
+        self.native_managed_tools: set[str] = set()
         self.secret_values = [
             str(x) for x in auth.credentials.values() if isinstance(x, str)
         ]
@@ -117,7 +119,9 @@ class CodexEngine:
         return CodexEventProjector(
             emit=self._send,
             model=lambda: self.model,
-            is_managed_tool=lambda name: name in self.allowed,
+            is_managed_tool=lambda name: (
+                name in self.allowed or name in self.native_managed_tools
+            ),
             image_attachments=partial(
                 image_attachments,
                 accessor=self.accessor,
@@ -333,8 +337,17 @@ class CodexEngine:
         self._owner_released = False
         self.invoker.seen.clear()
         schemas = self.invoker.schemas(self.agent, mode, opts)
+        signatures = [
+            {
+                **spec,
+                "omit_tools_from": list(self.tools.get(spec["name"]).omit_tools_from),
+            }
+            if self.tools.get(spec["name"]).omit_tools_from
+            else spec
+            for spec in schemas
+        ]
         fingerprint = hashlib.sha256(
-            json.dumps(schemas, sort_keys=True, separators=(",", ":")).encode()
+            json.dumps(signatures, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         if (
             self.external_session_id
@@ -344,6 +357,27 @@ class CodexEngine:
                 "Codex tool signatures changed; fork or start a new conversation"
             )
         self.allowed = {spec["name"] for spec in schemas}
+        native_groups: dict[str, list[dict[str, Any]]] = {}
+        native_names: dict[str, dict[str, str]] = {}
+        dynamic_schemas = []
+        self.native_managed_tools.clear()
+        for spec in schemas:
+            tool = self.tools.get(spec["name"])
+            if "code_mode" not in tool.omit_tools_from:
+                dynamic_schemas.append(spec)
+                continue
+            server = tool.native_mcp_server
+            name = tool.original_name
+            native_groups.setdefault(server, []).append(
+                {
+                    "name": name,
+                    "description": spec["description"],
+                    "inputSchema": spec["inputSchema"],
+                    **({"annotations": tool.annotations} if tool.annotations else {}),
+                }
+            )
+            native_names.setdefault(server, {})[name] = spec["name"]
+            self.native_managed_tools.add(f"mcp__{server}__{name}")
         # Native YOLO tools cannot consult arbitrary OpenCuria per-call rules.
         # With any explicit policy layer, disable native shell and keep native
         # edits read-only; managed tools retain the exact common evaluator.
@@ -387,6 +421,7 @@ class CodexEngine:
             on_failure=asyncio.current_task().cancel,
         )
         rpc = stream = steer = None
+        mcp_bridges: list[ManagedMcpBridge] = []
         error = None
         result = None
         self.items = {}
@@ -418,6 +453,23 @@ class CodexEngine:
             else:
                 await state_action(self.accessor, "fresh", home)
             await materialize_skills(self.accessor, home, opts.skills)
+            for server, server_schemas in native_groups.items():
+                bridge = ManagedMcpBridge(
+                    server_schemas,
+                    partial(
+                        self.invoker.invoke_mcp,
+                        agent=self.agent,
+                        mode=mode,
+                        opts=opts,
+                        model=model,
+                        allowed=self.allowed,
+                    ),
+                    names=native_names[server],
+                )
+                mcp_bridges.append(bridge)
+                settings[f"mcp_servers.{server}"] = await bridge.start(
+                    self.accessor, cwd, lease.owner
+                )
             config = "\n".join(
                 f"{key} = {_toml(value)}" for key, value in settings.items()
             )
@@ -475,7 +527,11 @@ class CodexEngine:
             else:
                 response = await rpc.request(
                     "thread/start",
-                    {**params, "dynamicTools": schemas, "historyMode": "paginated"},
+                    {
+                        **params,
+                        "dynamicTools": dynamic_schemas,
+                        "historyMode": "paginated",
+                    },
                 )
             thread = response["thread"]
             self.thread_id = str(uuid.UUID(thread["id"]))
@@ -600,6 +656,11 @@ class CodexEngine:
                         await asyncio.wait_for(stream.aclose(), 15)
                 except Exception as exc:
                     transport_error = exc
+                for bridge in reversed(mcp_bridges):
+                    try:
+                        await bridge.close()
+                    except Exception as exc:
+                        transport_error = transport_error or exc
                 # Runner release confirms all tree members dead even if EOF or
                 # stream close itself failed. No snapshot precedes this fence.
                 await asyncio.wait_for(lease.aclose(), 20)

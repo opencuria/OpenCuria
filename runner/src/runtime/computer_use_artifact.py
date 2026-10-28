@@ -16,7 +16,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 NODE_VERSION = "22.23.2"
 NODE_PINS = {
     "linux-x64": (
@@ -38,7 +38,7 @@ FILES = {
     "opencuria-cua",
 }
 ASSET = (
-    Path(__file__).with_name("assets") / "computer-use-0.1.0.tar.gz"
+    Path(__file__).with_name("assets") / f"computer-use-{VERSION}.tar.gz"
     if "__file__" in globals()
     else Path("/nonexistent")
 )

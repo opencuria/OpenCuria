@@ -260,6 +260,7 @@ class McpRuntime:
                 input_schema=item.input_schema,
                 connection=connection,
                 title_text=item.title,
+                annotations=item.annotations,
             )
             for item in connection.model_tools()
         ]

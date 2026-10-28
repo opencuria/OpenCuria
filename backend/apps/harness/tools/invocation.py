@@ -16,7 +16,7 @@ from ..images import build_tool_message_content
 from ..permissions.evaluator import ASK, DEFAULT_GLOBAL_RULES, DENY, PermissionEvaluator
 from ..providers.base import LLMMessage, ToolSchema
 from ..todos.service import TodoService
-from .base import ToolContext, ToolRegistry, ToolResult
+from .base import ToolContext, ToolError, ToolRegistry, ToolResult
 
 if TYPE_CHECKING:
     from ..engines.base import RunOptions
@@ -326,7 +326,7 @@ class AuthorizedToolDispatcher:
         return approved
 
     def _tool_error_outcome(
-        self, call: _PendingToolCall, content: str
+        self, call: _PendingToolCall, content: str | list[dict[str, Any]]
     ) -> _ToolCallOutcome:
         """Build a tool-role message for a rejected or failed call."""
         return _ToolCallOutcome(
@@ -481,7 +481,12 @@ class AuthorizedToolDispatcher:
                     "error": error,
                 }
             )
-            return self._tool_error_outcome(call, error)
+            return self._tool_error_outcome(
+                call,
+                exc.content
+                if isinstance(exc, ToolError) and exc.content is not None
+                else error,
+            )
         await self._send(
             {
                 "type": "tool_completed",
@@ -523,7 +528,11 @@ class AuthorizedToolDispatcher:
             # travel via the tool_completed event into HarnessPart.meta.
             message=LLMMessage(
                 role="tool",
-                content=build_tool_message_content(result.output, result.attachments),
+                content=(
+                    result.content
+                    if result.content is not None and not result.truncated
+                    else build_tool_message_content(result.output, result.attachments)
+                ),
                 tool_call_id=call.call_id,
             ),
             result=result,

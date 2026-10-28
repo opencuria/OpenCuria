@@ -12,6 +12,7 @@ type Execution = {
   textBytes: number;
   imageBytes: number;
   imageCount: number;
+  textChannels: Map<string | undefined, { type: 'text'; text: string }>;
   nativeBegin?: Promise<unknown>;
   operations: Set<Promise<void>>;
   finish: (error?: Error) => void;
@@ -25,7 +26,6 @@ export class Supervisor {
   private ended = false;
   private finishing?: Promise<void>;
   private context?: RuntimeContext;
-  private calls = 0;
 
   bindContext(context: RuntimeContext): void {
     if (!context.session_id || !context.turn_id) throw new CuaError('INVALID_CONTEXT', 'A backend session and turn identity are required');
@@ -55,14 +55,20 @@ export class Supervisor {
     return worker;
   }
 
-  private content(active: Execution, content: ContentBlock): void {
+  private content(active: Execution, content: ContentBlock, name?: string): void {
     if (this.active !== active) return;
     if (content.type === 'text') {
       const remaining = MAX_TEXT_BYTES - active.textBytes;
       const text = Buffer.from(content.text).subarray(0, Math.max(0, remaining)).toString('utf8');
       if (!text) return;
       active.textBytes += Buffer.byteLength(text);
-      active.content.push({ type: 'text', text });
+      const channel = active.textChannels.get(name);
+      if (channel) channel.text += text;
+      else {
+        const block = { type: 'text' as const, text };
+        active.textChannels.set(name, block);
+        active.content.push(block);
+      }
     } else if (content.type === 'image') {
       const size = Buffer.byteLength(content.data, 'base64');
       if (++active.imageCount > 2 || active.imageBytes + size > MAX_IMAGE_BYTES) {
@@ -77,7 +83,7 @@ export class Supervisor {
   private event(event: WorkerEvent): void {
     const active = this.active;
     if (!active || event.id !== active.id) return;
-    if (event.type === 'content') this.content(active, event.content);
+    if (event.type === 'content') this.content(active, event.content, event.name);
     else if (event.type === 'done') {
       const timedOut = /execution.*(terminated|timed out)/i.test(event.error ?? '');
       active.finish(event.error ? new CuaError(timedOut ? 'TIMEOUT' : 'JAVASCRIPT_ERROR', event.error.slice(0, 2000), 'possible') : undefined);
@@ -92,7 +98,7 @@ export class Supervisor {
           const value = await native.request(event.request.op, event.request.args);
           if (this.active === active && this.worker?.connected) this.worker.send({ type: 'native_result', requestId: event.requestId, value });
         } catch (error) {
-          if (this.active === active && this.worker?.connected) this.worker.send({ type: 'native_result', requestId: event.requestId, error: error instanceof CuaError ? `${error.code}: ${error.message}` : error instanceof Error ? error.message : 'Native operation failed' });
+          if (this.active === active && this.worker?.connected) this.worker.send({ type: 'native_result', requestId: event.requestId, error: error instanceof Error ? error.message : 'Native operation failed' });
         }
       })();
       active.operations.add(operation);
@@ -103,20 +109,21 @@ export class Supervisor {
   async execute(args: Record<string, unknown>, context: RuntimeContext, signal?: AbortSignal): Promise<CallToolResult> {
     if (this.ended) return errorResult(new CuaError('TURN_ENDED', 'This runtime cannot resume an ended turn'));
     if (this.active || this.finishing) return errorResult(new CuaError('BUSY', 'Another JavaScript execution is active'));
-    if (++this.calls > 100) return errorResult(new CuaError('CALL_LIMIT', 'Computer use reached its 100-call run budget'));
     const code = args.code;
     const timeout = args.timeout_ms ?? DEFAULT_TIMEOUT_MS;
-    if (typeof code !== 'string' || !code.trim() || Buffer.byteLength(code) > MAX_CODE_BYTES) return errorResult(new CuaError('INVALID_ARGUMENT', 'code must be nonempty and at most 64 KiB'));
-    if (!Number.isSafeInteger(timeout) || (timeout as number) < 1 || (timeout as number) > MAX_TIMEOUT_MS) return errorResult(new CuaError('INVALID_ARGUMENT', 'timeout_ms must be an integer from 1 to 60000'));
+    if (typeof code !== 'string' || !code.trim()) return errorResult(new CuaError('INVALID_ARGUMENT', 'js expects non-empty JavaScript source'));
+    if (Buffer.byteLength(code) > MAX_CODE_BYTES) return errorResult(new CuaError('INVALID_ARGUMENT', 'code exceeds 64 KiB'));
+    if (!Number.isSafeInteger(timeout) || (timeout as number) < 1 || (timeout as number) > MAX_TIMEOUT_MS) return errorResult(new CuaError('INVALID_ARGUMENT', 'timeout_ms must be a positive execution timeout'));
     if (!context.session_id || !context.turn_id) return errorResult(new CuaError('INVALID_CONTEXT', 'A backend session and turn identity are required'));
     if (this.context && (this.context.session_id !== context.session_id || this.context.turn_id !== context.turn_id)) return errorResult(new CuaError('INVALID_CONTEXT', 'A runtime cannot change its owning turn'));
     if (this.context && (this.context.generation !== context.generation || this.context.epoch !== context.epoch || this.context.input_generation !== context.input_generation)) await this.reset();
     this.context = context;
     const worker = this.startWorker();
+    const startedAt = performance.now();
     return await new Promise<CallToolResult>((resolve) => {
       let settled = false;
       const active: Execution = {
-        id: randomUUID(), context, content: [], textBytes: 0, imageBytes: 0, imageCount: 0, operations: new Set(),
+        id: randomUUID(), context, content: [], textChannels: new Map(), textBytes: 0, imageBytes: 0, imageCount: 0, operations: new Set(),
         finish: (error) => {
           if (settled) return;
           settled = true;
@@ -135,9 +142,10 @@ export class Supervisor {
               catch { error ??= new CuaError('CLEANUP_UNCONFIRMED', 'Could not confirm desktop input cleanup', 'unknown'); }
             }
             const result: CallToolResult = error ? errorResult(error) : {
-              content: active.content.length ? active.content : [{ type: 'text', text: 'JavaScript completed.' }],
-              structuredContent: { computer_use: { title: typeof args.title === 'string' ? args.title.slice(0, 80) : 'Computer use', effect_status: 'completed' } },
+              content: active.content.length ? active.content : [{ type: 'text', text: '' }],
+              isError: false,
             };
+            result._meta = { ...result._meta, 'codex/nodeReplExecutionDurationMs': Math.round(performance.now() - startedAt) };
             if (Buffer.byteLength(JSON.stringify(result)) > MAX_RESULT_BYTES) resolve(errorResult(new CuaError('OUTPUT_LIMIT', 'Computer use response exceeded 6 MiB', 'possible')));
             else resolve(result);
           })().catch(() => resolve(errorResult(new CuaError('CLEANUP_UNCONFIRMED', 'Runtime cleanup failed', 'unknown')))).finally(() => { this.finishing = undefined; });

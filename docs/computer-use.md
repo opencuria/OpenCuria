@@ -18,12 +18,21 @@ The public tools are `mcp_computer-use_cua_repl_js` and
 `mcp_computer-use_cua_repl_js_reset`. `turn_ended` is a private lifecycle RPC,
 filtered from model schemas and rejected by the agent invocation path. It
 bypasses the execution lock so stopping a busy call cannot deadlock teardown.
-All three harness engines use the same plugin tool contracts. Plan mode asks
+All three harness engines use the same plugin tool contracts. Codex exposes
+`js` and `js_reset` through a native managed MCP bridge with
+`omit_tools_from = ["code_mode", "deferred"]`, including for models that require
+Code Mode. Its private Unix socket relay forwards to the existing backend
+dispatcher; approvals, events, desktop ownership and images stay on the ordinary
+managed-tool path. No `functions.exec` wrapper or string image transport is needed.
+Plan mode asks
 before execution; explore denies these tools. Existing explicit denies win.
 JavaScript is executable workspace code. The workspace VM is the isolation
 boundary; the JavaScript worker is not a security sandbox.
 
-The API shape follows the reviewed ChatGPT Computer Use design: persistent JS,
+The agent-facing contract is pinned to the local ChatGPT `@oai/cua-repl` 0.1.2
+computer-only Linux surface in `packages/computer-use/src/contract.json`.
+Descriptions, input schemas and first-use documentation match that reference.
+The API follows its design: persistent JS,
 `cua` observations/actions, documentation at the first entry point, explicit
 image emission and reset/lifecycle tools. The implementation is independent
 OpenCuria code and does not install or depend on ChatGPT software. The initial
@@ -35,10 +44,12 @@ continues to use the browser plugin.
 Start with `await cua.getState()` or `await cua.listWindows()`. Read the returned
 documentation. Bind an observed window with
 `var app = await cua.getApp({windowId: observedId})`. Prefer its fresh AX tree;
-when the source is `x11`, it contains only limited window metadata. Activate a
-window explicitly before keyboard input or coordinate actions. Coordinates
-refer to the most recent window screenshot, including image scaling. They are
-invalid after an input action, movement, resize, rebinding or desktop handover.
+when the source is `x11`, it contains only limited window metadata.
+Linux input is delivered directly to the selected window;
+it requires no activation and does not move the desktop pointer. Coordinates
+are relative to that window. Input, inventory and observations share a 100 ms
+post-action settling deadline. Reobserve after UI changes before choosing the
+next target.
 Element references are bound to an AX snapshot and checked for changed identity.
 
 State lasts for one backend run, not across user turns or reconnects. Reset
@@ -47,8 +58,15 @@ Timeout/cancellation kills the worker, releases helper input and fences late
 callbacks; desktop generation or automation-owner changes reset state too.
 Calls are never automatically replayed when side effects are uncertain.
 
-Limits: 64 KiB code, 64 KiB text, two images totaling 4 MiB, 6 MiB result,
-1–60,000 ms per JS call (default 30,000), 100 JS calls per run, 256 MiB worker
+Observations emit their own text and images. Inventory is JSON text, named text
+channels are accumulated separately, and screenshots are MCP image blocks with
+`codex/imageDetail: original`. `nodeRepl.emitImage` accepts PNG/JPEG/WebP bytes,
+data/file URLs and `{ bytes, mimeType }`. Execution diagnostics remain private
+MCP metadata. Empty output and reset responses follow the reference contract.
+`cua.rewriteDocumentation()` repeats instructions without resetting JS bindings.
+
+Workspace bounds: 64 KiB code, 64 KiB text, two images totaling 4 MiB, 6 MiB result,
+positive JS timeouts (default 30,000 ms), 256 MiB worker
 heap, 1,500 AX nodes and 32 levels. Every CUA operation must be awaited. A
 separate supervisor owns deadlines so a synchronous infinite loop cannot block
 cancellation. AT-SPI calls have their own native timeouts.
@@ -82,13 +100,13 @@ packages during first provisioning. Network access to the distribution mirrors
 and nodejs.org is required on a cold cache. Linux glibc x64 and arm64 are
 supported; unsupported platforms fail with a health error.
 
-`ensure_runtime_artifact("computer-use", "0.1.0")` uses the shared artifact
+`ensure_runtime_artifact("computer-use", "0.2.0")` uses the shared artifact
 manager. The runner ships a deterministic bundle and downloads Node 22.23.2
 from fixed official URLs with size/SHA-256 pins. It checks each installed file,
 refuses changed or symlinked trees and publishes under a guest lock with atomic
 no-replace rename. Existing Claude/Codex artifact pins remain unchanged.
 The entry point is
-`/opt/opencuria/runtimes/computer-use/0.1.0/opencuria-cua`.
+`/opt/opencuria/runtimes/computer-use/0.2.0/opencuria-cua`.
 
 From the repository root:
 
@@ -100,7 +118,7 @@ npm run type-check -w packages/computer-use
 npm test -w packages/computer-use
 ```
 
-Commit the generated `runner/src/runtime/assets/computer-use-0.1.0.*` with the
+Commit the generated `runner/src/runtime/assets/computer-use-0.2.0.*` with the
 source. Increment the package/plugin/artifact version and provide a migration
 when changing a released runtime; immutable installed trees are never silently
 replaced. The bundle carries the MCP SDK/transitive license notices.
@@ -108,14 +126,20 @@ replaced. The bundle carries the MCP SDK/transitive license notices.
 Real desktop contracts require a private X11 display, a session D-Bus and GTK:
 
 ```sh
-DISPLAY=:196 dbus-run-session env OPENCURIA_CUA_DESKTOP_TEST=1 \
+xvfb-run -a dbus-run-session env OPENCURIA_CUA_DESKTOP_TEST=1 \
   npm test -w packages/computer-use
 cd runner
 CUA_TEST_NODE_ARCHIVE=/path/to/node-v22.23.2-linux-x64.tar.xz \
   .venv/bin/pytest tests/test_computer_use_artifact.py -q
 ```
 
-The GTK fixture is isolated, verifies actual saved UI data, exercises Unicode
-semantic insertion and clipboard paste, checks screenshots/stale bindings and
-cleans up after itself. Live model evaluations must identify the exact provider
+The GTK and Chrome fixtures are isolated, verify actual saved UI data and page
+navigation, and exercise Unicode insertion, clipboard paste, native keys and
+screenshots without activation or browser automation. Reference compatibility
+tests compare identical inputs against the installed ChatGPT runtime when
+available (`CUA_REFERENCE_ROOT` overrides its location). They compare tool
+schemas, descriptions, text channels, image inputs, errors, reset and the app
+facade; they do not require ChatGPT at deployment. Migration 0013 upgrades only
+the built-in runtime and its tool exposure, preserving workspace activations
+and custom permission settings. Live model evaluations must identify the exact provider
 model, inspect actual UI results independently and keep secrets out of reports.

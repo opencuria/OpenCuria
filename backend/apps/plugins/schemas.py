@@ -44,6 +44,9 @@ class McpToolPolicy(Schema):
     internal_tools: list[str] = Field(default_factory=list)
     desktop_tools: list[str] | None = None
     execution_tools: list[str] = Field(default_factory=list)
+    omit_tools_from: list[Literal["code_mode", "deferred"]] = Field(
+        default_factory=list
+    )
     on_run_end: str = ""
     desktop_kind: Literal["mcp", "computeruse"] = "mcp"
     exclusive_input: bool = False

@@ -22,19 +22,21 @@ compressed = io.BytesIO()
 with gzip.GzipFile(filename="", fileobj=compressed, mode="wb", mtime=0) as stream:
     stream.write(buffer.getvalue())
 asset = compressed.getvalue()
-(output / "computer-use-0.1.0.tar.gz").write_bytes(asset)
-(output / "computer-use-0.1.0.json").write_text(
+manifest = json.loads((root / "dist/manifest.json").read_text())
+version = manifest["version"]
+(output / f"computer-use-{version}.tar.gz").write_bytes(asset)
+(output / f"computer-use-{version}.json").write_text(
     json.dumps(
         {
             "sha256": hashlib.sha256(asset).hexdigest(),
             "size": len(asset),
-            "manifest": json.loads((root / "dist/manifest.json").read_text()),
+            "manifest": manifest,
         },
         indent=2,
     )
     + "\n"
 )
 
-(output / "computer-use-0.1.0.NOTICES.txt").write_bytes(
+(output / f"computer-use-{version}.NOTICES.txt").write_bytes(
     (root / "dist/NOTICES.txt").read_bytes()
 )
