@@ -12,7 +12,6 @@ from django.test import Client
 
 from apps.accounts.models import APIKey, APIKeyPermission
 from apps.organizations.models import Membership, MembershipRole
-from apps.runners.capture_repository import CaptureRepository
 from apps.runners.enums import ProcessStatus, TaskType, WorkspaceStatus
 from apps.runners.models import (
     CaptureRequest,
@@ -23,6 +22,7 @@ from apps.runners.models import (
 )
 from apps.runners.repositories import TaskRepository
 from apps.runners.services import get_runner_service
+from apps.runners.services.capture import CaptureService
 from apps.runners.tests.conftest import has_busy_agent
 from common.utils import generate_api_token, hash_token
 
@@ -60,7 +60,7 @@ def api_key_factory():
 
 
 def _capture_generation(source, *, name, captured_image_id=None):
-    _, task = CaptureRepository.allocate(
+    _, task = CaptureService.allocate(
         source.id,
         name=name,
         captured_image_id=captured_image_id,

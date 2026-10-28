@@ -331,8 +331,8 @@ def test_assignment_all_generations_retired(runner, user):
 
 
 def test_retirement_blocks_clone_and_capture(runner, user):
-    from apps.runners.capture_repository import CaptureRepository
     from apps.runners.repositories import ImageGenerationRepository
+    from apps.runners.services.capture import CaptureService
 
     base = image(runner, user)
     ws = Workspace.objects.create(
@@ -349,7 +349,7 @@ def test_retirement_blocks_clone_and_capture(runner, user):
     with transaction.atomic(), pytest.raises(ConflictError, match="ready"):
         ImageGenerationRepository.validate_selection(base.id)
     with pytest.raises(ConflictError, match="retired"):
-        CaptureRepository.allocate(ws.id, "new capture", has_busy_agent=has_busy_agent)
+        CaptureService.allocate(ws.id, "new capture", has_busy_agent=has_busy_agent)
 
 
 def test_false_and_stale_task_success_fenced(runner, user):

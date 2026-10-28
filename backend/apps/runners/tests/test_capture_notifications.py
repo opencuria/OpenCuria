@@ -8,13 +8,13 @@ from asgiref.sync import async_to_sync
 from django.db import transaction
 
 from apps.credentials.services import CredentialSvc
-from apps.runners.capture_repository import CaptureRepository
 from apps.runners.models import (
     CaptureRequest,
     LifecycleCommand,
     WorkspaceRecreateRequest,
 )
 from apps.runners.operations import OperationRepository
+from apps.runners.services.capture import CaptureService
 from apps.runners.services.recovery import RecoveryService
 from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_capture_pipeline import result
@@ -45,7 +45,7 @@ def test_unknown_result_notifies_only_after_commit(
     service, frontend, runner, workspace
 ):
     workspace.save()
-    _, child = CaptureRepository.allocate(
+    _, child = CaptureService.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
     )
     diagnostic = "Unknown outcome; intervention required"
@@ -86,7 +86,7 @@ def test_child_result_rollback_discards_changes_and_events(
 ):
     workspace.credentials_present = True
     workspace.save()
-    _, child = CaptureRepository.allocate(
+    _, child = CaptureService.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
     )
     request = CaptureRequest.objects.get(workspace=workspace)
@@ -94,7 +94,7 @@ def test_child_result_rollback_discards_changes_and_events(
         assert result(
             service, runner, child, "workspace:stopped", credentials_present=False
         )
-        assert CaptureRepository.tick() == []
+        assert CaptureService.tick() == []
         request.refresh_from_db()
     if phase == "resume":
         assert result(
@@ -112,7 +112,7 @@ def test_child_result_rollback_discards_changes_and_events(
             "resolve_workspace_credentials",
             side_effect=RuntimeError("credential revoked"),
         ):
-            assert CaptureRepository.tick() == []
+            assert CaptureService.tick() == []
         request.refresh_from_db()
     child = request.child
     workspace.refresh_from_db()
@@ -168,7 +168,7 @@ def test_deadline_intervention_tick_and_recovery_flags(
     service, frontend, sio_mock, workspace, monkeypatch
 ):
     workspace.save()
-    _, child = CaptureRepository.allocate(
+    _, child = CaptureService.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
     )
     diagnostic = "Unknown capture deadline"
@@ -181,14 +181,14 @@ def test_deadline_intervention_tick_and_recovery_flags(
     # Probe the notification without consuming it before recovery can publish it.
     with pytest.raises(RuntimeError, match="notification probe"):
         with transaction.atomic():
-            assert CaptureRepository.tick() == [notification]
-            assert CaptureRepository.tick() == []
+            assert CaptureService.tick() == [notification]
+            assert CaptureService.tick() == []
             raise RuntimeError("notification probe")
     monkeypatch.setattr(
         "apps.runners.services.RunnerService", lambda transport: service
     )
     async_to_sync(RecoveryService().tick)(sio_mock)
-    assert CaptureRepository.tick() == []
+    assert CaptureService.tick() == []
     frontend.assert_any_call(
         "workspace:operation_changed",
         operation_payload(workspace, diagnostic, True),
@@ -206,7 +206,7 @@ def test_completed_duplicate_ticks_notify_exactly_once(
 ):
     workspace = stopped_workspace
     workspace.save()
-    _, child = CaptureRepository.allocate(
+    _, child = CaptureService.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
     )
     assert result(
@@ -241,7 +241,7 @@ def test_completed_duplicate_ticks_notify_exactly_once(
     ]
     assert [c.args[1] for c in operations] == [operation_payload(workspace)]
     frontend.reset_mock()
-    assert CaptureRepository.tick() == []
+    assert CaptureService.tick() == []
     async_to_sync(RecoveryService().tick)(sio_mock)
     frontend.assert_not_called()
 
@@ -254,7 +254,7 @@ async def test_async_operation_projection_without_unsafe_orm(
 
     def allocate():
         workspace.save()
-        CaptureRepository.allocate(
+        CaptureService.allocate(
             workspace.id, "capture", has_busy_agent=has_busy_agent
         )
 

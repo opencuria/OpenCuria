@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from apps.runners.capture_repository import CaptureRepository
 from apps.runners.enums import ProcessStatus, TaskType, WorkspaceStatus
 from apps.runners.models import (
     CapturedImage,
@@ -21,6 +20,7 @@ from apps.runners.models import (
 )
 from apps.runners.repositories import TaskRepository, WorkspaceProcessRepository
 from apps.runners.services import RunnerService
+from apps.runners.services.capture import CaptureService
 from apps.runners.services.workspace_configuration import WorkspaceConfigurationService
 from apps.runners.tests.conftest import has_busy_agent
 from common.exceptions import ConflictError
@@ -122,7 +122,7 @@ def test_capture_snapshots_every_persistent_definition_without_runtime_state(
         session_id=uuid.uuid4(),
     )
 
-    _, task = CaptureRepository.allocate(
+    _, task = CaptureService.allocate(
         workspace.id, "Snapshot", has_busy_agent=has_busy_agent
     )
 
@@ -170,7 +170,7 @@ def test_capture_snapshots_are_generation_specific_and_detached_from_source_muta
         exit_code=0,
     )
 
-    _, first_task = CaptureRepository.allocate(
+    _, first_task = CaptureService.allocate(
         workspace.id, "Versioned image", has_busy_agent=has_busy_agent
     )
     TaskRepository.complete(first_task)
@@ -196,7 +196,7 @@ def test_capture_snapshots_are_generation_specific_and_detached_from_source_muta
         status=ProcessStatus.FAILED,
     )
 
-    _, second_task = CaptureRepository.allocate(
+    _, second_task = CaptureService.allocate(
         workspace.id,
         captured_image_id=line.id,
         message="second generation",
@@ -269,7 +269,7 @@ async def test_workspace_creation_restores_snapshot_as_fresh_exited_processes(
         )
         for definition in PROCESS_DEFINITIONS
     ]
-    _, capture_task = CaptureRepository.allocate(
+    _, capture_task = CaptureService.allocate(
         source.id, "Process image", has_busy_agent=has_busy_agent
     )
     image = ImageInstance.objects.get(origin_workspace=source)
@@ -424,7 +424,7 @@ def test_denied_capture_creates_no_snapshot_or_capture_artifacts(runner, user):
     counts = [model.objects.count() for model in artifact_models]
 
     with pytest.raises(ConflictError):
-        CaptureRepository.allocate(
+        CaptureService.allocate(
             workspace.id, "Denied snapshot", has_busy_agent=has_busy_agent
         )
 
@@ -448,7 +448,7 @@ def test_image_process_snapshot_is_write_once(runner, user):
         command="python server.py",
         workdir="/srv/api",
     )
-    CaptureRepository.allocate(
+    CaptureService.allocate(
         workspace.id, "Immutable snapshot", has_busy_agent=has_busy_agent
     )
     image = ImageInstance.objects.get(origin_workspace=workspace)
@@ -482,7 +482,7 @@ async def test_start_after_stale_preflight_does_not_insert_or_dispatch(
     create = service.processes.create
 
     def capture_before_create(**kwargs):
-        CaptureRepository.allocate(
+        CaptureService.allocate(
             workspace.id, "Start race", has_busy_agent=has_busy_agent
         )
         return create(**kwargs)
@@ -525,7 +525,7 @@ async def test_reconfiguration_after_stale_preflight_preserves_row_and_snapshot(
     update = service.processes.update_for_restart
 
     def capture_before_update(process_id, **kwargs):
-        CaptureRepository.allocate(
+        CaptureService.allocate(
             workspace.id, "Reconfiguration race", has_busy_agent=has_busy_agent
         )
         return update(process_id, **kwargs)
@@ -576,7 +576,7 @@ async def test_delete_after_capture_cannot_remove_snapshotted_definition(
     delete = service.processes.delete_for_workspace
 
     def capture_before_delete(process_id, workspace_id):
-        CaptureRepository.allocate(
+        CaptureService.allocate(
             workspace.id, "Delete race", has_busy_agent=has_busy_agent
         )
         return delete(process_id, workspace_id)
@@ -609,7 +609,7 @@ def test_process_definition_written_before_capture_is_in_snapshot(runner, user):
         run_count=1,
     )
 
-    CaptureRepository.allocate(
+    CaptureService.allocate(
         workspace.id, "Process already committed", has_busy_agent=has_busy_agent
     )
 

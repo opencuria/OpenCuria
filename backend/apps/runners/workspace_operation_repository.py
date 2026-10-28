@@ -1,8 +1,8 @@
 """Read durable workspace reservations without importing their coordinators.
 
 Task admission, persisted operation updates and frontend projections share this
-read boundary. Capture/recreate repositories own phase progression and depend on
-these reads, never the other way round.
+read boundary. The capture service and recreate coordinator own phase progression
+and depend on these reads, never the other way round.
 """
 
 from __future__ import annotations

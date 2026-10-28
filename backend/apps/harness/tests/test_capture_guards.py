@@ -238,7 +238,7 @@ async def test_nested_abort_settles_before_capture_and_blocks_child_resume(
         assert_user_abort,
         tree,
     )
-    from apps.runners.capture_repository import CaptureRepository
+    from apps.runners.services.capture import CaptureService
 
     Workspace.objects.filter(id=harness_workspace.id).update()
     provider = NestedProvider()
@@ -249,14 +249,14 @@ async def test_nested_abort_settles_before_capture_and_blocks_child_resume(
         await checkpoint(provider.grandchild_entered)
         sessions = tree(root)
         with pytest.raises(ConflictError, match="agent is active"):
-            await sync_to_async(CaptureRepository.allocate)(
+            await sync_to_async(CaptureService.allocate)(
                 harness_workspace.id,
                 "blocked capture",
                 has_busy_agent=HarnessSessionRepository.has_busy_for_workspace,
             )
         await service.abort_run(root.id)
         assert_user_abort(service, sessions)
-        await sync_to_async(CaptureRepository.allocate)(
+        await sync_to_async(CaptureService.allocate)(
             harness_workspace.id,
             "after tree abort",
             has_busy_agent=HarnessSessionRepository.has_busy_for_workspace,
@@ -286,7 +286,7 @@ async def test_capture_between_abort_join_and_gate_cleanup_keeps_tree_cleanup(
         assert_user_abort,
         tree,
     )
-    from apps.runners.capture_repository import CaptureRepository
+    from apps.runners.services.capture import CaptureService
 
     Workspace.objects.filter(id=harness_workspace.id).update()
     provider = NestedProvider()
@@ -318,7 +318,7 @@ async def test_capture_between_abort_join_and_gate_cleanup_keeps_tree_cleanup(
                     workspace=harness_workspace, status="busy"
                 ).exists()
                 captured.append(
-                    await sync_to_async(CaptureRepository.allocate)(
+                    await sync_to_async(CaptureService.allocate)(
                         harness_workspace.id,
                         "during stop cleanup",
                         has_busy_agent=HarnessSessionRepository.has_busy_for_workspace,

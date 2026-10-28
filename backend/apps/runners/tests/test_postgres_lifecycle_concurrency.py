@@ -30,8 +30,10 @@ from apps.runners.repositories import TaskRepository
 from apps.runners.services import RunnerService
 from apps.runners.services.operation_results import apply_result
 from apps.runners.services.workspace_configuration import WorkspaceConfigurationService
+from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_image_deletion_coordinator import image
 from apps.runners.tests.test_image_deletion_coordinator import request as delete_request
+from apps.runners.workspace_operation_repository import WorkspaceOperationRepository
 from common.exceptions import ConflictError
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -237,8 +239,8 @@ def test_capture_allocation_vs_harness_admission(runner, workspace, launch):
     """Capture and every harness admission contend on real PostgreSQL locks."""
     from apps.harness.harness_service import HarnessService
     from apps.harness.models import HarnessSession
-    from apps.runners.capture_repository import CaptureRepository as Capture
     from apps.runners.models import CaptureRequest
+    from apps.runners.services.capture import CaptureService as Capture
 
     if connection.vendor != "postgresql":
         pytest.skip("requires real PostgreSQL row locks")
@@ -256,7 +258,9 @@ def test_capture_allocation_vs_harness_admission(runner, workspace, launch):
 
     def allocate():
         try:
-            Capture.allocate(workspace.id, "Concurrent capture")
+            Capture.allocate(
+                workspace.id, "Concurrent capture", has_busy_agent=has_busy_agent
+            )
             return True
         except ConflictError:
             return False
@@ -286,7 +290,7 @@ def test_capture_allocation_vs_harness_admission(runner, workspace, launch):
     assert (workspace.current_task_id is not None) == captured
     assert not (
         HarnessSession.objects.filter(workspace=workspace, status="busy").exists()
-        and Capture.active(workspace.id)
+        and WorkspaceOperationRepository.capture_active(workspace.id)
     )
 
 
@@ -297,8 +301,8 @@ def test_stale_configuration_vs_inter_child_capture(
     """A stale preflight cannot overwrite the durable inter-child parent hold."""
     from unittest.mock import Mock
 
-    from apps.runners.capture_repository import CaptureRepository as Capture
     from apps.runners.models import CaptureRequest
+    from apps.runners.services.capture import CaptureService as Capture
     from apps.runners.tests.test_capture_pipeline import result
 
     if connection.vendor != "postgresql":
@@ -306,7 +310,9 @@ def test_stale_configuration_vs_inter_child_capture(
     configuration = WorkspaceConfigurationService()
     stale = configuration.workspaces.get_by_id(workspace.id)
     real_get = configuration.workspaces.get_by_id
-    _, stop = Capture.allocate(workspace.id, "Inter-child capture")
+    _, stop = Capture.allocate(
+        workspace.id, "Inter-child capture", has_busy_agent=has_busy_agent
+    )
     service = RunnerService(sio_server=AsyncMock())
     assert result(service, runner, stop, "workspace:stopped", credentials_present=False)
     workspace.refresh_from_db()
@@ -361,15 +367,17 @@ def test_stale_configuration_vs_inter_child_capture(
 def test_duplicate_capture_completion_finishes_parent_once(
     runner, stopped_workspace, progress, failed
 ):
-    """Queued advances and duplicate ACKs yield one terminal parent result."""
-    from apps.runners.capture_repository import CaptureRepository as Capture
-    from apps.runners.models import CaptureRequest
+    """Queued advances and duplicate ACKs finish or hand off exactly once."""
+    from apps.runners.models import CaptureRequest, WorkspaceRecreateRequest
+    from apps.runners.services.capture import CaptureService as Capture
     from apps.runners.tests.test_capture_pipeline import result
 
     if connection.vendor != "postgresql":
         pytest.skip("requires real PostgreSQL row locks")
     workspace = stopped_workspace
-    _, child = Capture.allocate(workspace.id, "Concurrent completion")
+    _, child = Capture.allocate(
+        workspace.id, "Concurrent completion", has_busy_agent=has_busy_agent
+    )
     request = CaptureRequest.objects.get(workspace=workspace)
     service = RunnerService(sio_server=AsyncMock())
     event = "image_artifact:failed" if failed else "image_artifact:created"
@@ -397,31 +405,40 @@ def test_duplicate_capture_completion_finishes_parent_once(
 
     outcomes = race(runner, finish, finish)
     notifications = [item for outcome in outcomes for item in outcome]
-    assert len(notifications) == 1
     request.refresh_from_db()
     workspace.refresh_from_db()
     child.refresh_from_db()
     expected = "failed" if failed else "completed"
     assert request.phase == expected and child.status == expected
-    assert notifications == [
-        {
-            "workspace_id": str(workspace.id),
-            "phase": expected,
-            "diagnostic": request.diagnostic,
-        }
-    ]
-    assert workspace.active_operation is None and workspace.current_task_id is None
     assert workspace.status == "stopped"
-    assert Task.objects.filter(workspace=workspace).count() == 1
-    assert LifecycleCommand.objects.filter(task__workspace=workspace).count() == 1
+    if failed:
+        assert notifications == [
+            {
+                "workspace_id": str(workspace.id),
+                "phase": expected,
+                "diagnostic": request.diagnostic,
+            }
+        ]
+        assert workspace.active_operation is None and workspace.current_task_id is None
+        assert not WorkspaceRecreateRequest.objects.filter(workspace=workspace).exists()
+    else:
+        assert notifications == []
+        replacement = WorkspaceRecreateRequest.objects.get(workspace=workspace)
+        assert replacement.phase == "remove" and not replacement.final_running
+        assert workspace.active_operation == "capturing_image"
+        assert workspace.current_task_id == replacement.child_id
+        assert workspace.pending_base_image_instance_id == request.image_id
+    count = 1 if failed else 2
+    assert Task.objects.filter(workspace=workspace).count() == count
+    assert LifecycleCommand.objects.filter(task__workspace=workspace).count() == count
     assert Capture.advance(request.id) is None
     assert Capture.tick() == []
 
 
 def test_credential_injection_admission_vs_capture(runner, workspace):
     """Credential synchronization and capture admit exactly one lock winner."""
-    from apps.runners.capture_repository import CaptureRepository as Capture
     from apps.runners.models import CaptureRequest
+    from apps.runners.services.capture import CaptureService as Capture
 
     if connection.vendor != "postgresql":
         pytest.skip("requires real PostgreSQL row locks")
@@ -441,7 +458,9 @@ def test_credential_injection_admission_vs_capture(runner, workspace):
 
     def capture():
         try:
-            Capture.allocate(workspace.id, "Admission race")
+            Capture.allocate(
+                workspace.id, "Admission race", has_busy_agent=has_busy_agent
+            )
             return True
         except ConflictError:
             return False
@@ -462,19 +481,25 @@ def test_credential_injection_admission_vs_capture(runner, workspace):
             task.refresh_from_db()
             assert task.status == status
             with pytest.raises(ConflictError, match="credentials are synchronizing"):
-                Capture.allocate(workspace.id, "Must wait for injection")
-            assert not Capture.active(workspace.id)
+                Capture.allocate(
+                    workspace.id,
+                    "Must wait for injection",
+                    has_busy_agent=has_busy_agent,
+                )
+            assert not WorkspaceOperationRepository.capture_active(workspace.id)
             assert not ImageInstance.objects.filter(origin_workspace=workspace).exists()
             if status == "pending":
                 TaskRepository.mark_in_progress(task)
         TaskRepository.complete(task)
         task.refresh_from_db()
         assert task.status == "completed"
-        Capture.allocate(workspace.id, "After terminal injection")
-        assert Capture.active(workspace.id)
+        Capture.allocate(
+            workspace.id, "After terminal injection", has_busy_agent=has_busy_agent
+        )
+        assert WorkspaceOperationRepository.capture_active(workspace.id)
     else:
         assert not inject()
         assert not Task.objects.filter(
             workspace=workspace, type="inject_credentials"
         ).exists()
-        assert Capture.active(workspace.id)
+        assert WorkspaceOperationRepository.capture_active(workspace.id)

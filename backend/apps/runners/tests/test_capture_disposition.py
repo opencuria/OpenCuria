@@ -9,10 +9,10 @@ from django.apps import apps
 from django.db import connection
 
 from apps.credentials.services import CredentialSvc
-from apps.runners.capture_repository import CaptureRepository
 from apps.runners.disposition_repository import DispositionRepository
 from apps.runners.models import CaptureRequest, LifecycleCommand, Task
 from apps.runners.operations import OperationRepository
+from apps.runners.services.capture import CaptureService
 from apps.runners.services.disposition import DispositionService
 from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_capture_pipeline import result
@@ -27,14 +27,14 @@ def interrupted_capture(service, runner, workspace, phase: str):
     """Allocate a real capture and fence its requested child phase."""
     workspace.credentials_present = True
     workspace.save()
-    _, child = CaptureRepository.allocate(
+    _, child = CaptureService.allocate(
         workspace.id, "interrupted capture", has_busy_agent=has_busy_agent
     )
     if phase != "stop":
         assert result(
             service, runner, child, "workspace:stopped", credentials_present=False
         )
-        CaptureRepository.tick()
+        CaptureService.tick()
     request = CaptureRequest.objects.get(workspace=workspace)
     if phase == "resume":
         assert result(
@@ -51,7 +51,7 @@ def interrupted_capture(service, runner, workspace, phase: str):
             "resolve_workspace_credentials",
             side_effect=RuntimeError("credential unavailable"),
         ):
-            CaptureRepository.tick()
+            CaptureService.tick()
         request.refresh_from_db()
     assert request.phase == phase
     OperationRepository.intervene(request.child, "Unknown child outcome")
@@ -83,7 +83,7 @@ def test_acknowledge_capture_closes_reservation_and_preserves_ready_image(
         evidence,
         "acknowledge_interrupted",
     )
-    CaptureRepository.tick()
+    CaptureService.tick()
     request.refresh_from_db()
     workspace.refresh_from_db()
     assert request.phase == "failed" and request.resume_suppressed
@@ -95,7 +95,7 @@ def test_acknowledge_capture_closes_reservation_and_preserves_ready_image(
     assert workspace.current_task_id is None and workspace.active_operation is None
     assert Task.objects.count() == count
     # The same version line can now reserve the next generation.
-    CaptureRepository.allocate(
+    CaptureService.allocate(
         workspace.id,
         captured_image_id=request.image.captured_image_id,
         has_busy_agent=has_busy_agent,

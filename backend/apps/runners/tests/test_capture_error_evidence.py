@@ -6,10 +6,10 @@ from unittest.mock import patch
 import pytest
 
 from apps.credentials.services import CredentialSvc
-from apps.runners.capture_repository import CaptureRepository
 from apps.runners.enums import TaskStatus, WorkspaceStatus
 from apps.runners.models import CaptureRequest, LifecycleCommand
 from apps.runners.operations import OperationRepository
+from apps.runners.services.capture import CaptureService
 from apps.runners.services.operation_results import apply_result
 from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_services import service as service
@@ -20,11 +20,11 @@ pytestmark = pytest.mark.django_db
 
 def resume_child(service, runner, workspace):
     workspace.save()
-    _, stop = CaptureRepository.allocate(
+    _, stop = CaptureService.allocate(
         workspace.id, "evidence capture", has_busy_agent=has_busy_agent
     )
     send(service, runner, stop, "workspace:stopped", credentials_present=False)
-    CaptureRepository.tick()
+    CaptureService.tick()
     request = CaptureRequest.objects.get(workspace=workspace)
     send(
         service,
@@ -41,7 +41,7 @@ def resume_child(service, runner, workspace):
         "resolve_workspace_credentials",
         side_effect=RuntimeError("credential revoked"),
     ):
-        CaptureRepository.tick()
+        CaptureService.tick()
     request.refresh_from_db()
     assert request.phase == "resume"
     return request
@@ -87,7 +87,7 @@ def test_known_resume_failure_persists_evidence(
     assert workspace.status == status
     assert workspace.credentials_present is present
     assert workspace.current_task_id is None
-    CaptureRepository.tick()
+    CaptureService.tick()
     request.refresh_from_db()
     assert request.phase == "completed"
     assert request.image.status == "ready"
@@ -106,7 +106,7 @@ def test_unknown_credentials_retains_fence_and_ready_image(service, runner, work
         outcome_known=False,
         execution_finished=True,
     )
-    CaptureRepository.tick()
+    CaptureService.tick()
     request.refresh_from_db()
     workspace.refresh_from_db()
     assert workspace.current_task_id == request.child_id
@@ -153,7 +153,7 @@ def test_known_stop_failure_persists_actual_evidence(
 ):
     workspace.credentials_present = not present
     workspace.save()
-    _, stop = CaptureRepository.allocate(
+    _, stop = CaptureService.allocate(
         workspace.id, "stop evidence", has_busy_agent=has_busy_agent
     )
     assert send(
@@ -177,7 +177,7 @@ def test_unknown_stop_failure_does_not_release_capture_reservation(
     service, runner, workspace
 ):
     workspace.save()
-    _, stop = CaptureRepository.allocate(
+    _, stop = CaptureService.allocate(
         workspace.id, "partial scrub", has_busy_agent=has_busy_agent
     )
     assert not send(
@@ -190,7 +190,7 @@ def test_unknown_stop_failure_does_not_release_capture_reservation(
         outcome_known=False,
         execution_finished=True,
     )
-    CaptureRepository.tick()
+    CaptureService.tick()
     workspace.refresh_from_db()
     request = CaptureRequest.objects.get(workspace=workspace)
     assert workspace.current_task_id == stop.id

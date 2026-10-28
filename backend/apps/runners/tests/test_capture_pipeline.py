@@ -2,13 +2,13 @@
 
 import pytest
 
-from apps.runners.capture_repository import CaptureRepository
 from apps.runners.models import (
     CaptureRequest,
     LifecycleCommand,
     WorkspaceRecreateRequest,
 )
 from apps.runners.operations import OperationRepository
+from apps.runners.services.capture import CaptureService
 from apps.runners.services.operation_results import apply_result
 from apps.runners.tests.conftest import capture_version_fields, has_busy_agent
 from apps.runners.tests.test_services import service as service
@@ -29,12 +29,12 @@ def result(service, runner, task, event, **extra):
 def test_automatic_stop_capture_resume(service, runner, workspace):
     workspace.credentials_present = True
     workspace.save()
-    _, stop = CaptureRepository.allocate(
+    _, stop = CaptureService.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
     )
     req = CaptureRequest.objects.get(workspace=workspace)
     assert result(service, runner, stop, "workspace:stopped", credentials_present=False)
-    CaptureRepository.tick()
+    CaptureService.tick()
     req.refresh_from_db()
     assert req.phase == "capture"
     assert LifecycleCommand.objects.get(task=req.child).payload[
@@ -49,7 +49,7 @@ def test_automatic_stop_capture_resume(service, runner, workspace):
         name="capture",
         size_bytes=123,
     )
-    CaptureRepository.tick()
+    CaptureService.tick()
     req.refresh_from_db()
     assert req.phase == "completed"
     assert req.image.status == "ready"
@@ -67,11 +67,11 @@ def test_unknown_capture_fences_and_suppressed_resume(
 ):
     ws = stopped_workspace
     ws.save()
-    _, task = CaptureRepository.allocate(
+    _, task = CaptureService.allocate(
         ws.id, "capture", has_busy_agent=has_busy_agent
     )
     OperationRepository.intervene(task, "Unknown capture deadline")
-    CaptureRepository.tick()
+    CaptureService.tick()
     req = CaptureRequest.objects.get(workspace=ws)
     ws.refresh_from_db()
     assert req.phase == "capture" and ws.current_task_id == task.id
@@ -82,16 +82,16 @@ def test_safe_capture_failure_resumes_but_unknown_failure_does_not(
     service, runner, workspace
 ):
     workspace.save()
-    _, stop = CaptureRepository.allocate(
+    _, stop = CaptureService.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
     )
     assert result(service, runner, stop, "workspace:stopped", credentials_present=False)
-    CaptureRepository.tick()
+    CaptureService.tick()
     req = CaptureRequest.objects.get(workspace=workspace)
     assert result(
         service, runner, req.child, "image_artifact:failed", error="safe refusal"
     )
-    CaptureRepository.tick()
+    CaptureService.tick()
     req.refresh_from_db()
     assert req.phase == "resume"
     assert req.image.status == "failed"
@@ -100,7 +100,7 @@ def test_safe_capture_failure_resumes_but_unknown_failure_does_not(
 def test_journal_interruption_failure_retains_fence(service, runner, stopped_workspace):
     ws = stopped_workspace
     ws.save()
-    _, task = CaptureRepository.allocate(
+    _, task = CaptureService.allocate(
         ws.id, "capture", has_busy_agent=has_busy_agent
     )
     assert not result(
@@ -110,7 +110,7 @@ def test_journal_interruption_failure_retains_fence(service, runner, stopped_wor
         "image_artifact:failed",
         error="Manual intervention required",
     )
-    CaptureRepository.tick()
+    CaptureService.tick()
     ws.refresh_from_db()
     assert ws.current_task_id == task.id
     assert LifecycleCommand.objects.get(task=task).phase == "intervention"
@@ -129,13 +129,13 @@ def test_retirement_after_clean_stop_preserves_restart_approval(
     )
     workspace.base_image_instance = base
     workspace.save()
-    _, stop = CaptureRepository.allocate(
+    _, stop = CaptureService.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
     )
     assert result(service, runner, stop, "workspace:stopped", credentials_present=False)
     base.status = "retired"
     base.save()
-    CaptureRepository.tick()
+    CaptureService.tick()
     req = CaptureRequest.objects.get(workspace=workspace)
     assert req.phase == "resume"
     assert req.image.status == "failed"
@@ -146,7 +146,7 @@ def test_unknown_handler_failure_and_delayed_unknown_result_hold_fence(
     service, runner, workspace
 ):
     workspace.save()
-    _, stop = CaptureRepository.allocate(
+    _, stop = CaptureService.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
     )
     for _ in range(2):
@@ -163,10 +163,10 @@ def test_unknown_handler_failure_and_delayed_unknown_result_hold_fence(
         assert workspace.current_task_id == stop.id
         assert LifecycleCommand.objects.get(task=stop).phase == "intervention"
         with pytest.raises(ConflictError):
-            CaptureRepository.allocate(
+            CaptureService.allocate(
                 workspace.id, "overlap", has_busy_agent=has_busy_agent
             )
-    CaptureRepository.tick()
+    CaptureService.tick()
     assert CaptureRequest.objects.get(workspace=workspace).phase == "stop"
 
 
@@ -183,11 +183,11 @@ def test_capture_resume_child_retains_exact_qemu_resources(
     workspace.qemu_memory_mb = 1024
     workspace.qemu_disk_size_gb = 20
     workspace.save()
-    _, stop = CaptureRepository.allocate(
+    _, stop = CaptureService.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
     )
     assert result(service, runner, stop, "workspace:stopped", credentials_present=False)
-    CaptureRepository.tick()
+    CaptureService.tick()
     req = CaptureRequest.objects.get(workspace=workspace)
     assert result(
         service,
@@ -198,7 +198,7 @@ def test_capture_resume_child_retains_exact_qemu_resources(
         name="capture",
         size_bytes=123,
     )
-    CaptureRepository.tick()
+    CaptureService.tick()
     req.refresh_from_db()
     payload = OperationRepository.delivery_payload(
         LifecycleCommand.objects.get(task=req.child)
@@ -210,7 +210,7 @@ def test_capture_resume_child_retains_exact_qemu_resources(
     assert result(
         service, runner, req.child, "workspace:resumed", credentials_present=False
     )
-    CaptureRepository.tick()
+    CaptureService.tick()
     req.refresh_from_db()
     workspace.refresh_from_db()
     assert req.phase == "completed"
@@ -363,7 +363,7 @@ def test_stopped_capture_final_clear_without_resume(service, runner, stopped_wor
 
     ws = stopped_workspace
     ws.save()
-    _, child = CaptureRepository.allocate(
+    _, child = CaptureService.allocate(
         ws.id, "capture", has_busy_agent=has_busy_agent
     )
     request = CaptureRequest.objects.get(workspace=ws)
@@ -379,7 +379,7 @@ def test_stopped_capture_final_clear_without_resume(service, runner, stopped_wor
     )
     ws.refresh_from_db()
     assert ws.current_task_id is None and ws.active_operation == "capturing_image"
-    assert CaptureRepository.tick() == []
+    assert CaptureService.tick() == []
     request.refresh_from_db()
     assert request.phase == "completed"
     recreate = WorkspaceRecreateRequest.objects.get(workspace=ws)
@@ -413,11 +413,11 @@ def test_safe_failure_final_diagnostics_and_recovery_event(
     from apps.runners.services import RunnerService
     from apps.runners.services.recovery import RecoveryService
     workspace.save()
-    _, stop = CaptureRepository.allocate(
+    _, stop = CaptureService.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
     )
     assert result(service, runner, stop, "workspace:stopped", credentials_present=False)
-    assert CaptureRepository.tick() == []
+    assert CaptureService.tick() == []
     request = CaptureRequest.objects.get(workspace=workspace)
     assert result(
         service,
@@ -434,7 +434,7 @@ def test_safe_failure_final_diagnostics_and_recovery_event(
             }
         ),
     )
-    assert CaptureRepository.tick() == []
+    assert CaptureService.tick() == []
     request.refresh_from_db()
     assert request.phase == "resume"
     if capture_failed:

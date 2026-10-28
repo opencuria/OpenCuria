@@ -25,6 +25,7 @@ from asgiref.sync import sync_to_async
 from common.exceptions import ConflictError
 
 from ...exceptions import WorkspaceNotFoundError
+from ..capture import CaptureService
 
 if TYPE_CHECKING:
     from ...models import Task, Workspace
@@ -284,14 +285,12 @@ class ImageLifecycleMixin:
         Without ``captured_image_id`` a new image (v1) is created; otherwise the
         capture becomes the next version of that image.
         """
-        from ...capture_repository import CaptureRepository
-
         workspace = await sync_to_async(self.workspaces.get_by_id)(workspace_id)
         if workspace is None or (
             organization_id and workspace.runner.organization_id != organization_id
         ):
             raise WorkspaceNotFoundError(str(workspace_id))
-        workspace, task = await sync_to_async(CaptureRepository.allocate)(
+        workspace, task = await sync_to_async(CaptureService.allocate)(
             workspace_id,
             name,
             has_busy_agent=self._harness().has_busy_session,

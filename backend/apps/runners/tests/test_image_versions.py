@@ -7,7 +7,6 @@ from django.contrib.auth import get_user_model
 
 from apps.harness.models import HarnessSession
 from apps.organizations.models import Membership, MembershipRole
-from apps.runners.capture_repository import CaptureRepository
 from apps.runners.deletion_repository import DeletionRepository
 from apps.runners.enums import WorkspaceStatus
 from apps.runners.image_lines import ImageLineRepository
@@ -21,6 +20,7 @@ from apps.runners.models import (
 )
 from apps.runners.recreate_repository import RecreateRepository
 from apps.runners.repositories import ImageGenerationRepository
+from apps.runners.services.capture import CaptureService
 from apps.runners.services.deletion import DeletionService
 from apps.runners.services.image_retention import ImageRetentionService
 from apps.runners.services.workspace_admission import WorkspaceAdmissionService
@@ -79,7 +79,7 @@ def drive(service, runner, request, event, **extra):
 
 def test_new_image_capture_creates_line_with_v1(runner, user):
     ws = qemu_workspace(runner, user, None, status=WorkspaceStatus.STOPPED)
-    CaptureRepository.allocate(
+    CaptureService.allocate(
         ws.id, "  My image ", message=" first ", has_busy_agent=has_busy_agent
     )
     image = ImageInstance.objects.get(origin_workspace=ws)
@@ -91,7 +91,7 @@ def test_new_image_capture_creates_line_with_v1(runner, user):
 def test_new_version_numbers_are_monotonic_and_never_reused(runner, user):
     line, (v1, _failed) = make_line(runner, user, ("ready", "failed"))
     ws = qemu_workspace(runner, user, v1, status=WorkspaceStatus.STOPPED)
-    CaptureRepository.allocate(
+    CaptureService.allocate(
         ws.id, captured_image_id=line.id, message="next", has_busy_agent=has_busy_agent
     )
     image = ImageInstance.objects.get(origin_workspace=ws)
@@ -108,18 +108,18 @@ def test_new_version_preconditions(runner, user, organization):
     line, (v1,) = make_line(runner, user)
     ws = qemu_workspace(runner, user, v1, status=WorkspaceStatus.STOPPED)
     with pytest.raises(ConflictError, match="name is required"):
-        CaptureRepository.allocate(ws.id, " ", has_busy_agent=has_busy_agent)
+        CaptureService.allocate(ws.id, " ", has_busy_agent=has_busy_agent)
     with pytest.raises(NotFoundError):
-        CaptureRepository.allocate(
+        CaptureService.allocate(
             ws.id, captured_image_id=foreign_line.id, has_busy_agent=has_busy_agent
         )
     with pytest.raises(ConflictError, match="runner"):
-        CaptureRepository.allocate(
+        CaptureService.allocate(
             ws.id, captured_image_id=remote_line.id, has_busy_agent=has_busy_agent
         )
     CapturedImage.objects.filter(pk=line.id).update(status="pending_deletion")
     with pytest.raises(ConflictError, match="being deleted"):
-        CaptureRepository.allocate(
+        CaptureService.allocate(
             ws.id, captured_image_id=line.id, has_busy_agent=has_busy_agent
         )
     CapturedImage.objects.filter(pk=line.id).update(status="active")
@@ -131,7 +131,7 @@ def test_new_version_preconditions(runner, user, organization):
         status="capturing",
     )
     with pytest.raises(ConflictError, match="being captured"):
-        CaptureRepository.allocate(
+        CaptureService.allocate(
             ws.id, captured_image_id=line.id, has_busy_agent=has_busy_agent
         )
     assert not CapturedImage.objects.filter(name="").exists()

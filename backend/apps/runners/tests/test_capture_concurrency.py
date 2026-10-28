@@ -8,9 +8,9 @@ from asgiref.sync import async_to_sync
 
 from apps.harness.models import HarnessSession, QuestionRequest
 from apps.harness.permissions.models import PermissionRequest
-from apps.runners.capture_repository import CaptureRepository
 from apps.runners.models import CaptureRequest, ImageInstance, LifecycleCommand, Task
 from apps.runners.operations import OperationRepository
+from apps.runners.services.capture import CaptureService
 from apps.runners.services.operation_results import apply_result
 from apps.runners.tests.conftest import has_busy_agent
 from apps.runners.tests.test_capture_pipeline import result
@@ -74,7 +74,7 @@ def test_any_busy_session_refuses_capture_without_mutations(
         LifecycleCommand.objects.count(),
     )
     for allocate in [
-        lambda: CaptureRepository.allocate(
+        lambda: CaptureService.allocate(
             workspace.id, "capture", has_busy_agent=has_busy_agent
         ),
         lambda: async_to_sync(service.create_image_artifact)(workspace.id, "capture"),
@@ -119,7 +119,7 @@ def test_foreign_callback_does_not_release_capture_or_emit_events(
     foreign_field,
 ):
     workspace.save()
-    _, child = CaptureRepository.allocate(
+    _, child = CaptureService.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
     )
     row = LifecycleCommand.objects.get(task=child)
@@ -144,14 +144,14 @@ def test_foreign_callback_does_not_release_capture_or_emit_events(
     assert workspace.current_task_id == child.id
     assert workspace.active_operation == "capturing_image"
     assert workspace.status == "running" and child.status == "pending"
-    assert CaptureRepository.tick() == []
+    assert CaptureService.tick() == []
     assert CaptureRequest.objects.get(workspace=workspace).phase == "stop"
 
 
 def test_unknown_stop_preserves_scrub_fence(service, runner, workspace):
     workspace.credentials_present = True
     workspace.save()
-    _, child = CaptureRepository.allocate(
+    _, child = CaptureService.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
     )
     for attempt in range(2):
@@ -165,7 +165,7 @@ def test_unknown_stop_preserves_scrub_fence(service, runner, workspace):
             outcome_known=False,
         )
         diagnostic = "Unknown child outcome; exact journal reconciliation required"
-        assert CaptureRepository.tick() == (
+        assert CaptureService.tick() == (
             [
                 {
                     "workspace_id": str(workspace.id),
@@ -207,13 +207,13 @@ def test_admitted_credential_sync_blocks_capture(runner, workspace, task_status)
     )
     Task.objects.filter(pk=task.id).update(status=task_status)
     with pytest.raises(ConflictError, match="credentials are synchronizing"):
-        CaptureRepository.allocate(
+        CaptureService.allocate(
             workspace.id, "capture", has_busy_agent=has_busy_agent
         )
     assert not CaptureRequest.objects.filter(workspace=workspace).exists()
     assert not ImageInstance.objects.filter(origin_workspace=workspace).exists()
     TaskRepository.complete(task)
-    _, child = CaptureRepository.allocate(
+    _, child = CaptureService.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
     )
     assert child.type == "stop_workspace"
@@ -221,7 +221,7 @@ def test_admitted_credential_sync_blocks_capture(runner, workspace, task_status)
 
 def test_capture_admitted_first_blocks_delayed_credential_sync(runner, workspace):
     from apps.runners.repositories import TaskRepository
-    _, child = CaptureRepository.allocate(
+    _, child = CaptureService.allocate(
         workspace.id, "capture", has_busy_agent=has_busy_agent
     )
     with pytest.raises(ConflictError, match="capturing image"):
