@@ -1,0 +1,67 @@
+{
+  "starting_commit": "71948fe",
+  "working_tree_initially_clean": true,
+  "existing_performance_branches_already_merged": true,
+  "random_method": "random.SystemRandom().choice(top_three)",
+  "selected_index_zero_based": 1,
+  "selected_candidate": "backend skill-selection catalogue-wide reads",
+  "redraws": 0,
+  "top_three": [
+    {
+      "rank": 1,
+      "candidate": "runner directory-list guest-call batching",
+      "evidence": "FileManager.list_files uses sequential realpath and find guest calls. A 500-entry listing via real local subprocesses measured p50 4.170 ms, p95 4.330 ms, 21 samples after 3 warmups. No SSH/QEMU measurement or simulated delay.",
+      "impact_frequency": "Interactive directory navigation and harness directory reads; remove one guest/SSH round trip per listing.",
+      "confidence": "High in call count, medium in production latency impact.",
+      "complexity_risk": "Medium: preserve path resolution, external-path policy, errors and capture admission. Localized runner execution change."
+    },
+    {
+      "rank": 2,
+      "candidate": "backend skill-selection catalogue-wide reads",
+      "evidence": "Selecting 3 skills in disposable SQLite measured p50 1.263/4.873/36.642 ms at 100/1000/10000 catalogue entries, 2 queries and 2427.9 KiB peak traced allocations at 10000. 21 samples after 3 warmups; real service and ORM.",
+      "impact_frequency": "Skill selection validation and every subsequent run inheriting saved skills; two catalogue scans for filter plus resolution.",
+      "confidence": "High: measured growth with unselected catalogue size.",
+      "complexity_risk": "Low: scoped primary-key queries; service retains validation, formatting and ordering. No cache or protocol changes."
+    },
+    {
+      "rank": 3,
+      "candidate": "backend summary unused aggregate-content loading",
+      "evidence": "Summary material loads aggregate message content alongside structured text. Real service on disposable SQLite at 10/50 turns measured p50 6.737/24.338 ms, p95 7.206/31.446 ms, peak traced allocation 2363.4/11241.2 KiB; 3 queries, 21 samples after 3 warmups. Each answer has 100000 commentary characters plus a final reply, duplicated in aggregate content; tool output 240000 characters.",
+      "impact_frequency": "Summary generation after completed turns when a metadata model is configured; grows with conversation length.",
+      "confidence": "High in redundant loading; exact projection benefit still needs measurement.",
+      "complexity_risk": "Medium: preserve legacy no-parts fallback and final-reply selection; repository projection must not duplicate service rules."
+    }
+  ],
+  "other_candidates": [
+    {
+      "candidate": "backend sequential MCP startup",
+      "evidence": "McpRuntime.setup opens servers serially; code inspection only.",
+      "decision": "High potential startup impact but greater regression risk: task affinity, cancellation, deterministic collision handling and cleanup."
+    },
+    {
+      "candidate": "shared session descendant traversal",
+      "evidence": "collectDescendantSessionIds repeatedly scans sessions; used by web scope derivation and mobile snapshots.",
+      "decision": "Code evidence only; actual depth is bounded and expected typical gain is smaller."
+    },
+    {
+      "candidate": "web growing Markdown parse and DOM projection",
+      "evidence": "HarnessMarkdown.parseMarkdownRoot runs marked, DOMPurify and DOMParser over text; computed segments rebuild from growing rendered text.",
+      "decision": "Needs browser profiling; incremental rendering must preserve sanitization, media and reference behavior."
+    },
+    {
+      "candidate": "mobile snapshot session cloning",
+      "evidence": "ChatController.buildSnapshot clones/freezes sessions and derives ancestry on publication. Unchanged message parts already benefit from merged optimization b08ea68.",
+      "decision": "Needs device profiling; preserve immutable snapshots and avoid duplicating shared rules."
+    },
+    {
+      "candidate": "shared upload repeated normalization",
+      "evidence": "planFilesUpload strips whitespace before splitBase64Chunks repeats normalization.",
+      "decision": "Code evidence only; limited effect relative to transfer costs."
+    },
+    {
+      "candidate": "runner VM metrics probe serialization",
+      "evidence": "WorkspaceRegistry.get_vm_metrics already uses asyncio.gather.",
+      "decision": "Rejected: suspected bottleneck is already addressed."
+    }
+  ]
+}

@@ -16,22 +16,29 @@ class SkillRepository:
     """Data access for Skill records."""
 
     @staticmethod
+    def _visible_to_user_in_org(user_id: int, org_id: uuid.UUID) -> QuerySet[Skill]:
+        return Skill.objects.filter(Q(user_id=user_id) | Q(organization_id=org_id))
+
+    @staticmethod
     def list_for_user_in_org(user_id: int, org_id: uuid.UUID) -> QuerySet[Skill]:
         """Return all skills visible to a user in an org:
         - Skills personally owned by this user, OR
         - Skills owned by this organization.
         """
-        return Skill.objects.filter(
-            Q(user_id=user_id) | Q(organization_id=org_id)
-        ).select_related("user", "organization", "created_by")
+        return SkillRepository._visible_to_user_in_org(user_id, org_id).select_related(
+            "user", "organization", "created_by"
+        )
 
     @staticmethod
-    def visible_ids_for_user_in_org(user_id: int, org_id: uuid.UUID) -> set[uuid.UUID]:
-        """Return the IDs of all skills visible to a user in an org."""
+    def get_visible_ids(
+        skill_ids: list[uuid.UUID], *, user_id: int, org_id: uuid.UUID
+    ) -> set[uuid.UUID]:
+        """Return only requested skill IDs visible to this user in this org."""
         return set(
-            SkillRepository.list_for_user_in_org(user_id, org_id).values_list(
-                "id", flat=True
-            )
+            SkillRepository._visible_to_user_in_org(user_id, org_id)
+            .filter(id__in=skill_ids)
+            .order_by()
+            .values_list("id", flat=True)
         )
 
     @staticmethod
@@ -44,9 +51,16 @@ class SkillRepository:
         )
 
     @staticmethod
-    def get_many_by_ids(skill_ids: list[uuid.UUID]) -> list[Skill]:
-        """Fetch multiple skills by IDs, preserving order."""
-        return list(Skill.objects.filter(id__in=skill_ids))
+    def get_visible_by_ids(
+        skill_ids: list[uuid.UUID], *, user_id: int, org_id: uuid.UUID
+    ) -> list[Skill]:
+        """Load requested visible prompt fragments; callers own selection order."""
+        return list(
+            SkillRepository._visible_to_user_in_org(user_id, org_id)
+            .filter(id__in=skill_ids)
+            .only("id", "name", "body")
+            .order_by()
+        )
 
     @staticmethod
     def create_personal(*, name: str, body: str, user) -> Skill:
@@ -54,7 +68,9 @@ class SkillRepository:
         return Skill.objects.create(name=name, body=body, user=user, created_by=user)
 
     @staticmethod
-    def create_org(*, name: str, body: str, organization_id: uuid.UUID, created_by) -> Skill:
+    def create_org(
+        *, name: str, body: str, organization_id: uuid.UUID, created_by
+    ) -> Skill:
         """Create a skill owned by an organization."""
         return Skill.objects.create(
             name=name,
@@ -64,7 +80,9 @@ class SkillRepository:
         )
 
     @staticmethod
-    def update(skill: Skill, *, name: str | None = None, body: str | None = None) -> Skill:
+    def update(
+        skill: Skill, *, name: str | None = None, body: str | None = None
+    ) -> Skill:
         """Update mutable fields on an existing skill."""
         update_fields = ["updated_at"]
         if name is not None:

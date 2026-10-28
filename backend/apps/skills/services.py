@@ -7,10 +7,14 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
 from common.exceptions import AuthenticationError, NotFoundError
 
 from .repositories import SkillRepository
+
+if TYPE_CHECKING:
+    from .models import Skill
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +37,7 @@ class SkillService:
     # Create
     # ------------------------------------------------------------------
 
-    def create_personal_skill(self, *, name: str, body: str, user) -> "Skill":
+    def create_personal_skill(self, *, name: str, body: str, user) -> Skill:
         """Create a personal skill owned by the user."""
         name = name.strip()
         body = body.strip()
@@ -47,7 +51,7 @@ class SkillService:
 
     def create_org_skill(
         self, *, name: str, body: str, org_id: uuid.UUID, user
-    ) -> "Skill":
+    ) -> Skill:
         """Create an org-shared skill. Caller must verify admin role."""
         name = name.strip()
         body = body.strip()
@@ -74,7 +78,7 @@ class SkillService:
         user,
         org_id: uuid.UUID,
         is_admin: bool,
-    ) -> "Skill":
+    ) -> Skill:
         """Update a skill. Enforces ownership rules:
         - Personal skills: only the owner may edit.
         - Org skills: only org admins may edit.
@@ -154,12 +158,14 @@ class SkillService:
                 parsed.append(uuid.UUID(str(raw).strip()))
             except ValueError:
                 raise ValueError(f"Invalid skill_id: {raw}")
-        visible = self.skills.visible_ids_for_user_in_org(user_id, organization_id)
-        by_id = {skill.id: skill for skill in self.skills.get_many_by_ids(parsed)}
+        by_id = {
+            skill.id: skill
+            for skill in self.skills.get_visible_by_ids(
+                parsed, user_id=user_id, org_id=organization_id
+            )
+        }
         bodies: list[str] = []
         for skill_id in parsed:
-            if skill_id not in visible:
-                raise ValueError(f"Skill not found or not accessible: {skill_id}")
             skill = by_id.get(skill_id)
             if skill is None:
                 raise ValueError(f"Skill not found or not accessible: {skill_id}")
@@ -179,16 +185,21 @@ class SkillService:
         longer shared) after it was chosen must drop out instead of failing
         every later run that inherits the selection.
         """
-        visible = self.skills.visible_ids_for_user_in_org(user_id, organization_id)
-        available: list[str] = []
+        parsed: list[tuple[str, uuid.UUID]] = []
         for raw in self.normalize_ids(skill_ids):
             try:
                 skill_id = uuid.UUID(raw)
             except ValueError:
                 continue
-            if skill_id in visible:
-                available.append(raw)
-        return available
+            parsed.append((raw, skill_id))
+        if not parsed:
+            return []
+        visible = self.skills.get_visible_ids(
+            [skill_id for _, skill_id in parsed],
+            user_id=user_id,
+            org_id=organization_id,
+        )
+        return [raw for raw, skill_id in parsed if skill_id in visible]
 
     @staticmethod
     def merge_bodies(
@@ -213,7 +224,9 @@ class SkillService:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _assert_can_edit(self, skill, *, user, org_id: uuid.UUID, is_admin: bool) -> None:
+    def _assert_can_edit(
+        self, skill, *, user, org_id: uuid.UUID, is_admin: bool
+    ) -> None:
         """Raise an error if the user cannot edit this skill."""
         if skill.user_id is not None:
             # Personal skill — only owner may edit
