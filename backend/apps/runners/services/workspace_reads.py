@@ -7,6 +7,7 @@ metadata and returns plain values for adapter response validation.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import asdict
 from datetime import timedelta
 from typing import Any
@@ -61,7 +62,45 @@ class WorkspaceReadService:
 
     def describe(self, workspace: Workspace) -> dict[str, Any]:
         """Describe an already-authorized workspace without exposing secrets."""
-        related = self.repository.load_relations(workspace)
+        return self.describe_many([workspace])[0]
+
+    def describe_many(self, workspaces: list[Workspace]) -> list[dict[str, Any]]:
+        """Describe authorized workspaces with bounded metadata query counts."""
+        if not workspaces:
+            return []
+        workspace_ids = [workspace.id for workspace in workspaces]
+        related = self.repository.load_relations_many(workspaces)
+        credentials = self.credentials.workspace_credential_ids_many(workspace_ids)
+        plugins = self.plugins.list_workspace_plugin_ids_many(workspace_ids)
+        versions = self.versions.version_refs(
+            [
+                image
+                for facts in related.values()
+                for image in (facts.base_image, facts.pending_base_image)
+                if image is not None
+            ]
+        )
+        return [
+            self._describe(
+                workspace,
+                related[workspace.id],
+                credential_ids=credentials[workspace.id],
+                plugin_ids=plugins[workspace.id],
+                versions=versions,
+            )
+            for workspace in workspaces
+        ]
+
+    def _describe(
+        self,
+        workspace: Workspace,
+        related: WorkspaceReadRelations,
+        *,
+        credential_ids: list[uuid.UUID],
+        plugin_ids: list[uuid.UUID],
+        versions: dict[uuid.UUID, dict],
+    ) -> dict[str, Any]:
+        """Compose one workspace from request-local metadata without I/O."""
         timeout = related.auto_stop_timeout_minutes
         auto_stop_at = None
         if (
@@ -100,12 +139,18 @@ class WorkspaceReadService:
                 getattr(workspace, "has_active_harness_session", False)
             ),
             **self._summary_values(related, prefer_annotation=True),
-            "credential_ids": self.credentials.workspace_credential_ids(workspace.id),
-            "plugin_ids": self.plugins.list_workspace_plugin_ids(workspace.id),
+            "credential_ids": credential_ids,
+            "plugin_ids": plugin_ids,
             "credentials_present": bool(
                 getattr(workspace, "credentials_present", False)
             ),
-            "base_image": self.versions.version_ref(related.base_image),
-            "pending_base_image": self.versions.version_ref(related.pending_base_image),
+            "base_image": (
+                versions[related.base_image.id] if related.base_image else None
+            ),
+            "pending_base_image": (
+                versions[related.pending_base_image.id]
+                if related.pending_base_image
+                else None
+            ),
             "repos": list(getattr(workspace, "repos", None) or []),
         }

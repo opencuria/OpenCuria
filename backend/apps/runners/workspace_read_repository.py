@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
+
+from django.db.models import prefetch_related_objects
 
 from .models import ImageInstance, Workspace
 
@@ -21,6 +24,22 @@ class WorkspaceReadRelations:
 
 class WorkspaceReadRepository:
     """Resolve potentially lazy foreign keys within the persistence boundary."""
+
+    @staticmethod
+    def load_relations_many(
+        workspaces: list[Workspace],
+    ) -> dict[uuid.UUID, WorkspaceReadRelations]:
+        """Preload read relations while retaining request-local annotations."""
+        prefetch_related_objects(
+            workspaces,
+            "runner__organization",
+            "base_image_instance__origin_definition",
+            "pending_base_image_instance",
+        )
+        return {
+            workspace.id: WorkspaceReadRepository.load_relations(workspace)
+            for workspace in workspaces
+        }
 
     @staticmethod
     def load_relations(

@@ -363,11 +363,28 @@ class WorkspacePluginActivationRepository:
     @staticmethod
     def list_plugin_ids(workspace_id: uuid.UUID) -> list[uuid.UUID]:
         """Return persisted selections in activation order, newest first."""
-        return list(
+        return WorkspacePluginActivationRepository.list_plugin_ids_many(
+            [workspace_id]
+        )[workspace_id]
+
+    @staticmethod
+    def list_plugin_ids_many(
+        workspace_ids: list[uuid.UUID],
+    ) -> dict[uuid.UUID, list[uuid.UUID]]:
+        """Read selections for authorized workspaces in activation order."""
+        grouped: dict[uuid.UUID, list[uuid.UUID]] = {
+            workspace_id: [] for workspace_id in workspace_ids
+        }
+        if not grouped:
+            return grouped
+        rows = (
             WorkspacePluginActivation.objects.filter(
-                workspace_id=workspace_id
-            ).values_list("plugin_id", flat=True)
+                workspace_id__in=grouped
+            ).values_list("workspace_id", "plugin_id")
         )
+        for workspace_id, plugin_id in rows:
+            grouped[workspace_id].append(plugin_id)
+        return grouped
 
     @staticmethod
     def enabled_plugin_ids(workspace_id: uuid.UUID) -> set[uuid.UUID]:

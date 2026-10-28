@@ -26,12 +26,31 @@ class ImageVersionService:
     def __init__(self) -> None:
         self.lines = ImageLineRepository
 
-    def version_ref(self, image) -> dict | None:
+    def version_ref(self, image: ImageInstance | None) -> dict | None:
         """Compact description of the version a workspace is based on."""
         if image is None:
             return None
-        line = self.lines.line_of(image)
-        latest = self.lines.latest(line)
+        return self.version_refs([image])[image.id]
+
+    def version_refs(self, images: list[ImageInstance]) -> dict[uuid.UUID, dict]:
+        """Describe current/pending versions with latest reads shared per line."""
+        images_by_id = {image.id: image for image in images}
+        lines = self.lines.lines_for_images(list(images_by_id.values()))
+        latest = self.lines.latest_many(list({line for line in lines.values() if line}))
+        return {
+            image.id: self._version_ref(
+                image, lines[image.id], latest.get(lines[image.id])
+            )
+            for image in images_by_id.values()
+        }
+
+    @staticmethod
+    def _version_ref(
+        image: ImageInstance,
+        line: ImageLine | None,
+        latest: ImageInstance | None,
+    ) -> dict:
+        """Present one version using the line's selected latest generation."""
         return {
             "id": image.id,
             "line_kind": line.kind if line else None,

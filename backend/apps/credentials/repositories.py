@@ -163,13 +163,23 @@ class CredentialRepository:
         )
 
     @staticmethod
-    def ids_for_workspace(workspace_id: uuid.UUID) -> list[uuid.UUID]:
-        """Return ordinary credential IDs attached to one workspace."""
-        return list(
-            Credential.objects.filter(workspaces__id=workspace_id)
+    def ids_for_workspaces(
+        workspace_ids: list[uuid.UUID],
+    ) -> dict[uuid.UUID, list[uuid.UUID]]:
+        """Read ordered ordinary attachment IDs without loading secret values."""
+        grouped: dict[uuid.UUID, list[uuid.UUID]] = {
+            workspace_id: [] for workspace_id in workspace_ids
+        }
+        if not grouped:
+            return grouped
+        rows = (
+            Credential.objects.filter(workspaces__id__in=grouped)
             .exclude(service__credential_type="provider_secret")
-            .values_list("id", flat=True)
+            .values_list("workspaces__id", "id")
         )
+        for workspace_id, credential_id in rows:
+            grouped[workspace_id].append(credential_id)
+        return grouped
 
     @staticmethod
     def list_for_workspace(

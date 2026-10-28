@@ -169,6 +169,12 @@ def test_bulk_latest_preserves_definition_selection(
     assert latest[line] == (older if available else None)
     assert latest[missing] is None
     assert ImageLineRepository.latest(line) == latest[line]
+    refs = ImageVersionService().version_refs([older, newer])
+    for image in (older, newer):
+        assert refs[image.id]["latest_id"] == (older.id if available else None)
+        assert refs[image.id]["update_available"] is (
+            available and image.id != older.id
+        )
     labels = ImageRetentionService.retention_labels(line, 1)
     assert labels[newer.id] == "kept"
     if selected_status == "ready":

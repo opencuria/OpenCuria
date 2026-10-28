@@ -261,9 +261,11 @@ class CredentialSvc:
             workspace_id, include_internal=include_internal
         )
 
-    def workspace_credential_ids(self, workspace_id: uuid.UUID) -> list[uuid.UUID]:
-        """Return ordinary attachment IDs without loading or decrypting secrets."""
-        return self.credentials.ids_for_workspace(workspace_id)
+    def workspace_credential_ids_many(
+        self, workspace_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, list[uuid.UUID]]:
+        """Return ordinary attachment IDs for already-authorized workspaces."""
+        return self.credentials.ids_for_workspaces(workspace_ids)
 
     # -- Create -------------------------------------------------------------
 

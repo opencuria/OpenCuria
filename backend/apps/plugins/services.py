@@ -342,9 +342,11 @@ class PluginService:
         """Return the plugin IDs selected for a workspace."""
         return self.workspace_activations.enabled_plugin_ids(workspace_id)
 
-    def list_workspace_plugin_ids(self, workspace_id: uuid.UUID) -> list[uuid.UUID]:
-        """Return persisted selections, newest first, including inactive plugins."""
-        return self.workspace_activations.list_plugin_ids(workspace_id)
+    def list_workspace_plugin_ids_many(
+        self, workspace_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, list[uuid.UUID]]:
+        """Return ordered stored selections for already-authorized workspaces."""
+        return self.workspace_activations.list_plugin_ids_many(workspace_ids)
 
     # -- Create / update / delete -------------------------------------------
 

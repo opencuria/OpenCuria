@@ -347,7 +347,7 @@ def list_workspaces(request: HttpRequest, runner_id: uuid.UUID | None = None):
         user=request.user,
     )
     reads = WorkspaceReadService()
-    return 200, [WorkspaceOut(**reads.describe(workspace)) for workspace in workspaces]
+    return 200, [WorkspaceOut(**data) for data in reads.describe_many(workspaces)]
 
 
 @workspace_router.post(

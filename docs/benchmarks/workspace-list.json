@@ -1,0 +1,187 @@
+{
+  "baseline_commit": "80bf10481b59ce36d93ae83fb169a95c093f9e3f",
+  "selection": {
+    "method": "secrets.randbelow(3)",
+    "index_zero_based": 0,
+    "redraws": 0,
+    "ranked_shortlist": [
+      "backend workspace-list metadata",
+      "runner exec-output decoding",
+      "backend tool-output truncation"
+    ]
+  },
+  "environment": {
+    "python": "3.12.3",
+    "django": "5.2.17",
+    "sqlite": "3.45.1",
+    "os": "Linux 6.8.0-147-generic"
+  },
+  "methodology": {
+    "path": "authenticated GET /api/v1/workspaces/ through Django HTTP test client",
+    "samples_per_implementation": 30,
+    "interleave_shuffle_seed": 17,
+    "p95_method": "nearest rank",
+    "allocation_metric": "tracemalloc peak MiB, separate from timings",
+    "response_equality": "complete JSON responses equal for all six fixtures",
+    "limitations": [
+      "local SQLite, no production PostgreSQL or network latency",
+      "Python allocations, not process RSS"
+    ]
+  },
+  "authenticated_rest_final_repeat": [
+    {
+      "p50_ms": [
+        8.223,
+        8.463
+      ],
+      "p95_ms": [
+        10.121,
+        10.057
+      ],
+      "peak_mib": [
+        0.16,
+        0.161
+      ],
+      "queries_before_after": [
+        9,
+        9
+      ],
+      "workspaces": 1,
+      "with_metadata": false
+    },
+    {
+      "p50_ms": [
+        32.606,
+        12.961
+      ],
+      "p95_ms": [
+        34.383,
+        14.319
+      ],
+      "peak_mib": [
+        0.525,
+        0.489
+      ],
+      "queries_before_after": [
+        57,
+        9
+      ],
+      "workspaces": 25,
+      "with_metadata": false
+    },
+    {
+      "p50_ms": [
+        111.801,
+        28.609
+      ],
+      "p95_ms": [
+        119.791,
+        36.076
+      ],
+      "peak_mib": [
+        1.724,
+        1.634
+      ],
+      "queries_before_after": [
+        207,
+        9
+      ],
+      "workspaces": 100,
+      "with_metadata": false
+    },
+    {
+      "p50_ms": [
+        13.502,
+        11.888
+      ],
+      "p95_ms": [
+        14.008,
+        12.993
+      ],
+      "peak_mib": [
+        0.184,
+        0.182
+      ],
+      "queries_before_after": [
+        15,
+        13
+      ],
+      "workspaces": 1,
+      "with_metadata": true
+    },
+    {
+      "p50_ms": [
+        125.06,
+        28.682
+      ],
+      "p95_ms": [
+        133.797,
+        33.583
+      ],
+      "peak_mib": [
+        0.975,
+        0.893
+      ],
+      "queries_before_after": [
+        159,
+        16
+      ],
+      "workspaces": 25,
+      "with_metadata": true
+    },
+    {
+      "p50_ms": [
+        473.314,
+        70.896
+      ],
+      "p95_ms": [
+        596.631,
+        211.959
+      ],
+      "peak_mib": [
+        3.445,
+        3.219
+      ],
+      "queries_before_after": [
+        609,
+        16
+      ],
+      "workspaces": 100,
+      "with_metadata": true
+    }
+  ],
+  "exploratory_measurements": {
+    "workspace_service_and_serialization": [
+      {
+        "workspaces": 1,
+        "queries": 5,
+        "p50_ms": 3.97
+      },
+      {
+        "workspaces": 25,
+        "queries": 53,
+        "p50_ms": 28.767
+      },
+      {
+        "workspaces": 100,
+        "queries": 203,
+        "p50_ms": 108.147
+      }
+    ],
+    "runner_parser_two_10_mib_streams": {
+      "p50_ms": 183.569,
+      "peak_mib": 87.19,
+      "samples": 12
+    },
+    "backend_truncate_10880000_byte_build_log": {
+      "p50_ms": 25.468,
+      "peak_mib": 35.44,
+      "samples": 12
+    },
+    "backend_truncate_10485760_byte_short_lines": {
+      "p50_ms": 55.796,
+      "peak_mib": 51.99,
+      "samples": 12
+    }
+  }
+}

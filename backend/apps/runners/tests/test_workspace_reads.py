@@ -41,9 +41,10 @@ def test_workspace_reads_use_loaded_relations_and_preserve_annotations(
         updated_at=now,
         has_active_harness_session=True,
     )
-    base, pending = object(), object()
+    base = SimpleNamespace(id=uuid.uuid4())
+    pending = SimpleNamespace(id=uuid.uuid4())
     repository = Mock()
-    repository.load_relations.return_value = WorkspaceReadRelations(
+    related = WorkspaceReadRelations(
         annotated_runner_online=annotated,
         runner_status=status,
         auto_stop_timeout_minutes=None,
@@ -51,10 +52,17 @@ def test_workspace_reads_use_loaded_relations_and_preserve_annotations(
         pending_base_image=pending,
         base_image_definition_name="Recipe",
     )
+    repository.load_relations_many.return_value = {workspace.id: related}
     credentials, plugins, versions = Mock(), Mock(), Mock()
-    credentials.workspace_credential_ids.return_value = [uuid.uuid4()]
-    plugins.list_workspace_plugin_ids.return_value = [uuid.uuid4()]
-    versions.version_ref.side_effect = [{"id": "base"}, {"id": "pending"}]
+    credential_ids, plugin_ids = [uuid.uuid4()], [uuid.uuid4()]
+    credentials.workspace_credential_ids_many.return_value = {
+        workspace.id: credential_ids
+    }
+    plugins.list_workspace_plugin_ids_many.return_value = {workspace.id: plugin_ids}
+    versions.version_refs.return_value = {
+        base.id: {"id": "base"},
+        pending.id: {"id": "pending"},
+    }
     service = WorkspaceReadService(
         repository=repository,
         credentials=credentials,
@@ -64,18 +72,15 @@ def test_workspace_reads_use_loaded_relations_and_preserve_annotations(
 
     data = service.describe(workspace)
 
-    repository.load_relations.assert_called_once_with(workspace)
-    credentials.workspace_credential_ids.assert_called_once_with(workspace.id)
-    plugins.list_workspace_plugin_ids.assert_called_once_with(workspace.id)
-    assert [call.args[0] for call in versions.version_ref.call_args_list] == [
-        base,
-        pending,
-    ]
+    repository.load_relations_many.assert_called_once_with([workspace])
+    credentials.workspace_credential_ids_many.assert_called_once_with([workspace.id])
+    plugins.list_workspace_plugin_ids_many.assert_called_once_with([workspace.id])
+    versions.version_refs.assert_called_once_with([base, pending])
     assert data["runner_online"] is expected
     assert data["has_active_session"] is True
     assert data["base_image"] == {"id": "base"}
     assert data["pending_base_image"] == {"id": "pending"}
     assert data["base_image_name"] == "Recipe"
-    assert data["credential_ids"] == credentials.workspace_credential_ids.return_value
-    assert data["plugin_ids"] == plugins.list_workspace_plugin_ids.return_value
+    assert data["credential_ids"] == credential_ids
+    assert data["plugin_ids"] == plugin_ids
     assert data["auto_stop_at"] is data["disk_usage"] is None

@@ -12,7 +12,14 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from django.db.models import Count, OuterRef, Q, QuerySet, Subquery
+from django.db.models import (
+    Count,
+    OuterRef,
+    Q,
+    QuerySet,
+    Subquery,
+    prefetch_related_objects,
+)
 
 from .models import (
     CapturedImage,
@@ -46,6 +53,16 @@ class ImageLine:
 
 class ImageLineRepository:
     """Read lines, selected versions, pins and reservations for both line kinds."""
+
+    @staticmethod
+    def lines_for_images(
+        images: list[ImageInstance],
+    ) -> dict[uuid.UUID, ImageLine | None]:
+        """Resolve version line identities without a query for each image."""
+        prefetch_related_objects(
+            images, "captured_image", "build_job__image_definition"
+        )
+        return {image.id: ImageLineRepository.line_of(image) for image in images}
 
     @staticmethod
     def line_of(image: ImageInstance | None) -> ImageLine | None:
