@@ -12,6 +12,8 @@ export interface OpenCuriaTheme {
   surface: string;
   raised: string;
   surfaceMuted: string;
+  /** Navigation revealed beneath the chat when the sidebar slides open. */
+  sidebar: string;
   userBubble: string;
   composer: string;
   /** Translucent fill for secondary controls placed on the composer surface. */
@@ -40,6 +42,7 @@ const THEMES: Record<ColorScheme, OpenCuriaTheme> = {
     surface: "#FFFFFF",
     raised: "#FFFFFF",
     surfaceMuted: "#F2F2F7",
+    sidebar: "#F4F4F5",
     userBubble: "#E9E9EB",
     composer: "#FFFFFF",
     controlFill: "rgba(0, 0, 0, 0.06)",
@@ -65,6 +68,7 @@ const THEMES: Record<ColorScheme, OpenCuriaTheme> = {
     surface: "#1C1C1E",
     raised: "#303030",
     surfaceMuted: "#262626",
+    sidebar: "#151517",
     userBubble: "#2C2C2E",
     composer: "#303030",
     controlFill: "rgba(255, 255, 255, 0.09)",

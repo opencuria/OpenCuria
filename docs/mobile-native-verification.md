@@ -31,13 +31,24 @@ Used a disposable, read-only Android API 35 emulator at 720×1600 and a separate
 
 The main editor keeps the OS multiline text input (`UITextView` / `EditText`). Keyboard avoidance measures its actual position beneath native navigation bars. Android modal screens use a local Expo module exposing the actual AppCompat Toolbar; iOS uses SwiftUI navigation bars. No JavaScript bottom-sheet presentation is used.
 
+## Sidebar (2026-10-27)
+
+The Claude-style sidebar replaced the separate chat-list page and the native list rows. Checked in a rebuilt Android development client (API 35, 720×1600) against a disposable local fixture with three running workspaces, a stopped one, Inbox entries, a busy chat and a waiting permission gate:
+
+- Menu button, horizontal swipes from mid-screen (open and close), tap on the visible chat edge and Android Back; vertical drags do not move the sidebar. A swipe starting at the screen edge is the Android Back gesture.
+- Inbox, grouped workspaces, four chats with Show more, collapse, the pen's New chat per workspace, selected row, search with Cancel (closes the keyboard), account sheet and workspace picker.
+- Long-press Material menu (Rename, Mark as read/unread, Delete) reaching the server.
+- Light and dark appearance.
+
+iPhone uses the same `SlideDrawer` and sidebar; its UIContextMenu, liquid-glass header and gestures still need a check on a Mac/iPhone.
+
 ## Screenshots
 
 Unedited captures from the Android development client with sample data:
 
-| Chat | Workspace sidebar |
-| --- | --- |
-| ![Native chat](images/mobile/native-chat-light.png) | ![Native sidebar with four chats](images/mobile/native-sidebar.png) |
+| Chat | Sidebar | Sidebar (light) | Chat menu |
+| --- | --- | --- | --- |
+| ![Native chat](images/mobile/native-chat-light.png) | ![Sidebar with Inbox and workspace groups](images/mobile/native-sidebar.png) | ![Sidebar in light appearance](images/mobile/native-sidebar-light.png) | ![Long-press chat menu](images/mobile/native-sidebar-menu.png) |
 
 | Keyboard | Settings | Question |
 | --- | --- | --- |

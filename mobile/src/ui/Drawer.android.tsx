@@ -1,66 +1,23 @@
-import React, { useEffect, useRef } from "react";
-import {
-  BackHandler,
-  DrawerLayoutAndroid,
-  StyleSheet,
-  View,
-  useWindowDimensions,
-} from "react-native";
+import React from "react";
+import { StyleSheet, View } from "react-native";
 import { Ellipsis, Menu, MessageCirclePlus } from "lucide-react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { DrawerProps } from "./Drawer.types";
-import { Button, IconButton } from "./controls";
+import { IconButton } from "./controls";
 import { NativeMenu } from "./NativeMenu";
 import { NativeScreen } from "./NativeScreen";
+import { SlideDrawer } from "./SlideDrawer";
 import { useTheme } from "./theme";
 
-/** DrawerLayout owns the edge gesture, scrim, animation and back handling. */
+/** The sidebar slides in beneath the chat; Back closes it first. */
 export function Drawer(props: DrawerProps): React.JSX.Element {
-  const drawer = useRef<DrawerLayoutAndroid>(null);
-  const { width } = useWindowDimensions();
   const { theme } = useTheme();
-  const insets = useSafeAreaInsets();
-  useEffect(() => {
-    if (props.visible) drawer.current?.openDrawer();
-    else drawer.current?.closeDrawer();
-  }, [props.visible]);
-  useEffect(() => {
-    if (!props.visible) return;
-    const handler = BackHandler.addEventListener("hardwareBackPress", () => {
-      props.onClose();
-      return true;
-    });
-    return () => handler.remove();
-  }, [props.visible, props.onClose]);
   const chrome = [styles.chrome, { backgroundColor: theme.surfaceMuted }];
   return (
-    <DrawerLayoutAndroid
-      ref={drawer}
-      style={{ flex: 1 }}
-      drawerWidth={Math.min(360, width - 56)}
-      drawerBackgroundColor={theme.surface}
-      onDrawerOpen={props.onOpen}
-      onDrawerClose={props.onClose}
-      keyboardDismissMode="on-drag"
-      renderNavigationView={() => (
-        <View
-          testID="conversation-drawer"
-          style={{
-            flex: 1,
-            paddingTop: insets.top,
-            paddingBottom: insets.bottom,
-            backgroundColor: theme.surface,
-          }}
-        >
-          {props.navigation}
-          <Button
-            title={props.profileTitle}
-            onPress={props.onProfile}
-            testID="drawer-profile"
-            variant="ghost"
-          />
-        </View>
-      )}
+    <SlideDrawer
+      open={props.visible}
+      onOpen={props.onOpen}
+      onClose={props.onClose}
+      sidebar={props.navigation}
     >
       <NativeScreen
         title=""
@@ -68,7 +25,7 @@ export function Drawer(props: DrawerProps): React.JSX.Element {
         left={
           <View style={chrome}>
             <IconButton
-              label="Open chats"
+              label="Open sidebar"
               icon={<Menu color={theme.text} size={22} />}
               onPress={props.onOpen}
               testID="main-menu"
@@ -100,7 +57,7 @@ export function Drawer(props: DrawerProps): React.JSX.Element {
       >
         {props.children}
       </NativeScreen>
-    </DrawerLayoutAndroid>
+    </SlideDrawer>
   );
 }
 

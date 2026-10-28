@@ -1,6 +1,5 @@
-import React, { useCallback, useEffect, useRef } from "react";
+import React, { useRef } from "react";
 import { Platform, View } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   Button as SwiftButton,
   Host,
@@ -19,61 +18,46 @@ import {
 import {
   NavigationContainer,
   NavigationIndependentTree,
-  StackActions,
-  useNavigationContainerRef,
 } from "expo-router/react-navigation";
 import {
   createNativeStackNavigator,
   type NativeStackHeaderItem,
 } from "expo-router/native-stack";
-import { Button } from "./controls";
 import type { NativeSymbol } from "./controls.types";
 import type { DrawerProps } from "./Drawer.types";
 import { HeaderChromeInset, navigationTheme } from "./NativeScreen";
+import { SlideDrawer } from "./SlideDrawer";
 import { useTheme } from "./theme";
 
-type Routes = { chats: undefined; chat: undefined };
+type Routes = { chat: undefined };
 const Stack = createNativeStackNavigator<Routes>();
 /** iOS 26 bar items float as liquid glass above content; older systems blur the bar. */
 const LIQUID_GLASS = Number.parseInt(String(Platform.Version), 10) >= 26;
 
 /**
- * iPhone: a native stack whose root is the chat list and whose pushed chat
- * scrolls beneath a transparent bar. iPad keeps the adaptive split view.
+ * iPhone: the sidebar slides in beneath the chat, whose transparent native bar
+ * keeps its liquid-glass items. iPad keeps the adaptive split view.
  */
 export function Drawer(props: DrawerProps): React.JSX.Element {
   return Platform.OS === "ios" && Platform.isPad ? (
     <SplitDrawer {...props} />
   ) : (
-    <StackDrawer {...props} />
+    <SlideDrawer
+      open={props.visible}
+      onOpen={props.onOpen}
+      onClose={props.onClose}
+      sidebar={props.navigation}
+    >
+      <ChatStack {...props} />
+    </SlideDrawer>
   );
 }
 
-function StackDrawer(props: DrawerProps): React.JSX.Element {
+/** A single native-stack screen supplies the transparent bar and scroll edge. */
+function ChatStack(props: DrawerProps): React.JSX.Element {
   const { theme } = useTheme();
-  const insets = useSafeAreaInsets();
-  const navigation = useNavigationContainerRef<Routes>();
   const latest = useRef(props);
   latest.current = props;
-  // Open straight into the chat without a push animation on first render.
-  const initialState = useRef(
-    props.visible
-      ? undefined
-      : {
-          index: 1,
-          routes: [{ name: "chats" as const }, { name: "chat" as const }],
-        },
-  ).current;
-
-  const sync = useCallback(() => {
-    if (!navigation.isReady()) return;
-    const top = navigation.getCurrentRoute()?.name;
-    if (props.visible && top === "chat")
-      navigation.dispatch(StackActions.popToTop());
-    else if (!props.visible && top === "chats")
-      navigation.dispatch(StackActions.push("chat"));
-  }, [navigation, props.visible]);
-  useEffect(sync, [sync]);
 
   const rightItems = (): NativeStackHeaderItem[] => [
     {
@@ -105,20 +89,7 @@ function StackDrawer(props: DrawerProps): React.JSX.Element {
 
   return (
     <NavigationIndependentTree>
-      <NavigationContainer
-        ref={navigation}
-        theme={navigationTheme(theme)}
-        initialState={initialState}
-        onReady={sync}
-        onStateChange={(state) => {
-          // Reflect native back swipes in the owner's drawer state.
-          const top = state?.routes[state.index]?.name;
-          if (top === "chats" && !latest.current.visible)
-            latest.current.onOpen();
-          else if (top === "chat" && latest.current.visible)
-            latest.current.onClose();
-        }}
-      >
+      <NavigationContainer theme={navigationTheme(theme)}>
         <Stack.Navigator
           screenOptions={{
             headerShadowVisible: false,
@@ -126,23 +97,6 @@ function StackDrawer(props: DrawerProps): React.JSX.Element {
             contentStyle: { backgroundColor: theme.background },
           }}
         >
-          <Stack.Screen name="chats" options={{ title: "OpenCuria" }}>
-            {() => (
-              <View
-                testID="conversation-drawer"
-                style={{ flex: 1, paddingBottom: insets.bottom }}
-              >
-                {props.navigation}
-                <Button
-                  title={props.profileTitle}
-                  symbol="person.crop.circle"
-                  variant="ghost"
-                  onPress={props.onProfile}
-                  testID="drawer-profile"
-                />
-              </View>
-            )}
-          </Stack.Screen>
           <Stack.Screen
             name="chat"
             options={{
@@ -156,7 +110,7 @@ function StackDrawer(props: DrawerProps): React.JSX.Element {
               unstable_headerLeftItems: () => [
                 {
                   type: "button",
-                  label: "Open chats",
+                  label: "Open sidebar",
                   icon: { type: "sfSymbol", name: "line.3.horizontal" },
                   onPress: () => latest.current.onOpen(),
                 },
@@ -194,7 +148,7 @@ function SplitDrawer(props: DrawerProps): React.JSX.Element {
         <NavigationSplitView.Sidebar>
           <Toolbar
             modifiers={[
-              navigationTitle("OpenCuria"),
+              navigationTitle(""),
               navigationBarTitleDisplayMode("inline"),
             ]}
           >
@@ -203,16 +157,6 @@ function SplitDrawer(props: DrawerProps): React.JSX.Element {
                 {props.navigation}
               </View>
             </RNHostView>
-            <Toolbar.Content>
-              <ToolbarItem placement="bottomBar">
-                <SwiftButton
-                  label={props.profileTitle}
-                  systemImage="person.crop.circle"
-                  onPress={props.onProfile}
-                  testID="drawer-profile"
-                />
-              </ToolbarItem>
-            </Toolbar.Content>
           </Toolbar>
         </NavigationSplitView.Sidebar>
         <NavigationSplitView.Detail>
@@ -228,7 +172,7 @@ function SplitDrawer(props: DrawerProps): React.JSX.Element {
             <Toolbar.Content>
               <ToolbarItem placement="topBarLeading">
                 <SwiftButton
-                  label="Open chats"
+                  label="Open sidebar"
                   systemImage="sidebar.left"
                   onPress={props.onOpen}
                   testID="main-menu"

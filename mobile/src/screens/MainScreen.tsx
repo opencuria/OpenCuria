@@ -1128,45 +1128,38 @@ export function MainScreen(): React.JSX.Element {
           setSheet((current) => (current === "drawer" ? null : current))
         }
         title={workspace?.name ?? "OpenCuria"}
-        profileTitle={profileTitle}
-        onProfile={() => setSheet("profile")}
         onCreate={newChat}
         canCreate={canStart}
         menuActions={chatMenuActions}
         onMenuAction={chatMenuAction}
         navigation={
-          <>
-            {drawerError ? (
-              <Banner
-                tone="error"
-                message={drawerError}
-                onDismiss={() => setDrawerError(null)}
-              />
-            ) : null}
-            <WorkspaceSidebar
-              workspaces={workspaces}
-              conversations={conversations}
-              activeWorkspaceId={workspaceId}
-              activeSessionId={chat.activeSessionId}
-              scopeKey={`${client.api.baseUrl}:${session?.organizationId ?? ""}`}
-              canCreate={canStart}
-              onCreate={newChat}
-              onWorkspace={chooseWorkspace}
-              onConversation={openConversation}
-              onMarkAllRead={() => {
-                void markAllRead();
-              }}
-              onAllWorkspaces={() => {
-                setSearch("");
-                setSheet("workspaces");
-              }}
-              onConversationAction={(row, action) => {
-                if (action === "rename") rename(row);
-                else if (action === "read") void markConversation(row);
-                else sessionMenu(row);
-              }}
-            />
-          </>
+          <WorkspaceSidebar
+            workspaces={workspaces}
+            conversations={conversations}
+            activeWorkspaceId={workspaceId}
+            activeSessionId={chat.activeSessionId}
+            scopeKey={`${client.api.baseUrl}:${session?.organizationId ?? ""}`}
+            canCreate={canStart}
+            onCreate={newChat}
+            onWorkspace={chooseWorkspace}
+            onConversation={openConversation}
+            onMarkAllRead={() => {
+              void markAllRead();
+            }}
+            onAllWorkspaces={() => {
+              setSearch("");
+              setSheet("workspaces");
+            }}
+            onConversationAction={(row, action) => {
+              if (action === "rename") rename(row);
+              else if (action === "read") void markConversation(row);
+              else sessionMenu(row);
+            }}
+            profileTitle={profileTitle}
+            onProfile={() => setSheet("profile")}
+            error={drawerError}
+            onDismissError={() => setDrawerError(null)}
+          />
         }
       >
         <ChatLayout

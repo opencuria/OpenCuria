@@ -141,6 +141,18 @@ exports.NativeMenu = ({
   )
 }
 
+exports.NativeContextMenu = ({ children, label, actions, onSelect }) =>
+  h(
+    View,
+    null,
+    children(),
+    h(
+      exports.NativeMenu,
+      { label: `Actions for ${label}`, actions, onSelect },
+      h(Text, null, 'More'),
+    ),
+  )
+
 exports.NativeList = ({ sections }) =>
   h(
     View,
@@ -226,14 +238,12 @@ exports.Drawer = ({
   canCreate,
   menuActions,
   onMenuAction,
-  onProfile,
-  profileTitle,
 }) =>
   h(
     View,
     null,
     h(exports.IconButton, {
-      label: 'Open chats',
+      label: 'Open sidebar',
       onPress: onOpen,
       testID: 'main-menu',
     }),
@@ -262,11 +272,6 @@ exports.Drawer = ({
         style: { display: visible ? 'flex' : 'none' },
       },
       navigation,
-      h(exports.Button, {
-        title: profileTitle,
-        onPress: onProfile,
-        testID: 'drawer-profile',
-      }),
     ),
     children,
   )

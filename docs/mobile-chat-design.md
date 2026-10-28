@@ -13,8 +13,9 @@ The native-control reference is `t3code/apps/mobile/` in the workspace. OpenCuri
 | Attachment and message menus | UIMenu | Android PopupMenu |
 | Model, effort and agent selection | SwiftUI sheet with detents and List rows | Material 3 ModalBottomSheet with list rows |
 | Question options | Standard checkmark selection rows | Material RadioButton/Checkbox rows |
-| Workspace/chat lists | SwiftUI List/Section | Material LazyColumn/ListItem |
-| Navigation | iPhone: native stack with the chat list as root; iPad: adaptive NavigationSplitView | Android DrawerLayout |
+| Sidebar rows | Compact native views with UIContextMenu on long press | Compact native views with ripple and PopupMenu on long press |
+| Workspace picker list | SwiftUI List/Section | Material LazyColumn/ListItem |
+| Navigation | iPhone: sidebar sliding in beneath the chat; iPad: adaptive NavigationSplitView | Sidebar sliding in beneath the chat |
 | Modal screens | UIKit page-sheet presentation | Android system modal dialog |
 | Chat header | Transparent UINavigationBar with bar button items and UIMenu | Transparent Toolbar with tonal icon buttons and PopupMenu |
 | Modal headers | UINavigationBar | Android Toolbar |
@@ -26,7 +27,7 @@ Android modal headers use the local `mobile/modules/opencuria-native-ui` Expo mo
 
 ## Chat chrome
 
-The chat follows the Claude app layout. The header has no title: the leading button opens the chat list, the trailing group holds New chat and an overflow menu (switch workspace, rename and delete chat; the menu title names the workspace on iOS). The transcript scrolls beneath the transparent header; iOS 26 applies a soft scroll-edge blur and liquid-glass bar items, earlier iOS versions blur the bar, and Android fades the content under tonal buttons. Status banners float directly below the header and the transcript pads its first message by their height.
+The chat follows the Claude app layout. The header has no title: the leading button opens the sidebar, the trailing group holds New chat and an overflow menu (switch workspace, rename and delete chat; the menu title names the workspace on iOS). The transcript scrolls beneath the transparent header; iOS 26 applies a soft scroll-edge blur and liquid-glass bar items, earlier iOS versions blur the bar, and Android fades the content under tonal buttons. Status banners float directly below the header and the transcript pads its first message by their height.
 
 The composer shows the editor on top and one toolbar below it: attachments (`+`), a pill with the model and effort that opens the model sheet, and Send/Stop. The model sheet combines recent models (up to six, with "All models" and search), reasoning effort and agent (engine plus Build/Plan, as in the webapp). An existing chat keeps its engine, so only that engine's modes are offered.
 
@@ -45,7 +46,11 @@ The transcript retains unboxed assistant text, quiet user bubbles, native Markdo
 
 ## Sidebar
 
-Web and mobile import the same eligibility, sorting and inbox helpers from `packages/chat-core/src/conversationGroups.ts`. The native sidebar includes New chat, search, Inbox, workspace chat groups, All workspaces and account access. Scheduled tasks remain outside mobile.
+The sidebar follows the Claude app; it is not a separate screen. Opening it slides the chat right as a rounded, dimmed card and reveals the sidebar beneath it. A horizontal swipe anywhere on the chat opens it, a swipe to the left or a tap on the visible chat edge closes it, and Android Back closes it first. Vertical scrolling and held fingers (text selection, context menus) keep their own gestures; the keyboard closes as the sidebar opens.
+
+Layout, top to bottom: the OpenCuria mark and name with a round search button, a Workspaces row (opens the workspace picker), the Inbox, and chats grouped by workspace. Workspace names are smaller section labels that collapse their group; the pen beside a name starts a chat in that workspace when it can take one. Chat rows are compact borderless rows with a status icon (chat, spinner, waiting gate), a single-line title and a quiet relative time (the workspace name in the Inbox). Long-press a chat for Rename, Mark as read/unread and Delete; the same actions are accessibility actions. An account button and a New chat pill float at the bottom.
+
+Web and mobile import the same eligibility, sorting and inbox helpers from `packages/chat-core/src/conversationGroups.ts`. Scheduled tasks remain outside mobile.
 
 Running and lifecycle-reserved workspaces are grouped, online first. Each group shows four newest chats by default, and Show more adds four independently. Opening an older active chat reveals its page. Closing navigation preserves group/page state; switching server or organization resets it. Stopped history remains reachable through All workspaces and eligible Inbox entries. Transitioning workspaces retain readable history with their mutation menus disabled.
 

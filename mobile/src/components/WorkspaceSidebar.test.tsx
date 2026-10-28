@@ -9,6 +9,11 @@ import type { HarnessConversation, Workspace } from "@opencuria/client";
 import { ThemeProvider } from "../ui/theme";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
+jest.mock(
+  "lucide-react-native",
+  () => new Proxy({}, { get: () => () => null }),
+);
+
 const workspace = (id: string, status = "running"): Workspace =>
   ({ id, name: id, status, runner_online: true }) as Workspace;
 const chats = (id: string, count: number): HarnessConversation[] =>
@@ -44,6 +49,8 @@ function setup(
     onConversation,
     onConversationAction: jest.fn(),
     onAllWorkspaces,
+    profileTitle: "Demo",
+    onProfile: jest.fn(),
     ...overrides,
   };
   const tree = (values = props) => (
@@ -62,6 +69,15 @@ function setup(
   };
 }
 
+const search = (text: string) => {
+  if (!screen.queryByLabelText("Search workspaces and conversations"))
+    fireEvent.press(screen.getByRole("button", { name: "Search chats" }));
+  fireEvent.changeText(
+    screen.getByLabelText("Search workspaces and conversations"),
+    text,
+  );
+};
+
 it("shows four newest chats per workspace and paginates each independently", () => {
   const { onConversation } = setup();
   expect(screen.getByTestId("Alpha-4")).toBeTruthy();
@@ -69,12 +85,14 @@ it("shows four newest chats per workspace and paginates each independently", () 
   expect(screen.getByTestId("Beta-4")).toBeTruthy();
   expect(screen.queryByTestId("Beta-5")).toBeNull();
   fireEvent.press(
-    within(screen.getByTestId("section-Alpha")).getByText("Show 4 more chats"),
+    screen.getByRole("button", { name: "Show 4 more chats in Alpha" }),
   );
   expect(screen.getByTestId("Alpha-8")).toBeTruthy();
   expect(screen.queryByTestId("Alpha-9")).toBeNull();
   expect(screen.queryByTestId("Beta-5")).toBeNull();
-  fireEvent.press(screen.getByText("Show 1 more chat"));
+  fireEvent.press(
+    screen.getByRole("button", { name: "Show 1 more chat in Alpha" }),
+  );
   fireEvent.press(screen.getByTestId("Alpha-9"));
   expect(onConversation).toHaveBeenCalledWith(
     expect.objectContaining({ session_id: "Alpha-9" }),
@@ -84,7 +102,7 @@ it("shows four newest chats per workspace and paginates each independently", () 
 it("retains collapse and pagination through refresh and reveals an older active chat", () => {
   const { props, update } = setup();
   fireEvent.press(
-    within(screen.getByTestId("section-Alpha")).getByText("Show 4 more chats"),
+    screen.getByRole("button", { name: "Show 4 more chats in Alpha" }),
   );
   fireEvent.press(
     screen.getByRole("button", { name: "Collapse workspace Alpha" }),
@@ -112,32 +130,55 @@ it("uses the web inbox and workspace eligibility rules while keeping offline his
     ],
     conversations: [...chats("Alpha", 1), stopped, ...chats("Deleted", 1)],
   });
-  expect(screen.getByTestId("inbox-Stopped-1")).toBeTruthy();
+  expect(
+    within(screen.getByTestId("inbox-Stopped-1")).getByText("Stopped"),
+  ).toBeTruthy();
   expect(screen.queryByTestId("section-Stopped")).toBeNull();
   expect(screen.queryByTestId("section-Deleted")).toBeNull();
-  expect(screen.getByText("All workspaces (2)")).toBeTruthy();
+  expect(
+    screen.getByRole("button", { name: "All workspaces, 2" }),
+  ).toBeTruthy();
+});
+
+it("marks chats that wait for the user and announces their state", () => {
+  setup({
+    conversations: [
+      {
+        ...chats("Alpha", 1)[0]!,
+        needs_attention: true,
+        attention_kind: "permission",
+      },
+      { ...chats("Beta", 1)[0]!, status: "busy" },
+    ],
+  });
+  expect(screen.getByTestId("inbox-Alpha-1").props.accessibilityLabel).toBe(
+    "Alpha chat 1, Permission required, Alpha",
+  );
+  expect(screen.getByTestId("Beta-1").props.accessibilityLabel).toMatch(
+    /^Beta chat 1, Working, /,
+  );
+  expect(screen.getByTestId("workspace-busy-Beta")).toBeTruthy();
 });
 
 it("searches across chat titles and workspace names and handles no results", () => {
   setup();
-  fireEvent.changeText(
-    screen.getByLabelText("Search workspaces and conversations"),
-    "Beta chat 6",
-  );
+  search("Beta chat 6");
   expect(screen.getByTestId("Beta-6")).toBeTruthy();
   expect(screen.queryByTestId("section-Alpha")).toBeNull();
-  fireEvent.changeText(
-    screen.getByLabelText("Search workspaces and conversations"),
-    "unmatched",
-  );
+  search("unmatched");
   expect(screen.queryByTestId("section-Beta")).toBeNull();
-  expect(screen.getByText("All workspaces (2)")).toBeTruthy();
+  expect(screen.getByText("No matching chats")).toBeTruthy();
+  expect(
+    screen.getByRole("button", { name: "All workspaces, 2" }),
+  ).toBeTruthy();
+  fireEvent.press(screen.getByRole("button", { name: "Cancel" }));
+  expect(screen.getByTestId("section-Alpha")).toBeTruthy();
 });
 
 it("clears scoped navigation state when the organization changes", () => {
   const { update } = setup();
   fireEvent.press(
-    within(screen.getByTestId("section-Alpha")).getByText("Show 4 more chats"),
+    screen.getByRole("button", { name: "Show 4 more chats in Alpha" }),
   );
   fireEvent.press(
     screen.getByRole("button", { name: "Collapse workspace Beta" }),
@@ -156,24 +197,44 @@ it("keeps history readable while workspace operations disable its mutation menu"
   });
   fireEvent.press(screen.getByTestId("Alpha-1"));
   expect(props.onConversation).toHaveBeenCalled();
+  expect(
+    screen.getByRole("button", { name: "New chat in Alpha" }),
+  ).toBeDisabled();
   fireEvent.press(
     screen.getByRole("button", { name: "Actions for Alpha chat 1" }),
   );
   expect(screen.getByRole("button", { name: "Rename" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "Delete" })).toBeDisabled();
   expect(props.onConversationAction).not.toHaveBeenCalled();
+  expect(
+    screen
+      .getByTestId("Alpha-1")
+      .props.accessibilityActions.map(({ name }: { name: string }) => name),
+  ).toEqual(["read"]);
 });
 
-it("opens the workspace from its group header and exposes mark-all-read only when needed", () => {
+it("starts a chat in a workspace from its header and exposes mark-all-read only when needed", () => {
   const onMarkAllRead = jest.fn();
-  const { props } = setup({
-    conversations: [{ ...chats("Alpha", 1)[0]!, unread: true }],
+  const { props, update } = setup({
+    conversations: chats("Alpha", 1),
     onMarkAllRead,
   });
-  fireEvent.press(screen.getByRole("button", { name: "Open workspace Alpha" }));
+  expect(screen.queryByRole("button", { name: "Mark all as read" })).toBeNull();
+  fireEvent.press(screen.getByRole("button", { name: "New chat in Alpha" }));
   expect(props.onWorkspace).toHaveBeenCalledWith(
     expect.objectContaining({ id: "Alpha" }),
   );
-  fireEvent.press(screen.getByText("Mark all as read"));
+  update({ conversations: [{ ...chats("Alpha", 1)[0]!, unread: true }] });
+  fireEvent.press(screen.getByRole("button", { name: "Mark all as read" }));
   expect(onMarkAllRead).toHaveBeenCalledTimes(1);
+});
+
+it("offers the account and New chat from the floating footer", () => {
+  const { props, update } = setup();
+  fireEvent.press(screen.getByTestId("drawer-profile"));
+  expect(props.onProfile).toHaveBeenCalledTimes(1);
+  fireEvent.press(screen.getByRole("button", { name: "New chat" }));
+  expect(props.onCreate).toHaveBeenCalledTimes(1);
+  update({ canCreate: false });
+  expect(screen.getByRole("button", { name: "New chat" })).toBeDisabled();
 });
