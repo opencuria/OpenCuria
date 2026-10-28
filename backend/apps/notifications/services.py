@@ -15,7 +15,10 @@ from django.utils import timezone
 from apps.accounts.models import User
 from apps.credentials.models import Credential
 from apps.credentials.services import CredentialSvc
-from apps.harness.models import HarnessSession
+from apps.harness.conversation_activity_service import (
+    ConversationActivity,
+    ConversationActivityService,
+)
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, NotFoundError
 from common.utils import decrypt_value, encrypt_value, hash_token
@@ -34,7 +37,7 @@ ALERT_LABELS = {
 }
 
 
-def activity_row(session: HarnessSession, phase: str) -> dict:
+def activity_row(session: ConversationActivity, phase: str) -> dict:
     """Use bounded conversation metadata; never include prompts or tool output."""
 
     def title(value: str, limit: int, fallback: str) -> str:
@@ -49,7 +52,7 @@ def activity_row(session: HarnessSession, phase: str) -> dict:
         "sessionId": str(session.id),
         "workspaceId": str(session.workspace_id),
         "title": title(session.title, 100, "Conversation"),
-        "workspaceName": title(session.workspace.name, 80, "Workspace"),
+        "workspaceName": title(session.workspace_name, 80, "Workspace"),
         "phase": phase,
     }
 
@@ -61,9 +64,11 @@ class NotificationService:
         self,
         *,
         repository: type[NotificationRepository] | None = None,
+        activity: ConversationActivityService | None = None,
         providers: PushProviders | None = None,
     ) -> None:
         self.repo = repository or NotificationRepository
+        self.activity = activity or ConversationActivityService()
         self.providers = providers
 
     def configuration(
@@ -192,22 +197,16 @@ class NotificationService:
         """Completion signals and restart repair share the same idempotency key."""
         if not self.repo.has_devices():
             return
-        source = self.repo.message_source(message_id)
+        source = self.activity.message_source(message_id)
         if source is None:
             return
         session, message = source
         if message.completed_at is None:
             return
-        if message.finish in {"abort", "aborted", "cancelled", "interrupted"}:
-            phase = "interrupted"
-        elif message.error or message.finish == "error":
-            phase = "error"
-        else:
-            phase = "completed"
         self._enqueue(
             session,
             f"finished:{message.id}",
-            phase,
+            message.phase,
             message_id=str(message.id),
             occurred_at=message.completed_at,
         )
@@ -220,12 +219,12 @@ class NotificationService:
         if not session_id:
             return
         try:
-            root_id = self.repo.root_id(uuid.UUID(str(session_id)))
+            root_id = self.activity.root_id(uuid.UUID(str(session_id)))
         except (ValueError, TypeError):
             return
         if root_id is None:
             return
-        source = self.repo.source(root_id)
+        source = self.activity.source(root_id)
         if source is None:
             return
         session, message = source
@@ -252,7 +251,7 @@ class NotificationService:
 
     def _enqueue(
         self,
-        session: HarnessSession,
+        session: ConversationActivity,
         event_key: str,
         phase: str,
         *,
@@ -269,7 +268,9 @@ class NotificationService:
             "request_id": request_id,
             "row": activity_row(session, phase),
         }
-        for device in self.repo.devices_for_session(session):
+        for device in self.repo.devices_for_owner(
+            session.organization_id, session.workspace_owner_id
+        ):
             # Do not replay old completions to newly registered installations.
             if occurred_at and (
                 device.created_at > occurred_at
@@ -283,7 +284,7 @@ class NotificationService:
                 self.repo.enqueue(device, event_key, "activity", payload)
 
     def _snapshot(self, device: MobileDevice, fallback: dict | None = None) -> dict:
-        rows = self.repo.active_rows(device)
+        rows = self.activity.active_rows(device.organization_id, device.user_id)
         priority = {"waiting_for_approval": 0, "waiting_for_input": 1, "running": 2}
         rows.sort(key=lambda item: priority.get(item[1], 2))
         activities = [activity_row(session, phase) for session, phase in rows[:3]]
@@ -308,12 +309,12 @@ class NotificationService:
             return DeliveryResult("failed", "organization_changed")
         source = None
         if job.payload.get("session_id"):
-            source = await sync_to_async(self.repo.source)(
+            source = await sync_to_async(self.activity.source)(
                 uuid.UUID(job.payload["session_id"])
             )
             if (
                 source is None
-                or source[0].workspace.created_by_id != device.user_id
+                or source[0].workspace_owner_id != device.user_id
                 or source[0].organization_id != device.organization_id
             ):
                 return DeliveryResult("failed", "conversation_unavailable")
@@ -370,7 +371,7 @@ class NotificationService:
         if phase in {"waiting_for_approval", "waiting_for_input"}:
             if source is None or source[0].status != "busy":
                 return DeliveryResult("failed", "attention_resolved")
-            if not await sync_to_async(self.repo.pending_gate)(
+            if not await sync_to_async(self.activity.pending_gate)(
                 job.payload["request_id"],
                 phase,
                 device.organization_id,

@@ -47,12 +47,12 @@ class NotificationWorker:
             try:
                 if time.monotonic() - last_repair >= 60:
                     for message_id in await sync_to_async(
-                        self.service.repo.recent_completions
+                        self.service.activity.recent_completions
                     )():
                         await sync_to_async(self.service.record_finished)(message_id)
                     await sync_to_async(self.service.repo.prune)()
                     for event, data in await sync_to_async(
-                        self.service.repo.recent_attention_events
+                        self.service.activity.recent_attention_events
                     )():
                         await sync_to_async(self.service.record_activity)(event, data)
                     last_repair = time.monotonic()

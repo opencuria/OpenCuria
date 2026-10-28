@@ -1,4 +1,4 @@
-"""All ORM operations for mobile destinations, snapshots and outbox claims."""
+"""ORM operations for mobile destinations, configuration and outbox claims."""
 
 from __future__ import annotations
 
@@ -10,8 +10,6 @@ from django.db import transaction
 from django.db.models import F, Q
 from django.utils import timezone
 
-from apps.harness.models import HarnessMessage, HarnessSession, QuestionRequest
-from apps.harness.permissions.models import PermissionRequest
 from apps.organizations.models import Membership
 from common.exceptions import NotFoundError
 
@@ -143,73 +141,17 @@ class NotificationRepository:
         )
 
     @staticmethod
-    def source(
-        session_id: uuid.UUID,
-    ) -> tuple[HarnessSession, HarnessMessage | None] | None:
-        """Return a root conversation and its most recent assistant turn."""
-        session = (
-            HarnessSession.objects.select_related("workspace")
-            .filter(
-                id=session_id, workspace__runner__organization_id=F("organization_id")
-            )
-            .first()
-        )
-        if session is None or session.parent_id is not None:
-            return None
-        message = (
-            HarnessMessage.objects.filter(session=session, role="assistant")
-            .order_by("-position")
-            .first()
-        )
-        return session, message
-
-    @staticmethod
-    def message_source(
-        message_id: uuid.UUID,
-    ) -> tuple[HarnessSession, HarnessMessage] | None:
-        """Resolve completion signals without exposing child-agent completions."""
-        message = (
-            HarnessMessage.objects.select_related("session__workspace")
-            .filter(
-                id=message_id,
-                role="assistant",
-                session__parent__isnull=True,
-                session__workspace__runner__organization_id=F(
-                    "session__organization_id"
-                ),
-            )
-            .first()
-        )
-        return (message.session, message) if message else None
-
-    @staticmethod
-    def root_id(session_id: uuid.UUID) -> uuid.UUID | None:
-        """Resolve child gates to their owning conversation without a depth cap."""
-        seen: set[uuid.UUID] = set()
-        while session_id not in seen:
-            seen.add(session_id)
-            row = (
-                HarnessSession.objects.filter(id=session_id)
-                .values("id", "parent_id")
-                .first()
-            )
-            if row is None:
-                return None
-            if row["parent_id"] is None:
-                return row["id"]
-            session_id = row["parent_id"]
-        return None
-
-    @staticmethod
-    def devices_for_session(session: HarnessSession) -> list[MobileDevice]:
+    def devices_for_owner(
+        org_id: uuid.UUID, user_id: int | None
+    ) -> list[MobileDevice]:
         """Match REST's workspace-owner boundary and current organization membership."""
         return list(
             MobileDevice.objects.filter(
-                organization_id=session.organization_id,
-                user_id=session.workspace.created_by_id,
+                organization_id=org_id,
+                user_id=user_id,
                 user__is_active=True,
                 last_seen_at__gte=timezone.now() - timedelta(days=30),
-                user__memberships__organization_id=session.organization_id,
+                user__memberships__organization_id=org_id,
             ).distinct()
         )
 
@@ -223,79 +165,6 @@ class NotificationRepository:
                 user_id=device.user_id, organization_id=device.organization_id
             ).exists()
         )
-
-    @staticmethod
-    def pending_gate(
-        request_id: str, phase: str, org_id: uuid.UUID, workspace_id: str
-    ) -> bool:
-        """Validate the exact gate, even when more than three runs are active."""
-        model = (
-            PermissionRequest if phase == "waiting_for_approval" else QuestionRequest
-        )
-        try:
-            return model.objects.filter(
-                id=uuid.UUID(request_id),
-                organization_id=org_id,
-                workspace_id=uuid.UUID(workspace_id),
-                status="pending",
-            ).exists()
-        except (ValueError, TypeError):
-            return False
-
-    @staticmethod
-    def active_rows(device: MobileDevice) -> list[tuple[HarnessSession, str]]:
-        """Derive status from durable sessions and outstanding gates."""
-        sessions = list(
-            HarnessSession.objects.select_related("workspace")
-            .filter(
-                organization_id=device.organization_id,
-                workspace__runner__organization_id=device.organization_id,
-                workspace__created_by_id=device.user_id,
-                parent__isnull=True,
-                status="busy",
-            )
-            .order_by("-updated_at")
-        )
-        if not sessions:
-            return []
-        # Several root conversations can run in one workspace. Attribute child
-        # gates to their actual root so the card opens the conversation in need.
-        busy_ids = HarnessSession.objects.filter(
-            organization_id=device.organization_id,
-            workspace_id__in=[s.workspace_id for s in sessions],
-            status="busy",
-        ).values_list("id", flat=True)
-
-        def pending_roots(model: type[PermissionRequest] | type[QuestionRequest]):
-            return {
-                NotificationRepository.root_id(session_id)
-                for session_id in model.objects.filter(
-                    organization_id=device.organization_id,
-                    session_id__in=busy_ids,
-                    status="pending",
-                )
-                .values_list("session_id", flat=True)
-                .distinct()
-            }
-
-        permission_roots = pending_roots(PermissionRequest)
-        question_roots = pending_roots(QuestionRequest)
-        result = []
-        for session in sessions:
-            latest = (
-                HarnessMessage.objects.filter(session=session, role="assistant")
-                .order_by("-position")
-                .first()
-            )
-            if latest and latest.completed_at is not None:
-                continue
-            phase = "running"
-            if session.id in permission_roots:
-                phase = "waiting_for_approval"
-            elif session.id in question_roots:
-                phase = "waiting_for_input"
-            result.append((session, phase))
-        return result
 
     @staticmethod
     def enqueue(device: MobileDevice, event_key: str, kind: str, payload: dict) -> None:
@@ -347,42 +216,6 @@ class NotificationRepository:
             claim_token=None,
             available_at=timezone.now() + timedelta(seconds=delay),
         )
-
-    @staticmethod
-    def recent_completions() -> list[uuid.UUID]:
-        """Repair missed completion signals after an interrupted server process."""
-        return list(
-            HarnessMessage.objects.filter(
-                role="assistant",
-                session__parent__isnull=True,
-                completed_at__gte=timezone.now() - timedelta(minutes=15),
-            ).values_list("id", flat=True)
-        )
-
-    @staticmethod
-    def recent_attention_events() -> list[tuple[str, dict[str, str]]]:
-        """Repair fresh unanswered gates if their original signal was missed."""
-        busy = HarnessSession.objects.filter(status="busy").values("id")
-        result = []
-        for model, event in (
-            (PermissionRequest, "harness.permission_required"),
-            (QuestionRequest, "harness.question_required"),
-        ):
-            for request in model.objects.filter(
-                status="pending",
-                session_id__in=busy,
-                created_at__gte=timezone.now() - timedelta(minutes=15),
-            ).values("id", "session_id"):
-                result.append(
-                    (
-                        event,
-                        {
-                            "request_id": str(request["id"]),
-                            "session_id": str(request["session_id"]),
-                        },
-                    )
-                )
-        return result
 
     @staticmethod
     def activity_devices() -> list[MobileDevice]:

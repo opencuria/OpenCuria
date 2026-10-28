@@ -184,6 +184,33 @@ def _imported_modules(path: Path, tree: ast.Module) -> set[str]:
     return imported
 
 
+def test_notifications_reach_harness_only_through_activity_service_and_events() -> None:
+    """Notification storage must not own harness queries or activity rules."""
+    public_modules = {
+        "apps.harness.conversation_activity_service",
+        "apps.harness.run_events",
+    }
+    violations = []
+    for path in _source_files():
+        if path.relative_to(APPS_ROOT).parts[0] != "notifications":
+            continue
+        for imported in _imported_modules(path, ast.parse(path.read_text())):
+            if imported != "apps.harness" and not imported.startswith("apps.harness."):
+                continue
+            if not _is_persistence_module(path) and any(
+                imported == module or imported.startswith(f"{module}.")
+                for module in public_modules
+            ):
+                continue
+            violations.append(f"{_module_name(path)} -> {imported}")
+    assert violations == [], (
+        "Notifications must consume immutable activity from the harness service "
+        "and its lifecycle events; notification repositories must not import "
+        "the harness, even through function-local imports:\n"
+        + "\n".join(sorted(violations))
+    )
+
+
 def test_runner_domains_and_infrastructure_never_import_composition_facade() -> None:
     """Domain and infrastructure dependencies must point away from the facade."""
     services = APPS_ROOT / "runners" / "services"

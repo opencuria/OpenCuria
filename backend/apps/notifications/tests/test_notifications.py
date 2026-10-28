@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from apps.accounts.auth_backends import DjangoJWTBackend
 from apps.accounts.models import User
+from apps.harness.conversation_activity_service import ConversationActivityService
 from apps.harness.harness_service import HarnessService
 from apps.harness.models import HarnessMessage, HarnessSession, QuestionRequest
 from apps.harness.permissions.models import PermissionRequest
@@ -243,7 +244,10 @@ def test_gate_events_include_child_attention_and_resolutions(setup, device):
     )
     alert = PushDelivery.objects.select_related("device__user").get(kind="alert")
     assert alert.payload["session_id"] == str(session.id)
-    assert NotificationRepository.active_rows(device)[0][1] == "waiting_for_input"
+    rows = ConversationActivityService().active_rows(
+        device.organization_id, device.user_id
+    )
+    assert rows[0][1] == "waiting_for_input"
     question.status = "answered"
     question.save()
     service = NotificationService(providers=providers())
@@ -313,8 +317,10 @@ def test_workspace_organization_change_fences_old_notification_scope(setup, devi
     runner.save()
     finish(message)
     NotificationService().record_finished(message.id)
-    assert NotificationRepository.source(session.id) is None
-    assert not NotificationRepository.active_rows(device)
+    assert ConversationActivityService().source(session.id) is None
+    assert not ConversationActivityService().active_rows(
+        device.organization_id, device.user_id
+    )
     assert not PushDelivery.objects.exists()
 
 
@@ -481,7 +487,7 @@ def test_repair_of_missed_attention_is_repeat_safe(setup, device):
         tool="exec",
     )
     for _ in range(2):
-        for event, data in NotificationRepository.recent_attention_events():
+        for event, data in ConversationActivityService().recent_attention_events():
             NotificationService().record_activity(event, data)
     assert PushDelivery.objects.filter(kind="alert").count() == 1
     assert (
