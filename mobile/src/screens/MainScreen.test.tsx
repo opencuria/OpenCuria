@@ -117,6 +117,7 @@ jest.mock("../components", () => {
   return {
     ChatComposer: (props: {
       settings?: { model?: string; effort?: string };
+      workspaceName?: string;
       placeholder?: string;
       disabled?: boolean;
       onSettings: () => void;
@@ -129,6 +130,13 @@ jest.mock("../components", () => {
       ReactRuntime.createElement(
         View,
         null,
+        props.workspaceName
+          ? ReactRuntime.createElement(
+              Text,
+              { testID: "composer-workspace" },
+              props.workspaceName,
+            )
+          : null,
         ReactRuntime.createElement(
           Pressable,
           { testID: "test-settings", onPress: props.onSettings },
@@ -341,6 +349,9 @@ it("selects the initial ready workspace, creates a new chat and accepts the firs
   await waitFor(() =>
     expect(mockController.newChat).toHaveBeenCalledWith(runningWorkspace.id),
   );
+  expect(screen.getByTestId("composer-workspace")).toHaveTextContent(
+    runningWorkspace.name,
+  );
   expect(client.harness.listEngineModels).toHaveBeenCalledWith("claude");
   expect(client.harness.listEngineModels).toHaveBeenCalledWith("native");
   expect(client.harness.listAgentConfigs).toHaveBeenCalled();
@@ -529,6 +540,63 @@ it.each([
   });
   if (workspaceButton) expect(workspaceButton).toBeDisabled();
   expect(mockController.send).not.toHaveBeenCalled();
+  tree.unmount();
+});
+
+it("shows the workspace in new chats and removes it when a session opens", async () => {
+  const client = mockClient();
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() =>
+    expect(mockController.newChat).toHaveBeenCalledWith(runningWorkspace.id),
+  );
+  expect(screen.getByTestId("composer-workspace")).toHaveTextContent(
+    runningWorkspace.name,
+  );
+
+  act(() => {
+    snapshot = { ...snapshot, activeSessionId: "existing-chat" };
+    listeners.forEach((listener) => listener());
+  });
+  expect(screen.queryByTestId("composer-workspace")).toBeNull();
+
+  fireEvent.press(screen.getByTestId("new-chat"));
+  await waitFor(() =>
+    expect(screen.getByTestId("composer-workspace")).toHaveTextContent(
+      runningWorkspace.name,
+    ),
+  );
+  tree.unmount();
+});
+
+it("updates the new-chat workspace label when switching workspaces", async () => {
+  const client = mockClient();
+  client.workspaces.list.mockResolvedValue([
+    runningWorkspace,
+    { ...runningWorkspace, id: "workspace-b", name: "Other workspace" },
+  ]);
+  mockUseSession.mockReturnValue(sessionValue(client) as never);
+  const tree = render(
+    <ThemeProvider>
+      <MainScreen />
+    </ThemeProvider>,
+  );
+  await waitFor(() => expect(mockController.newChat).toHaveBeenCalled());
+
+  fireEvent.press(screen.getByTestId("chat-menu"));
+  fireEvent.press(screen.getByRole("button", { name: "Switch workspace" }));
+  fireEvent.press(screen.getByRole("button", { name: /^Other workspace,/ }));
+
+  await waitFor(() =>
+    expect(mockController.newChat).toHaveBeenLastCalledWith("workspace-b"),
+  );
+  expect(screen.getByTestId("composer-workspace")).toHaveTextContent(
+    "Other workspace",
+  );
   tree.unmount();
 });
 

@@ -1136,6 +1136,9 @@ export function MainScreen(): React.JSX.Element {
             workspace ? (
               <ChatComposer
                 draft={draft}
+                workspaceName={
+                  !chat.activeSessionId ? workspace.name : undefined
+                }
                 onDraftChange={(value) => setDraft(value)}
                 onSend={send}
                 onStop={async () => {

@@ -71,6 +71,33 @@ function renderComposer(
 }
 
 describe("ChatComposer", () => {
+  it("shows the selected workspace above a new draft and updates it with the context", () => {
+    const { rerenderComposer } = renderComposer({
+      workspaceName: "EventAlertExpo",
+      contextKey: "workspace-one:new",
+    });
+
+    expect(screen.getByLabelText("Workspace: EventAlertExpo")).toHaveTextContent(
+      "EventAlertExpo",
+    );
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Test");
+    expect(screen.getByTestId("chat-composer-workspace")).toHaveTextContent(
+      "EventAlertExpo",
+    );
+
+    rerenderComposer({
+      workspaceName: "Another workspace",
+      contextKey: "workspace-two:new",
+    });
+    expect(screen.getByTestId("chat-composer-workspace")).toHaveTextContent(
+      "Another workspace",
+    );
+    expect(screen.queryByLabelText("Workspace: EventAlertExpo")).toBeNull();
+
+    rerenderComposer({ contextKey: "workspace-two:existing-chat" });
+    expect(screen.queryByTestId("chat-composer-workspace")).toBeNull();
+  });
+
   it("shows the model and effort on one control below the input", () => {
     const onSettings = jest.fn();
     renderComposer({
@@ -104,9 +131,43 @@ describe("ChatComposer", () => {
     );
   });
 
-  it("stops a busy run even when the draft and attachments are empty", async () => {
+  it("only enables sending a draft when the chat is available", () => {
+    const { onSend, rerenderComposer } = renderComposer();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "  ");
+    fireEvent.press(screen.getByTestId("chat-composer-send"));
+    expect(onSend).not.toHaveBeenCalled();
+
+    fireEvent.changeText(screen.getByTestId("chat-composer-input"), "Test");
+    expect(screen.getByTestId("chat-composer-send")).toBeEnabled();
+    rerenderComposer({ disabled: true });
+    fireEvent.press(screen.getByTestId("chat-composer-send"));
+    expect(screen.getByTestId("chat-composer-send")).toBeDisabled();
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("sends an attachment without requiring a text draft", async () => {
+    const attachment = {
+      id: "document",
+      uri: "file:///review.txt",
+      name: "review.txt",
+    };
+    const { onSend } = renderComposer({ attachments: [attachment] });
+    expect(screen.getByTestId("chat-composer-send")).toBeEnabled();
+    fireEvent.press(screen.getByTestId("chat-composer-send"));
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith({
+        text: "",
+        skillIds: [],
+        attachments: [attachment],
+      }),
+    );
+  });
+
+  it("stops a busy run even when the composer is disabled and empty", async () => {
     const onStop = jest.fn().mockResolvedValue(undefined);
-    renderComposer({ busy: true, onStop });
+    renderComposer({ busy: true, disabled: true, onStop });
 
     fireEvent.press(screen.getByTestId("chat-composer-stop"));
 

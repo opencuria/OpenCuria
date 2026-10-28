@@ -9,6 +9,7 @@ import { Image } from "expo-image";
 import {
   AtSign,
   ArrowUp,
+  ChevronDown,
   FileText,
   Plus,
   Sparkles,
@@ -34,7 +35,7 @@ import {
   filterSkillCandidates,
   type MentionCandidate,
 } from "@opencuria/chat-core/harnessMentions";
-import { Banner, IconButton, NativeAction } from "../ui/primitives";
+import { Banner, NativeAction } from "../ui/primitives";
 import { NativeMenu } from "../ui/NativeMenu";
 import { ComposerSurface } from "../ui/ComposerSurface";
 import { ComposerEditor } from "./ComposerEditor";
@@ -80,6 +81,8 @@ export interface ChatComposerProps {
   busy?: boolean;
   disabled?: boolean;
   placeholder?: string;
+  /** Selected workspace shown above the editor when composing a new chat. */
+  workspaceName?: string;
   /** Summary shown on the model control; pressing it calls `onSettings`. */
   settings?: ComposerSettingsSummary;
   onSettings?: () => void;
@@ -127,6 +130,7 @@ export function ChatComposer({
   busy = false,
   disabled = false,
   placeholder = "Ask OpenCuria",
+  workspaceName,
   settings,
   onSettings,
   skills = [],
@@ -535,13 +539,16 @@ export function ChatComposer({
     >
       <View
         pointerEvents="none"
-        style={[
-          styles.control,
-          styles.round,
-          { backgroundColor: theme.controlFill, opacity: disabled ? 0.38 : 1 },
-        ]}
+        style={styles.actionTarget}
       >
-        <Plus size={22} color={theme.text} />
+        <View
+          style={[
+            styles.actionCircle,
+            { backgroundColor: theme.controlFill, opacity: disabled ? 0.38 : 1 },
+          ]}
+        >
+          <Plus size={21} color={theme.mutedText} />
+        </View>
       </View>
     </NativeMenu>
   ) : null;
@@ -561,18 +568,14 @@ export function ChatComposer({
         accessibilityHint="Choose model, effort and agent"
         onPress={onSettings}
         testID="chat-composer-settings"
-        style={[
-          styles.control,
-          styles.pill,
-          { backgroundColor: theme.controlFill },
-        ]}
+        style={styles.modelControl}
       >
         <Text
           numberOfLines={1}
-          // Native hosts size the pill to its label; bound it beside +/send.
+          // Bound the native label beside the attachment and send targets.
           style={[
-            styles.pillText,
-            { maxWidth: Math.max(96, windowWidth - 176) },
+            styles.modelText,
+            { maxWidth: Math.max(64, windowWidth - 186) },
           ]}
         >
           {settings.mode === "plan" ? (
@@ -585,30 +588,39 @@ export function ChatComposer({
             <Text style={{ color: theme.mutedText }}> {settings.effort}</Text>
           ) : null}
         </Text>
+        <ChevronDown size={14} color={theme.mutedText} />
       </NativeAction>
     ) : null;
+  const sendDisabled = busy ? !onStop || stopping : !canSubmit || sending;
+  const actionForeground = sendDisabled ? theme.subtleText : theme.background;
   const sendButton = (
-    <IconButton
-      symbol={busy ? "stop.fill" : "arrow.up"}
-      tone="primary"
-      icon={
-        busy ? (
-          <Square
-            size={16}
-            color={theme.primaryForeground}
-            fill={theme.primaryForeground}
-          />
-        ) : (
-          <ArrowUp size={24} color={theme.primaryForeground} />
-        )
-      }
-      label={busy ? "Stop OpenCuria" : "Send message"}
-      disabled={busy ? !onStop || stopping : !canSubmit || sending}
+    <NativeAction
+      accessibilityRole="button"
+      accessibilityLabel={busy ? "Stop OpenCuria" : "Send message"}
+      disabled={sendDisabled}
       onPress={() => {
         void send();
       }}
+      style={styles.actionTarget}
       testID={busy ? "chat-composer-stop" : "chat-composer-send"}
-    />
+    >
+      <View
+        style={[
+          styles.actionCircle,
+          { backgroundColor: sendDisabled ? theme.controlFill : theme.text },
+        ]}
+      >
+        {busy ? (
+          <Square
+            size={14}
+            color={actionForeground}
+            fill={actionForeground}
+          />
+        ) : (
+          <ArrowUp size={22} strokeWidth={2.25} color={actionForeground} />
+        )}
+      </View>
+    </NativeAction>
   );
 
   return (
@@ -691,6 +703,16 @@ export function ChatComposer({
           style={styles.core}
         >
           <ComposerSurface>
+            {workspaceName ? (
+              <Text
+                numberOfLines={1}
+                accessibilityLabel={`Workspace: ${workspaceName}`}
+                testID="chat-composer-workspace"
+                style={[styles.workspaceName, { color: theme.mutedText }]}
+              >
+                {workspaceName}
+              </Text>
+            ) : null}
             {activeSkills.length ? (
               <ScrollView
                 horizontal
@@ -802,7 +824,11 @@ export function ChatComposer({
               returnKeyType="default"
               blurOnSubmit={false}
               textAlignVertical="top"
-              style={[styles.input, { color: theme.text }]}
+              style={[
+                styles.input,
+                workspaceName ? styles.newChatInput : null,
+                { color: theme.text },
+              ]}
             />
             <View style={styles.toolbar}>
               {attachmentButton}
@@ -854,29 +880,56 @@ const INPUT_MAX_HEIGHT = 170;
 const styles = StyleSheet.create({
   root: { paddingHorizontal: 12 },
   core: { paddingTop: 6 },
+  workspaceName: {
+    marginHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 2,
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: "500",
+  },
   input: {
     minWidth: 0,
     minHeight: 36,
     maxHeight: INPUT_MAX_HEIGHT,
+    paddingHorizontal: 0,
     paddingVertical: 6,
     marginHorizontal: 12,
     marginTop: 6,
     fontSize: 17,
     lineHeight: 24,
   },
+  newChatInput: { minHeight: 76 },
   toolbar: {
-    minHeight: 48,
+    minHeight: 44,
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    paddingLeft: 4,
-    paddingTop: 2,
+    gap: 4,
   },
-  control: { height: 40, alignItems: "center", justifyContent: "center" },
-  round: { width: 40, borderRadius: 20 },
+  // A compact visible circle keeps the full native touch target around it.
+  actionTarget: {
+    width: 44,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  actionCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   settings: { flex: 1, flexDirection: "row", minWidth: 0 },
-  pill: { maxWidth: "100%", borderRadius: 20, paddingHorizontal: 15 },
-  pillText: { fontSize: 15, fontWeight: "500" },
+  modelControl: {
+    maxWidth: "100%",
+    minHeight: 44,
+    paddingHorizontal: 4,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  modelText: { flexShrink: 1, fontSize: 15, fontWeight: "500" },
   chips: {
     alignItems: "center",
     gap: 7,

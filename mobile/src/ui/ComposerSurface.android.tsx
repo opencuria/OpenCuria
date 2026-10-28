@@ -19,6 +19,7 @@ export function ComposerSurface({
         ignoreSafeAreaKeyboardInsets
       >
         <Surface
+          color={theme.surfaceMuted}
           tonalElevation={3}
           shape={Shape.RoundedCorner({
             cornerRadii: {
