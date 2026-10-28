@@ -1,14 +1,20 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createWebHistory } from 'vue-router'
 
 import HarnessChatPanel from './HarnessChatPanel.vue'
 import { useHarnessStore } from '@/stores/harness'
-import { listHarnessSessions, markHarnessSessionRead } from '@/services/harness.api'
+import {
+  listHarnessParts,
+  listHarnessSessions,
+  markHarnessSessionRead,
+} from '@/services/harness.api'
 import { onEvent } from '@/services/socket'
 import { armComposerTransition, clearComposerTransition } from '@/lib/composerTransition'
 import type { HarnessSession } from '@/types/harness'
+
+enableAutoUnmount(afterEach)
 
 vi.mock('@/services/socket', () => ({
   subscribeToWorkspace: vi.fn(() => () => {}),
@@ -99,6 +105,147 @@ function makeSession(overrides: Partial<HarnessSession> = {}): HarnessSession {
     ...overrides,
   }
 }
+
+describe('HarnessChatPanel route navigation', () => {
+  let router: ReturnType<typeof createRouter>
+  let wrapper: VueWrapper | undefined
+  const secondSession = makeSession({ id: 'session-second', title: 'Second chat', mode: 'plan' })
+
+  beforeEach(async () => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    vi.mocked(listHarnessSessions).mockReset().mockResolvedValue([])
+    clearComposerTransition()
+    router = createRouter({
+      history: createWebHistory(),
+      routes: [{ path: '/workspaces/:id', component: { template: '<div />' } }],
+    })
+    await router.push('/workspaces/ws-1?session=session-root')
+    vi.mocked(listHarnessParts).mockImplementation(async (sessionId) => ({
+      session: makeSession({ id: sessionId }),
+      messages: [
+        {
+          id: `message-${sessionId}`,
+          session_id: sessionId,
+          role: 'user',
+          content: `Transcript ${sessionId}`,
+          parts: [],
+        },
+      ],
+    }))
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+    vi.mocked(listHarnessParts).mockResolvedValue({ session: makeSession(), messages: [] })
+  })
+
+  async function openChat(sessions = [makeSession()]): Promise<void> {
+    vi.mocked(listHarnessSessions).mockResolvedValueOnce(sessions)
+    wrapper = mount(HarnessChatPanel, {
+      props: { workspaceId: 'ws-1', canPrompt: true },
+      global: { plugins: [router], stubs },
+    })
+    await flushPromises()
+    expect(useHarnessStore().activeSessionId).toBe('session-root')
+  }
+
+  it('switches loaded chats and their transcripts when only the session query changes', async () => {
+    await openChat([makeSession(), secondSession])
+    await router.push('/workspaces/ws-1?session=session-second')
+    await flushPromises()
+
+    const store = useHarnessStore()
+    expect(store.activeSessionId).toBe('session-second')
+    expect(store.viewingSessionId).toBe('session-second')
+    expect(store.activeMessages[0]?.content).toBe('Transcript session-second')
+    expect(wrapper!.findComponent(HarnessChatInputStub).props('mode')).toBe('plan')
+    expect(listHarnessSessions).toHaveBeenCalledTimes(1)
+
+    router.back()
+    await vi.waitFor(() => expect(store.activeSessionId).toBe('session-root'))
+    expect(store.activeMessages[0]?.content).toBe('Transcript session-root')
+    router.forward()
+    await vi.waitFor(() => expect(store.activeSessionId).toBe('session-second'))
+  })
+
+  it('refreshes sessions to open a chat created since the workspace was loaded', async () => {
+    await openChat()
+    vi.mocked(listHarnessSessions).mockResolvedValueOnce([makeSession(), secondSession])
+
+    await router.push('/workspaces/ws-1?session=session-second')
+    await flushPromises()
+
+    const store = useHarnessStore()
+    expect(store.activeSessionId).toBe('session-second')
+    expect(store.viewingSessionId).toBe('session-second')
+    expect(store.activeMessages[0]?.content).toBe('Transcript session-second')
+    expect(wrapper!.findComponent(HarnessChatInputStub).props('mode')).toBe('plan')
+    expect(listHarnessSessions).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not load an unavailable session after refreshing the workspace session list', async () => {
+    await openChat()
+    vi.mocked(listHarnessSessions).mockResolvedValueOnce([makeSession()])
+
+    await router.push('/workspaces/ws-1?session=unavailable')
+    await flushPromises()
+
+    expect(listHarnessSessions).toHaveBeenCalledTimes(2)
+    expect(useHarnessStore().activeSessionId).toBe('session-root')
+    expect(listHarnessParts).not.toHaveBeenCalledWith('unavailable')
+  })
+
+  it('preserves the current chat when refreshing sessions fails', async () => {
+    await openChat()
+    vi.mocked(listHarnessSessions).mockRejectedValueOnce(new Error('Session access denied'))
+
+    await router.push('/workspaces/ws-1?session=session-second')
+    await flushPromises()
+
+    expect(useHarnessStore().error).toBe('Session access denied')
+    expect(useHarnessStore().activeSessionId).toBe('session-root')
+    expect(useHarnessStore().activeMessages[0]?.content).toBe('Transcript session-root')
+  })
+
+  it('keeps the latest selection when navigation races a session refresh', async () => {
+    await openChat()
+    let resolve!: (sessions: HarnessSession[]) => void
+    vi.mocked(listHarnessSessions).mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done
+      }),
+    )
+
+    await router.push('/workspaces/ws-1?session=session-second')
+    await router.push('/workspaces/ws-1?session=session-root')
+    resolve([makeSession(), secondSession])
+    await flushPromises()
+
+    expect(useHarnessStore().activeSessionId).toBe('session-root')
+    expect(router.currentRoute.value.query.session).toBe('session-root')
+  })
+
+  it('does not select a chat after leaving the panel during a session refresh', async () => {
+    await openChat()
+    let resolve!: (sessions: HarnessSession[]) => void
+    vi.mocked(listHarnessSessions).mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done
+      }),
+    )
+
+    await router.push('/workspaces/ws-1?session=session-second')
+    wrapper!.unmount()
+    wrapper = undefined
+    resolve([makeSession(), secondSession])
+    await flushPromises()
+
+    expect(useHarnessStore().activeSessionId).toBe('session-root')
+    expect(useHarnessStore().viewingSessionId).toBeNull()
+  })
+})
 
 describe('HarnessChatPanel', () => {
   const router = createRouter({
@@ -1583,7 +1730,11 @@ describe('HarnessChatPanel', () => {
       })
       expect(fetchParts).not.toHaveBeenCalled()
 
-      handlers['harness.part_updated']!({ ...event, part_id: 'compaction-1', delta: { compaction: true } })
+      handlers['harness.part_updated']!({
+        ...event,
+        part_id: 'compaction-1',
+        delta: { compaction: true },
+      })
       expect(fetchParts).toHaveBeenCalledWith('session-root')
     })
   })
