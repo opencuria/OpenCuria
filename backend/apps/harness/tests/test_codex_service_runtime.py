@@ -96,16 +96,19 @@ class ServiceAccessor(LocalAccessor):
 
 
 class Responses:
-    """Actual loopback SSE endpoint, scripted at the Responses boundary only."""
+    """Actual loopback SSE endpoints for Codex Responses and metadata chat."""
 
     def __init__(self):
         self.requests = []
         self.auxiliary_requests = []
+        self.chat_requests = []
         self.script = []
         self.respond = None
         self.observe = lambda: {}
         self.blocked = asyncio.Event()
         self.release = asyncio.Event()
+        self.title_blocked = asyncio.Event()
+        self.title_release = asyncio.Event()
 
     @staticmethod
     def text(value="Root done."):
@@ -123,6 +126,50 @@ class Responses:
             "name": name,
             "arguments": json.dumps(args or {"path": "note.txt", "content": "local"}),
         }
+
+    async def handle_chat_completions(self, request):
+        observed = {
+            "body": await request.json(),
+            "authorization": request.headers.get("Authorization"),
+            "owners": self.observe(),
+        }
+        self.chat_requests.append(observed)
+        body = observed["body"]
+        user_prompt = " ".join(
+            str(message.get("content") or "")
+            for message in body.get("messages", [])
+            if message.get("role") == "user"
+        )
+        system_prompt = " ".join(
+            str(message.get("content") or "")
+            for message in body.get("messages", [])
+            if message.get("role") == "system"
+        )
+        is_title = "short title" in system_prompt
+        if is_title and "First Codex root prompt" in user_prompt:
+            self.title_blocked.set()
+            await self.title_release.wait()
+        text = "Codex first prompt title" if is_title else "Codex goal summary"
+        chunks = [
+            {
+                "choices": [
+                    {"index": 0, "delta": {"content": text}, "finish_reason": None}
+                ]
+            },
+            {
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 4,
+                    "total_tokens": 7,
+                },
+            },
+        ]
+        return web.Response(
+            text="".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+            + "data: [DONE]\n\n",
+            content_type="text/event-stream",
+        )
 
     async def handle(self, request):
         observed = {
@@ -187,6 +234,7 @@ async def runtime(harness_workspace, tmp_path, monkeypatch):
     provider = Responses()
     app = web.Application()
     app.router.add_post("/v1/responses", provider.handle)
+    app.router.add_post("/v1/chat/completions", provider.handle_chat_completions)
 
     async def models(_):
         return web.json_response({"data": []})
@@ -277,6 +325,7 @@ async def runtime(harness_workspace, tmp_path, monkeypatch):
         yield data
     finally:
         provider.release.set()
+        provider.title_release.set()
         tasks = list(service._tasks.values())
         for task in tasks:
             task.cancel()
@@ -288,12 +337,12 @@ async def runtime(harness_workspace, tmp_path, monkeypatch):
         clear_models_cache()
 
 
-def new_session(data, **kwargs):
+def new_session(data, *, prompt="Local test", **kwargs):
     return data.service.create_session(
         workspace_id=data.workspace.id,
         organization_id=data.workspace.runner.organization_id,
         user_id=data.workspace.created_by_id,
-        prompt="Local test",
+        prompt=prompt,
         harness_id="codex",
         model="openrouter/acme/local",
         **kwargs,
@@ -345,6 +394,117 @@ def cold_service(data):
         ),
         plaintexts={},
     )
+
+
+async def test_codex_start_run_generates_first_title_with_frozen_account(
+    runtime, monkeypatch
+):
+    """Codex titles use a local OpenRouter call and the root's captured account."""
+    from apps.harness.services import ProviderConfigService
+
+    data = runtime
+    data.provider.script = ["block", Responses.text("Second Codex answer.")]
+    ProviderConfigService().save_config(
+        organization_id=data.workspace.runner.organization_id,
+        small_model="openrouter/acme/local",
+    )
+    session = new_session(data, prompt="First Codex root prompt")
+    data.events.clear()
+    title_entered = asyncio.Event()
+    allow_title = asyncio.Event()
+    title_kwargs = []
+    generate_title = data.service.metadata.generate_title
+
+    async def gated_title(**kwargs):
+        title_kwargs.append(dict(kwargs))
+        title_entered.set()
+        await allow_title.wait()
+        await generate_title(**kwargs)
+
+    monkeypatch.setattr(data.service.metadata, "generate_title", gated_title)
+    first, task = await start(data, session, "First Codex root prompt")
+    await asyncio.wait_for(data.provider.blocked.wait(), 20)
+    await asyncio.wait_for(title_entered.wait(), 10)
+    turn = ProviderTurn.objects.get(assistant_message=first)
+    assert turn.account_ids == {"openrouter": str(data.account.id)}
+
+    replacement = data.accounts.save_account(
+        organization_id=session.organization_id,
+        user=data.workspace.created_by,
+        provider="openrouter",
+        payload={
+            "label": "Selected after root admission",
+            "api_key": "replacement-local-secret",
+            "base_url": data.account.config["base_url"],
+        },
+    )
+    data.accounts.select_account(
+        session.organization_id,
+        session.created_by_id,
+        "openrouter",
+        replacement.id,
+    )
+    allow_title.set()
+    await asyncio.wait_for(data.provider.title_blocked.wait(), 15)
+    title_request = data.provider.chat_requests[0]
+    assert title_request["authorization"] == "Bearer local-secret-key"
+    assert title_request["body"]["model"] == "acme/local"
+    assert "short title" in " ".join(
+        str(message.get("content") or "")
+        for message in title_request["body"]["messages"]
+        if message.get("role") == "system"
+    )
+    assert title_kwargs[0]["account_ids"] == {"openrouter": str(data.account.id)}
+    assert title_kwargs[0]["provider_turn_id"] == turn.id
+    assert title_kwargs[0]["initiated_by_id"] == session.created_by_id
+    turn.refresh_from_db()
+    assert turn.used_account_ids == [str(data.account.id)]
+    assert title_request["owners"][str(session.id)]["account_ids"] == {
+        "openrouter": str(data.account.id)
+    }
+
+    data.provider.title_release.set()
+    data.provider.release.set()
+    await asyncio.wait_for(task, 40)
+    async with asyncio.timeout(10):
+        while (
+            HarnessSession.objects.get(id=session.id).title
+            != "Codex first prompt title"
+        ):
+            await asyncio.sleep(0.02)
+        while (
+            sum(name == "harness.conversations_changed" for name, _ in data.events) < 2
+        ):
+            await asyncio.sleep(0.02)
+    assert_settled(data, session, first)
+    assert sum(name == "harness.conversations_changed" for name, _ in data.events) == 2
+    assert title_request["authorization"] != "Bearer replacement-local-secret"
+    async with asyncio.timeout(10):
+        while ProviderTurn.objects.get(id=turn.id).active:
+            await asyncio.sleep(0.02)
+
+    second = await finish(data, session, "Second Codex root prompt")
+    assert_settled(data, session, second)
+    async with asyncio.timeout(10):
+        while len(data.provider.chat_requests) < 3:
+            await asyncio.sleep(0.02)
+    session.refresh_from_db()
+    assert session.title == "Codex first prompt title"
+    title_requests = [
+        request
+        for request in data.provider.chat_requests
+        if "short title"
+        in " ".join(
+            str(message.get("content") or "")
+            for message in request["body"]["messages"]
+            if message.get("role") == "system"
+        )
+    ]
+    assert len(title_requests) == 1
+    assert "First Codex root prompt" in json.dumps(title_requests[0]["body"])
+    assert "Second Codex root prompt" not in json.dumps(title_requests[0]["body"])
+    assert sum(name == "harness.conversations_changed" for name, _ in data.events) == 3
+    assert title_requests[0]["authorization"] == "Bearer local-secret-key"
 
 
 async def test_native_file_changes_persist_before_the_final_answer(

@@ -666,6 +666,18 @@ class HarnessSessionRepository:
         return session
 
     @staticmethod
+    def set_generated_title(
+        session_id: uuid.UUID, expected_title: str, title: str
+    ) -> bool:
+        """Replace the prompt fallback atomically; a manual rename always wins."""
+        return (
+            HarnessSession.objects.filter(id=session_id, title=expected_title).update(
+                title=(title or "").strip()[:255], updated_at=timezone.now()
+            )
+            == 1
+        )
+
+    @staticmethod
     def clear_summary(session_id: uuid.UUID) -> None:
         """Drop the status sentence once a new run of the session starts."""
         HarnessSession.objects.filter(id=session_id).exclude(summary="").update(

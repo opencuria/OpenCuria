@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -22,7 +23,7 @@ from apps.harness.models import (
 from apps.harness.permissions.evaluator import PermissionEvaluator
 from apps.harness.permissions.models import PermissionAllowlist, PermissionRequest
 from apps.harness.permissions.service import PermissionService
-from apps.harness.providers.base import Usage
+from apps.harness.providers.base import Delta, ProviderAdapter, Usage
 from apps.harness.repositories import HarnessMessageRepository
 from apps.harness.run_timeline import FRONTEND_EVENT_PART
 from apps.harness.tests.conftest import FakeAccessor
@@ -641,7 +642,13 @@ async def _fake_accessor(workspace_id: str) -> FakeAccessor:
     return FakeAccessor(workspace_id)
 
 
-async def _new_session(service, harness_workspace, *, harness_id="claude"):
+async def _new_session(
+    service,
+    harness_workspace,
+    *,
+    harness_id="claude",
+    prompt="Summarize the repository",
+):
     from django.contrib.auth import get_user_model
 
     from apps.harness.provider_accounts import ProviderAccountService
@@ -667,12 +674,154 @@ async def _new_session(service, harness_workspace, *, harness_id="claude"):
     return service.create_session(
         workspace_id=harness_workspace.id,
         organization_id=harness_workspace.runner.organization_id,
-        prompt="Summarize the repository",
+        prompt=prompt,
         mode="build",
         harness_id=harness_id,
         connection_id=account.id,
         user_id=harness_workspace.created_by_id,
     )
+
+
+class ClaudeMetadataProvider(ProviderAdapter):
+    """Local metadata provider that records actual title/summary requests."""
+
+    name = "local-metadata"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+
+    async def chat_stream(self, model, messages, tools, opts=None):  # type: ignore[no-untyped-def]
+        system = " ".join(
+            str(message.content or "")
+            for message in messages
+            if message.role == "system"
+        )
+        user_prompts = [
+            str(message.content or "") for message in messages if message.role == "user"
+        ]
+        kind = "title" if "Generate a short title" in system else "summary"
+        prompt = next(
+            (item for item in user_prompts if "First root prompt" in item),
+            user_prompts[0] if user_prompts else "",
+        )
+        self.calls.append((kind, model, prompt))
+        output = (
+            "Claude first prompt title" if kind == "title" else "Claude goal summary"
+        )
+        yield Delta(text=output, usage=Usage(1, 1, 2))
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_claude_start_run_generates_first_title_with_frozen_account(
+    harness_workspace, monkeypatch
+):
+    """Claude uses the org small model once, under the first turn's authority."""
+    from apps.harness.models import ProviderTurn
+    from apps.harness.provider_accounts import ProviderAccountService
+    from apps.harness.services import ProviderConfigService
+
+    service, _registry, connections, events = _service(connection_id=uuid.uuid4())
+    provider = ClaudeMetadataProvider()
+    service._provider_factory = lambda _org: provider
+    service.metadata._provider_factory = service._provider_factory
+    service.conversation_events.emit_sync = lambda *_: None
+    org_id = harness_workspace.runner.organization_id
+    ProviderConfigService().save_config(
+        organization_id=org_id, small_model="openrouter/local-title-model"
+    )
+    session = await _new_session(service, harness_workspace, prompt="First root prompt")
+    events.clear()
+    initial_account_id = connections.connection_id
+
+    title_calls: list[dict[str, Any]] = []
+    generate_title = service.metadata.generate_title
+
+    async def observe_title(**kwargs):  # type: ignore[no-untyped-def]
+        title_calls.append(dict(kwargs))
+        await generate_title(**kwargs)
+
+    monkeypatch.setattr(service.metadata, "generate_title", observe_title)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_run = FakeClaudeEngine.run
+
+    async def pause_first_prompt(self, prompt, agent, model, mode, opts):  # type: ignore[no-untyped-def]
+        if prompt == "First root prompt":
+            entered.set()
+            await release.wait()
+        return await original_run(self, prompt, agent, model, mode, opts)
+
+    monkeypatch.setattr(FakeClaudeEngine, "run", pause_first_prompt)
+    first = await service.start_run(
+        session, "First root prompt", user_id=harness_workspace.created_by_id
+    )
+    first_task = service._tasks[str(session.id)]
+    await asyncio.wait_for(entered.wait(), 5)
+    first_turn = ProviderTurn.objects.get(assistant_message_id=first.id)
+    assert first_turn.account_ids == {"claude-agent": str(initial_account_id)}
+
+    accounts = ProviderAccountService()
+    replacement = accounts.save_account(
+        organization_id=org_id,
+        user=harness_workspace.created_by,
+        provider="claude-agent",
+        payload={
+            "label": "Claude selected after admission",
+            "auth_type": "api_token",
+            "token": "replacement-claude-token",
+        },
+    )
+    accounts.select_account(
+        org_id, harness_workspace.created_by_id, "claude-agent", replacement.id
+    )
+    connections.connection_id = replacement.id
+    release.set()
+    await first_task
+
+    async def wait_until(predicate: Callable[[], bool]) -> None:
+        async with asyncio.timeout(8):
+            while not predicate():
+                await asyncio.sleep(0.02)
+
+    await wait_until(
+        lambda: (
+            HarnessSession.objects.get(id=session.id).title
+            == "Claude first prompt title"
+        )
+    )
+    await wait_until(
+        lambda: sum(name == "harness.conversations_changed" for name, _ in events) >= 2
+    )
+    await wait_until(lambda: not ProviderTurn.objects.get(id=first_turn.id).active)
+    await wait_until(lambda: not service._provider_turn_roots)
+    first_title_calls = [call for call in provider.calls if call[0] == "title"]
+    assert first_title_calls == [("title", "local-title-model", "First root prompt")]
+    assert len(title_calls) == 1
+    assert title_calls[0]["account_ids"] == {"claude-agent": str(initial_account_id)}
+    assert title_calls[0]["initiated_by_id"] == harness_workspace.created_by_id
+    assert title_calls[0]["provider_turn_id"] == first_turn.id
+    first_turn.refresh_from_db()
+    assert first_turn.account_ids == {"claude-agent": str(initial_account_id)}
+    assert sum(name == "harness.conversations_changed" for name, _ in events) == 2
+
+    second = await service.start_run(
+        session, "Second root prompt", user_id=harness_workspace.created_by_id
+    )
+    await service._tasks[str(session.id)]
+    await wait_until(
+        lambda: sum(kind == "summary" for kind, _model, _prompt in provider.calls) >= 2
+    )
+    second_turn = ProviderTurn.objects.get(assistant_message_id=second.id)
+    await wait_until(lambda: not ProviderTurn.objects.get(id=second_turn.id).active)
+    await wait_until(lambda: not service._provider_turn_roots)
+    session.refresh_from_db()
+    assert second.finish == "stop"
+    assert session.title == "Claude first prompt title"
+    assert len(title_calls) == 1
+    assert [prompt for kind, _model, prompt in provider.calls if kind == "title"] == [
+        "First root prompt"
+    ]
+    assert sum(name == "harness.conversations_changed" for name, _ in events) == 3
 
 
 @pytest.mark.django_db(transaction=True)

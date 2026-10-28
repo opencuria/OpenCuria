@@ -7,6 +7,7 @@ callbacks publish changes without depending on the session lifecycle service.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
 from functools import partial
@@ -28,6 +29,7 @@ from .small_model_service import build_small_model_runner
 log = structlog.get_logger(__name__)
 
 FRONTEND_EVENT_SUMMARY = "harness.session_summary"
+TITLE_GENERATION_TIMEOUT_SECONDS = 60
 
 
 class SessionMetadataService:
@@ -168,10 +170,11 @@ class SessionMetadataService:
         account_ids: dict[str, str] | None = None,
         initiated_by_id: int | None = None,
     ) -> None:
-        """Run the hidden title agent on the initiating answer's snapshot."""
+        """Title any engine using the org's small model and frozen authority."""
         try:
             session = await sync_to_async(self.sessions.get_by_id)(session_id)
-            if session is None or getattr(session, "harness_id", "native") != "native":
+            auto_title = title_from_prompt(prompt)
+            if session is None or session.title != auto_title:
                 return
             if provider_turn_id and await sync_to_async(self.turns.cancellation_reason)(
                 provider_turn_id
@@ -191,12 +194,15 @@ class SessionMetadataService:
             if small is None:
                 return
             runner, small_model = small
-            result = await runner.run(
-                prompt,
-                "title",
-                small_model,
-                "build",
-                RunOptions(auto_approve=True),
+            result = await asyncio.wait_for(
+                runner.run(
+                    prompt,
+                    "title",
+                    small_model,
+                    "build",
+                    RunOptions(auto_approve=True),
+                ),
+                timeout=TITLE_GENERATION_TIMEOUT_SECONDS,
             )
             if provider_turn_id and await sync_to_async(self.turns.cancellation_reason)(
                 provider_turn_id
@@ -205,26 +211,24 @@ class SessionMetadataService:
             title = _normalize_generated_title(result.output or "")
             if not title:
                 return
-            session = await sync_to_async(self.sessions.get_by_id)(session_id)
-            if session is None:
-                return
-            if provider_turn_id and await sync_to_async(self.turns.cancellation_reason)(
-                provider_turn_id
-            ):
-                return
-            auto_title = title_from_prompt(prompt)
-            if (session.title or "").strip() != auto_title:
-                return
-            await sync_to_async(self.sessions.set_title)(session, title)
-            if session.parent_id is None:
+            stored = await sync_to_async(self.sessions.set_generated_title)(
+                session_id, auto_title, title
+            )
+            if stored and session.parent_id is None:
                 await self._conversations_changed(session.workspace_id)
-        except Exception:  # pragma: no cover - title must never break runs
-            log.warning("harness_title_generation_failed", session_id=str(session_id))
+        except Exception as exc:  # title must never break runs
+            log.warning(
+                "harness_title_generation_failed",
+                session_id=str(session_id),
+                error_type=type(exc).__name__,
+            )
 
 
 def _normalize_generated_title(text: str) -> str:
     """Clamp a generated title to at most eight words and 255 chars."""
-    title = " ".join((text or "").strip().split())
+    lines = [line for line in (text or "").splitlines() if line.strip()]
+    title = " ".join(lines[0].split()) if lines else ""
+    title = title.strip("#*`\"'“”„ ").replace("**", "").replace("`", "")
     words = title.split()
     if len(words) > 8:
         title = " ".join(words[:8])

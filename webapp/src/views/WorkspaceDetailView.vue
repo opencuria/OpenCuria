@@ -3,12 +3,14 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useWorkspaceStore } from '@/stores/workspaces'
 import { useHarnessStore } from '@/stores/harness'
+import { useHarnessConversationStore } from '@/stores/harnessConversations'
 import { useProcessesStore } from '@/stores/processes'
 import { useWorkspaceImageStore } from '@/stores/workspaceImages'
 import { subscribeToWorkspace, onEvent, onReconnect } from '@/services/socket'
 import { WorkspaceOperation, WorkspaceStatus } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
 import { isComposerTransitionPending } from '@/lib/composerTransition'
+import { resolveActiveChatTitle } from '@/lib/activeChatTitle'
 import HarnessChatPanel from '@/components/chat/HarnessChatPanel.vue'
 import WorkspaceChatHeader from '@/components/chat/WorkspaceChatHeader.vue'
 import EditWorkspaceDialog from '@/components/workspaces/EditWorkspaceDialog.vue'
@@ -65,7 +67,14 @@ const showImminentAutoStop = computed(() => {
 
 const harnessStore = useHarnessStore()
 
-const activeChatTitle = computed(() => harnessStore.activeSession?.title?.trim() || null)
+const conversationStore = useHarnessConversationStore()
+const activeChatTitle = computed(() =>
+  resolveActiveChatTitle(
+    harnessStore.activeSession,
+    workspaceId.value,
+    conversationStore.conversations,
+  ),
+)
 
 function handleNewHarnessChat(): void {
   harnessStore.setActiveSession(null)

@@ -1309,6 +1309,7 @@ class HarnessService:
         spawned_task: asyncio.Task | None = None
         provider_turn_id: uuid.UUID | None = None
         provider_turn_holder: str | None = None
+        title_holder: str | None = None
         inherited_turn_hold = False
         owner = asyncio.current_task()
         if owner is not None:
@@ -1468,6 +1469,20 @@ class HarnessService:
                 )
                 await asyncio.shield(edit_commit_task)
                 edit_committed = True
+            if (
+                _edit_message_id is None
+                and session.parent_id is None
+                and prior_user_messages == 0
+                and provider_turn_id
+                and not scheduled
+            ):
+                # Reserve before spawning: a fast answer may release its last
+                # holder before the title task gets a chance to start.
+                title_holder = f"title:{uuid.uuid4()}"
+                if not await sync_to_async(self._provider_turn_service.add_hold)(
+                    provider_turn_id, title_holder
+                ):
+                    title_holder = None
             run_coro = self._execute_run(
                 session=session,
                 prompt=prompt.strip(),
@@ -1498,6 +1513,25 @@ class HarnessService:
                 self._on_run_task_done(task, key)
 
             spawned_task.add_done_callback(run_done)
+            if title_holder is not None:
+                title_task = self._spawn_background(
+                    self.metadata.generate_title(
+                        session_id=session.id,
+                        prompt=prompt.strip(),
+                        organization_id=org_id,
+                        provider_turn_id=provider_turn_id,
+                        account_ids=dict(account_ids),
+                        initiated_by_id=run_user_id,
+                    )
+                )
+                self._watch_provider_followup(run_context, title_task, title_holder)
+                title_task.add_done_callback(
+                    lambda _task, turn_id=provider_turn_id, holder=title_holder: (
+                        self._spawn_background(
+                            self._finish_provider_hold(turn_id, holder)
+                        )
+                    )
+                )
             if self._user_abort_requested(session):
                 # Stop arrived while this run was being admitted. Cancel a
                 # still-running owner. A task already cancelled before its
@@ -1510,36 +1544,6 @@ class HarnessService:
                     spawned_task.cancelling() or spawned_task.done()
                 ):
                     raise asyncio.CancelledError()
-            if (
-                engine_id == "native"
-                and _edit_message_id is None
-                and session.parent_id is None
-                and prior_user_messages == 0
-                and provider_turn_id
-                and not scheduled
-            ):
-                title_holder = f"title:{uuid.uuid4()}"
-                if await sync_to_async(self._provider_turn_service.add_hold)(
-                    provider_turn_id, title_holder
-                ):
-                    title_task = self._spawn_background(
-                        self.metadata.generate_title(
-                            session_id=session.id,
-                            prompt=prompt.strip(),
-                            organization_id=org_id,
-                            provider_turn_id=provider_turn_id,
-                            account_ids=dict(account_ids),
-                            initiated_by_id=run_user_id,
-                        )
-                    )
-                    self._watch_provider_followup(run_context, title_task, title_holder)
-                    title_task.add_done_callback(
-                        lambda _task, turn_id=provider_turn_id, holder=title_holder: (
-                            self._spawn_background(
-                                self._finish_provider_hold(turn_id, holder)
-                            )
-                        )
-                    )
             await self._emit_frontend(
                 FRONTEND_EVENT_STATUS,
                 self._session_status_payload(
@@ -1612,6 +1616,8 @@ class HarnessService:
                 await sync_to_async(self._provider_turn_service.finish_once)(
                     provider_turn_id, provider_turn_holder
                 )
+            if provider_turn_id and title_holder and spawned_task is None:
+                await self._finish_provider_hold(provider_turn_id, title_holder)
             monitor_task = run_context.get("provider_monitor_task")
             if monitor_task is not None and not monitor_task.done():
                 monitor_task.cancel()
