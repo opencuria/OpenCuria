@@ -382,7 +382,6 @@ describe('buildRenderBlocks', () => {
 describe('question helpers', () => {
   it('detects question tool parts and pending state', () => {
     expect(isQuestionToolPart(makePart('tool', { tool: 'question' }))).toBe(true)
-    expect(isQuestionToolPart(makePart('tool', { tool: 'ask_user' }))).toBe(true)
     expect(isQuestionToolPart(makePart('tool', { tool: 'read' }))).toBe(false)
     expect(isQuestionToolPart(makePart('patch'))).toBe(false)
     expect(isPendingQuestionPart(makePart('tool', { tool: 'question', state: 'running' }))).toBe(

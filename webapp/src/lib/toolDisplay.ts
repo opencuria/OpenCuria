@@ -7,13 +7,11 @@ import {
   FolderOpen,
   Globe,
   Image,
-  Keyboard,
   BookText,
   Lightbulb,
   ListTodo,
   MessageCircleQuestion,
   Monitor,
-  MousePointer2,
   Network,
   Search,
   Terminal,
@@ -32,17 +30,6 @@ export {
   toolDisplayLabel,
   truncatePreview,
 } from '@opencuria/chat-core/toolDisplay'
-
-const COMPUTER_USE_VIEW_TOOLS = new Set(['view_screen', 'view_region'])
-const COMPUTER_USE_POINTER_TOOLS = new Set([
-  'move_mouse',
-  'left_click',
-  'right_click',
-  'middle_click',
-  'double_click',
-  'drag',
-  'scroll',
-])
 
 /** Lucide icon for a tool or reasoning row. */
 export function toolDisplayIcon(part: HarnessPart): Component {
@@ -73,20 +60,12 @@ export function toolDisplayIcon(part: HarnessPart): Component {
     case 'tool_call':
       return Wrench
     case 'webfetch':
-    case 'open_url':
       return Globe
     case 'todowrite':
       return ListTodo
     case 'question':
-    case 'ask_user':
       return MessageCircleQuestion
-    case 'type_text':
-    case 'press_key':
-    case 'wait':
-      return Keyboard
     default:
-      if (COMPUTER_USE_VIEW_TOOLS.has(tool)) return Monitor
-      if (COMPUTER_USE_POINTER_TOOLS.has(tool)) return MousePointer2
       return Wrench
   }
 }

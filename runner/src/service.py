@@ -83,9 +83,7 @@ class WorkspaceService:
             WORKSPACE_CREDENTIAL_ENV_FILE,
         )
         self.git = GitService(get_cached, get_runtime)
-        self.desktop = DesktopManager(
-            runtime, get_cached, get_runtime, self.harness.exec_harness_command
-        )
+        self.desktop = DesktopManager(runtime, get_cached, get_runtime)
         self.lifecycle = WorkspaceLifecycle(
             self.registry,
             settings,

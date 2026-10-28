@@ -25,20 +25,19 @@ const GROUPABLE_TYPES = new Set<HarnessPartType>(["tool"]);
 const CARD_TYPES = new Set<HarnessPartType>(["subtask", "patch"]);
 const SKIP_TYPES = new Set<HarnessPartType>(["step-start", "step-finish"]);
 const PATCHED_FILE_TOOLS = new Set(["edit", "write"]);
-const QUESTION_TOOLS = new Set(["question", "ask_user"]);
 
 /**
- * A question tool call (`question` / `ask_user`). Pending ones stay
+ * A `question` tool call. Pending ones stay
  * invisible (composer sheet owns them); answered ones render as cards.
  */
 export function isQuestionToolPart(part: HarnessPart): boolean {
   if (part.type !== "tool") return false;
   const projectedTool =
     part.detail_loaded === false ? part.display?.tool : undefined;
-  return QUESTION_TOOLS.has(
+  return (
     String(
       part.input?.["tool"] || resolveToolName(part) || projectedTool || "",
-    ).toLowerCase(),
+    ).toLowerCase() === "question"
   );
 }
 

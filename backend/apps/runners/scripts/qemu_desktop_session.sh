@@ -97,8 +97,7 @@ printf "password\npassword\n" | vncpasswd -u root -w -r 2>/dev/null || true
 # python-Xlib unconditionally opens $XAUTHORITY/~/.Xauthority on connect,
 # even against the auth-less Xvnc (-SecurityTypes None). Bake an empty
 # file into the image so X11 Python clients (native desktop input)
-# connect out of the box; the runner additionally touches it at every
-# desktop start and before each execute for self-healing.
+# connect out of the box; the runner also touches it at every desktop start.
 touch /root/.Xauthority
 
 cat >/root/.vnc/kasmvnc.yaml <<'KASMCFG'

@@ -20,22 +20,6 @@ import { isComputerUseTool, resolveToolName, toolDisplayIcon, toolDisplayLabel }
 import { toolRowLabel } from '@/lib/toolRowLabel'
 import { cn } from '@/lib/utils'
 
-const COMPUTER_USE_DETAIL_TOOLS = new Set([
-  'view_screen',
-  'view_region',
-  'move_mouse',
-  'left_click',
-  'right_click',
-  'middle_click',
-  'double_click',
-  'drag',
-  'scroll',
-  'type_text',
-  'press_key',
-  'open_url',
-  'wait',
-])
-
 const DETAIL_BY_TOOL: Record<string, Component> = {
   bash: ToolDetailBash,
   read: ToolDetailRead,
@@ -110,7 +94,7 @@ const reasoningPreview = computed(() => {
 const detailComponent = computed<Component>(() => {
   const tool = resolveToolName(props.part).toLowerCase()
   if (DETAIL_BY_TOOL[tool]) return DETAIL_BY_TOOL[tool]!
-  if (isComputerUseTool(props.part) || COMPUTER_USE_DETAIL_TOOLS.has(tool)) return ToolDetailComputerUse
+  if (isComputerUseTool(props.part)) return ToolDetailComputerUse
   return ToolDetailDefault
 })
 

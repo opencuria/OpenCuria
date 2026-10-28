@@ -110,23 +110,13 @@ describe('toolDisplayLabel', () => {
 })
 
 describe('computerUseSummary', () => {
-  it('formats click coordinates and typed text', () => {
-    expect(
-      computerUseSummary(
-        makePart({
-          tool: 'left_click',
-          input: { arguments: '{"x":120,"y":40}' },
-        }),
-      ),
-    ).toBe('Left click (120, 40)')
-    expect(
-      computerUseSummary(
-        makePart({
-          tool: 'type_text',
-          input: { arguments: '{"text":"hello"}' },
-        }),
-      ),
-    ).toBe('Type “hello”')
+  it.each([
+    ['mcp_computer-use_cua_repl_js', {}, 'Computer Use'],
+    ['mcp_computer-use_cua_repl_js_reset', {}, 'Reset Computer Use'],
+    ['mcp_computer-use_cua_repl_js', { title: 'Click Save' }, 'Click Save'],
+    ['mcp_computer-use_cua_repl_js', { title: 'x'.repeat(100) }, 'x'.repeat(80)],
+  ])('summarizes %s from its bounded title', (tool, args, expected) => {
+    expect(computerUseSummary(makePart({ tool, input: { arguments: args } }))).toBe(expected)
   })
 })
 

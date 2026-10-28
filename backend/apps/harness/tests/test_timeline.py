@@ -42,7 +42,7 @@ def test_patch_preview_is_bounded_and_handles_hunks_and_added_file():
     assert display["deletions"] == 0
 
 
-def test_question_projection_preserves_bounded_question_answer_and_ask_user():
+def test_question_projection_preserves_question_and_answer():
     question = build_part_display(
         part_type="tool",
         input_data={
@@ -79,11 +79,3 @@ def test_question_projection_preserves_bounded_question_answer_and_ask_user():
     )
     assert meta_question["question_rows"][0]["header"] == "Meta"
     assert meta_question["question_rows"][0]["answer"] == "Meta answer"
-
-    legacy = build_part_display(
-        part_type="tool",
-        input_data={"tool": "ask_user", "arguments": {"question": "Q"}},
-        output="A" * 900,
-    )
-    assert legacy["question_rows"][0]["question"] == "Q"
-    assert len(legacy["question_rows"][0]["answer"]) == 500

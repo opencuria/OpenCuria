@@ -150,7 +150,7 @@ class _FakeService:
                 "generation": generation,
                 "epoch": "fake-desktop-epoch",
             }
-        if action == "screenshot" and args and args.get("fail"):
+        if action == "record_start" and args and args.get("fail"):
             raise RuntimeError("Desktop session is not active")
         if action == "record_start" and args and args.get("path") == "/etc/passwd":
             raise ValueError("Path must be under /workspace")
@@ -552,7 +552,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
             _payload(
                 workspace_id,
                 "d2",
-                action="screenshot",
+                action="record_start",
                 args={"fail": True},
             )
         )
@@ -750,26 +750,6 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(closed, [workspace_id])
 
-    async def test_screenshot_emits_no_lifecycle_event(self) -> None:
-        """Normal I/O actions must not announce desktop lifecycle events."""
-        service = _FakeService()
-        interface = _interface(service)
-        workspace_id = uuid.uuid4()
-        handler = interface._sio.handlers["/"]["harness:desktop_action"]
-        service.desktop_action_calls.clear()
-        await handler(
-            _payload(
-                workspace_id,
-                "d-shot",
-                action="screenshot",
-                args={},
-            )
-        )
-        events = [call.args[0] for call in interface._sio.emit.await_args_list]
-        self.assertIn("harness:desktop_action_result", events)
-        self.assertNotIn("desktop:process", events)
-        self.assertNotIn("desktop:stopped", events)
-
     async def test_viewer_hold_does_not_close_healthy_tunnels(self) -> None:
         """An idempotent viewer hold keeps concurrent viewers attached."""
         from unittest.mock import MagicMock
@@ -935,7 +915,7 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
         await task
         self.assertNotIn("harness:d-reg", interface._running_tasks)
 
-    async def test_desktop_execute_cancelled_by_harness_cancel(self) -> None:
+    async def test_desktop_record_start_cancelled_by_harness_cancel(self) -> None:
         started = asyncio.Event()
 
         class BlockingService(_FakeService):
@@ -952,17 +932,17 @@ class HarnessDesktopActionTests(unittest.IsolatedAsyncioTestCase):
             interface._sio.handlers["/"]["harness:desktop_action"](
                 _payload(
                     workspace_id,
-                    "d-exec",
-                    action="execute",
-                    args={"code": "import time"},
+                    "d-record",
+                    action="record_start",
+                    args={"run_id": "run-1", "lease_id": "computeruse-lease"},
                 )
             )
         )
         await asyncio.wait_for(started.wait(), timeout=5)
-        self.assertIn("harness:d-exec", interface._running_tasks)
+        self.assertIn("harness:d-record", interface._running_tasks)
         cancel = interface._sio.handlers["/"]["harness:cancel"]
-        await cancel({"request_id": "d-exec"})
-        self.assertNotIn("harness:d-exec", interface._running_tasks)
+        await cancel({"request_id": "d-record"})
+        self.assertNotIn("harness:d-record", interface._running_tasks)
         await handler_task
         emitted_events = [
             call.args[0] for call in interface._sio.emit.await_args_list

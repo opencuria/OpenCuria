@@ -1,18 +1,14 @@
-"""Validated recording references, including historical computer-use output."""
+"""Validated recording references and bounded subagent output."""
 
 
 def _video_markdown(recording_path: str) -> str:
     return f"\n\n![Computer use]({recording_path})"
 
 
-def default_recording_path(run_id: str) -> str:
-    return f"/workspace/.opencuria/computeruse/{run_id}/session.mp4"
-
-
 #: Canonical workspace-internal computer-use recording directory.
 _RECORDING_BASE = "/workspace/.opencuria/computeruse"
 
-#: Safe runner run ids (mirrors ``runner/src/service.py::_RUN_ID_RE``).
+#: Safe runner run ids (mirrors ``services/sessions/desktop.py::_RUN_ID_RE``).
 _SAFE_RUN_ID_PATTERN = None  # compiled lazily to keep import cost low
 
 
@@ -68,22 +64,6 @@ def is_valid_recording_path(target: object) -> bool:
     return True
 
 
-def sanitize_run_id(session_id: str) -> str:
-    """Sanitize a session id for runner ``record_*`` actions."""
-    import re
-    import uuid as _uuid
-
-    raw = (session_id or "").strip()
-    cleaned = re.sub(r"[^A-Za-z0-9._-]", "-", raw)
-    cleaned = re.sub(r"-+", "-", cleaned).strip("-")
-    if not cleaned or not re.match(r"^[A-Za-z0-9]", cleaned):
-        cleaned = f"run-{cleaned}" if cleaned else f"run-{_uuid.uuid4().hex[:12]}"
-    cleaned = cleaned.strip("-")
-    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", cleaned):
-        cleaned = f"run-{_uuid.uuid4().hex[:12]}"
-    return cleaned
-
-
 def append_video_to_output(output: str, recording_path: str) -> str:
     """Append the recording markdown embed when not already present."""
     marker = f"![Computer use]({recording_path})"
@@ -108,17 +88,12 @@ def truncate_task_output(
     """
     if recording_path and not is_valid_recording_path(recording_path):
         recording_path = None
-    marker = _recording_marker(output)
     if recording_path:
         wanted = f"![Computer use]({recording_path})"
         if wanted not in (output or ""):
-            # The caller-supplied path is not a real marker of this
-            # output (e.g. a sanitized default for a run that never
-            # recorded) — fall back to plain truncation.
+            # Preserve only a recording actually embedded in this output.
             recording_path = None
-        else:
-            marker = wanted
-    if not recording_path or marker is None:
+    if not recording_path:
         text = output or ""
         if len(text) <= max_chars:
             return text, False
@@ -141,19 +116,6 @@ def truncate_task_output(
     notice_reserve = 40
     avail = max(0, max_chars - len(suffix) - notice_reserve)
     return text[:avail] + f"\n…[truncated {len(text)} chars total]" + suffix, True
-
-
-def _recording_marker(output: str) -> str | None:
-    """Return the first validated ``![Computer use](...)`` marker in *output*."""
-    import re
-
-    match = re.search(r"!\[Computer use\]\(([^)]+)\)", output or "")
-    if match is None:
-        return None
-    target = match.group(1).strip()
-    if not is_valid_recording_path(target):
-        return None
-    return match.group(0)
 
 
 def extract_recording_path(output: str) -> str | None:

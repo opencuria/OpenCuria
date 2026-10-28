@@ -3,7 +3,7 @@
 Timeline patch preview contract: ``display.preview`` is at most four objects
 ``{type, oldNo, newNo, content}``, matching the frontend collapsed diff window;
 the browser should render these lines directly and never parse full diffs here.
-Question/ask_user calls expose bounded ``display.question_rows`` so the timeline
+Question calls expose bounded ``display.question_rows`` so the timeline
 need not send potentially large tool input/output fields.
 """
 
@@ -84,7 +84,7 @@ def project_question_definitions(source: object) -> list[dict[str, Any]]:
 def _question_rows(
     args: dict[str, Any], meta: dict[str, Any], output: str
 ) -> list[dict[str, Any]]:
-    """Project both structured question and legacy ask_user calls safely."""
+    """Project structured questions and their answers safely."""
     arguments = _json_object(args.get("arguments"))
     source = meta.get("questions") or arguments.get("questions")
     definitions = project_question_definitions(source)
@@ -107,19 +107,6 @@ def _question_rows(
             }
         )
 
-    # Legacy computer-use ask_user uses one `question` arg and plain output.
-    ask_user_question = arguments.get("question") or meta.get("question")
-    if not rows and ask_user_question:
-        answer = meta.get("answer")
-        if answer is None:
-            answer = output if not result else ""
-        rows.append({
-            "header": "",
-            "question": _short(ask_user_question, QUESTION_TEXT_LIMIT),
-            "options": [],
-            "multiple": False,
-            "answer": _short(answer, QUESTION_TEXT_LIMIT),
-        })
     return rows
 
 
@@ -235,7 +222,7 @@ def build_part_display(
         display.update(tool=tool_name, summary=_short(title), step=meta.get("step"))
         if tool_name:
             display["tool"] = tool_name
-        if tool_name in {"question", "ask_user"}:
+        if tool_name == "question":
             rows = _question_rows(args, meta, output or "")
             display["question_rows"] = rows
     elif part_type == "reasoning":

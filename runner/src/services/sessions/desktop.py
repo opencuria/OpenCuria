@@ -33,12 +33,7 @@ logger = structlog.get_logger(__name__)
 
 DESKTOP_DISPLAY = ":1"
 DESKTOP_HOME = "/root"
-#: Marker file written by the runner once a workspace X11 client
-#: environment is known to accept connections (currently an empty
-#: ``.Xauthority`` is sufficient: Xvnc uses ``-SecurityTypes None`` but
-#: python-Xlib unconditionally opens ``$XAUTHORITY``/``~/.Xauthority``,
-#: so every X11 client — including PyAutoGUI — requires the file to
-#: exist; without it every ``execute`` snippet fails before connecting).
+#: X11 clients require an authority file even when Xvnc disables authentication.
 DESKTOP_XAUTHORITY_PATH = "/root/.Xauthority"
 DEFAULT_DESKTOP_WIDTH = 1920
 DEFAULT_DESKTOP_HEIGHT = 1080
@@ -47,11 +42,6 @@ MAX_DESKTOP_WIDTH = 3840
 MIN_DESKTOP_HEIGHT = 600
 MAX_DESKTOP_HEIGHT = 2160
 COMPUTER_USE_RECORD_DIR = "/workspace/.opencuria/computeruse"
-#: Max accepted ``desktop_action("execute")`` code payload (chars).
-#: Mirrors the backend ``ACTION_EXECUTE_MAX_CHARS`` guard.
-DESKTOP_EXECUTE_MAX_CHARS = 200_000
-#: Timeout (seconds) for one remote ``desktop_action("execute")`` snippet.
-DESKTOP_EXECUTE_TIMEOUT_S = 120.0
 _RUN_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 DESKTOP_STOP_COMMAND = (
     Path(__file__).with_name("desktop_stop.sh").read_text(encoding="utf-8")
@@ -76,8 +66,8 @@ class WorkspaceEndedEvidence:
 class DesktopManager:
     """Owns desktop processes, leases, recordings, and desktop actions.
 
-    Runtime backends, workspace lookup functions, and harness execution are
-    injected by the runner composition root.
+    Runtime backends and workspace lookup functions are injected by the
+    runner composition root.
     """
 
     def __init__(
@@ -85,13 +75,6 @@ class DesktopManager:
         runtime: RuntimeBackend | None = None,
         get_cached: Callable[[uuid.UUID], WorkspaceInfo] | None = None,
         get_runtime: Callable[[uuid.UUID], RuntimeBackend] | None = None,
-        exec_harness_command: (
-            Callable[
-                [uuid.UUID, list[str] | str, str, dict[str, str] | None],
-                Awaitable[tuple[int, str, str]],
-            ]
-            | None
-        ) = None,
         lease_store: DesktopLeaseStore | None = None,
         epoch: str | None = None,
         close_owner_streams: Callable[[str], Awaitable[bool]] | None = None,
@@ -107,7 +90,6 @@ class DesktopManager:
         self._runtime = runtime
         self._get_cached = get_cached
         self._get_runtime = get_runtime
-        self._exec_harness_command = exec_harness_command
         self._desktop_sessions: dict[uuid.UUID, DesktopSession] = {}
         # Keep the last incarnation number after stop so generations remain
         # monotonic for this runner epoch and can fence delayed stop events.
@@ -1184,13 +1166,7 @@ class DesktopManager:
 
     @staticmethod
     def _desktop_env() -> dict[str, str]:
-        """Return environment variables for desktop X11 commands.
-
-        ``XAUTHORITY`` is pinned alongside ``HOME``/``DISPLAY`` so every
-        X11 client (xdotool, ffmpeg x11grab, python-Xlib/PyAutoGUI, ...)
-        resolves auth through the runner-owned file instead of depending
-        on ambient workspace state.
-        """
+        """Pin X11 commands to the runner's display, home, and authority file."""
         return {
             "HOME": DESKTOP_HOME,
             "DISPLAY": DESKTOP_DISPLAY,
@@ -1203,42 +1179,6 @@ class DesktopManager:
         if not run_id or not _RUN_ID_RE.match(run_id):
             raise ValueError(f"Invalid run_id: {run_id}")
         return run_id
-
-    async def _ensure_desktop_xauthority(self, workspace_id: uuid.UUID) -> None:
-        """Ensure the X11 client auth file exists inside the workspace.
-
-        Xvnc runs with ``-SecurityTypes None``, but python-Xlib
-        unconditionally opens ``$XAUTHORITY``/``~/.Xauthority`` — an empty
-        file is sufficient for the auth-less server. Idempotent best
-        effort: failures only degrade to the previous behaviour (the
-        client raises ``FileNotFoundError``) and must never fail an
-        otherwise healthy ``execute``.
-        """
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        try:
-            exit_code, output = await runtime.exec_command_wait(
-                info.instance_id,
-                ["sh", "-lc", "touch /root/.Xauthority"],
-                env=self._desktop_env(),
-            )
-            if exit_code != 0:
-                logger.warning(
-                    "desktop_xauthority_ensure_failed",
-                    workspace_id=str(workspace_id),
-                    exit_code=exit_code,
-                    output=output,
-                )
-        except Exception:
-            logger.exception(
-                "desktop_xauthority_ensure_failed",
-                workspace_id=str(workspace_id),
-            )
-
-    async def _require_desktop_live(self, workspace_id: uuid.UUID) -> None:
-        """Raise when the workspace desktop session is not accepting input."""
-        if not await self._is_desktop_session_live(workspace_id):
-            raise RuntimeError("Desktop session is not active")
 
     async def _exec_desktop_shell(
         self,
@@ -1257,13 +1197,8 @@ class DesktopManager:
     async def _get_desktop_geometry(
         self,
         workspace_id: uuid.UUID,
-        width: int | None = None,
-        height: int | None = None,
     ) -> tuple[int, int]:
-        """Return desktop width and height, optionally overriding query results."""
-        if width is not None and height is not None:
-            return width, height
-
+        """Return desktop width and height for recording."""
         exit_code, output = await self._exec_desktop_shell(
             workspace_id,
             "xdotool getdisplaygeometry 2>/dev/null || echo '1920 1080'",
@@ -1285,13 +1220,8 @@ class DesktopManager:
         action: str,
         args: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Execute a desktop I/O action inside the workspace display.
-
-        Dispatches actions after applying shared validation and liveness
-        checks; individual action handlers implement each operation.
-        """
+        """Manage desktop leases, input ownership, and recordings."""
         payload = args or {}
-        log = logger.bind(workspace_id=str(workspace_id), desktop_action=action)
 
         if action == "activate":
             if payload.get("kind") == "agent":
@@ -1323,206 +1253,15 @@ class DesktopManager:
                     "generation": self.get_desktop_generation(workspace_id),
                 }
 
-        execute_code = self._validate_desktop_execute_code(action, payload)
-
-        if action != "record_stop":
-            await self._require_desktop_live(workspace_id)
-
-        if action == "display_info":
-            return await self._desktop_action_display_info(workspace_id, payload)
-
-        if action == "screenshot":
-            return await self._desktop_action_screenshot(workspace_id, payload, log)
-
         if action == "record_start":
+            if not await self._is_desktop_session_live(workspace_id):
+                raise RuntimeError("Desktop session is not active")
             return await self._managed_record_start(workspace_id, payload)
 
         if action == "record_stop":
             return await self._managed_record_stop(workspace_id, payload)
 
-        if action == "execute":
-            return await self._desktop_action_execute(
-                workspace_id, payload, execute_code
-            )
-
         raise ValueError(f"Unknown desktop action: {action}")
-
-    def _validate_desktop_execute_code(
-        self,
-        action: str,
-        payload: dict[str, Any],
-    ) -> str:
-        """Validate the ``execute`` code boundary; return the snippet."""
-        execute_code = ""
-        if action == "execute":
-            raw_code = payload.get("code", "")
-            if not isinstance(raw_code, str) or not raw_code.strip():
-                raise ValueError("code must not be empty")
-            if len(raw_code) > DESKTOP_EXECUTE_MAX_CHARS:
-                raise ValueError(f"code exceeds {DESKTOP_EXECUTE_MAX_CHARS} characters")
-            execute_code = raw_code
-
-        return execute_code
-
-    async def _desktop_action_display_info(
-        self,
-        workspace_id: uuid.UUID,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Return the display name and framebuffer size."""
-        width, height = await self._get_desktop_geometry(workspace_id)
-        return {
-            "ok": True,
-            "display": DESKTOP_DISPLAY,
-            "width": width,
-            "height": height,
-        }
-
-    async def _desktop_action_screenshot(
-        self,
-        workspace_id: uuid.UUID,
-        payload: dict[str, Any],
-        log: Any,
-    ) -> dict[str, Any]:
-        """Capture one frame via ffmpeg x11grab."""
-        width, height = await self._get_desktop_geometry(
-            workspace_id,
-            width=payload.get("width"),
-            height=payload.get("height"),
-        )
-        crop_w = payload.get("crop_w")
-        crop_h = payload.get("crop_h")
-        crop_x = payload.get("crop_x")
-        crop_y = payload.get("crop_y")
-        crop_filter = ""
-        result_width = width
-        result_height = height
-        if (
-            crop_w is not None
-            and crop_h is not None
-            and crop_x is not None
-            and crop_y is not None
-        ):
-            crop_w_int = int(crop_w)
-            crop_h_int = int(crop_h)
-            crop_x_int = int(crop_x)
-            crop_y_int = int(crop_y)
-            if (
-                crop_w_int < 1
-                or crop_h_int < 1
-                or crop_x_int < 0
-                or crop_y_int < 0
-                or crop_x_int + crop_w_int > width
-                or crop_y_int + crop_h_int > height
-            ):
-                raise ValueError("Invalid screenshot crop bounds")
-            crop_filter = (
-                f"-vf crop={crop_w_int}:{crop_h_int}:{crop_x_int}:{crop_y_int} "
-            )
-            result_width = crop_w_int
-            result_height = crop_h_int
-        image_format = str(payload.get("format") or "jpeg").strip().lower()
-        if image_format not in {"jpeg", "png"}:
-            raise ValueError(
-                f"Invalid screenshot format: {payload.get('format')!r} "
-                "(expected 'jpeg' or 'png')"
-            )
-        max_dimension = payload.get("max_dimension")
-        scale_filter = ""
-        if max_dimension is not None:
-            try:
-                max_dim = int(max_dimension)
-            except (TypeError, ValueError):
-                raise ValueError(
-                    "Invalid screenshot max_dimension: "
-                    f"{max_dimension!r} (expected positive integer)"
-                )
-            if max_dim < 1 or max_dim > 7680:
-                raise ValueError(
-                    "Invalid screenshot max_dimension: "
-                    f"{max_dimension!r} (expected 1..7680)"
-                )
-            if max(result_width, result_height) > max_dim:
-                factor = max_dim / max(result_width, result_height)
-                out_w = max(1, int(result_width * factor))
-                out_h = max(1, int(result_height * factor))
-                scale_filter = f"scale={out_w}:{out_h},"
-                result_width = out_w
-                result_height = out_h
-        if image_format == "png":
-            codec_args = "-f image2 -vcodec png pipe:1"
-            result_mime = "image/png"
-        else:
-            codec_args = "-f image2 -vcodec mjpeg pipe:1"
-            result_mime = "image/jpeg"
-        vf_filters: list[str] = []
-        if crop_filter:
-            # crop_filter is "-vf crop=... "; keep only the filter spec.
-            vf_filters.append(crop_filter.replace("-vf", "").strip())
-        if scale_filter:
-            vf_filters.append(scale_filter.rstrip(","))
-        vf_args = f"-vf {','.join(vf_filters)} " if vf_filters else ""
-        ffmpeg_cmd = (
-            f"ffmpeg -y -f x11grab -video_size {width}x{height} "
-            f"-draw_mouse 1 -i {DESKTOP_DISPLAY} -frames:v 1 "
-            f"{vf_args}"
-            f"{codec_args} 2>/dev/null | base64 -w0"
-        )
-        exit_code, output = await self._exec_desktop_shell(workspace_id, ffmpeg_cmd)
-        if exit_code != 0 or not output.strip():
-            log.error("desktop_screenshot_failed", exit_code=exit_code)
-            raise RuntimeError("Failed to capture desktop screenshot")
-        image_b64 = output.strip()
-        log.info(
-            "desktop_screenshot_captured",
-            format=image_format,
-            width=result_width,
-            height=result_height,
-            image_b64_chars=len(image_b64),
-        )
-        return {
-            "ok": True,
-            "image_b64": image_b64,
-            "mime": result_mime,
-            "width": result_width,
-            "height": result_height,
-            "text": "",
-        }
-
-    async def _desktop_action_execute(
-        self,
-        workspace_id: uuid.UUID,
-        payload: dict[str, Any],
-        execute_code: str,
-    ) -> dict[str, Any]:
-        """Run a caller-provided snippet via ``python3 -c``."""
-        # Generic desktop execution: run exactly the passed
-        # internal code (materialized by the backend core) via
-        # ``python3 -c`` with the desktop env. No agent logic lives
-        # here; validation only guards the RPC boundary. Validation ran
-        # above; a single generic liveness probe also ran above.
-        # Xvnc runs with ``-SecurityTypes None``, but python-Xlib
-        # unconditionally opens ``$XAUTHORITY``/``~/.Xauthority`` —
-        # without the file every snippet dies before connecting.
-        # Ensure it (idempotent) on the generic execute path as well:
-        # this self-heals desktops started before the start-command
-        # fix and any workspace where the file was removed.
-        await self._ensure_desktop_xauthority(workspace_id)
-        exit_code, stdout, stderr = await asyncio.wait_for(
-            self._exec_harness_command(
-                workspace_id,
-                ["python3", "-c", execute_code],
-                workdir="/workspace",
-                env=self._desktop_env(),
-            ),
-            timeout=DESKTOP_EXECUTE_TIMEOUT_S,
-        )
-        return {
-            "ok": True,
-            "exit_code": exit_code,
-            "stdout": stdout,
-            "stderr": stderr,
-        }
 
     @live_interaction
     async def write_desktop_clipboard(self, workspace_id: uuid.UUID, text: str) -> None:
@@ -1666,8 +1405,6 @@ __all__ = [
     "DEFAULT_DESKTOP_HEIGHT",
     "DEFAULT_DESKTOP_WIDTH",
     "DESKTOP_DISPLAY",
-    "DESKTOP_EXECUTE_MAX_CHARS",
-    "DESKTOP_EXECUTE_TIMEOUT_S",
     "DESKTOP_HOME",
     "DESKTOP_XAUTHORITY_PATH",
     "MAX_DESKTOP_HEIGHT",

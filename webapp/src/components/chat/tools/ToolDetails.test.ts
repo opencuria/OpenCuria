@@ -289,14 +289,14 @@ describe('tool detail components', () => {
     const wrapper = mount(ToolDetailComputerUse, {
       props: {
         part: makePart({
-          tool: 'left_click',
+          tool: 'mcp_computer-use_cua_repl_js',
           state: 'error',
           output: 'click failed',
-          input: { arguments: '{"x":10,"y":20}' },
+          input: { arguments: { code: 'await app.click(...)', title: 'Click Save' } },
         }),
       },
     })
-    expect(wrapper.text()).toContain('Left click (10, 20)')
+    expect(wrapper.text()).toContain('Click Save')
     expect(wrapper.text()).toContain('click failed')
   })
 

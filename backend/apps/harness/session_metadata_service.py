@@ -280,7 +280,7 @@ def _assistant_summary_content(
             continue
         if part.type == "tool":
             tool = str((part.display or {}).get("tool") or "").strip().lower()
-            if tool in {"question", "ask_user"} and part.state in {
+            if tool == "question" and part.state in {
                 "pending",
                 "running",
             }:

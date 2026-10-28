@@ -2,18 +2,6 @@
 
 import type { HarnessPart } from "./harness";
 
-const COMPUTER_USE_VIEW_TOOLS = new Set(["view_screen", "view_region"]);
-const COMPUTER_USE_POINTER_TOOLS = new Set([
-  "move_mouse",
-  "left_click",
-  "right_click",
-  "middle_click",
-  "double_click",
-  "drag",
-  "scroll",
-]);
-const COMPUTER_USE_KEYBOARD_TOOLS = new Set(["type_text", "press_key", "wait"]);
-
 /** Parse `input.arguments` whether it is a JSON string or an object. */
 export function parseToolArguments(part: HarnessPart): Record<string, unknown> {
   const raw = part.input?.["arguments"];
@@ -71,17 +59,6 @@ function basename(path: string): string {
   return slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
 }
 
-function formatPoint(
-  args: Record<string, unknown>,
-  xKey: string,
-  yKey: string,
-): string {
-  const x = args[xKey];
-  const y = args[yKey];
-  if (x == null || y == null) return "";
-  return `(${x}, ${y})`;
-}
-
 /** Recognize the stable product tool identity, including persisted calls. */
 export function isComputerUseTool(part: HarnessPart): boolean {
   return /^mcp_computer-use_cua_repl_js(?:_reset)?$/.test(resolveToolName(part));
@@ -91,45 +68,10 @@ export function isComputerUseTool(part: HarnessPart): boolean {
 export function computerUseSummary(part: HarnessPart): string {
   const tool = resolveToolName(part);
   const args = parseToolArguments(part);
-  if (isComputerUseTool(part)) {
-    return stringArg(args, "title").slice(0, 80) || (tool.endsWith("_reset") ? "Reset Computer Use" : "Computer Use");
-  }
-  switch (tool) {
-    case "view_screen":
-      return "View screen";
-    case "view_region":
-      return `View region (${args.left}, ${args.top})–(${args.right}, ${args.bottom})`;
-    case "move_mouse":
-      return `Move mouse ${formatPoint(args, "x", "y")}`.trim();
-    case "left_click":
-      return `Left click ${formatPoint(args, "x", "y")}`.trim();
-    case "right_click":
-      return `Right click ${formatPoint(args, "x", "y")}`.trim();
-    case "middle_click":
-      return `Middle click ${formatPoint(args, "x", "y")}`.trim();
-    case "double_click":
-      return `Double click ${formatPoint(args, "x", "y")}`.trim();
-    case "drag":
-      return `Drag ${formatPoint(args, "startX", "startY")} → ${formatPoint(args, "endX", "endY")}`.trim();
-    case "scroll":
-      return `Scroll ${stringArg(args, "direction") || "down"}`.trim();
-    case "type_text": {
-      const text = stringArg(args, "text");
-      return text ? `Type “${text}”` : "Type text";
-    }
-    case "press_key":
-      return `Press ${stringArg(args, "key") || "key"}`;
-    case "open_url":
-      return `Open ${stringArg(args, "url") || "URL"}`;
-    case "wait": {
-      const ms = stringArg(args, "milliseconds");
-      return ms ? `Wait ${ms}ms` : "Wait";
-    }
-    case "ask_user":
-      return stringArg(args, "question") || "Ask user";
-    default:
-      return part.title || tool || "Computer use";
-  }
+  return (
+    stringArg(args, "title").slice(0, 80) ||
+    (tool.endsWith("_reset") ? "Reset Computer Use" : "Computer Use")
+  );
 }
 
 /** Row label: persisted title, then a tool-specific fallback from arguments. */
@@ -193,20 +135,10 @@ export function toolDisplayLabel(part: HarnessPart): string {
     case "todowrite":
       return "Update todos";
     case "question":
-    case "ask_user":
       return "Question";
     case "task":
       return "Subagent";
     default:
-      if (
-        COMPUTER_USE_VIEW_TOOLS.has(tool) ||
-        COMPUTER_USE_POINTER_TOOLS.has(tool) ||
-        COMPUTER_USE_KEYBOARD_TOOLS.has(tool) ||
-        tool === "open_url" ||
-        tool === "ask_user"
-      ) {
-        return computerUseSummary(part);
-      }
       return tool || "tool";
   }
 }

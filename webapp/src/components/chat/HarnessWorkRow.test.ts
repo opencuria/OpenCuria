@@ -195,25 +195,21 @@ describe('HarnessWorkRow', () => {
     )
   })
 
-  it('uses Monitor for computer-use view tools', () => {
+  it('renders Computer Use MCP calls with a monitor and dedicated details', async () => {
     const wrapper = mount(HarnessWorkRow, {
       props: {
-        part: makePart({ tool: 'view_screen', title: 'View screen' }),
+        part: makePart({
+          tool: 'mcp_computer-use_cua_repl_js',
+          title: '',
+          input: { arguments: { code: 'await cua.getState()', title: 'Inspect desktop' } },
+        }),
       },
     })
 
-    expect(wrapper.find('[data-testid="harness-work-row-label"]').text()).toBe('View screen')
+    expect(wrapper.find('[data-testid="harness-work-row-label"]').text()).toBe('Inspect desktop')
     expect(wrapper.find('svg.lucide-monitor').exists()).toBe(true)
-  })
-
-  it('uses MousePointer2 for computer-use input tools', () => {
-    const wrapper = mount(HarnessWorkRow, {
-      props: {
-        part: makePart({ tool: 'left_click', title: 'Left click' }),
-      },
-    })
-
-    expect(wrapper.find('svg.lucide-mouse-pointer-2').exists()).toBe(true)
+    await wrapper.get('[data-slot="collapsible-trigger"]').trigger('click')
+    expect(wrapper.get('[data-testid="tool-detail-computer-use"]').text()).toBe('Inspect desktop')
   })
 
   it('uses native icons for the new built-in tools', () => {

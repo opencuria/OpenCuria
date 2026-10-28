@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import io
 import tarfile
 import tempfile
@@ -138,22 +137,13 @@ async def test_terminal_manager_pty_lifecycle_and_unknown_id_error() -> None:
 class _ComposedRuntime:
 
     def __init__(self) -> None:
-        self.exec_calls: list[tuple[str, list[str], str | None, dict | None]] = []
         self.clone_calls: list[tuple[str, str]] = []
         self.archives: list[tuple[str, str, bytes]] = []
-        self.harness_output = (
-            "OPENCURIA_STDOUT\n"
-            + base64.b64encode(b"desktop output").decode()
-            + "\nOPENCURIA_STDERR\n"
-            + base64.b64encode(b"desktop error").decode()
-            + "\nEXIT:0"
-        )
 
     async def exec_command_wait(
         self, instance_id: str, command, workdir=None, env=None
     ) -> tuple[int, str]:
-        self.exec_calls.append((instance_id, list(command), workdir, env))
-        return 0, self.harness_output
+        return 0, "ok"
 
     async def create_workspace_from_image_artifact(
         self, artifact_id: str, workspace_id: str, **kwargs
@@ -165,31 +155,10 @@ class _ComposedRuntime:
         self.archives.append((instance_id, path, archive))
 
 
-async def test_composer_wires_desktop_harness_and_image_credentials() -> None:
+async def test_composer_wires_image_credentials() -> None:
     runtime = _ComposedRuntime()
     service = _make_service(runtime=runtime)
-    source_id = uuid.uuid4()
-    _cache_workspace(service, source_id)
-
-    # These callbacks are injected by WorkspaceService's composition root;
-    # exercise them through their consumers, not facade delegates.
-    assert service.desktop._exec_harness_command.__self__ is service.harness
     assert service.images._credentials_injector.__self__ is service.credentials
-
-    result = await service.desktop.desktop_action(
-        source_id, "execute", {"code": "print('hello')"}
-    )
-    assert result == {
-        "ok": True,
-        "exit_code": 0,
-        "stdout": "desktop output",
-        "stderr": "desktop error",
-    }
-    harness_calls = [
-        call for call in runtime.exec_calls if "OPENCURIA_STDOUT" in " ".join(call[1])
-    ]
-    assert len(harness_calls) == 1
-    assert "python3" in " ".join(harness_calls[0][1])
 
     clone_id = uuid.uuid4()
     (

@@ -1,5 +1,5 @@
 /**
- * Parsing helpers for answered `question` / `ask_user` tool calls.
+ * Parsing helpers for answered `question` tool calls.
  *
  * The backend persists the asked questions in `input.arguments.questions`
  * (mirrored into `meta.questions` on live parts) and the user answers as

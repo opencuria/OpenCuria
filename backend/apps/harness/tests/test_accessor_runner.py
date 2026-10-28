@@ -191,33 +191,6 @@ async def test_read_write_list_stat_roundtrip() -> None:
     assert transport.emitted[-1][1]["path"] == "/etc/passwd"
 
 
-async def test_desktop_action_returns_screenshot_payload() -> None:
-    """desktop_action emits harness:desktop_action and returns image fields."""
-    transport = FakeTransport()
-
-    async def auto_reply(event: str, payload: dict) -> None:
-        route_harness_result(
-            {
-                "request_id": payload["request_id"],
-                "workspace_id": "ws-1",
-                "ok": True,
-                "image_b64": "aGVsbG8=",
-                "mime": "image/png",
-                "width": 10,
-                "height": 20,
-            }
-        )
-
-    transport.auto_reply = auto_reply
-    accessor = _accessor(transport)
-    result = await accessor.desktop_action("screenshot", {"full": True})
-    assert result["image_b64"] == "aGVsbG8="
-    assert result["width"] == 10
-    payload = _request_id(transport, "harness:desktop_action")
-    assert payload["action"] == "screenshot"
-    assert payload["args"] == {"full": True}
-
-
 async def test_desktop_action_hold_includes_geometry() -> None:
     """Hold attaches the workspace framebuffer size for Xvnc start."""
     transport = FakeTransport()
@@ -265,7 +238,7 @@ async def test_desktop_action_runner_error_raises() -> None:
     transport.auto_reply = auto_reply
     accessor = _accessor(transport)
     with pytest.raises(RunnerAccessorError, match="desktop unavailable"):
-        await accessor.desktop_action("screenshot")
+        await accessor.desktop_action("binding")
 
 
 async def test_desktop_action_timeout_sends_cancel() -> None:
@@ -273,7 +246,7 @@ async def test_desktop_action_timeout_sends_cancel() -> None:
     transport = FakeTransport()
     accessor = _accessor(transport, default_timeout=30.0)
     with pytest.raises(TimeoutError, match="timed out"):
-        await accessor.desktop_action("screenshot", timeout=0.02)
+        await accessor.desktop_action("binding", timeout=0.02)
     events = [event for event, _ in transport.emitted]
     assert events[0] == "harness:desktop_action"
     assert events[-1] == "harness:cancel"
