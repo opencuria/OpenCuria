@@ -14,7 +14,7 @@ Matching rules:
 - LAST-MATCH-WINS within one rule dict (insertion order).
 - Merge order across layers: global -> agent -> mode. ``deny``
   in any layer beats a merged allow; ``ask`` beats ``allow``
-  (see ``_combine_decisions`` in ``runner``).
+  (see ``_combine_decisions`` in ``tools.invocation``).
 - Default when nothing matches: ``allow``, except the reserved key
   ``doom_loop`` which defaults to ``ask``. ``external_directory``
   falls through to normal tool rules unless an explicit reserved-key

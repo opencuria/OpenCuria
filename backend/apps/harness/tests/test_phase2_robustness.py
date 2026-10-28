@@ -20,6 +20,7 @@ from apps.harness.providers.base import (
     ToolSchema,
     Usage,
 )
+from apps.harness.providers.resolver import StaticModelResolver
 from apps.harness.runner import (
     CONTENT_FILTER_NOTICE,
     LENGTH_TRUNCATION_NOTICE,
@@ -103,7 +104,7 @@ async def test_retry_events_emitted_with_attempt_and_delay(monkeypatch) -> None:
     provider.chat_stream = flaky  # type: ignore[method-assign]
     events: list[dict[str, Any]] = []
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         accessor=FakeAccessor(files={}),
         emit=events.append,
@@ -133,7 +134,7 @@ async def test_retry_events_rejected_without_permission_gate() -> None:
 
     events: list[dict[str, Any]] = []
     runner = HarnessRunner(
-        provider=AuthFail(),
+        model_resolver=StaticModelResolver(AuthFail()).resolve,
         tools=default_tool_registry(),
         emit=events.append,
     )
@@ -165,7 +166,7 @@ async def test_content_filter_skips_tools_with_notice() -> None:
     )
     events: list[dict[str, Any]] = []
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         accessor=FakeAccessor(files={"/workspace/a.txt": b"secret"}),
         emit=events.append,
@@ -201,7 +202,7 @@ async def test_length_stop_retries_exactly_once(monkeypatch) -> None:
     )
     events: list[dict[str, Any]] = []
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         accessor=FakeAccessor(files={}),
         emit=events.append,
@@ -224,7 +225,7 @@ async def test_run_step_tools_trims_recent_calls() -> None:
     """20 identical calls keep doom detection but cap the buffer."""
     provider = ScriptProvider([[Delta(text="x", usage=Usage(0, 0, 0))]])
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         accessor=FakeAccessor(files={}),
     )
@@ -232,7 +233,7 @@ async def test_run_step_tools_trims_recent_calls() -> None:
     calls = [
         runner_module_call("read", {"path": "a.txt"}, f"c{i}") for i in range(20)
     ]
-    from apps.harness.runner import _PendingToolCall
+    from apps.harness.tools.invocation import _PendingToolCall
 
     typed = [
         _PendingToolCall(
@@ -254,7 +255,7 @@ def runner_module_call(
 
 async def _doom_probe(runner: HarnessRunner, calls: list, recent: list[str]) -> bool:
     """Feed *calls* through doom-flag logic by stubbing dispatch."""
-    from apps.harness.runner import _ToolCallOutcome
+    from apps.harness.tools.invocation import _ToolCallOutcome
 
     async def ok_dispatch(**kwargs):  # type: ignore[no-untyped-def]
         call = kwargs["call"]
@@ -394,7 +395,7 @@ async def test_no_default_step_budget() -> None:
     assert runner_mod._is_last_step(2, 2) is True
     provider = ScriptProvider([[Delta(text="ok", usage=Usage(1, 1, 2))]])
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         accessor=FakeAccessor(files={}),
         emit=lambda event: asyncio.sleep(0),

@@ -59,27 +59,16 @@ from .provider_retry import (
 from .providers.base import (
     ChatOptions,
     LLMMessage,
-    ProviderAdapter,
     ToolSchema,
     Usage,
 )
 from .providers.context_errors import is_context_overflow_error
-from .providers.resolver import ResolvedModel, StaticModelResolver
+from .providers.resolver import ResolvedModel
 from .tools.base import ToolContext, ToolRegistry
-
-# Compatibility exports for existing integrations and tests.
-from .tools.invocation import (  # noqa: F401
-    EXTERNAL_PATH_TOOLS,
-    TOOL_ERROR_ARGS_SNIPPET,
+from .tools.invocation import (
     AuthorizedToolDispatcher,
-    _action_for_registered_tool,
-    _action_for_tool,
-    _combine_decisions,
-    _detect_external_directory,
     _PendingToolCall,
-    _todos_payload,
     _ToolCallOutcome,
-    _with_args,
 )
 
 log = structlog.get_logger(__name__)
@@ -112,26 +101,6 @@ class ModelResolver(Protocol):
         ...
 
 
-def _slot_sort_key(key: Any) -> tuple[int, int, str]:
-    """Return a comparison-safe sort key for mixed stream-key types.
-
-    Kept for backwards compatibility (mixed ``int``/``str`` stream keys
-    must stay comparable without raising ``TypeError``). New code
-    preserves *observed* provider positions (insertion order) instead of
-    sorting: numeric ``index`` blocks stream in order in practice, while
-    string keys (Responses ``item_id``, synthetic ``call-{step}-{n}`` and
-    ``{index}#{n}`` split keys) must never be reordered
-    lexicographically when observed order differs. ``_provider_step``
-    therefore iterates fragments in first-seen order; this helper is no
-    longer used for final call ordering.
-    """
-    if isinstance(key, bool):
-        return (0, int(key), "")
-    if isinstance(key, int):
-        return (0, key, "")
-    return (1, 0, str(key))
-
-
 def _parse_arguments(raw: Any) -> dict[str, Any]:
     """Parse raw tool arguments (JSON string or dict) into a dict."""
     if isinstance(raw, dict):
@@ -156,8 +125,7 @@ class HarnessRunner(AuthorizedToolDispatcher):
     def __init__(
         self,
         *,
-        provider: ProviderAdapter | None = None,
-        model_resolver: ModelResolver | None = None,
+        model_resolver: ModelResolver,
         tools: ToolRegistry,
         evaluator: PermissionEvaluator | None = None,
         accessor: WorkspaceAccessor | None = None,
@@ -167,8 +135,6 @@ class HarnessRunner(AuthorizedToolDispatcher):
         """Create a runner.
 
         Args:
-            provider: Legacy single-adapter injection (tests). Wrapped into a
-                static resolver so existing fakes keep working.
             model_resolver: Callable ``resolve(model_ref) -> ResolvedModel`` used
                 for per-step adapter selection in multi-provider setups.
             tools: Registry of executable tools.
@@ -177,23 +143,10 @@ class HarnessRunner(AuthorizedToolDispatcher):
             emit: Async callback receiving streaming event dicts.
             chat_options: Optional per-request provider settings.
         """
-        if model_resolver is not None:
-            self._resolve_model = model_resolver
-            self.provider = None
-        elif provider is not None:
-            self._resolve_model = StaticModelResolver(provider).resolve
-            self.provider = provider
-        else:
-            raise ValueError("HarnessRunner requires provider or model_resolver")
+        self._resolve_model = model_resolver
         super().__init__(tools=tools, accessor=accessor, emit=emit, evaluator=evaluator)
         self._log = log
         self.chat_options = chat_options or ChatOptions()
-        self._emit = emit or self._noop_emit
-
-    @staticmethod
-    async def _noop_emit(event: dict[str, Any]) -> None:
-        """Drop events when no emitter was provided."""
-        return None
 
     async def _send(self, event: dict[str, Any]) -> None:
         """Emit *event* without breaking the loop on emitter errors."""
@@ -1243,7 +1196,3 @@ class _MissingAccessor(WorkspaceAccessor):
     async def open_tcp(self, host, port, tls=False, server_hostname=None, timeout=None):  # type: ignore[no-untyped-def]
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
-
-
-#: Backwards-friendly alias (brief allows ``AgentRunner``).
-AgentRunner = HarnessRunner

@@ -941,7 +941,6 @@ class HarnessService:
         organization_id: uuid.UUID,
         session: HarnessSession,
         *,
-        provider: ProviderAdapter | None = None,
         user_id: int | None = None,
         account_ids: dict[str, str] | None = None,
     ) -> str:
@@ -980,7 +979,7 @@ class HarnessService:
                 session.reasoning_effort or "high"
             )
             return session.model
-        if provider is not None or self._provider_factory is not None:
+        if self._provider_factory is not None:
             return session_model
         from .services import ProviderConfigService
 
@@ -1065,7 +1064,6 @@ class HarnessService:
         prompt: str,
         *,
         organization_id: uuid.UUID | None = None,
-        provider: ProviderAdapter | None = None,
         workspace_id: str = "",
         user_id: int | None = None,
         skill_ids: list[str] | None = None,
@@ -1240,16 +1238,10 @@ class HarnessService:
         resolved_model = await sync_to_async(self.validate_provider_for_run)(
             org_id,
             session,
-            provider=provider,
             user_id=run_user_id,
             account_ids=account_ids,
         )
-        resolved_provider = ""
-        if provider is not None:
-            resolved_provider = provider.name
-        else:
-            provider_id, _ = parse_model_ref(resolved_model)
-            resolved_provider = provider_id
+        resolved_provider, _ = parse_model_ref(resolved_model)
         admitted = await sync_to_async(self.reserve_run)(session, scheduled=scheduled)
         if not admitted:
             detail = (
@@ -1448,7 +1440,6 @@ class HarnessService:
                 prompt=prompt.strip(),
                 history=history,
                 assistant=assistant,
-                provider=provider,
                 organization_id=org_id,
                 depth=depth,
                 max_depth=max_depth,
@@ -2164,7 +2155,6 @@ class HarnessService:
         prompt: str,
         history: list[LLMMessage],
         assistant: HarnessMessage,
-        provider: ProviderAdapter | None,
         organization_id: uuid.UUID,
         depth: int,
         max_depth: int,
@@ -2203,9 +2193,7 @@ class HarnessService:
             model_resolver = None
             small_model = ""
             agent_configs: dict[str, dict[str, Any]] = {}
-            if provider is not None:
-                model_resolver = StaticModelResolver(provider).resolve
-            elif self._provider_factory is not None:
+            if self._provider_factory is not None:
                 model_resolver = StaticModelResolver(
                     self._provider_factory(organization_id)
                 ).resolve
@@ -2329,7 +2317,6 @@ class HarnessService:
                     )
             if self._runner_factory is not None:
                 loop_runner = self._runner_factory(
-                    provider=provider,
                     model_resolver=model_resolver,
                     tools=tools,
                     accessor=accessor,
@@ -2339,7 +2326,6 @@ class HarnessService:
                 effort = (session.reasoning_effort or "").strip() or None
                 loop_runner = self._engine_registry_for_run().create(
                     "native",
-                    provider=provider,
                     model_resolver=model_resolver,
                     tools=tools,
                     accessor=accessor,
@@ -3559,7 +3545,3 @@ def reset_default_harness_service() -> None:
     """Drop the process singleton (tests)."""
     global _default_harness_service
     _default_harness_service = None
-
-
-#: Backwards-friendly alias used by tests for the double-run conflict.
-HarnessBusyError = ConflictError

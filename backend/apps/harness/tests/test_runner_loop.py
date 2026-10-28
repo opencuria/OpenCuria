@@ -24,10 +24,12 @@ from apps.harness.providers.base import (
     ToolSchema,
     Usage,
 )
-from apps.harness.runner import AgentRunner, HarnessRunner
+from apps.harness.providers.resolver import StaticModelResolver
+from apps.harness.runner import HarnessRunner
 from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import Tool, ToolResult
+from apps.harness.tools.invocation import AuthorizedToolDispatcher
 
 
 class FakeProvider(ProviderAdapter):
@@ -179,7 +181,7 @@ def _runner(
         events.append(event)
 
     return HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         evaluator=PermissionEvaluator(global_rules=agent_rules),
         accessor=FakeAccessor(files=files or {"/workspace/a.txt": b"hi"}),
@@ -314,20 +316,12 @@ async def test_always_approval_not_cached_as_once() -> None:
 
 async def test_mode_rules_reach_decide_and_schemas() -> None:
     """Mode-specific rules apply via the wired mode layer (happy path)."""
-    events: list[dict[str, Any]] = []
-
-    async def emit(event: dict[str, Any]) -> None:
-        events.append(event)
-
-    provider = FakeProvider([_text_step("planned")])
-    runner = HarnessRunner(
-        provider=provider,
+    runner = AuthorizedToolDispatcher(
         tools=default_tool_registry(),
         evaluator=PermissionEvaluator(
             mode_rules={"plan": {"bash": "deny"}},
         ),
         accessor=FakeAccessor(files={"/workspace/a.txt": b"hi"}),
-        emit=emit,
     )
     from apps.harness.agents.definitions import get_agent
 
@@ -349,11 +343,10 @@ async def test_tool_errors_include_raw_arguments() -> None:
     async def emit(event: dict[str, Any]) -> None:
         events.append(event)
 
-    from apps.harness.runner import _PendingToolCall
     from apps.harness.tools.base import ToolContext
+    from apps.harness.tools.invocation import _PendingToolCall
 
-    runner = HarnessRunner(
-        provider=FakeProvider([]),
+    runner = AuthorizedToolDispatcher(
         tools=default_tool_registry(),
         accessor=FakeAccessor(files={}),
         emit=emit,
@@ -392,8 +385,8 @@ async def test_tool_errors_include_raw_arguments() -> None:
 async def test_tool_image_attachment_reaches_tool_message() -> None:
     """Tool image attachments become multimodal tool message content."""
     from apps.harness.agents.definitions import get_agent
-    from apps.harness.runner import _PendingToolCall
     from apps.harness.tools.base import Tool, ToolContext, ToolResult
+    from apps.harness.tools.invocation import _PendingToolCall
 
     class ImageArgs(BaseModel):
         """No arguments for the image probe tool."""
@@ -426,8 +419,7 @@ async def test_tool_image_attachment_reaches_tool_message() -> None:
 
     registry = default_tool_registry()
     registry.register(ImageTool())
-    runner = HarnessRunner(
-        provider=FakeProvider([]),
+    runner = AuthorizedToolDispatcher(
         tools=registry,
         accessor=FakeAccessor(files={}),
         emit=emit,
@@ -472,8 +464,8 @@ async def test_tool_image_attachment_reaches_tool_message() -> None:
 async def test_tool_pdf_attachment_reaches_model_as_file_part() -> None:
     """PDF attachments become file parts in tool content (OpenCode parity)."""
     from apps.harness.agents.definitions import get_agent
-    from apps.harness.runner import _PendingToolCall
     from apps.harness.tools.base import Tool, ToolContext, ToolResult
+    from apps.harness.tools.invocation import _PendingToolCall
 
     class PdfArgs(BaseModel):
         """No arguments for the PDF probe tool."""
@@ -507,8 +499,7 @@ async def test_tool_pdf_attachment_reaches_model_as_file_part() -> None:
 
     registry = default_tool_registry()
     registry.register(PdfTool())
-    runner = HarnessRunner(
-        provider=FakeProvider([]),
+    runner = AuthorizedToolDispatcher(
         tools=registry,
         accessor=FakeAccessor(files={}),
         emit=emit,
@@ -825,7 +816,7 @@ async def test_abort_emits_aborted() -> None:
             await asyncio.sleep(30)
 
     slow_runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         accessor=FakeAccessor(files={}),
         emit=slow_emit,
@@ -1030,11 +1021,6 @@ async def test_plan_mode_bash_and_process_auto_flow() -> None:
     )
 
 
-async def test_agent_runner_alias() -> None:
-    """AgentRunner is an alias of HarnessRunner."""
-    assert AgentRunner is HarnessRunner
-
-
 async def test_empty_prompt_rejected() -> None:
     """Empty prompts raise ValueError."""
     provider = FakeProvider([_text_step("x")])
@@ -1075,7 +1061,7 @@ async def test_parallel_tools_overlap_and_preserve_call_order() -> None:
         events.append(event)
 
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=registry,
         accessor=FakeAccessor(files={}),
         emit=emit,
@@ -1124,7 +1110,7 @@ async def test_parallel_tool_failure_does_not_cancel_sibling(cancelled: bool) ->
         events.append(event)
 
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=registry,
         accessor=FakeAccessor(files={}),
         emit=emit,
@@ -1172,7 +1158,7 @@ async def test_abort_cancels_in_flight_parallel_tools() -> None:
         events.append(event)
 
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=registry,
         accessor=FakeAccessor(files={}),
         emit=emit,
@@ -1233,7 +1219,7 @@ async def test_send_logs_emitter_errors_without_raising() -> None:
 
     provider = FakeProvider([_text_step("ok")])
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         emit=boom,
     )
@@ -1431,7 +1417,7 @@ async def _provider_step_events(
 
     provider = FakeProvider([step_deltas])
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         accessor=FakeAccessor(files={}),
         emit=emit,

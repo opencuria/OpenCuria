@@ -24,6 +24,7 @@ from apps.harness.providers.base import (
     ToolSchema,
     Usage,
 )
+from apps.harness.providers.resolver import StaticModelResolver
 from apps.harness.repositories import (
     HarnessMessageRepository,
     HarnessPartRepository,
@@ -185,7 +186,7 @@ def _runner(provider: ScriptedProvider) -> HarnessRunner:
         return None
 
     return HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         evaluator=PermissionEvaluator(global_rules={"*": "allow"}),
         accessor=FakeAccessor(files={"/workspace/a.txt": b"hi"}),

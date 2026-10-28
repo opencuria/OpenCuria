@@ -21,6 +21,7 @@ from apps.harness.providers.base import (
     ToolSchema,
     Usage,
 )
+from apps.harness.providers.resolver import StaticModelResolver
 from apps.harness.runner import HarnessRunner
 from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.todos.memory_repository import InMemoryTodoRepository
@@ -176,7 +177,7 @@ async def test_task_in_task_blocked_by_runner_loop(fake_accessor) -> None:
         events.append(event)
 
     runner = HarnessRunner(
-        provider=child_provider,
+        model_resolver=StaticModelResolver(child_provider).resolve,
         tools=default_tool_registry(),
         evaluator=PermissionEvaluator(),
         accessor=fake_accessor,
@@ -204,7 +205,7 @@ async def test_explore_child_is_read_only(fake_accessor) -> None:
         ]
     )
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         evaluator=PermissionEvaluator(),
         accessor=fake_accessor,
@@ -318,7 +319,7 @@ async def test_todo_updated_event_after_todowrite(fake_accessor) -> None:
         events.append(event)
 
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=registry,
         evaluator=PermissionEvaluator(),
         accessor=fake_accessor,
@@ -343,7 +344,7 @@ async def test_runner_withholds_task_at_max_depth(fake_accessor) -> None:
         events.append(event)
 
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         evaluator=PermissionEvaluator(),
         accessor=fake_accessor,
@@ -363,7 +364,7 @@ async def test_runner_allows_task_below_max_depth(fake_accessor) -> None:
         events.append(event)
 
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         evaluator=PermissionEvaluator(),
         accessor=fake_accessor,
@@ -388,7 +389,7 @@ async def test_runner_denies_direct_nested_task_call(fake_accessor) -> None:
         events.append(event)
 
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         evaluator=PermissionEvaluator(),
         accessor=fake_accessor,
@@ -419,7 +420,7 @@ async def test_runner_denies_todowrite_in_child(fake_accessor) -> None:
         events.append(event)
 
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         evaluator=PermissionEvaluator(),
         accessor=fake_accessor,

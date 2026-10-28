@@ -417,7 +417,14 @@ async def test_follower_inherits_snapshot_and_remains_revocable_after_root_finis
     )
     entered = asyncio.Event()
     observed = {}
-    service = HarnessService()
+
+    class Provider(ProviderAdapter):
+        name = "local"
+
+        async def chat_stream(self, *args, **kwargs):
+            yield Delta(text="finished")
+
+    service = HarnessService(provider_factory=lambda _org: Provider())
 
     async def generate_follower(**kwargs):
         observed.update(kwargs)
@@ -438,20 +445,12 @@ async def test_follower_inherits_snapshot_and_remains_revocable_after_root_finis
     else:
         monkeypatch.setattr(service.metadata, "generate_title", no_follower)
 
-    class Provider(ProviderAdapter):
-        name = "local"
-
-        async def chat_stream(self, *args, **kwargs):
-            yield Delta(text="finished")
-
     session = await sync_to_async(HarnessSessionRepository.create)(
         workspace_id=harness_workspace.id,
         organization_id=org.id,
         model="openrouter/acme/test-model",
     )
-    answer = await service.start_run(
-        session, "answer", user_id=provider_member.id, provider=Provider()
-    )
+    answer = await service.start_run(session, "answer", user_id=provider_member.id)
     await asyncio.wait_for(entered.wait(), timeout=8)
     await _wait_run(service, session.id)
     accounts.select_account(org.id, provider_member.id, "openrouter", other.id)

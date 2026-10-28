@@ -56,12 +56,12 @@ from apps.harness.mcp_client.workspace_http import (
     build_workspace_http_client,
     parse_mcp_http_url,
 )
-from apps.harness.runner import (
-    HarnessRunner,
+from apps.harness.tools.base import ToolError
+from apps.harness.tools.invocation import (
+    AuthorizedToolDispatcher,
     _action_for_registered_tool,
     _action_for_tool,
 )
-from apps.harness.tools.base import ToolError
 
 
 def _namespaced(plugin: str, server: str, tool: str) -> str:
@@ -146,9 +146,9 @@ async def test_runner_dispatch_action_uses_original_name():
     # against ``_dispatch_tool_call`` so no looping provider is needed.
     from apps.harness.agents.definitions import get_agent
     from apps.harness.engines.base import RunOptions
-    from apps.harness.runner import _PendingToolCall
     from apps.harness.tools import default_tool_registry
     from apps.harness.tools.base import ToolContext
+    from apps.harness.tools.invocation import _PendingToolCall
 
     seen: list[tuple[str, str]] = []
 
@@ -163,8 +163,7 @@ async def test_runner_dispatch_action_uses_original_name():
     from apps.harness.permissions.evaluator import PermissionEvaluator
     from apps.harness.tests.conftest import FakeAccessor
 
-    runner = HarnessRunner(
-        provider=_NoopProvider(),
+    runner = AuthorizedToolDispatcher(
         tools=registry,
         accessor=None,
         evaluator=PermissionEvaluator(global_rules={"*": "ask", "mcp_*": "ask"}),
@@ -203,17 +202,6 @@ async def test_runner_dispatch_action_uses_original_name():
     assert gated_tool == tool.name
     assert gated_action == "lookup"
     assert "super-secret" not in gated_action
-
-
-class _NoopProvider:
-    """Minimal provider stub (never called in the dispatch unit test)."""
-
-    name = "noop"
-
-    async def chat_stream(self, model, messages, tools, opts=None):
-        if False:  # pragma: no cover - never iterated
-            yield None
-        raise AssertionError("provider must not be called")
 
 
 # -- runtime collision: first wins, collider skipped+closed ------------------

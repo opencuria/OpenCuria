@@ -27,6 +27,7 @@ from apps.harness.providers.base import (
     ToolSchema,
     Usage,
 )
+from apps.harness.providers.resolver import StaticModelResolver
 from apps.harness.repositories import QuestionRequestRepository
 from apps.harness.runner import HarnessRunner
 from apps.harness.tests.conftest import FakeAccessor
@@ -109,7 +110,7 @@ async def test_question_tool_pauses_until_resolve() -> None:
         events.append(event)
 
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         emit=emit,
     )
@@ -170,7 +171,7 @@ async def test_question_timeout_is_tool_error() -> None:
         [_tool_step("question", {"questions": [{"question": "Hi?"}]})]
     )
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         emit=emit,
     )
@@ -229,7 +230,7 @@ async def test_runner_emits_patch_event_after_write() -> None:
         events.append(event)
 
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         accessor=FakeAccessor(files={}),
         emit=emit,
@@ -320,7 +321,7 @@ async def test_compaction_runs_before_provider_when_overflow() -> None:
         ]
     )
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         emit=emit,
     )
@@ -366,7 +367,7 @@ async def test_compaction_child_emit_does_not_leak_to_parent() -> None:
         events.append(event)
 
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         emit=emit,
     )

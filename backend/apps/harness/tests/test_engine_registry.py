@@ -88,7 +88,6 @@ def test_native_factory_preserves_runner_injection(
         return expected
 
     monkeypatch.setattr(runner_module, "HarnessRunner", fake_runner)
-    provider = object()
     model_resolver = object()
     tools = object()
     accessor = object()
@@ -96,7 +95,6 @@ def test_native_factory_preserves_runner_injection(
 
     created = default_engine_registry().create(
         "native",
-        provider=provider,
         model_resolver=model_resolver,
         tools=tools,
         accessor=accessor,
@@ -104,7 +102,6 @@ def test_native_factory_preserves_runner_injection(
     )
 
     assert created is expected
-    assert runner_args["provider"] is provider
     assert runner_args["model_resolver"] is model_resolver
     assert runner_args["tools"] is tools
     assert runner_args["accessor"] is accessor

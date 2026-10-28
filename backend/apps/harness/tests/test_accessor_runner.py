@@ -17,6 +17,7 @@ from apps.harness.access.runner_accessor import (
     route_harness_file_chunk,
     route_harness_result,
 )
+from apps.harness.providers.resolver import StaticModelResolver
 
 
 class FakeTransport:
@@ -426,7 +427,9 @@ async def test_cancel_during_retry_sleep_propagates() -> None:
     from apps.harness.tools import default_tool_registry
 
     runner = HarnessRunner(
-        provider=_SlowProvider(),  # type: ignore[arg-type]
+        model_resolver=StaticModelResolver(
+            _SlowProvider(),  # type: ignore[arg-type]
+        ).resolve,
         tools=default_tool_registry(),
     )
     task = _asyncio.create_task(

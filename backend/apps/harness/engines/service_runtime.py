@@ -17,8 +17,7 @@ def _create_native_engine(**kwargs: Any) -> HarnessEngine:
     from apps.harness.runner import HarnessRunner
 
     return HarnessRunner(
-        provider=kwargs.get("provider"),
-        model_resolver=kwargs.get("model_resolver"),
+        model_resolver=kwargs["model_resolver"],
         tools=kwargs["tools"],
         accessor=kwargs.get("accessor"),
         emit=kwargs.get("emit"),

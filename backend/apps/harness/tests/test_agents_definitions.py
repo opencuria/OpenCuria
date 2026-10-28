@@ -11,6 +11,7 @@ from apps.harness.agents.definitions import (
     list_agents,
     subagent_descriptions,
 )
+from apps.harness.tools.invocation import AuthorizedToolDispatcher
 
 
 def test_all_agents_defined() -> None:
@@ -115,14 +116,10 @@ def test_subagent_question_denied_but_build_allowed() -> None:
 
 def test_global_read_env_is_allowed_for_every_agent() -> None:
     """All agents can read .env and absolute external paths without approval."""
-    from apps.harness.runner import HarnessRunner
     from apps.harness.tests.conftest import FakeAccessor
     from apps.harness.tools import default_tool_registry
 
-    from .test_runner_loop import FakeProvider
-
-    runner = HarnessRunner(
-        provider=FakeProvider([]),
+    runner = AuthorizedToolDispatcher(
         tools=default_tool_registry(),
         accessor=FakeAccessor(files={"/workspace/a.txt": b"hi"}),
     )
@@ -143,14 +140,10 @@ def test_global_read_env_is_allowed_for_every_agent() -> None:
 def test_explicit_global_rules_still_apply() -> None:
     """Custom organization/global rules retain precedence over agent grants."""
     from apps.harness.permissions.evaluator import PermissionEvaluator
-    from apps.harness.runner import HarnessRunner
     from apps.harness.tests.conftest import FakeAccessor
     from apps.harness.tools import default_tool_registry
 
-    from .test_runner_loop import FakeProvider
-
-    runner = HarnessRunner(
-        provider=FakeProvider([]),
+    runner = AuthorizedToolDispatcher(
         tools=default_tool_registry(),
         evaluator=PermissionEvaluator(
             global_rules={"read": {"*.env": "ask"}, "edit": "deny"}

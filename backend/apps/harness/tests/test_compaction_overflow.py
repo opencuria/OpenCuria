@@ -36,6 +36,7 @@ from apps.harness.providers.base import (
     ToolSchema,
     Usage,
 )
+from apps.harness.providers.resolver import StaticModelResolver
 from apps.harness.runner import HarnessRunner
 from apps.harness.tests.conftest import FakeAccessor
 from apps.harness.tests.test_paket6_features import ScriptProvider
@@ -472,7 +473,7 @@ async def test_provider_context_overflow_error_compacts_and_retries() -> None:
         events.append(event)
 
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         emit=emit,
     )
@@ -507,7 +508,10 @@ async def test_text_only_overflow_compacts_without_second_answer() -> None:
             [Delta(text="## Objective\n- summary", usage=Usage(1, 1, 2))],
         ]
     )
-    runner = HarnessRunner(provider=provider, tools=default_tool_registry())
+    runner = HarnessRunner(
+        model_resolver=StaticModelResolver(provider).resolve,
+        tools=default_tool_registry(),
+    )
     result = await runner.run(
         "follow-up",
         "build",
@@ -556,7 +560,7 @@ async def test_tool_step_overflow_does_not_compact_twice_same_turn() -> None:
         ]
     )
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         accessor=FakeAccessor(files={"/workspace/README.md": b"hello"}),
         emit=emit,
@@ -603,7 +607,10 @@ async def test_compaction_never_adds_synthetic_continue_user_message() -> None:
             [Delta(text="final", usage=Usage(1, 1, 2))],
         ]
     )
-    runner = HarnessRunner(provider=provider, tools=default_tool_registry())
+    runner = HarnessRunner(
+        model_resolver=StaticModelResolver(provider).resolve,
+        tools=default_tool_registry(),
+    )
     await runner.run(
         "follow-up",
         "build",
@@ -724,7 +731,10 @@ class AlwaysOverflowAfterCompactProvider(ProviderAdapter):
 async def test_overflow_retry_drops_huge_tool_output() -> None:
     """Provider overflow retries without the overflowing tool blob."""
     provider = OverflowRetryCaptureProvider()
-    runner = HarnessRunner(provider=provider, tools=default_tool_registry())
+    runner = HarnessRunner(
+        model_resolver=StaticModelResolver(provider).resolve,
+        tools=default_tool_registry(),
+    )
     result = await runner.run(
         "follow-up",
         "build",
@@ -773,7 +783,7 @@ async def test_daily_token_quota_is_not_treated_as_overflow() -> None:
         events.append(event)
 
     runner = HarnessRunner(
-        provider=provider,
+        model_resolver=StaticModelResolver(provider).resolve,
         tools=default_tool_registry(),
         emit=emit,
     )
@@ -794,7 +804,10 @@ async def test_daily_token_quota_is_not_treated_as_overflow() -> None:
 async def test_overflow_after_compaction_stops_without_loop() -> None:
     """A second context overflow after compaction fails the run once."""
     provider = AlwaysOverflowAfterCompactProvider()
-    runner = HarnessRunner(provider=provider, tools=default_tool_registry())
+    runner = HarnessRunner(
+        model_resolver=StaticModelResolver(provider).resolve,
+        tools=default_tool_registry(),
+    )
     with pytest.raises(RuntimeError, match="too large to compact"):
         await runner.run(
             "follow-up",
