@@ -6,7 +6,6 @@ import uuid
 from typing import Any
 
 from asgiref.sync import sync_to_async
-from django.db import transaction
 
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, NotFoundError
@@ -210,8 +209,7 @@ class ProviderOAuthService:
         poll_token: uuid.UUID,
     ) -> bool:
         """Save exact account and consume its flow as one transaction."""
-        with transaction.atomic():
-            self.accounts._lock_fence()
+        with self.accounts.repository.account_transaction():
             flow = ProviderOAuthRepository.claim_completion(
                 flow_id, organization_id, int(user.id), poll_token
             )

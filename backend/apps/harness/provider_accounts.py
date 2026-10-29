@@ -1,11 +1,13 @@
-"""Business logic for named, organization-context provider accounts."""
+"""Business logic for named, organization-context provider accounts.
+
+The account repository owns transactions, admission fencing and commit hooks;
+this service owns visibility, credential policy, selection and revocation.
+"""
 
 from __future__ import annotations
 
 import uuid
 from typing import Any
-
-from django.db import transaction
 
 from apps.credentials.services import CredentialSvc
 from apps.organizations.services import OrganizationService
@@ -87,11 +89,6 @@ class ProviderAccountService:
             raise NotFoundError("ProviderAccount", str(account_id)) from None
 
     @staticmethod
-    def _lock_fence() -> None:
-        """Serialize account mutations with provider-turn admission and use."""
-        ProviderTurnRepository.lock_mutex()
-
-    @staticmethod
     def _assert_secret_binding(account: ProviderConnection) -> None:
         """Reject malformed or cross-account internal credential references."""
         if account.credential_id is None:
@@ -153,8 +150,7 @@ class ProviderAccountService:
     ) -> list[dict[str, Any]]:
         """Return safe account metadata visible to the requesting member."""
         provider_filter = self._provider(provider) if provider is not None else None
-        with transaction.atomic():
-            self._lock_fence()
+        with self.repository.account_transaction():
             membership = self.organizations.require_active_membership(
                 user_id, organization_id, lock=True
             )
@@ -230,8 +226,7 @@ class ProviderAccountService:
         if "shared" in payload and not isinstance(payload["shared"], bool):
             raise ValueError("shared must be a boolean")
 
-        with transaction.atomic():
-            self._lock_fence()
+        with self.repository.account_transaction():
             membership = self.organizations.require_active_membership(
                 user_id, organization_id, lock=True
             )
@@ -376,7 +371,7 @@ class ProviderAccountService:
                     raise NotFoundError("ProviderAccount", str(account.id))
             if scope_changed and old_user_id is None:
                 self.repository.clear_selections_for_others(account.id, user_id)
-                transaction.on_commit(lambda: notify_account_revoked(account.id))
+                self.repository.after_commit(lambda: notify_account_revoked(account.id))
             return account
 
     @staticmethod
@@ -478,8 +473,7 @@ class ProviderAccountService:
     ) -> None:
         """Soft-delete after canceling dependents within the shared fence."""
         parsed_id = self._parse_account_id(account_id)
-        with transaction.atomic():
-            self._lock_fence()
+        with self.repository.account_transaction():
             membership = self.organizations.require_active_membership(
                 user_id, organization_id, lock=True
             )
@@ -503,7 +497,7 @@ class ProviderAccountService:
                 )
             self.repository.clear_selections(account.id)
             self.repository.soft_delete(account)
-            transaction.on_commit(lambda: notify_account_revoked(account.id))
+            self.repository.after_commit(lambda: notify_account_revoked(account.id))
 
     def select_account(
         self,
@@ -517,8 +511,7 @@ class ProviderAccountService:
         selected_id = (
             self._parse_account_id(account_id) if account_id is not None else None
         )
-        with transaction.atomic():
-            self._lock_fence()
+        with self.repository.account_transaction():
             self.organizations.require_active_membership(
                 user_id, organization_id, lock=True
             )
@@ -536,8 +529,7 @@ class ProviderAccountService:
         self, organization_id: uuid.UUID, user_id: int
     ) -> dict[str, ProviderConnection]:
         """Return selected accounts, initializing only absent selection rows."""
-        with transaction.atomic():
-            self._lock_fence()
+        with self.repository.account_transaction():
             self.organizations.require_active_membership(
                 user_id, organization_id, lock=True
             )
@@ -611,8 +603,7 @@ class ProviderAccountService:
     ) -> None:
         """Persist refresh by exact ID, serializing merge with metadata writes."""
         parsed_id = self._parse_account_id(account_id)
-        with transaction.atomic():
-            self._lock_fence()
+        with self.repository.account_transaction():
             account = self.repository.get_by_id(parsed_id, lock=True)
             if account is None or account.credential_id is None:
                 raise NotFoundError("ProviderAccount", str(account_id))

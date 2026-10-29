@@ -3,17 +3,38 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
 from .models import ProviderConnection, ProviderSelection
+from .provider_turn_repository import ProviderTurnRepository
 
 
 class ProviderAccountRepository:
-    """Persistence operations used only by ``ProviderAccountService``."""
+    """Persist accounts and selections, serializing account workflows."""
+
+    @staticmethod
+    @contextmanager
+    def account_transaction() -> Iterator[None]:
+        """Hold admission's fence through account reads, policy and writes.
+
+        Secrets, selections and dependent turn revocations share this atomic
+        scope. Acquire the same mutex as provider-turn admission before any
+        account or membership reads, on both SQLite and PostgreSQL.
+        """
+        with transaction.atomic():
+            ProviderTurnRepository.lock_mutex()
+            yield
+
+    @staticmethod
+    def after_commit(callback: Callable[[], None]) -> None:
+        """Defer the service's effect until the outer transaction commits."""
+        transaction.on_commit(callback)
 
     @staticmethod
     def get_by_id(

@@ -44,6 +44,9 @@ Session metadata generation is independent as well; the lifecycle service only
 schedules it and supplies change notifications to ``SessionMetadataService``.
 Provider account management never imports its orchestration consumers; account
 validation stays with accounts and revocation wakeups use a leaf event module.
+Account transactions, admission fencing and commit hooks belong to the account
+repository, including OAuth completion; services choose policy and effects
+without importing Django DB.
 Provider-history reconstruction is independent of run orchestration; its caller
 supplies persistence ports to ``ProviderHistoryService``.
 Permission and question interactions own pending requests and live waiters in
@@ -696,6 +699,29 @@ def test_provider_accounts_never_import_their_orchestration_consumers() -> None:
         "wakeups through provider_account_events; account management must not "
         "import its consumers, even transitively or inside functions:\n"
         + "\n".join(sorted(violations))
+    )
+
+
+def test_provider_account_service_delegates_transactions_and_locks() -> None:
+    """Account and OAuth policy use the repository-owned admission fence."""
+    violations = []
+    for name in ("provider_accounts.py", "provider_oauth.py"):
+        path = APPS_ROOT / "harness" / name
+        tree = ast.parse(path.read_text())
+        violations.extend(
+            f"{name}: {module}"
+            for module in sorted(_imported_modules(path, tree))
+            if module == "django.db" or module.startswith("django.db.")
+        )
+        violations.extend(
+            f"{name}:{node.lineno}: {node.attr}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and node.attr in {"save", "asave", "delete", "adelete", "lock_mutex"}
+        )
+    assert violations == [], (
+        "Keep provider account transactions, admission locking and commit hooks "
+        "in ProviderAccountRepository:\n" + "\n".join(violations)
     )
 
 
