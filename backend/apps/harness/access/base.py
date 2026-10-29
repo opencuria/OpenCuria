@@ -215,10 +215,6 @@ class WorkspaceAccessor(abc.ABC):
         """List directory entries inside the sandboxed workspace."""
 
     @abc.abstractmethod
-    async def stat(self, path: str) -> file_types.FileStat:
-        """Stat a path inside the sandboxed workspace."""
-
-    @abc.abstractmethod
     async def desktop_action(
         self,
         action: str,

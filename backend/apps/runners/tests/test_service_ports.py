@@ -115,7 +115,7 @@ def test_harness_reply_and_stream_routing_use_gateway():
     svc = RunnerService(harness_gateway=gateway)
     result = {"request_id": "r1", "workspace_id": "w"}
     chunk = {"request_id": "r2", "workspace_id": "w"}
-    assert svc._route_harness_reply("harness:stat_result", result) is True
+    assert svc._route_harness_reply("harness:list_result", result) is True
     svc._validate_runner_file_chunk = MagicMock(return_value=True)
     assert svc._route_harness_reply("harness:read_file_chunk", chunk) is True
     assert svc._route_harness_reply("terminal:output", {}) is None

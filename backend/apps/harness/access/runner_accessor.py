@@ -16,7 +16,6 @@ Protocol (backend -> runner)::
                                total_chunks, content}
     harness:write_file_finish {request_id, workspace_id, path}
     harness:list        {request_id, workspace_id, path}
-    harness:stat           {request_id, workspace_id, path}
     harness:desktop_action {request_id, workspace_id, action, args}
     harness:cancel         {request_id, workspace_id}
 
@@ -35,8 +34,6 @@ Protocol (runner -> backend)::
                               or {..., error}
     harness:list_result      {request_id, workspace_id, entries}
                              or {..., error}
-    harness:stat_result           {request_id, workspace_id, path, is_dir,
-                                   size, mime} or {..., error}
     harness:desktop_action_result {request_id, workspace_id, ok?, ...}
                                   or {..., error}
 
@@ -73,7 +70,7 @@ from .base import (
     sanitize_exec_workdir,
     sanitize_harness_path,
 )
-from .file_types import DirEntry, FileContent, FileStat, guess_mime_type
+from .file_types import DirEntry, FileContent, guess_mime_type
 
 log = structlog.get_logger(__name__)
 
@@ -936,33 +933,6 @@ class RunnerWorkspaceAccessor(WorkspaceAccessor):
                 )
             )
         return entries
-
-    async def stat(self, path: str) -> FileStat:
-        """Stat a path in the workspace VM."""
-        safe_path = sanitize_harness_path(path)
-        request_id = uuid.uuid4().hex
-        result = await self._await_result(
-            request_id,
-            "harness:stat",
-            {
-                "request_id": request_id,
-                "workspace_id": self.workspace_id,
-                "path": safe_path,
-            },
-            None,
-        )
-        self._raise_for_error(result, "harness:stat")
-        mime = str(
-            result.get("mime") or result.get("mime_type") or guess_mime_type(
-                safe_path
-            )
-        )
-        return FileStat(
-            path=str(result.get("path", safe_path)),
-            is_dir=bool(result.get("is_dir", False)),
-            size=int(result.get("size", 0) or 0),
-            mime=mime,
-        )
 
     async def desktop_action(
         self,

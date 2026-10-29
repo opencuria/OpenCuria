@@ -579,59 +579,6 @@ class FileManager:
         }
 
     @live_interaction
-    async def stat_path(
-        self,
-        workspace_id: uuid.UUID,
-        path: str,
-        *,
-        allow_external: bool = False,
-    ) -> dict:
-        """Stat a path inside the workspace VM.
-
-        Returns a dict with ``path``, ``is_dir``, ``size``, ``mime_type``.
-        """
-        safe_path = self._file_path(path, allow_external=allow_external)
-        assert self._get_cached is not None and self._get_runtime is not None
-        info = self._get_cached(workspace_id)
-        runtime = self._get_runtime(workspace_id)
-        if not info.instance_id:
-            raise RuntimeError("Workspace has no instance assigned")
-        safe_path = await self._realpath_under_workspace(
-            runtime, info.instance_id, safe_path, allow_external=allow_external
-        )
-
-        qpath = shlex.quote(safe_path)
-        shell_cmd = (
-            f"if [ -e {qpath} ]; then "
-            f"if [ -d {qpath} ]; then echo 'dir'; "
-            f"du -sb {qpath} | cut -f1; "
-            f"echo 'inode/directory'; "
-            f"else stat -c '%s' {qpath}; "
-            f"file --mime-type -b {qpath} 2>/dev/null "
-            "|| echo 'application/octet-stream'; "
-            f"fi; else echo 'missing'; fi"
-        )
-        exit_code, output = await runtime.exec_command_wait(
-            info.instance_id,
-            command=["sh", "-c", shell_cmd],
-            workdir="/workspace",
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"Failed to stat path: {output}")
-        lines = output.strip().splitlines()
-        if not lines or lines[0].strip() == "missing":
-            raise FileNotFoundError(f"No such file or directory: {path}")
-        is_dir = lines[0].strip() == "dir"
-        size = int(lines[1].strip()) if len(lines) > 1 else 0
-        mime_type = lines[2].strip() if len(lines) > 2 else "application/octet-stream"
-        return {
-            "path": safe_path,
-            "is_dir": is_dir,
-            "size": size,
-            "mime_type": mime_type,
-        }
-
-    @live_interaction
     async def write_file_content(
         self,
         workspace_id: uuid.UUID,

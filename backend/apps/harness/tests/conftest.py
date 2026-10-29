@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from apps.harness.access.base import ExecResult, WorkspaceAccessor
-from apps.harness.access.file_types import DirEntry, FileContent, FileStat
+from apps.harness.access.file_types import DirEntry, FileContent
 from apps.harness.access.runner_accessor import RunnerAccessorError
 from apps.harness.models import ProviderConnection
 from apps.organizations.models import Organization
@@ -196,13 +196,6 @@ class FakeAccessor(WorkspaceAccessor):
                         )
                     )
         return entries
-
-    async def stat(self, path: str) -> FileStat:
-        """Stat the in-memory file map."""
-        self._maybe_fail()
-        if path in self.files:
-            return FileStat(path=path, size=len(self.files[path]))
-        raise RunnerAccessorError(f"stat failed: not found {path}")
 
     async def desktop_action(
         self,

@@ -1146,10 +1146,6 @@ class _MissingAccessor(WorkspaceAccessor):
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")
 
-    async def stat(self, path):  # type: ignore[no-untyped-def]
-        """Raise (no workspace connected)."""
-        raise RuntimeError("No workspace accessor configured")
-
     async def desktop_action(self, action, args=None, timeout=None):  # type: ignore[no-untyped-def]
         """Raise (no workspace connected)."""
         raise RuntimeError("No workspace accessor configured")

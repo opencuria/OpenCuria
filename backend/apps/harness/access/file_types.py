@@ -6,7 +6,7 @@ These contracts are independent of accessors, process streams and file readers.
 from __future__ import annotations
 
 import mimetypes
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 def guess_mime_type(path: str) -> str:
@@ -33,14 +33,3 @@ class DirEntry:
     path: str
     is_dir: bool = False
     size: int = 0
-
-
-@dataclass(frozen=True)
-class FileStat:
-    """Metadata returned by ``stat``."""
-
-    path: str
-    is_dir: bool = False
-    size: int = 0
-    mime: str = "application/octet-stream"
-    extra: dict = field(default_factory=dict)

@@ -119,7 +119,6 @@ async def test_client_clean_flag_does_not_replace_scrub_proof(service):
         ("files", "upload_file", ("/workspace", "test", "dGVzdA==")),
         ("files", "download_file", ("/workspace/test",)),
         ("files", "write_file_content", ("/workspace/test", "data")),
-        ("files", "stat_path", ("/workspace/test",)),
         ("harness", "exec_harness_command", (["echo", "test"],)),
         ("git", "execute_git_operation", ("list_repos",)),
         ("terminal_manager", "start_terminal", ()),

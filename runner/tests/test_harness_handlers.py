@@ -25,7 +25,6 @@ class _FakeService:
         self.find_calls: list[tuple[object, str, object]] = []
         self.read_calls: list[tuple[str, str, object]] = []
         self.write_calls: list[tuple[str, str, str, int]] = []
-        self.stat_calls: list[tuple[str, str]] = []
         self.file_access_calls: list[tuple[str, str, bool]] = []
         self.desktop_action_calls: list[tuple[object, str, object]] = []
         self.wait_result = (0, "out", "err")
@@ -68,9 +67,6 @@ class _FakeService:
             return await self._outer._find_files_impl(
                 workspace_id, query=query, limit=limit
             )
-
-        async def stat_path(self, workspace_id, path, *, allow_external=False):
-            return await self._outer._stat_path_impl(workspace_id, path, allow_external=allow_external)
 
     class _FakeDesktop:
         def __init__(self, outer: _FakeService) -> None:
@@ -237,18 +233,6 @@ class _FakeService:
             "truncated": False,
         }
 
-    async def _stat_path_impl(self, workspace_id, path, *, allow_external=False):
-        self.stat_calls.append((workspace_id, path))
-        self.file_access_calls.append(("stat", path, allow_external))
-        if self._is_external_path(path) and not allow_external:
-            raise ValueError("Path must be under /workspace")
-        return {
-            "path": "/workspace/a.txt",
-            "is_dir": False,
-            "size": 2,
-            "mime_type": "text/plain",
-        }
-
 
 def _interface(service: _FakeService) -> WebSocketInterface:
     interface = WebSocketInterface(service, RunnerSettings(state_dir=tempfile.mkdtemp()))
@@ -325,7 +309,7 @@ class HarnessExecWaitTests(unittest.IsolatedAsyncioTestCase):
 
 
 class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_read_list_stat_ok(self) -> None:
+    async def test_read_list_ok(self) -> None:
         service = _FakeService()
         interface = _interface(service)
         workspace_id = uuid.uuid4()
@@ -335,9 +319,6 @@ class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         await interface._sio.handlers["/"]["harness:list"](
             _payload(workspace_id, "l1", path="/workspace")
-        )
-        await interface._sio.handlers["/"]["harness:stat"](
-            _payload(workspace_id, "s1", path="/workspace/a.txt")
         )
 
         emitted = {
@@ -350,7 +331,6 @@ class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             emitted["harness:list_result"]["entries"][0]["name"], "a.txt"
         )
-        self.assertFalse(emitted["harness:stat_result"]["is_dir"])
 
     async def test_harness_file_rpcs_allow_external_paths(self) -> None:
         service = _FakeService()
@@ -365,9 +345,6 @@ class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):
         await handlers["harness:list"](
             _payload(workspace_id, "l-external", path="/etc")
         )
-        await handlers["harness:stat"](
-            _payload(workspace_id, "s-external", path=path)
-        )
 
         emitted = {
             call.args[0]: call.args[1]
@@ -380,13 +357,11 @@ class HarnessFileHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             emitted["harness:list_result"]["entries"][0]["name"], "a.txt"
         )
-        self.assertFalse(emitted["harness:stat_result"]["is_dir"])
         self.assertEqual(
             service.file_access_calls,
             [
                 ("read", path, True),
                 ("list", "/etc", True),
-                ("stat", path, True),
             ],
         )
 
@@ -990,19 +965,9 @@ class HarnessServiceSandboxTests(unittest.IsolatedAsyncioTestCase):
             service.files.read_file(workspace_id, "/etc/passwd"),
             service.files.write_file_content(workspace_id, "/etc/passwd", content),
             service.files.list_files(workspace_id, "/etc"),
-            service.files.stat_path(workspace_id, "/etc/passwd"),
         ):
             with self.subTest(operation=operation), self.assertRaises(ValueError):
                 await operation
-
-    async def test_stat_path_rejects_traversal(self) -> None:
-        from src.service import WorkspaceService
-
-        service = WorkspaceService(
-            runtime={}, settings=RunnerSettings(state_dir=tempfile.mkdtemp())
-        )
-        with self.assertRaises(ValueError):
-            await service.files.stat_path(uuid.uuid4(), "/workspace/../evil")
 
     def test_parse_exec_output_splits_streams(self) -> None:
         from src.services.harness_exec import HarnessExecService
@@ -1062,16 +1027,6 @@ class HarnessServiceQuoteInjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(shlex.quote(evil), shell_cmd)
         self.assertNotIn("'x'; touch", shell_cmd.replace(shlex.quote(evil), ""))
 
-    async def test_stat_path_quotes_single_quote_path(self) -> None:
-        import shlex
-
-        service, captured, workspace_id = self._service()
-        evil = "/workspace/x'; touch /tmp/pwned; echo '"
-        with self.assertRaises(FileNotFoundError):
-            await service.files.stat_path(workspace_id, evil)
-        shell_cmd = next(c[2] for c in captured if c[:2] == ["sh", "-c"])
-        self.assertIn(shlex.quote(evil), shell_cmd)
-
     async def test_download_dir_passes_single_quote_path_as_argv(self) -> None:
         from src.models import WorkspaceInfo
 
@@ -1126,8 +1081,6 @@ class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
                     return 0, "f\t3\t/etc/target.txt\n"
                 if command[0] == "sh" and "test -f" in command[2]:
                     return 0, "3\ntext/plain\nYWJj\n"
-                if command[0] == "sh" and "if [ -e" in command[2]:
-                    return 0, "3\n3\ntext/plain\n"
                 return 0, ""
 
             async def put_archive(self, instance_id, path, archive):
@@ -1149,11 +1102,6 @@ class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
         service, _runtime, workspace_id = self._service("/etc/shadow")
         with self.assertRaises(ValueError):
             await service.files.read_file(workspace_id, "/workspace/link")
-
-    async def test_stat_path_rejects_symlink_escape(self) -> None:
-        service, _runtime, workspace_id = self._service("/etc/passwd")
-        with self.assertRaises(ValueError):
-            await service.files.stat_path(workspace_id, "/workspace/link")
 
     async def test_list_files_rejects_symlink_escape(self) -> None:
         service, _runtime, workspace_id = self._service("/etc")
@@ -1190,9 +1138,6 @@ class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
                 listed = await manager.list_files(
                     workspace_id, requested_path, allow_external=True
                 )
-                stat = await manager.stat_path(
-                    workspace_id, requested_path, allow_external=True
-                )
                 await manager.write_file_content(
                     workspace_id,
                     requested_path,
@@ -1206,8 +1151,6 @@ class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(read_result["size"], 3)
                 self.assertEqual(listed[0]["path"], "/etc/target.txt")
-                self.assertEqual(stat["path"], "/etc/target.txt")
-                self.assertEqual(stat["size"], 3)
                 self.assertIn(
                     [
                         "find",
@@ -1225,13 +1168,6 @@ class HarnessServiceSymlinkEscapeTests(unittest.IsolatedAsyncioTestCase):
                     any(
                         command[0] == "sh"
                         and "test -f /etc/target.txt" in command[2]
-                        for command in runtime.commands
-                    )
-                )
-                self.assertTrue(
-                    any(
-                        command[0] == "sh"
-                        and "if [ -e /etc/target.txt ]" in command[2]
                         for command in runtime.commands
                     )
                 )

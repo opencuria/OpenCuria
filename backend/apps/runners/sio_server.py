@@ -328,17 +328,6 @@ def _register_event_handlers(sio: socketio.AsyncServer) -> None:
             "harness:list_result", data, runner_id=runner_id
         )
 
-    @sio.on("harness:stat_result")
-    async def on_harness_stat_result(sid: str, data: dict):
-        """Route stat results to the owning harness accessor."""
-        runner_id = await _require_runner_id(sio, sid, "harness:stat_result")
-        if not runner_id:
-            return
-        service = get_runner_service()
-        await sync_to_async(service.handle_harness_reply)(
-            "harness:stat_result", data, runner_id=runner_id
-        )
-
     @sio.on("harness:desktop_action_result")
     async def on_harness_desktop_action_result(sid: str, data: dict):
         """Route desktop action results to the owning harness accessor."""

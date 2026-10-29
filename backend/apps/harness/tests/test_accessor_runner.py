@@ -126,8 +126,8 @@ async def test_exec_wait_timeout_sends_cancel() -> None:
     assert events[-1] == "harness:cancel"
 
 
-async def test_read_write_list_stat_roundtrip() -> None:
-    """read/write/list/stat use request_id correlation and sandbox paths."""
+async def test_read_write_list_roundtrip() -> None:
+    """read/write/list use request_id correlation and sandbox paths."""
     transport = FakeTransport()
     accessor = _accessor(transport)
 
@@ -163,17 +163,6 @@ async def test_read_write_list_stat_roundtrip() -> None:
                     ],
                 }
             )
-        elif event == "harness:stat":
-            route_harness_result(
-                {
-                    "request_id": rid,
-                    "workspace_id": "ws-1",
-                    "path": "/workspace/a.txt",
-                    "is_dir": False,
-                    "size": 2,
-                    "mime": "text/plain",
-                }
-            )
 
     transport.auto_reply = auto_reply
     content = await accessor.read_file("/workspace/a.txt")
@@ -183,9 +172,6 @@ async def test_read_write_list_stat_roundtrip() -> None:
     entries = await accessor.list_dir("/workspace")
     assert entries[0].name == "a.txt"
     assert entries[0].is_dir is False
-    info = await accessor.stat("/workspace/a.txt")
-    assert info.size == 2
-    assert info.is_dir is False
 
     external = await accessor.read_file("/etc/passwd")
     assert external.content == b"hi"

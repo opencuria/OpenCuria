@@ -2324,34 +2324,6 @@ class WebSocketInterface(Interface):
                 )
                 logger.exception("harness_list_failed")
 
-        @sio.on("harness:stat")
-        async def on_harness_stat(data: dict) -> None:
-            ws_echo, request_id, path = _file_request_echo(data)
-            try:
-                workspace_id = uuid.UUID(ws_echo)
-                result = await self._service.files.stat_path(
-                    workspace_id, path, allow_external=True
-                )
-                await _harness_result(
-                    "harness:stat_result",
-                    {
-                        "workspace_id": str(workspace_id),
-                        "request_id": request_id,
-                        **result,
-                    },
-                )
-            except Exception as exc:
-                await _harness_result(
-                    "harness:stat_result",
-                    {
-                        "workspace_id": ws_echo,
-                        "request_id": request_id,
-                        "path": path,
-                        "error": str(exc),
-                    },
-                )
-                logger.exception("harness_stat_failed")
-
         @sio.on("harness:desktop_action")
         async def on_harness_desktop_action(data: dict) -> None:
             workspace_id = uuid.UUID(data["workspace_id"])

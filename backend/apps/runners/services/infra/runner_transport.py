@@ -121,7 +121,6 @@ class RunnerTransportMixin:
             "harness:read_file_chunk",
             "harness:write_file_result",
             "harness:list_result",
-            "harness:stat_result",
             "harness:desktop_action_result",
             "workspace:artifact_ensure_result",
         }
