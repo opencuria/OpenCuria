@@ -8,12 +8,10 @@ from typing import Any
 
 from common.exceptions import NotFoundError
 
+from ..model_catalog_service import list_merged_provider_models
 from ..provider_accounts import ProviderAccountService
 from ..providers.base import ProviderError
-from ..providers.models_catalog import (
-    ProviderModel,
-    list_merged_provider_models,
-)
+from ..providers.models_catalog import ProviderModel
 from .catalog import list_claude_models, list_engines
 from .codex.catalog import (
     CODEX_EFFORTS,

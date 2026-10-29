@@ -5,13 +5,15 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from apps.harness.model_catalog_service import (
+    clear_models_cache,
+    list_merged_provider_models,
+)
 from apps.harness.providers.bedrock import resolve_bedrock_model_id
 from apps.harness.providers.model_ref import namespaced_model_id, parse_model_ref
 from apps.harness.providers.models_catalog import (
     bedrock_models,
     chatgpt_models,
-    clear_models_cache,
-    list_merged_provider_models,
 )
 
 

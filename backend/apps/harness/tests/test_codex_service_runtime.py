@@ -17,6 +17,7 @@ from aiohttp import web
 from apps.harness.engines.codex.session_store import CodexSessionStore, home_for
 from apps.harness.engines.run_repository import HarnessRunRepository
 from apps.harness.harness_service import HarnessService
+from apps.harness.model_catalog_service import clear_models_cache
 from apps.harness.models import (
     HarnessMessage,
     HarnessPart,
@@ -27,7 +28,6 @@ from apps.harness.models import (
 from apps.harness.permissions.models import PermissionRequest
 from apps.harness.provider_accounts import ProviderAccountService
 from apps.harness.providers.models_catalog import (
-    clear_models_cache,
     normalize_openrouter_catalog,
 )
 from apps.harness.tests.test_codex_core import PINNED, LocalAccessor, McpWriteTool

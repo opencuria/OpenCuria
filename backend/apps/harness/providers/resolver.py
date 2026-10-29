@@ -13,17 +13,17 @@ from typing import Any
 import structlog
 from asgiref.sync import sync_to_async
 
+from ..model_catalog_service import (
+    get_cached_account_catalog,
+    selected_catalog_connections,
+)
 from ..provider_accounts import ProviderAccountService
 from .base import ChatOptions, Delta, LLMMessage, ProviderAdapter, ToolSchema
 from .bedrock import DEFAULT_REGION, BedrockAdapter, resolve_bedrock_model_id
 from .chatgpt import ChatGPTAdapter
 from .chatgpt_credentials import get_fresh_chatgpt_credentials
 from .model_ref import namespaced_model_id, parse_model_ref
-from .models_catalog import (
-    ProviderModel,
-    get_cached_account_catalog,
-    selected_catalog_connections,
-)
+from .models_catalog import ProviderModel
 from .openai_compatible import OpenAICompatibleAdapter
 from .openrouter import DEFAULT_BASE_URL, OpenRouterAdapter
 

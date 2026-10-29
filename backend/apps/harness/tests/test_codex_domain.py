@@ -23,9 +23,9 @@ from apps.harness.engines.repositories import HarnessEngineRepository
 from apps.harness.engines.runs import HarnessRunService
 from apps.harness.engines.service import EngineCatalogService
 from apps.harness.harness_service import HarnessService
+from apps.harness.model_catalog_service import clear_models_cache
 from apps.harness.models import HarnessSession
 from apps.harness.provider_accounts import ProviderAccountService
-from apps.harness.providers.models_catalog import clear_models_cache
 from apps.harness.repositories import HarnessMessageRepository
 from apps.harness.session_access_service import SessionAccessService
 from apps.organizations.models import Membership

@@ -10,6 +10,7 @@ from asgiref.sync import sync_to_async
 from apps.organizations.services import OrganizationService
 from common.exceptions import AuthenticationError, NotFoundError
 
+from .model_catalog_service import clear_models_cache
 from .provider_accounts import ProviderAccountService
 from .provider_oauth_models import ProviderOAuthFlow
 from .provider_oauth_repository import ProviderOAuthRepository
@@ -245,8 +246,6 @@ class ProviderOAuthService:
                 str(account.id),
                 str(credentials.get("account_id") or ""),
             )
-            from .providers.models_catalog import clear_models_cache
-
             clear_models_cache(str(organization_id))
             return True
 

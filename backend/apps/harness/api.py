@@ -31,6 +31,7 @@ from apps.runners.services import get_runner_service
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
 from .conversation_service import ConversationService
+from .model_catalog_service import clear_models_cache
 from .schemas import (
     AgentConfigOut,
     AgentConfigSaveIn,
@@ -1199,7 +1200,6 @@ def create_provider_account(
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.provider_accounts import ProviderAccountService
-        from apps.harness.providers.models_catalog import clear_models_cache
 
         if provider == "chatgpt":
             raise ValueError("ChatGPT accounts must be connected using OAuth")
@@ -1244,7 +1244,6 @@ def update_provider_account(
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.provider_accounts import ProviderAccountService
-        from apps.harness.providers.models_catalog import clear_models_cache
 
         service = ProviderAccountService()
         account = service.get_account(
@@ -1287,7 +1286,6 @@ def delete_provider_account(request: HttpRequest, provider: str, account_id: uui
         org_id = _get_org_id(request)
         OrganizationService().require_membership(request.user, org_id)
         from apps.harness.provider_accounts import ProviderAccountService
-        from apps.harness.providers.models_catalog import clear_models_cache
 
         service = ProviderAccountService()
         account = service.get_account(

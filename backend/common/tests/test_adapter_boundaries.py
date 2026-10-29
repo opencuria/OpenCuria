@@ -38,6 +38,9 @@ Harness persistence never imports tool adapters; todo records and their storage
 port live in ``apps.harness.todos.domain`` and tools call its todo service.
 Provider wire adapters share context-error classification within ``providers``;
 neither they nor their dependencies import orchestration or persistence.
+Provider catalog parsing and static capabilities obey the same boundary;
+account authorization, credential resolution and caching live in
+``apps.harness.model_catalog_service``.
 Stateless commit suggestions and shared small-model composition are independent
 of chat session orchestration; their adapter calls ``CommitMessageService``.
 Session metadata generation is independent as well; the lifecycle service only
@@ -734,7 +737,7 @@ def test_provider_accounts_never_import_their_orchestration_consumers() -> None:
         "apps.harness.provider_turns",
         "apps.harness.harness_service",
         "apps.harness.engines",
-        "apps.harness.providers.models_catalog",
+        "apps.harness.model_catalog_service",
         "apps.harness.providers.resolver",
     }
     pending = {"apps.harness.provider_accounts"}
@@ -791,7 +794,7 @@ def test_provider_account_events_remain_independent_of_application_code() -> Non
 
 
 def test_provider_wire_adapters_never_import_harness_orchestration() -> None:
-    """Provider streams and their dependencies are independent of the control plane."""
+    """Provider streams and catalog protocols stay below the control plane."""
     package = "apps.harness.providers"
     trees = {path: ast.parse(path.read_text()) for path in _source_files()}
     modules = {_module_name(path): path for path in trees}
@@ -816,6 +819,7 @@ def test_provider_wire_adapters_never_import_harness_orchestration() -> None:
         f"{package}.openai_compatible",
         f"{package}.openrouter",
     } <= pending
+    pending.add(f"{package}.models_catalog")
     checked: set[str] = set()
     violations = set()
     while pending:
@@ -832,7 +836,7 @@ def test_provider_wire_adapters_never_import_harness_orchestration() -> None:
             elif imported in modules and imported not in checked:
                 pending.add(imported)
     assert violations == set(), (
-        "Provider wire adapters and their transitive dependencies must not "
+        "Provider wire adapters, catalog protocols and their dependencies must not "
         "import orchestration, workspace access or persistence. Put shared "
         "provider error classification in the provider layer:\n"
         + "\n".join(sorted(violations))
@@ -840,7 +844,7 @@ def test_provider_wire_adapters_never_import_harness_orchestration() -> None:
 
 
 def test_provider_wire_adapters_import_without_django_setup() -> None:
-    """A fresh interpreter can load every provider stream without app setup."""
+    """Provider streams and catalog parsing can load without Django or app setup."""
     env = os.environ.copy()
     env.pop("DJANGO_SETTINGS_MODULE", None)
     result = subprocess.run(
@@ -851,7 +855,11 @@ def test_provider_wire_adapters_import_without_django_setup() -> None:
             "from apps.harness.providers.chatgpt import ChatGPTAdapter\n"
             "from apps.harness.providers.openai_compatible "
             "import OpenAICompatibleAdapter\n"
-            "from apps.harness.providers.openrouter import OpenRouterAdapter\n",
+            "from apps.harness.providers.openrouter import OpenRouterAdapter\n"
+            "from apps.harness.providers.models_catalog "
+            "import normalize_reasoning_effort, normalize_openrouter_catalog\n"
+            "import sys\n"
+            "assert 'django' not in sys.modules\n",
         ],
         cwd=BACKEND_ROOT,
         env=env,

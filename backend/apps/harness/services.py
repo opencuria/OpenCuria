@@ -17,13 +17,16 @@ from common.exceptions import NotFoundError
 
 from .agents.definitions import AGENT_DEFINITIONS
 from .constants import DEFAULT_MAX_DEPTH, MAX_SUBAGENT_DEPTH
+from .model_catalog_service import (
+    clear_models_cache,
+    list_merged_provider_models,
+    selected_catalog_connections,
+)
 from .models import ProviderConfig, RecentModel
 from .provider_accounts import ProviderAccountService
 from .providers.model_ref import parse_model_ref
 from .providers.models_catalog import (
     ProviderModel,
-    clear_models_cache,
-    list_merged_provider_models,
     normalize_reasoning_effort,
 )
 from .providers.resolver import ProviderResolver
@@ -271,8 +274,6 @@ class ProviderConfigService:
         account_ids: dict[str, str] | None = None,
     ) -> list[ProviderModel]:
         """List models offered by precisely the selected accounts."""
-        from .providers.models_catalog import selected_catalog_connections
-
         if not selected_catalog_connections(organization_id, user_id, account_ids):
             raise NotFoundError("ProviderConnection", str(organization_id))
         return list_merged_provider_models(
