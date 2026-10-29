@@ -70,14 +70,6 @@ class CredentialServiceRepository:
         )
 
     @staticmethod
-    def get_by_slug(slug: str) -> CredentialService | None:
-        return (
-            CredentialService.objects.exclude(credential_type="provider_secret")
-            .filter(slug=slug)
-            .first()
-        )
-
-    @staticmethod
     def get_global_by_slug(slug: str) -> CredentialService | None:
         return (
             CredentialService.objects.exclude(credential_type="provider_secret")
@@ -413,33 +405,6 @@ class CredentialRepository:
         )
 
     @staticmethod
-    def create_oauth(
-        *,
-        user,
-        organization,
-        service: CredentialService,
-        name: str,
-        server_url: str,
-        resource: str,
-        registration,
-        encrypted_value: str,
-        created_by,
-    ) -> Credential:
-        """Persist a fresh service-scoped OAuth grant as its own credential."""
-        return Credential.objects.create(
-            user=user,
-            organization=organization,
-            service=service,
-            name=name,
-            encrypted_value=encrypted_value,
-            created_by=created_by,
-            oauth_server_url=server_url,
-            oauth_resource=resource,
-            oauth_registration=registration,
-            oauth_status="connected",
-        )
-
-    @staticmethod
     def create_org(
         *,
         organization_id: uuid.UUID,
@@ -496,75 +461,6 @@ class CredentialRepository:
             .select_related("service", "oauth_registration")
         )
 
-    @staticmethod
-    def exists_for_service_ids(service_ids: list[uuid.UUID]) -> bool:
-        return (
-            bool(service_ids)
-            and Credential.objects.filter(service_id__in=service_ids)
-            .exclude(service__credential_type="provider_secret")
-            .exists()
-        )
-
-    @staticmethod
-    def service_ids_with_credentials(service_ids: list[uuid.UUID]) -> set[uuid.UUID]:
-        if not service_ids:
-            return set()
-        return set(
-            Credential.objects.filter(service_id__in=service_ids)
-            .exclude(service__credential_type="provider_secret")
-            .values_list("service_id", flat=True)
-        )
-
-    @staticmethod
-    def credential_ids_for_services(service_ids: list[uuid.UUID]) -> set[uuid.UUID]:
-        if not service_ids:
-            return set()
-        return set(
-            Credential.objects.filter(service_id__in=service_ids)
-            .exclude(service__credential_type="provider_secret")
-            .values_list("id", flat=True)
-        )
-
-    @staticmethod
-    def org_service_ids_with_credentials(
-        org_id: uuid.UUID, service_ids: list[uuid.UUID]
-    ) -> set[uuid.UUID]:
-        if not service_ids:
-            return set()
-        return set(
-            Credential.objects.filter(
-                organization_id=org_id, service_id__in=service_ids
-            )
-            .exclude(service__credential_type="provider_secret")
-            .values_list("service_id", flat=True)
-        )
-
-    @staticmethod
-    def oauth_candidates(
-        *,
-        credential_ids,
-        service_id: uuid.UUID,
-        server_url: str,
-        org_id: uuid.UUID,
-        owner_id: int,
-    ):
-        """Return attached owned OAuth credentials for a fixed service endpoint."""
-        return list(
-            Credential.objects.filter(
-                id__in=credential_ids,
-                service_id=service_id,
-                oauth_server_url=server_url,
-                oauth_status="connected",
-            )
-            .filter(
-                Q(service__organization__isnull=True)
-                | Q(service__organization_id=org_id)
-            )
-            .filter(Q(user_id=owner_id) | Q(organization_id=org_id))
-            .exclude(service__credential_type="provider_secret")
-            .select_related("service", "oauth_registration", "created_by")
-        )
-
 
 class OrgCredentialServiceActivationRepository:
     """Data access for organization service activation rows."""
@@ -604,15 +500,6 @@ class OrgCredentialServiceActivationRepository:
                 .values_list("id", flat=True)
             ),
         )
-
-    @staticmethod
-    def active_in_org(service_id: uuid.UUID, org_id: uuid.UUID) -> bool:
-        """Return whether this org has activated the given service."""
-        from .models import OrgCredentialServiceActivation
-
-        return OrgCredentialServiceActivation.objects.filter(
-            organization_id=org_id, credential_service_id=service_id
-        ).exists()
 
     @staticmethod
     def deactivate(org_id: uuid.UUID, service_id: uuid.UUID) -> None:

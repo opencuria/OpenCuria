@@ -392,14 +392,14 @@ async def create_workspace(request: HttpRequest, payload: WorkspaceCreateIn):
             organization_id=org_id,
             plugin_ids=payload.plugin_ids,
         )
-        plugin_ids = await sync_to_async(PluginService().list_workspace_plugin_ids)(
-            workspace.id
-        )
+        plugin_ids = await sync_to_async(
+            PluginService().list_workspace_plugin_ids_many
+        )([workspace.id])
         return 202, WorkspaceCreateOut(
             workspace_id=workspace.id,
             task_id=task.id,
             status=workspace.status,
-            plugin_ids=plugin_ids,
+            plugin_ids=plugin_ids[workspace.id],
         )
     except NotFoundError as e:
         return 404, ErrorOut(detail=e.message, code=e.code)
@@ -737,11 +737,11 @@ async def update_workspace(
             organization_id=org_id,
         )
         persisted_plugin_ids = await sync_to_async(
-            PluginService().list_workspace_plugin_ids
-        )(workspace.id)
-        credential_ids = await sync_to_async(CredentialSvc().workspace_credential_ids)(
-            workspace.id
-        )
+            PluginService().list_workspace_plugin_ids_many
+        )([workspace.id])
+        credential_ids = await sync_to_async(
+            CredentialSvc().workspace_credential_ids_many
+        )([workspace.id])
         return 200, WorkspaceUpdateOut(
             id=workspace.id,
             name=workspace.name,
@@ -749,8 +749,8 @@ async def update_workspace(
             active_operation=workspace.active_operation,
             intervention_required=workspace.intervention_required,
             lifecycle_diagnostic=workspace.lifecycle_diagnostic,
-            credential_ids=credential_ids,
-            plugin_ids=persisted_plugin_ids,
+            credential_ids=credential_ids[workspace.id],
+            plugin_ids=persisted_plugin_ids[workspace.id],
             credential_sync_status=getattr(
                 workspace, "credential_sync_status", "not_required"
             ),
@@ -1177,7 +1177,7 @@ async def git_repo(
     workspace_id: uuid.UUID,
     repo_path: str,
 ):
-    """Return the full snapshot (status/branches/remotes/recent history) for one repo."""
+    """Return the full status, branches, remotes and recent history of one repo."""
     if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
         return _perm_denied(APIKeyPermission.WORKSPACES_GIT_READ)
     try:
@@ -1531,13 +1531,14 @@ async def create_workspace_from_captured_image(
             organization_id=org_id,
             plugin_ids=payload.plugin_ids,
         )
+        plugin_ids = await sync_to_async(
+            PluginService().list_workspace_plugin_ids_many
+        )([workspace.id])
         return 202, WorkspaceFromImageArtifactOut(
             workspace_id=workspace.id,
             task_id=task.id,
             status=workspace.status,
-            plugin_ids=await sync_to_async(PluginService().list_workspace_plugin_ids)(
-                workspace.id
-            ),
+            plugin_ids=plugin_ids[workspace.id],
         )
     except (NotFoundError, ConflictError) as exc:
         return _captured_image_errors(exc)

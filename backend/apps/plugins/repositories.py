@@ -151,11 +151,6 @@ class PluginSkillRepository:
             PluginSkill.objects.bulk_create(instances)
         return list(PluginSkillRepository.list_for_plugin(plugin.id))
 
-    @staticmethod
-    def delete_for_plugin(plugin_id: uuid.UUID) -> int:
-        count, _ = PluginSkill.objects.filter(plugin_id=plugin_id).delete()
-        return count
-
 
 class PluginMcpServerRepository:
     """Data access for PluginMcpServer records."""
@@ -233,11 +228,6 @@ class PluginMcpServerRepository:
 
         return list(PluginMcpServerRepository.list_for_plugin(plugin.id))
 
-    @staticmethod
-    def delete_for_plugin(plugin_id: uuid.UUID) -> int:
-        count, _ = PluginMcpServer.objects.filter(plugin_id=plugin_id).delete()
-        return count
-
 
 class PluginCredentialRequirementRepository:
     """Data access for PluginCredentialRequirement records."""
@@ -257,17 +247,6 @@ class PluginCredentialRequirementRepository:
         return PluginCredentialRequirement.objects.filter(
             plugin_id__in=plugin_ids
         ).select_related("credential_service")
-
-    @staticmethod
-    def list_required_service_ids_for_plugins(
-        plugin_ids: list[uuid.UUID],
-    ) -> set[uuid.UUID]:
-        """Return IDs of required services for the given plugins."""
-        return set(
-            PluginCredentialRequirement.objects.filter(
-                plugin_id__in=plugin_ids, required=True
-            ).values_list("credential_service_id", flat=True)
-        )
 
     @staticmethod
     def delete_for_plugin(plugin_id: uuid.UUID) -> int:
@@ -291,36 +270,6 @@ class PluginCredentialRequirementRepository:
         ]
         if instances:
             PluginCredentialRequirement.objects.bulk_create(instances)
-
-    @staticmethod
-    def requirements_exist_for_plugins(
-        plugin_ids: set[uuid.UUID], service_id: uuid.UUID
-    ) -> bool:
-        """Return True when any of *plugin_ids* requires *service_id*."""
-        if not plugin_ids:
-            return False
-        return PluginCredentialRequirement.objects.filter(
-            plugin_id__in=plugin_ids,
-            credential_service_id=service_id,
-        ).exists()
-
-    @staticmethod
-    def service_ids_used_by_other_org_plugins(
-        *, org_id: uuid.UUID, excluded_plugin_id: uuid.UUID
-    ) -> set[uuid.UUID]:
-        """Service IDs still required by other org plugins."""
-        other_ids = list(
-            Plugin.objects.filter(organization_id=org_id)
-            .exclude(id=excluded_plugin_id)
-            .values_list("id", flat=True)
-        )
-        if not other_ids:
-            return set()
-        return set(
-            PluginCredentialRequirement.objects.filter(
-                plugin_id__in=other_ids
-            ).values_list("credential_service_id", flat=True)
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -391,22 +340,6 @@ class WorkspacePluginActivationRepository:
         return set(WorkspacePluginActivationRepository.list_plugin_ids(workspace_id))
 
     @staticmethod
-    def list_for_workspace(
-        workspace_id: uuid.UUID,
-    ) -> QuerySet[WorkspacePluginActivation]:
-        return WorkspacePluginActivation.objects.filter(
-            workspace_id=workspace_id
-        ).select_related("plugin")
-
-    @staticmethod
-    def list_for_workspaces(
-        workspace_ids: list[uuid.UUID],
-    ) -> QuerySet[WorkspacePluginActivation]:
-        return WorkspacePluginActivation.objects.filter(
-            workspace_id__in=workspace_ids
-        ).select_related("plugin")
-
-    @staticmethod
     def replace_for_workspace(
         workspace, plugin_ids: list[uuid.UUID], *, enabled_by
     ) -> None:
@@ -424,10 +357,3 @@ class WorkspacePluginActivationRepository:
                 ],
                 ignore_conflicts=True,
             )
-
-    @staticmethod
-    def workspaces_with_plugin(plugin_id: uuid.UUID) -> QuerySet:
-        """Return workspace IDs that have the plugin activated."""
-        return WorkspacePluginActivation.objects.filter(
-            plugin_id=plugin_id
-        ).values_list("workspace_id", flat=True)
