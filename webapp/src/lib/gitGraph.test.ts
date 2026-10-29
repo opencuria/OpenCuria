@@ -3,13 +3,10 @@ import { describe, expect, it } from 'vitest'
 import {
   GIT_GRAPH_COLORS,
   GIT_GRAPH_CURVE_D,
-  branchPaths,
+  branchPath,
   computeGitGraphLayout,
   enforceChildBeforeParent,
   filterReachableCommits,
-  getContentWidth,
-  getGraphHeight,
-  getWidthsAtVertices,
   vertexPixel,
 } from './gitGraph'
 import type { GitCommit } from '@/types/git'
@@ -33,7 +30,7 @@ describe('computeGitGraphLayout (engine port)', () => {
     const commits = [makeCommit('c0', ['c1'], 1), makeCommit('c1', ['c2'], 2), makeCommit('c2', [], 3)]
     const layout = computeGitGraphLayout(commits)
 
-    expect(layout.orderedCommits.map((c) => c.hash)).toEqual(['c0', 'c1', 'c2'])
+    expect(layout.vertices.map((v) => v.hash)).toEqual(['c0', 'c1', 'c2'])
     expect(layout.vertices.map((v) => v.x)).toEqual([0, 0, 0])
     expect(layout.branches).toHaveLength(1)
     expect(layout.branches[0]!.colour).toBe(0)
@@ -61,21 +58,6 @@ describe('computeGitGraphLayout (engine port)', () => {
     expect(second.segments.some((s) => s.p1.x !== s.p2.x)).toBe(true)
   })
 
-  it('routes a merge with first parent continuing and locked transitions', () => {
-    const commits = [
-      makeCommit('merge', ['main-tip', 'feat-tip'], 0),
-      makeCommit('main-tip', ['base'], 2),
-      makeCommit('feat-tip', ['base'], 3),
-      makeCommit('base', [], 4),
-    ]
-    const layout = computeGitGraphLayout(commits)
-
-    expect(layout.vertices[0]!.isMerge).toBe(true)
-    expect(layout.vertices.map((v) => v.x)).toEqual([0, 0, 1, 0])
-    // Merge commit spawns two branches: main line + side branch to feat-tip.
-    expect(layout.branches.length).toBeGreaterThanOrEqual(2)
-  })
-
   it('handles a merge between two already-placed vertices via parent branch', () => {
     // Diamond where the merge's second parent is already on a branch:
     // m merges a (on branch 0) and b (on branch 1).
@@ -89,17 +71,12 @@ describe('computeGitGraphLayout (engine port)', () => {
 
     expect(layout.vertices[0]!.isMerge).toBe(true)
     expect(layout.vertices.map((v) => v.x)).toEqual([0, 0, 1, 0])
+    expect(layout.branches).toHaveLength(2)
     // All segments reference valid vertex rows.
     for (const branch of layout.branches) {
       for (const seg of branch.segments) {
         expect(seg.p1.y).toBeGreaterThanOrEqual(0)
         expect(seg.p2.y).toBeLessThan(commits.length)
-      }
-    }
-    // lockedFirst is always a boolean set by the layout pass.
-    for (const branch of layout.branches) {
-      for (const seg of branch.segments) {
-        expect(typeof seg.lockedFirst).toBe('boolean')
       }
     }
     // Main-line branch segments follow the lastPoint.x < curPoint.x rule.
@@ -115,7 +92,6 @@ describe('computeGitGraphLayout (engine port)', () => {
       makeCommit('old', [], 1),
     ]
     const layout = computeGitGraphLayout(commits)
-    expect(layout.orderedCommits.map((c) => c.hash)).toEqual(['tip', 'old'])
     expect(layout.vertices.map((v) => v.hash)).toEqual(['tip', 'old'])
   })
 
@@ -129,7 +105,7 @@ describe('computeGitGraphLayout (engine port)', () => {
       makeCommit('parent', [], 3),
     ].slice().reverse()
     const layout = computeGitGraphLayout(commits)
-    expect(layout.orderedCommits.map((c) => c.hash)).toEqual([
+    expect(layout.vertices.map((v) => v.hash)).toEqual([
       'tip',
       'child',
       'parent',
@@ -150,7 +126,6 @@ describe('computeGitGraphLayout (engine port)', () => {
     expect(layout.vertices).toEqual([])
     expect(layout.branches).toEqual([])
     expect(layout.vertexColours).toEqual([])
-    expect(layout.widthsAtVertices).toEqual([])
   })
 })
 
@@ -167,8 +142,7 @@ describe('graph pixel helpers', () => {
       b.segments.some((s) => s.p1.x !== s.p2.x),
     )
     expect(withCurve).toBeDefined()
-    const paths = branchPaths(withCurve!, -1, 250)
-    const joined = paths.map((p) => p.d).join(' ')
+    const joined = branchPath(withCurve!, -1, 250)
     expect(joined).toContain('C')
     // Curve control points use y1+d / y2-d with d=19.2.
     expect(joined).toMatch(/C\d+,\d+\.\d+ \d+,\d+\.\d+/)
@@ -187,8 +161,8 @@ describe('graph pixel helpers', () => {
     expect(expanded.height - plain.height).toBe(250)
 
     // Branch paths stretch without crashing.
-    const before = branchPaths(plain.branches[0]!, -1, 250).map((p) => p.d).join(' ')
-    const after = branchPaths(expanded.branches[0]!, 0, 250).map((p) => p.d).join(' ')
+    const before = branchPath(plain.branches[0]!, -1, 250)
+    const after = branchPath(expanded.branches[0]!, 0, 250)
     expect(after).not.toBe(before)
   })
 
@@ -216,7 +190,7 @@ describe('graph pixel helpers', () => {
     expect(new Set(forkColours).size).toBe(forkColours.length)
   })
 
-  it('computes widths / colours / content width plausibly', () => {
+  it('sizes the graph to its lanes and rows and uses the theme palette', () => {
     const commits = [
       makeCommit('main-tip', ['base'], 1),
       makeCommit('feat-tip', ['base'], 2),
@@ -224,10 +198,8 @@ describe('graph pixel helpers', () => {
     ]
     const layout = computeGitGraphLayout(commits)
     expect(layout.vertexColours).toEqual(layout.vertices.map((v) => v.colour % GIT_GRAPH_COLORS.length))
-    expect(layout.widthsAtVertices).toEqual(getWidthsAtVertices(layout.vertices))
-    expect(layout.contentWidth).toBe(getContentWidth(layout.vertices))
-    expect(layout.contentWidth).toBeGreaterThan(0)
-    expect(layout.height).toBe(getGraphHeight(3, false, 250))
+    expect(layout.contentWidth).toBe(48)
+    expect(layout.height).toBe(72)
     expect(GIT_GRAPH_COLORS).toHaveLength(8)
     expect(GIT_GRAPH_COLORS[0]).toBe('var(--git-branch-1)')
   })

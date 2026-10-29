@@ -24,7 +24,7 @@ import {
   GIT_GRAPH_COLORS,
   GIT_GRAPH_GRID_Y,
   GIT_GRAPH_NODE_R,
-  branchPaths,
+  branchPath,
   computeGitGraphLayout,
   filterReachableCommits,
   vertexPixel,
@@ -131,7 +131,7 @@ const layout = computed(() =>
 const renderedBranches = computed(() =>
   layout.value.branches.map((branch) => ({
     colour: branch.colour,
-    paths: branchPaths(branch, expandedIndex.value, expandY.value),
+    d: branchPath(branch, expandedIndex.value, expandY.value),
   })),
 )
 
@@ -502,7 +502,6 @@ const visibleNodeHashes = computed(() => {
 interface VisibleBranchPath {
   key: string
   d: string
-  isCommitted: boolean
   colour: number
 }
 
@@ -530,18 +529,12 @@ const visibleBranches = computed<VisibleBranchPath[]>(() => {
   const bottom = rowOffsetTop(end) + rowHeightAt(end) + OVERSCAN_ROWS * GIT_GRAPH_GRID_Y
   const out: VisibleBranchPath[] = []
   renderedBranches.value.forEach((branch, branchIndex) => {
-    branch.paths.forEach((path, pathIndex) => {
-      const range = pathYRange(path.d)
-      // No parseable extent → keep (safe fallback, never drop lines).
-      if (!range || (range.max >= top && range.min <= bottom)) {
-        out.push({
-          key: `branch-${branchIndex}-path-${pathIndex}`,
-          d: path.d,
-          isCommitted: path.isCommitted,
-          colour: path.colour,
-        })
-      }
-    })
+    if (!branch.d) return
+    const range = pathYRange(branch.d)
+    // No parseable extent → keep (safe fallback, never drop lines).
+    if (!range || (range.max >= top && range.min <= bottom)) {
+      out.push({ key: `branch-${branchIndex}`, d: branch.d, colour: branch.colour })
+    }
   })
   return out
 })
@@ -714,7 +707,7 @@ function copyRefName(name: string): void {
             />
             <path
               :d="path.d"
-              :stroke="path.isCommitted ? branchColor(path.colour) : 'var(--muted-foreground)'"
+              :stroke="branchColor(path.colour)"
               stroke-width="2"
               fill="none"
             />

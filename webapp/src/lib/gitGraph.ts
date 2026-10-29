@@ -4,7 +4,7 @@
  * any DOM/SVG rendering.
  *
  * The component layer converts the returned vertices/branches to SVG pixels
- * via `vertexPixel` / `branchPaths`.
+ * via `vertexPixel` / `branchPath`.
  */
 
 import type { GitCommit } from '@/types/git'
@@ -36,9 +36,6 @@ export const GIT_GRAPH_COLORS: string[] = [
 ]
 /** Bezier control offset factor for the rounded graph style. */
 export const GIT_GRAPH_CURVE_FACTOR_ROUNDED = 0.8
-/** Bezier control offset factor for the angular graph style (reserved). */
-export const GIT_GRAPH_CURVE_FACTOR_ANGULAR = 0.38
-
 /** Curve offset `d` for the rounded style (GRID_Y * 0.8 = 19.2). */
 export const GIT_GRAPH_CURVE_D = GIT_GRAPH_GRID_Y * GIT_GRAPH_CURVE_FACTOR_ROUNDED
 
@@ -56,7 +53,6 @@ export interface GraphSegment {
   p2: GraphPoint
   /** True => transition locked to p1, false => locked to p2. */
   lockedFirst: boolean
-  isCommitted: boolean
 }
 
 /** A rendered branch: colour index plus its logical segments. */
@@ -85,24 +81,14 @@ export interface GitGraphLayout {
   branches: GraphBranch[]
   /** Per-vertex colour index (already modulo the palette length). */
   vertexColours: number[]
-  widthsAtVertices: number[]
   contentWidth: number
   height: number
-  orderedCommits: GitCommit[]
 }
 
 export interface ComputeGitGraphLayoutOptions {
   headHash?: string | null
   expandedIndex?: number
   expandY?: number
-}
-
-/** A single SVG sub-path of a branch (split on committed/uncommitted). */
-export interface GraphBranchPath {
-  d: string
-  isCommitted: boolean
-  /** Raw branch colour index. */
-  colour: number
 }
 
 // --- Internal engine classes (port of `Vertex` / `Branch`) ---
@@ -118,41 +104,22 @@ interface UnavailablePoint {
 
 class EngineBranch {
   private readonly colour: number
-  private end = 0
-  private lines: { p1: GraphPoint; p2: GraphPoint; lockedFirst: boolean }[] = []
-  private numUncommitted = 0
+  private lines: GraphSegment[] = []
 
   constructor(colour: number) {
     this.colour = colour
   }
 
-  public addLine(p1: GraphPoint, p2: GraphPoint, isCommitted: boolean, lockedFirst: boolean): void {
+  public addLine(p1: GraphPoint, p2: GraphPoint, lockedFirst: boolean): void {
     this.lines.push({ p1, p2, lockedFirst })
-    if (isCommitted) {
-      if (p2.x === 0 && p2.y < this.numUncommitted) this.numUncommitted = p2.y
-    } else {
-      this.numUncommitted++
-    }
   }
 
   public getColour(): number {
     return this.colour
   }
 
-  public getEnd(): number {
-    return this.end
-  }
-
-  public setEnd(end: number): void {
-    this.end = end
-  }
-
-  public getLines(): ReadonlyArray<{ p1: GraphPoint; p2: GraphPoint; lockedFirst: boolean }> {
+  public getLines(): ReadonlyArray<GraphSegment> {
     return this.lines
-  }
-
-  public getNumUncommitted(): number {
-    return this.numUncommitted
   }
 }
 
@@ -160,21 +127,15 @@ class EngineVertex {
   public readonly id: number
 
   private x = 0
-  private children: EngineVertex[] = []
   private parents: EngineVertex[] = []
   private nextParent = 0
   private onBranch: EngineBranch | null = null
-  private isCommitted = true
   private isCurrent = false
   private nextX = 0
   private connections: UnavailablePoint[] = []
 
   constructor(id: number) {
     this.id = id
-  }
-
-  public addChild(vertex: EngineVertex): void {
-    this.children.push(vertex)
   }
 
   public addParent(vertex: EngineVertex): void {
@@ -184,11 +145,6 @@ class EngineVertex {
   public getNextParent(): VertexOrNull {
     if (this.nextParent < this.parents.length) return this.parents[this.nextParent] as EngineVertex
     return null
-  }
-
-  public getLastParent(): VertexOrNull {
-    if (this.nextParent < 1) return null
-    return this.parents[this.nextParent - 1] as EngineVertex
   }
 
   public registerParentProcessed(): void {
@@ -253,14 +209,6 @@ class EngineVertex {
 
   public getColour(): number {
     return this.onBranch !== null ? this.onBranch.getColour() : 0
-  }
-
-  public getIsCommitted(): boolean {
-    return this.isCommitted
-  }
-
-  public setNotCommitted(): void {
-    this.isCommitted = false
   }
 
   public setCurrent(): void {
@@ -350,10 +298,8 @@ export function computeGitGraphLayout(
       vertices: [],
       branches: [],
       vertexColours: [],
-      widthsAtVertices: [],
       contentWidth: getContentWidth([]),
       height: getGraphHeight(0, false, expandY),
-      orderedCommits: [],
     }
   }
 
@@ -369,7 +315,6 @@ export function computeGitGraphLayout(
       const vertex = vertices[i] as EngineVertex
       if (typeof parentIndex === 'number') {
         vertex.addParent(vertices[parentIndex] as EngineVertex)
-        ;(vertices[parentIndex] as EngineVertex).addChild(vertex)
       } else {
         // Parent is not part of the graph (shallow boundary).
         vertex.addParent(nullVertex)
@@ -423,7 +368,6 @@ export function computeGitGraphLayout(
         parentBranch.addLine(
           lastPointRef.point,
           curPoint,
-          vertex.getIsCommitted(),
           !foundPointToParent && curVertex !== parentVertex
             ? lastPointRef.point.x < curPoint.x
             : true,
@@ -449,7 +393,6 @@ export function computeGitGraphLayout(
         branch.addLine(
           lastPointRef.point,
           curPoint,
-          vertex.getIsCommitted(),
           lastPointRef.point.x < curPoint.x,
         )
         curVertex.registerUnavailablePoint(curPoint.x, parentVertex, branch)
@@ -472,7 +415,6 @@ export function computeGitGraphLayout(
         // Vertex is the last in the graph, so no more branch can be formed to the parent
         vertex.registerParentProcessed()
       }
-      branch.setEnd(i)
       branches.push(branch)
       availableColours[branch.getColour()] = i
     }
@@ -500,11 +442,10 @@ export function computeGitGraphLayout(
 
   const exportedBranches: GraphBranch[] = branches.map((b) => ({
     colour: b.getColour(),
-    segments: b.getLines().map((line, index) => ({
+    segments: b.getLines().map((line) => ({
       p1: { ...line.p1 },
       p2: { ...line.p2 },
       lockedFirst: line.lockedFirst,
-      isCommitted: index >= b.getNumUncommitted(),
     })),
   }))
 
@@ -513,10 +454,8 @@ export function computeGitGraphLayout(
     vertices: exportedVertices,
     branches: exportedBranches,
     vertexColours: exportedVertices.map((v) => v.colour % GIT_GRAPH_COLORS.length),
-    widthsAtVertices: getWidthsAtVertices(exportedVertices),
     contentWidth: getContentWidth(exportedVertices),
     height: getGraphHeight(commits.length, expanded, expandY),
-    orderedCommits: [...commits],
   }
 }
 
@@ -540,32 +479,27 @@ export function vertexPixel(
 interface PlacedPixelLine {
   p1: { x: number; y: number }
   p2: { x: number; y: number }
-  isCommitted: boolean
-  lockedFirst: boolean
 }
 
 /**
- * Convert a branch into SVG path strings (port of `Branch.draw`).
- * Returns one entry per contiguous committed/uncommitted run so the graph
- * can render each directly as a `<path>` (colour via
- * `GIT_GRAPH_COLORS[colour % len]`).
+ * Convert a commit branch into its rounded SVG path (port of `Branch.draw`).
+ * Disconnected segments start a new subpath within the same SVG path.
  */
-export function branchPaths(
+export function branchPath(
   branch: GraphBranch,
   expandedIndex = -1,
   expandY: number = GIT_GRAPH_EXPAND_Y,
-  style: 'rounded' | 'angular' = 'rounded',
-): GraphBranchPath[] {
-  const d = GIT_GRAPH_GRID_Y * (style === 'angular' ? GIT_GRAPH_CURVE_FACTOR_ANGULAR : GIT_GRAPH_CURVE_FACTOR_ROUNDED)
+): string {
+  const d = GIT_GRAPH_CURVE_D
   const expandAt = expandedIndex
 
   // Convert branch lines into pixel coordinates, respecting expanded commit extensions
   const lines: PlacedPixelLine[] = []
   for (let idx = 0; idx < branch.segments.length; idx++) {
     const line = branch.segments[idx] as GraphSegment
-    let x1 = line.p1.x * GIT_GRAPH_GRID_X + GIT_GRAPH_OFFSET_X
+    const x1 = line.p1.x * GIT_GRAPH_GRID_X + GIT_GRAPH_OFFSET_X
     let y1 = line.p1.y * GIT_GRAPH_GRID_Y + GIT_GRAPH_OFFSET_Y
-    let x2 = line.p2.x * GIT_GRAPH_GRID_X + GIT_GRAPH_OFFSET_X
+    const x2 = line.p2.x * GIT_GRAPH_GRID_X + GIT_GRAPH_OFFSET_X
     let y2 = line.p2.y * GIT_GRAPH_GRID_Y + GIT_GRAPH_OFFSET_Y
 
     // If a commit is expanded, stretch the graph for the commit details view height
@@ -581,18 +515,18 @@ export function branchPaths(
           y2 += expandY
         } else if (line.lockedFirst) {
           // Locked to the first point, the transition stays in its normal position
-          lines.push({ p1: { x: x1, y: y1 }, p2: { x: x2, y: y2 }, isCommitted: line.isCommitted, lockedFirst: line.lockedFirst })
-          lines.push({ p1: { x: x2, y: y1 + GIT_GRAPH_GRID_Y }, p2: { x: x2, y: y2 + expandY }, isCommitted: line.isCommitted, lockedFirst: line.lockedFirst })
+          lines.push({ p1: { x: x1, y: y1 }, p2: { x: x2, y: y2 } })
+          lines.push({ p1: { x: x2, y: y1 + GIT_GRAPH_GRID_Y }, p2: { x: x2, y: y2 + expandY } })
           continue
         } else {
           // Locked to the second point, the transition moves to after the expansion
-          lines.push({ p1: { x: x1, y: y1 }, p2: { x: x1, y: y2 - GIT_GRAPH_GRID_Y + expandY }, isCommitted: line.isCommitted, lockedFirst: line.lockedFirst })
+          lines.push({ p1: { x: x1, y: y1 }, p2: { x: x1, y: y2 - GIT_GRAPH_GRID_Y + expandY } })
           y1 += expandY
           y2 += expandY
         }
       }
     }
-    lines.push({ p1: { x: x1, y: y1 }, p2: { x: x2, y: y2 }, isCommitted: line.isCommitted, lockedFirst: line.lockedFirst })
+    lines.push({ p1: { x: x1, y: y1 }, p2: { x: x2, y: y2 } })
   }
 
   // Simplify consecutive lines that are straight by removing the 'middle' point
@@ -604,8 +538,7 @@ export function branchPaths(
       line.p1.x === line.p2.x &&
       line.p2.x === nextLine.p1.x &&
       nextLine.p1.x === nextLine.p2.x &&
-      line.p2.y === nextLine.p1.y &&
-      line.isCommitted === nextLine.isCommitted
+      line.p2.y === nextLine.p1.y
     ) {
       line.p2.y = nextLine.p2.y
       lines.splice(s + 1, 1)
@@ -614,10 +547,8 @@ export function branchPaths(
     }
   }
 
-  // Iterate through all lines, producing the svg paths
-  const paths: GraphBranchPath[] = []
+  // Iterate through all lines, producing the SVG path.
   let curPath = ''
-  let curCommitted = true
   for (let k = 0; k < lines.length; k++) {
     const line = lines[k] as PlacedPixelLine
     const prev = k > 0 ? (lines[k - 1] as PlacedPixelLine) : null
@@ -626,32 +557,14 @@ export function branchPaths(
     const x2 = line.p2.x
     const y2 = line.p2.y
 
-    // If the new point belongs to a different path, store the current path and reset it
-    if (curPath !== '' && prev !== null && line.isCommitted !== prev.isCommitted) {
-      paths.push({ d: curPath, isCommitted: prev.isCommitted, colour: branch.colour })
-      curPath = ''
-    }
-
     // If the path hasn't been started or the new point belongs to a different path, move to p1
     if (curPath === '' || (prev !== null && (x1 !== prev.p2.x || y1 !== prev.p2.y))) {
       curPath += 'M' + x1.toFixed(0) + ',' + y1.toFixed(1)
-      curCommitted = line.isCommitted
     }
 
     if (x1 === x2) {
       // Vertical path, draw a straight line
       curPath += 'L' + x2.toFixed(0) + ',' + y2.toFixed(1)
-    } else if (style === 'angular') {
-      // Horizontal transition with straight segments
-      curPath +=
-        'L' +
-        (line.lockedFirst
-          ? x2.toFixed(0) + ',' + (y2 - d).toFixed(1)
-          : x1.toFixed(0) + ',' + (y1 + d).toFixed(1)) +
-        'L' +
-        x2.toFixed(0) +
-        ',' +
-        y2.toFixed(1)
     } else {
       // Rounded transition with a bezier curve
       curPath +=
@@ -668,23 +581,14 @@ export function branchPaths(
         ',' +
         y2.toFixed(1)
     }
-    curCommitted = line.isCommitted
   }
 
-  if (curPath !== '') {
-    paths.push({ d: curPath, isCommitted: curCommitted, colour: branch.colour })
-  }
-  return paths
+  return curPath
 }
 
 /** Total graph height in px (port of `Graph.getHeight`). */
 export function getGraphHeight(count: number, expanded: boolean, expandY: number = GIT_GRAPH_EXPAND_Y): number {
   return count * GIT_GRAPH_GRID_Y + GIT_GRAPH_OFFSET_Y - GIT_GRAPH_GRID_Y / 2 + (expanded ? expandY : 0)
-}
-
-/** Per-row graph widths in px (port of `Graph.getWidthsAtVertices`). */
-export function getWidthsAtVertices(vertices: Pick<GraphVertex, 'nextX'>[]): number[] {
-  return vertices.map((v) => GIT_GRAPH_OFFSET_X + v.nextX * GIT_GRAPH_GRID_X - 2)
 }
 
 /** Graph content width in px (port of `Graph.getContentWidth`). */
