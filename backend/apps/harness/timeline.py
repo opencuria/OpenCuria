@@ -251,6 +251,8 @@ def build_part_display(
                 else {}
             ),
         )
+        if isinstance(meta.get("context"), dict):
+            display["context"] = meta["context"]
     elif part_type == "subtask":
         display.update(
             summary=_short(title),

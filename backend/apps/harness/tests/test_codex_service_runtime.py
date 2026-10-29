@@ -566,6 +566,27 @@ async def test_managed_write_usage_encrypted_checkpoint_and_cold_followup(runtim
     assert data.accessor.path("/workspace/note.txt").read_text() == "local"
     assert session.tokens == assistant.tokens
     assert assistant.tokens == {"prompt": 20, "completion": 10, "total": 30}
+    context = {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "context_length": 258400,
+    }
+    finished = HarnessPart.objects.get(message=assistant, type="step-finish")
+    assert finished.meta["context"] == finished.display["context"] == context
+    live_context = [
+        payload
+        for name, payload in data.events
+        if name == "harness.part_updated"
+        and payload["message_id"] == str(assistant.id)
+        and "context" in payload["delta"]
+    ]
+    assert len(live_context) == 3  # Two live requests and the final step.
+    assert live_context[0]["delta"] == {"context": context}
+    assert live_context[-1]["delta"]["context"] == context
+    start = HarnessPart.objects.get(message=assistant, type="step-start")
+    assert live_context[0]["part_id"] == str(start.id)
+    assert start.display["context"] == context
     assert (
         HarnessPart.objects.filter(
             message=assistant, type="tool", state="completed"
@@ -601,6 +622,9 @@ async def test_managed_write_usage_encrypted_checkpoint_and_cold_followup(runtim
     assert session.engine_state["codex_generation"] != old_generation
     assert session.tokens["total"] == first_tokens + second.tokens["total"]
     assert second.tokens == {"prompt": 10, "completion": 5, "total": 15}
+    assert HarnessPart.objects.get(message=second, type="step-finish").display[
+        "context"
+    ] == context
     assert HarnessTranscriptBatch.objects.filter(session=session).count() == 1
     assert len(data.accessor.opened) == 2
     assert "function_call_output" in json.dumps(data.provider.requests[1])

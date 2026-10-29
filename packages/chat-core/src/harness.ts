@@ -284,6 +284,8 @@ export interface HarnessPartDelta {
   step_finish?: number;
   cost?: number;
   tokens?: Record<string, number>;
+  /** Current context occupancy and effective limit reported by the runtime. */
+  context?: Record<string, number>;
   tool_started?: string;
   tool_completed?: string;
   tool_error?: string;

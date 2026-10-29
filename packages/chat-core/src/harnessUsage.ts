@@ -33,7 +33,7 @@ function tokensFromRecord(record: Record<string, unknown> | undefined): {
 }
 
 function usageFromStepFinish(part: HarnessPart): MessageUsage {
-  const meta = part.meta ?? {};
+  const meta = { ...part.display, ...part.meta };
   const tokens = tokensFromRecord(
     meta["tokens"] && typeof meta["tokens"] === "object"
       ? (meta["tokens"] as Record<string, unknown>)

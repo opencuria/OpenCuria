@@ -1152,6 +1152,22 @@ describe('HarnessChatInput', () => {
     expect(last.percent).toBe(25)
   })
 
+  it('uses the Codex runtime limit when the model catalog has no context length', async () => {
+    const wrapper = mountInput({
+      harnessId: 'codex',
+      model: 'chatgpt/gpt-6.1-sol',
+      contextUsed: 51_680,
+      contextLimit: 258_400,
+    })
+    expect(wrapper.get('[data-testid="composer-context-usage"]').attributes('aria-label'))
+      .toBe('Context usage 20%')
+    await wrapper.setProps({ contextUsed: 77_520 })
+    const metrics = wrapper.emitted('context-metrics') ?? []
+    expect(metrics[metrics.length - 1]?.[0]).toEqual({
+      used: 77_520, limit: 258_400, percent: 30,
+    })
+  })
+
   it('keeps rounded corners and an accent focus ring when a sheet is attached', () => {
     const wrapper = mountInput({ attached: true })
     const card = wrapper.find('[data-testid="composer-card"]')

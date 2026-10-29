@@ -187,6 +187,11 @@ class RunTimeline:
             )
         elif etype == "step_finish":
             tokens = event.get("tokens", {}) or {}
+            context = (
+                {"context": event["context"]}
+                if isinstance(event.get("context"), dict)
+                else {}
+            )
             usage = Usage(
                 prompt_tokens=int(tokens.get("prompt_tokens", 0)),
                 completion_tokens=int(tokens.get("completion_tokens", 0)),
@@ -240,6 +245,7 @@ class RunTimeline:
                     "step": event.get("step"),
                     "tokens": tokens,
                     "cost": event.get("cost", 0.0),
+                    **context,
                 },
             )
             await self._emit(
@@ -252,6 +258,7 @@ class RunTimeline:
                         "step_finish": event.get("step"),
                         "cost": event.get("cost", 0.0),
                         "tokens": tokens,
+                        **context,
                     },
                     "step": event.get("step"),
                     "part_id": str(part.id),
@@ -482,7 +489,7 @@ class RunTimeline:
         assistant: HarnessMessage,
         event: dict[str, Any],
     ) -> str | None:
-        """Append text/reasoning deltas to the running text/reasoning parts.
+        """Persist text/reasoning and context updates on their running parts.
 
         Reasoning parts stay step-attributed via ``meta["step"]`` (normal
         LLM reasoning without a step keeps working — ``step`` is simply
@@ -504,6 +511,23 @@ class RunTimeline:
         key = str(session.id)
         run_ctx = self._run_context(key)
         touched_id: str | None = None
+        if isinstance(delta.get("context"), dict):
+            part_id = run_ctx.get("step_parts", {}).get(str(step))
+            part = (
+                await sync_to_async(self.parts.get_by_id)(part_id)
+                if part_id is not None
+                else None
+            )
+            if (
+                part is not None
+                and part.message_id == assistant.id
+                and part.type == "step-start"
+                and part.state == "running"
+            ):
+                await sync_to_async(self.parts.mark_state)(
+                    part, "running", meta={"context": delta["context"]}
+                )
+                touched_id = str(part.id)
         if text:
             await self._complete_stream_part(run_ctx, "reasoning_part_id")
             part_id = run_ctx.get("text_part_id")

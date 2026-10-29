@@ -43,6 +43,20 @@ from .tools import ManagedToolInvoker
 _T = TypeVar("_T")
 
 
+def _token_usage(value: Any) -> Usage | None:
+    """Read an inclusive token snapshot from the pinned app-server protocol."""
+    keys = ("inputTokens", "outputTokens", "totalTokens")
+    if not isinstance(value, dict) or not all(
+        type(value.get(key)) is int and value[key] >= 0 for key in keys
+    ):
+        return None
+    return Usage(
+        prompt_tokens=value["inputTokens"],
+        completion_tokens=value["outputTokens"],
+        total_tokens=value["totalTokens"],
+    )
+
+
 async def _finish_cleanup(
     awaitable: Awaitable[_T], *, propagate_cancel: bool = False
 ) -> _T:
@@ -429,6 +443,7 @@ class CodexEngine:
         self.redactors = {}
         self.projector = self._create_projector()
         self.usage = Usage()
+        self.context_usage: dict[str, int] = {}
         self.total_text_bytes = 0
         try:
             await lease.reserve()
@@ -702,6 +717,11 @@ class CodexEngine:
                                 "total_tokens": self.usage.total_tokens,
                             },
                             "cost": 0.0,
+                            **(
+                                {"context": self.context_usage}
+                                if self.context_usage
+                                else {}
+                            ),
                         }
                     )
                 elif transport_error and error is None:
@@ -763,26 +783,42 @@ class CodexEngine:
                 params.get("item") or {}, completed=method == "item/completed"
             )
         elif method == "thread/tokenUsage/updated":
-            total = (params.get("tokenUsage") or {}).get("total") or {}
-            if all(
-                isinstance(total.get(k, 0), int) and total.get(k, 0) >= 0
-                for k in ("inputTokens", "outputTokens", "totalTokens")
-            ):
-                self.usage_total = total
+            snapshot = params.get("tokenUsage")
+            if not isinstance(snapshot, dict):
+                return
+            total = _token_usage(snapshot.get("total"))
+            if total is not None:
+                self.usage_total = snapshot["total"]
                 self.usage = Usage(
                     prompt_tokens=max(
                         0,
-                        total.get("inputTokens", 0) - self.usage_baseline.prompt_tokens,
+                        total.prompt_tokens - self.usage_baseline.prompt_tokens,
                     ),
                     completion_tokens=max(
                         0,
-                        total.get("outputTokens", 0)
+                        total.completion_tokens
                         - self.usage_baseline.completion_tokens,
                     ),
                     total_tokens=max(
                         0,
-                        total.get("totalTokens", 0) - self.usage_baseline.total_tokens,
+                        total.total_tokens - self.usage_baseline.total_tokens,
                     ),
+                )
+            # The last request measures context occupancy; cumulative totals
+            # include every tool-loop request and are only for turn accounting.
+            last = _token_usage(snapshot.get("last"))
+            if last is not None:
+                context = {
+                    "prompt_tokens": last.prompt_tokens,
+                    "completion_tokens": last.completion_tokens,
+                    "total_tokens": last.total_tokens,
+                }
+                limit = snapshot.get("modelContextWindow")
+                if type(limit) is int and limit > 0:
+                    context["context_length"] = limit
+                self.context_usage = context
+                await self._send(
+                    {"type": "part_updated", "step": 1, "delta": {"context": context}}
                 )
         elif method == "turn/plan/updated" and self.opts.depth == 0:
             await self._send(

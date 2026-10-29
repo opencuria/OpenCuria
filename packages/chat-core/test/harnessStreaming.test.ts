@@ -24,6 +24,24 @@ function stream(
 }
 
 describe("current harness streaming contract", () => {
+  it("updates live context without closing streams or accumulating snapshots", () => {
+    const messages: HarnessMessage[] = [];
+    stream(messages, "step", { step_start: 1 });
+    const assistant = stream(messages, "text", { text: "Working" });
+    const context = {
+      prompt_tokens: 40,
+      completion_tokens: 10,
+      context_length: 258400,
+    };
+    for (let index = 0; index < 2; index += 1)
+      stream(messages, "step", { context });
+    expect(assistant.parts).toHaveLength(2);
+    expect(assistant.parts[0]?.meta).toEqual({ step: 1, context });
+    expect(assistant.parts[1]?.state).toBe("running");
+    stream(messages, "finish", { step_finish: 1, context });
+    expect(assistant.parts[2]?.meta?.context).toEqual(context);
+  });
+
   it("keeps text chunks in their persisted part and preserves the parts array", () => {
     const messages: HarnessMessage[] = [];
     const assistant = stream(messages, "text-1", { text: "Hello " });

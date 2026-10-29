@@ -133,6 +133,7 @@ const props = defineProps<{
    */
   attached?: boolean
   contextUsed?: number
+  contextLimit?: number
   contextOpen?: boolean
   uploadDrag?: ChatUploadDragState
   /** Scheduled-task editor uses the shared composer without chat-only state. */
@@ -383,6 +384,7 @@ const CONTEXT_RING_RADIUS = 6
 const contextRingCircumference = 2 * Math.PI * CONTEXT_RING_RADIUS
 
 const contextLimit = computed(() => {
+  if (props.contextLimit && props.contextLimit > 0) return props.contextLimit
   const catalogModel = resolveCatalogModel(catalog.value, localModel.value)
   return catalogModel?.context_length ?? (localHarnessId.value === 'claude' ? 200_000 : 0)
 })

@@ -62,6 +62,13 @@ describe('resolveMessageUsage', () => {
     expect(usage.promptTokens).toBe(15)
     expect(usage.completionTokens).toBe(6)
   })
+
+  it('reads tokens from compact timeline parts after reload', () => {
+    expect(resolveMessageUsage(makeMessage({ parts: [makePart({
+      meta: {},
+      display: { tokens: { prompt_tokens: 1204, completion_tokens: 318 } },
+    })] }))).toEqual({ cost: 0, promptTokens: 1204, completionTokens: 318 })
+  })
 })
 
 describe('formatMessageUsage', () => {

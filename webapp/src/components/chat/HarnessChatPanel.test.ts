@@ -68,6 +68,8 @@ const HarnessChatInputStub = {
     'model',
     'effort',
     'busyMessage',
+    'contextUsed',
+    'contextLimit',
   ],
   emits: ['prefill', 'send', 'stop', 'update:harnessId', 'update:mode'],
   methods: {
@@ -150,6 +152,44 @@ describe('HarnessChatPanel route navigation', () => {
     await flushPromises()
     expect(useHarnessStore().activeSessionId).toBe('session-root')
   }
+
+  it('passes persisted Codex context and its runtime limit to the composer', async () => {
+    vi.mocked(listHarnessParts).mockResolvedValue({
+      session: makeSession({ harness_id: 'codex' }),
+      messages: [
+        {
+          id: 'answer',
+          session_id: 'session-root',
+          role: 'assistant',
+          content: 'Done',
+          tokens: { prompt: 100_000, completion: 3000 },
+          parts: [
+            {
+              id: 'finish',
+              session_id: 'session-root',
+              type: 'step-finish',
+              state: 'completed',
+              title: '',
+              output: '',
+              display: {
+                context: {
+                  prompt_tokens: 50_000,
+                  completion_tokens: 1500,
+                  total_tokens: 51_500,
+                  context_length: 258_400,
+                },
+              },
+            },
+          ],
+        },
+      ],
+    })
+    await openChat()
+    expect(wrapper!.findComponent(HarnessChatInputStub).props()).toMatchObject({
+      contextUsed: 51_500,
+      contextLimit: 258_400,
+    })
+  })
 
   it('switches loaded chats and their transcripts when only the session query changes', async () => {
     await openChat([makeSession(), secondSession])

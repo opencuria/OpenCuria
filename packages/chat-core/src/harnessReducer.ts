@@ -167,8 +167,8 @@ function toStepNumber(value: unknown): number | undefined {
   return value;
 }
 
-/** Cost/tokens meta keys forwarded on step-finish parts. */
-const STEP_FINISH_META_KEYS = ["cost", "tokens", "step"] as const;
+/** Usage meta keys forwarded on step-finish parts. */
+const STEP_FINISH_META_KEYS = ["cost", "tokens", "step", "context"] as const;
 
 export interface HarnessPartDeltaOptions {
   step?: number;
@@ -337,6 +337,24 @@ export function applyPartDelta(
         meta: { step: delta.step_start },
       });
     }
+  }
+
+  if (delta.context && delta.step_finish === undefined) {
+    let part = findPart(message, partId);
+    if (!part) {
+      part = {
+        id: partId,
+        message_id: message.id,
+        session_id: sessionId,
+        type: "step-start",
+        state: "running",
+        title: `Step ${opts.step ?? 1}`,
+        output: "",
+        meta: { step: opts.step },
+      };
+      message.parts.push(part);
+    }
+    part.meta = { ...part.meta, context: delta.context };
   }
 
   if (delta.step_finish !== undefined) {

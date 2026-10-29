@@ -461,7 +461,9 @@ async def test_real_codex_managed_tool_checkpoint_cold_resume(tmp_path):
     assert not permissions
     assert not state["codex_dirty"]
     assert sum(e["type"] == "tool_completed" for e in events) == 2, events
-    assert sum(e["type"] == "part_updated" for e in events) == 2
+    deltas = [e["delta"] for e in events if e["type"] == "part_updated"]
+    assert sum("text" in delta for delta in deltas) == 2
+    assert sum("context" in delta for delta in deltas) == 4
     assert accessor.path("/workspace/note.txt").read_text() == "codex local test"
     assert all(s.process.returncode is not None for s in accessor.streams)
     assert any("function_call_output" in json.dumps(r) for r in requests)

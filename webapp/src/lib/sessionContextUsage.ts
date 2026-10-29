@@ -43,12 +43,29 @@ function tokensFromStepFinish(part: HarnessPart): { prompt: number; completion: 
   )
 }
 
-/** Prompt + completion for one assistant message (last step when present). */
+/** Current runtime context, falling back to the last completed model step. */
 export function resolveMessageContextTokens(message: HarnessMessage): {
   prompt: number
   completion: number
   used: number
+  limit?: number
 } {
+  for (let index = message.parts.length - 1; index >= 0; index -= 1) {
+    const part = message.parts[index]!
+    if (part.type !== 'step-start' && part.type !== 'step-finish') continue
+    const context = part.meta?.['context'] ?? part.display?.['context']
+    if (!context || typeof context !== 'object') continue
+    const record = context as Record<string, unknown>
+    const tokens = tokensFromRecord(record)
+    const used = asFiniteNumber(record['total_tokens']) || tokens.prompt + tokens.completion
+    if (used <= 0) continue
+    const limit = asFiniteNumber(record['context_length'])
+    return {
+      ...tokens,
+      used,
+      ...(limit > 0 ? { limit } : {}),
+    }
+  }
   const stepFinishes = message.parts.filter((part) => part.type === 'step-finish')
   const tokens =
     stepFinishes.length > 0
@@ -66,6 +83,7 @@ export function resolveSessionUsedTokens(messages: HarnessMessage[]): {
   used: number
   promptTokens: number
   completionTokens: number
+  limit?: number
 } {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
@@ -76,6 +94,7 @@ export function resolveSessionUsedTokens(messages: HarnessMessage[]): {
         used: tokens.used,
         promptTokens: tokens.prompt,
         completionTokens: tokens.completion,
+        ...(tokens.limit ? { limit: tokens.limit } : {}),
       }
     }
   }
@@ -92,13 +111,14 @@ export function formatTokenCount(value: number): string {
 
 /** Resolve used, limit, and fill percent for the active session model. */
 export function getSessionContextUsage(input: SessionContextUsageInput): SessionContextUsage {
-  const { used, promptTokens, completionTokens } = resolveSessionUsedTokens(input.messages)
+  const { used, promptTokens, completionTokens, limit: runtimeLimit } =
+    resolveSessionUsedTokens(input.messages)
   const catalogModel = resolveCatalogModel(
     input.models,
     input.modelId,
     input.defaultModel ?? '',
   )
-  const limit = catalogModel?.context_length ?? 0
+  const limit = runtimeLimit ?? catalogModel?.context_length ?? 0
   const percent = limit > 0 ? Math.round((used / limit) * 100) : 0
   return { used, limit, percent, promptTokens, completionTokens }
 }

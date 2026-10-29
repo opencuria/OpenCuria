@@ -132,6 +132,9 @@ are pinned, but aarch64 runtime execution has not been verified. QEMU
 transport support does not imply every guest kernel permits native sandboxing.
 Usage comes from Codex token totals with resumed baselines subtracted. Displayed
 cost is **unknown (recorded as zero)**, not an invoice or a promise of free usage.
+The context indicator uses the latest request's tokens and effective context
+limit reported by Codex. It updates during a run and survives chat reloads;
+the answer footer retains cumulative input/output tokens for the whole turn.
 
 ## Optional real-runtime tests
 

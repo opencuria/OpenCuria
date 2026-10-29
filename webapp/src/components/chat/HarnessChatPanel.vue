@@ -89,11 +89,11 @@ const mentionCandidates = ref<MentionCandidate[]>([])
 const contextOpen = ref(false)
 const contextMetrics = ref<Pick<ContextSheetState, 'used' | 'limit' | 'percent'> | null>(null)
 
-const contextUsed = computed(() => resolveSessionUsedTokens(harness.activeMessages).used)
+const contextUsage = computed(() => resolveSessionUsedTokens(harness.activeMessages))
 
 const contextSheet = computed<ContextSheetState | null>(() => {
   if (!contextMetrics.value) return null
-  const breakdown = resolveSessionUsedTokens(harness.activeMessages)
+  const breakdown = contextUsage.value
   return {
     ...contextMetrics.value,
     promptTokens: breakdown.promptTokens,
@@ -826,7 +826,8 @@ async function handleForkMessage(messageId: string): Promise<void> {
           :session-id="harness.activeSessionId"
           :files="fileExplorer.tree"
           :skill-options="skillStore.skills"
-          :context-used="contextUsed"
+          :context-used="contextUsage.used"
+          :context-limit="contextUsage.limit"
           :context-open="contextOpen"
           :upload-drag="uploadDragState"
           mention-controlled

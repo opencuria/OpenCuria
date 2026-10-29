@@ -170,6 +170,88 @@ describe('resolveSessionUsedTokens', () => {
 })
 
 describe('getSessionContextUsage', () => {
+  it.each(['meta', 'display'] as const)(
+    'uses Codex runtime context from %s instead of cumulative tokens and catalog limits',
+    (source) => {
+      const usage = getSessionContextUsage({
+        messages: [
+          makeMessage({
+            tokens: { prompt: 300_000, completion: 15_000, total: 315_000 },
+            parts: [
+              makePart({
+                [source]: {
+                  tokens: { prompt_tokens: 300_000, completion_tokens: 15_000 },
+                  context: {
+                    prompt_tokens: 50_000,
+                    completion_tokens: 1500,
+                    total_tokens: 51_500,
+                    context_length: 258_400,
+                  },
+                },
+              }),
+            ],
+          }),
+        ],
+        modelId: 'chatgpt/gpt-6.1-sol',
+        models: [{ ...models[0]!, id: 'chatgpt/gpt-6.1-sol', context_length: 0 }],
+      })
+      expect(usage).toEqual({
+        used: 51_500,
+        limit: 258_400,
+        percent: 20,
+        promptTokens: 50_000,
+        completionTokens: 1500,
+      })
+    },
+  )
+
+  it('uses live context on the running step before an answer completes', () => {
+    expect(
+      resolveSessionUsedTokens([
+        makeMessage({
+          parts: [
+            makePart({
+              type: 'step-start',
+              state: 'running',
+              meta: {
+                context: {
+                  prompt_tokens: 50_000,
+                  completion_tokens: 1500,
+                  context_length: 258_400,
+                },
+              },
+            }),
+          ],
+        }),
+      ]),
+    ).toEqual({
+      used: 51_500,
+      promptTokens: 50_000,
+      completionTokens: 1500,
+      limit: 258_400,
+    })
+  })
+
+  it.each([null, 'invalid', { total_tokens: Infinity, context_length: NaN }])(
+    'keeps the existing token fallback for malformed context: %s',
+    (context) => {
+      expect(
+        resolveMessageContextTokens(
+          makeMessage({
+            parts: [
+              makePart({
+                meta: {
+                  context,
+                  tokens: { prompt_tokens: 40, completion_tokens: 10 },
+                },
+              }),
+            ],
+          }),
+        ),
+      ).toEqual({ prompt: 40, completion: 10, used: 50 })
+    },
+  )
+
   it('rounds usage percent against the catalog context length', () => {
     const usage = getSessionContextUsage({
       messages: [makeMessage({ tokens: { prompt: 50_000, completion: 14_400 } })],

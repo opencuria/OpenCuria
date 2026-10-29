@@ -81,6 +81,11 @@ describe("immutable streaming", () => {
     ["step start", "step", { step_start: 2 }],
     ["step finish", "finish", { step_finish: 2, cost: 0.1 }],
     [
+      "live context",
+      "step",
+      { context: { prompt_tokens: 40, completion_tokens: 10 } },
+    ],
+    [
       "patch",
       "patch",
       { patch: "Updated file", display: { summary: "Patch" } },
