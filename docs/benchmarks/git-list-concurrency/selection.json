@@ -1,0 +1,54 @@
+{
+  "baseline_commit": "2cfab8a",
+  "ranking_basis": "Impact and frequency, measured evidence, complexity, regression risk and architecture; exploratory CPU timings are local synthetic workloads, not production SLOs.",
+  "top3": [
+    {
+      "rank": 1,
+      "id": "runner-file-read",
+      "path": "runner/src/services/files.py:read_file",
+      "evidence": "With a predecoded guest response, 100 MiB read: p50 365.606 ms, peak additional Python allocations 368.909 MiB (7 timing samples, separate tracemalloc).",
+      "impact": "File previews, attachments and harness reads; stops event-loop stalls and large temporary allocations.",
+      "risk": "Low: parse only the two header lines, preserve bounded reads and containment."
+    },
+    {
+      "rank": 2,
+      "id": "backend-patch-projection",
+      "path": "backend/apps/harness/timeline.py:_patch_projection",
+      "evidence": "Generated added-file diff: 100k lines / 1.89 MB p50 233.400 ms; 500k lines / 9.89 MB p50 1216.937 ms; 7 samples. Parser traverses all lines multiple times.",
+      "impact": "Every edit/write patch persisted before its live event; delays tool progress on large generated files.",
+      "risk": "Low-medium: one bounded scan retaining the existing collapsed-preview contract."
+    },
+    {
+      "rank": 3,
+      "id": "runner-git-list",
+      "path": "runner/src/services/git_service.py:_git_discover_repos and list_repos",
+      "evidence": "Existing complete-list benchmark at HEAD: 1 repo 7 guest execs / p50 6.878 ms, 5 repos 23 execs / p50 27.769 ms on local runtime, 3 samples. Validations and entries are sequential.",
+      "impact": "Git panel refresh on multi-repo workspaces; SSH round trips add latency beyond local timings.",
+      "risk": "Medium: bound concurrency while preserving per-repo locks, fail-closed validation, error cleanup and sorted results."
+    }
+  ],
+  "selection_method": "secrets.choice(top3), using OS randomness",
+  "selected": "runner-git-list",
+  "other_opportunities": [
+    {
+      "id": "backend-attention",
+      "path": "backend/apps/harness/conversation_service.py:attention_for_sessions",
+      "evidence": "Static inspection: loads full pending gate rows when only session IDs are needed, repeats descendant traversal for every returned session. Needs DB profiling; ranked below measured paths."
+    },
+    {
+      "id": "mobile-block-rendering",
+      "path": "mobile/src/components/ChatMessages.tsx:MessageRow",
+      "evidence": "Static inspection: sorts and rebuilds all blocks on each immutable streaming parts change; current memoization and virtualization already limit impact. Needs native render profiling."
+    },
+    {
+      "id": "shared-descendants",
+      "path": "packages/chat-core/src/harnessSubtaskActivity.ts:collectDescendantSessionIds",
+      "evidence": "Static inspection: repeated full-session passes; called during every mobile snapshot. Normal creation order often makes traversal linear, so confidence lower."
+    },
+    {
+      "id": "webapp-block-rendering",
+      "path": "webapp/src/components/chat/HarnessMessageView.vue",
+      "evidence": "Static inspection: computed block derivation and page identities; existing stable membership optimization already removes repeated sorting. No new bottleneck proven."
+    }
+  ]
+}

@@ -4,7 +4,8 @@ Run with runner/.venv/bin/python scripts/benchmark_git_list_entries.py.
 The local run includes discovery via the existing Git test runtime. Optional
 loopback SSH runs the complete list through QemuRuntime.exec_command_wait,
 mapping /workspace to the disposable fixture tree. No simulated delays or
-QEMU guest are used. --entries-only isolates the phase after discovery.
+QEMU guest are used. --loopback-ssh starts a disposable SSH server with real
+local subprocesses. --entries-only isolates the phase after discovery.
 """
 
 from __future__ import annotations
@@ -25,6 +26,8 @@ import tempfile
 import time
 import tracemalloc
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +43,7 @@ from tests.test_git_operations import FakeGitRuntime  # noqa: E402
 
 
 def _baseline_type(revision: str) -> type[GitService]:
-    """Load only the original list-entry method, sharing unchanged discovery."""
+    """Load the original list orchestration, discovery and entry reads."""
     source = subprocess.check_output(
         ["git", "show", f"{revision}:runner/src/services/git_service.py"],
         cwd=REPO,
@@ -51,21 +54,64 @@ def _baseline_type(revision: str) -> type[GitService]:
         for node in ast.parse(source).body
         if isinstance(node, ast.ClassDef) and node.name == "GitService"
     )
-    method = next(
+    methods = [
         node
         for node in service.body
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_git_list_entry"
-    )
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name in {
+            "_git_discover_repos", "_git_list_entry", "_execute_git_operation_inner"
+        }
+    ]
+    assert len(methods) == 3
     namespace = dict(vars(sys.modules[GitService.__module__]))
-    tree = ast.Module(body=[method], type_ignores=[])
-    exec(compile(tree, f"{revision}:_git_list_entry", "exec"), namespace)  # noqa: S102
+    tree = ast.Module(body=methods, type_ignores=[])
+    exec(compile(tree, f"{revision}:git-list", "exec"), namespace)  # noqa: S102
     return type(
         "BaselineGitService",
         (GitService,),
-        {
-            "_git_list_entry": namespace["_git_list_entry"],
-        },
+        {method.name: namespace[method.name] for method in methods},
     )
+
+
+@asynccontextmanager
+async def _loopback_ssh() -> AsyncIterator[asyncssh.SSHClientConnection]:
+    """Run actual SSH and shell commands without persistent keys or host config."""
+    client_key = asyncssh.generate_private_key("ssh-ed25519")
+    host_key = asyncssh.generate_private_key("ssh-ed25519")
+
+    class Server(asyncssh.SSHServer):
+        def public_key_auth_supported(self) -> bool:
+            return True
+
+        def validate_public_key(self, username: str, key: asyncssh.SSHKey) -> bool:
+            return username == "benchmark" and key == client_key.convert_to_public()
+
+    async def run(process: asyncssh.SSHServerProcess) -> None:
+        child = await asyncio.create_subprocess_shell(
+            process.command,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await child.communicate()
+            process.stdout.write(stdout.decode())
+            process.stderr.write(stderr.decode())
+            process.exit(child.returncode)
+        finally:
+            if child.returncode is None:
+                child.kill()
+                await child.wait()
+
+    async with asyncssh.listen(
+        "127.0.0.1", 0, config=None, server_factory=Server,
+        server_host_keys=[host_key], process_factory=run,
+    ) as server, asyncssh.connect(
+        "127.0.0.1", port=server.get_port(), config=None,
+        username="benchmark", client_keys=[client_key], agent_path=None,
+        known_hosts=([host_key.convert_to_public()], [], []),
+    ) as connection:
+        yield connection
 
 
 class SSHRuntime:
@@ -79,6 +125,8 @@ class SSHRuntime:
         self._runtime = object.__new__(QemuRuntime)
         self._root = root
         self.calls: list[list[str]] = []
+        self.active = 0
+        self.peak_active = 0
 
         async def get_ssh(_instance_id: str) -> asyncssh.SSHClientConnection:
             return connection
@@ -110,9 +158,14 @@ class SSHRuntime:
             if safe_command == ["sh", "-c", "test -s /root/.opencuria-env.sh"]:
                 safe_command = ["test", "-s", str(self._root / "absent-credentials")]
             workdir = mapped(workdir) if workdir else workdir
-        code, output = await self._runtime.exec_command_wait(
-            instance_id, safe_command, workdir, env
-        )
+        self.active += 1
+        self.peak_active = max(self.peak_active, self.active)
+        try:
+            code, output = await self._runtime.exec_command_wait(
+                instance_id, safe_command, workdir, env
+            )
+        finally:
+            self.active -= 1
         if self._root is not None:
             output = output.replace(str(self._root), "/workspace")
         return code, output
@@ -229,6 +282,8 @@ async def _case(
             if iteration >= 3:
                 elapsed[name].append(duration)
             validate(rows)
+            if ssh:
+                assert runtimes[name].active == 0
             pair[name] = rows
             calls[name] = len(runtimes[name].calls)
         assert pair["before"] == pair["after"]
@@ -249,6 +304,7 @@ async def _case(
         report[name] = {
             **_summary(elapsed[name]),
             "guest_exec_calls": calls[name],
+            "peak_parallel_guest_calls": runtimes[name].peak_active if ssh else None,
             "peak_python_bytes": peak,
             "latency_samples_ms": [round(value, 3) for value in elapsed[name]],
         }
@@ -276,6 +332,9 @@ async def _workloads(
 
 
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
+    if args.loopback_ssh:
+        async with _loopback_ssh() as ssh:
+            return await _workloads(args, ssh)
     if args.ssh_port:
         async with asyncssh.connect(
             "127.0.0.1",
@@ -289,12 +348,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> None:
-    """Run paired measurements against the selected original method."""
+    """Run paired measurements against the selected original list methods."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--baseline", default="922f3e2")
+    parser.add_argument("--baseline", default="2cfab8a")
     parser.add_argument("--samples", type=int, default=41)
     parser.add_argument("--repos", type=int, nargs="+", default=[1, 5, 15])
     parser.add_argument("--ssh-port", type=int)
+    parser.add_argument("--loopback-ssh", action="store_true")
     parser.add_argument("--entries-only", action="store_true")
     parser.add_argument("--ssh-key", type=Path)
     parser.add_argument("--known-hosts", type=Path)
@@ -304,6 +364,8 @@ def main() -> None:
         parser.error("samples must be >= 2 and repos >= 1")
     if args.ssh_port and not (args.ssh_key and args.known_hosts):
         parser.error("SSH requires --ssh-key and --known-hosts")
+    if args.loopback_ssh and args.ssh_port:
+        parser.error("choose --loopback-ssh or --ssh-port")
     os.environ.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
     result = json.dumps(asyncio.run(_run(args)), indent=2) + "\n"
     if args.output:

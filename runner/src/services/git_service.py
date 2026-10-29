@@ -25,6 +25,7 @@ from .workspace_helpers import KeyedLockMap
 logger = structlog.get_logger(__name__)
 
 _UNTRACKED_DIFF_CONCURRENCY = 4
+_GIT_LIST_CONCURRENCY = 4
 
 
 class GitService:
@@ -51,6 +52,9 @@ class GitService:
         # Share the budget across repos/workspaces served by this executor.
         # Leave SSH channel capacity for terminals and other file operations.
         self._untracked_diff_slots = asyncio.Semaphore(_UNTRACKED_DIFF_CONCURRENCY)
+        # Listing is read-only across repositories, but concurrent list RPCs
+        # must share a bounded SSH budget rather than multiplying fan-out.
+        self._git_list_slots = asyncio.Semaphore(_GIT_LIST_CONCURRENCY)
 
     # ── Git operations (dumb-executor git service) ──────────────────────
 
@@ -328,52 +332,66 @@ class GitService:
         omitted fail-closed.
         """
         roots: list[str] = []
-        try:
-            verified = await self._git_verify_repo_root(
-                runtime, instance_id, "/workspace", env
-            )
-        except (git_ops.GitError, ValueError):
-            verified = None
+        async with self._git_list_slots:
+            try:
+                verified = await self._git_verify_repo_root(
+                    runtime, instance_id, "/workspace", env
+                )
+            except (git_ops.GitError, ValueError):
+                verified = None
         if verified is not None:
             roots.append("/workspace")
-        exit_code, output = await self._git_exec(
-            runtime,
-            instance_id,
-            git_ops.discovery_find_args("/workspace"),
-            workdir="/workspace",
-            env=env,
-            timeout=git_ops.GIT_READ_TIMEOUT_S,
-        )
-        if exit_code == 0 and output.strip():
-            candidates = git_ops.discovery_repo_roots(output)
-            for candidate in candidates:
-                if candidate in roots:
-                    continue
+        async with self._git_list_slots:
+            exit_code, output = await self._git_exec(
+                runtime,
+                instance_id,
+                git_ops.discovery_find_args("/workspace"),
+                workdir="/workspace",
+                env=env,
+                timeout=git_ops.GIT_READ_TIMEOUT_S,
+            )
+
+        async def verify(candidate: str) -> str | None:
+            # Keep every root/gitdir/common-dir containment check in its
+            # original order. Only independent candidates run in parallel.
+            async with self._git_list_slots:
                 try:
                     resolved = await self._git_realpath_contained(
                         runtime, instance_id, candidate, env, context="repo"
                     )
-                except (git_ops.GitError, ValueError):
-                    # Fail closed: unresolvable candidates are skipped,
-                    # never trusted unresolved.
-                    continue
-                if not git_ops.is_workspace_path(resolved):
-                    continue
-                if "/.git/" in resolved:
-                    continue
-                # The workspace root itself is only listed once (verified
-                # above); skip the duplicate find hit.
-                if resolved == "/workspace":
-                    continue
-                try:
-                    await self._git_verify_repo_root(
+                    if (
+                        not git_ops.is_workspace_path(resolved)
+                        or "/.git/" in resolved
+                        or resolved == "/workspace"
+                    ):
+                        return None
+                    return await self._git_verify_repo_root(
                         runtime, instance_id, resolved, env
                     )
                 except (git_ops.GitError, ValueError):
-                    continue
-                roots.append(resolved)
-                if len(roots) >= git_ops.GIT_DISCOVERY_MAX_REPOS:
-                    break
+                    return None
+
+        if exit_code == 0 and output.strip():
+            candidates = [
+                path
+                for path in git_ops.discovery_repo_roots(output)
+                if path not in roots
+            ]
+            while candidates and len(roots) < git_ops.GIT_DISCOVERY_MAX_REPOS:
+                size = min(
+                    _GIT_LIST_CONCURRENCY, git_ops.GIT_DISCOVERY_MAX_REPOS - len(roots)
+                )
+                batch, candidates = candidates[:size], candidates[size:]
+                # Drain the batch even on failure before leaving the askpass
+                # and capture contexts. Caller cancellation reaches all children.
+                verified_roots = await asyncio.gather(
+                    *(verify(candidate) for candidate in batch), return_exceptions=True
+                )
+                for root in verified_roots:
+                    if isinstance(root, BaseException):
+                        raise root
+                    if root is not None:
+                        roots.append(root)
         return sorted(set(roots))[: git_ops.GIT_DISCOVERY_MAX_REPOS]
 
     # -- git snapshot helpers -------------------------------------------------
@@ -1163,15 +1181,29 @@ class GitService:
             env = git_ops.build_git_env(askpass_script=askpass)
             if operation == "list_repos":
                 repos = await self._git_discover_repos(runtime, instance_id, env)
-                entries: list[dict[str, Any]] = []
-                for root in repos:
+
+                async def read_entry(root: str) -> dict[str, Any]:
                     lock = await self._git_lock(workspace_id, root)
-                    async with lock:
-                        entries.append(
-                            await self._git_list_entry(
-                                runtime, instance_id, root, env
-                            )
+                    async with lock, self._git_list_slots:
+                        return await self._git_list_entry(
+                            runtime, instance_id, root, env
                         )
+
+                entries: list[dict[str, Any]] = []
+                for start in range(0, len(repos), _GIT_LIST_CONCURRENCY):
+                    batch = await asyncio.gather(
+                        *(
+                            read_entry(root)
+                            for root in repos[start : start + _GIT_LIST_CONCURRENCY]
+                        ),
+                        return_exceptions=True,
+                    )
+                    # Preserve repository order and deterministic first-error
+                    # selection, waiting for all reads before releasing context.
+                    for entry in batch:
+                        if isinstance(entry, BaseException):
+                            raise entry
+                        entries.append(entry)
                 return {"ok": True, "repos": entries}
 
             # All other operations require an explicit repository root.
