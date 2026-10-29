@@ -1,0 +1,30 @@
+{
+  "date": "2026-10-29",
+  "baseline": "19389bf12caa4ce6a9b198b518e1e7746926c6a2",
+  "random_source": "secrets.choice (OS randomness)",
+  "top_three": [
+    { "rank": 1, "candidate": "runner-base64-normalization" },
+    { "rank": 2, "candidate": "backend-tool-output-truncation" },
+    { "rank": 3, "candidate": "shared-stream-reducer-scans" }
+  ],
+  "selection": { "rank": 2, "candidate": "backend-tool-output-truncation" },
+  "redraws": 0,
+  "scouts": {
+    "runner_download_handler": [
+      { "raw_mib": 10, "samples": 7, "p50_ms": 476.53092999826185 },
+      { "raw_mib": 100, "samples": 7, "p50_ms": 4694.468991001486 }
+    ],
+    "backend_truncation_ascii_log": {
+      "input_bytes": 10500000,
+      "samples": 15,
+      "head_p50_ms": 31.349080003565177,
+      "tail_p50_ms": 29.82999398955144,
+      "peak_python_allocated_bytes": 45175421
+    },
+    "shared_vue_reactive_reducer": [
+      { "parts": 100, "events": 400, "p50_ms": 0.09689500000001772 },
+      { "parts": 500, "events": 400, "p50_ms": 0.44627700000000914 },
+      { "parts": 2000, "events": 400, "p50_ms": 1.7755280000000084 }
+    ]
+  }
+}
