@@ -121,23 +121,17 @@ class ToolCallParts:
         The normal path updates the ``tool_queued`` row for the same
         ``call_id`` to running and re-emits ``delta.tool_started`` with the
         *same* ``part_id`` (frontend dedupes). When the queued ``call_id``
-        was provisional, a pending tool part for
-        the same step+tool is rebound by updating its ``call_id`` instead of
-        creating a second row. Without any queued row this falls back to
+        was provisional, ``queued_id`` identifies the part to rebind to the
+        final ``call_id``. Without any queued row this falls back to
         creating the part here (legacy runner path).
         """
         call_id = str(event.get("call_id", ""))
         step = event.get("step")
-        tool = str(event.get("tool", ""))
         run_ctx = self._run_context(str(session.id))
         part = await self._lookup_tool_part(run_ctx, assistant, call_id)
         queued_id = str(event.get("queued_id", "") or "")
         if part is None and queued_id:
             part = await self._lookup_tool_part(run_ctx, assistant, queued_id)
-        if part is None and not queued_id:
-            part = await self._rebind_provisional_tool_part(
-                run_ctx, assistant, step=step, tool=tool, call_id=call_id
-            )
         if part is None:
             part = await sync_to_async(self.parts.create)(
                 message_id=assistant.id,
@@ -198,33 +192,6 @@ class ToolCallParts:
                 assistant.id, call_id
             )
         return part
-
-    async def _rebind_provisional_tool_part(
-        self,
-        run_ctx: dict[str, Any],
-        assistant: HarnessMessage,
-        *,
-        step: Any,
-        tool: str,
-        call_id: str,
-    ) -> HarnessPart | None:
-        """Rebind a pending queued part when ``tool_queued`` used a temp id.
-
-        Matches the oldest still-pending tool part for the same step+tool so
-        the real ``tool_started`` id adopts that row (same ``part_id``
-        across both live events) instead of appending a duplicate.
-        """
-        if not tool or not call_id:
-            return None
-        candidate = await sync_to_async(self.parts.list_pending_tools)(assistant.id)
-        for row in candidate:
-            meta = dict(row.meta or {})
-            row_tool = str((row.input or {}).get("tool", "") or row.title or "")
-            if meta.get("step") == step and (
-                row_tool == tool or (row.title or "") == tool or not row_tool
-            ):
-                return row
-        return None
 
     async def record_finished(
         self, assistant: HarnessMessage, event: dict[str, Any], *, state: str

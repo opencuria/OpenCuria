@@ -124,52 +124,25 @@ async def test_tool_part_lookup_prefers_run_context_then_call_id(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_rebind_provisional_tool_part_picks_oldest_pending_match(
+async def test_tool_start_does_not_rebind_an_unrelated_queued_call(
     harness_workspace,
 ) -> None:
-    """A real call id adopts the oldest pending part of the same step + tool."""
+    """A same-name pending tool is never evidence of a call's identity."""
     session = _session(harness_workspace)
     assistant = _assistant(session)
-    HarnessPartRepository.create(
-        message_id=assistant.id,
-        type="tool",
-        state="running",
-        input={"tool": "bash"},
-        meta={"step": 1},
-    )
-    HarnessPartRepository.create(
-        message_id=assistant.id,
-        type="tool",
-        state="pending",
-        input={"tool": "read"},
-        meta={"step": 1},
-    )
-    oldest = HarnessPartRepository.create(
-        message_id=assistant.id,
-        type="tool",
-        state="pending",
-        input={"tool": "bash"},
-        meta={"step": 1},
-    )
-    HarnessPartRepository.create(
-        message_id=assistant.id,
-        type="tool",
-        state="pending",
-        input={"tool": "bash"},
-        meta={"step": 1},
-    )
     tool_calls = _tool_calls({})
+    queued = await tool_calls.record_queued(
+        session, assistant, {"call_id": "queued", "step": 1, "tool": "read"}
+    )
 
-    match = await tool_calls._rebind_provisional_tool_part(
-        {}, assistant, step=1, tool="bash", call_id="real"
+    started = await tool_calls.record_started(
+        session, assistant, {"call_id": "other", "step": 1, "tool": "read"}
     )
-    assert match is not None and match.id == oldest.id
-    assert (
-        await tool_calls._rebind_provisional_tool_part(
-            {}, assistant, step=2, tool="bash", call_id="real"
-        )
-        is None
-    )
+
+    queued.refresh_from_db()
+    assert started.id != queued.id
+    assert queued.call_id == "queued"
+    assert queued.state == "pending"
 
 
 @pytest.mark.django_db(transaction=True)

@@ -821,8 +821,8 @@ class HarnessRunner(AuthorizedToolDispatcher):
         provisional ``call-{step}-{n}`` (or ``call-{step}-{index}`` for
         indexed slots without an id). When the real id arrives in a
         later fragment for the same slot the slot is rebound to it; the
-        queued provisional id is adopted by the service via its
-        provisional-rebind path, and the final call uses the real id.
+        queued provisional id is carried as ``queued_id`` so persistence
+        can rebind that exact row, and the final call uses the real id.
 
         Final call order preserves provider positions: numeric stream
         keys (explicit ordered blocks) sort numerically; all other keys

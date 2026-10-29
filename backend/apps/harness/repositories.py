@@ -1696,15 +1696,6 @@ class HarnessPartRepository:
         return list(query)
 
     @staticmethod
-    def list_pending_tools(message_id: uuid.UUID) -> list[HarnessPart]:
-        """Return pending tool parts of one message in timeline order."""
-        return list(
-            HarnessPart.objects.filter(
-                message_id=message_id, type="tool", state="pending"
-            ).order_by("position", "created_at", "id")
-        )
-
-    @staticmethod
     def rebind_call_id(
         part: HarnessPart, call_id: str, *, meta: dict | None = None
     ) -> HarnessPart:

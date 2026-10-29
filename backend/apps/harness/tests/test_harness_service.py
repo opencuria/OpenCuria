@@ -3029,54 +3029,6 @@ async def test_tool_result_updates_same_part_no_new_row(harness_workspace) -> No
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_provisional_queued_call_id_rebound_on_started(harness_workspace) -> None:
-    """A provisional queued id is rebound to the real started id (one row)."""
-    service, _, events = _service()
-    session = await _db_create_session(harness_workspace)
-    assistant = await sync_to_async(HarnessMessageRepository.create)(
-        session_id=session.id, role="assistant", content=""
-    )
-    service._runs[str(session.id)] = _timeline_ctx(session.id, assistant.id)
-    await service._on_runner_event(
-        session,
-        assistant,
-        {
-            "type": "tool_queued",
-            "step": 1,
-            "call_id": "provisional-1",
-            "tool": "read",
-            "title": "Read",
-            "arguments": "{}",
-        },
-    )
-    queued_id = HarnessPartRepository.list_for_message(assistant.id)[0].id
-    await service._on_runner_event(
-        session,
-        assistant,
-        {
-            "type": "tool_started",
-            "step": 1,
-            "call_id": "real-1",
-            "tool": "read",
-            "title": "Read",
-            "arguments": "{}",
-        },
-    )
-    rows = HarnessPartRepository.list_for_message(assistant.id)
-    assert len(rows) == 1
-    assert rows[0].id == queued_id
-    assert rows[0].call_id == "real-1"
-    assert rows[0].state == "running"
-    started = [
-        e
-        for e in events
-        if e.get("event") == FRONTEND_EVENT_PART
-        and (e.get("delta") or {}).get("tool_started") == "read"
-    ]
-    assert started[-1]["part_id"] == str(queued_id)
-
-
-@pytest.mark.django_db(transaction=True)
 async def test_text_reasoning_kind_transition_closes_other_stream(
     harness_workspace,
 ) -> None:

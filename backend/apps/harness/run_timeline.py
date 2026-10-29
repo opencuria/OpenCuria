@@ -121,8 +121,8 @@ class RunTimeline:
           fields plus the ``part_id``. The later ``tool_started`` for the
           same call flips the same part to running and re-emits that small
           projection. ``tool_queued`` ``call_id`` may be provisional: when
-          the real ``tool_started`` carries a *different* id for the same
-          step/tool, we rebind the queued part instead of creating a second row.
+          the real ``tool_started`` carries a *different* id, its ``queued_id``
+          identifies the part to rebind instead of creating a second row.
         """
         etype = str(event.get("type", ""))
         workspace_id = str(session.workspace_id)
