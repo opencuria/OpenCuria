@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from ..access.base import sanitize_harness_path
 from ..access.file_types import guess_mime_type
 from ..access.runner_accessor import RunnerAccessorError
+from ..image_processing import image_path_notice, prepare_image
 from .base import Tool, ToolContext, ToolError, ToolResult
 from .file_locks import get_lock
 from .truncate import MAX_BYTES, MAX_LINES
@@ -405,11 +406,27 @@ class ReadTool(Tool):
         content = stored.content
         on_disk = stored.size or len(content)
         if on_disk > MAX_MEDIA_INGEST_BYTES or (len(content) > MAX_MEDIA_INGEST_BYTES):
+            if mime in SUPPORTED_IMAGE_MIMES:
+                return ToolResult(
+                    output=image_path_notice(safe_path, "image exceeds the read limit"),
+                    metadata={"path": safe_path, "size": on_disk},
+                )
             raise ToolError(
                 f"Media exceeds {MAX_MEDIA_INGEST_BYTES} byte ingestion "
                 f"limit: {display_path}",
                 tool=self.name,
             )
+        if mime in SUPPORTED_IMAGE_MIMES:
+            try:
+                if stored.truncated:
+                    raise ValueError("Image read was truncated")
+                preview = await prepare_image(content)
+                content, mime = preview.content, preview.mime
+            except Exception:
+                return ToolResult(
+                    output=image_path_notice(safe_path, "preview unavailable"),
+                    metadata={"path": safe_path, "size": on_disk},
+                )
         output = (
             "PDF read successfully"
             if is_pdf_attachment(mime)

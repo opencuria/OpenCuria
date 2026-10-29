@@ -47,7 +47,11 @@ from .compaction import (
 )
 from .constants import DEFAULT_MAX_DEPTH
 from .engines import base as engine_contracts
-from .images import hydrate_workspace_images
+from .engines.shared.media import (
+    AuthorizeRead,
+    hydrate_image_messages,
+    limit_image_messages,
+)
 from .max_steps import MAX_STEPS_PROMPT, MAX_STEPS_TOOL_ERROR
 from .permissions.evaluator import PermissionEvaluator
 from .prompts.composer import compose_system_prompt
@@ -334,17 +338,26 @@ class HarnessRunner(AuthorizedToolDispatcher):
                 message_id=opts.current_user_message_id or "",
             ),
         ]
+
+        async def authorize_image(path: str) -> bool:
+            decision = self._decide(agent, "read", path, mode)
+            if decision != "ask":
+                return decision == "allow"
+            return await self._resolve_ask(
+                tool_name="read",
+                action=path,
+                title=f"Read {path}",
+                call_id=f"media-{path}",
+                step=0,
+                doom_loop=False,
+                opts=opts,
+            )
+
+        authorize_read = opts.authorize_file_read or authorize_image
         if self.accessor is not None:
-            last = messages[-1]
-            if last.role == "user" and isinstance(last.content, str):
-                hydrated = await hydrate_workspace_images(last.content, self.accessor)
-                messages[-1] = LLMMessage(
-                    role=last.role,
-                    content=hydrated,
-                    tool_calls=last.tool_calls,
-                    tool_call_id=last.tool_call_id,
-                    message_id=last.message_id,
-                )
+            messages = await hydrate_image_messages(
+                messages, self.accessor, authorize_read=authorize_read
+            )
         ctx = ToolContext(
             session_id=opts.session_id or "session",
             workspace_id=opts.workspace_id or "workspace",
@@ -494,7 +507,7 @@ class HarnessRunner(AuthorizedToolDispatcher):
                 )
             if not calls:
                 messages.append(LLMMessage(role="assistant", content=text))
-                steered = await self._take_steering(opts)
+                steered = await self._take_steering(opts, authorize_read=authorize_read)
                 if steered:
                     # The user spoke while the model was answering: continue
                     # the turn with their message instead of stopping.
@@ -581,10 +594,15 @@ class HarnessRunner(AuthorizedToolDispatcher):
                 )
             # Tool results must stay adjacent to their calls, so a steer joins
             # the conversation only after every outcome (and any compaction).
-            messages.extend(await self._take_steering(opts))
+            messages.extend(
+                await self._take_steering(opts, authorize_read=authorize_read)
+            )
 
     async def _take_steering(
-        self, opts: engine_contracts.RunOptions
+        self,
+        opts: engine_contracts.RunOptions,
+        *,
+        authorize_read: AuthorizeRead | None = None,
     ) -> list[LLMMessage]:
         """Deliver queued steers and return them as user messages."""
         if opts.steering is None:
@@ -594,7 +612,12 @@ class HarnessRunner(AuthorizedToolDispatcher):
         for entry in entries:
             content: Any = entry.content
             if self.accessor is not None:
-                content = await hydrate_workspace_images(content, self.accessor)
+                hydrated = await hydrate_image_messages(
+                    [LLMMessage(role="user", content=content)],
+                    self.accessor,
+                    authorize_read=authorize_read or opts.authorize_file_read,
+                )
+                content = hydrated[0].content
             steered.append(LLMMessage(role="user", content=content))
         return steered
 
@@ -873,7 +896,7 @@ class HarnessRunner(AuthorizedToolDispatcher):
 
         async for delta in resolved.adapter.chat_stream(
             resolved.model_id,
-            messages,
+            limit_image_messages(messages),
             schemas,
             chat_options or self.chat_options,
         ):

@@ -14,20 +14,20 @@ from apps.harness.images import (
     resolve_workspace_image_path,
 )
 from apps.harness.providers.base import LLMMessage
-from apps.harness.tests.conftest import FakeAccessor
+from apps.harness.tests.conftest import TINY_PNG, FakeAccessor
 
 
 @pytest.mark.asyncio
 async def test_hydrate_workspace_image_adds_data_url() -> None:
     """Image markdown becomes text plus image_url provider parts."""
-    png_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * 8
+    png_bytes = TINY_PNG
     accessor = FakeAccessor(files={"/workspace/cat.png": png_bytes})
     content = "see ![cat](/workspace/cat.png)"
     hydrated = await hydrate_workspace_images(content, accessor)
     assert isinstance(hydrated, list)
     assert hydrated[0] == {"type": "text", "text": "see "}
-    assert hydrated[1]["type"] == "image_url"
-    url = hydrated[1]["image_url"]["url"]
+    assert hydrated[1] == {"type": "text", "text": "![cat](/workspace/cat.png)"}
+    url = hydrated[2]["image_url"]["url"]
     assert url.startswith("data:image/png;base64,")
     assert base64.b64decode(url.split(",", 1)[1]) == png_bytes
 
@@ -38,7 +38,9 @@ async def test_hydrate_missing_image_keeps_text_only() -> None:
     accessor = FakeAccessor(files={})
     content = "see ![cat](/workspace/missing.png)"
     hydrated = await hydrate_workspace_images(content, accessor)
-    assert hydrated == content
+    assert isinstance(hydrated, str)
+    assert hydrated.startswith(content)
+    assert "Image not loaded" in hydrated
 
 
 @pytest.mark.asyncio
@@ -53,7 +55,7 @@ async def test_hydrate_non_image_markdown_stays_text() -> None:
 @pytest.mark.asyncio
 async def test_hydrate_user_messages_only_touches_user_role() -> None:
     """Only user messages are hydrated in a message list."""
-    png_bytes = b"\x89PNG\r\n\x1a\n"
+    png_bytes = TINY_PNG
     accessor = FakeAccessor(files={"/workspace/a.png": png_bytes})
     messages = [
         LLMMessage(role="system", content="sys"),
@@ -74,14 +76,8 @@ def test_resolve_workspace_image_path_relative_and_absolute() -> None:
         resolve_workspace_image_path("screenshots/login.png")
         == "/workspace/screenshots/login.png"
     )
-    assert (
-        resolve_workspace_image_path("/workspace/cat.png")
-        == "/workspace/cat.png"
-    )
-    assert (
-        resolve_workspace_image_path('cat.png "kitten"')
-        == "/workspace/cat.png"
-    )
+    assert resolve_workspace_image_path("/workspace/cat.png") == "/workspace/cat.png"
+    assert resolve_workspace_image_path('cat.png "kitten"') == "/workspace/cat.png"
     assert resolve_workspace_image_path("https://example.com/a.png") is None
     assert resolve_workspace_image_path("../etc/passwd.png") is None
     assert resolve_workspace_image_path("/tmp/x.png") is None
@@ -92,16 +88,16 @@ def test_resolve_workspace_image_path_relative_and_absolute() -> None:
 @pytest.mark.asyncio
 async def test_hydrate_relative_image_path() -> None:
     """Relative markdown images hydrate from /workspace."""
-    png_bytes = b"\x89PNG\r\n\x1a\n"
+    png_bytes = TINY_PNG
     accessor = FakeAccessor(files={"/workspace/cat.png": png_bytes})
     hydrated = await hydrate_workspace_images("see ![cat](cat.png)", accessor)
     assert isinstance(hydrated, list)
     assert hydrated[0] == {"type": "text", "text": "see "}
-    assert hydrated[1]["type"] == "image_url"
+    assert hydrated[2]["type"] == "image_url"
 
     dotted = await hydrate_workspace_images("![cat](./cat.png)", accessor)
     assert isinstance(dotted, list)
-    assert dotted[0]["type"] == "image_url"
+    assert dotted[1]["type"] == "image_url"
 
 
 @pytest.mark.asyncio

@@ -43,7 +43,6 @@ from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 from .agents.definitions import get_agent
 from .conversation_events import ConversationEvents
 from .engines.base import RunOptions
-from .images import hydrate_user_messages
 from .interaction_service import InteractionService
 from .models import (
     HarnessMessage,
@@ -2270,8 +2269,6 @@ class HarnessService:
             accessor = None
             if self._accessor_factory is not None:
                 accessor = await self._accessor_factory(str(session.workspace_id))
-            if accessor is not None:
-                history = await hydrate_user_messages(history, accessor)
             tools = self._tools_for_session(key, session.agent_name or "build")
             from .services import ComputerUseConfigService
 

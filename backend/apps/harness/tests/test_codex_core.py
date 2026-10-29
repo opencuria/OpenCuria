@@ -8,8 +8,10 @@ import os
 import shutil
 import signal
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from aiohttp import web
@@ -21,6 +23,8 @@ from apps.harness.engines.codex.engine import CodexEngine
 from apps.harness.engines.codex.protocol import CodexProtocol, CodexProtocolError
 from apps.harness.engines.codex.session_store import home_for, validate_snapshot
 from apps.harness.permissions.evaluator import PermissionEvaluator
+from apps.harness.providers.base import LLMMessage
+from apps.harness.steering import SteeringChannel
 from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import ToolRegistry
 from apps.harness.tools.files import WriteTool
@@ -234,6 +238,11 @@ async def fixture_run(
     response_item=None,
     registry=None,
     code_mode_only=False,
+    prompt: str = "Local test only.",
+    history: list[LLMMessage] | None = None,
+    steering: SteeringChannel | None = None,
+    request_hook: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    resume_prompt: str = "Continue the local conversation.",
 ):
     if not PINNED.exists():
         pytest.skip("Pinned Codex binary unavailable; set OPENCURIA_TEST_CODEX_BINARY")
@@ -244,6 +253,8 @@ async def fixture_run(
         nonlocal calls
         body = await request.json()
         requests.append(body)
+        if request_hook is not None:
+            await request_hook(body)
         auxiliary = body.get("model") != "~test/model"
         if not auxiliary:
             calls += 1
@@ -304,7 +315,7 @@ async def fixture_run(
             content_type="text/event-stream",
         )
 
-    app = web.Application()
+    app = web.Application(client_max_size=16 * 1024 * 1024)
     app.router.add_post("/v1/responses", responses)
 
     async def models(_):
@@ -393,12 +404,13 @@ async def fixture_run(
         )
         owner = asyncio.create_task(
             engine.run(
-                "Local test only.",
+                prompt,
                 agent,
                 "openrouter/test/model",
                 mode,
                 RunOptions(
-                    session_id=session, on_permission=permission, skills=list(skills)
+                    session_id=session, on_permission=permission, skills=list(skills),
+                    history=history or [], steering=steering,
                 ),
             )
         )
@@ -431,7 +443,7 @@ async def fixture_run(
             )
             result = await asyncio.wait_for(
                 engine.run(
-                    "Continue the local conversation.",
+                    resume_prompt,
                     next_agent,
                     "openrouter/test/model",
                     next_mode,
@@ -439,6 +451,9 @@ async def fixture_run(
                         session_id=session,
                         on_permission=permission,
                         skills=list(skills),
+                        history=[
+                            *(history or []), LLMMessage(role="user", content=prompt)
+                        ],
                     ),
                 ),
                 35,

@@ -26,7 +26,7 @@ from apps.harness.providers.base import (
 )
 from apps.harness.providers.resolver import StaticModelResolver
 from apps.harness.runner import HarnessRunner
-from apps.harness.tests.conftest import FakeAccessor
+from apps.harness.tests.conftest import TINY_PNG, FakeAccessor
 from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import Tool, ToolResult
 from apps.harness.tools.invocation import AuthorizedToolDispatcher
@@ -960,7 +960,7 @@ async def test_prompt_workspace_image_hydrated_for_provider() -> None:
     """User prompts with workspace image markdown become multimodal."""
     provider = FakeProvider([_text_step("seen")])
     events: list[dict[str, Any]] = []
-    png_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * 4
+    png_bytes = TINY_PNG
     runner, opts = _runner(
         provider,
         events,

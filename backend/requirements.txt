@@ -63,3 +63,6 @@ redis>=5.0,<7.0
 
 # Bounded PDF text extraction in an isolated resource-limited subprocess.
 pypdf==6.21.1
+
+# Decode and resize image attachments before they reach any agent harness.
+Pillow>=12.3,<14.0

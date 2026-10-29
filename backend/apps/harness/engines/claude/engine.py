@@ -28,7 +28,7 @@ from ...constants import DEFAULT_MAX_DEPTH
 from ...permissions.evaluator import DEFAULT_GLOBAL_RULES, PermissionEvaluator
 from ...prompts.composer import ComposedPrompt
 from ...prompts.opencuria import opencuria_context
-from ...providers.base import ToolSchema, Usage
+from ...providers.base import LLMMessage, ToolSchema, Usage
 from ...todos.service import TodoService
 from ...tools.base import ToolContext, ToolError, ToolRegistry, ToolResult
 from ..base import RunOptions, RunResult
@@ -112,6 +112,7 @@ class ClaudeEngine:
             raise TypeError("runtime_artifact_ensurer must be callable")
         self._default_effort = normalize_claude_effort(effort)
         self._options: RunOptions | None = None
+        self._image_history: list[LLMMessage] = []
         self._agent: AgentDefinition | None = None
         self._bridge: PermissionBridge | None = None
         self._mode = "build"
@@ -925,7 +926,7 @@ class ClaudeEngine:
     async def _prompt_with_history(self, prompt: str) -> str | list[dict[str, Any]]:
         """Hydrate current prompt and non-resumed history into Claude blocks."""
         options = self._options
-        return await build_user_content(
+        content = await build_user_content(
             prompt,
             accessor=self.accessor,
             history=options.history if options is not None else None,
@@ -936,6 +937,11 @@ class ClaudeEngine:
                 else self._authorize_media_read
             ),
         )
+        self._image_history = [
+            *(options.history if options is not None else []),
+            LLMMessage(role="user", content=prompt),
+        ]
+        return content
 
     async def _steer_content(self, text: str) -> str | list[dict[str, Any]]:
         """Hydrate a steered message like the prompt, without replaying history.
@@ -946,10 +952,10 @@ class ClaudeEngine:
         """
         options = self._options
         try:
-            return await build_user_content(
+            content = await build_user_content(
                 text,
                 accessor=self.accessor,
-                history=None,
+                history=self._image_history,
                 include_history=False,
                 authorize_read=(
                     options.authorize_file_read
@@ -959,7 +965,9 @@ class ClaudeEngine:
             )
         except Exception:
             log.warning("claude_steer_hydration_failed")
-            return text
+            content = text
+        self._image_history.append(LLMMessage(role="user", content=text))
+        return content
 
     async def _authorize_media_read(self, path: str) -> bool:
         """Apply the native Read policy to explicit user attachments as well."""

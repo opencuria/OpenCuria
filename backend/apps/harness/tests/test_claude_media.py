@@ -26,6 +26,7 @@ from apps.harness.engines.claude.message_projection import (
 )
 from apps.harness.engines.shared.media import build_user_content, data_url_block
 from apps.harness.providers.base import LLMMessage
+from apps.harness.tests.conftest import TINY_PNG, make_image
 from apps.harness.tools import default_tool_registry
 from apps.harness.tools.base import Tool, ToolContext, ToolRegistry, ToolResult
 
@@ -144,7 +145,7 @@ async def test_workspace_markdown_image_is_hydrated_and_translated_for_claude(
     tmp_path: Path,
 ) -> None:
     accessor = MediaAccessor(tmp_path)
-    payload = b"\x89PNG\r\n\x1a\nworkspace-image"
+    payload = TINY_PNG
     accessor.files["/workspace/screenshot.png"] = payload
     content = await build_user_content(
         "Inspect ![screen](/workspace/screenshot.png) please.", accessor=accessor
@@ -155,6 +156,7 @@ async def test_workspace_markdown_image_is_hydrated_and_translated_for_claude(
     assert base64.b64decode(image["source"]["data"]) == payload
     assert [block.get("text") for block in content if block["type"] == "text"] == [
         "Inspect ",
+        "![screen](/workspace/screenshot.png)",
         " please.",
     ]
     assert accessor.reads[0][1] is not None
@@ -166,7 +168,7 @@ async def test_history_image_parts_are_preserved_but_resume_omits_duplicate_hist
     tmp_path: Path,
 ) -> None:
     accessor = MediaAccessor(tmp_path)
-    payload = b"\xff\xd8\xfffixture"
+    payload = make_image(format="JPEG")
     encoded = base64.b64encode(payload).decode()
     history = [
         LLMMessage(
@@ -204,11 +206,7 @@ async def test_local_sse_real_cli_receives_workspace_image_without_provider_netw
     )
 
     require_pinned_cli()
-    payload = base64.b64decode(
-        "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAACXBIWXMAAAABAAAA"
-        "AQBPJcTWAAAAKUlEQVR4nO3NsQkAAAzDsPz/c6FPJJvAs5VLpm3vAAAAAAAAAAAAoNgDp+T0"
-        "Ltwd/VwAAAAASUVORK5CYII="
-    )
+    payload = TINY_PNG
     (
         result,
         _events,
@@ -241,6 +239,41 @@ async def test_local_sse_real_cli_receives_workspace_image_without_provider_netw
     assert image["source"]["media_type"] == "image/png"
     assert base64.b64decode(image["source"]["data"]) == payload
     assert all("image_url" not in json.dumps(message) for message in messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("many", [False, True])
+async def test_real_claude_run_completes_with_path_only_images(
+    tmp_path: Path, many: bool
+) -> None:
+    from apps.harness.tests.test_claude_engine import (
+        _run_local_cli_fixture,
+        require_pinned_cli,
+    )
+
+    require_pinned_cli()
+    prompt = "Inspect " + " ".join(
+        f"@file:/workspace/image-{index}.png" for index in range(17 if many else 1)
+    )
+    result, _, _, requests, _, _, _ = await _run_local_cli_fixture(
+        tmp_path,
+        tool_name="",
+        tool_arguments={},
+        tools=default_tool_registry(),
+        prompt=prompt,
+        cwd="/workspace",
+        fixture_files={"image-0.png": b"broken image"},
+    )
+    assert result.output == "fixture answer"
+    assert "/workspace/image-0.png" in json.dumps(requests)
+    assert "Image not loaded" in json.dumps(requests)
+    assert not any(
+        block.get("type") == "image"
+        for request in requests
+        for message in request.get("messages", [])
+        for block in message.get("content", [])
+        if isinstance(block, dict)
+    )
 
 
 @pytest.mark.asyncio

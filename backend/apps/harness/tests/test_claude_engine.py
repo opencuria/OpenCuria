@@ -307,6 +307,7 @@ class LocalSseWorkspaceAccessor:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=16 * 1024 * 1024,
             )
             return FakeProcessStream(
                 process,
@@ -361,6 +362,7 @@ class LocalSseWorkspaceAccessor:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=16 * 1024 * 1024,
         )
         stream = FakeProcessStream(
             process,
@@ -730,7 +732,7 @@ async def _run_local_cli_fixture(
         await response.write_eof()
         return response
 
-    app = web.Application()
+    app = web.Application(client_max_size=16 * 1024 * 1024)
     app.router.add_post("/v1/messages", messages)
     server = web.AppRunner(app)
     await server.setup()

@@ -18,7 +18,7 @@ from ...agents.definitions import get_agent
 from ...desktop_leases import DesktopLease
 from ...permissions.evaluator import PermissionEvaluator
 from ...prompts.opencuria import opencuria_context
-from ...providers.base import Usage
+from ...providers.base import LLMMessage, Usage
 from ...tools.base import ToolRegistry
 from ..base import RunOptions, RunResult
 from ..shared.security import StreamingRedactor, redact_text, redact_value
@@ -117,6 +117,7 @@ class CodexEngine:
         self.turn_id = ""
         self.status: str | None = None
         self.thread_id = self.external_session_id
+        self._image_history: list[LLMMessage] = []
         self.terminal = asyncio.Event()
         self.turn_ready = asyncio.Event()
         self.allowed = set()
@@ -279,7 +280,7 @@ class CodexEngine:
                 content = await user_input(
                     entry.content,
                     accessor=self.accessor,
-                    opts=self.opts,
+                    opts=replace(self.opts, history=self._image_history),
                     include_history=False,
                 )
                 sent = True
@@ -299,6 +300,7 @@ class CodexEngine:
                 channel.release(entry.id, uncertain=sent)
                 raise
             await channel.acknowledge(entry.id)
+            self._image_history.append(LLMMessage(role="user", content=entry.content))
 
     async def run(
         self,
@@ -421,6 +423,7 @@ class CodexEngine:
             opts=opts,
             include_history=not self.external_session_id,
         )
+        self._image_history = [*opts.history, LLMMessage(role="user", content=prompt)]
         binary = await self.accessor.ensure_runtime_artifact(
             "codex-agent", CODEX_VERSION
         )

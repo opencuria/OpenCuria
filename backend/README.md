@@ -12,6 +12,18 @@ for installation, migrations, and the single-worker ASGI startup command.
 - [MCP OAuth setup and operations](../docs/mcp-oauth.md).
 - [Lifecycle recovery](../docs/image-lifecycle-implementation.md#recovery-hardening-operator-workflow).
 
+## Image attachments
+
+Native, Claude and Codex runs share image preparation for `@file:` mentions and
+workspace Markdown images, including history and steering messages. Up to 16
+images are automatically decoded and, when needed, reduced to previews bounded
+by 2048 pixels per edge and 1.5 MB each. Originals and their paths are preserved.
+More than 16 images use paths only, without opening the files. Missing, denied,
+corrupt, oversized or otherwise unreadable images also remain as paths with an
+explanation for the agent instead of aborting input preparation. File-reading
+tools use the same preview processing and fallback. Resumed sessions and steering
+count previously referenced images toward the same limit without replaying them.
+
 ## Codex harness
 
 See the [Codex guide](../docs/codex.md) for supported ChatGPT/OpenRouter accounts,

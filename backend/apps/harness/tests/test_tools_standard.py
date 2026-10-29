@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from apps.harness.access.base import ExecResult
 from apps.harness.access.runner_accessor import RunnerAccessorError
-from apps.harness.tests.conftest import FakeAccessor
+from apps.harness.tests.conftest import TINY_PNG, FakeAccessor, make_image
 from apps.harness.todos.memory_repository import InMemoryTodoRepository
 from apps.harness.todos.service import TodoService
 from apps.harness.tools import (
@@ -95,9 +95,7 @@ async def test_read_image_detected_from_content_not_extension() -> None:
 
     from apps.harness.tools.files import MAX_MEDIA_INGEST_BYTES
 
-    jpeg = bytes(
-        [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01]
-    )
+    jpeg = make_image(format="JPEG")
     accessor = FakeAccessor(files={"/workspace/image.bin": jpeg})
     result = await ReadTool().execute({"path": "/workspace/image.bin"}, _ctx(accessor))
     assert result.output == "Image read successfully"
@@ -119,7 +117,7 @@ async def test_read_png_happy_path() -> None:
     """PNG magic bytes return an image attachment."""
     import base64
 
-    png = b"\x89PNG\r\n\x1a\n" + b"x" * 8
+    png = TINY_PNG
     accessor = FakeAccessor(files={"/workspace/cat.png": png})
     result = await ReadTool().execute({"path": "/workspace/cat.png"}, _ctx(accessor))
     assert result.output == "Image read successfully"
@@ -147,8 +145,8 @@ async def test_read_pdf_happy_path() -> None:
     assert result.metadata["attachments"] == result.attachments
 
 
-async def test_read_media_over_ingestion_limit_rejected() -> None:
-    """Media larger than MAX_MEDIA_INGEST_BYTES raises ToolError."""
+async def test_read_image_over_ingestion_limit_returns_path() -> None:
+    """Oversized images return a usable file reference without an attachment."""
     from apps.harness.access.file_types import FileContent
     from apps.harness.tools.files import MAX_MEDIA_INGEST_BYTES
 
@@ -164,8 +162,10 @@ async def test_read_media_over_ingestion_limit_rejected() -> None:
             return FileContent(content=shown, size=size, truncated=True)
 
     accessor = _HugeAccessor(files={"/workspace/big.png": jpeg})
-    with pytest.raises(ToolError, match="ingestion limit"):
-        await ReadTool().execute({"path": "/workspace/big.png"}, _ctx(accessor))
+    result = await ReadTool().execute({"path": "/workspace/big.png"}, _ctx(accessor))
+    assert "/workspace/big.png" in result.output
+    assert "Image not loaded" in result.output
+    assert not result.attachments
 
 
 async def test_read_unsupported_image_mime_falls_through_to_text() -> None:

@@ -13,12 +13,17 @@ import os
 import re
 from collections import Counter
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ...access.base import WorkspaceAccessor, sanitize_harness_path
 from ...access.file_types import FileContent
 from ...access.runner_accessor import RunnerAccessorError
+from ...image_processing import (
+    MAX_IMAGE_SOURCE_BYTES,
+    image_path_notice,
+    prepare_image,
+)
 from ...images import (
     MARKDOWN_IMAGE_RE,
     parse_markdown_link_dest,
@@ -88,6 +93,9 @@ class _RequestPlan:
     document_bytes: int = 0
     image_count: int = 0
     media_count: int = 0
+    images_as_paths: bool = False
+    include_documents: bool = True
+    enforce_content_limit: bool = True
 
     def add_text(self, text: str) -> None:
         """Account for UTF-8 text in the shared request budget."""
@@ -128,6 +136,10 @@ class _RequestPlan:
         """Account for text and media references without opening any files."""
         self.add_text(text)
         for reference in _media_references(text):
+            if reference.kind == "image" and self.images_as_paths:
+                continue
+            if reference.kind == "document" and not self.include_documents:
+                continue
             self.references[(reference.path, reference.kind)] += 1
 
     def check(self) -> None:
@@ -144,7 +156,10 @@ class _RequestPlan:
             raise MediaLimitError("Claude aggregate image limit exceeded")
         if self.document_bytes > MAX_CLAUDE_DOCUMENT_BYTES:
             raise MediaLimitError("Claude aggregate PDF limit exceeded")
-        if self.text_bytes + self.media_chars > MAX_USER_CONTENT_BYTES:
+        if (
+            self.enforce_content_limit
+            and self.text_bytes + self.media_chars > MAX_USER_CONTENT_BYTES
+        ):
             raise MediaLimitError("Claude request content exceeds the input limit")
 
 
@@ -439,14 +454,81 @@ def _user_texts(content: str | list[dict[str, Any]] | None) -> list[str]:
     return []
 
 
+def _image_count(messages: list[LLMMessage]) -> int:
+    """Count the whole request before opening or decoding any images."""
+    count = 0
+    for message in messages:
+        if message.role == "user":
+            count += sum(
+                reference.kind == "image"
+                for text in _user_texts(message.content)
+                for reference in _media_references(text)
+            )
+        if isinstance(message.content, list):
+            count += sum(
+                isinstance(part, dict) and part.get("type") == "image_url"
+                for part in message.content
+            )
+    return count
+
+
+async def _prepare_inline_images(
+    content: str | list[dict[str, Any]] | None, *, paths_only: bool
+) -> str | list[dict[str, Any]] | None:
+    """Make historical inline images safe without reading any referenced paths."""
+    if not isinstance(content, list):
+        return content
+    prepared: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") != "image_url":
+            prepared.append(part)
+            continue
+        label = str(part.get("path") or part.get("filename") or "image attachment")
+        reason = "too many images in this request"
+        if not paths_only:
+            try:
+                value = part.get("image_url")
+                url = value.get("url") if isinstance(value, dict) else value
+                match = _DATA_URL.fullmatch(url) if isinstance(url, str) else None
+                if (
+                    match is None
+                    or match.group(1).lower() not in SUPPORTED_IMAGE_MIMES
+                    or len(match.group(2)) > (MAX_IMAGE_SOURCE_BYTES + 2) // 3 * 4
+                ):
+                    raise ValueError("Unsupported or oversized image data URL")
+                preview = await prepare_image(
+                    base64.b64decode(match.group(2), validate=True)
+                )
+                encoded = base64.b64encode(preview.content).decode("ascii")
+                prepared.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{preview.mime};base64,{encoded}"},
+                    }
+                )
+                continue
+            except Exception:
+                # Cancellation is a BaseException and must still stop the run.
+                reason = "preview unavailable; inspect the file if needed"
+        prepared.append({"type": "text", "text": image_path_notice(label, reason)})
+    return prepared
+
+
 def _request_plan(
     prompt: str,
     history: list[LLMMessage] | None,
     *,
     include_history: bool,
+    images_as_paths: bool = False,
+    include_documents: bool = True,
+    enforce_content_limit: bool = True,
 ) -> _RequestPlan:
     """Preflight exact text/media inputs and the same user refs later hydrated."""
-    plan = _RequestPlan()
+    plan = _RequestPlan(
+        images_as_paths=images_as_paths,
+        include_documents=include_documents,
+        enforce_content_limit=enforce_content_limit,
+    )
     if include_history and history:
         plan.add_text("Prior conversation context:")
         for message in history:
@@ -478,6 +560,46 @@ def _request_plan(
     plan.add_user_text(prompt.strip())
     plan.check()
     return plan
+
+
+async def _prepare_request(
+    prompt: str,
+    history: list[LLMMessage] | None,
+    *,
+    include_history: bool,
+    include_documents: bool = True,
+    enforce_content_limit: bool = True,
+) -> tuple[_RequestPlan, list[LLMMessage]]:
+    """Fall back to paths before request-wide image limits can reject a run."""
+    prior = list(history or [])
+    messages = prior if include_history else []
+    # Resumed CLI sessions already retain history: count it without replaying it.
+    image_count = _image_count([*prior, LLMMessage(role="user", content=prompt)])
+    paths_only = image_count > MAX_USER_IMAGE_BLOCKS
+    while True:
+        prepared = [
+            replace(
+                message,
+                content=await _prepare_inline_images(
+                    message.content, paths_only=paths_only
+                ),
+            )
+            for message in messages
+        ]
+        try:
+            plan = _request_plan(
+                prompt,
+                prepared,
+                include_history=include_history,
+                images_as_paths=paths_only,
+                include_documents=include_documents,
+                enforce_content_limit=enforce_content_limit,
+            )
+            return plan, prepared
+        except MediaLimitError:
+            if paths_only or not image_count:
+                raise
+            paths_only = True
 
 
 class _MediaLoader:
@@ -552,16 +674,23 @@ class _MediaLoader:
         if key in self._failed:
             raise self._failed[key]
         if key not in self._loaded:
-            if safe_path not in self._authorized and self._authorize_read is not None:
-                if not await self._authorize_read(safe_path):
-                    raise MediaAuthorizationError(
-                        f"Access to user-referenced media was denied: {safe_path}"
-                    )
-                self._authorized.add(safe_path)
-            limit = self._read_limit(key)
             try:
+                if (
+                    safe_path not in self._authorized
+                    and self._authorize_read is not None
+                ):
+                    if not await self._authorize_read(safe_path):
+                        raise MediaAuthorizationError(
+                            f"Access to user-referenced media was denied: {safe_path}"
+                        )
+                    self._authorized.add(safe_path)
+                limit = (
+                    MAX_IMAGE_SOURCE_BYTES if kind == "image" else self._read_limit(key)
+                )
                 stored = await _read_media_no_follow(
-                    self._accessor, safe_path, max_size=limit + 1
+                    self._accessor,
+                    safe_path,
+                    max_size=limit if kind == "image" else limit + 1,
                 )
                 if (
                     stored.truncated
@@ -579,11 +708,17 @@ class _MediaLoader:
                 )
                 if mime not in allowed:
                     raise ValueError(f"Unsupported Claude workspace media type: {mime}")
+                if kind == "image":
+                    preview = await prepare_image(stored.content)
+                    stored = FileContent(content=preview.content, mime=preview.mime)
+                    mime = preview.mime
                 self._loaded[key] = (stored, mime)
-            except (FileNotFoundError, OSError, RunnerAccessorError, ValueError) as exc:
+            except Exception as exc:
                 self._failed[key] = exc
                 raise
         stored, mime = self._loaded[key]
+        if kind == "image" and len(stored.content) > self._read_limit(key):
+            raise MediaLimitError("Image preview exceeds the remaining request budget")
         encoded = base64.b64encode(stored.content).decode("ascii")
         block = (
             _image_block(mime, encoded)
@@ -610,8 +745,36 @@ async def _user_text_blocks(text: str, loader: _MediaLoader) -> list[dict[str, A
     output: list[dict[str, Any]] = []
     cursor = 0
     for reference in _media_references(text):
+        if reference.kind == "document" and not loader._plan.include_documents:
+            continue
         if reference.start > cursor:
             output.extend(content_blocks(text[cursor : reference.start]))
+        if reference.kind == "image":
+            # Retain the original path even when a preview is successfully sent.
+            output.extend(content_blocks(text[reference.start : reference.end]))
+            if loader._plan.images_as_paths:
+                output.extend(
+                    content_blocks(
+                        image_path_notice(
+                            reference.path, "too many images or image budget exceeded"
+                        )
+                    )
+                )
+            else:
+                try:
+                    output.append(await loader.load(reference.path, reference.kind))
+                except Exception:
+                    loader.skip(reference.path, reference.kind)
+                    output.extend(
+                        content_blocks(
+                            image_path_notice(
+                                reference.path,
+                                "preview unavailable; inspect the file if needed",
+                            )
+                        )
+                    )
+            cursor = reference.end
+            continue
         if not reference.markdown:
             output.extend(content_blocks(text[reference.start : reference.end]))
         try:
@@ -663,9 +826,11 @@ async def build_user_content(
     include_history: bool = True,
     authorize_read: AuthorizeRead | None = None,
 ) -> str | list[dict[str, Any]]:
-    """Build bounded Claude content and authorize all user-referenced media."""
+    """Build shared media content; unavailable images always remain as paths."""
     current_prompt = prompt.strip()
-    plan = _request_plan(current_prompt, history, include_history=include_history)
+    plan, history = await _prepare_request(
+        current_prompt, history, include_history=include_history
+    )
     loader = _MediaLoader(accessor, plan, authorize_read)
     blocks: list[dict[str, Any]] = []
     if include_history and history:
@@ -683,6 +848,103 @@ async def build_user_content(
     return checked_content(blocks)
 
 
+def _canonical_content(blocks: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+    """Translate shared media blocks into the native provider content contract."""
+    content: list[dict[str, Any]] = []
+    for block in blocks:
+        if block["type"] == "text":
+            content.append(block)
+        else:
+            source = block["source"]
+            url = f"data:{source['media_type']};base64,{source['data']}"
+            if block["type"] == "image":
+                content.append({"type": "image_url", "image_url": {"url": url}})
+            else:
+                content.append(
+                    {
+                        "type": "file",
+                        "url": url,
+                        "mime": source["media_type"],
+                        "filename": block.get("title", ""),
+                    }
+                )
+    if not any(part["type"] != "text" for part in content):
+        return "".join(part["text"] for part in content)
+    return content
+
+
+async def hydrate_image_messages(
+    messages: list[LLMMessage],
+    accessor: WorkspaceAccessor,
+    *,
+    authorize_read: AuthorizeRead | None = None,
+) -> list[LLMMessage]:
+    """Apply the shared image policy without flattening native conversation roles."""
+    plan, prepared = await _prepare_request(
+        "",
+        messages,
+        include_history=True,
+        include_documents=False,
+        enforce_content_limit=False,
+    )
+    loader = _MediaLoader(accessor, plan, authorize_read)
+    return [
+        replace(
+            message,
+            content=_canonical_content(await _history_message_blocks(message, loader))
+            if message.role == "user"
+            else message.content,
+        )
+        for message in prepared
+    ]
+
+
+def limit_image_messages(messages: list[LLMMessage]) -> list[LLMMessage]:
+    """Keep subsequent tool and steering images within the same request budget."""
+    images = [
+        part
+        for message in messages
+        if isinstance(message.content, list)
+        for part in message.content
+        if isinstance(part, dict) and part.get("type") == "image_url"
+    ]
+    chars = 0
+    for part in images:
+        value = part.get("image_url")
+        url = value.get("url") if isinstance(value, dict) else value
+        if isinstance(url, str):
+            chars += len(url)
+    if (
+        len(images) <= MAX_USER_IMAGE_BLOCKS
+        and chars <= MAX_CLAUDE_IMAGE_BASE64_CHARS * 2
+    ):
+        return messages
+    return [
+        replace(
+            message,
+            content=[
+                {
+                    "type": "text",
+                    "text": image_path_notice(
+                        str(
+                            part.get("path")
+                            or part.get("filename")
+                            or "referenced above"
+                        ),
+                        "image budget exceeded; read files individually",
+                    ),
+                }
+                if isinstance(part, dict) and part.get("type") == "image_url"
+                else part
+                for part in message.content
+            ],
+        )
+        if isinstance(message.content, list)
+        else message
+        for message in messages
+    ]
+
+
 __all__ = [
     "MAX_CLAUDE_DOCUMENT_BYTES",
     "MAX_CLAUDE_IMAGE_BASE64_CHARS",
@@ -695,5 +957,7 @@ __all__ = [
     "checked_content",
     "content_blocks",
     "data_url_block",
+    "hydrate_image_messages",
+    "limit_image_messages",
     "mcp_content_blocks",
 ]

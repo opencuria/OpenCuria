@@ -13,11 +13,11 @@ from apps.harness.engines.shared import media
 from apps.harness.engines.shared.media import (
     MAX_CLAUDE_TOOL_ARGUMENT_BYTES,
     MAX_USER_CONTENT_BYTES,
-    MediaAuthorizationError,
     MediaLimitError,
     build_user_content,
 )
 from apps.harness.providers.base import LLMMessage
+from apps.harness.tests.conftest import TINY_PNG
 
 
 class MediaAccessor:
@@ -69,7 +69,7 @@ def _text(content: str | list[dict[str, Any]]) -> str:
 
 @pytest.mark.asyncio
 async def test_current_and_history_user_file_refs_load_png_and_pdf_in_place() -> None:
-    png = b"\x89PNG\r\n\x1a\nmedia"
+    png = TINY_PNG
     pdf = b"%PDF-1.7\nmedia"
     accessor = MediaAccessor({"/workspace/one.png": png, "/workspace/two.pdf": pdf})
     content = await build_user_content(
@@ -98,26 +98,27 @@ async def test_current_and_history_user_file_refs_load_png_and_pdf_in_place() ->
 
 @pytest.mark.asyncio
 async def test_user_media_requires_optional_authorization_before_read() -> None:
-    accessor = MediaAccessor({"/workspace/screenshot.png": b"\x89PNG\r\n\x1a\nscreen"})
+    accessor = MediaAccessor({"/workspace/screenshot.png": TINY_PNG})
     authorized: list[str] = []
 
     async def authorize(path: str) -> bool:
         authorized.append(path)
         return False
 
-    with pytest.raises(MediaAuthorizationError, match="denied.*screenshot.png"):
-        await build_user_content(
-            "Inspect @file:/workspace/screenshot.png",
-            accessor=accessor,
-            authorize_read=authorize,
-        )
+    content = await build_user_content(
+        "Inspect @file:/workspace/screenshot.png",
+        accessor=accessor,
+        authorize_read=authorize,
+    )
+    assert not _media_blocks(content)
+    assert "/workspace/screenshot.png" in _text(content)
     assert authorized == ["/workspace/screenshot.png"]
     assert accessor.reads == []
 
 
 @pytest.mark.asyncio
 async def test_user_media_rejects_traversal_and_nonmedia_refs_without_reads() -> None:
-    accessor = MediaAccessor({"/workspace/photo.png": b"\x89PNG\r\n\x1a\nimage"})
+    accessor = MediaAccessor({"/workspace/photo.png": TINY_PNG})
     content = await build_user_content(
         "@file:/workspace/../workspace/photo.png @file:/workspace/photo.png.bak "
         "@file:/tmp/outside.png @file:/workspace/photo.png",
@@ -131,8 +132,10 @@ async def test_user_media_rejects_traversal_and_nonmedia_refs_without_reads() ->
 
 
 @pytest.mark.asyncio
-async def test_dot_relative_markdown_image_hydrates_and_parent_traversal_does_not() -> None:
-    png = b"\x89PNG\r\n\x1a\nimage"
+async def test_dot_relative_markdown_image_hydrates_and_parent_traversal_does_not() -> (
+    None
+):
+    png = TINY_PNG
     accessor = MediaAccessor({"/workspace/screenshots/cat.png": png})
 
     content = await build_user_content(
@@ -154,7 +157,7 @@ async def test_dot_relative_markdown_image_hydrates_and_parent_traversal_does_no
 
 @pytest.mark.asyncio
 async def test_repeated_media_is_read_once_and_count_limit_preflights() -> None:
-    png = b"\x89PNG\r\n\x1a\nimage"
+    png = TINY_PNG
     accessor = MediaAccessor({"/workspace/a.png": png})
     authorized: list[str] = []
 
@@ -172,32 +175,35 @@ async def test_repeated_media_is_read_once_and_count_limit_preflights() -> None:
     assert authorized == ["/workspace/a.png"]
 
     accessor = MediaAccessor({"/workspace/a.png": png})
-    with pytest.raises(MediaLimitError, match="too many image blocks"):
-        await build_user_content(
-            " ".join(
-                "@file:/workspace/a.png"
-                for _ in range(media.MAX_USER_IMAGE_BLOCKS + 1)
-            ),
-            accessor=accessor,
-        )
+    content = await build_user_content(
+        " ".join(
+            "@file:/workspace/a.png" for _ in range(media.MAX_USER_IMAGE_BLOCKS + 1)
+        ),
+        accessor=accessor,
+    )
+    assert not _media_blocks(content)
+    assert "too many images" in _text(content)
     assert accessor.reads == []
 
 
 @pytest.mark.asyncio
-async def test_oversized_explicit_media_fails_without_returning_partial_payload() -> None:
-    limit = media.MAX_CLAUDE_IMAGE_BASE64_CHARS * 3 // 4
+async def test_oversized_explicit_media_keeps_path_without_partial_payload() -> None:
+    limit = media.MAX_IMAGE_SOURCE_BYTES
     accessor = MediaAccessor(
         {"/workspace/too-large.png": b"\x89PNG\r\n\x1a\n" + b"x" * limit}
     )
-    with pytest.raises(MediaLimitError, match="exceeds Claude's input limit"):
-        await build_user_content("@file:/workspace/too-large.png", accessor=accessor)
+    content = await build_user_content(
+        "@file:/workspace/too-large.png", accessor=accessor
+    )
+    assert not _media_blocks(content)
+    assert "/workspace/too-large.png" in _text(content)
     assert len(accessor.reads) == 1
-    assert accessor.reads[0][1] == limit + 1
+    assert accessor.reads[0][1] == limit
 
 
 @pytest.mark.asyncio
 async def test_inline_history_media_is_accounted_once_with_workspace_refs() -> None:
-    png = b"\x89PNG\r\n\x1a\nimage"
+    png = TINY_PNG
     encoded = base64.b64encode(png).decode()
     accessor = MediaAccessor({"/workspace/a.png": png})
     history = [
@@ -205,7 +211,10 @@ async def test_inline_history_media_is_accounted_once_with_workspace_refs() -> N
             role="user",
             content=[
                 {"type": "text", "text": "prior"},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{encoded}"},
+                },
             ],
         )
     ]
@@ -216,17 +225,20 @@ async def test_inline_history_media_is_accounted_once_with_workspace_refs() -> N
     assert len(accessor.reads) == 1
 
     # Inline canonical media alone remains valid at normal request sizes.
-    assert len(
-        _media_blocks(
-            await build_user_content("current", accessor=accessor, history=history)
+    assert (
+        len(
+            _media_blocks(
+                await build_user_content("current", accessor=accessor, history=history)
+            )
         )
-    ) == 1
+        == 1
+    )
 
 
 @pytest.mark.asyncio
 async def test_media_aggregate_limit_includes_inline_history_before_any_read() -> None:
-    encoded = base64.b64encode(b"\x89PNG\r\n\x1a\nimage").decode()
-    accessor = MediaAccessor({"/workspace/a.png": b"\x89PNG\r\n\x1a\nimage"})
+    encoded = base64.b64encode(TINY_PNG).decode()
+    accessor = MediaAccessor({"/workspace/a.png": TINY_PNG})
     # Keep text within the request budget; the tiny PNG itself is well within the
     # request-wide byte cap. Multiple inline blocks below cross the max block cap
     # before any reference read, which proves preflight and mapping share counts.
@@ -234,13 +246,19 @@ async def test_media_aggregate_limit_includes_inline_history_before_any_read() -
         LLMMessage(
             role="user",
             content=[
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}}
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{encoded}"},
+                }
                 for _ in range(media.MAX_USER_IMAGE_BLOCKS)
             ],
         )
     ]
-    with pytest.raises(MediaLimitError, match="too many image blocks"):
-        await build_user_content("@file:/workspace/a.png", accessor=accessor, history=history)
+    content = await build_user_content(
+        "@file:/workspace/a.png", accessor=accessor, history=history
+    )
+    assert not _media_blocks(content)
+    assert "too many images" in _text(content)
     assert accessor.reads == []
 
     with pytest.raises(MediaLimitError, match="content exceeds"):
@@ -249,8 +267,31 @@ async def test_media_aggregate_limit_includes_inline_history_before_any_read() -
 
 
 @pytest.mark.asyncio
+async def test_resumed_history_counts_images_without_replaying_or_reading_it() -> None:
+    accessor = MediaAccessor({"/workspace/new.png": TINY_PNG})
+    content = await build_user_content(
+        "Inspect @file:/workspace/new.png",
+        accessor=accessor,
+        history=[
+            LLMMessage(
+                role="user",
+                content=" ".join(
+                    f"@file:/workspace/prior-{index}.png"
+                    for index in range(media.MAX_USER_IMAGE_BLOCKS)
+                ),
+            )
+        ],
+        include_history=False,
+    )
+    assert not _media_blocks(content)
+    assert "/workspace/new.png" in _text(content)
+    assert "prior-" not in _text(content)
+    assert accessor.reads == []
+
+
+@pytest.mark.asyncio
 async def test_file_references_strip_matching_punctuation_and_preserve_text() -> None:
-    png = b"\x89PNG\r\n\x1a\nimage"
+    png = TINY_PNG
     accessor = MediaAccessor({"/workspace/a.png": png})
     prompt = "See @file:/workspace/a.png), then @file:/workspace/a.png], next"
     content = await build_user_content(prompt, accessor=accessor)
@@ -263,7 +304,7 @@ async def test_file_references_strip_matching_punctuation_and_preserve_text() ->
 @pytest.mark.asyncio
 async def test_media_references_in_markdown_code_are_never_hydrated() -> None:
     accessor = MediaAccessor(
-        {"/workspace/a.png": b"\x89PNG\r\n\x1a\nimage", "/workspace/b.png": b"\x89PNG\r\n\x1a\nimage"}
+        {"/workspace/a.png": TINY_PNG, "/workspace/b.png": TINY_PNG}
     )
     prompt = (
         "`@file:/workspace/a.png`\n\n"
@@ -279,8 +320,8 @@ async def test_media_references_in_markdown_code_are_never_hydrated() -> None:
 
 
 @pytest.mark.asyncio
-async def test_only_user_history_is_scanned_for_media_and_tool_calls_are_preserved() -> None:
-    png = b"\x89PNG\r\n\x1a\nimage"
+async def test_user_history_media_keeps_tool_calls() -> None:
+    png = TINY_PNG
     accessor = MediaAccessor({"/workspace/private.png": png})
     user = LLMMessage(role="user", content="User ![photo](/workspace/private.png)")
     assistant = LLMMessage(
@@ -290,7 +331,9 @@ async def test_only_user_history_is_scanned_for_media_and_tool_calls_are_preserv
             {
                 "id": "call-123",
                 "name": "read",
-                "arguments": json.dumps({"path": "src/app.py", "token": "secret-token"}),
+                "arguments": json.dumps(
+                    {"path": "src/app.py", "token": "secret-token"}
+                ),
             }
         ],
     )

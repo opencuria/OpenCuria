@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import io
 import os
 import uuid
 from collections.abc import Callable
 from typing import Any
 
 import pytest
+from PIL import Image
 
 from apps.harness.access.base import ExecResult, WorkspaceAccessor
 from apps.harness.access.file_types import DirEntry, FileContent
@@ -18,12 +20,14 @@ from apps.organizations.models import Organization
 # Allow sync ORM calls from async test functions (Django safety check).
 os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
 
-#: Minimal 1x1 PNG payload for media tests.
-TINY_PNG = (
-    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00"
-    b"\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
-)
+def make_image(size: tuple[int, int] = (1, 1), *, format: str = "PNG") -> bytes:
+    """Return a complete decodable image instead of a magic-byte stub."""
+    output = io.BytesIO()
+    Image.new("RGB", size, "white").save(output, format=format)
+    return output.getvalue()
+
+
+TINY_PNG = make_image()
 
 
 @pytest.fixture
