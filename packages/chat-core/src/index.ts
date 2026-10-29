@@ -14,6 +14,5 @@ export * from "./harnessMessageCopy";
 export * from "./harnessQuestion";
 export * from "./harnessUsage";
 export * from "./harnessPagination";
-export * from "./harnessConversationState";
 export * from "./toolDisplay";
 export * from "./workspaceReadiness";

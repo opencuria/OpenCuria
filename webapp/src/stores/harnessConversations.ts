@@ -1,7 +1,7 @@
 /**
  * Harness conversations Pinia store.
  *
- * Powers the dashboard kanban/list feed of root harness sessions.
+ * Powers root-session navigation and attention indicators.
  * Unread state is sourced from backend `last_read_at` / `manual_unread_at`.
  * Pending permission/question gates set `needs_attention`.
  * Order and displayed times use `last_message_at` (last completed
@@ -16,14 +16,11 @@ import type {
   HarnessConversation,
   HarnessSessionStatus,
 } from '@/types/harness'
-import { extractActiveConversations } from '@/lib/conversationGroups'
 import {
   listHarnessConversations,
   markHarnessSessionRead,
   markHarnessSessionUnread,
 } from '@/services/harness.api'
-import { WorkspaceStatus } from '@/types'
-import { useWorkspaceStore } from '@/stores/workspaces'
 
 const ATTENTION_REFRESH_MS = 300
 
@@ -31,7 +28,6 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
   const conversations = ref<HarnessConversation[]>([])
   const loading = ref(false)
   const error = ref<string | null>(null)
-  const searchQuery = ref('')
   let attentionRefreshTimer: ReturnType<typeof setTimeout> | null = null
   let conversationsGeneration = 0
   let conversationsContext = localStorage.getItem('kern_active_org_id') ?? ''
@@ -40,28 +36,6 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
   const markReadFlights = new Map<string, Promise<boolean>>()
   const markUnreadFlights = new Map<string, Promise<void>>()
 
-  const filteredConversations = computed(() => {
-    const workspaceStore = useWorkspaceStore()
-    const runningWorkspaceIds = new Set(
-      workspaceStore.workspaces
-        .filter((workspace) => workspace.status === WorkspaceStatus.RUNNING)
-        .map((workspace) => workspace.id),
-    )
-    const visible = conversations.value.filter((conv) =>
-      runningWorkspaceIds.has(conv.workspace_id),
-    )
-    const q = searchQuery.value.trim().toLowerCase()
-    if (!q) return visible
-    return visible.filter((conv) => {
-      return (
-        conv.workspace_name.toLowerCase().includes(q) ||
-        conv.title.toLowerCase().includes(q) ||
-        conv.agent_name.toLowerCase().includes(q) ||
-        conv.mode.toLowerCase().includes(q)
-      )
-    })
-  })
-
   const uniqueWorkspaceIds = computed(() => {
     const ids = new Set<string>()
     for (const conv of conversations.value) {
@@ -69,8 +43,6 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
     }
     return [...ids]
   })
-
-  const activeConversations = computed(() => extractActiveConversations(conversations.value))
 
   const attentionCount = computed(
     () => conversations.value.filter((row) => row.needs_attention).length,
@@ -221,10 +193,7 @@ export const useHarnessConversationStore = defineStore('harnessConversations', (
     conversations,
     loading,
     error,
-    searchQuery,
-    filteredConversations,
     uniqueWorkspaceIds,
-    activeConversations,
     attentionCount,
     fetchConversations,
     markAsRead,
