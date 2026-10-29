@@ -69,7 +69,7 @@ def test_callback_commit_rechecks_registration_membership_service_and_activation
         "apps.credentials.mcp_oauth._registration", lambda *_args: registration
     )
     monkeypatch.setattr(
-        "apps.credentials.mcp_oauth._validated_https_url",
+        "apps.credentials.oauth_http.validate_endpoint",
         lambda url, **_kwargs: (url, ("93.184.216.34",)),
     )
     token_calls = []
@@ -195,7 +195,7 @@ def test_connect_without_plugin_creates_independent_named_accounts_and_reconnect
         "apps.credentials.mcp_oauth._registration", lambda *args: registration
     )
     monkeypatch.setattr(
-        "apps.credentials.mcp_oauth._validated_https_url",
+        "apps.credentials.oauth_http.validate_endpoint",
         lambda url, **kwargs: (url, ("93.184.216.34",)),
     )
     token_calls = []

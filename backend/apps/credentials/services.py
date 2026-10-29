@@ -22,6 +22,7 @@ from common.utils import decrypt_value, encrypt_value, generate_ssh_keypair
 from .deletion_guards import collect_deletion_blockers
 from .enums import CredentialType
 from .models import Credential, CredentialService
+from .oauth_errors import OAuthError
 from .oauth_grant_service import OAuthGrantService
 from .oauth_metadata import (
     registration_fingerprint,
@@ -978,7 +979,6 @@ class CredentialOAuthSvc:
         from common.utils import decrypt_value
 
         from .mcp_oauth import (
-            OAuthError,
             _consume_callback_state,
             _post_token,
             _token_auth,

@@ -101,7 +101,7 @@ def test_connect_sets_binding_cookie_then_callback_redirects_only_to_frontend_re
 
     monkeypatch.setattr("apps.credentials.mcp_oauth._registration", registration)
     monkeypatch.setattr(
-        "apps.credentials.mcp_oauth._validated_https_url",
+        "apps.credentials.oauth_http.validate_endpoint",
         lambda url, **_kwargs: (url, ("93.184.216.34",)),
     )
     token_exchange_calls = []
@@ -172,7 +172,8 @@ def test_connect_sets_binding_cookie_then_callback_redirects_only_to_frontend_re
 
 
 def test_cross_site_or_hostname_browser_flow_mismatch_is_explicit(settings):
-    from apps.credentials.mcp_oauth import OAuthError, _validate_browser_flow_origins
+    from apps.credentials.mcp_oauth import _validate_browser_flow_origins
+    from apps.credentials.oauth_errors import OAuthError
 
     settings.DEBUG = True
     settings.MCP_OAUTH_CALLBACK_URL = "http://localhost:8000/api/v1/mcp-oauth/callback/"

@@ -4,18 +4,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import ipaddress
 import json
 import re
 import secrets
-import socket
-import ssl
-import time
 import uuid
 from datetime import timedelta
 from urllib.parse import quote_plus, urlencode, urlparse
 
-import httpcore
 import httpx
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -24,7 +19,9 @@ from django.utils import timezone
 
 from common.utils import decrypt_value, encrypt_value
 
+from . import oauth_http
 from .models import Credential, McpOAuthAuthorizationState
+from .oauth_errors import OAuthError
 from .oauth_metadata import (
     grant_metadata,
     is_safe_registration_url,
@@ -35,157 +32,21 @@ from .oauth_metadata import (
 from .repositories import McpOAuthRepository
 
 STATE_TTL = timedelta(minutes=10)
-HTTP_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
-MAX_RESPONSE = 256 * 1024
-
-
-class OAuthError(ValueError):
-    """Sanitized OAuth protocol/configuration error."""
 
 
 class McpOAuthUnauthorizedError(RuntimeError):
     """The bound OAuth credential is unavailable or rejected."""
 
 
-def _public_addresses(host: str, port: int) -> tuple[str, ...]:
-    """Resolve once, reject non-global answers, and pin requests to checked IPs."""
-    try:
-        results = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    except OSError:
-        raise OAuthError("OAuth endpoint host could not be resolved") from None
-    addresses = []
-    for result in results:
-        try:
-            address = ipaddress.ip_address(result[4][0])
-        except ValueError:
-            raise OAuthError("OAuth endpoint DNS response is invalid") from None
-        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-            address = address.ipv4_mapped
-        if not address.is_global:
-            raise OAuthError("OAuth endpoints cannot target private or local addresses")
-        addresses.append(str(address))
-    if not addresses:
-        raise OAuthError("OAuth endpoint host could not be resolved")
-    return tuple(dict.fromkeys(addresses))
-
-
-def _validated_https_url(
-    url: str, *, oauth_server_url: bool = False
-) -> tuple[str, tuple[str, ...]]:
-    if not isinstance(url, str) or not url or any(ord(char) < 0x21 for char in url):
-        raise OAuthError("OAuth endpoint URL is invalid")
-    parsed = urlparse(url)
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or "@" in parsed.netloc
-        or parsed.fragment
-        or (oauth_server_url and (parsed.query or "?" in url or "#" in url))
-    ):
-        raise OAuthError("OAuth endpoints must be valid HTTPS URLs")
-    try:
-        port = parsed.port or 443
-    except ValueError:
-        raise OAuthError("OAuth endpoint URL is invalid") from None
-    if not 1 <= port <= 65535:
-        raise OAuthError("OAuth endpoint URL is invalid")
-    addresses = _public_addresses(parsed.hostname, port)
-    return url, addresses
-
-
-class _PinnedBackend(httpcore.NetworkBackend):
-    """httpcore backend avoiding a second, untrusted DNS lookup."""
-
-    def __init__(self, host: str, addresses: tuple[str, ...]):
-        self.host = host.lower()
-        self.addresses = addresses
-
-    def connect_tcp(
-        self, host, port, timeout=None, local_address=None, socket_options=None
-    ):
-        if host.lower() != self.host:
-            raise httpcore.ConnectError("OAuth request escaped its pinned host")
-        last_error = None
-        for address in self.addresses:
-            try:
-                sock = socket.create_connection(
-                    (address, port),
-                    timeout,
-                    source_address=(local_address, 0) if local_address else None,
-                )
-                for option in socket_options or ():
-                    sock.setsockopt(*option)
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                from httpcore._backends.sync import SyncStream
-
-                return SyncStream(sock)
-            except OSError as exc:
-                last_error = exc
-        raise httpcore.ConnectError("OAuth endpoint connection failed") from last_error
-
-    def connect_unix_socket(self, path, timeout=None, socket_options=None):
-        raise httpcore.ConnectError("OAuth endpoints cannot use local sockets")
-
-    def sleep(self, seconds):
-        time.sleep(seconds)
-
-
-def _request(method, url, *, data=None, json_body=None, headers=None):
-    """Bounded pinned HTTP; no redirects/proxies and sanitized transport errors."""
-    _, addresses = _validated_https_url(url)
-    parsed = urlparse(url)
-    transport = httpx.HTTPTransport(trust_env=False)
-    # httpx lacks a public custom-network-backend hook; replace its core pool
-    # explicitly so DNS is not looked up again after address validation.
-    transport._pool = httpcore.ConnectionPool(
-        network_backend=_PinnedBackend(parsed.hostname, addresses),
-        max_connections=1,
-        max_keepalive_connections=0,
-        ssl_context=ssl.create_default_context(),
-    )
-    try:
-        with httpx.Client(
-            transport=transport,
-            timeout=HTTP_TIMEOUT,
-            follow_redirects=False,
-            trust_env=False,
-        ) as client:
-            with client.stream(
-                method,
-                url,
-                data=data,
-                json=json_body,
-                headers={"Accept": "application/json", **(headers or {})},
-            ) as response:
-                raw = bytearray()
-                for chunk in response.iter_bytes():
-                    raw.extend(chunk)
-                    if len(raw) > MAX_RESPONSE:
-                        raise OAuthError("OAuth endpoint response is too large")
-                body = None
-                if raw:
-                    try:
-                        body = json.loads(raw)
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        body = None
-                return response.status_code, dict(response.headers), body
-    except OAuthError:
-        raise
-    except Exception:
-        raise OAuthError("OAuth endpoint request failed") from None
-
-
 def _get_json(url: str) -> dict:
-    status, _, payload = _request("GET", url)
+    status, _, payload = oauth_http.request("GET", url)
     if status >= 400 or not isinstance(payload, dict):
         raise OAuthError("OAuth metadata request failed")
     return payload
 
 
 def _post_registration(url: str, payload: dict) -> dict:
-    status, _, payload = _request(
+    status, _, payload = oauth_http.request(
         "POST", url, json_body=payload, headers={"Content-Type": "application/json"}
     )
     if status >= 400 or not isinstance(payload, dict):
@@ -198,7 +59,7 @@ def _request_basic_token(url, data, auth):
     # encoding to each credential separately before joining with a colon.
     pair = f"{quote_plus(auth[0], safe='')}:{quote_plus(auth[1], safe='')}"
     encoded = base64.b64encode(pair.encode()).decode("ascii")
-    return _request(
+    return oauth_http.request(
         "POST",
         url,
         data=data,
@@ -216,7 +77,7 @@ def _post_token(url, form, *, auth=None, post_client_secret=""):
     if auth is not None:
         status, _, result = _request_basic_token(url, data, auth)
     else:
-        status, _, result = _request(
+        status, _, result = oauth_http.request(
             "POST",
             url,
             data=data,
@@ -232,7 +93,7 @@ def _post_token(url, form, *, auth=None, post_client_secret=""):
 
 
 def _issuer_metadata(issuer: str) -> dict:
-    _validated_https_url(issuer)
+    oauth_http.validate_endpoint(issuer)
     parsed = urlparse(issuer)
     path = parsed.path.rstrip("/")
     origin = f"https://{parsed.netloc}"
@@ -320,7 +181,7 @@ def _challenge_scope_from_header(challenge: str) -> str:
 
 
 def _validate_resource_metadata_endpoint(server_url: str, endpoint: str) -> None:
-    _validated_https_url(server_url, oauth_server_url=True)
+    oauth_http.validate_endpoint(server_url, oauth_server_url=True)
     server, candidate = urlparse(server_url), urlparse(endpoint)
     try:
         server_port, candidate_port = server.port or 443, candidate.port or 443
@@ -348,13 +209,13 @@ def _discover(server_url: str):
         raise OAuthError("OAuth MCP server URL must be a valid HTTPS URL") from None
     if normalized_server_url != server_url:
         raise OAuthError("OAuth MCP server URL must be normalized")
-    _validated_https_url(server_url, oauth_server_url=True)
+    oauth_http.validate_endpoint(server_url, oauth_server_url=True)
     parsed = urlparse(server_url)
     origin = f"https://{parsed.netloc}"
     path = parsed.path.rstrip("/")
     scope, metadata_url = "", ""
     try:
-        status, headers, _ = _request("GET", server_url)
+        status, headers, _ = oauth_http.request("GET", server_url)
     except OAuthError:
         status, headers = 0, {}
     if status == 401:
@@ -399,12 +260,12 @@ def _discover(server_url: str):
     # An Authorization Server Identifier is an HTTPS issuer URL and the
     # PRM issuer must be accepted as-is; no discovery fallback is allowed.
     issuer = auth_servers[0]
-    _validated_https_url(issuer)
+    oauth_http.validate_endpoint(issuer)
     metadata = _issuer_metadata(issuer)
     for key in ("authorization_endpoint", "token_endpoint"):
         if not isinstance(metadata.get(key), str):
             raise OAuthError("OAuth server metadata is missing required endpoints")
-        _validated_https_url(metadata[key])
+        oauth_http.validate_endpoint(metadata[key])
     if metadata.get("issuer") != issuer:
         raise OAuthError("OAuth issuer does not match protected resource metadata")
     methods = metadata.get("code_challenge_methods_supported")
@@ -440,7 +301,7 @@ def _registration(server_url, callback, protected, metadata):
     )
     if method is None:
         raise OAuthError("OAuth server has no supported client authentication method")
-    _validated_https_url(endpoint)
+    oauth_http.validate_endpoint(endpoint)
     result = _post_registration(
         endpoint,
         {
@@ -592,10 +453,10 @@ def start_flow(
     ):
         raise OAuthError("OAuth registration metadata is invalid")
     try:
-        _validated_https_url(registration.authorization_endpoint)
-        _validated_https_url(registration.token_endpoint)
+        oauth_http.validate_endpoint(registration.authorization_endpoint)
+        oauth_http.validate_endpoint(registration.token_endpoint)
         if registration.registration_endpoint:
-            _validated_https_url(registration.registration_endpoint)
+            oauth_http.validate_endpoint(registration.registration_endpoint)
     except OAuthError:
         raise OAuthError("OAuth registration endpoint must use valid HTTPS") from None
     state, binding, verifier = (

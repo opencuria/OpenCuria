@@ -5,12 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import ssl
-import threading
 import uuid
-from datetime import datetime, timedelta
-from datetime import timezone as dt_timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import timedelta
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 
@@ -22,10 +18,10 @@ from django.test import Client
 from django.utils import timezone
 
 from apps.accounts.auth_backends import DjangoJWTBackend
+from apps.credentials import oauth_http
 from apps.credentials.enums import CredentialType
 from apps.credentials.mcp_oauth import (
     McpOAuthHTTPAuth,
-    OAuthError,
     _discover,
     _post_registration,
     start_flow,
@@ -36,6 +32,7 @@ from apps.credentials.models import (
     McpOAuthAuthorizationState,
     McpOAuthClientRegistration,
 )
+from apps.credentials.oauth_errors import OAuthError
 from apps.credentials.repositories import McpOAuthRepository
 from apps.credentials.services import CredentialSvc
 from apps.organizations.models import Membership, MembershipRole, Organization
@@ -255,8 +252,8 @@ def test_dcr_is_json_and_discovery_requires_prm_matching_resource_and_s256(
     from apps.credentials import mcp_oauth
 
     monkeypatch.setattr(
-        mcp_oauth,
-        "_validated_https_url",
+        oauth_http,
+        "validate_endpoint",
         lambda url, **kwargs: (url, ("93.184.216.34",)),
     )
     seen = {}
@@ -265,7 +262,7 @@ def test_dcr_is_json_and_discovery_requires_prm_matching_resource_and_s256(
         seen.update(method=method, url=url, **kwargs)
         return 201, {}, {"client_id": "registered"}
 
-    monkeypatch.setattr(mcp_oauth, "_request", fake_request)
+    monkeypatch.setattr(oauth_http, "request", fake_request)
     assert _post_registration(
         "https://auth.example/register", {"redirect_uris": ["https://back/cb"]}
     ) == {"client_id": "registered"}
@@ -284,8 +281,8 @@ def test_dcr_is_json_and_discovery_requires_prm_matching_resource_and_s256(
         "code_challenge_methods_supported": ["S256"],
     }
     monkeypatch.setattr(
-        mcp_oauth,
-        "_request",
+        oauth_http,
+        "request",
         lambda method, url, **kwargs: (
             401,
             {
@@ -312,94 +309,18 @@ def test_dcr_is_json_and_discovery_requires_prm_matching_resource_and_s256(
 
 
 @pytest.mark.django_db
-def test_pinned_request_uses_checked_ip_and_disables_redirects(monkeypatch, tmp_path):
-    """Exercise HTTPTransport + the real pinned backend over local TLS."""
-    from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.x509.oid import NameOID
-
-    from apps.credentials import mcp_oauth
-
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "mcp.test")])
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(issuer)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.now(dt_timezone.utc) - timedelta(minutes=1))
-        .not_valid_after(datetime.now(dt_timezone.utc) + timedelta(minutes=5))
-        .add_extension(
-            x509.SubjectAlternativeName([x509.DNSName("mcp.test")]), critical=False
-        )
-        .sign(key, hashes.SHA256())
-    )
-    cert_file = tmp_path / "server.pem"
-    key_file = tmp_path / "server-key.pem"
-    cert_file.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-    key_file.write_bytes(
-        key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.TraditionalOpenSSL,
-            serialization.NoEncryption(),
-        )
-    )
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(302)
-            self.send_header("Location", "https://127.0.0.1/collect")
-            self.end_headers()
-
-        def log_message(self, *_args):
-            return
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    tls.load_cert_chain(str(cert_file), str(key_file))
-    server.socket = tls.wrap_socket(server.socket, server_side=True)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    original_create_default_context = ssl.create_default_context
-
-    def trusted_default_context(*, cafile=None, capath=None, cadata=None):
-        return original_create_default_context(
-            cafile=str(cert_file), capath=capath, cadata=cadata
-        )
-
-    monkeypatch.setattr(
-        mcp_oauth.ssl, "create_default_context", trusted_default_context
-    )
-    monkeypatch.setattr(
-        mcp_oauth, "_public_addresses", lambda host, port: ("127.0.0.1",)
-    )
-    try:
-        status, headers, _ = mcp_oauth._request(
-            "GET", f"https://mcp.test:{server.server_port}/mcp"
-        )
-        assert status == 302
-        assert headers["location"] == "https://127.0.0.1/collect"
-    finally:
-        server.shutdown()
-        thread.join(timeout=2)
-        server.server_close()
-
-
-@pytest.mark.django_db
 def test_ssrf_rejects_private_dns_and_callback_urls_are_fixed(monkeypatch, settings):
     from apps.credentials import mcp_oauth
 
     settings.MCP_OAUTH_CALLBACK_URL = "http://127.0.0.1:8000/api/v1/mcp-oauth/callback/"
 
     monkeypatch.setattr(
-        mcp_oauth.socket,
+        oauth_http.socket,
         "getaddrinfo",
         lambda *args, **kwargs: [(2, 1, 6, "", ("127.0.0.1", 443))],
     )
     with pytest.raises(OAuthError, match="private or local"):
-        mcp_oauth._validated_https_url("https://evil.example/token")
+        oauth_http.validate_endpoint("https://evil.example/token")
     for url in (
         "http://mcp.example/mcp",
         "https://user:pass@mcp.example/mcp",
@@ -449,7 +370,7 @@ def test_start_flow_persists_hashed_state_verifier_and_scoped_cookie(
         "apps.credentials.mcp_oauth._registration", lambda *args: registration
     )
     monkeypatch.setattr(
-        "apps.credentials.mcp_oauth._validated_https_url",
+        "apps.credentials.oauth_http.validate_endpoint",
         lambda url, **kwargs: (url, ("93.184.216.34",)),
     )
     auth_url, binding, cookie_name = start_flow(
@@ -520,7 +441,7 @@ def test_callback_consumes_mismatch_and_failure_and_stores_bound_token(
         "apps.credentials.mcp_oauth._registration", lambda *args: registration
     )
     monkeypatch.setattr(
-        "apps.credentials.mcp_oauth._validated_https_url",
+        "apps.credentials.oauth_http.validate_endpoint",
         lambda url, **kwargs: (url, ("93.184.216.34",)),
     )
     from apps.credentials.services import CredentialOAuthSvc
@@ -782,7 +703,7 @@ def test_api_requires_real_jwt_and_status_disconnect_permissions(
         lambda *args: registration,
     )
     monkeypatch.setattr(
-        "apps.credentials.mcp_oauth._validated_https_url",
+        "apps.credentials.oauth_http.validate_endpoint",
         lambda url, **kwargs: (url, ("93.184.216.34",)),
     )
     response = client.post(

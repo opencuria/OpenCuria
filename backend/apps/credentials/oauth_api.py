@@ -14,7 +14,8 @@ from apps.accounts.api_auth import check_api_key_permission
 from apps.accounts.models import APIKeyPermission
 from common.exceptions import AuthenticationError, ConflictError, NotFoundError
 
-from .mcp_oauth import OAuthError, frontend_return_url, state_cookie_name
+from .mcp_oauth import frontend_return_url, state_cookie_name
+from .oauth_errors import OAuthError
 from .services import CredentialOAuthSvc
 
 
