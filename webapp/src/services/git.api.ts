@@ -7,7 +7,6 @@
  * - GET `/workspaces/{id}/git/repos/` (light summaries)
  * - GET `/workspaces/{id}/git/repo/?repo_path=..` (full single-repo snapshot)
  * - GET `/workspaces/{id}/git/history/?repo_path=..&history_limit=..&history_skip=..&branch=..`
- * - GET `/workspaces/{id}/git/diff/?repo_path=..`
  * - GET `/workspaces/{id}/git/commits/{hash}/?repo_path=..`
  * - POST `/workspaces/{id}/git/operation/` (typed mutations only)
  * - POST `/workspaces/{id}/git/commit-message/` (small-model commit subject)
@@ -157,17 +156,6 @@ export interface RawGitHistoryResponse {
   history_limit: number
 }
 
-export interface RawGitWorkingDiff {
-  staged: RawGitCommitFile[]
-  unstaged: RawGitCommitFile[]
-}
-
-export interface RawGitDiffResponse {
-  ok: boolean
-  repo_path: string
-  diff: RawGitWorkingDiff
-}
-
 export interface RawGitCommitDetails {
   hash: string
   message: string
@@ -309,16 +297,6 @@ export function getGitHistory(
   if (opts?.branch) params.set('branch', opts.branch)
   return get<RawGitHistoryResponse>(
     `/workspaces/${encodeURIComponent(workspaceId)}/git/history/?${params.toString()}`,
-  )
-}
-
-export function getGitWorkingDiff(
-  workspaceId: string,
-  repoPath: string,
-): Promise<RawGitDiffResponse> {
-  const params = new URLSearchParams({ repo_path: repoPath })
-  return get<RawGitDiffResponse>(
-    `/workspaces/${encodeURIComponent(workspaceId)}/git/diff/?${params.toString()}`,
   )
 }
 

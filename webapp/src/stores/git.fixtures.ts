@@ -302,11 +302,6 @@ export function setupGitRepos(
       history_limit: limit,
     }
   })
-  mocked.getGitWorkingDiff.mockResolvedValue({
-    ok: true,
-    repo_path: repos[0]?.path ?? '/workspace/repo-app',
-    diff: { staged: [], unstaged: [] },
-  })
   mocked.getGitCommitDetails.mockImplementation(async (_ws, _repo, hash) => ({
     ok: true,
     repo_path: repos[0]?.path ?? '/workspace/repo-app',

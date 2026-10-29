@@ -3,8 +3,7 @@
  *
  * All data comes from the backend git API (`src/services/git.api.ts`):
  * light repo summaries (`GET /git/repos/`), lazy per-repo snapshots
- * (`GET /git/repo/`), paged history (`GET /git/history/`), lazy
- * working-tree diffs (`GET /git/diff/`), lazy commit details
+ * (`GET /git/repo/`), paged history (`GET /git/history/`), lazy commit details
  * (`GET /git/commits/{hash}/`), typed mutations
  * (`POST /git/operation/`) and small-model commit subjects
  * (`POST /git/commit-message/`). There is no mock fallback.
@@ -58,7 +57,6 @@ import {
   getGitHistory,
   getGitRepo,
   getGitRepos,
-  getGitWorkingDiff,
   runGitOperation,
   type GitOperationRequest,
   type RawGitChange,
@@ -150,30 +148,6 @@ function errorMessage(e: unknown): string {
   if (e instanceof Error) return e.message || 'Unknown error'
   return typeof e === 'string' && e ? e : 'Unknown error'
 }
-
-/**
- * Module-level working-diff request sequence. Lives outside the setup
- * closure on purpose: Pinia setup stores expose state, but per-request
- * invalidation tokens must never be reset/ref-counted by state resets —
- * `closeDiff`/`reset` bump the sequence so late losers are always dropped.
- * (Kept outside `defineStore` so HMR re-execution can't resurrect a stale
- * closure counter either.)
- */
-const useGitWorkingDiffSeq = (() => {
-  let seq = 0
-  return {
-    next(): number {
-      seq += 1
-      return seq
-    },
-    invalidate(): void {
-      seq += 1
-    },
-    isCurrent(req: number): boolean {
-      return req === seq
-    },
-  }
-})()
 
 // ---------------------------------------------------------------------------
 // Normalization (snake_case wire -> camelCase domain)
@@ -387,18 +361,8 @@ export const useGitStore = defineStore('git', () => {
 
   /** Path of the working-tree change whose diff is open, if any. */
   const viewingDiffPath = ref<string | null>(null)
-  /**
-   * Selected diff side for `viewingDiffPath`: true = staged, false =
-   * unstaged, null = legacy selection without a side (falls back to the
-   * snapshot row).
-   */
+  /** Selected diff side: true = staged, false = unstaged, null = closed. */
   const viewingDiffStaged = ref<boolean | null>(null)
-  const workingDiffLoading = ref(false)
-  const workingDiffError = ref<string | null>(null)
-  /** Lazily loaded staged/unstaged file diffs keyed by repo path. */
-  const workingDiffCache = ref<
-    Record<string, { staged: GitCommitFile[]; unstaged: GitCommitFile[] }>
-  >({})
 
   /** Hash of the commit whose details row is expanded, if any. */
   const expandedCommitHash = ref<string | null>(null)
@@ -411,26 +375,6 @@ export const useGitStore = defineStore('git', () => {
 
   /** Commit details view height in px (persisted). */
   const cdvHeight = ref<number>(loadCdvHeight())
-
-  /**
-   * Legacy projection of the details cache keyed by hash (current repo
-   * wins). New code should use `commitDetailsCache` / `expandedCommitDetails`.
-   */
-  const commitDetailsByHash = computed<Record<string, GitCommitDetails>>(() => {
-    const out: Record<string, GitCommitDetails> = {}
-    const currentPath = currentRepo.value?.path
-    const entries = Object.entries(commitDetailsCache.value)
-    entries.sort(([a], [b]) => {
-      const aCurrent = currentPath !== undefined && a.startsWith(`${currentPath}::`)
-      const bCurrent = currentPath !== undefined && b.startsWith(`${currentPath}::`)
-      return Number(bCurrent) - Number(aCurrent)
-    })
-    for (const [key, details] of entries) {
-      const hash = key.slice(key.lastIndexOf('::') + 2)
-      if (!(hash in out)) out[hash] = details
-    }
-    return out
-  })
 
   // -- request bookkeeping (stale guards, serialization, polling) --------------
 
@@ -608,35 +552,6 @@ export const useGitStore = defineStore('git', () => {
     return refGroupsByHash.value.get(hash) ?? []
   }
 
-  /** Lazily loaded cache entry for the current diff selection, if any. */
-  const viewingDiffEntry = computed<GitCommitFile | null>(() => {
-    const path = viewingDiffPath.value
-    const repo = currentRepo.value
-    if (!path || !repo) return null
-    const cache = workingDiffCache.value[repo.path]
-    if (!cache) return null
-    const stagedSide = viewingDiffStaged.value ?? repo.changes.find((c) => c.path === path)?.staged ?? true
-    const list = stagedSide ? cache.staged : cache.unstaged
-    return (
-      list.find((f) => f.newPath === path || f.oldPath === path) ?? null
-    )
-  })
-
-  /**
-   * Working-tree change selected for the main-area diff: snapshot metadata
-   * enriched with the lazily loaded hunks of the selected side.
-   */
-  const viewingDiffChange = computed<GitFileChange | null>(() => {
-    const path = viewingDiffPath.value
-    const repo = currentRepo.value
-    if (!path || !repo) return null
-    const row = repo.changes.find((c) => c.path === path) ?? null
-    if (!row) return null
-    const stagedSide =
-      viewingDiffStaged.value ?? row.staged
-    return { ...row, staged: stagedSide, diff: viewingDiffEntry.value?.diff ?? [] }
-  })
-
   /** Details of the expanded commit (null until lazily loaded). */
   const expandedCommitDetails = computed<GitCommitDetails | null>(() => {
     const hash = expandedCommitHash.value
@@ -809,10 +724,6 @@ export const useGitStore = defineStore('git', () => {
   }
 
   function invalidateRepoCaches(repoPath: string): void {
-    delete workingDiffCache.value[repoPath]
-    if (workingDiffError.value !== null && currentRepo.value?.path === repoPath) {
-      workingDiffError.value = null
-    }
     for (const key of Object.keys(commitDetailsCache.value)) {
       if (key.startsWith(`${repoPath}::`)) delete commitDetailsCache.value[key]
     }
@@ -957,10 +868,6 @@ export const useGitStore = defineStore('git', () => {
     commitDetailsCache.value = {}
     commitDetailsLoading.value = {}
     commitDetailsError.value = {}
-    workingDiffCache.value = {}
-    workingDiffLoading.value = false
-    workingDiffError.value = null
-    useGitWorkingDiffSeq.invalidate()
     historyLoading.value = false
     busyOperation.value = null
     generatingCommitMessage.value = false
@@ -1102,10 +1009,6 @@ export const useGitStore = defineStore('git', () => {
     opQueue = Promise.resolve()
     viewingDiffPath.value = null
     viewingDiffStaged.value = null
-    useGitWorkingDiffSeq.invalidate()
-    workingDiffLoading.value = false
-    workingDiffError.value = null
-    workingDiffCache.value = {}
     expandedCommitHash.value = null
     expandedFilePath.value = null
     commitDetailsCache.value = {}
@@ -1114,74 +1017,6 @@ export const useGitStore = defineStore('git', () => {
   }
 
   // -- lazy loaders -------------------------------------------------------------------
-
-  /** Load staged/unstaged file diffs for the current repo (cached per repo). */
-  async function loadWorkingDiffForCurrentRepo(options?: {
-    force?: boolean
-  }): Promise<void> {
-    const wsId = workspaceId.value
-    if (wsId && !isCurrentWorkspaceRequest(wsId, loadGen)) return
-    const repo = currentRepo.value
-    if (!wsId || !repo) return
-    const repoPath = repo.path
-    if (!options?.force && workingDiffCache.value[repoPath]) return
-    const gen = loadGen
-    const req = useGitWorkingDiffSeq.next()
-    workingDiffLoading.value = true
-    workingDiffError.value = null
-    try {
-      const res = await getGitWorkingDiff(wsId, repoPath)
-      // Repo-/request-safe: drop results when the workspace changed, the
-      // selection moved to another repo, the diff was closed meanwhile, or a
-      // newer diff request superseded this one.
-      if (
-        !useGitWorkingDiffSeq.isCurrent(req) ||
-        gen !== loadGen ||
-        workspaceId.value !== wsId ||
-        currentRepo.value?.path !== repoPath ||
-        viewingDiffPath.value === null
-      ) {
-        return
-      }
-      workingDiffCache.value[repoPath] = {
-        staged: (res.diff?.staged ?? []).map(normalizeCommitFile),
-        unstaged: (res.diff?.unstaged ?? []).map(normalizeCommitFile),
-      }
-    } catch (e: unknown) {
-      if (
-        !useGitWorkingDiffSeq.isCurrent(req) ||
-        gen !== loadGen ||
-        workspaceId.value !== wsId ||
-        currentRepo.value?.path !== repoPath ||
-        viewingDiffPath.value === null
-      ) {
-        return
-      }
-      workingDiffError.value = errorMessage(e)
-    } finally {
-      // Only the latest request for the current selection may clear the
-      // loading flag — a stale loser must never flip loading false.
-      if (
-        useGitWorkingDiffSeq.isCurrent(req) &&
-        gen === loadGen &&
-        workspaceId.value === wsId &&
-        currentRepo.value?.path === repoPath &&
-        viewingDiffPath.value !== null
-      ) {
-        workingDiffLoading.value = false
-      }
-    }
-  }
-
-  /**
-   * Retry the working diff after an error (bypasses the per-repo cache so a
-   * failed load actually re-requests).
-   */
-  function retryWorkingDiff(): Promise<void> {
-    const repo = currentRepo.value
-    if (repo) delete workingDiffCache.value[repo.path]
-    return loadWorkingDiffForCurrentRepo({ force: true })
-  }
 
   /** Load commit details for the current repo+hash (cached per repo+hash). */
   async function ensureCommitDetails(hash: string): Promise<void> {
@@ -1275,8 +1110,6 @@ export const useGitStore = defineStore('git', () => {
         if (expandedCommitHash.value) {
           // Details were invalidated above; reload the expanded commit.
           void ensureCommitDetails(expandedCommitHash.value)
-        } else if (viewingDiffPath.value) {
-          void loadWorkingDiffForCurrentRepo()
         }
         if (callbacks?.successTitle) {
           notifications.success(callbacks.successTitle, callbacks.successMessage)
@@ -1334,34 +1167,26 @@ export const useGitStore = defineStore('git', () => {
     })
   }
 
-  /**
-   * Open a working-tree diff. `staged` selects the side when the same path
-   * exists staged AND unstaged (omit for legacy single-side behaviour).
-   */
-  async function openDiff(path: string, staged?: boolean): Promise<void> {
+  /** Open the selected working-tree side in the workspace editor. */
+  async function openDiff(path: string, staged: boolean): Promise<void> {
     // Working-tree and commit diffs are mutually exclusive.
     expandedFilePath.value = null
     viewingDiffPath.value = path
-    viewingDiffStaged.value = staged ?? null
+    viewingDiffStaged.value = staged
     if (workspaceId.value && currentRepo.value) {
-      void useEditorStore().openDiff(
+      await useEditorStore().openDiff(
         workspaceId.value,
         currentRepo.value.path,
         path,
-        staged ?? currentRepo.value.changes.find((change) => change.path === path)?.staged ?? false,
+        staged,
         currentRepo.value.changes.find((change) => change.path === path)?.oldPath ?? path,
       )
     }
-    await loadWorkingDiffForCurrentRepo()
   }
 
   function closeDiff(): void {
     viewingDiffPath.value = null
     viewingDiffStaged.value = null
-    // Invalidate any in-flight working-diff request so its late settlement
-    // can neither populate the (now cleared) selection nor flip loading.
-    useGitWorkingDiffSeq.invalidate()
-    workingDiffLoading.value = false
   }
 
   // -- actions: commit details (expandable rows) --------------------------------
@@ -1386,8 +1211,6 @@ export const useGitStore = defineStore('git', () => {
     // Commit and working-tree diffs are mutually exclusive.
     viewingDiffPath.value = null
     viewingDiffStaged.value = null
-    useGitWorkingDiffSeq.invalidate()
-    workingDiffLoading.value = false
     expandedFilePath.value = path
     const selected = viewingCommitDiff.value
     if (selected && workspaceId.value && currentRepo.value) {
@@ -1948,13 +1771,9 @@ export const useGitStore = defineStore('git', () => {
     polling,
     viewingDiffPath,
     viewingDiffStaged,
-    workingDiffLoading,
-    workingDiffError,
-    workingDiffCache,
     expandedCommitHash,
     expandedFilePath,
     commitDetailsCache,
-    commitDetailsByHash,
     commitDetailsLoading,
     commitDetailsError,
     cdvHeight,
@@ -1969,8 +1788,6 @@ export const useGitStore = defineStore('git', () => {
     tagsByHash,
     refGroupsByHash,
     refGroupsFor,
-    viewingDiffEntry,
-    viewingDiffChange,
     expandedCommitDetails,
     viewingCommitFile,
     viewingCommitDiff,
@@ -1986,8 +1803,6 @@ export const useGitStore = defineStore('git', () => {
     selectRepo,
     openDiff,
     closeDiff,
-    loadWorkingDiffForCurrentRepo,
-    retryWorkingDiff,
     toggleCommitDetails,
     closeCommitDetails,
     selectCommitFile,

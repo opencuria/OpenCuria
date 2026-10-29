@@ -6,6 +6,7 @@ import { nextTick } from 'vue'
 import GitChangesSection from './GitChangesSection.vue'
 import * as gitApi from '@/services/git.api'
 import { useGitStore } from '@/stores/git'
+import { useEditorStore } from '@/stores/editor'
 import {
   makeRawChange,
   makeRepoSnapshot,
@@ -28,14 +29,12 @@ vi.mock('@/services/git.api', () => ({
   getGitHistory: vi.fn(),
   getGitRepo: vi.fn(),
   getGitRepos: vi.fn(),
-  getGitWorkingDiff: vi.fn(),
   runGitOperation: vi.fn(),
 }))
 
 const getRepos = vi.mocked(gitApi.getGitRepos)
 const getRepo = vi.mocked(gitApi.getGitRepo)
 const getHistory = vi.mocked(gitApi.getGitHistory)
-const getDiff = vi.mocked(gitApi.getGitWorkingDiff)
 const getDetails = vi.mocked(gitApi.getGitCommitDetails)
 const runOp = vi.mocked(gitApi.runGitOperation)
 const generateMessage = vi.mocked(gitApi.generateGitCommitMessage)
@@ -78,11 +77,6 @@ describe('GitChangesSection', () => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
     setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot()])
-    getDiff.mockResolvedValue({
-      ok: true,
-      repo_path: '/workspace/repo-app',
-      diff: { staged: [], unstaged: [] },
-    })
     getDetails.mockResolvedValue({
       ok: true,
       repo_path: '/workspace/repo-app',
@@ -624,8 +618,9 @@ describe('GitChangesSection', () => {
     ).toBeDefined()
   })
 
-  it('opens the diff view when a change is clicked (lazy getDiff)', async () => {
+  it('opens the editor diff when a change is clicked', async () => {
     const store = await initStore()
+    const openDiff = vi.spyOn(useEditorStore(), 'openDiff').mockResolvedValue()
     const wrapper = mountSection()
     await nextTick()
     const row = wrapper.find('[data-testid="git-changed-file"]')
@@ -636,6 +631,6 @@ describe('GitChangesSection', () => {
 
     expect(store.viewingDiffPath).toBe(path)
     expect(store.viewingDiffStaged).toBe(false)
-    expect(getDiff).toHaveBeenCalledWith('workspace-1', '/workspace/repo-app')
+    expect(openDiff).toHaveBeenCalledWith('workspace-1', '/workspace/repo-app', path, false, path)
   })
 })

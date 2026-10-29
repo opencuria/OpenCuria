@@ -4,9 +4,9 @@ import { createPinia, setActivePinia } from 'pinia'
 import { ApiRequestError } from '@/services/api'
 import * as gitApi from '@/services/git.api'
 import { useGitStore, selectedRepoStorageKey } from './git'
+import { useEditorStore } from './editor'
 import {
   makeCommitDetails,
-  makeCommitFile,
   makeRawChange,
   makeRawCommit,
   makeRawStash,
@@ -34,14 +34,12 @@ vi.mock('@/services/git.api', () => ({
   getGitHistory: vi.fn(),
   getGitRepo: vi.fn(),
   getGitRepos: vi.fn(),
-  getGitWorkingDiff: vi.fn(),
   runGitOperation: vi.fn(),
 }))
 
 const getRepos = vi.mocked(gitApi.getGitRepos)
 const getRepo = vi.mocked(gitApi.getGitRepo)
 const getHistory = vi.mocked(gitApi.getGitHistory)
-const getDiff = vi.mocked(gitApi.getGitWorkingDiff)
 const getDetails = vi.mocked(gitApi.getGitCommitDetails)
 const runOp = vi.mocked(gitApi.runGitOperation)
 const generateMessage = vi.mocked(gitApi.generateGitCommitMessage)
@@ -105,7 +103,6 @@ describe('git store (productive)', () => {
     vi.clearAllMocks()
     localStorage.clear()
     setRepos([makeRepoSnapshot()])
-    getDiff.mockResolvedValue({ ok: true, repo_path: '/workspace/repo-app', diff: { staged: [], unstaged: [] } })
     getDetails.mockImplementation(async (_ws, repo, hash) => ({
       ok: true,
       repo_path: repo,
@@ -274,71 +271,18 @@ describe('git store (productive)', () => {
     expect(store.currentBranch).toBeNull()
   })
 
-  it('lazily loads working diffs per side and ignores stale responses', async () => {
-    const path = 'dup/file.ts'
-    const change = makeRawChange(path, {
-      status: 'M',
-      staged: true,
-      staged_kind: 'M',
-      unstaged: 'M',
-    })
-    const store = await initWith([makeRepoSnapshot({ changes: [change] })])
-    const staged = makeCommitFile(path, { status: 'M', additions: 5 })
-    const unstaged = makeCommitFile(path, { status: 'M', additions: 9 })
-    getDiff.mockResolvedValue({
-      ok: true,
-      repo_path: '/workspace/repo-app',
-      diff: { staged: [staged], unstaged: [unstaged] },
-    })
+  it.each([true, false])('opens the selected diff side in the editor (staged=%s)', async (staged) => {
+    const path = 'renamed.ts'
+    const store = await initWith([makeRepoSnapshot({
+      changes: [makeRawChange(path, { old_path: 'original.ts', staged_kind: 'R', unstaged: 'M' })],
+    })])
+    const openDiff = vi.spyOn(useEditorStore(), 'openDiff').mockResolvedValue()
 
-    await store.openDiff(path, true)
-    expect(store.viewingDiffChange?.staged).toBe(true)
-    expect(store.viewingDiffChange?.diff).toHaveLength(1)
-    expect(store.viewingDiffEntry?.additions).toBe(5)
+    await store.openDiff(path, staged)
 
-    await store.openDiff(path, false)
-    expect(store.viewingDiffChange?.staged).toBe(false)
-    expect(store.viewingDiffEntry?.additions).toBe(9)
-
-    // Cache: no second request for the same repo.
-    const calls = getDiff.mock.calls.length
-    await store.openDiff(path, true)
-    expect(getDiff.mock.calls.length).toBe(calls)
-
-    // Stale responses (older workspace generation) are ignored.
-    getDiff.mockClear()
-    getDiff.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          setTimeout(
-            () =>
-              resolve({
-                ok: true,
-                repo_path: '/workspace/repo-app',
-                diff: { staged: [staged], unstaged: [unstaged] },
-              }),
-            20,
-          )
-        }),
-    )
-    // New repo without cache to force a fresh load racing with reset.
-    store.workingDiffCache = {}
-    const pending = store.openDiff(path, true)
-    store.reset()
-    await pending
-    expect(store.viewingDiffPath).toBeNull()
-  })
-
-  it('surfaces working-diff load errors without crashing the viewer', async () => {
-    const store = await initWith()
-    const path = store.currentRepo!.changes[0]!.path
-    delete store.workingDiffCache[store.currentRepo!.path]
-    getDiff.mockRejectedValueOnce(new ApiRequestError(500, 'diff failed', 'error'))
-    await store.openDiff(path)
-    expect(store.workingDiffError).toBe('diff failed')
-    // Snapshot metadata is still available.
-    expect(store.viewingDiffChange?.path).toBe(path)
-    expect(store.viewingDiffChange?.diff).toEqual([])
+    expect(openDiff).toHaveBeenCalledExactlyOnceWith('ws-1', '/workspace/repo-app', path, staged, 'original.ts')
+    expect(store.viewingDiffPath).toBe(path)
+    expect(store.viewingDiffStaged).toBe(staged)
   })
 
   it('lazily loads commit details with cache and per-commit errors', async () => {
@@ -1076,12 +1020,12 @@ describe('git store (productive)', () => {
     const second = makeRepoSnapshot({ id: '/workspace/other', path: '/workspace/other', name: 'other' })
     const store = await initWith([makeRepoSnapshot(), second])
     const path = store.currentRepo!.changes[0]!.path
-    await store.openDiff(path)
-    expect(store.viewingDiffChange).not.toBeNull()
+    await store.openDiff(path, false)
+    expect(store.viewingDiffPath).toBe(path)
 
     store.selectRepo('/workspace/other')
     expect(store.currentRepo?.id).toBe('/workspace/other')
-    expect(store.viewingDiffChange).toBeNull()
+    expect(store.viewingDiffPath).toBeNull()
     // Fire-and-forget details for the new selection resolve via getGitRepo.
     await vi.waitFor(() => {
       expect(getRepo).toHaveBeenCalledWith('ws-1', '/workspace/other')

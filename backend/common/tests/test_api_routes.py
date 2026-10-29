@@ -9,6 +9,11 @@ from config.urls import api
     ("method", "path", "replacement"),
     [
         ("post", "/auth/register/", "/auth/login/"),
+        (
+            "get",
+            "/workspaces/{workspace_id}/git/diff/",
+            "/workspaces/{workspace_id}/git/file-content/",
+        ),
         ("get", "/organizations/", "/auth/me/"),
         ("get", "/plugins/{plugin_id}/", "/plugins/"),
         ("get", "/captured-images/{captured_image_id}/", "/captured-images/"),

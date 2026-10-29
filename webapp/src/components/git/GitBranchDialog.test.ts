@@ -25,7 +25,6 @@ vi.mock('@/services/git.api', () => ({
   getGitHistory: vi.fn(),
   getGitRepo: vi.fn(),
   getGitRepos: vi.fn(),
-  getGitWorkingDiff: vi.fn(),
   runGitOperation: vi.fn(),
 }))
 

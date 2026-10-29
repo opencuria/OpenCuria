@@ -1324,40 +1324,6 @@ async def git_history(
 
 
 @git_router.get(
-    "/{workspace_id}/git/diff/",
-    response=_GIT_RESPONSES,
-    summary="Get working-tree diff for one repo",
-)
-async def git_diff(
-    request: HttpRequest,
-    workspace_id: uuid.UUID,
-    repo_path: str,
-):
-    """Return staged/unstaged diff entries for one repository."""
-    if not check_api_key_permission(request, APIKeyPermission.WORKSPACES_GIT_READ):
-        return _perm_denied(APIKeyPermission.WORKSPACES_GIT_READ)
-    try:
-        query = GitRepoQuery(repo_path=repo_path)
-    except Exception as exc:
-        return 400, ErrorOut(detail=str(exc), code="validation_error")
-    org_id = get_organization_id(request)
-    await _require_org_membership_async(request, org_id)
-
-    service = _get_service()
-    try:
-        await _get_owned_workspace_async(request, org_id, workspace_id)
-        result = await service.run_git_operation(
-            workspace_id,
-            "working_diff",
-            repo_path=query.repo_path,
-            args={},
-        )
-        return _git_result_to_response(result)
-    except Exception as exc:
-        return git_error_to_response(exc)
-
-
-@git_router.get(
     "/{workspace_id}/git/commits/{commit_hash}/",
     response=_GIT_RESPONSES,
     summary="Get commit details",

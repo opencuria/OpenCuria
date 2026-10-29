@@ -29,14 +29,12 @@ vi.mock('@/services/git.api', () => ({
   getGitHistory: vi.fn(),
   getGitRepo: vi.fn(),
   getGitRepos: vi.fn(),
-  getGitWorkingDiff: vi.fn(),
   runGitOperation: vi.fn(),
 }))
 
 const getRepos = vi.mocked(gitApi.getGitRepos)
 const getRepo = vi.mocked(gitApi.getGitRepo)
 const getHistory = vi.mocked(gitApi.getGitHistory)
-const getDiff = vi.mocked(gitApi.getGitWorkingDiff)
 const getDetails = vi.mocked(gitApi.getGitCommitDetails)
 const runOp = vi.mocked(gitApi.runGitOperation)
 
@@ -91,11 +89,6 @@ describe('GitPanel', () => {
     stubPointerCapture()
     stubContainerRect()
     setupGitRepos(getRepos, getRepo, getHistory, [makeRepoSnapshot()])
-    getDiff.mockResolvedValue({
-      ok: true,
-      repo_path: '/workspace/repo-app',
-      diff: { staged: [], unstaged: [] },
-    })
     getDetails.mockResolvedValue({
       ok: true,
       repo_path: '/workspace/repo-app',

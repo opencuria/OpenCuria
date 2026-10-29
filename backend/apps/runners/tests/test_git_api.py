@@ -120,7 +120,6 @@ def _all_git_perms() -> list[str]:
             {"history_limit": 50, "history_skip": 0},
             {"commits": [], "has_more": False},
         ),
-        ("diff/", "working_diff", {}, {"diff": {"staged": []}}),
         (
             "commits/ABC123/",
             "commit_details",
@@ -527,19 +526,12 @@ def test_git_pull_branch_without_remote_rejected_422(client: Client, monkeypatch
 
 @pytest.mark.django_db
 def test_git_get_rejects_invalid_repo_and_hash(client: Client, monkeypatch):
-    """GET diff/commit/repo/history validate inputs as 400; service untouched."""
+    """GET commit/repo/history validate inputs as 400; service untouched."""
     user, org, runner, workspace = _make_context()
     token = _create_api_key(user=user, permissions=_read_perms())
     fake = _install_fake(
         monkeypatch, run_return={"ok": True, "repos": []}
     )
-
-    bad_repo = client.get(
-        f"/api/v1/workspaces/{workspace.id}/git/diff/",
-        {"repo_path": "/etc/passwd"},
-        **_auth_headers(token, str(org.id)),
-    )
-    assert bad_repo.status_code == 400
 
     bad_hash = client.get(
         f"/api/v1/workspaces/{workspace.id}/git/commits/zzz/",

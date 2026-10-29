@@ -7,7 +7,6 @@ import {
   getGitHistory,
   getGitRepo,
   getGitRepos,
-  getGitWorkingDiff,
   GIT_HISTORY_PAGE_SIZE,
   runGitOperation,
   type RawGitRepoSnapshot,
@@ -87,14 +86,6 @@ describe('git.api', () => {
     expect(url).toContain('history_limit=50')
     expect(url).toContain('history_skip=10')
     expect(url).toContain('branch=main')
-  })
-
-  it('encodes repo_path for the working diff endpoint', async () => {
-    getMock.mockResolvedValue({ ok: true, repo_path: '/workspace/repo', diff: { staged: [], unstaged: [] } })
-    await getGitWorkingDiff('ws-1', '/workspace/my repo')
-    const url = getMock.mock.calls[0]![0] as string
-    expect(url.startsWith('/workspaces/ws-1/git/diff/?')).toBe(true)
-    expect(url).toContain('repo_path=%2Fworkspace%2Fmy+repo')
   })
 
   it('encodes repo_path and commit hash for the commit details endpoint', async () => {
